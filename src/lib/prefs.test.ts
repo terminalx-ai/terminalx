@@ -23,18 +23,28 @@ describe("organization display preferences", () => {
   });
 });
 
-describe("permission mode preferences", () => {
-  it("defaults fresh preferences to bypass permissions", async () => {
-    const { getPrefs } = await import("./prefs");
-
-    expect(getPrefs().lastMode).toBe("bypassPermissions");
-  });
-
-  it("preserves an explicitly saved permission mode", async () => {
-    localStorage.setItem("raccoon.prefs", JSON.stringify({ lastMode: "manual" }));
+describe("permission mode preferences (PRO-162)", () => {
+  it("starts a fresh profile in Ask every time", async () => {
     const { getPrefs } = await import("./prefs");
 
     expect(getPrefs().lastMode).toBe("manual");
+  });
+
+  it("remembers the mode picked after that across a restart", async () => {
+    const { setPrefs } = await import("./prefs");
+    setPrefs({ lastMode: "plan" });
+    vi.resetModules();
+
+    expect((await import("./prefs")).getPrefs().lastMode).toBe("plan");
+  });
+
+  it("keeps a saved Bypass, and gives saved preferences that hold no mode the first-run one", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ lastMode: "bypassPermissions", sounds: false }));
+    expect((await import("./prefs")).getPrefs()).toMatchObject({ lastMode: "bypassPermissions", sounds: false });
+
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ sounds: false }));
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs()).toMatchObject({ lastMode: "manual", sounds: false });
   });
 });
 

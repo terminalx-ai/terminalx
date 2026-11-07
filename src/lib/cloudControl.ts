@@ -30,7 +30,7 @@ import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudControlNative } from "@/lib/cloudControlNative";
 import { getPrefs } from "@/lib/prefs";
-import { DEFAULT_PERMISSION_MODE, pickerMode } from "@/lib/models";
+import { FIRST_RUN_PERMISSION_MODE, pickerMode } from "@/lib/models";
 import { recoveryFromEvents } from "@/lib/recovery";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
 import type { AgentEvent, RecoveryKind } from "@/types/events";
@@ -835,7 +835,7 @@ async function sessionsCreate(params: Params) {
     agent,
     model: text(params, "model") ?? prefs.lastModel[agent] ?? "",
     effort: text(params, "effort") ?? prefs.lastEffort[agent] ?? null,
-    mode: mode ?? DEFAULT_PERMISSION_MODE,
+    mode: mode ?? FIRST_RUN_PERMISSION_MODE,
     prompt,
     useWorktree: params.useWorktree !== false,
   };
@@ -846,7 +846,11 @@ async function sessionsCreate(params: Params) {
     request.issue = { ref: issue, body: text(params, "issueBody"), worktreeName: issueWorktreeName(issue.identifier, issue.title), pipeline, settings };
     // As the issue page starts one: the switches at the project's defaults for
     // an issue, said outright so an older runtime does not take its own (#700).
-    if (pipeline) request.pipeline = pipelineLaunchDefaults(settings, true);
+    if (pipeline) request.pipeline = {
+      ...pipelineLaunchDefaults(settings, true),
+      ...(typeof params.resolveConflicts === "boolean" ? { resolveConflicts: params.resolveConflicts } : {}),
+      autoMerge: false,
+    };
   }
   let outcome: CloudIssueOutcome | null = null;
   const plan = planCloudStart(project);

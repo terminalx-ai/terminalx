@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RpcWireRequest } from "./rpc";
 import {
   METHOD_CAPABILITIES,
@@ -397,6 +397,44 @@ describe("workspace RPC client", () => {
       epoch: "e1",
     });
     expect(seen).toBe("hello world!");
+    client.close();
+  });
+
+  it("preserves output batch sizes while deduplicating bytes and accepts older peers without sizes", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const onData = vi.fn();
+    await client.attachPty("p1", { onData });
+    const output = (data: string, offset: number, size?: unknown) => runtime.deliver({ event: "pty.output", params: { subscriptionId: "sub-1", ptyId: "p1", data: btoa(data), offset, size } });
+    output("abc", 0, { cols: 30, rows: 12 });
+    output("bc", 1, { cols: 30, rows: 12 }); // Duplicate after a reconnect.
+    output("def", 3, { cols: 18, rows: 8 });
+    output("old", 6);
+    expect(onData).toHaveBeenCalledTimes(3);
+    const calls = onData.mock.calls.map(([bytes, ...rest]) => [new TextDecoder().decode(bytes), ...rest]);
+    expect(calls[0]).toEqual(["abc", 0, false, { cols: 30, rows: 12 }]);
+    expect(calls[1]).toEqual(["def", 3, false, { cols: 18, rows: 8 }]);
+    expect(calls[2]).toEqual(["old", 6, false]);
+    client.close();
+  });
+
+  it("delivers ordered size-only completions without advancing or rewinding the byte cursor", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const onData = vi.fn();
+    const attachment = await client.attachPty("p1", { onData });
+    runtime.typeOutput("kept");
+    const complete = (cols: number, rows: number, offset = 4) => runtime.deliver({ event: "pty.resize-complete", params: { subscriptionId: "sub-1", ptyId: "p1", offset, size: { cols, rows } } });
+    complete(30, 8);
+    complete(18, 8);
+    complete(80, 12, 0); // An old completion replayed behind the byte cursor is stale.
+    expect(onData).toHaveBeenCalledTimes(3);
+    expect(onData.mock.calls.slice(1).map(([bytes, ...rest]) => [bytes.length, ...rest])).toEqual([
+      [0, 4, false, { cols: 30, rows: 8 }], [0, 4, false, { cols: 18, rows: 8 }],
+    ]);
+    expect(attachment.cursor()?.offset).toBe(4);
     client.close();
   });
 

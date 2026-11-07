@@ -1,3 +1,4 @@
+import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
@@ -794,6 +795,7 @@ export function SessionView({
                   aria-hidden={selected?.kind !== "agent" || t.id !== selected.id}
                   className={cn("flex min-h-0 flex-1 flex-col", (selected?.kind !== "agent" || t.id !== selected.id) && "hidden")}
                 >
+                  {!cloud && <EnvironmentNotice id={t.pane ?? `tab:${t.id}`} active={selected?.kind === "agent" && t.id === selected.id && !activeInTerminal} />}
                   <TabView
                     session={session}
                     tab={t}

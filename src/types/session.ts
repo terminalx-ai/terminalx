@@ -33,6 +33,8 @@ export interface TabEntry {
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
+  /** A user/assistant message exists, even when its timestamp cannot be verified. */
+  hasMessages?: boolean;
   contextUsed?: number | null;
   contextMax?: number | null;
   /** A cloud tab whose conversation has not been read yet: the chat says it is loading, not that it is empty. */
@@ -129,6 +131,8 @@ export interface SessionEntry {
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
+  /** Includes messages in closed tabs and legacy transcripts without verified times. */
+  hasMessages?: boolean;
   archived: boolean;
   /** Archived by the idle sweep rather than by a person (#718); absent otherwise. */
   autoArchived?: boolean;
@@ -309,6 +313,8 @@ export interface HarnessInfo {
   path?: string;
   installHint: string;
   installUrl: string;
+  /** The app installs this CLI and signs in to it by itself (PRO-152). */
+  installable?: boolean;
   caps: Capabilities;
 }
 

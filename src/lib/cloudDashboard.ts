@@ -1,3 +1,4 @@
+import type { MessageActivity } from "./messageActivity";
 import { useSyncExternalStore } from "react";
 import type { RuntimeSession } from "@terminalx/portable/workspace";
 import type { DashboardSession, DashboardTab, DashboardTabStatus } from "@terminalx/portable/dashboard";
@@ -46,7 +47,7 @@ export interface CloudDashboardTab extends DashboardTab {
   failure?: boolean;
 }
 
-export interface CloudDashboardSession extends DashboardSession {
+export interface CloudDashboardSession extends DashboardSession, MessageActivity {
   kind: "cloud";
   /** `cloud:<orgId>:<workspaceId>:<sessionId>`; also `id`. */
   key: string;
@@ -181,6 +182,10 @@ function projectWorkspace(item: CloudWorkspaceListItem, org: { id: string; name:
       branch: row.branch ?? workspace.launch?.workBranch ?? null,
       title: row.title,
       modified: row.modified,
+      created: row.created,
+      lastMessageAt: row.lastMessageAt,
+      pinned: row.pinned,
+      hasMessages: row.hasMessages,
       archived: row.archived,
       connected,
       stopped,

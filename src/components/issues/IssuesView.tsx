@@ -33,10 +33,12 @@ import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam,
 import { filterMiss, issueFilterFor, issueFilterKey, wireFilter, type IssueListFilter } from "@/lib/issueListFilter";
 import { openAutomation, selectProject, selectSession, startCloudSessionIn, takeNewIssueRequest, upsertSession, useSessionStore } from "@/lib/sessions";
 import { openCloudSession } from "@/lib/cloudDashboard";
+import { getCloudAgents } from "@/lib/cloudAgents";
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { planCloudStart, startInWorkspace, type CloudIssueOutcome } from "@/lib/cloudNewSession";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { cn } from "@/lib/cn";
+import { noteSessionStarted } from "@/lib/notify";
 import { issuePrompt, issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import type { IssueThread } from "@/lib/issueComments";
 import type { IssueDetails } from "@/lib/issueOps";
@@ -44,8 +46,8 @@ import { useIssueViewer } from "@/lib/issueViewer";
 import { mine, taken, unavailableText, useIssueWork, workKeyOf, workToWarnAbout, type IssueWorker } from "@/lib/issueWork";
 import { cloudPipelineSettings, pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
 import type { IssuePipeline } from "@/types/issuePipeline";
-import type { Project, WorkStatus } from "@/types/session";
-import type { CloudProject } from "@/types/target";
+import type { Project, SessionEntry, WorkStatus } from "@/types/session";
+import { cloudSessionKey, type CloudProject } from "@/types/target";
 
 type Provider = "github" | "linear";
 /** Which issues the list shows by who works on them (#441). */
@@ -231,6 +233,13 @@ export function IssuesView({
   const filter = issueFilterFor(filterKey ? prefs.issueFilters[filterKey] : undefined, provider);
   const filterAsked = JSON.stringify(wireFilter(filter, ""));
   const pinFilter = `${filterAsked}\n${search}`;
+  // Starts keep their rows in this list until the reader refreshes or changes its filters.
+  // Record before publishing the session so the store update cannot remove the row even briefly.
+  const startedRowScope = JSON.stringify([projectPath, provider, pinFilter, workFilter]);
+  const startedRows = useRef({ scope: startedRowScope, keys: new Set<string>() });
+  useEffect(() => {
+    startedRows.current = { scope: startedRowScope, keys: new Set() };
+  }, [startedRowScope]);
   const setFilter = (next: IssueListFilter) => {
     if (filterKey) setPrefs({ issueFilters: { ...getPrefs().issueFilters, [filterKey]: next } });
   };
@@ -263,7 +272,7 @@ export function IssuesView({
   const workOf = (issue: Issue) => work.byIssue.get(workKeyOf(issue));
   // The issue just created here stays listed while it is pinned, whoever works on it (PRO-99).
   const pinnedKey = created.current ? writeKey(created.current.issue) : null;
-  const shownList = workFilter === "all" ? list : list.filter((issue) => writeKey(issue) === pinnedKey || (workFilter === "free" ? !taken(workOf(issue)) : mine(workOf(issue))));
+  const shownList = workFilter === "all" ? list : list.filter((issue) => writeKey(issue) === pinnedKey || (startedRows.current.scope === startedRowScope && startedRows.current.keys.has(writeKey(issue))) || (workFilter === "free" ? !taken(workOf(issue)) : mine(workOf(issue))));
   const workNote = unavailableText(work.answer, work.hasCloud);
   // Issues with a pipeline here that the list does not hold: closed by their
   // merge, or outside the search. They stay below it, so the record of what
@@ -447,6 +456,9 @@ export function IssuesView({
     setStarting(true);
     setError(null);
     setStartNote(null);
+    const rowKey = writeKey(issue);
+    const retained = startedRows.current.scope === startedRowScope ? startedRows.current.keys : null;
+    const wasRetained = retained?.has(rowKey);
     try {
       // The discussion goes with the first prompt: the pane's thread when it was read, else read now, before the session exists.
       const key = `${projectPath}\n${issue.provider}\n${issue.id}`;
@@ -464,6 +476,7 @@ export function IssuesView({
           return;
         }
         const body = (issue as Partial<IssueDetails>).description ?? issue.body ?? null;
+        retained?.add(rowKey);
         const startedKey = await startInWorkspace(
           plan,
           {
@@ -484,11 +497,15 @@ export function IssuesView({
               settings: pipelineDefaults,
             },
           },
-          { onIssue: (outcome) => setStartNote(cloudIssueNote(outcome)) },
+          { select: false, onIssue: (outcome) => setStartNote(cloudIssueNote(outcome)) },
         );
         work.recordCloudStart(startedKey, issue);
+        const { orgId, id: workspaceId } = plan.node.item.workspace;
+        const tab = getCloudAgents({ organizationId: orgId, workspaceId }).tabs.find((tab) => cloudSessionKey(orgId, workspaceId, tab.info.sessionId) === startedKey);
+        if (tab) noteSessionStarted(startedKey, tab.tabId, harness.id, `${issue.identifier} ${issue.title}`);
         return;
       }
+      retained?.add(rowKey);
       const s = await api.createSession({
         projectPath,
         title: `${issue.identifier} ${issue.title}`.slice(0, 80),
@@ -515,9 +532,10 @@ export function IssuesView({
           console.error("issue pipeline did not start", e);
         }
       }
-      selectSession(s.id);
       onCreated?.(s.id, s.tabs[0].id, prompt);
+      noteSessionStarted(s.id, s.tabs[0].id, harness.id, `${issue.identifier} ${issue.title}`);
     } catch (e) {
+      if (!wasRetained) retained?.delete(rowKey);
       setError({
         message: cloud ? cloudStartError(e, cloud.project.orgId) : errorMessage(e),
         organizationId: cloud?.project.orgId ?? null,
@@ -525,7 +543,7 @@ export function IssuesView({
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, projectPath, cloud, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, pipelineDefaults, pipeline, pipelineLaunch.value, work.byIssue]);
+  }, [detail, selected, projectPath, cloud, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, pipelineDefaults, pipeline, pipelineLaunch.value, work.byIssue, startedRowScope]);
 
   const emptyReason = useMemo(() => {
     if (!projectPath) return "Add a project to see its issues.";
@@ -606,11 +624,16 @@ export function IssuesView({
   };
   // The editors are the open issue's own: a switch starts them afresh.
   const issueKey = selected ? `${projectPath}:${selected.provider}:${selected.id}` : "";
-  // The session working on the issue: the pipeline's author, never its reviewer. A cloud one is its workspace's.
-  const linkedSession = selected
-    ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
-    : null;
-  const openLinked = linkedSession ? () => selectSession(linkedSession.id) : pipeline?.place ? () => openCloudSession(pipeline.author.sessionId, pipeline.author.tabId) : null;
+  // Open the newest work, even when an older pipeline remains. Reviewer sessions are never candidates.
+  // Seed with the pipeline author: older sessions may have no issue metadata. A later append wins a timestamp tie.
+  const pipelineAuthor = store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? null;
+  const reviewers = new Set(pipelines.flatMap((value) => value.reviewer ? [value.reviewer.sessionId] : []));
+  const linkedSession = selected ? store.sessions.reduce<SessionEntry | null>((latest, session) => {
+    if (session.projectPath !== projectPath || session.issue?.url !== selected.url || reviewers.has(session.id)) return latest;
+    return !latest || (Date.parse(session.created) || 0) >= (Date.parse(latest.created) || 0) ? session : latest;
+  }, pipelineAuthor) : null;
+  const cloudLinked = selected ? work.byIssue.get(workKeyOf(selected))?.filter((worker) => worker.you && worker.cloudSession).sort((a, b) => b.since - a.since)[0]?.cloudSession : null;
+  const openLinked = linkedSession ? () => selectSession(linkedSession.id) : cloudLinked ? () => openCloudSession(cloudLinked.key, cloudLinked.tabId) : pipeline?.place ? () => openCloudSession(pipeline.author.sessionId, pipeline.author.tabId) : null;
 
   // Who has the issue shows once that is known: from the row, or from its details.
   const assigneeShown = !!current && !!(current.assignees || current.assignee || !detailLoading);
@@ -760,7 +783,7 @@ export function IssuesView({
               </Button>
             </WithTooltip>
             <WithTooltip label="Refresh">
-              <Button variant="ghost" size="icon-xs" aria-label="Refresh" onClick={() => setTick((t) => t + 1)}>
+              <Button variant="ghost" size="icon-xs" aria-label="Refresh" onClick={() => { startedRows.current.keys.clear(); setTick((t) => t + 1); }}>
                 {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
               </Button>
             </WithTooltip>

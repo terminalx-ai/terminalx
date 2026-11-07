@@ -13,12 +13,23 @@ use serde::{Deserialize, Serialize};
 
 use super::transaction;
 
+#[path = "local_sections.rs"]
+pub mod local_sections;
+
 const TRANSACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The launch mode of any session or tab whose creator did not name one —
 /// the desktop, the CLI, the relay, a cloud launch, an automation — and of a
-/// stored tab that has none. Only an explicit mode overrides it.
+/// stored tab that has none. Only an explicit mode overrides it. The desktop's
+/// own new chats name theirs: the reader's last pick, Ask every time until
+/// they make one (`FIRST_RUN_PERMISSION_MODE` in packages/portable).
 pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
+
+/// The mode a new chat starts in until the reader picks one (PRO-162): Ask
+/// every time. Offered as the starting choice wherever a person opens a new
+/// chat form this side cannot read the reader's last pick for (the phone).
+/// Mirrors `FIRST_RUN_PERMISSION_MODE` in packages/portable/src/agentSettings.ts.
+pub const FIRST_RUN_PERMISSION_MODE: &str = "manual";
 
 /// A requested mode, or the default when none was named. Blank is not a mode.
 pub fn permission_mode_or_default(mode: Option<&str>) -> String {
@@ -583,6 +594,10 @@ pub struct TabState {
 struct IndexFile {
     #[serde(default)]
     sessions: Vec<SessionEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    local_sections: Vec<local_sections::LocalSection>,
+    #[serde(default)]
+    local_sections_revision: u64,
     /// Left out of the file until a workspace is arranged, so an index nobody
     /// reordered is written exactly as before.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -610,6 +625,7 @@ pub fn revision() -> u64 {
 }
 
 fn save_file(file: &mut IndexFile) -> Result<()> {
+    local_sections::prune(file);
     // A closed tab goes with its session: there is nothing left to reopen it into.
     let IndexFile { sessions, closed_tabs, .. } = file;
     closed_tabs.retain(|closed| sessions.iter().any(|session| session.id == closed.session_id));
@@ -1188,6 +1204,15 @@ mod tests {
         assert_eq!(requested_mode(Some(" ".into())), None);
         assert_eq!(requested_mode(None), None);
         assert_eq!(requested_mode(Some("plan".into())), Some("plan".into()));
+    }
+
+    #[test]
+    fn the_first_run_mode_is_ask_every_time_on_both_sides() {
+        // The desktop's new chats and the phone's form must open in the same mode.
+        let portable = include_str!("../../../packages/portable/src/agentSettings.ts");
+        assert!(portable.contains(&format!("export const FIRST_RUN_PERMISSION_MODE = \"{FIRST_RUN_PERMISSION_MODE}\";")), "agentSettings.ts and index.rs disagree on the first-run mode");
+        assert_eq!(FIRST_RUN_PERMISSION_MODE, "manual");
+        assert_ne!(FIRST_RUN_PERMISSION_MODE, DEFAULT_PERMISSION_MODE);
     }
 
     #[test]

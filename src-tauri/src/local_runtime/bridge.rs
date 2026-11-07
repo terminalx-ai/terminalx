@@ -19,11 +19,11 @@ use anyhow::{bail, Result};
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use crate::pty::Tap;
+use crate::pty::{Tap, SizedTap};
 use crate::sink::EventSink;
 use super::client::{Client, Stream};
 
-type Views = HashMap<String, (String, Tap)>;
+type Views = HashMap<String, (String, SizedTap)>;
 /// Told once, with why, when the connection ends by itself; never after
 /// `disconnect`. Whoever is told logs it: without one, the bridge does.
 pub type Lost = Box<dyn FnOnce(String) + Send>;
@@ -108,11 +108,12 @@ impl Bridge {
                             let id = frame["id"].as_str().ok_or_else(|| anyhow::anyhow!("pane id is missing"))?;
                             let token = frame["token"].as_str().ok_or_else(|| anyhow::anyhow!("view token is missing"))?;
                             let bytes = base64::engine::general_purpose::STANDARD.decode(frame["data"].as_str().unwrap_or_default())?;
+                            let size = serde_json::from_value(frame["size"].clone()).unwrap_or(None);
                             let mut state = reader.lock().unwrap();
                             if let Some((current, tap)) = state.views.get(id) {
                                 // A replaced view must never consume an old view's
                                 // replay or acknowledge its bytes.
-                                if current == token && !tap(&bytes) {
+                                if current == token && !tap(&bytes, size) {
                                     state.views.remove(id);
                                     state.send(json!({"method":"detach", "id":id,"token":token}))?;
                                 }
@@ -177,6 +178,10 @@ impl Bridge {
     }
 
     pub fn attach(&self, id: &str, token: &str, tap: Tap) -> Result<()> {
+        self.attach_sized(id, token, Box::new(move |bytes, _| tap(bytes)))
+    }
+
+    pub fn attach_sized(&self, id: &str, token: &str, tap: SizedTap) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.views.insert(id.into(), (token.into(), tap));
         state.send(json!({"method":"attach","id":id,"token":token}))

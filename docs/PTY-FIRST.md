@@ -259,6 +259,8 @@ of a tab share a submission guard: a confirmed local response retires its
 card even before the broadcast arrives, and a stale click sends no second
 decision. A cloud mailbox enqueue still waits for the owner's decision event;
 queuing an answer does not establish that the request was answered.
+A Codex call that the model runs again while the same call still waits on
+its card files no second card (see "Two gates, a card for each").
 
 ### The composer writes keystrokes
 
@@ -804,7 +806,7 @@ configuration snapshots and draw nothing. Occupancy is
 `token_count.info.last_token_usage.total_tokens`; the sibling `total` is
 cumulative over the turn and would over-report it several times.
 
-### Two gates, one card
+### Two gates, a card for each
 
 `PermissionRequest` is a decision-returning hook for Codex as it is for Claude,
 but its shape and its reach both differ:
@@ -839,10 +841,74 @@ that decision is supported only alongside rewritten `updatedInput`. `ask` is
 also unsupported. This is checked against the
 [0.164.0 hook parser](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/hooks/src/engine/output_parser.rs).
 
-Acknowledging `PreToolUse` does *not* satisfy the sandbox, so an escalating command reaches
-`PermissionRequest` a moment later with the same `tool_input.command`. One tool
-must not cost two cards, so the answer is remembered for the turn under the
-tool and its target and reused for the request that follows.
+Acknowledging `PreToolUse` does *not* satisfy the sandbox, so an escalating
+command reaches `PermissionRequest` a moment later with the same
+`tool_input.command`. That second ask wants more than the first: running
+the command outside the sandbox. It gets a card of its own, which says
+"Codex asks to run this outside its sandbox" and carries the model's
+justification. Until PRO-160 the answer at `PreToolUse` was remembered for
+the turn and reused there, and for any later call of the same command, so
+the escalation was granted without the reader seeing it. No answer is
+reused now. Each hook that asks gets a card.
+
+The one exception is a repeat of a call that is still waiting. Codex's
+code-mode `exec` hands the turn back to the model once its yield time
+passes (30 s by default) while a call inside it waits on a card. The model
+then sees `Script running with cell ID …` and should call `wait`, but it can
+run the same command again instead. That repeat is a second request for the
+same command while the first is still waiting. Filed as a card, it was an
+identical card that stayed live after Allow, and answering it ran the
+command a second time (PRO-160).
+
+The repeat can reach either gate while the first waits at either one. Its
+`PreToolUse` can arrive while the first waits to leave the sandbox, and in
+any mode its `PermissionRequest` can carry a reworded justification. So a
+repeat is told by what it runs, not by which gate asks or by the agent's
+words. That is the tool and its input, less `description` and
+`justification` and less a command's trailing whitespace. A request that
+matches a card the same launch still waits on, at either gate, files no
+card. It is refused at once with `This command is already waiting for
+approval in another call. Wait for that call's result instead of running it
+again.` The model reads that as `Command blocked by PreToolUse hook: …`. The
+call that is waiting keeps its card and the reader's answer.
+
+The check runs under the same lock that files a card, so two such hooks
+cannot both pass. A call's own `PermissionRequest` is not a repeat: it
+starts only after that call's `PreToolUse` hook has been answered, and an
+answered card no longer waits.
+
+What the hooks say was recorded from the real Codex 0.166.0 TUI on
+2026-11-06, with a stand-in model. Every model Codex lists is code-mode
+(`tool_mode: code_mode_only`). The model writes JavaScript for one `exec`
+tool, and the script calls `tools.exec_command({cmd, sandbox_permissions,
+justification})` or `tools.apply_patch(…)`.
+
+- `exec` and `wait` fire no hooks. Each nested call does, as
+  `tool_name: "Bash"` or `"apply_patch"`, with `tool_input.command`.
+- `PreToolUse` carries the call's `tool_use_id` (`exec-<uuid>`).
+  `PermissionRequest` carries none. For `Bash` it adds the justification as
+  `tool_input.description`. For `apply_patch` it drops the patch's final
+  newline.
+- One call's `PermissionRequest` starts only after its `PreToolUse` hook has
+  exited, 60–260 ms later. No call gets either hook twice.
+- Calls a script makes at once (`Promise.all`) ask at once, each with its own
+  hooks.
+- After a denial at `PreToolUse` there is no `PermissionRequest`. The script
+  gets `Command blocked by PreToolUse hook: The user declined this action.`
+- A command the sandbox blocks without asking to escalate fails back to the
+  model. Codex does not ask to retry it outside the sandbox.
+
+`harness/codex/fixtures/permission_gates_*.jsonl` hold five of these
+recordings, with only the paths rewritten:
+- a session's first escalated command;
+- a denied command run again;
+- a command run again while its first card waits;
+- a command run again while its card to leave the sandbox waits;
+- in auto mode, a command run again with its justification reworded.
+
+The tests replay each one through the hook handler, starting and ending
+hooks as they did, and expect each reply to be what the recorded hook
+printed.
 
 Permission modes map as `plan → -a on-request -s read-only`, everything else
 `→ -a on-request -s workspace-write` (with the `PreToolUse` gate for "Ask every

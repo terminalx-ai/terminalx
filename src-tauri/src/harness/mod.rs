@@ -16,7 +16,9 @@ pub mod codex;
 pub mod host;
 pub mod opencode;
 pub mod readiness;
+pub mod read_only;
 pub mod settings;
+pub mod setup;
 pub mod tui;
 
 use serde::{Deserialize, Serialize};
@@ -113,6 +115,9 @@ pub struct HarnessInfo {
     pub path: Option<String>,
     pub install_hint: String,
     pub install_url: String,
+    /// The app can install this CLI and sign in to it by itself (PRO-152).
+    #[serde(default)]
+    pub installable: bool,
     pub caps: Capabilities,
 }
 
@@ -149,7 +154,29 @@ struct Spec {
     headless: Headless,
     install_hint: &'static str,
     install_url: &'static str,
+    /// How the app installs and signs in to this CLI by itself (PRO-152).
+    /// `None`: only the hint and the guide are offered.
+    setup: Option<Setup>,
     caps: Capabilities,
+}
+
+/// The provider's own way to install its CLI and sign in to it, run by
+/// `setup` in a terminal the reader watches. Nothing here needs Node or a
+/// package manager: a stock Mac has `curl`, `sh` and `bash`.
+struct Setup {
+    /// The provider's official install script.
+    installer: &'static str,
+    /// What runs the script, as the provider's instructions pipe it, with any
+    /// settings first (`env NAME=value … sh`).
+    runner: &'static [&'static str],
+    /// Where the installer writes, under the home directory. Each must be
+    /// writable (or creatable) before the download starts.
+    writes: &'static [&'static str],
+    /// The CLI's own sign-in, after the binary.
+    login: &'static [&'static str],
+    /// A page of the provider's that answers when the network does, asked
+    /// only after a failure, to tell an outage from a refusal.
+    probe: &'static str,
 }
 
 struct Headless {
@@ -164,8 +191,17 @@ const REGISTRY: &[Spec] = &[
         binary: "claude",
         packages: &["@anthropic-ai/claude-code"],
         headless: Headless { commands: &["mcp", "doctor", "update", "install", "config", "setup-token"], flags: &["-p", "--print"] },
-        install_hint: "npm install -g @anthropic-ai/claude-code && claude auth login",
+        install_hint: "curl -fsSL https://claude.ai/install.sh | bash && claude auth login",
         install_url: "https://claude.com/product/claude-code",
+        // Puts the binary in ~/.local/bin and its versions in ~/.local/share/claude;
+        // the download lands in ~/.claude/downloads first.
+        setup: Some(Setup {
+            installer: "https://claude.ai/install.sh",
+            runner: &["bash"],
+            writes: &[".local/bin", ".local/share/claude", ".claude"],
+            login: &["auth", "login"],
+            probe: "https://claude.ai/install.sh",
+        }),
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: true, at_mentions: true, fork: true, resume: true },
     },
     Spec {
@@ -174,8 +210,18 @@ const REGISTRY: &[Spec] = &[
         binary: "codex",
         packages: &["@openai/codex"],
         headless: Headless { commands: &["exec", "e", "mcp", "mcp-server", "app-server", "login", "logout", "completion"], flags: &[] },
-        install_hint: "npm install -g @openai/codex && codex login",
+        install_hint: "curl -fsSL https://chatgpt.com/codex/install.sh | sh && codex login",
         install_url: "https://developers.openai.com/codex/cli",
+        // The standalone build: ~/.local/bin/codex, linked into ~/.codex/packages.
+        // Non-interactive, so it neither asks to start Codex nor to remove
+        // another install: sign-in comes next, here.
+        setup: Some(Setup {
+            installer: "https://chatgpt.com/codex/install.sh",
+            runner: &["env", "CODEX_NON_INTERACTIVE=1", "sh"],
+            writes: &[".local/bin", ".codex"],
+            login: &["login"],
+            probe: "https://chatgpt.com/codex/install.sh",
+        }),
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: false, at_mentions: false, fork: false, resume: true },
     },
     Spec {
@@ -186,6 +232,7 @@ const REGISTRY: &[Spec] = &[
         headless: Headless { commands: &[], flags: &["-p", "--print"] },
         install_hint: "curl https://cursor.com/install -fsS | bash && agent login",
         install_url: "https://cursor.com/cli",
+        setup: None,
         caps: Capabilities { images: true, steer: false, permission_modes: true, effort: false, slash_commands: false, at_mentions: false, fork: false, resume: true },
     },
     Spec {
@@ -196,6 +243,7 @@ const REGISTRY: &[Spec] = &[
         headless: Headless { commands: &["run", "serve"], flags: &[] },
         install_hint: "curl -fsSL https://opencode.ai/install | bash && opencode auth login",
         install_url: "https://opencode.ai",
+        setup: None,
         caps: Capabilities { images: true, steer: false, permission_modes: true, effort: false, slash_commands: false, at_mentions: false, fork: false, resume: true },
     },
 ];
@@ -213,6 +261,7 @@ pub fn catalog() -> Vec<HarnessInfo> {
                 path: path.map(|p| p.to_string_lossy().into_owned()),
                 install_hint: spec.install_hint.into(),
                 install_url: spec.install_url.into(),
+                installable: spec.setup.is_some() && cfg!(unix),
                 caps: spec.caps,
             }
         })

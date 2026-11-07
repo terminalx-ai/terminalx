@@ -48,6 +48,7 @@ const harness = { id: "claude", name: "Claude", available: true, installHint: ""
 const store = {
   projects: [project] as Project[], selectedProject: project.path as string | null,
   harnesses: [harness], newSessionQuick: false,
+  newSessionSectionId: null as string | null,
   newSessionPreset: null as { projectPath: string; cwd: string | null; fromBranch?: string } | null,
 };
 const { createQuickChat, selectSession } = vi.hoisted(() => ({ createQuickChat: vi.fn(), selectSession: vi.fn() }));
@@ -87,12 +88,13 @@ beforeEach(() => {
   store.projects = [project];
   store.harnesses = [harness];
   store.newSessionQuick = false;
+  store.newSessionSectionId = null;
   store.newSessionPreset = null;
   store.selectedProject = project.path;
   project.kind = "git";
   delete project.issuePipeline;
   vi.stubGlobal("crypto", { randomUUID: vi.fn(() => "attachment-1") });
-  vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn(() => "blob:preview"), revokeObjectURL: vi.fn() });
+  vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL: vi.fn(() => "blob:preview"), revokeObjectURL: vi.fn() }));
 });
 
 afterEach(() => {
@@ -378,8 +380,45 @@ it("starts a branch with both switches off, and one started from an issue picked
   expect(invoke).toHaveBeenCalledWith("issue_pipeline_set_resolve_conflicts", { id: "p1", value: true });
 });
 
+it("opening the main window preserves an unsent initial prompt in the source view", async () => {
+  const view = render(<NewSessionView quick compact />);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "An initial prompt I have not sent" } });
+  invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+    if (cmd === "chat_window_open_in_main" && args.closeSource !== false) view.unmount();
+  });
+  const { openChatWindowInMain } = await import("@/lib/chatWindowHandoff");
+  await act(async () => { await openChatWindowInMain("", null); });
+  expect(screen.getByRole("textbox")).toHaveProperty("value", "An initial prompt I have not sent");
+  expect(invoke).toHaveBeenCalledWith("chat_window_open_in_main", { sessionId: "", tabId: null, closeSource: false });
+});
 
 describe("one new-chat composer (PRO-173)", () => {
+  it("updates setup and enables the installed agent after returning from Terminal without Check again (PRO-170)", async () => {
+    store.harnesses = [{ ...harness, id: "codex", name: "Codex", available: false }];
+    let readiness = "missing";
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: readiness, checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this draft" } });
+    await screen.findByText("Not installed");
+
+    readiness = "signed_out";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await screen.findByText("Installed · sign in required");
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
+
+    readiness = "ready";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await screen.findByText("Ready · local login found");
+    expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Codex · Bypass");
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+    expect(createQuickChat).not.toHaveBeenCalled();
+  });
+
   it.each([
     [false, "signed_out", "signed_out", null], [true, "signed_out", "signed_out", null],
     [false, "ready", "signed_out", "Claude"], [true, "ready", "signed_out", "Claude"],
@@ -418,5 +457,20 @@ describe("one new-chat composer (PRO-173)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
     expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({ projectPath: project.path, baseRef: "feature/login", useWorktree: true, cwd: null }) });
+  });
+});
+
+describe("new sessions in a personal section", () => {
+  it.each([false, true])("includes the section in the creation request (quick=%s)", async (quick) => {
+    store.newSessionSectionId = "release";
+    store.newSessionQuick = quick;
+    const { onCreated } = renderView();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Ship the release" } });
+    const send = screen.getByRole("button", { name: quick ? "Ask" : "Create" });
+    await waitFor(() => expect(send.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(send);
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    if (quick) expect(createQuickChat).toHaveBeenCalledWith(expect.objectContaining({ sectionId: "release" }));
+    else expect(invoke).toHaveBeenCalledWith("create_session", expect.objectContaining({ req: expect.objectContaining({ sectionId: "release" }) }));
   });
 });

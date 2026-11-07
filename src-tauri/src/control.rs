@@ -309,6 +309,12 @@ impl WindowControl {
 
     #[cfg(unix)]
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
+        if command == "environment.snapshot" {
+            let key = params["key"].as_str().ok_or_else(|| ControlError::invalid("Environment scope required."))?;
+            let revision = params["revision"].as_str().ok_or_else(|| ControlError::invalid("Environment revision required."))?;
+            return crate::store::environment::desktop_snapshot(key, revision)
+                .and_then(|snapshot| Ok(serde_json::to_value(snapshot)?)).map_err(|_| ControlError::internal("Environment overrides are unavailable."));
+        }
         if let Some(action) = command.strip_prefix("share.") {
             let pairing = self.pairing.as_ref().ok_or_else(|| ControlError::internal("Sharing is unavailable."))?;
             let session = params["sessionId"].as_str().ok_or_else(|| ControlError::internal("Session id required."))?;
@@ -685,7 +691,7 @@ impl ControlService {
                 format!("{command} needs the TerminalX desktop app; terminalx-serve lists issues only."),
                 None::<String>,
             )),
-            "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
+            "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -776,6 +782,8 @@ impl ControlService {
             /// The issue's "merge automatically" switch; the project's default when absent.
             #[serde(default)]
             auto_merge: Option<bool>,
+            #[serde(default)]
+            resolve_conflicts: Option<bool>,
             /// Start from the issue and stop at the code, as before pipelines.
             #[serde(default)]
             no_pipeline: bool,
@@ -804,8 +812,8 @@ impl ControlService {
         if p.issue.is_none() && p.provider.is_some() {
             return Err(ControlError::invalid("--provider applies to a session started with --issue."));
         }
-        if p.auto_merge.is_some() && (p.no_pipeline || p.on_main) {
-            return Err(ControlError::invalid("--auto-merge needs the pipeline and a worktree: it cannot be combined with --no-pipeline or --on-main."));
+        if (p.auto_merge.is_some() || p.resolve_conflicts.is_some()) && (p.no_pipeline || p.on_main || p.quick) {
+            return Err(ControlError::invalid("Pipeline switches need a project pipeline and a worktree: they cannot be combined with --no-pipeline, --on-main or --quick."));
         }
         if p.quick {
             if p.project.is_some() || p.name.is_some() || p.use_worktree || p.on_main || p.issue.is_some() {
@@ -855,7 +863,7 @@ impl ControlService {
             None => {
                 // The title a quick chat started from the window gets: the prompt's first line.
                 let title = p.title.or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
-                let quick = crate::session_ops::NewQuickChat { title, cwd: p.cwd, tab: Some(first_tab) };
+                let quick = crate::session_ops::NewQuickChat { section_id: None, title, cwd: p.cwd, tab: Some(first_tab) };
                 crate::session_ops::create_quick_chat_blocking(&*self.sink, quick).map_err(ControlError::invalid)?
             }
             Some(selector) => {
@@ -863,11 +871,15 @@ impl ControlService {
                 // The tracker is asked before anything is created: an issue
                 // that cannot be read must not leave a worktree behind.
                 if let Some(reference) = p.issue.as_deref() {
+                    if !cfg!(feature = "desktop") && self.local_lifetime.is_none() {
+                        return Err(ControlError::new("unsupported", "This runtime cannot start a local issue session.", Some("Start it from the Issues page, or update TerminalX.".into())));
+                    }
                     issue = Some(issue_for_session(&project.path, reference, p.provider.as_deref())?);
                 }
                 crate::session_ops::create_named_session_blocking(
                     &*self.sink,
                     NewSession {
+                        section_id: None,
                         project_path: project.path,
                         title: p.title,
                         use_worktree: p.use_worktree,
@@ -901,8 +913,8 @@ impl ControlService {
         let mut pipeline_note = Value::Null;
         // A session not started from an issue gets a pipeline only where the project turned a switch on.
         let pipeline_default = crate::store::projects::issue_pipeline_settings(&entry.project_path).is_ok_and(|settings| settings.enabled && (settings.auto_merge == Some(true) || settings.resolve_conflicts == Some(true)));
-        if (issue.is_some() || p.auto_merge.is_some() || pipeline_default) && !p.no_pipeline {
-            match self.start_pipeline(&entry.id, &tab.id, p.auto_merge) {
+        if (issue.is_some() || p.auto_merge.is_some() || p.resolve_conflicts.is_some() || pipeline_default) && !p.no_pipeline {
+            match self.start_pipeline(&entry.id, &tab.id, p.auto_merge, p.resolve_conflicts, issue.as_ref().and_then(|issue| issue.body.as_deref())) {
                 Ok((started, brief)) => {
                     prompt = format!("{prompt}\n\n{brief}");
                     pipeline = started;
@@ -926,9 +938,9 @@ impl ControlService {
 
     /// Start the issue pipeline for a new session: the pipeline and what the
     /// author's first prompt must carry for it, or why there is none.
-    fn start_pipeline(&self, session_id: &str, tab_id: &str, auto_merge: Option<bool>) -> Result<(Value, String), String> {
+    fn start_pipeline(&self, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, issue_body: Option<&str>) -> Result<(Value, String), String> {
         if !cfg!(feature = "desktop") && self.local_lifetime.is_none() { return Err("Issue pipelines need a local desktop owner.".into()); }
-        let pipeline = crate::issue_pipeline::engine::start(&self.pipeline_host(), session_id, tab_id, auto_merge, None).map_err(|error| format!("{error:#}"))?;
+        let pipeline = crate::issue_pipeline::engine::start_with_switches(&self.pipeline_host(), session_id, tab_id, auto_merge, resolve_conflicts, issue_body).map_err(|error| format!("{error:#}"))?;
         Ok((json!(pipeline), crate::issue_pipeline::prompts::author_brief()))
     }
 
@@ -947,9 +959,15 @@ impl ControlService {
         let host = self.pipeline_host();
         let changed = match command {
             "pipelines.show" => Ok(pipeline),
-            "pipelines.autoMerge" => {
+            "pipelines.autoMerge" | "pipelines.resolveConflicts" => {
                 let value = params.get("value").and_then(Value::as_bool).ok_or_else(|| ControlError::invalid("Say on or off."))?;
-                engine::set_auto_merge(&host, &pipeline.id, value)
+                // Caller metadata is attribution only; it grants no merge authority.
+                let actor = crate::issue_pipeline::SwitchActor::Cli {
+                    session_id: params["caller"]["session"].as_str().map(str::to_owned),
+                    tab_id: params["caller"]["tab"].as_str().map(str::to_owned),
+                };
+                if command == "pipelines.autoMerge" { engine::set_auto_merge_by(&host, &pipeline.id, value, actor) }
+                else { engine::set_resolve_conflicts_by(&host, &pipeline.id, value, actor) }
             }
             "pipelines.act" => {
                 let action: engine::Action = serde_json::from_value(params.get("action").cloned().unwrap_or(Value::Null)).map_err(|_| ControlError::invalid("Unknown pipeline action."))?;
@@ -1371,7 +1389,6 @@ fn cloud_issue_start(params: Value) -> Result<Value, ControlError> {
     Ok(params)
 }
 
-#[cfg(feature = "desktop")]
 fn issue_for_session(project_path: &str, reference: &str, provider: Option<&str>) -> Result<IssueStart, ControlError> {
     let (provider, id) = crate::issues::parse_issue_reference(reference, provider).map_err(ControlError::invalid)?;
     // A URL names its repository. The issue is read from the project's own,
@@ -1394,17 +1411,12 @@ fn issue_for_session(project_path: &str, reference: &str, provider: Option<&str>
     } else {
         crate::issues::github_details(Path::new(project_path), &id)
     }
-    .map_err(|error| ControlError::not_found(format!("{reference} could not be read: {error:#}")))?;
+    .map_err(|error| ControlError::new("issue_unavailable", format!("{reference} could not be read: {error:#}"), Some("Check the issue and its integration in the Issues page, then retry. If this runtime cannot serve issue starts, start it from the Issues page or update TerminalX.".into())))?;
     Ok(IssueStart {
         prompt: crate::issue_pipeline::prompts::issue_prompt(&issue),
         body: issue.body.clone(),
         reference: crate::store::index::IssueRef { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url },
     })
-}
-
-#[cfg(not(feature = "desktop"))]
-fn issue_for_session(_project_path: &str, _reference: &str, _provider: Option<&str>) -> Result<IssueStart, ControlError> {
-    Err(ControlError::invalid("Sessions are started from an issue in the desktop app."))
 }
 
 /// A pipeline by its id (or the start of it), by its issue (`#433`,
@@ -1732,7 +1744,7 @@ fn resolve_worktree(params: &Value) -> Result<(projects::Project, crate::workspa
 mod tests {
     use super::*;
 
-    fn headless_service() -> (ControlService, Arc<crate::sink::BroadcastSink>) {
+    pub(super) fn headless_service() -> (ControlService, Arc<crate::sink::BroadcastSink>) {
         let sink = Arc::new(crate::sink::BroadcastSink::new(16));
         let endpoint = crate::hooks::prepare_control().unwrap();
         let manager = SessionManager::new(
@@ -1779,6 +1791,7 @@ mod tests {
         })).unwrap()).unwrap();
         // Pointed at the project's own folder: still not one of the project's sessions.
         let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            section_id: None,
             title: Some("Quick question".into()), cwd: Some(project.path.clone()), tab: None,
         }).unwrap();
         let (service, _sink) = headless_service();
@@ -1856,7 +1869,7 @@ mod tests {
         assert_eq!(ids(&service.execute("sessions.list", json!({}), "r9").unwrap()), sorted(vec![first.id.clone(), third.id.clone()]));
     }
 
-    fn git_repo() -> tempfile::TempDir {
+    pub(super) fn git_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         crate::git::run(p, &["init", "-q", "-b", "main"]).unwrap();
@@ -1889,6 +1902,7 @@ mod tests {
             "projectPath": other.path, "title": "Another project's", "useWorktree": false, "cwd": cwd,
         })).unwrap()).unwrap();
         let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            section_id: None,
             title: Some("Quick look".into()), cwd: Some(cwd.clone()), tab: None,
         }).unwrap();
         let everyone: std::collections::BTreeSet<String> = [&own, &foreign, &quick].iter().map(|s| s.id.clone()).collect();
@@ -2274,3 +2288,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "control_issue_tests.rs"]
+mod issue_tests;

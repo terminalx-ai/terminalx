@@ -1613,6 +1613,12 @@ pub async fn pairing_status(state: tauri::State<'_, crate::AppState>) -> CmdResu
 }
 
 #[tauri::command]
+pub async fn pairing_retry_relay(state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.retry_relay()).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
 pub async fn pairing_generate(
     connection_mode: Option<crate::pairing::PairingConnectionMode>,
     state: tauri::State<'_, crate::AppState>,
@@ -1752,6 +1758,21 @@ pub async fn project_create(parent: String, name: String) -> StartResult<String>
 pub fn list_sessions(app: tauri::AppHandle) -> CmdResult<Vec<SessionEntry>> {
     store::message_activity::backfill(std::sync::Arc::new(app));
     store::conversation_titles::backfill().map_err(err)
+}
+
+/// Personal local section metadata, read independently of agent processes.
+#[tauri::command]
+pub async fn local_sections() -> CmdResult<index::local_sections::SectionState> {
+    tauri::async_runtime::spawn_blocking(|| index::local_sections::load().map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn edit_local_section(app: AppHandle, edit: index::local_sections::SectionEdit) -> CmdResult<index::local_sections::SectionState> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let saved = index::local_sections::edit(edit).map_err(err)?;
+        let _ = app.emit("local_sections_changed", &saved);
+        Ok(saved)
+    }).await.map_err(err)?
 }
 
 // ---------------------------------------------------------------- automations
@@ -2176,6 +2197,24 @@ pub async fn list_harnesses() -> CmdResult<Vec<harness::HarnessInfo>> {
     tauri::async_runtime::spawn_blocking(harness::offered).await.map_err(err)
 }
 
+/// Install an agent's CLI or sign in to it (PRO-152) in setup pane `id`,
+/// which the webview shows; its exit code says how the step ended
+/// (`harness::setup::exit`).
+#[tauri::command]
+pub async fn agent_setup_start(state: State<'_, AppState>, id: String, harness: String, step: String, cols: u16, rows: u16) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.agent_setup(&id, &harness, &step, cols, rows)).await.map_err(err)?.map_err(err)
+}
+
+/// The setup step running for an agent, as `{pane, step}` or null: a window
+/// that did not start it (another one, or this one before a reload) shows it
+/// instead of starting another (PRO-152).
+#[tauri::command]
+pub async fn agent_setup_running(state: State<'_, AppState>, harness: String) -> CmdResult<serde_json::Value> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.agent_setup_running(&harness)).await.map_err(err)?.map_err(err)
+}
+
 #[tauri::command]
 pub async fn check_agent_readiness(harness: String) -> CmdResult<harness::readiness::Readiness> {
     crate::binpath::invalidate();
@@ -2518,6 +2557,17 @@ pub async fn send_message(
 pub async fn report_send_shown(state: State<'_, AppState>, session_id: String, tab_id: String, seq: u64, timings: crate::session::SendShown) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.note_shown(&session_id, &tab_id, seq, &timings).map_err(err)).await.map_err(err)?
+}
+
+/// What the window showed of a tab's warning, or what was done in it (#815).
+/// The report is labels and numbers only (`recovery_log::UiReport` refuses
+/// anything else); the app's own build is put on it here. Recording is best
+/// effort: the window does not wait on it or show its failure.
+#[tauri::command]
+pub async fn report_recovery_ui(state: State<'_, AppState>, session_id: String, tab_id: String, report: crate::recovery_log::UiReport) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    let report = report.bounded(env!("CARGO_PKG_VERSION"));
+    tauri::async_runtime::spawn_blocking(move || m.note_incident_ui(&session_id, &tab_id, &report).map_err(err)).await.map_err(err)?
 }
 
 /// The recovery banner's "Resend last prompt": the prompt the tab's agent
@@ -2912,7 +2962,7 @@ pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_assoc
 
 #[tauri::command]
 pub async fn pr_list(cwd: String, branch: String) -> CmdResult<Vec<crate::github::PullRequest>> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::github::panel_prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2922,7 +2972,7 @@ pub async fn pr_landed(cwd: String) -> CmdResult<crate::landed::Landed> {
 
 #[tauri::command]
 pub async fn pr_details(cwd: String, number: u64, url: Option<String>) -> CmdResult<crate::github::PullRequest> {
-    tauri::async_runtime::spawn_blocking(move || crate::github::associated_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::github::panel_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -3016,6 +3066,22 @@ pub async fn pty_attach(window: tauri::WebviewWindow, state: State<'_, AppState>
     let label = window.label().to_owned();
     tauri::async_runtime::spawn_blocking(move || runtime.attach(&label, &id, &token, Box::new(move |bytes| channel.send(tauri::ipc::InvokeResponseBody::Raw(bytes.to_vec())).is_ok())))
         .await.map_err(err)?.map_err(err)
+}
+
+/// Sized output: two little-endian u16 dimensions followed by raw PTY bytes.
+/// Zero dimensions mean replay, or an owner predating output size metadata.
+#[tauri::command]
+pub async fn pty_attach_sized(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, token: String, channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    let label = window.label().to_owned();
+    tauri::async_runtime::spawn_blocking(move || runtime.attach_sized(&label, &id, &token, Box::new(move |bytes, size| {
+        let size = size.unwrap_or(crate::pty::OutputSize { cols: 0, rows: 0 });
+        let mut frame = Vec::with_capacity(bytes.len() + 4);
+        frame.extend_from_slice(&size.cols.to_le_bytes());
+        frame.extend_from_slice(&size.rows.to_le_bytes());
+        frame.extend_from_slice(bytes);
+        channel.send(tauri::ipc::InvokeResponseBody::Raw(frame)).is_ok()
+    }))).await.map_err(err)?.map_err(err)
 }
 
 /// The window has drawn `drawn` bytes of the pane's output since it attached (flow control).
@@ -3869,6 +3935,7 @@ mod command_tests {
         let before = git(&project, &["worktree", "list", "--porcelain"]);
 
         let session = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: None,
             use_worktree: true,
@@ -3907,6 +3974,7 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let first = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
             use_worktree: true,
@@ -3926,6 +3994,7 @@ mod command_tests {
         })
         .unwrap();
         let second = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Second".into()),
             use_worktree: false,
@@ -3973,6 +4042,7 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let session = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
             use_worktree: true,
@@ -4023,6 +4093,7 @@ mod command_tests {
         git(&project, &["worktree", "add", "-q", "-b", "feature/attached", worktree.to_str().unwrap()]);
 
         let created = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Attached session".into()),
             use_worktree: true,
@@ -4048,6 +4119,7 @@ mod command_tests {
         })
         .unwrap();
         let companion = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Companion session".into()),
             use_worktree: true,
@@ -4062,6 +4134,7 @@ mod command_tests {
         })
         .unwrap();
         let bystander = create_session_entry(NewSession {
+            section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Session on main".into()),
             use_worktree: false,
@@ -4432,6 +4505,55 @@ pub fn set_work_status_settings(share_with_team: bool, state: tauri::State<'_, c
 #[tauri::command]
 pub fn agent_settings() -> crate::store::settings::AgentSettings {
     store::settings::load().agents
+}
+
+/// Applied by the owner at the next permission hook, including running tabs.
+#[tauri::command]
+pub fn set_read_only_commands(enabled: bool) -> CmdResult<crate::store::settings::AgentSettings> {
+    let mut settings = store::settings::load();
+    settings.agents.read_only_commands = enabled;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.agents)
+}
+
+/// Settings → About: whether recovery incidents are recorded (#815).
+#[tauri::command]
+pub fn diagnostics_settings() -> crate::store::settings::DiagnosticsSettings {
+    store::settings::load().diagnostics
+}
+
+/// The runtime follows the change at its next line: it reads the file again
+/// whenever the file has changed.
+#[tauri::command]
+pub fn set_recovery_incidents(enabled: bool) -> CmdResult<crate::store::settings::DiagnosticsSettings> {
+    let mut settings = store::settings::load();
+    settings.diagnostics.recovery_incidents = enabled;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.diagnostics)
+}
+
+/// The recorded incidents, summed up by reason, build and transport.
+#[tauri::command]
+pub async fn recovery_incidents_summary() -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(|| crate::recovery_log::read_all().map(|lines| crate::recovery_log::summarize(&lines)).map_err(err)).await.map_err(err)?
+}
+
+/// Write the incidents, sessions and tabs named by salted hashes, and their
+/// summary to `path`, a file the reader chose.
+#[tauri::command]
+pub async fn recovery_incidents_export(path: String) -> CmdResult<()> {
+    let mut target = std::path::PathBuf::from(&path);
+    if !target.is_absolute() { return Err("Choose where to save the export.".into()); }
+    if !target.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("json")) {
+        target.as_mut_os_string().push(".json");
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::recovery_log::export(&target).map_err(err)).await.map_err(err)?
+}
+
+/// Remove every recorded incident.
+#[tauri::command]
+pub fn clear_recovery_incidents() -> CmdResult<()> {
+    crate::recovery_log::clear().map_err(err)
 }
 
 /// The runtime that owns the agents reads the limit again at its next look,

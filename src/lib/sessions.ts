@@ -10,7 +10,8 @@ import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
 import { activateLatestTerminal, closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import { bootTabLayouts } from "@/lib/tabLayouts";
-import { isFloatingWindow } from "@/lib/appWindow";
+import { isCompactWindow } from "@/lib/appWindow";
+import { listenForChatWindowDrafts } from "@/lib/chatWindowHandoff";
 import type { NewQuickChat, OpenTarget } from "@/lib/api";
 import type {
   ProjectPatch,
@@ -62,6 +63,8 @@ interface State {
   newSessionPreset: { projectPath: string; cwd: string | null; fromBranch?: string } | null;
   /** The same composer, with no project or worktree. */
   newSessionQuick: boolean;
+  /** Personal local section chosen from its header; cleared on leaving the composer. */
+  newSessionSectionId: string | null;
   /**
    * A new-session form for a cloud project (`cloud:<orgId>:<identity>`),
    * from the project row's `+`. Cleared by the same navigation that clears
@@ -96,6 +99,7 @@ let state: State = {
   newSessionReturn: null,
   newSessionPreset: null,
   newSessionQuick: false,
+  newSessionSectionId: null,
   cloudSessionPreset: null,
   selectedCloudProject: null,
   paletteIndex: buildPaletteIndex([], [], {}, []),
@@ -119,6 +123,7 @@ function set(patch: Partial<State>) {
   // (Strict Mode also runs cleanup when a workspace first mounts).
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
   if (next.view !== "new" || next.selectedSessionId || "newSessionPreset" in patch || "cloudSessionPreset" in patch) next.newSessionQuick = patch.newSessionQuick ?? false;
+  if (next.view !== "new" || next.selectedSessionId || patch.cloudSessionPreset) next.newSessionSectionId = null;
   // Opened from a session, the form remembers it; any other way out forgets it.
   // Only an explicit "New session" (`openNewSession`, a project's or branch's +) records where to go back to; any way out forgets it.
   if (next.view !== "new" || next.selectedSessionId) next.newSessionReturn = null;
@@ -171,8 +176,8 @@ export function subscribeSessionStore(listener: () => void): () => void {
 let booted = false;
 const workspaceRefreshVersions = new Map<string, number>();
 // Backfill can publish while the first list is being read. Subscribe first,
-// retaining only chronology until initialization supplies the session rows.
-const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt">>();
+// retaining message activity until initialization supplies the session rows.
+const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt" | "hasMessages">>();
 export async function bootSessions() {
   if (booted) return;
   booted = true;
@@ -180,7 +185,7 @@ export async function bootSessions() {
     await listen<SessionEntry>("session_updated", (e) => {
       if (state.loaded) upsertSession(e.payload);
       else initialMessageTimes.set(e.payload.id, keepMessageTime(
-        { lastMessageAt: e.payload.lastMessageAt }, initialMessageTimes.get(e.payload.id),
+        { lastMessageAt: e.payload.lastMessageAt, hasMessages: e.payload.hasMessages }, initialMessageTimes.get(e.payload.id),
       ));
     });
     // A new live connection (#643): what changed during the gap was never
@@ -215,7 +220,10 @@ async function loadIndex() {
     // Another window added, removed or edited a project.
     await listen("projects_changed", () => void refreshProjects());
     // The floating window hands a session over ("Open in main window").
-    if (!isFloatingWindow()) await listen<OpenTarget>("open_session", (e) => openTarget(e.payload));
+    if (!isCompactWindow()) {
+      await listen<OpenTarget>("open_session", (e) => openTarget(e.payload));
+      await listenForChatWindowDrafts();
+    }
   } catch {
     /* outside a webview */
   }
@@ -317,7 +325,7 @@ export function openWelcome(closedWorkspaceSessionId: string | null = null) {
 
 export function selectSession(id: string | null) {
   const selected = id ? state.sessions.find((session) => session.id === id) : null;
-  const patch: Partial<State> = { selectedSessionId: id, view: id ? "welcome" : "new", newSessionPreset: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null };
+  const patch: Partial<State> = { selectedSessionId: id, view: id ? "welcome" : "new", newSessionPreset: null, newSessionSectionId: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null };
   // A quick chat has no project to focus: the one in focus stays as it is.
   if (selected && selected.kind !== "quick") focusProject(selected.projectPath, patch);
   else set(patch);
@@ -345,7 +353,7 @@ async function refreshProjects() {
  * wakes the workspace. Local project focus is left as it is.
  */
 export function selectCloudSession(key: string) {
-  set({ selectedSessionId: key, view: "welcome", newSessionPreset: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+  set({ selectedSessionId: key, view: "welcome", newSessionPreset: null, newSessionSectionId: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
 }
 
 /** The issues browser takes the workspace; no session stays selected. */
@@ -428,7 +436,7 @@ export function selectProjectInSidebar(path: string | null) {
 
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
 export function startSessionIn(projectPath: string, cwd: string | null, fromBranch?: string) {
-  focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd, ...(fromBranch ? { fromBranch } : {}) }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+  focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionSectionId: null, newSessionPreset: { projectPath, cwd, ...(fromBranch ? { fromBranch } : {}) }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
 }
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
@@ -602,6 +610,12 @@ export async function startChat(place?: { projectPath: string; cwd?: string; fro
   set({ newSessionReturn: back, newSessionQuick: true });
 }
 
+export function startSessionInSection(sectionId: string) {
+  const back = returnHere();
+  selectSession(null);
+  set({ newSessionReturn: back, newSessionQuick: true, newSessionSectionId: sectionId });
+}
+
 export async function removeProject(path: string) {
   await api.removeProject(path);
   set({
@@ -668,7 +682,7 @@ export async function runIdleArchive(): Promise<string[]> {
 
 /** The main window runs the idle sweep, once soon after launch and then every half hour. */
 export function startIdleArchive() {
-  if (idleArchiveStarted || isFloatingWindow()) return;
+  if (idleArchiveStarted || isCompactWindow()) return;
   idleArchiveStarted = true;
   const next = (delay: number) => setTimeout(() => void runIdleArchive().finally(() => next(IDLE_ARCHIVE_EVERY)), delay);
   next(IDLE_ARCHIVE_FIRST);

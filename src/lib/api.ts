@@ -198,6 +198,7 @@ export interface StatsUsageState {
 }
 
 export interface NewSession {
+  sectionId?: string | null;
   projectPath: string;
   /** Run in this existing workspace instead of creating a worktree. */
   cwd?: string | null;
@@ -224,6 +225,7 @@ export interface WorkspaceRename {
 }
 
 export interface NewQuickChat {
+  sectionId?: string | null;
   title?: string | null;
   cwd?: string | null;
   tab?: NewTab | null;
@@ -520,6 +522,7 @@ export const api = {
 
   // opt-in device pairing
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),
+  pairingRetryRelay: () => invoke<PairingStatus>("pairing_retry_relay"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
   /** This Mac's name as the user's other devices show it (#686). */
@@ -2099,6 +2102,14 @@ export interface PullRequest {
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  /** Absent on older workspace runtimes. */
+  mergeState?: string;
+  mergeQueueEnabled?: boolean | null;
+  mergeQueueEntry?: { position: number; state: string } | null;
+  autoMergeEnabled?: boolean;
+  requiredChecks?: string[] | null;
+  deployments?: { name: string; state: string; url?: string | null }[];
+  detailsError?: string | null;
   reviewDecision: string | null;
   checks: PrCheck[];
   body: string;
@@ -2136,7 +2147,7 @@ export const gh = {
   details: (cwd: string, number: number, url?: string) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}) }),
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
     invoke<string>("pr_create", { cwd, title, body, base, draft, ...(sessionId ? { sessionId } : {}) }),
-  merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
+  merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase" | "queue", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
   ready: (cwd: string, number: number, url?: string) => invoke<void>("pr_ready", { cwd, number, ...(url ? { url } : {}) }),
 };
 
@@ -2244,6 +2255,24 @@ export const floatingWindow = {
   openInMain: (sessionId: string, tabId?: string | null) => invoke<void>("floating_open_in_main", { sessionId, tabId: tabId ?? null }),
 };
 
+// ---- agent setup (PRO-152)
+export type AgentSetupStep = "install" | "login";
+export const agentSetup = {
+  /**
+   * Run an agent's official installer, or its own sign-in, in setup pane `id`
+   * (`setup:<harness>:<run>`, a pane of no session). A pane whose step has
+   * ended goes on with the next one, its output kept above. The pane's exit
+   * code says how the step ended (`agentSetupFlow.ts`).
+   */
+  start: (id: string, harness: string, step: AgentSetupStep, cols: number, rows: number) =>
+    invoke<void>("agent_setup_start", { id, harness, step, cols, rows }),
+  /**
+   * The agent's step that runs now, wherever it was started (another window,
+   * or this one before a reload): the runtime runs one at a time per agent.
+   */
+  running: (harness: string) => invoke<{ pane: string; step: AgentSetupStep } | null>("agent_setup_running", { harness }),
+};
+
 // ---- terminals
 export const pty = {
   /** `title` names a shell tab for every window that lists it. */
@@ -2268,6 +2297,16 @@ export const pty = {
     const channel = new Channel<ArrayBuffer>();
     channel.onmessage = (message) => onData(new Uint8Array(message));
     return invoke<void>("pty_attach", { id, token, channel });
+  },
+  attachSized: (id: string, token: string, onData: (bytes: Uint8Array, size?: { cols: number; rows: number }) => void) => {
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (message) => {
+      if (message.byteLength < 4) return;
+      const header = new DataView(message);
+      const cols = header.getUint16(0, true), rows = header.getUint16(2, true);
+      onData(new Uint8Array(message, 4), cols > 0 && rows > 0 ? { cols, rows } : undefined);
+    };
+    return invoke<void>("pty_attach_sized", { id, token, channel });
   },
   /** This window has drawn `drawn` bytes of the pane's output since it attached; the backend holds a pane that gets too far ahead. */
   ack: (id: string, token: string, drawn: number) => invoke<void>("pty_ack", { id, token, drawn }),
@@ -2469,6 +2508,7 @@ export interface WorkCloudSession {
 
 /** When an agent nobody is using is stopped (#696). */
 export interface AgentSettings {
+  readOnlyCommands: boolean;
   /** Minutes an agent may sit idle before it is stopped; 0 is never. */
   idleStopMinutes: number;
 }
@@ -2478,6 +2518,7 @@ export const IDLE_STOP_MINUTES = [0, 30, 60, 120, 240, 480, 1440] as const;
 
 export const agentSettings = {
   get: () => invoke<AgentSettings>("agent_settings"),
+  setReadOnlyCommands: (enabled: boolean) => invoke<AgentSettings>("set_read_only_commands", { enabled }),
   setIdleStopMinutes: (minutes: number) => invoke<AgentSettings>("set_agent_idle_stop_minutes", { minutes }),
 };
 
@@ -2520,6 +2561,36 @@ export const experimental = {
     }
   },
 };
+
+/** Settings → Storage: what is kept about the warnings tabs raise (#815). */
+export interface DiagnosticsSettings {
+  /** Record when a tab's warning was raised, shown, acted on and cleared: labels, counts and times only. */
+  recoveryIncidents: boolean;
+}
+
+/**
+ * The runtime's log of recovery incidents (#815, `recovery_log.rs`). A
+ * window reports what it showed and what was pressed; every field is a label
+ * or a number, refused otherwise at the boundary. Reports are best effort.
+ */
+export const recoveryIncidents = {
+  report: (sessionId: string, tabId: string, report: import("@/lib/recoveryReports").UiReport) => invoke<void>("report_recovery_ui", { sessionId, tabId, report }),
+  settings: () => invoke<DiagnosticsSettings>("diagnostics_settings"),
+  setEnabled: (enabled: boolean) => invoke<DiagnosticsSettings>("set_recovery_incidents", { enabled }),
+  summary: () => invoke<RecoveryIncidentSummary>("recovery_incidents_summary"),
+  export: (path: string) => invoke<void>("recovery_incidents_export", { path }),
+  clear: () => invoke<void>("clear_recovery_incidents"),
+};
+
+/** What `recovery_log::summarize` says, as far as the settings row reads it. */
+export interface RecoveryIncidentSummary {
+  lines: number;
+  lines_lost: number;
+  incidents: number;
+  busy_refusals_while_turn_open: number;
+  suspected_false_positives: { incident: string; reason: string; why: string }[];
+  groups: { reason: string; runtime: string; transport: string; incidents: number; occurrences: number }[];
+}
 
 export interface OrganizationWorkStatus {
   shareWorkStatus: boolean;

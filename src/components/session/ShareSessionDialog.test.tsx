@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ShareSessionDialogHost } from "./ShareSessionDialog";
-import { closeSessionShare, EMPTY_SHARE, openSessionShare } from "@/lib/localSharing";
+import { LocalShareButton, ShareSessionDialogHost } from "./ShareSessionDialog";
+import { closeSessionShare, EMPTY_SHARE, openSessionShare, type ShareState } from "@/lib/localSharing";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), signedIn: true }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
@@ -26,9 +26,13 @@ const open = async () => {
   await screen.findByRole("button", { name: "Create share link" });
 };
 describe("Share session", () => {
-  it("creates signed-in driver access with permission approval explicitly off and a finite expiry", async () => {
+  it("creates a read-only link that admits each person only once approved, with a finite expiry (PRO-162)", async () => {
     await open();
     expect(screen.getByText(/They see the transcript and terminal so far/)).toBeTruthy();
+    // The form shows the defaults it will send.
+    expect((screen.getByLabelText("Default access") as HTMLSelectElement).value).toBe("viewer");
+    expect((screen.getByLabelText("Approve each person") as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText("Guests may approve permissions") as HTMLInputElement).checked).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
@@ -38,7 +42,8 @@ describe("Share session", () => {
           directOnly: true,
           settings: expect.objectContaining({
             audience: "anyone",
-            role: "driver",
+            role: "viewer",
+            approveEachPerson: true,
             canApprove: false,
             maximumPeople: 8,
             singleUse: false,
@@ -70,6 +75,41 @@ describe("Share session", () => {
         }),
       ),
     );
+  });
+  it("lets the host make a driver link that admits people unasked, and starts the next link from the defaults again", async () => {
+    await open();
+    fireEvent.change(screen.getByLabelText("Default access"), { target: { value: "driver" } });
+    fireEvent.click(screen.getByLabelText("Approve each person"));
+    fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        "session_share_create",
+        expect.objectContaining({ settings: expect.objectContaining({ role: "driver", approveEachPerson: false }) }),
+      ),
+    );
+    await waitFor(() => expect((screen.getByLabelText("Default access") as HTMLSelectElement).value).toBe("viewer"));
+    expect((screen.getByLabelText("Approve each person") as HTMLInputElement).checked).toBe(true);
+  });
+  it("shows on the session's Share button who waits to be admitted, not only inside Share (PRO-162)", async () => {
+    const guest = (userId: string, displayName: string, admitted: boolean): ShareState["people"][number] => ({
+      person: { userId, displayName, email: `${userId}@example.com`, emailVerified: true },
+      role: "viewer", canApprove: false, admitted, connections: 1, viewing: [], typing: false, linkIds: ["link-1"],
+    });
+    mocks.invoke.mockResolvedValue({ ...EMPTY_SHARE, active: true, people: [guest("ana", "Ana", true), guest("kim", "Kim", false)] });
+    render(<LocalShareButton sessionId="waiting-session" />);
+    const button = screen.getByRole("button", { name: "Share session…" });
+    await waitFor(() => expect(screen.getByTestId("share-waiting").textContent).toBe("· 1 waiting"));
+    // Kim is not a guest yet: the count is of admitted people, and Kim is said apart from it.
+    expect(button.textContent).toContain("1 guests");
+    expect(button.getAttribute("title")).toBe("Ana · Kim is waiting to join");
+    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe("1 waiting");
+    cleanup();
+
+    mocks.invoke.mockResolvedValue({ ...EMPTY_SHARE, active: true, people: [guest("ana", "Ana", true), guest("kim", "Kim", true)] });
+    render(<LocalShareButton sessionId="admitted-session" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Share session…" }).textContent).toContain("2 guests"));
+    expect(screen.queryByTestId("share-waiting")).toBeNull();
+    expect(screen.getByRole("button", { name: "Share session…" }).hasAttribute("aria-describedby")).toBe(false);
   });
   it("requires sign-in before offering to create a link", async () => {
     mocks.signedIn = false;

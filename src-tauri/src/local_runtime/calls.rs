@@ -18,6 +18,9 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
     }
     if let Some(method) = command.strip_prefix("runtime.pty.") {
         let terminals = manager.terminals();
+        if method == "environmentReady" {
+            return Ok(json!(crate::store::environment::wait_ready(params["projectPath"].as_str())));
+        }
         if method == "mobileDrivers" { return Ok(serde_json::to_value(manager.mobile.driven_tabs())?); }
         if method == "shells" { return Ok(serde_json::to_value(terminals.shells())?); }
         if method == "stats" { return Ok(serde_json::to_value(terminals.stats())?); }
@@ -25,6 +28,14 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
             let sessions = crate::store::index::load()?;
             let taken: std::collections::HashSet<_> = sessions.iter().flat_map(|session| &session.tabs).filter_map(|tab| tab.follow.pane.as_deref()).collect();
             return Ok(serde_json::to_value(terminals.shells().into_iter().filter(|shell| !taken.contains(shell.id.as_str())).collect::<Vec<_>>())?);
+        }
+        // The setup step running for an agent (PRO-152), for a window that did not start it.
+        if method == "agentSetupRunning" {
+            let harness = string(&params, "harness")?;
+            return Ok(match crate::harness::setup::current(harness, &setup_panes(terminals, harness)) {
+                Some((pane, step)) => json!({ "pane": pane, "step": step.name() }),
+                None => Value::Null,
+            });
         }
         if method == "busyMany" {
             let ids: Vec<String> = serde_json::from_value(params["ids"].clone())?;
@@ -55,6 +66,23 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 if let Some(shell) = terminals.shell(id) { sink.emit("pty_opened", &shell); }
                 Ok(Value::Null)
             }
+            // An agent's install or sign-in (PRO-152), in a pane of no
+            // session. The step's command is the registry's, never the caller's.
+            "agentSetup" => {
+                manager.accepting_work()?;
+                let harness = string(&params, "harness")?;
+                if !crate::harness::setup::is_pane(harness, id) { bail!("invalid setup pane id"); }
+                let step = crate::harness::setup::Step::parse(string(&params, "step")?)?;
+                let command = crate::harness::setup::command(harness, step)?;
+                let (cols, rows) = size()?;
+                let home = dirs::home_dir().context("no home directory")?;
+                // One step at a time per agent, whichever pane or window asks.
+                crate::harness::setup::begin(harness, id, step, || setup_panes(terminals, harness), || {
+                    // In the place of the step before, whose output stays above this one's.
+                    terminals.respawn(sink.clone(), id, crate::pty::PaneSpec { cwd: &home.to_string_lossy(), cols, rows, command: Some(&command), env: &[] })
+                })?;
+                Ok(Value::Null)
+            }
             "write" => {
                 let data = string(&params, "data")?;
                 if data.len() > 1024 * 1024 { bail!("terminal input is too large"); }
@@ -65,6 +93,7 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 Ok(Value::Null)
             }
             "resize" => { let (cols, rows) = size()?; manager.mobile.desktop_input(id, || terminals.resize(id, cols, rows))?; Ok(Value::Null) }
+            "environmentChanged" => Ok(json!(manager.environment_changed(id)?)),
             "busy" => Ok(json!(terminals.is_busy(id))),
             "output" => Ok(json!({"data":terminals.read_output(id).map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
                 "running":terminals.is_running(id), "pid":terminals.pid(id)})),
@@ -83,6 +112,11 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
     } else {
         bail!("unsupported local runtime operation")
     }
+}
+
+/// An agent's setup panes whose step still runs.
+fn setup_panes(terminals: &crate::pty::Terminals, harness: &str) -> Vec<String> {
+    terminals.panes().into_iter().filter(|pane| pane.running && crate::harness::setup::is_pane(harness, &pane.id)).map(|pane| pane.id).collect()
 }
 
 pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> Result<Value> {
@@ -130,6 +164,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
         "send" => serde_json::to_value(manager.send_pressed(session, tab, string(&params, "text")?.into(),
             serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64())?)?,
+        "incidentUi" => { manager.note_incident_ui(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "sendShown" => { manager.note_shown(session, tab, params["seq"].as_u64().context("seq is required")?, &serde_json::from_value(params["timings"].clone())?)?; Value::Null }
         "interrupt" => json!(manager.interrupt(session, tab)?),
         "stop" => { manager.stop(session, tab)?; Value::Null }

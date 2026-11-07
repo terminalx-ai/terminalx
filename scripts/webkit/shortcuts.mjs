@@ -163,19 +163,25 @@ const fits = (layout) => ({
   await page.keyboard.up("AltLeft");
   const afterLeft = await dictation();
 
+  // Keep short key sequences below the hold threshold even when the test
+  // driver is descheduled between real key events on a busy runner.
+  await page.clock.install();
+  await page.clock.pauseAt(Date.now() + 60_000);
+
   // A combination: Right Option, then a key before the hold counts.
   await page.keyboard.down("AltRight");
   await page.keyboard.press("KeyE");
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   await page.keyboard.up("AltRight");
   const afterCombination = await dictation();
 
   // A tap is not a hold.
   await page.keyboard.down("AltRight");
-  await page.waitForTimeout(40);
+  await page.clock.runFor(40);
   await page.keyboard.up("AltRight");
-  await page.waitForTimeout(400);
+  await page.clock.runFor(400);
   const afterTap = await dictation();
+  await page.clock.resume();
 
   await page.keyboard.down("AltRight");
   await page.getByText("Listening. Speak, then release the key.", { exact: true }).waitFor();

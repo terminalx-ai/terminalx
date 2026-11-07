@@ -23,7 +23,7 @@ import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
-import { startUpdateChecks } from "@/lib/updates";
+import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
 import { bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent, type ImageInput } from "@/lib/api";
@@ -33,7 +33,6 @@ import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
-import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
 import { GuestSessionHost } from "@/components/session/GuestSession";
@@ -66,6 +65,10 @@ import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
+import { openLocalProject } from "@/lib/projectStart";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { REPO_URL, repoFile } from "@/lib/repo";
+import { stepVisibleSession } from "@/lib/sessionNavigation";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
@@ -102,6 +105,8 @@ export function AppShell() {
   // Every request for Settings, so asking again with it open still lands on the section asked for.
   const [settingsRequest, setSettingsRequest] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // A menu/palette selection navigates away from Settings just like the sidebar.
+  useEffect(() => setSettingsOpen(false), [store.navigationVersion]);
 
   // An update is looked for in the background, so it is seen without going to Settings for it.
   useEffect(() => startUpdateChecks(), []);
@@ -159,8 +164,8 @@ export function AppShell() {
   }, []);
   // An organization's page (PRO-107): a message that names its Agent logins offers the way there, with the
   // organization it is about. The Organizations section opens that page, and the logins scroll themselves into view.
-  const openOrganizationsSettings = useCallback(() => {
-    setSettingsTab("organizations");
+  const openOrganizationsSettings = useCallback((row: "organizations.overview" | "organizations.agentLogins") => {
+    setSettingsTab(row);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
@@ -180,13 +185,22 @@ export function AppShell() {
     setSettingsOpen(false);
     openHome();
   }, []);
-  const showIssues = useCallback(() => openIssues(), []);
-  const showAgents = useCallback(() => openAgents(), []);
+  const showIssues = useCallback(() => { setSettingsOpen(false); openIssues(); }, []);
+  const showAgents = useCallback(() => { setSettingsOpen(false); openAgents(); }, []);
   const showStats = useCallback(() => openStats(), []);
   const showSkills = useCallback(() => openSkills(), []);
-  const showAutomations = useCallback(() => openAutomations(), []);
+  const showAutomations = useCallback(() => { setSettingsOpen(false); openAutomations(); }, []);
   const showQuickChat = useCallback(() => void showFloatingWindow().catch((e) => console.error("floating window", e)), []);
 
+  useShortcut("app.about", () => openSettings("about"));
+  useShortcut("app.checkUpdates", () => { openSettings("about"); void checkForUpdate(); });
+  useShortcut("app.shortcuts", () => openSettings("shortcuts"));
+  useShortcut("app.addProject", () => { setSettingsOpen(false); void openLocalProject().catch((error) => console.error("add project", error)); });
+  useShortcut("app.openRecent", () => setPaletteOpen(true));
+  useShortcut("app.nextSession", () => { setSettingsOpen(false); stepVisibleSession(1); });
+  useShortcut("app.previousSession", () => { setSettingsOpen(false); stepVisibleSession(-1); });
+  useShortcut("app.docs", () => { void openUrl(repoFile("README.md")).catch(console.error); });
+  useShortcut("app.reportIssue", () => { void openUrl(`${REPO_URL}/issues/new`).catch(console.error); });
   useShortcut("app.toggleSidebar", toggleSidebar);
   useShortcut("app.togglePanel", togglePanel);
   useShortcut("app.settings", () => openSettings());
@@ -213,7 +227,6 @@ export function AppShell() {
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
-        <StarReminder />
         <MergedCleanupNotices />
         <CloseUndoNotices />
         <Toasts />

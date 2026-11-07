@@ -109,6 +109,8 @@ pub enum Decision {
     AllowWith(Value),
     /// Allow, carrying the answers to a question back as the tool's input.
     Answers(Value),
+    /// Run a replacement input whose guard enforces the approval's scope.
+    Execute(Value),
     Deny,
 }
 
@@ -118,6 +120,8 @@ pub(crate) struct DecisionSender {
     /// The hook that waits: `PermissionRequest` or `PreToolUse`, which a
     /// handover carries with the wait (#765).
     gate: String,
+    /// Exact command and directory offered on this card, never a prefix.
+    session_command: Option<String>,
 }
 
 impl DecisionSender {
@@ -133,8 +137,6 @@ struct Waiting {
     /// `PermissionRequest` or `PreToolUse`: which reply the hook prints.
     gate: String,
     request_id: String,
-    tool_name: String,
-    input: Value,
     local_owner: bool,
 }
 
@@ -811,10 +813,6 @@ pub struct CliTab {
     /// the transcript records is then that turn's, and says nothing about
     /// whichever turn is open by the time it is read.
     pub transcript_end_owed: bool,
-    /// Tools already answered for in this turn, by the command they name.
-    /// Codex fires `PreToolUse` and then `PermissionRequest` for the same
-    /// call, and one tool must not cost the reader two cards.
-    pub answered: HashMap<String, bool>,
     /// What the pane is running, for the terminal view's header and for a
     /// window that has to be told about a pane it did not see start.
     pub command: String,
@@ -879,6 +877,7 @@ pub struct TabRuntime {
     pub status: TabStatus,
     pub child: Option<Arc<LiveChild>>,
     pub child_pid: Option<u32>,
+    pub environment: crate::store::environment::Stamp,
     pub engine: Engine,
     pub pending: HashMap<String, PendingAsk>,
     pub queued: Vec<QueuedMessage>,
@@ -899,6 +898,8 @@ pub struct TabRuntime {
     signed_out_in_turn: bool,
     pub last_activity: Instant,
     pub recovery: Option<RecoveryKind>,
+    /// The warnings this tab raised and what became of them (#815).
+    pub incidents: crate::recovery_log::Tracker,
     /// When the session watcher raised a silence/delivery warning, if it did.
     /// A timeout the provider reported is a different fact and is not
     /// cleared by the terminal drawing again.
@@ -1002,6 +1003,46 @@ impl TabRuntime {
                 .zip(self.compact_boundary_at).is_some_and(|(prompt, boundary)| prompt <= boundary)
     }
 
+    /// Note something about this tab's warnings (#815), with what it is
+    /// doing as it is noted.
+    fn incident(&mut self, note: impl FnOnce(&mut crate::recovery_log::Tracker, &crate::recovery_log::Ctx)) {
+        let state = self.incident_state();
+        let ctx = crate::recovery_log::Ctx { session: &self.session_id, tab: &self.tab_id, state };
+        note(&mut self.incidents, &ctx);
+    }
+
+    /// What the runtime knows of the tab right now, as labels and counts.
+    fn incident_state(&self) -> crate::recovery_log::State {
+        let (engine, connection) = match &self.engine {
+            Engine::Cli(_) => ("cli", None),
+            Engine::CodexStdio(e) => ("codex_stdio", Some(if e.failed() { "failed" } else if e.exited || e.blocked { "exited" } else if e.ready { "ready" } else { "starting" })),
+            Engine::Acp(_) => ("acp", None),
+            Engine::OpenCode(_) => ("opencode", None),
+            Engine::None => ("none", None),
+        };
+        let process = match &self.child {
+            _ if self.stdio_starting => "starting",
+            Some(child) if child.terminal_receipt().is_some() => "exited",
+            Some(_) => "running",
+            // A PTY tab's CLI runs in its pane, not as a child of the tab.
+            None if matches!(self.engine, Engine::Cli(_)) => "running",
+            None => "none",
+        };
+        crate::recovery_log::State {
+            turn_open: self.turn_open, pending_asks: self.pending.len(), queued: self.queued.len(),
+            displayed: match self.status { TabStatus::Idle => "idle", TabStatus::InProgress => "in_progress", TabStatus::Completed => "completed", TabStatus::Waiting => "waiting" },
+            recovery: self.recovery, stalled: self.stalled_at.is_some(), engine, process, connection,
+        }
+    }
+
+    /// The agent the tab's incident lines name, read from its entry.
+    fn incident_agent(&mut self) {
+        let Some(tab) = index::get(&self.session_id).ok().and_then(|entry| entry.tab(&self.tab_id).cloned()) else { return };
+        use crate::store::index::AgentTransport;
+        let transport = match tab.transport { AgentTransport::Pty => "pty", AgentTransport::ExperimentalCodexStdio => "codex_stdio" };
+        self.incidents.set_agent(crate::recovery_log::Agent::new(&tab.harness, transport, Some(&tab.model), tab.effort.as_deref()));
+    }
+
     /// The tab's private diagnostics, beside its log.
     fn diagnostics_path(&self) -> PathBuf {
         self.log_path.with_extension("diagnostics.jsonl")
@@ -1062,6 +1103,9 @@ pub struct SessionManager {
     status: Arc<crate::status::StatusState>,
     control: crate::hooks::ControlEndpoint,
     tabs: Arc<Mutex<HashMap<String, Arc<Mutex<TabRuntime>>>>>,
+    /// Explicit command grants for this tab's conversation. Kept across
+    /// turns and CLI restarts; forgotten when the owner runtime exits.
+    session_commands: Arc<Mutex<HashMap<String, std::collections::HashSet<String>>>>,
     /// One writer per pane, so two prompts sent in quick succession cannot
     /// interleave their paste and their Enter, nor overtake one another.
     writers: Arc<Mutex<HashMap<String, Arc<PaneWriter>>>>,
@@ -1317,21 +1361,56 @@ fn one_per_key<V: Clone>(map: &Mutex<HashMap<String, V>>, key: &str, make: impl 
     Ok(v)
 }
 
-/// What one tool call is, for the purpose of not asking about it twice. The
-/// same command reaches `PreToolUse` and `PermissionRequest` under different
-/// ids but with the same input, minus the justification Codex adds.
-fn tool_key(tool_name: &str, input: &Value) -> String {
-    let target = ["command", "file_path", "path", "pattern", "query", "url"].iter().find_map(|k| input.get(*k).and_then(Value::as_str)).unwrap_or_default();
-    format!("{tool_name}\u{1}{target}")
+/// What a permission hook asks to run, for telling a repeat of a call that
+/// still waits on a card (PRO-160). It is the tool's input less the agent's
+/// own words about it (`description`, `justification`). Codex adds those
+/// at `PermissionRequest`, and a model running the call again may reword
+/// them. It also leaves out a command's trailing whitespace, since Codex
+/// drops a patch's last newline at `PermissionRequest`.
+fn asked_to_run(input: &Value) -> Value {
+    let mut what = input.clone();
+    if let Some(fields) = what.as_object_mut() {
+        fields.remove("description");
+        fields.remove("justification");
+        for key in ["command", "cmd"] {
+            if let Some(Value::String(command)) = fields.get_mut(key) {
+                command.truncate(command.trim_end().len());
+            }
+        }
+    }
+    what
+}
+
+/// The directory this provider proves the command will execute in. Codex's
+/// session cwd is not its exec_command workdir, so it is never a fallback.
+fn permission_directory(kind: CliKind, payload: &Value) -> Option<&str> {
+    let input = &payload["tool_input"];
+    match kind {
+        CliKind::Codex => {
+            crate::harness::read_only::command(payload["tool_name"].as_str()?, input)?;
+            crate::harness::read_only::explicit_cwd(input)
+        }
+        CliKind::Claude => {
+            let cwd = payload["cwd"].as_str().filter(|cwd| Path::new(cwd).is_absolute())?;
+            // Claude's Bash uses the hook cwd. Do not treat unsupported or
+            // conflicting execution-directory arguments as an override.
+            for field in ["workdir", "cwd"] {
+                if input.get(field).is_some() && input[field].as_str() != Some(cwd) { return None; }
+            }
+            Some(cwd)
+        }
+    }
 }
 
 /// Why a permission hook's card is up, in TerminalX's words (#775): the
 /// gate that asked, which the agent's own description of the call never
 /// says. None when the session's own mode asked, which needs no telling.
 ///
-/// Codex in Ask every time is asked by the app, at `PreToolUse`; its
-/// sandbox asks for itself at `PermissionRequest`, with the agent's
-/// justification. TerminalX's Claude hooks only ever deny, so a Claude
+/// Codex in Ask every time is asked by the app, at `PreToolUse`. Its
+/// sandbox asks for itself at `PermissionRequest`, in any mode, when a call
+/// is to run outside it, with the agent's justification as the call's
+/// description. That is a wider grant than running the command, and the
+/// reader is told so (PRO-160). TerminalX's Claude hooks only ever deny, so a Claude
 /// `PermissionRequest` in bypass mode comes from a check bypass does not
 /// cover: Claude Code's own safety check. The hook's `permission_mode` is
 /// the mode Claude is in when it asks, and decides; the tab's is the
@@ -1340,8 +1419,11 @@ fn tool_key(tool_name: &str, input: &Value) -> String {
 /// commands.
 fn asked_because(kind: CliKind, gate: &str, payload: &Value, tab_mode: &str, tool_name: &str) -> Option<String> {
     match kind {
-        CliKind::Codex => (gate == "PreToolUse" && codex::asks_every_tool(tab_mode))
-            .then(|| "Approval is required because this session is set to Ask every time.".into()),
+        CliKind::Codex => match gate {
+            "PreToolUse" => codex::asks_every_tool(tab_mode).then(|| "Approval is required because this session is set to Ask every time.".into()),
+            "PermissionRequest" => Some(codex::pty::OUTSIDE_SANDBOX.into()),
+            _ => None,
+        },
         CliKind::Claude => {
             let mode = payload["permission_mode"].as_str().map(str::trim).filter(|m| !m.is_empty()).unwrap_or(tab_mode);
             (gate == "PermissionRequest" && mode == "bypassPermissions").then(|| claude::mapper::safety_check_reason(tool_name).into())
@@ -1351,6 +1433,16 @@ fn asked_because(kind: CliKind, gate: &str, payload: &Value, tab_mode: &str, too
 
 /// The reader's decision as the hook that asked has to print it.
 fn reply_for(kind: CliKind, event: &str, decision: Decision) -> HookReply {
+    if let Decision::Execute(input) = decision {
+        let output = match (kind, event) {
+            (CliKind::Codex, "PreToolUse") => codex::pty::pre_tool_rewrite(input),
+            (CliKind::Claude, _) => claude::pty::permission_decision(true, Some(input), vec![]),
+            // Codex PermissionRequest cannot rewrite input. Never drop a
+            // directory guard and accidentally allow the unchanged command.
+            (CliKind::Codex, _) => codex::pty::permission_decision(false),
+        };
+        return HookReply { output: Some(output), refused: None };
+    }
     let allow = !matches!(decision, Decision::Deny);
     let output = match (kind, event) {
         (CliKind::Claude, _) => {
@@ -1403,6 +1495,7 @@ impl SessionManager {
             status,
             control,
             tabs: Arc::new(Mutex::new(HashMap::new())),
+            session_commands: Arc::default(),
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1487,7 +1580,7 @@ impl SessionManager {
             if let Some((seq, sent_at)) = overdue {
                 if rt.recovery.is_none() && rt.pending.is_empty() {
                     recovery::diagnose_delivery(&rt.diagnostics_path(), seq, "unconfirmed", now.saturating_duration_since(sent_at), serde_json::json!({ "queued": false }));
-                    self.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed);
+                    self.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery);
                     continue;
                 }
             }
@@ -1506,6 +1599,7 @@ impl SessionManager {
             let drawn = pane.and_then(|pane| drawn_at(&pane));
             if let Some(at) = rt.stalled_at {
                 if drawn.is_some_and(|drawn| drawn > at) {
+                    rt.incidents.progress("terminal_output");
                     self.stall_disproved(&mut rt);
                 }
                 continue;
@@ -1522,7 +1616,8 @@ impl SessionManager {
                     RecoveryKind::Timeout
                 };
                 recovery::diagnose_stall(&rt.diagnostics_path(), rt.turn_opener, quiet);
-                self.needs_recovery(&mut rt, kind);
+                let source = if kind == RecoveryKind::Timeout { crate::recovery_log::Source::Watcher } else { crate::recovery_log::Source::Delivery };
+                self.needs_recovery(&mut rt, kind, source);
                 rt.stalled_at = Some(now);
             }
         }
@@ -1655,7 +1750,7 @@ impl SessionManager {
             "start" => started(engine::start(&host,string("sessionId")?,string("tabId")?,params["autoMerge"].as_bool(),None)?),
             "continue" => engine::continue_launch(&host,string("sessionId")?,string("tabId")?,&serde_json::from_value(params["options"].clone())?)?.map(started).unwrap_or(serde_json::Value::Null),
             "autoMerge" => serde_json::to_value(engine::set_auto_merge(&host,string("id")?,params["value"].as_bool().context("value is required")?)?)?,
-            "resolveConflicts" => serde_json::to_value(engine::set_resolve_conflicts(&host,string("id")?,params["value"].as_bool().context("value is required")?)?)?,
+            "resolveConflicts" => serde_json::to_value(engine::set_resolve_conflicts_by(&host,string("id")?,params["value"].as_bool().context("value is required")?,crate::issue_pipeline::SwitchActor::Person)?)?,
             "act" => serde_json::to_value(engine::act(&host,string("id")?,serde_json::from_value(params["action"].clone())?)?)?,
             _ => anyhow::bail!("unsupported desktop pipeline operation"),
         })
@@ -1667,6 +1762,22 @@ impl SessionManager {
 
     pub(crate) fn automation_host(&self) -> crate::automations::RuntimeHost {
         crate::automations::RuntimeHost { sink: self.sink.clone(), sessions: self.clone() }
+    }
+
+    pub fn environment_changed(&self, id: &str) -> Result<crate::store::environment::Status> {
+        if let Some(status) = self.terminals.environment_changed(id)? { return Ok(status); }
+        let Some(tab_id) = id.strip_prefix("tab:") else { return Ok(Default::default()); };
+        let tab = self.tabs.lock().unwrap().iter()
+            .find(|(key, _)| key.rsplit_once('/').is_some_and(|(_, id)| id == tab_id))
+            .map(|(_, tab)| tab.clone());
+        if let Some(tab) = tab {
+            let stamp = {
+                let rt = tab.lock().unwrap();
+                rt.child.as_ref().filter(|child| child.terminal_receipt().is_none()).map(|_| rt.environment.clone())
+            };
+            if let Some(stamp) = stamp { return stamp.status(); }
+        }
+        Ok(Default::default())
     }
 
     pub fn terminals(&self) -> &Arc<pty::Terminals> {
@@ -1693,6 +1804,7 @@ impl SessionManager {
                 status: TabStatus::Idle,
                 child: None,
                 child_pid: None,
+                environment: Default::default(),
                 engine: Engine::None,
                 pending: HashMap::new(),
                 queued: Vec::new(),
@@ -1709,6 +1821,7 @@ impl SessionManager {
                 signed_out_in_turn: false,
                 last_activity: Instant::now(),
                 recovery: None,
+                incidents: Default::default(),
                 stalled_at: None,
                 last_settings_report: None,
                 reported_mode_to_judge: None,
@@ -1789,6 +1902,21 @@ impl SessionManager {
             Ok(None) => {}
             Err(error) => log::warn!("record message activity: {error:#}"),
         }
+        // The turns incidents are told against (#815), as the log has them.
+        if ev.subagent.is_none() {
+            match &ev.payload {
+                Payload::UserMessage { queued: false, .. } if !rt.incidents.turn_open() => {
+                    rt.incident_agent();
+                    rt.incident(|incidents, ctx| incidents.turn_started(ctx, ev.seq, "prompt"));
+                }
+                Payload::TurnStarted { .. } if !rt.incidents.turn_open() => {
+                    rt.incident_agent();
+                    rt.incident(|incidents, ctx| incidents.turn_started(ctx, ev.seq, "agent"));
+                }
+                Payload::TurnCompleted { status, .. } => rt.incident(|incidents, ctx| incidents.turn_ended(ctx, ev.seq, *status)),
+                _ => {}
+            }
+        }
         self.observer.agent_event(&ev);
         self.sink.emit("agent_event", &ev);
         ev
@@ -1801,13 +1929,23 @@ impl SessionManager {
         crate::cloud_grants::reject_launch(&rt.launch_key());
     }
 
-    fn needs_recovery(&self, rt: &mut TabRuntime, kind: RecoveryKind) {
+    /// `source`: the evidence the warning stands on, for its incident (#815).
+    fn needs_recovery(&self, rt: &mut TabRuntime, kind: RecoveryKind, source: crate::recovery_log::Source) {
         rt.recovery = Some(kind);
         // Whatever is reported here replaces the watcher's guess, if there
         // was one; the watcher marks its own after this returns.
         rt.stalled_at = None;
-        self.publish(rt, Payload::Recovery { kind: Some(kind) }, None);
+        let event = self.publish(rt, Payload::Recovery { kind: Some(kind) }, None);
+        rt.incident_agent();
+        rt.incident(|incidents, ctx| incidents.raised(ctx, kind, source, event.seq));
         self.set_status(rt, TabStatus::Waiting);
+    }
+
+    /// Take the tab's warning down, published and noted with `cause` (#815).
+    /// The caller has already let go of `rt.recovery`.
+    fn recovery_cleared(&self, rt: &mut TabRuntime, cause: &'static str) {
+        let event = self.publish(rt, Payload::Recovery { kind: None }, None);
+        rt.incident(|incidents, ctx| incidents.cleared(ctx, cause, event.seq));
     }
 
     /// Take back a stall the watcher called, now that something has shown
@@ -1822,7 +1960,7 @@ impl SessionManager {
             self.set_status(rt, TabStatus::InProgress);
         } else if rt.recovery.take().is_some() {
             // Still waiting, on an ask or on nothing: only the warning goes.
-            self.publish(rt, Payload::Recovery { kind: None }, None);
+            self.recovery_cleared(rt, "stall_disproved");
         }
     }
 
@@ -1849,7 +1987,7 @@ impl SessionManager {
                 self.set_status(rt, TabStatus::InProgress);
             } else {
                 rt.recovery = None;
-                self.publish(rt, Payload::Recovery { kind: None }, None);
+                self.recovery_cleared(rt, "delivery_confirmed");
             }
         }
     }
@@ -1864,7 +2002,7 @@ impl SessionManager {
         if unsent.is_empty() || rt.turn_open || rt.recovery.is_some() {
             return false;
         }
-        self.needs_recovery(rt, RecoveryKind::DeliveryUnconfirmed);
+        self.needs_recovery(rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery);
         true
     }
 
@@ -1872,7 +2010,17 @@ impl SessionManager {
         if status != TabStatus::Waiting {
             rt.stalled_at = None;
             if rt.recovery.take().is_some() {
-                self.publish(rt, Payload::Recovery { kind: None }, None);
+                // What took it down, as far as this can tell: the agent's
+                // own progress a moment ago, a send or a recovery that set
+                // it working again, or its turn's end.
+                let recent = rt.incidents.last_progress().is_some_and(|(age, _)| age < Duration::from_secs(2));
+                let cause = match status {
+                    TabStatus::InProgress if recent => "progress",
+                    TabStatus::InProgress => "resumed",
+                    _ if !rt.turn_open => "turn_ended",
+                    _ => "status",
+                };
+                self.recovery_cleared(rt, cause);
             }
         }
         // CLI work starts require a live hook (or a delivered permission
@@ -1939,7 +2087,7 @@ impl SessionManager {
                     Some(tab) if codex_stdio::selected(tab) => codex_stdio::recovery_on_open(tab, &path, kind),
                     _ => kind,
                 };
-                self.needs_recovery(&mut rt, kind);
+                self.needs_recovery(&mut rt, kind, crate::recovery_log::Source::History);
             }
         }
         Ok(events)
@@ -2240,6 +2388,9 @@ impl SessionManager {
             for (request_id, pending) in &runtime.pending {
                 let mut options = vec!["allow".to_string(), "deny".to_string()];
                 options.extend((0..pending.suggestions.len()).map(|index| format!("suggest:{index}")));
+                if matches!(&runtime.engine, Engine::Cli(p) if p.decisions.get(request_id).is_some_and(|d| d.session_command.is_some())) {
+                    options.insert(1, crate::harness::read_only::SESSION_OPTION.to_string());
+                }
                 out.push(PendingPermission {
                     session_id: runtime.session_id.clone(),
                     tab_id: runtime.tab_id.clone(),
@@ -2282,12 +2433,14 @@ impl SessionManager {
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         self.accepting_work()?;
         let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
-        let mut env = vec![
+        let environment = crate::store::environment::launch(cwd);
+        let mut env: Vec<_> = environment.values.into_iter().collect();
+        env.extend([
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
             ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
             (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
-        ];
+        ]);
         // A cloud workspace's agent credentials (`cloud_grants`). Only Cursor
         // runs this way, and its grant only sets a variable.
         let harness = program.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
@@ -2296,6 +2449,7 @@ impl SessionManager {
         env.extend(crate::cloud_config::launch_config(&harness, &rt.key()).env);
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
         let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &[] }, sink)?;
+        rt.environment = environment.stamp;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
         Ok(())
@@ -2338,12 +2492,13 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
             drop(sharing);
-            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images)
+            let origin = if pressed_at.is_some() { crate::recovery_log::Origin::Composer } else { crate::recovery_log::Origin::Programmatic };
+            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, origin)
         };
         drop(admission);
         self.forget_baseline(session_id, tab_id);
@@ -2403,6 +2558,14 @@ impl SessionManager {
         Ok(())
     }
 
+    /// What a window showed of a tab's warning, or what was done in it
+    /// (#815), noted with the incident the runtime knows it by.
+    pub fn note_incident_ui(&self, session_id: &str, tab_id: &str, report: &crate::recovery_log::UiReport) -> Result<()> {
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        rt_arc.lock().unwrap().incident(|incidents, ctx| incidents.ui(ctx, report));
+        Ok(())
+    }
+
     /// Continuations use the normal send path, but only acknowledge delivery
     /// when the provider echoes the prompt or runs its UserPromptSubmit hook.
     ///
@@ -2431,7 +2594,7 @@ impl SessionManager {
             let _sharing = self.sharing.lock().unwrap();
             let _admitted = permit.enter()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx))
+            self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -2561,19 +2724,32 @@ impl SessionManager {
 
     /// Send one prompt to the agent while publishing a different, user-facing
     /// representation to the transcript.
+    #[allow(clippy::too_many_arguments)]
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>,
+        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
             return outcome;
         }
+        // Native Codex still on its turn refused the request, not the turn
+        // (#815): the turn goes on, nothing is raised in the tab, and the
+        // sender is told why in words of its own.
+        if outcome.as_ref().is_err_and(|error| error.is::<codex_stdio::Busy>()) {
+            return outcome;
+        }
         if let Err(error) = &outcome {
             if let Ok(rt) = self.runtime(session_id, tab_id) {
+                let mut rt = rt.lock().unwrap();
                 let message = format!("{error:#}");
-                self.apply(&mut rt.lock().unwrap(), Payload::Error { detail: recovery::detail(&message), message, fatal: false }, None);
+                let kind = RecoveryKind::classify(&message);
+                rt.signed_out_in_turn |= kind == RecoveryKind::SignedOut && rt.turn_open;
+                // As `apply` raises an agent's error, but standing on the
+                // refused request, so its incident says what it was.
+                self.needs_recovery(&mut rt, kind, crate::recovery_log::Source::RequestRefused);
+                self.publish(&mut rt, Payload::Error { detail: recovery::detail(&message), message, fatal: false }, None);
             }
         }
         outcome.map_err(|error| anyhow!(RecoveryKind::classify(&error.to_string()).message()))
@@ -2592,7 +2768,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             permit.check_mode(session_id, tab_id)?;
             self.send_admitted(&admission, session_id, tab_id, PromptText { mobile:Some(permit.clone()),
-                shared_connection:None,author:None,agent:text,display }, images, None)
+                shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         outcome
@@ -2600,7 +2776,7 @@ impl SessionManager {
 
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
-        self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None)
+        self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
     #[cfg(test)]
@@ -2615,7 +2791,8 @@ impl SessionManager {
     ) -> Result<SendOutcome> {
         self.prepare_baseline(session_id, tab_id);
         let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
-        let outcome = self.send_admitted(&admission, session_id, tab_id, prompt, images, receipt);
+        let origin = if receipt.is_some() { crate::recovery_log::Origin::Continuation } else { crate::recovery_log::Origin::Programmatic };
+        let outcome = self.send_admitted(&admission, session_id, tab_id, prompt, images, receipt, origin);
         drop(admission);
         self.forget_baseline(session_id, tab_id);
         outcome
@@ -2624,13 +2801,40 @@ impl SessionManager {
     /// Every send, from wherever it came, passes here. One the tab took is a
     /// message its agent now has, which an issue pipeline stopped on its
     /// answer is waiting for (#725).
+    #[allow(clippy::too_many_arguments)]
     fn send_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
         session_id: &str, tab_id: &str, prompt: PromptText,
-        images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>,
+        images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
-        let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt)?;
+        // What the send found, before it changed anything.
+        let found = self.runtime(session_id, tab_id).ok().map(|rt| { let rt = rt.lock().unwrap(); (rt.turn_open, rt.pending.len()) });
+        let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt);
+        self.note_send(session_id, tab_id, origin, found, &outcome);
+        let outcome = outcome?;
         self.observer.answered(session_id, tab_id);
         Ok(outcome)
+    }
+
+    /// What became of a send, in the tab's incidents (#815): admitted with
+    /// its prompt's seq, which its turn is told by, or refused and why. A
+    /// refusal is the request's: the turn it met is not failed by it.
+    fn note_send(&self, session_id: &str, tab_id: &str, origin: crate::recovery_log::Origin, found: Option<(bool, usize)>, outcome: &Result<SendOutcome>) {
+        use crate::recovery_log::{Admission, Refusal};
+        let Ok(rt_arc) = self.runtime(session_id, tab_id) else { return };
+        let (admission, refusal, prompt_seq) = match outcome {
+            Ok(sent) => (if sent.queued { Admission::Queued } else { Admission::Admitted }, None,
+                sent.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. })).map(|event| event.seq)),
+            Err(error) if error.is::<codex_stdio::Busy>() || error.is::<crate::local_runtime::mobile::Busy>() => (Admission::Busy, Some(Refusal::Busy), None),
+            Err(error) => {
+                let said = error.to_string();
+                let refusal = if error.is::<follow::Refusal>() { Refusal::LeftTerminal }
+                    else if said.starts_with("Stop has not confirmed") { Refusal::Stopping }
+                    else if said.contains("restarting to apply its settings") { Refusal::Restarting }
+                    else { Refusal::Other };
+                (Admission::Refused, Some(refusal), None)
+            }
+        };
+        rt_arc.lock().unwrap().incident(|incidents, ctx| incidents.send(ctx, origin, admission, refusal, prompt_seq, found));
     }
 
     fn deliver_admitted(&self, _admission: &crate::issue_pipeline::admission::Admitted,
@@ -3198,7 +3402,7 @@ impl SessionManager {
             if Instant::now() >= deadline {
                 let mut rt = rt_arc.lock().unwrap();
                 rt.stop_in_flight = false;
-                self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+                self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
                 bail!("Local process exit could not be confirmed. Retry Stop before resuming.");
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -3246,6 +3450,7 @@ impl SessionManager {
         crate::session_ops::delete_session_blocking(self.sink.as_ref(), session_id, &|_| {})
             .map_err(anyhow::Error::msg)?;
         self.tabs.lock().unwrap().retain(|_, tab| tab.lock().unwrap().session_id != session_id);
+        self.session_commands.lock().unwrap().retain(|key, _| !key.starts_with(&format!("{session_id}/")));
         Ok(())
     }
 
@@ -3333,15 +3538,26 @@ impl SessionManager {
         if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
             rt.pending.remove(request_id);
             self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
-            self.needs_recovery(&mut rt, RecoveryKind::PermissionExpired);
+            self.needs_recovery(&mut rt, RecoveryKind::PermissionExpired, crate::recovery_log::Source::PermissionLapsed);
             bail!("the agent is no longer running; the request lapsed");
         }
         let ask = rt.pending.get(request_id).cloned().ok_or_else(|| anyhow!("that request is no longer open"))?;
+        let session_command = if option_id == crate::harness::read_only::SESSION_OPTION {
+            match &rt.engine {
+                Engine::Cli(p) => p.decisions.get(request_id).filter(|d| p.harness != CliKind::Codex || d.gate == "PreToolUse").and_then(|d| d.session_command.clone()),
+                _ => None,
+            }.ok_or_else(|| anyhow!("that request does not offer a session command allowance"))?
+        } else { String::new() };
         let (allow, label) = match &mut rt.engine {
             Engine::Cli(p) => {
                 let (decision, label) = match option_id {
                     "deny" => (Decision::Deny, "Denied".to_string()),
                     "allow" => (Decision::Allow, "Allowed".to_string()),
+                    crate::harness::read_only::SESSION_OPTION => {
+                        let input = crate::harness::read_only::session_input(&ask.tool_name, &ask.input, &session_command)
+                            .ok_or_else(|| anyhow!("the command's session allowance has no valid directory scope"))?;
+                        (Decision::Execute(input), "Allowed for this session".to_string())
+                    }
                     s if s.starts_with("suggest:") => {
                         let i: usize = s[8..].parse().unwrap_or(usize::MAX);
                         let sugg = ask.suggestions.get(i).cloned().ok_or_else(|| anyhow!("unknown option"))?;
@@ -3373,6 +3589,10 @@ impl SessionManager {
             }
             Engine::None => bail!("no engine"),
         };
+        // Only remember a grant after the waiting hook accepted its answer.
+        if option_id == crate::harness::read_only::SESSION_OPTION {
+            self.session_commands.lock().unwrap().entry(key_of(session_id, tab_id)).or_default().insert(session_command);
+        }
         rt.pending.remove(request_id);
         self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: allow, label, automatic: false }, None);
         if rt.pending.is_empty() && !matches!(rt.engine, Engine::Cli(_)) {
@@ -4120,7 +4340,6 @@ impl SessionManager {
             turn_tail: Default::default(),
             transcript_turn: None,
             transcript_end_owed: false,
-            answered: HashMap::new(),
             command: launch.command,
             origin: Origin { token, transcript_root: launch.transcript_root, conversation: launch.conversation },
             by_hand: None,
@@ -4390,7 +4609,7 @@ impl SessionManager {
         if !matches!(rt.engine, Engine::None) || self.terminals.is_live(&work.pane) { return Ok(None); }
         if !exited {
             rt.stopping = true;
-            self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+            self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
             bail!("Local process exit could not be confirmed. Retry Stop before resuming.");
         }
         rt.stopping_pid = None;
@@ -4522,6 +4741,7 @@ impl SessionManager {
             p.recorded = true;
         }
         if !payloads.is_empty() {
+            rt.incidents.progress("transcript");
             self.stall_disproved(&mut rt);
         }
         let turn_open = rt.turn_open;
@@ -4547,7 +4767,6 @@ impl SessionManager {
                                 _ => unreachable!(),
                             };
                             if !already_closed {
-                                self.forget_tool_answers(&mut rt);
                                 self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
                             }
                         }
@@ -4785,7 +5004,6 @@ impl SessionManager {
             };
             if mark == Some(tui::TurnMark::Aborted) {
                 // Interrupted in its own screen: not a turn that finished.
-                self.forget_tool_answers(&mut rt);
                 self.end_open_turn(&mut rt, TurnStatus::Aborted, None);
                 let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
                 drop(rt);
@@ -5219,7 +5437,7 @@ impl SessionManager {
                     // the watcher closes the turn this prompt opened and
                     // says the agent went.
                 } else if ready.is_some() && matches!(&rt.engine, Engine::Cli(p) if p.awaiting_delivery.is_some()) {
-                    manager.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed);
+                    manager.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery);
                     rt.stalled_at = Some(Instant::now());
                 }
             }
@@ -5860,7 +6078,6 @@ impl SessionManager {
                     }
                 }
                 self.record_activity(&rt, TabStatus::Completed, store::activity::Source::Live);
-                self.forget_tool_answers(&mut rt);
                 self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
                 drop(rt);
                 self.observer.automation_failed(&frame.session, &frame.tab, "The automation turn was interrupted.");
@@ -5886,11 +6103,10 @@ impl SessionManager {
         reply
     }
 
-    /// Finish a Stop hook or a watcher-closed turn. Forget its answers while
-    /// still holding the tab lock, then release it before notifying automation
-    /// or scheduling a settings restart that may re-enter the tab.
-    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, mut rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>) {
-        self.forget_tool_answers(&mut rt);
+    /// Finish a Stop hook or a watcher-closed turn. Release the tab lock
+    /// before notifying automation or scheduling a settings restart that may
+    /// re-enter the tab.
+    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>) {
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
         let tail = match &rt.engine { Engine::Cli(p) => Some(p.tail.clone()), _ => None };
         drop(rt);
@@ -5941,13 +6157,6 @@ impl SessionManager {
         });
     }
 
-    /// Answers only stand for the turn they were given in.
-    fn forget_tool_answers(&self, rt: &mut TabRuntime) {
-        if let Engine::Cli(p) = &mut rt.engine {
-            p.answered.clear();
-        }
-    }
-
     /// Turn a permission hook into the chat's own card and wait for it to be
     /// answered. The hook thread parks here, which is exactly what holds the
     /// CLI's tool call up until the reader decides.
@@ -5965,32 +6174,76 @@ impl SessionManager {
         let suggestions: Vec<Value> = frame.payload["permission_suggestions"].as_array().cloned().unwrap_or_default();
         let gate = frame.event.as_str();
 
-        // Codex raises `PermissionRequest` for a command the reader has just
-        // been asked about at `PreToolUse`. Reusing that answer is what keeps
-        // one tool to one card.
-        if kind == CliKind::Codex {
-            let key = tool_key(&tool_name, &input);
-            let already = {
-                let rt = rt_arc.lock().unwrap();
-                match &rt.engine {
-                    Engine::Cli(p) if p.origin.accepts(frame) => p.answered.get(&key).copied(),
-                    _ => None,
+        // Every hook that asks is asked on its own card, whichever gate it is
+        // and whatever was answered before: Codex's sandbox asking at
+        // `PermissionRequest` after the reader allowed the command at
+        // `PreToolUse` wants more than the reader granted (PRO-160).
+        //
+        // An automatic discovery allowance only skips TerminalX's Ask gate.
+        // Codex's own PermissionRequest (sandbox/network escalation), and
+        // Claude's safety checks in bypass mode, always remain a decision.
+        let verified_cwd = permission_directory(kind, &frame.payload);
+        let cwd = verified_cwd.or_else(|| {
+            (kind == CliKind::Codex && crate::harness::read_only::command(&tool_name, &input).is_some())
+                .then(|| crate::harness::read_only::reported_scope(&input, frame.payload["cwd"].as_str())).flatten()
+        });
+        let session_command = {
+            let rt = rt_arc.lock().unwrap();
+            let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
+            if !p.origin.accepts(frame) { return HookReply::default(); }
+            let mode = if kind == CliKind::Claude { frame.payload["permission_mode"].as_str().unwrap_or(&p.mode) } else { &p.mode };
+            let ask_gate = codex::asks_every_tool(mode)
+                && ((kind == CliKind::Codex && gate == "PreToolUse") || kind == CliKind::Claude);
+            if ask_gate {
+                let key = crate::harness::read_only::session_key(&tool_name, &input, cwd);
+                let granted = key.as_ref().is_some_and(|key| self.session_commands.lock().unwrap()
+                    .get(&rt.key()).is_some_and(|commands| commands.contains(key)));
+                if granted {
+                    // The grant covers this gate only: a subsequent provider
+                    // escalation still needs its own approval card.
+                    if let Some(updated) = key.as_deref().and_then(|key| crate::harness::read_only::session_input(&tool_name, &input, key)) {
+                        return reply_for(kind, gate, Decision::Execute(updated));
+                    }
                 }
-            };
-            if let Some(allow) = already {
-                return reply_for(kind, gate, if allow { Decision::Allow } else { Decision::Deny });
-            }
-        }
+                if let Some(updated) = store::settings::load().agents.read_only_commands
+                    .then(|| crate::harness::read_only::approved_input(&tool_name, &input, cwd)).flatten() {
+                    // Approve only the sanitized replacement. The unchanged
+                    // input may inherit executors/config from shell startup.
+                    let output = match kind {
+                        CliKind::Codex => codex::pty::pre_tool_rewrite(updated),
+                        CliKind::Claude => claude::pty::permission_decision(true, Some(updated), vec![]),
+                    };
+                    return HookReply { output: Some(output), refused: None };
+                }
+                key
+            } else { None }
+        };
 
         let (tx, rx) = std::sync::mpsc::channel::<Decision>();
         {
             let mut rt = rt_arc.lock().unwrap();
-            let Engine::Cli(p) = &mut rt.engine else { return HookReply::default() };
+            let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
             if !p.origin.accepts(frame) { return HookReply::default(); }
+            // PRO-160: Codex's code-mode `exec` hands the turn back to the
+            // model while a call inside it waits on its card, and the model
+            // may run the same command again. Its repeat can reach either
+            // gate while the first waits at either one: its `PreToolUse`
+            // while the first waits to leave the sandbox, or its
+            // `PermissionRequest` with the justification reworded. A second
+            // card for it is the one a reader answers twice, and the command
+            // then runs twice. Judged under the same lock that files a card,
+            // so two hooks cannot both pass; the model is told why, and the
+            // waiting call has the answer.
+            let what = asked_to_run(&input);
+            if kind == CliKind::Codex && rt.pending.iter().any(|(id, ask)| ask.tool_name == tool_name && p.decisions.contains_key(id) && asked_to_run(&ask.input) == what) {
+                return HookReply { output: Some(codex::pty::already_waiting(gate)), refused: None };
+            }
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
             p.decisions.insert(request_id.clone(), DecisionSender {
                 sender: tx,
                 caller: if local_owner { crate::hooks::Caller::current() } else { crate::hooks::Caller::default() },
                 gate: gate.to_string(),
+                session_command: session_command.clone(),
             });
             // The event carries no tool_use_id — it fires before the call is
             // recorded — so the card stands on its own rather than attaching
@@ -6007,9 +6260,26 @@ impl SessionManager {
                     description: ["justification", "description"].iter()
                         .find_map(|field| input[*field].as_str().filter(|s| !s.trim().is_empty()))
                         .map(String::from),
-                    reason: asked_because(kind, gate, &frame.payload, &p.mode, &tool_name),
+                    // Codex's sandbox asking to be left is said as that (PRO-160);
+                    // no session allowance is offered at that gate.
+                    reason: if kind == CliKind::Codex && gate != "PermissionRequest" && verified_cwd.is_none() && crate::harness::read_only::command(&tool_name, &input).is_some() {
+                        Some(match cwd {
+                            Some(scope) => format!("Session allowances are limited to {scope}. Commands executing in another directory are blocked and need a separate one-time approval."),
+                            None => "Codex did not report a verifiable execution directory. Approval applies only to this invocation.".into(),
+                        })
+                    } else { asked_because(kind, gate, &frame.payload, &p.mode, &tool_name) },
                     cwd: frame.payload["cwd"].as_str().filter(|s| !s.trim().is_empty()).map(String::from),
-                    options: claude::mapper::build_options(&suggestions),
+                    options: {
+                        let mut options = claude::mapper::build_options(&suggestions);
+                        if session_command.is_some() {
+                            options.insert(1, crate::events::PermissionOption {
+                                id: crate::harness::read_only::SESSION_OPTION.into(),
+                                label: "Allow for this session".into(),
+                                kind: crate::events::PermissionOptionKind::AllowSession,
+                            });
+                        }
+                        options
+                    },
                     tool_name: tool_name.clone(),
                     input: input.clone(),
                 }
@@ -6020,7 +6290,7 @@ impl SessionManager {
             );
             self.apply(&mut rt, payload, None);
         }
-        let waiting = Waiting { kind, gate: gate.to_string(), request_id, tool_name, input, local_owner };
+        let waiting = Waiting { kind, gate: gate.to_string(), request_id, local_owner };
         // Teardown or a settings restart may replace this CLI while the hook
         // waits. An answer for that old launch cannot start the new one's work.
         self.await_decision(rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)))
@@ -6031,7 +6301,7 @@ impl SessionManager {
     /// CLI that asked. A frame handed over by the runtime this one replaced
     /// waits here too, for the card it asked for there (#765).
     fn await_decision(&self, rt_arc: &Arc<Mutex<TabRuntime>>, waiting: Waiting, rx: std::sync::mpsc::Receiver<Decision>, mine: impl Fn(&TabRuntime) -> bool) -> HookReply {
-        let Waiting { kind, gate, request_id, tool_name, input, local_owner } = waiting;
+        let Waiting { kind, gate, request_id, local_owner } = waiting;
         let gate = gate.as_str();
         let wait = match kind {
             CliKind::Claude => claude::pty::PERMISSION_WAIT,
@@ -6049,9 +6319,6 @@ impl SessionManager {
         }
         if let Engine::Cli(p) = &mut rt.engine {
             p.decisions.remove(&request_id);
-            if let Some(d) = &answer {
-                p.answered.insert(tool_key(&tool_name, &input), !matches!(d, Decision::Deny));
-            }
         }
         match answer {
             Some(decision) => {
@@ -6079,7 +6346,7 @@ impl SessionManager {
                 // The CLI has stopped waiting on us and will ask in its own
                 // TUI; the card must stop offering buttons that go nowhere.
                 self.apply(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
-                self.needs_recovery(&mut rt, RecoveryKind::PermissionExpired);
+                self.needs_recovery(&mut rt, RecoveryKind::PermissionExpired, crate::recovery_log::Source::PermissionLapsed);
                 HookReply::default()
             }
         }
@@ -6129,6 +6396,7 @@ impl SessionManager {
             Engine::OpenCode(o) => o.handle(line),
             Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => return,
         };
+        rt.incidents.progress("agent_output");
         self.stall_disproved(&mut rt);
         self.apply_actions(&mut rt, actions);
     }
@@ -6153,6 +6421,9 @@ impl SessionManager {
             self.provider_settings(rt, Signal::Current { model: Some(model.clone()), effort: None });
         }
         if subagent.is_none() {
+            // Before anything below reads it: a warning this progress takes
+            // down is taken down by progress (#815).
+            if let Some(kind) = crate::recovery_log::progress_of(&payload) { rt.incidents.progress(kind); }
             if matches!(&payload, Payload::ModelRequestStarted | Payload::Reasoning { .. } | Payload::Delta(Delta::ThinkingDelta { .. }) | Payload::ToolCallCompleted { .. }) {
                 self.delivery_confirmed(rt);
             }
@@ -6166,11 +6437,11 @@ impl SessionManager {
             // turn that has ended is not. A failed ending raises its own
             // recovery just below.
             if payload.is_turn_boundary() && rt.stalled_at.take().is_some() && rt.recovery.take().is_some() {
-                self.publish(rt, Payload::Recovery { kind: None }, None);
+                self.recovery_cleared(rt, "turn_ended");
             }
             if let Some(kind) = recovery::failure(&payload) {
                 rt.signed_out_in_turn |= kind == RecoveryKind::SignedOut && rt.turn_open;
-                self.needs_recovery(rt, kind);
+                self.needs_recovery(rt, kind, crate::recovery_log::source_of(&payload));
             }
         }
         match &payload {
@@ -6240,7 +6511,7 @@ impl SessionManager {
         if sign_in_refused {
             // A reply drawn after the refusal may have taken the recovery back.
             if rt.recovery != Some(RecoveryKind::SignedOut) {
-                self.needs_recovery(rt, RecoveryKind::SignedOut);
+                self.needs_recovery(rt, RecoveryKind::SignedOut, crate::recovery_log::Source::SignIn);
             }
             self.sign_in_refused(rt);
         } else if worked {
@@ -6324,7 +6595,7 @@ impl SessionManager {
             self.publish(&mut rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false, detail: None }, None);
         }
         rt.queued.clear();
-        if let Some(kind) = recovery { self.needs_recovery(&mut rt, kind); }
+        if let Some(kind) = recovery { self.needs_recovery(&mut rt, kind, crate::recovery_log::Source::Connection); }
         else { self.set_status(&mut rt, TabStatus::Idle); }
     }
 }
@@ -6620,15 +6891,22 @@ mod tests {
         assert_eq!(odd["hookSpecificOutput"]["decision"], json!({"behavior": "allow"}));
     }
 
+    /// What runs is the call, whichever gate asks and however the agent
+    /// words it (PRO-160); a different command or input is another call.
     #[test]
-    fn one_tool_is_the_same_tool_whichever_hook_asks_about_it() {
-        // Codex adds its justification to the input when it escalates; the
-        // command is what says these are one call, so the reader is asked once.
-        let pre = tool_key("Bash", &json!({"command": "rm -rf build"}));
-        let request = tool_key("Bash", &json!({"command": "rm -rf build", "description": "Delete the build tree?"}));
-        assert_eq!(pre, request);
-        assert_ne!(pre, tool_key("Bash", &json!({"command": "rm -rf dist"})));
-        assert_ne!(pre, tool_key("Read", &json!({"command": "rm -rf build"})));
+    fn a_repeat_is_told_by_what_it_runs() {
+        let pre = asked_to_run(&json!({"command": "touch /x"}));
+        assert_eq!(pre, asked_to_run(&json!({"command": "touch /x", "description": "May I write /x?"})));
+        assert_eq!(pre, asked_to_run(&json!({"command": "touch /x", "description": "I need /x."})));
+        assert_eq!(asked_to_run(&json!({"command": "*** Begin Patch\n*** End Patch\n"})), asked_to_run(&json!({"command": "*** Begin Patch\n*** End Patch"})));
+        assert_ne!(pre, asked_to_run(&json!({"command": "touch /y"})));
+        assert_ne!(pre, asked_to_run(&json!({"command": "touch /x", "workdir": "/elsewhere"})));
+        assert_ne!(asked_to_run(&json!({"server": "a", "args": {"q": 1}})), asked_to_run(&json!({"server": "a", "args": {"q": 2}})));
+        let cmd = asked_to_run(&json!({"cmd": "touch note", "workdir": "/workspace/app"}));
+        assert_eq!(cmd, asked_to_run(&json!({"cmd": "touch note\n", "workdir": "/workspace/app", "justification": "Make a note"})));
+        assert_ne!(cmd, asked_to_run(&json!({"cmd": "rm file", "workdir": "/workspace/app"})));
+        assert_ne!(cmd, asked_to_run(&json!({"cmd": "touch note", "workdir": "/workspace/other"})));
+        assert_ne!(cmd, asked_to_run(&json!({"cmd": "touch note", "workdir": "/workspace/app", "shell": "other-shell"})));
     }
 
     #[test]

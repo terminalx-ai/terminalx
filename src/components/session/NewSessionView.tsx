@@ -125,7 +125,12 @@ export function NewSessionView({
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
   const readiness = useAgentReadinessList(store.harnesses, !cloud);
-  const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient, undefined, cloud ? undefined : readiness.values);
+  // Fresh local probes take precedence over discovery cached before an install or removal.
+  const harnesses = store.harnesses.map((item) => {
+    const state = readiness.values?.[item.id]?.state;
+    return state && state !== "unknown" ? { ...item, available: state !== "missing" } : item;
+  });
+  const agentSelection = useSessionAgent(harnesses, !cloud, modelClient, undefined, cloud ? undefined : readiness.values);
   const { harness, modelId, effort, mode } = agentSelection;
   const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
     cloud?.project ? cloudPipelineSettings(cloud.project.key) : pipelineSettings(project),
@@ -316,7 +321,7 @@ export function NewSessionView({
       if (blocked) { setError(blocked); return; }
       const title = text.trim().split("\n")[0].slice(0, 60);
       const images = attach.images;
-      const s = await createQuickChat({ title, cwd: quickCwd, tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
+      const s = await createQuickChat({ title, cwd: quickCwd, ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}), tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
       setText("");
       attach.clear();
       setQuickCwd(null);
@@ -349,6 +354,7 @@ export function NewSessionView({
       const named = checkoutBranch ? (checkoutBranch.split("/").pop() ?? "") : !preset?.cwd && useWorktree && !issue ? worktreeNameFromPrompt(text) : "";
       const worktreeName = named ? await api.previewWorkspaceName(project.path, named).catch(() => workspaceName) : workspaceName;
       const s = await api.createSession({
+        ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}),
         projectPath: project.path,
         title,
         useWorktree: preset?.cwd ? false : useWorktree,
@@ -605,7 +611,8 @@ export function NewSessionView({
           {!cloud && <p className="mt-2 px-1 text-xs text-faint">Nothing starts until you press {quick ? "Ask" : "Create"}.</p>}
           {!cloud && harness && !available && (
             <p className="mt-2 px-1 text-xs text-muted-foreground">
-              Install it with <code className="font-mono">{harness.installHint}</code>
+              {harness.installable ? <>Install it with <span className="font-medium text-foreground">Install and sign in</span> above, or run </> : "Install it with "}
+              <code className="font-mono">{harness.installHint}</code>
             </p>
           )}
           {/* Reached with a role that changed meanwhile (demoted while drafting): Create is off, with the reason. */}

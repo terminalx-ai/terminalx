@@ -282,10 +282,11 @@ struct ViewTap {
 
 impl ViewTap {
     /// `false` once the view has fallen behind: the pane stops sending to it.
-    fn send(&self, bytes: &[u8]) -> bool {
-        for piece in bytes.chunks(PTY_PIECE) {
+    fn send(&self, bytes: &[u8], size: Option<crate::pty::OutputSize>) -> bool {
+        // Size-only completions must survive even when the program is silent.
+        for piece in bytes.chunks(PTY_PIECE).chain((bytes.is_empty() && size.is_some()).then_some(bytes)) {
             let frame = encode(&json!({"type":"pty", "id":self.id, "token":self.token,
-                "data":base64::engine::general_purpose::STANDARD.encode(piece)}));
+                "data":base64::engine::general_purpose::STANDARD.encode(piece), "size":size}));
             if !frame.is_some_and(|frame| self.output.frame(frame, Some(&self.budget))) {
                 return self.fell_behind();
             }
@@ -495,7 +496,7 @@ async fn connection(socket: tokio::net::UnixStream, token: &str, sink: Arc<Broad
                         if stream == Some(Stream::Events) { bail!("an event connection carries no terminal output"); }
                         let view = ViewTap { output: output.clone(), budget: Arc::new(Semaphore::new(VIEW_QUEUED_BYTES)),
                             id: id.clone(), token: token.clone(), told, peer: peer.clone(), tally: tally.clone() };
-                        terminals.attach(&attached.window, &id, &format!("{}:{token}", attached.window), Box::new(move |bytes| view.send(bytes)));
+                        terminals.attach_sized(&attached.window, &id, &format!("{}:{token}", attached.window), Box::new(move |bytes, size| view.send(bytes, size)));
                     }
                     Input::Ack { id, token, drawn } => terminals.ack(&id, &format!("{}:{token}", attached.window), drawn),
                     Input::Detach { id, token } => terminals.detach(&id, &format!("{}:{token}", attached.window)),

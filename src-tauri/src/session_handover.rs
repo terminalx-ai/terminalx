@@ -94,6 +94,10 @@ pub(crate) struct TabRecord {
     /// The app's own CLI in the tab's terminal, when it is running.
     #[serde(default)]
     pub cli: Option<CliRecord>,
+    /// The tab's open and last warning (#815), so the next runtime goes on
+    /// with the same incident rather than starting a second one for it.
+    #[serde(default)]
+    pub incidents: Option<crate::recovery_log::Handed>,
 }
 
 /// A permission or question card waiting on someone.
@@ -106,6 +110,8 @@ pub(crate) struct AskRecord {
     pub input: Value,
     #[serde(default)]
     pub suggestions: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_command: Option<String>,
 }
 
 /// The app's CLI in a tab, as the tab drives it.
@@ -170,8 +176,6 @@ pub(crate) struct CliRecord {
     pub transcript_turn: Option<String>,
     #[serde(default)]
     pub transcript_end_owed: bool,
-    #[serde(default)]
-    pub answered: HashMap<String, bool>,
     pub command: String,
     /// The secret this launch's hooks show, and where its transcript may be.
     pub token: String,
@@ -445,6 +449,10 @@ impl SessionManager {
             status: rt.status,
             pending: rt.pending.iter().map(|(id, ask)| AskRecord {
                 request_id: id.clone(), tool_use_id: ask.tool_use_id.clone(), tool_name: ask.tool_name.clone(), input: ask.input.clone(), suggestions: ask.suggestions.clone(),
+                session_command: match &rt.engine {
+                    Engine::Cli(p) => p.decisions.get(id).and_then(|d| d.session_command.clone()),
+                    _ => None,
+                },
             }).collect(),
             queued: rt.queued.clone(),
             turn_open: rt.turn_open,
@@ -461,6 +469,7 @@ impl SessionManager {
             message_times: rt.message_times.clone(),
             left_at: rt.left_at.clone(),
             cli: None,
+            incidents: Some(rt.incidents.handed()),
         };
         let Engine::Cli(p) = &rt.engine else {
             // Nothing runs for it: only what is waiting goes over.
@@ -514,7 +523,6 @@ impl SessionManager {
             turn_tail: TurnTailRecord { said, anticipated, closed },
             transcript_turn: p.transcript_turn.map(|mark| mark_name(mark).to_string()),
             transcript_end_owed: p.transcript_end_owed,
-            answered: p.answered.clone(),
             command: p.command.clone(),
             token: p.origin.token.clone(),
             transcript_root: p.origin.transcript_root.clone(),
@@ -546,6 +554,8 @@ impl SessionManager {
         rt.last_activity = back(record.last_activity_ms);
         rt.recovery = record.recovery;
         rt.stalled_at = record.stalled_ms.map(back);
+        let handed = record.incidents.clone();
+        rt.incident(|incidents, ctx| incidents.adopt(ctx, handed));
         rt.reported_mode_to_judge = record.reported_mode_to_judge;
         rt.message_times = record.message_times;
         rt.left_at = record.left_at;
@@ -598,7 +608,6 @@ impl SessionManager {
             turn_tail: tui::TurnTail::from_parts(cli.turn_tail.said, cli.turn_tail.anticipated, cli.turn_tail.closed),
             transcript_turn: cli.transcript_turn.as_deref().and_then(mark_of),
             transcript_end_owed: cli.transcript_end_owed,
-            answered: cli.answered,
             command: cli.command,
             origin: Origin { token: cli.token, transcript_root: cli.transcript_root, conversation: cli.conversation },
             by_hand: None,
@@ -622,7 +631,11 @@ impl SessionManager {
                 Ok(connection) if local_owner => crate::hooks::Caller::of(Arc::new(connection)),
                 _ => crate::hooks::Caller::default(),
             };
-            p.decisions.insert(ask.request_id.clone(), DecisionSender { sender: tx, caller, gate: gate.clone() });
+            let session_command = ask.session_command.clone().filter(|key| {
+                (p.harness != CliKind::Codex || gate == "PreToolUse")
+                    && crate::harness::read_only::session_input(&ask.tool_name, &ask.input, key).is_some()
+            });
+            p.decisions.insert(ask.request_id.clone(), DecisionSender { sender: tx, caller, gate: gate.clone(), session_command });
             (p.harness, p.origin.token.clone(), p.generation)
         };
         let manager = self.clone();
@@ -633,7 +646,7 @@ impl SessionManager {
                     None => return reply_for(kind, &gate, Decision::Deny),
                 }
             } else { None };
-            let waiting = Waiting { kind, gate, request_id: ask.request_id, tool_name: ask.tool_name, input: ask.input, local_owner };
+            let waiting = Waiting { kind, gate, request_id: ask.request_id, local_owner };
             manager.await_decision(&rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.generation == generation && p.origin.token == token))
         });
     }

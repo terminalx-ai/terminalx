@@ -228,6 +228,9 @@ impl Host for LocalHost {
     }
 
     fn send(&self, to: &SessionRef, prompt: &str) -> Result<()> {
+        let running = self.manager.is_running(&to.session_id, &to.tab_id)
+            .then(|| self.manager.environment_changed(&SessionManager::pane_id(&to.tab_id))).transpose()?;
+        crate::store::environment::prepare_unattended(&index::get(&to.session_id)?.cwd, running)?;
         self.manager.send(&to.session_id, &to.tab_id, prompt.to_string(), Vec::new())?;
         Ok(())
     }

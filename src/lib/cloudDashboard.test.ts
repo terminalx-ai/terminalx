@@ -1,3 +1,4 @@
+import { adjacentSession } from "./sessionNavigation";
 import { describe, expect, it } from "vitest";
 import type { RuntimeSession } from "@terminalx/portable/workspace";
 import type { CloudWorkspaceListItem } from "@/lib/api";
@@ -30,6 +31,7 @@ function session(id: string, title: string, status: RuntimeSession["tabs"][numbe
     title,
     created: "2026-09-30T10:00:00.000Z",
     modified: "2026-09-30T11:00:00.000Z",
+    lastMessageAt: "2026-09-30T10:30:00.000Z",
     archived: false,
     pinned: false,
     tabs: [{ id: `${id}-tab`, harness: "claude", title: null, model: "opus", permissionMode: "bypassPermissions", status, created: "2026-09-30T10:00:00.000Z", modified: "2026-09-30T10:00:00.000Z" }],
@@ -110,6 +112,48 @@ const columnOf = (sessions: CloudDashboardSession[], key: string) => {
 };
 
 describe("cloud sessions in the dashboard's columns", () => {
+  it("preserves sidebar message activity and pins for session navigation", () => {
+    const sessions = project({
+      workspaces: [item("ws-1")],
+      cached: { "ws-1": [
+        session("A", "Newest message", "idle", { created: "2026-10-01", lastMessageAt: "2026-11-03", modified: "2026-11-03" }),
+        session("B", "Renamed today", "idle", { created: "2026-10-02", lastMessageAt: "2026-11-02", modified: "2026-11-06" }),
+        session("C", "No messages", "idle", { created: "2026-11-01", modified: "2026-11-01" }),
+        session("P", "Pinned", "idle", { created: "2026-09-01", modified: "2026-09-01", pinned: true }),
+      ] },
+    });
+    const key = (id: string) => `cloud:${ORG}:ws-1:${id}`;
+    expect(adjacentSession(sessions, key("A"), 1)).toBe(key("B"));
+    expect(adjacentSession(sessions, key("B"), 1)).toBe(key("C"));
+    expect(adjacentSession(sessions, key("A"), -1)).toBe(key("P"));
+  });
+
+  it("keeps timestamp-free legacy conversations Done from lists, tab metadata and checkpoints", () => {
+    const legacy = session("legacy", "Legacy", "idle", { lastMessageAt: null, hasMessages: true });
+    const known = agentTab("legacy", "idle");
+    known.info.hasMessages = true;
+    for (const world of [
+      { live: { "ws-1": [legacy] }, connected: ["ws-1"] },
+      { cached: { "ws-1": [legacy] } },
+      { live: { "ws-1": [{ ...legacy, hasMessages: false, tabs: legacy.tabs.map((tab) => ({ ...tab, hasMessages: true })) }] } },
+      { tabs: { "ws-1": [known] } },
+    ]) {
+      const sessions = project({ workspaces: [item("ws-1")], ...world });
+      expect(columnOf(sessions, `cloud:${ORG}:ws-1:legacy`)).toBe("done");
+      expect(sessions[0].lastMessageAt).toBeUndefined();
+    }
+  });
+
+  it("keeps empty cloud chats in Not started and retains message evidence for read chats", () => {
+    const sessions = project({
+      workspaces: [item("ws-1")],
+      live: { "ws-1": [session("empty", "Empty", "idle", { lastMessageAt: null }), session("read", "Read", "idle")] },
+      connected: ["ws-1"],
+    });
+    expect(columnOf(sessions, `cloud:${ORG}:ws-1:empty`)).toBe("not-started");
+    expect(columnOf(sessions, `cloud:${ORG}:ws-1:read`)).toBe("done");
+  });
+
   it("uses the live tab state while connected: waiting is Needs you, in progress is Working", () => {
     const sessions = project({
       workspaces: [item("ws-1", { runtimeActivity: { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 } })],

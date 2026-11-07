@@ -135,6 +135,9 @@ async fn accept_control(
     let hello: serde_json::Value =
         serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
     assert_eq!(hello["type"], "host-hello");
+    // A WebSocket heartbeat may arrive during proof as well as afterwards.
+    socket.send(Message::Ping(vec![4, 5, 6].into())).await.unwrap();
+    assert_eq!(socket.next().await.unwrap().unwrap(), Message::Pong(vec![4, 5, 6].into()));
     let (challenge, proof) = challenge(&HostKeypair::from_secret([5; 32]), origin);
     socket
         .send(Message::Text(challenge.to_string().into()))
@@ -201,6 +204,90 @@ fn diagnostic_records(directory: &std::path::Path) -> Vec<serde_json::Value> {
     let bytes =
         std::fs::read_to_string(directory.join(super::super::diagnostics::FILE_NAME)).unwrap();
     serde_json::from_str(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn manual_retry_wakes_backoff_keeps_the_cause_and_uses_one_supervisor() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = manager_with_diagnostics(directory.path());
+    let calls = Arc::new(AtomicU32::new(0));
+    let connected = Arc::new(tokio::sync::Notify::new());
+    let release = connected.clone();
+    let attempts = calls.clone();
+    let supervisor = tokio::spawn(supervise_with(manager.clone(), move |manager, _, retry| {
+        let call = attempts.fetch_add(1, Ordering::SeqCst);
+        let release = release.clone();
+        Box::pin(async move {
+            if call == 0 {
+                retry.attempts = 12; // Automatic backoff would wait 90 seconds.
+                return Err(anyhow!(cloud::CloudHttpError(502)).context(Stage::Assignment));
+            }
+            assert_eq!(retry.attempts, 13);
+            assert!(retry.reconnect);
+            release.notified().await;
+            manager.stopped.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+    }));
+    wait_until(|| manager.inner.lock().unwrap().relay_status.phase == super::super::RelayPhase::Offline).await;
+    let status = manager.retry_relay().unwrap();
+    assert_eq!(status.relay.phase, super::super::RelayPhase::Connecting);
+    assert!(status.relay.message.unwrap().contains("service is temporarily unavailable"));
+    wait_until(|| calls.load(Ordering::SeqCst) == 2).await;
+    assert!(manager.inner.lock().unwrap().relay_status.message.as_ref().unwrap().contains("service is temporarily unavailable"));
+    manager.retry_relay().unwrap(); // A stale click cannot start another connection.
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let records = diagnostic_records(directory.path());
+    assert_eq!(records.iter().filter(|record| record["event"] == "retry-requested").count(), 1);
+    connected.notify_one();
+    supervisor.await.unwrap();
+}
+
+#[tokio::test]
+async fn websocket_heartbeats_are_answered_and_service_closes_have_a_safe_cause() {
+    use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+
+    let directory = tempfile::tempdir().unwrap();
+    let manager = manager_with_diagnostics(directory.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server_origin = origin.clone();
+    let server = tokio::spawn(async move {
+        let mut socket = accept_control(&listener, &server_origin, 1).await;
+        socket.send(Message::Ping(vec![1, 2, 3].into())).await.unwrap();
+        assert_eq!(socket.next().await.unwrap().unwrap(), Message::Pong(vec![1, 2, 3].into()));
+        socket.close(Some(CloseFrame {
+            code: CloseCode::from(4503),
+            reason: "private-token=secret".into(),
+        })).await.unwrap();
+    });
+    let error = connect_to_cell(manager.clone(), context(), &mut RetryState::default(), origin, ControlTiming::default()).await.unwrap_err();
+    server.await.unwrap();
+    let failure = Failure::from_error(&error);
+    assert_eq!(failure.category, Category::ServiceRestart);
+    assert_eq!(failure.stage, Stage::ControlSession);
+    manager.record_relay_diagnostic(Event::Failed, 0, Some(failure));
+    assert!(failure.message().contains("restarting or replacing"));
+    let bytes = serde_json::to_string(&diagnostic_records(directory.path())).unwrap();
+    assert!(bytes.contains("service-restart"));
+    assert!(!bytes.contains("private-token"));
+    assert!(!bytes.contains("secret"));
+}
+
+#[test]
+fn documented_close_codes_select_the_recovery_reason() {
+    for (code, expected) in [
+        (1000, Category::RemoteClosed),
+        (4401, Category::Authentication),
+        (4408, Category::Timeout),
+        (4409, Category::AssignmentChanged),
+        (4429, Category::RateLimited),
+        (4503, Category::ServiceRestart),
+    ] {
+        assert_eq!(close_category(Some(code)), expected);
+    }
+    assert_eq!(close_category(None), Category::Network);
+    assert_eq!(close_category(Some(4999)), Category::Network);
 }
 
 #[tokio::test]

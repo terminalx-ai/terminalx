@@ -9,6 +9,7 @@ import {
   closeSessionShare,
   createShare,
   defaultShareSettings,
+  isWaitingGuest,
   openSessionShare,
   refreshShare,
   useLocalShare,
@@ -300,7 +301,7 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
         <ul className="mb-5 flex flex-col divide-y divide-hairline rounded-xl bg-well hairline" data-testid="share-terms">
           <ShareTerm icon={<Eye />} title="Guests can watch">They see the transcript and terminal so far.</ShareTerm>
           <ShareTerm icon={<Terminal />} title="A driver can act">They can have the agent change files and run commands on this computer.</ShareTerm>
-          <ShareTerm icon={<Link2 />} title="The link is the key">Anyone signed in with it can join. Name people or require approval to limit who.</ShareTerm>
+          <ShareTerm icon={<Link2 />} title="The link is the key">Anyone signed in with it can ask to join. While Approve each person is on, each waits until you admit them.</ShareTerm>
         </ul>
         {!signedIn ? (
           <div className="flex flex-col items-stretch gap-2" data-testid="share-sign-in">
@@ -495,10 +496,15 @@ export function LocalShareButton({ sessionId }: { sessionId: string }) {
     void refreshShare(sessionId).catch(() => undefined);
   }, [sessionId]);
   const people = share.people.filter((person) => person.admitted);
+  // Each link approves people by default (PRO-162): whoever waits is shown here, not only inside Share.
+  const waiting = share.people.filter(isWaitingGuest);
+  const waitingNote = `${waiting.length} waiting`;
   const detail = [
     ...people.map((guest) => `${guest.person.displayName}${guest.typing ? " (typing)" : ""}`),
     ...share.leases.map((lease) => `${lease.holder.displayName} is driving`),
+    ...waiting.map((guest) => `${guest.person.displayName} is waiting to join`),
   ].join(" · ");
+  const waitingId = `share-waiting-${sessionId}`;
   return (
     <Button
       variant="ghost"
@@ -506,11 +512,18 @@ export function LocalShareButton({ sessionId }: { sessionId: string }) {
       // A 20px icon like the header's others, and a label sized to stand beside it.
       className="gap-1.5 px-3 text-[13px] [&>svg]:size-5"
       aria-label="Share session…"
+      aria-describedby={waiting.length ? waitingId : undefined}
       title={detail || "Share session"}
       onClick={() => openSessionShare(sessionId)}
     >
       <UserPlus />
       <span>{share.active ? `${people.length} guests` : "Share"}</span>
+      {waiting.length > 0 && (
+        <span className="text-warning" data-testid="share-waiting">
+          <span aria-hidden className="text-faint">· </span>
+          <span id={waitingId}>{waitingNote}</span>
+        </span>
+      )}
     </Button>
   );
 }

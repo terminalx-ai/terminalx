@@ -23,4 +23,13 @@ describe("turnFileChanges", () => {
   it("counts a patch's own lines", () => {
     expect(editLineCounts({ unified: "--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n-a\n+b\n+c\n d" })).toEqual({ added: 2, removed: 1 });
   });
+
+  it.each([
+    ["--- a/x\n+++ b/x\n@@ -1 +1 @@\n---counter;\n+++counter;\n", 1, 1],
+    ["@@\n----\n+replacement\n", 1, 1],
+    ["---counter;\n+++counter;\n", 1, 1],
+    ["--- a/x\n+++ b/x\n@@ -1 +1 @@\n--- literal content\n+++ literal content\n", 1, 1],
+  ])("counts header-like content in %s", (unified, added, removed) => {
+    expect(editLineCounts({ unified })).toEqual({ added, removed });
+  });
 });

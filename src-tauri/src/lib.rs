@@ -98,8 +98,11 @@ mod issue_ops;
 mod issues;
 #[cfg(feature = "desktop")]
 mod installation;
-#[cfg(feature = "desktop")]
 mod keychain;
+#[cfg(feature = "desktop")]
+mod environment_commands;
+#[cfg(feature = "desktop")]
+mod secret_clipboard;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
@@ -114,6 +117,10 @@ mod project_start;
 mod pty;
 #[cfg(feature = "desktop")]
 mod quit;
+#[cfg(feature = "desktop")]
+mod native_menu;
+#[cfg(feature = "desktop")]
+mod chat_windows;
 mod relay_e2ee;
 pub mod remote;
 mod session;
@@ -123,6 +130,7 @@ mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
+mod recovery_log;
 mod continuation;
 pub mod skills;
 mod store;
@@ -284,7 +292,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().with_filter(|label| !chat_windows::is_chat_window(label)).build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -395,6 +403,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            environment_commands::environment_list,
+            environment_commands::environment_reveal,
+            environment_commands::environment_copy,
+            environment_commands::environment_save,
+            environment_commands::environment_delete,
+            environment_commands::environment_read_file,
+            environment_commands::environment_changed,
             local_runtime::ui::local_runtime_status,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
@@ -525,6 +540,7 @@ pub fn run() {
             cloud_catalog::cloud_catalog_load,
             cloud_catalog::cloud_catalog_save,
             commands::pairing_status,
+            commands::pairing_retry_relay,
             commands::session_share_create,
             commands::session_share_status,
             commands::session_share_change,
@@ -546,6 +562,8 @@ pub fn run() {
             commands::project_start_defaults,
             commands::project_create,
             commands::list_sessions,
+            commands::local_sections,
+            commands::edit_local_section,
             commands::automations_list,
             commands::automation_runs,
             commands::automation_issue_states,
@@ -588,6 +606,8 @@ pub fn run() {
             commands::delete_session,
             commands::list_harnesses,
             commands::check_agent_readiness,
+            commands::agent_setup_start,
+            commands::agent_setup_running,
             commands::list_skills,
             commands::skill_detail,
             commands::work_status,
@@ -609,6 +629,7 @@ pub fn run() {
             commands::prepare_continuation,
             commands::send_message,
             commands::report_send_shown,
+            commands::report_recovery_ui,
             commands::resend_unsent,
             commands::resend_message,
             commands::submit_waiting_prompt,
@@ -675,6 +696,7 @@ pub fn run() {
             commands::pty_busy,
             commands::pty_write,
             commands::pty_attach,
+            commands::pty_attach_sized,
             commands::pty_detach,
             commands::pty_detach_all,
             commands::pty_ack,
@@ -734,6 +756,12 @@ pub fn run() {
             commands::set_work_status_settings,
             commands::agent_settings,
             commands::set_agent_idle_stop_minutes,
+            commands::set_read_only_commands,
+            commands::diagnostics_settings,
+            commands::set_recovery_incidents,
+            commands::recovery_incidents_summary,
+            commands::recovery_incidents_export,
+            commands::clear_recovery_incidents,
             commands::conversation_settings,
             commands::set_archive_idle_days,
             commands::experimental_settings,
@@ -801,6 +829,11 @@ pub fn run() {
             commands::status_usage_refresh,
             commands::status_codex_reset,
             commands::status_resource_overview,
+            native_menu::set_native_menu,
+            native_menu::native_window_action,
+            native_menu::forward_menu_action,
+            chat_windows::new_chat_window,
+            chat_windows::chat_window_open_in_main,
             commands::status_resource_sample,
             commands::status_resource_kill,
             browser::ui::browser_pages,
@@ -822,6 +855,7 @@ pub fn run() {
             computer::computer_reset_permissions,
         ])
         .on_menu_event(|app, event| {
+            native_menu::dispatch(app, event.id().as_ref());
             if event.id().as_ref() == status::MENU_ID {
                 status::toggle_from_menu(app);
             }
@@ -860,7 +894,9 @@ pub fn run() {
                         let_go_of_unresponsive_runtime(&state);
                         state.pairing.stop();
                         if let Some(runtime) = state.runtime() { runtime.disconnect(); }
-                        if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) { let _ = floating.destroy(); }
+                        for (label, secondary) in window.app_handle().webview_windows() {
+                            if label == floating::LABEL || chat_windows::is_chat_window(&label) { let _ = secondary.destroy(); }
+                        }
                         state.computer.shutdown();
                         state.browser.shutdown();
                     }
