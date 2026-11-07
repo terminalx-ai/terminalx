@@ -11,6 +11,10 @@ describe("native menus and the action registry", () => {
     const items = leaves(buildNativeMenu(resolveKeymap({}, true), []).flatMap((group) => group.items));
     expect(items.find((item) => item.id.endsWith(":app.newWindow"))).toMatchObject({
       id: "command:main:app.newWindow",
+      accelerator: null,
+    });
+    expect(items.find((item) => item.id.endsWith(":app.startFrom"))).toMatchObject({
+      id: "command:main:app.startFrom",
       accelerator: "CmdOrCtrl+Shift+N",
     });
   });
@@ -19,7 +23,7 @@ describe("native menus and the action registry", () => {
     const groups = buildNativeMenu(resolveKeymap({}, true), []);
     expect(groups.map((group) => [group.id, group.items.map((item) => item.id.split(":").at(-1))])).toEqual([
       ["app", ["app.about", "app.settings", "app.checkUpdates"]],
-      ["file", ["app.newSession", "app.newWindow", "app.addProject", "app.openRecent", "session.closeTab", "app.closeWindow"]],
+      ["file", ["app.newSession", "app.newWindow", "app.startFrom", "app.addProject", "app.openRecent", "session.closeTab", "app.closeWindow"]],
       ["view", ["app.toggleSidebar", "app.togglePanel", "session.latestShell", "session.toggleTerminalView", "app.zoomIn", "app.zoomOut", "app.zoomReset", "app.fullscreen"]],
       ["go", ["app.agentDashboard", "app.issues", "app.automations", "app.nextSession", "app.previousSession"]],
       ["help", ["app.docs", "app.shortcuts", "app.reportIssue"]],
@@ -52,11 +56,11 @@ describe("native menus and the action registry", () => {
 
   it("lists up to ten recent projects in recency order, excluding archives, with an always-available Show All action", () => {
     const projects = Array.from({ length: 12 }, (_, n) => ({ path: `/repo/${n}`, name: `Project ${n}`, lastOpened: `2026-11-${String(n + 1).padStart(2, "0")}`, archived: n === 11 }));
-    const recent = buildNativeMenu(resolveKeymap({}), projects)[1].items[3];
+    const recent = buildNativeMenu(resolveKeymap({}), projects)[1].items.find((item) => item.id.endsWith(":app.openRecent"))!;
     expect(recent.children?.map((item) => item.id)).toEqual([
       ...Array.from({ length: 10 }, (_, n) => `recent:/repo/${10 - n}`), "command:main:app.openRecent",
     ]);
-    expect(buildNativeMenu(resolveKeymap({}), [])[1].items[3].children).toEqual([
+    expect(buildNativeMenu(resolveKeymap({}), [])[1].items.find((item) => item.id.endsWith(":app.openRecent"))!.children).toEqual([
       expect.objectContaining({ id: "command:main:app.openRecent", text: "Show All…", separator: false }),
     ]);
   });

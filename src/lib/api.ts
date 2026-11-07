@@ -208,6 +208,7 @@ export interface NewSession {
   worktreeName?: string | null;
   /** An existing branch to check out in the new worktree, instead of a new branch. */
   checkoutBranch?: string | null;
+  checkoutPr?: number | null;
   /** Explicit acknowledgement that a requested worktree should be skipped. */
   onMain?: boolean;
   issue?: IssueRef | null;
@@ -2130,6 +2131,8 @@ export interface PrAssociation {
 }
 
 export const gh = {
+  search: (cwd: string, query: string) => invoke<PullRequest[]>("pr_search", { cwd, query }),
+  attach: (cwd: string, number: number) => invoke<string>("pr_attach", { cwd, number }),
   landed: (cwd: string) => invoke<import("@/types/session").Landed>("pr_landed", { cwd }),
   available: () => invoke<boolean>("gh_available"),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),

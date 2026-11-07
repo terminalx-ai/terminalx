@@ -1587,3 +1587,154 @@ mod star_tests {
         assert!(!star_repository_with(Command::new("/nonexistent/gh")).await);
     }
 }
+
+/// Exact numbers include closed/merged PRs; text searches titles and author logins.
+pub fn search_prs(cwd: &Path, query: &str) -> Result<Vec<PullRequest>> {
+    search_prs_with(cwd, query, run)
+}
+
+fn search_prs_with(cwd: &Path, query: &str, mut run: impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<Vec<PullRequest>> {
+    let query = query.trim().trim_start_matches('#');
+    if !query.is_empty() && query.bytes().all(|b| b.is_ascii_digit()) {
+        let number = query.parse::<u64>()?;
+        if number == 0 { return Ok(vec![]); }
+        let out = match run(cwd, &["pr", "view", &number.to_string(), "--json", FIELDS]) {
+            Ok(out) => out,
+            Err(error) if error.to_string().contains("Could not resolve to a PullRequest") || error.to_string().contains("no pull requests found") => return Ok(vec![]),
+            Err(error) => return Err(error),
+        };
+        return Ok(vec![parse_pr(&serde_json::from_str(&out)?)]);
+    }
+    let search = format!("\"{}\" in:title", query.replace(['"', '\\'], " "));
+    let mut args = vec!["pr", "list", "--state", "open", "--limit", "30", "--json", FIELDS];
+    if !query.is_empty() { args.extend(["--search", &search]); }
+    let mut records: Vec<Value> = serde_json::from_str(&run(cwd, &args)?)?;
+    let author = query.trim_start_matches('@');
+    if !author.is_empty() && author.len() <= 39 && author.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        let authored: Vec<Value> = serde_json::from_str(&run(cwd, &["pr", "list", "--state", "open", "--limit", "30", "--json", FIELDS, "--author", author])?)?;
+        records.extend(authored);
+    }
+    let mut seen = BTreeSet::new();
+    Ok(records.iter().map(parse_pr).filter(|pr| pr.number > 0 && seen.insert(pr.number)).take(60).collect())
+}
+
+/// gh resolves both same-repository and fork heads. No force, and no main checkout is touched.
+pub fn checkout_pr(cwd: &Path, number: u64, branch: &str) -> Result<()> {
+    checkout_pr_with(cwd, number, branch, run)
+}
+
+fn checkout_pr_with(cwd: &Path, number: u64, branch: &str, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<()> {
+    if number == 0 || branch.starts_with('-') || branch.is_empty() { bail!("Invalid pull request checkout"); }
+    run(cwd, &["pr", "checkout", &number.to_string(), "--branch", branch])?;
+    Ok(())
+}
+
+fn pr_markdown(value: &Value) -> String {
+    let pr = parse_pr(value);
+    let mut text = format!("# #{} {}\n\n{}\n\nState: {}{}\nAuthor: {}\nHead: {} → {}\n\n## Body\n\n{}\n\n## Diff stat\n\n{} files changed, +{} / -{}\n", pr.number, pr.title, pr.url, pr.state, if pr.is_draft { " (draft)" } else { "" }, pr.author, pr.head, pr.base, pr.body, value["changedFiles"].as_u64().unwrap_or(0), pr.additions, pr.deletions);
+    if let Some(files) = value["files"].as_array() {
+        for file in files {
+            text.push_str(&format!("\n- {}: +{} / -{}", file["path"].as_str().unwrap_or(""), file["additions"].as_u64().unwrap_or(0), file["deletions"].as_u64().unwrap_or(0)));
+        }
+    }
+    text.push('\n');
+    text
+}
+
+/// Store outside the checkout so a first prompt can refer to it from its future worktree too.
+pub fn attach_pr(cwd: &Path, number: u64) -> Result<String> {
+    attach_pr_with(cwd, number, run)
+}
+
+fn attach_pr_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
+    if number == 0 { bail!("Invalid pull request number"); }
+    let fields = format!("{FIELDS},files,changedFiles");
+    let value = serde_json::from_str(&run(cwd, &["pr", "view", &number.to_string(), "--json", &fields])?)?;
+    let dir = crate::store::root()?.join("pr-attachments");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("pr-{number}-{}.md", uuid::Uuid::now_v7()));
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(&path)?.write_all(pr_markdown(&value).as_bytes())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod start_from_tests {
+    use super::*;
+    // Recorded with gh pr view 12 --json <FIELDS>,files,changedFiles in terminalx-ai/terminalx.
+    const PR: &str = include_str!("fixtures/github_pr_12.json");
+
+    #[test]
+    fn number_search_reads_the_exact_pr_even_when_it_is_not_open() {
+        for query in ["12", "#12", " 12 "] {
+            let found = search_prs_with(Path::new("/repo"), query, |cwd, args| {
+                assert_eq!(cwd, Path::new("/repo"));
+                assert_eq!(args, ["pr", "view", "12", "--json", FIELDS]);
+                Ok(PR.into())
+            }).unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].number, 12);
+            assert_eq!(found[0].state, "MERGED");
+        }
+        assert!(search_prs_with(Path::new("/repo"), "12", |_, _| bail!("HTTP 403")).is_err());
+        assert!(search_prs_with(Path::new("/repo"), "12", |_, _| bail!("Could not resolve to a PullRequest with the number of 12")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn searches_titles_and_authors_and_deduplicates() {
+        let mut calls = vec![];
+        let found = search_prs_with(Path::new("/repo"), "alice", |_, args| {
+            calls.push(args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            Ok(format!("[{PR}]"))
+        }).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(&calls[0][8..], ["--search", "\"alice\" in:title"]);
+        assert_eq!(&calls[1][8..], ["--author", "alice"]);
+        assert!(search_prs_with(Path::new("/repo"), "", |_, _| Ok("not json".into())).is_err());
+    }
+
+    #[test]
+    fn attachment_contains_recorded_title_body_state_and_diff_stat() {
+        let value: Value = serde_json::from_str(PR).unwrap();
+        let text = pr_markdown(&value);
+        for key in ["title", "body", "state", "url"] { assert!(text.contains(value[key].as_str().unwrap()), "missing {key}"); }
+        assert!(text.contains("## Diff stat"));
+        assert!(text.contains(&format!("+{} / -{}", value["additions"], value["deletions"])));
+        assert!(text.contains(value["files"][0]["path"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn selected_prs_are_saved_as_distinct_private_markdown_files() {
+        let _home = crate::store::temp_home();
+        let save = || attach_pr_with(Path::new("/repo"), 12, |_, args| {
+            assert_eq!(args, ["pr", "view", "12", "--json", &format!("{FIELDS},files,changedFiles")]);
+            Ok(PR.into())
+        }).unwrap();
+        let first = save();
+        let second = save();
+        assert_ne!(first, second);
+        assert!(Path::new(&first).is_absolute());
+        assert!(first.ends_with(".md"));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), pr_markdown(&serde_json::from_str(PR).unwrap()));
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), std::fs::read_to_string(&first).unwrap());
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(first).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn checkout_delegates_fork_resolution_to_gh_without_force() {
+        checkout_pr_with(Path::new("/isolated/worktree"), 12, "raccoon/pr-12", |cwd, args| {
+            assert_eq!(cwd, Path::new("/isolated/worktree"));
+            assert_eq!(args, ["pr", "checkout", "12", "--branch", "raccoon/pr-12"]);
+            Ok("Switched to a new branch 'raccoon/pr-12'\n".into())
+        }).unwrap();
+    }
+}

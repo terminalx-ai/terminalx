@@ -1645,6 +1645,7 @@ fn seed_session(project: &Path, title: &str, cwd: Option<&Path>) -> SessionEntry
     crate::session_ops::create_session_entry(crate::session_ops::NewSession {
         project_path: project.to_string_lossy().into_owned(),
         checkout_branch: None,
+        checkout_pr: None,
         title: Some(title.into()),
         use_worktree: false,
         base_ref: None,

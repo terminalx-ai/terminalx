@@ -808,6 +808,38 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
     })
 }
 
+/// Begin detached so gh can create a uniquely named branch directly at the PR head.
+pub fn checkout_pr_worktree(project: &Path, name: &str, number: u64) -> Result<CreatedWorktree> {
+    checkout_pr_worktree_with(project, name, number, crate::github::checkout_pr)
+}
+
+fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: impl FnOnce(&Path, u64, &str) -> Result<()>) -> Result<CreatedWorktree> {
+    if name.is_empty() || name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') || number == 0 { bail!("Invalid pull request worktree"); }
+    let branch = worktree_branch(name);
+    if branch_exists(project, &branch) { bail!("Branch {branch} already exists"); }
+    let path = worktree_path(project, name);
+    if path.exists() { bail!("Worktree path already exists: {}", path.display()); }
+    std::fs::create_dir_all(worktree_root(project))?;
+    run(project, &["worktree", "add", "--detach", arg(&path)?, "HEAD"])?;
+    let result = (|| {
+        checkout(&path, number, &branch)?;
+        let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
+        let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
+        Ok(CreatedWorktree {
+            name: name.into(), path: path.to_string_lossy().into_owned(), branch: branch.clone(),
+            base: commit.clone(), base_tree,
+            worktree_base: Some(WorktreeBase { commit, fetched: true, warning: None, from: None }),
+        })
+    })();
+    if result.is_err() {
+        // Only the checkout allocated above is removed; it has never hosted a session.
+        if run(project, &["worktree", "remove", "--force", arg(&path)?]).is_ok() && branch_exists(project, &branch) {
+            let _ = run(project, &["branch", "-D", &branch]);
+        }
+    } else { ensure_worktree_dir_ignored(project); }
+    result
+}
+
 /// `git worktree add <path> <branch>`, saying plainly when the branch is already checked out somewhere.
 fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str) -> Result<()> {
     let mut args = vec!["worktree", "add", arg(path)?];
@@ -1398,6 +1430,38 @@ mod tests {
         run(p, &["add", "."]).unwrap();
         run(p, &["commit", "-q", "-m", "init"]).unwrap();
         dir
+    }
+
+    #[test]
+    fn pr_checkout_uses_the_fetched_head_and_cleans_up_a_failed_checkout() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = dir.path();
+        let original = run(project, &["rev-parse", "HEAD"]).unwrap();
+        run(project, &["checkout", "-qb", "fork-head"]).unwrap();
+        std::fs::write(project.join("fork.txt"), "from a fork").unwrap();
+        run(project, &["add", "."]).unwrap();
+        run(project, &["commit", "-qm", "fork change"]).unwrap();
+        let head = run(project, &["rev-parse", "HEAD"]).unwrap();
+        run(project, &["checkout", "main"]).unwrap();
+        let wt = checkout_pr_worktree_with(project, "pr-12", 12, |cwd, number, branch| {
+            assert_eq!(number, 12);
+            assert_ne!(cwd, project);
+            assert!(current_branch(cwd).is_none());
+            run(cwd, &["checkout", "-b", branch, head.trim()]).map(|_| ())
+        }).unwrap();
+        assert_eq!(run(Path::new(&wt.path), &["rev-parse", "HEAD"]).unwrap(), head);
+        assert_eq!(run(project, &["rev-parse", "HEAD"]).unwrap(), original);
+        assert!(Path::new(&wt.path).join("fork.txt").exists());
+        assert!(checkout_pr_worktree_with(project, "broken-pr", 12, |cwd, _, branch| {
+            run(cwd, &["checkout", "-b", branch])?;
+            bail!("GitHub unavailable")
+        }).is_err());
+        assert!(!worktree_path(project, "broken-pr").exists());
+        assert!(!branch_exists(project, &worktree_branch("broken-pr")));
+        // A collision never deletes the earlier worktree or branch.
+        assert!(checkout_pr_worktree_with(project, "pr-12", 12, |_, _, _| unreachable!()).is_err());
+        assert!(Path::new(&wt.path).exists());
     }
 
     #[test]

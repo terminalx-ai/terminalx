@@ -63,6 +63,8 @@ interface State {
   newSessionPreset: { projectPath: string; cwd: string | null; fromBranch?: string } | null;
   /** The same composer, with no project or worktree. */
   newSessionQuick: boolean;
+  /** A keyboard request to show Start from in the new-session form. */
+  startFromRequest: number;
   /**
    * A new-session form for a cloud project (`cloud:<orgId>:<identity>`),
    * from the project row's `+`. Cleared by the same navigation that clears
@@ -97,6 +99,7 @@ let state: State = {
   newSessionReturn: null,
   newSessionPreset: null,
   newSessionQuick: false,
+  startFromRequest: 0,
   cloudSessionPreset: null,
   selectedCloudProject: null,
   paletteIndex: buildPaletteIndex([], [], {}, []),
@@ -122,7 +125,10 @@ function set(patch: Partial<State>) {
   if (next.view !== "new" || next.selectedSessionId || "newSessionPreset" in patch || "cloudSessionPreset" in patch) next.newSessionQuick = patch.newSessionQuick ?? false;
   // Opened from a session, the form remembers it; any other way out forgets it.
   // Only an explicit "New session" (`openNewSession`, a project's or branch's +) records where to go back to; any way out forgets it.
-  if (next.view !== "new" || next.selectedSessionId) next.newSessionReturn = null;
+  if (next.view !== "new" || next.selectedSessionId) {
+    next.newSessionReturn = null;
+    next.startFromRequest = 0;
+  }
   // A cloud draft goes the same way, and gives way to any local one.
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId || ("newSessionPreset" in patch && !("cloudSessionPreset" in patch))) next.cloudSessionPreset = null;
   if ("selectedProject" in patch && !("selectedCloudProject" in patch)) next.selectedCloudProject = null;
@@ -486,10 +492,10 @@ function returnHere(): State["newSessionReturn"] {
 }
 
 /** "New session" (⌘N, the + buttons): the form, as a dialog over what is shown now. */
-export function openNewSession() {
+export function openNewSession(startFrom = false) {
   const back = returnHere();
   selectSession(null);
-  set({ newSessionReturn: back });
+  set({ newSessionReturn: back, startFromRequest: startFrom ? state.startFromRequest + 1 : 0 });
 }
 
 /** Close the new-session dialog: back to the session or view it was opened over. */

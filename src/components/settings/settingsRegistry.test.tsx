@@ -55,7 +55,9 @@ describe("settings registry", () => {
   });
 });
 
-it("keeps standard settings rows in the registry; organization internals register as sections", () => {
-  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx"], { query: "?raw", import: "default", eager: true });
+it("keeps global settings rows in the registry", () => {
+  // Custom organization fields register as a section. Per-action dialog fields
+  // edit an unsaved repository record and stay with that record's editor.
+  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx"], { query: "?raw", import: "default", eager: true });
   for (const [path, source] of Object.entries(adapters)) expect(source, path).not.toMatch(/<SettingRow\b/);
 });
