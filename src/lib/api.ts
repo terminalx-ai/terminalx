@@ -198,6 +198,7 @@ export interface StatsUsageState {
 }
 
 export interface NewSession {
+  sectionId?: string | null;
   projectPath: string;
   /** Run in this existing workspace instead of creating a worktree. */
   cwd?: string | null;
@@ -224,6 +225,7 @@ export interface WorkspaceRename {
 }
 
 export interface NewQuickChat {
+  sectionId?: string | null;
   title?: string | null;
   cwd?: string | null;
   tab?: NewTab | null;
@@ -2555,6 +2557,36 @@ export const experimental = {
     }
   },
 };
+
+/** Settings → Storage: what is kept about the warnings tabs raise (#815). */
+export interface DiagnosticsSettings {
+  /** Record when a tab's warning was raised, shown, acted on and cleared: labels, counts and times only. */
+  recoveryIncidents: boolean;
+}
+
+/**
+ * The runtime's log of recovery incidents (#815, `recovery_log.rs`). A
+ * window reports what it showed and what was pressed; every field is a label
+ * or a number, refused otherwise at the boundary. Reports are best effort.
+ */
+export const recoveryIncidents = {
+  report: (sessionId: string, tabId: string, report: import("@/lib/recoveryReports").UiReport) => invoke<void>("report_recovery_ui", { sessionId, tabId, report }),
+  settings: () => invoke<DiagnosticsSettings>("diagnostics_settings"),
+  setEnabled: (enabled: boolean) => invoke<DiagnosticsSettings>("set_recovery_incidents", { enabled }),
+  summary: () => invoke<RecoveryIncidentSummary>("recovery_incidents_summary"),
+  export: (path: string) => invoke<void>("recovery_incidents_export", { path }),
+  clear: () => invoke<void>("clear_recovery_incidents"),
+};
+
+/** What `recovery_log::summarize` says, as far as the settings row reads it. */
+export interface RecoveryIncidentSummary {
+  lines: number;
+  lines_lost: number;
+  incidents: number;
+  busy_refusals_while_turn_open: number;
+  suspected_false_positives: { incident: string; reason: string; why: string }[];
+  groups: { reason: string; runtime: string; transport: string; incidents: number; occurrences: number }[];
+}
 
 export interface OrganizationWorkStatus {
   shareWorkStatus: boolean;

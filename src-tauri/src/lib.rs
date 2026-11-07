@@ -131,6 +131,7 @@ mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
+mod recovery_log;
 mod continuation;
 pub mod skills;
 mod store;
@@ -562,6 +563,8 @@ pub fn run() {
             commands::project_start_defaults,
             commands::project_create,
             commands::list_sessions,
+            commands::local_sections,
+            commands::edit_local_section,
             commands::automations_list,
             commands::automation_runs,
             commands::automation_issue_states,
@@ -627,6 +630,7 @@ pub fn run() {
             commands::prepare_continuation,
             commands::send_message,
             commands::report_send_shown,
+            commands::report_recovery_ui,
             commands::resend_unsent,
             commands::resend_message,
             commands::submit_waiting_prompt,
@@ -754,6 +758,11 @@ pub fn run() {
             commands::agent_settings,
             commands::set_agent_idle_stop_minutes,
             commands::set_read_only_commands,
+            commands::diagnostics_settings,
+            commands::set_recovery_incidents,
+            commands::recovery_incidents_summary,
+            commands::recovery_incidents_export,
+            commands::clear_recovery_incidents,
             commands::conversation_settings,
             commands::set_archive_idle_days,
             commands::experimental_settings,

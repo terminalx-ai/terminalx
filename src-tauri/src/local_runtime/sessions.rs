@@ -207,6 +207,11 @@ impl Sessions {
             "pressedAt":timings.pressed_at,"drawnAt":timings.drawn_at,"answeredAt":timings.answered_at,"shownAt":timings.shown_at}}))
     }
 
+    /// A window's report of a tab's warning (`SessionManager::note_incident_ui`).
+    pub fn note_incident_ui(&self, session: &str, tab: &str, report: &crate::recovery_log::UiReport) -> Result<()> {
+        self.quick_tab("incidentUi", session, tab, json!({"report": report}))
+    }
+
     pub fn send_confirmed(&self, session: &str, tab: &str, text: String) -> Result<SendOutcome> {
         self.tab("sendConfirmed", session, tab, json!({"text":text}))
     }
