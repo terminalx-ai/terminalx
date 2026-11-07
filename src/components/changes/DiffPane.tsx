@@ -11,13 +11,15 @@ import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
  * they highlight, collapse unchanged regions and never freeze the page on a
  * large file.
  */
-export function DiffPane({ path, before, after, mode, wrap = true, hideWhitespace = false }: { wrap?: boolean; hideWhitespace?: boolean; path: string; before: string; after: string; mode: "unified" | "split" }) {
+export function DiffPane({ path, before, after, mode, wrap = true, hideWhitespace = false }: { wrap?: boolean; hideWhitespace?: boolean; path: string; before: string; after: string; mode: "unified" | "split" | "entire" }) {
   const host = useRef<HTMLDivElement>(null);
+  const scroll = useRef({ top: 0, left: 0, outerTop: 0, outerLeft: 0 });
   useEffect(() => {
     const el = host.current;
     if (!el) return;
     const common = [raccoonTheme, raccoonHighlight, languageFor(path), EditorView.editable.of(false), EditorState.readOnly.of(true), lineNumbers(), ...(wrap ? [EditorView.lineWrapping] : [])];
     let dispose: () => void;
+    let scroller: HTMLElement;
     if (mode === "split") {
       const mv = new MergeView({
         a: { doc: before, extensions: common },
@@ -28,6 +30,7 @@ export function DiffPane({ path, before, after, mode, wrap = true, hideWhitespac
         highlightChanges: true,
         gutter: true,
       });
+      scroller = mv.b.scrollDOM;
       dispose = () => mv.destroy();
     } else {
       const view = new EditorView({
@@ -36,13 +39,23 @@ export function DiffPane({ path, before, after, mode, wrap = true, hideWhitespac
           doc: after,
           extensions: [
             ...common,
-            unifiedMergeView({ original: before, diffConfig: hideWhitespace ? { override: whitespaceDiff } : undefined, mergeControls: false, collapseUnchanged: { margin: 3, minSize: 4 }, highlightChanges: true }),
+            ...(mode === "entire" ? [] : [unifiedMergeView({ original: before, diffConfig: hideWhitespace ? { override: whitespaceDiff } : undefined, mergeControls: false, collapseUnchanged: { margin: 3, minSize: 4 }, highlightChanges: true })]),
           ],
         }),
       });
+      scroller = view.scrollDOM;
       dispose = () => view.destroy();
     }
-    return () => dispose();
+    const frame = requestAnimationFrame(() => {
+      el.scrollTop = scroll.current.outerTop;
+      el.scrollLeft = scroll.current.outerLeft;
+      if (scroll.current.top || scroll.current.left) { scroller.scrollTop = scroll.current.top; scroller.scrollLeft = scroll.current.left; }
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      scroll.current = { top: scroller.scrollTop, left: scroller.scrollLeft, outerTop: el.scrollTop, outerLeft: el.scrollLeft };
+      dispose();
+    };
   }, [path, before, after, mode, wrap, hideWhitespace]);
   return <div ref={host} className="diff-pane h-full min-h-0 overflow-auto scrollbar-thin select-text" />;
 }

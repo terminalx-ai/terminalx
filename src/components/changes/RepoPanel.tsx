@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, RotateCcw, TriangleAlert } from "@/icons";
-import { useGitWorkingChanges } from "@/lib/changes";
+import { useGitWorkingChanges, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource, type SourceStatus } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -21,7 +21,8 @@ export type RepoView = "uncommitted" | "history";
  * writes, and each refetches. `source` is a cloud repository (PRO-27);
  * without it this is the local checkout at `cwd`.
  */
-export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false }: {
+export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onOpenDiff }: {
+  onOpenDiff?: (file: ChangedFile, range: ChangeRange) => void;
   cwd?: string;
   source?: GitSource;
   active: boolean;
@@ -190,7 +191,11 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
             <FileList
               files={files}
               selected={selected}
-              onSelect={(p) => setSelected((s) => (s === p ? null : p))}
+              onSelect={(p) => {
+                const file = files.find((f) => f.path === p);
+                if (onOpenDiff && file && head) onOpenDiff(file, { base: head, head: null });
+                else setSelected((s) => s === p ? null : p);
+              }}
               empty="Working tree is clean."
               trailing={(f) => source.discard && writable && (
                 <span

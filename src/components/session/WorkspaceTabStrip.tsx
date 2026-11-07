@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { ChevronDown, Globe, Lock, Terminal, TerminalSquare, X } from "@/icons";
+import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Terminal, TerminalSquare, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { StatusStripe } from "@/components/layout/SidebarRows";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,7 @@ const STATUS_DOT: Partial<Record<TabStatus, string>> = {
 
 /** What a tab is now, at a glance: the mark of the agent in it, a terminal, a page. */
 export function TabIcon({ tab, className = "size-3.5 shrink-0" }: { tab: PeerTab; className?: string }) {
+  if (tab.kind === "review") return tab.editor.kind === "diff" ? <FileDiff className={className} /> : <GitPullRequest className={className} />;
   const agent = peerAgent(tab);
   if (agent) return <AgentMark id={agent} className={className} decorative />;
   return tab.kind === "browser" ? <Globe className={className} /> : <TerminalSquare className={className} />;
@@ -296,6 +297,7 @@ export function WorkspaceTabStrip({
                           tab.pinned ? "justify-center px-0" : "pl-3 pr-1",
                         )}
                       >
+                        {tab.kind === "review" && tab.editor.dirty ? <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-label="Unsaved" /> : null}
                         {status ? <StatusStripe status={status} size="tab" /> : null}
                         <TabIcon tab={tab} />
                         {tab.pinned ? null : <span className={cn("min-w-0 flex-1 truncate text-left", exited && "text-faint line-through")}>{label}</span>}
