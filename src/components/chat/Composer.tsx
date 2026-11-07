@@ -570,8 +570,6 @@ export function Composer({
               <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modelLock} title={modelLock ?? modelTitle} aria-label={modelLock ? `Model: ${modelLock}` : undefined} data-testid="model-picker">
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
                 <span className="min-w-0 truncate text-foreground">{modelName}</span>
-                {/* An alias and the same version pinned read alike otherwise: a tag on the name, not a word after it. */}
-                {model?.alias ? <span className="shrink-0 rounded-sm bg-veil-raised px-1 text-[11px] leading-4 text-faint">latest</span> : null}
                 {/* The effort is a setting of its own: set apart from the model, a step brighter than the tag. */}
                 {effortName ? <><span aria-hidden className="h-3 w-px shrink-0 bg-hairline-strong" /><span className="min-w-0 truncate text-muted-foreground">{effortName}</span></> : null}
                 <ChevronDown className="size-3 text-faint" />

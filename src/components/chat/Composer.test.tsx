@@ -312,10 +312,10 @@ describe("a Claude alias in the model picker (#256)", () => {
     listed.models = [];
   });
 
-  it("names the version the CLI says the alias runs, and says the alias follows the latest", () => {
+  it("names the version the CLI says the alias runs, and says in its title that the alias follows the latest", () => {
     show();
     const button = screen.getByTitle("Model: Opus (latest, running Opus 5.5)");
-    expect(button.textContent).toBe("Opus 5.5latest");
+    expect(button.textContent).toBe("Opus 5.5");
   });
 
   it("reads differently on the alias and on the same version pinned", () => {
@@ -325,15 +325,15 @@ describe("a Claude alias in the model picker (#256)", () => {
 
   it("names what the session itself reported over what the CLI listed", () => {
     show({ reportedModel: "claude-opus-5" });
-    expect(screen.getByTitle("Model: Opus (latest, running Opus 5)").textContent).toBe("Opus 5latest");
+    expect(screen.getByTitle("Model: Opus (latest, running Opus 5)").textContent).toBe("Opus 5");
   });
 
   it("claims no version for a cloud tab until its session reports one", () => {
     const view = show({ modelsAreLocal: false });
-    expect(screen.getByTitle("Model: Opus (latest)").textContent).toBe("Opuslatest");
+    expect(screen.getByTitle("Model: Opus (latest)").textContent).toBe("Opus");
     view.unmount();
     show({ modelsAreLocal: false, reportedModel: "claude-opus-5-5" });
-    expect(screen.getByTitle("Model: Opus (latest, running Opus 5.5)").textContent).toBe("Opus 5.5latest");
+    expect(screen.getByTitle("Model: Opus (latest, running Opus 5.5)").textContent).toBe("Opus 5.5");
   });
 
   it("offers a cloud tab the aliases only, and keeps a pinned version it is already on", async () => {
