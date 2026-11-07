@@ -524,6 +524,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "action", location: "Local repositories and agent conversation stores" }, layout: "content",
   }),
   defineSetting({
+    id: "storage.recoveryIncidents", section: "storage", title: "Record recovery incidents",
+    description: "When a session warns that it needs attention, TerminalX notes on this Mac when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
+    searchTerms: ["storage", "record", "recovery", "incidents", "diagnostics", "needs attention", "warnings", "privacy", "export"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#diagnostics.recoveryIncidents, $TERMINALX_HOME/diagnostics/recovery-incidents.jsonl" },
+  }),
+  defineSetting({
     id: "transcription.microphone", hideDescription: true, section: "transcription", title: "Microphone",
     description: "Choose the microphone used for dictation.",
     searchTerms: ["transcription", "microphone"], scope: "user",
