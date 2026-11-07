@@ -10,6 +10,19 @@
   field no longer resets valid credentials, permission choices, or other
   settings when the app starts. (Part of PRO-140)
 
+- Native Codex no longer asks for attention while it is working. A turn
+  that ran longer than five minutes was called stalled at every look of the
+  watcher, because Codex's own progress did not count as activity, and a
+  message sent while Codex was still on its turn (or right after
+  interrupting it) was raised as an agent error with Needs attention. That
+  message is now kept in the composer with a note to send it when the turn
+  ends, and the turn goes on; real silence and real failures still warn.
+  Settings → Storage → **Record recovery incidents** (on by default, on this
+  Mac only) notes when a warning was raised and cleared, how long it was on
+  screen, what was pressed and what became of the turn, as labels, counts and
+  times only; it can be exported with sessions named by codes, or cleared.
+  (#815)
+
 ## 0.2.25
 
 ### Getting started

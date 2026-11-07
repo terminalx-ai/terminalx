@@ -13,6 +13,7 @@ export const SETTINGS_SECTIONS = {
   general: { title: "General", group: "Personal", entry: "general.websiteLinks" },
   appearance: { title: "Appearance", group: "Personal", entry: "appearance.theme" },
   agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup" },
+  environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
   repositories: { title: "Workspace cleanup", group: "Repositories", entry: "repositories.mergedCleanup" },
@@ -239,6 +240,12 @@ export const SETTINGS_ROWS = [
     description: "Inspect and revoke devices paired with this computer.",
     searchTerms: ["devices", "paired", "devices"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/devices.json" }, layout: "content",
+  }),
+  defineSetting({
+    id: "environment.variables", section: "environment", title: "Environment variables",
+    description: "Variables for new local agent and shell tabs. Repository values override user values. All values are stored in Keychain on this Mac.",
+    searchTerms: ["environment", "variables", "env", "dotenv", "secrets", "keychain", "repository", "overrides", "import"], scope: "user",
+    storage: { kind: "system", location: "macOS Keychain (values); $TERMINALX_HOME/environment.json (names and revisions)" }, layout: "content",
   }),
   defineSetting({
     id: "experimental.nativeCodex", section: "experimental", title: "Native Codex",
@@ -503,6 +510,12 @@ export const SETTINGS_ROWS = [
     description: "Review and remove safe leftover worktrees, branches and agent data.",
     searchTerms: ["storage", "leftovers"], scope: "user",
     storage: { kind: "action", location: "Local repositories and agent conversation stores" }, layout: "content",
+  }),
+  defineSetting({
+    id: "storage.recoveryIncidents", section: "storage", title: "Record recovery incidents",
+    description: "When a session warns that it needs attention, TerminalX notes on this Mac when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
+    searchTerms: ["storage", "record", "recovery", "incidents", "diagnostics", "needs attention", "warnings", "privacy", "export"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#diagnostics.recoveryIncidents, $TERMINALX_HOME/diagnostics/recovery-incidents.jsonl" },
   }),
   defineSetting({
     id: "transcription.microphone", hideDescription: true, section: "transcription", title: "Microphone",

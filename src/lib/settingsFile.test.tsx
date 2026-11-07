@@ -17,7 +17,10 @@ let file: SettingsFileStatus;
 let migrated: boolean;
 // Keep cold Vite compilation outside the row's five-second behavior check.
 // beforeEach still resets modules so each case starts with its own stores.
-beforeAll(async () => { await import("../components/settings/AgentIdleSettings"); }, 60_000);
+beforeAll(async () => {
+  await import("../components/settings/AgentIdleSettings");
+  await import("../components/settings/RecoveryIncidentSettings");
+}, 60_000);
 beforeEach(() => {
   vi.resetModules();
   localStorage.clear();
@@ -114,6 +117,26 @@ describe("user preference files", () => {
     minutes = 30;
     await act(async () => mocks.listeners.get("settings_file_changed")!());
     await waitFor(() => expect(screen.getByRole("radio", { name: "30 min" }).getAttribute("aria-checked")).toBe("true"));
+  });
+
+  it("reloads recovery recording after a file edit without writing the setting", async () => {
+    const settings = await import("./settingsFile");
+    await settings.bootSettingsFile();
+    const original = mocks.invoke.getMockImplementation()!;
+    let enabled = true;
+    mocks.invoke.mockImplementation((command, args) => {
+      if (command === "diagnostics_settings") return Promise.resolve({ recoveryIncidents: enabled });
+      if (command === "recovery_incidents_summary") return Promise.resolve({ incidents: 0, lines: 0 });
+      return original(command, args);
+    });
+    const { RecoveryIncidentSettings } = await import("../components/settings/RecoveryIncidentSettings");
+    render(<RecoveryIncidentSettings />);
+    const toggle = screen.getByRole("switch", { name: "Record recovery incidents" });
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
+    enabled = false;
+    await act(async () => mocks.listeners.get("settings_file_changed")!());
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "set_recovery_incidents")).toBe(false);
   });
 
   it("retains legacy storage when migration fails, retries after repair, and shows one file error", async () => {

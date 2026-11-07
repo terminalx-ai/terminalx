@@ -419,6 +419,7 @@ mod tests {
             (r#"{"agents":{"idleStopMinutes":1}}"#, "agents.idleStopMinutes"),
             (r#"{"statusBar":{"percent":"all"}}"#, "statusBar.percent"),
             (r#"{"notifications":null}"#, "notifications"),
+            (r#"{"diagnostics":{"recoveryIncidents":"yes"}}"#, "diagnostics.recoveryIncidents"),
             (r#"{"preferences":{"shortcuts":{"session.stop":"escape"}}}"#, "preferences.shortcuts.session.stop"),
             (r#"{"floating":{"retentionDays":3651}}"#, "floating.retentionDays"),
         ] {
@@ -452,6 +453,7 @@ mod tests {
         let source = json!({
             "$schema": "https://example.test/settings.schema.json", "future": {"enabled": true},
             "linearApiKey": "private-key", "agents": {"readOnlyCommands": false, "future": 42},
+            "diagnostics": {"recoveryIncidents": false},
             "mergedCleanup": {"enabled": true, "graceMinutes": 30, "projects": {"/repo": true}},
             "floating": {"shortcut": "alt+space", "alwaysOnTop": false, "retentionDays": 7},
             "preferences": {"sounds": false, "theme": "moss", "future": "preserve-me"}
@@ -462,6 +464,7 @@ mod tests {
         assert!(state.error.is_none());
         assert_eq!(state.good.linear_api_key.as_deref(), Some("private-key"));
         assert!(!state.good.agents.read_only_commands);
+        assert!(!state.good.diagnostics.recovery_incidents);
         assert!(state.good.merged_cleanup.enabled);
         assert_eq!(state.good.merged_cleanup.grace_minutes, 30);
         assert_eq!(state.good.floating.shortcut.as_deref(), Some("alt+space"));
@@ -484,6 +487,7 @@ mod tests {
         assert!(saved.get("linearApiKey").is_none());
         assert_eq!(saved["mergedCleanup"]["projects"], json!({}));
         assert_eq!(saved["notifications"], false);
+        assert_eq!(saved["diagnostics"]["recoveryIncidents"], false);
     }
 
     #[test]

@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { SessionChrome } from "@/components/session/SessionView";
 import type { SessionEntry } from "@/types/session";
+// Prepare the cold module graph before test timers start. mount() still resets
+// every store; a timed-out cold import could otherwise render after cleanup.
+import "./FloatingShell";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -83,7 +86,7 @@ async function mount(label: "floating" | `chat-${string}` = "floating") {
 
 const called = (command: string) => mocks.invoke.mock.calls.filter(([name]) => name === command).map(([, args]) => args);
 
-beforeEach(async () => {
+beforeEach(() => {
   localStorage.clear();
   mocks.listeners.clear();
   mocks.ask.mockReset();
@@ -123,10 +126,7 @@ beforeEach(async () => {
         throw new Error(`Unexpected command: ${command}`);
     }
   });
-  // Load the module graph during setup. Each mount still resets its stores,
-  // while the behavior deadline measures the shell instead of Vite compilation.
-  await import("./FloatingShell");
-}, 60_000);
+});
 
 afterEach(() => {
   cleanup();

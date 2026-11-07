@@ -61,6 +61,24 @@ pub struct Settings {
     /// Settings → Experimental. Tabs are made by the Rust side, which reads
     /// these when it makes one, so they live here.
     pub experimental: ExperimentalSettings,
+    /// What the runtime keeps about the warnings tabs raise (#815,
+    /// `recovery_log.rs`). The runtime writes it, so it reads this itself.
+    pub diagnostics: DiagnosticsSettings,
+}
+
+/// Private evidence kept on this Mac only, for reports the reader makes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DiagnosticsSettings {
+    /// Record when a tab's warning was raised, shown, acted on and cleared:
+    /// labels, counts and times, never a message, code or a path.
+    pub recovery_incidents: bool,
+}
+
+impl Default for DiagnosticsSettings {
+    fn default() -> Self {
+        Self { recovery_incidents: true }
+    }
 }
 
 /// Agents the app started that sit idle are stopped after a while (#696),
@@ -325,6 +343,7 @@ impl Default for Settings {
             agents: AgentSettings::default(),
             conversations: ConversationSettings::default(),
             experimental: ExperimentalSettings::default(),
+            diagnostics: DiagnosticsSettings::default(),
         }
     }
 }
