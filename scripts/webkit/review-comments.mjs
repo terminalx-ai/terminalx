@@ -43,7 +43,8 @@ try {
  page.on('pageerror', error=>errors.push(String(error)));
  await openConversation(page,'claude tab');
  await tab(page,'gemini tab').click();
- await page.getByRole('button',{name:'Changes',exact:true}).click();
+ await page.getByRole('button',{name:'Branch',exact:true}).click();
+ await page.getByRole('tab',{name:'Changes',exact:true}).click();
  await page.getByRole('button',{name:/review.ts/}).click();
  const centre=page.getByRole('tabpanel',{name:'review.ts · All changes',exact:true});
  for(const mode of ['Unified','Split']) {
@@ -131,7 +132,8 @@ try {
  await page.reload();
  await openConversation(page,'claude tab');
  await tab(page,'gemini tab').click();
- await page.getByRole('button',{name:'Changes',exact:true}).click();
+ await page.getByRole('button',{name:'Branch',exact:true}).click();
+ await page.getByRole('tab',{name:'Changes',exact:true}).click();
  await page.getByText('3 review comments',{exact:true}).filter({visible:true}).waitFor();
  assert.deepEqual(errors,[]);
  console.log('PASS: unified/split range comments, inline layout, edit, batch draft, unsaved warning, relocation, base isolation, outdated inventory and reopen');

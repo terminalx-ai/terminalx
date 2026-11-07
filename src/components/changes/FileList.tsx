@@ -1,14 +1,20 @@
 import { useMemo } from "react";
 import { useReviewComments } from "./ReviewComments";
+import { FileTypeIcon } from "@/components/files/FileTypeIcon";
 import { cn } from "@/lib/cn";
 import { dirName, fileName } from "@/lib/paths";
 import type { ChangedFile } from "@/types/session";
 
-const STATUS_GLYPH: Record<ChangedFile["status"], [string, string]> = {
-  added: ["A", "text-add"],
-  modified: ["M", "text-warning"],
-  deleted: ["D", "text-destructive"],
-  renamed: ["R", "text-info"],
+/**
+ * A file's status, as a word for its title and a dot on its icon. Modified, by
+ * far the most common, wears no dot: the dot marks the exceptions (new, gone,
+ * moved), and a deleted file's name is struck through as the chat shows it.
+ */
+const STATUS: Record<ChangedFile["status"], { word: string; dot: string | null }> = {
+  added: { word: "Added", dot: "bg-add" },
+  modified: { word: "Modified", dot: null },
+  deleted: { word: "Deleted", dot: "bg-destructive" },
+  renamed: { word: "Renamed", dot: "bg-info" },
 };
 
 /** Rows of changed files: name first (it wins the truncation), directory after. */
@@ -37,19 +43,24 @@ export function FileList({
   return (
     <div className="flex flex-col px-1.5 py-1">
       {files.map((f) => {
-        const [glyph, color] = STATUS_GLYPH[f.status];
+        const status = STATUS[f.status];
         return (
           <button
             key={f.path}
             type="button"
+            title={`${status.word} · ${f.path}`}
             onClick={() => onSelect(f.path)}
             className={cn(
               "group flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
               selected === f.path ? "bg-selected" : "hover:bg-selected/50",
             )}
           >
-            <span className={cn("w-3 shrink-0 font-mono text-[11px] font-semibold", color)}>{glyph}</span>
-            <span className="shrink-0 truncate font-mono">{fileName(f.path)}</span>
+            <span className="relative flex shrink-0" data-status={f.status}>
+              <FileTypeIcon name={fileName(f.path)} isDir={false} size={14} />
+              {status.dot && <span aria-hidden className={cn("absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-2 ring-background", status.dot)} />}
+              <span className="sr-only">{status.word}</span>
+            </span>
+            <span className={cn("shrink-0 truncate font-mono", f.status === "deleted" && "text-muted-foreground line-through")}>{fileName(f.path)}</span>
             <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">{dirName(f.path)}</span>
             <span className="shrink-0 font-mono text-[11px] tabular-nums">
               {f.additions > 0 && <span className="text-add">+{f.additions}</span>}{" "}

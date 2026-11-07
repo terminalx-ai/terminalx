@@ -241,7 +241,7 @@ export function PrPanel({
     });
 
   if (available === false) {
-    if (inline) return held ? null : <div className="px-3"><NextLine tone="muted" text={<>Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span> to open a pull request</>} /></div>;
+    if (inline) return held ? null : <div><NextLine tone="muted" text={<>Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span> to open a pull request</>} /></div>;
     return (
       <div className="px-3 py-4 text-xs text-muted-foreground">
         Pull requests need the GitHub CLI. Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span>.
@@ -376,7 +376,7 @@ export function PrPanel({
       })}
 
       {inline && canCreate && !creating && source.canWrite && !held && (
-        <div className="px-3">
+        <div>
           <NextLine
             tone="good"
             text={`Open a pull request into ${status?.defaultBranch ?? "the base"}`}
