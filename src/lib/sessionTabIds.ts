@@ -7,4 +7,3 @@ export function tabNodeId(tab: SelectedSessionTab) {
 export function tabPanelId(tab: SelectedSessionTab) {
   return `session-${tab.kind}-panel-${encodeURIComponent(tab.id)}`;
 }
-
