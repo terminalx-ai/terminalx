@@ -696,6 +696,7 @@ export const api = {
   listBranches: (cwd: string) => invoke<BranchInfo[]>("list_branches", { cwd }),
   turnCheckpoint: (sessionId: string, tabId: string, seq: number) => invoke<TurnCheckpoint | null>("turn_checkpoint", { sessionId, tabId, seq }),
   keepTurn: (sessionId: string, tabId: string, seq: number) => invoke<void>("keep_turn", { sessionId, tabId, seq }),
+  restoreUndo: (sessionId: string, tabId: string, seq: number, confirmed: string | null = null) => invoke<TurnUndoResult>("restore_undo", { sessionId, tabId, seq, confirmed }),
   undoTurn: (sessionId: string, tabId: string, seq: number, confirmed: string | null = null) => invoke<TurnUndoResult>("undo_turn", { sessionId, tabId, seq, confirmed }),
   snapshotTree: (cwd: string) => invoke<string>("snapshot_tree", { cwd }),
   headTree: (cwd: string) => invoke<string | null>("head_tree", { cwd }),
@@ -2939,5 +2940,5 @@ export function closeWorkspaceConnectionsIn(orgId: string): void {
   }
 }
 
-export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[] }
-export interface TurnUndoResult { overlap: string[]; token: string; undone: boolean }
+export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null }
+export interface TurnUndoResult { overlap: string[]; token: string; undone: boolean; backupRef?: string | null }

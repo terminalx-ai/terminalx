@@ -1187,6 +1187,15 @@ struct PromptText {
     display: String,
 }
 
+impl PromptText {
+    fn append_agent_context(&mut self, context: &str) {
+        if !context.is_empty() {
+            self.agent.push_str("\n\n");
+            self.agent.push_str(context);
+        }
+    }
+}
+
 /// The checkout's tree for a prompt's `baseline`, read before it was admitted.
 struct PreparedBaseline {
     cwd: String,
@@ -2817,20 +2826,16 @@ impl SessionManager {
         let revert_send = crate::checkpoints::send_lock(session_id, tab_id);
         let _revert_send = revert_send.lock().unwrap();
         let notes = if tui::is_slash_command(&prompt.agent) { Vec::new() } else { crate::checkpoints::pending(session_id, tab_id)? };
-        if !notes.is_empty() {
-            let context = format!("\n\n{}", crate::checkpoints::context(&notes));
-            prompt.agent.push_str(&context);
-            // Keep it with the persisted prompt too: Resend after failed asynchronous
-            // CLI delivery must carry the same context without consuming it twice.
-            prompt.display.push_str(&context);
-        }
+        prompt.append_agent_context(&crate::checkpoints::context(&notes));
         // What the send found, before it changed anything.
         let found = self.runtime(session_id, tab_id).ok().map(|rt| { let rt = rt.lock().unwrap(); (rt.turn_open, rt.pending.len()) });
         let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt);
         self.note_send(session_id, tab_id, origin, found, &outcome);
         let outcome = outcome?;
-        if let Err(error) = crate::checkpoints::acknowledge(session_id, tab_id, &notes) {
-            log::warn!("acknowledge revert context: {error:#}");
+        if let Some(event) = outcome.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. })) {
+            if let Err(error) = crate::checkpoints::acknowledge_sent(session_id, tab_id, event.seq, &notes) {
+                log::warn!("acknowledge revert context: {error:#}");
+            }
         }
         self.observer.answered(session_id, tab_id);
         Ok(outcome)
@@ -6748,6 +6753,16 @@ mod tests {
 
         assert_eq!(projected.len(), 2, "one projected record per real submission");
         assert!(projected.iter().all(|p| matches!(p, Payload::UserMessage { text, images, .. } if text == "describe this" && images.as_slice() == std::slice::from_ref(&image))));
+    }
+
+    #[test]
+    fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
+        let mut prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        prompt.append_agent_context("The user reverted a.txt from turn 1.");
+        let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
+        assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));
+        assert!(matches!(message, Payload::UserMessage { text, .. } if text == "Continue"));
+        assert!(echo.matches(&prompt.agent), "the provider echo of the augmented prompt must be deduplicated");
     }
 
     #[test]

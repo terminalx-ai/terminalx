@@ -1,6 +1,9 @@
 //! Pinned turn trees and narrowly scoped restores. No shell interpolation or pathspec expansion.
 use super::*;
 use std::collections::BTreeSet;
+#[path = "checkpoint_retention.rs"]
+mod retention;
+pub use retention::LimitExceeded;
 
 pub fn reference(session: &str, turn: &str, edge: &str) -> Result<String> {
     for part in [session, turn, edge] {
@@ -15,7 +18,18 @@ pub fn pin(cwd: &Path, session: &str, turn: &str, edge: &str, tree: &str) -> Res
     if !is_tree_id(tree) {
         bail!("Invalid checkpoint tree");
     }
-    run(cwd, &["update-ref", &reference(session, turn, edge)?, tree])?;
+    retention::pin(cwd, &reference(session, turn, edge)?, tree)
+}
+
+pub fn exists(cwd: &Path, session: &str, turn: &str, edge: &str) -> Result<bool> {
+    Ok(run_ok(cwd, &["show-ref", "--verify", "--quiet", &reference(session, turn, edge)?]))
+}
+
+pub fn prune_turn(cwd: &Path, session: &str, turn: &str) -> Result<()> {
+    let prefix = reference(session, turn, "start")?.trim_end_matches("start").to_string();
+    for name in run(cwd, &["for-each-ref", "--format=%(refname)", &prefix])?.lines() {
+        run(cwd, &["update-ref", "-d", name])?;
+    }
     Ok(())
 }
 

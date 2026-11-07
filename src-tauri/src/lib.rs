@@ -677,6 +677,7 @@ pub fn run() {
             commands::turn_checkpoint,
             commands::keep_turn,
             commands::undo_turn,
+            commands::restore_undo,
             commands::unfinished_merge,
             commands::commit_merge,
             commands::abort_merge,

@@ -359,7 +359,8 @@ pub fn list_branches(cwd: &Path) -> Result<Vec<BranchInfo>> {
 
 /// Tree id of the working tree right now, via a temp index so the real index,
 /// working tree and stash are untouched. Copying the index rather than starting
-/// empty keeps this fast: the copy carries git's stat cache.
+/// empty keeps this fast: the copy carries git's stat cache. Only paths under
+/// cwd are refreshed; checkpoint callers explicitly pass the checkout root.
 pub fn snapshot_tree(cwd: &Path) -> Result<String> {
     snapshot_tree_including(cwd, &[])
 }
@@ -374,7 +375,7 @@ fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
     }
     let result = (|| {
         let mut c = git();
-        c.current_dir(cwd).env("GIT_INDEX_FILE", &tmp).args(["add", "-A"]);
+        c.current_dir(cwd).env("GIT_INDEX_FILE", &tmp).args(["add", "-A", "--", "."]);
         let o = c.output()?;
         if !o.status.success() {
             bail!("snapshot add: {}", String::from_utf8_lossy(&o.stderr));

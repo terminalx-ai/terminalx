@@ -21,7 +21,7 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint }:
   const [saved, setSaved] = useState<TurnCheckpoint | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [overlap, setOverlap] = useState<TurnUndoResult | null>(null);
+  const [overlap, setOverlap] = useState<(TurnUndoResult & { action: "undo" | "restore" }) | null>(null);
   useEffect(() => {
     let cancelled = false;
     setSaved(null);
@@ -33,25 +33,27 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint }:
     return () => { cancelled = true; };
   }, [checkpoint?.sessionId, checkpoint?.tabId, checkpoint?.seq]);
   const changes: TurnFileChange[] = saved ? saved.files.map((f) => ({ path: f.path, kind: f.status === "added" ? "create" : f.status === "deleted" ? "delete" : "update", added: f.additions, removed: f.deletions })) : fallback;
-  const review = async (action: "keep" | "undo", confirmed: string | null = null) => {
+  const review = async (action: "keep" | "undo" | "restore", confirmed: string | null = null) => {
     if (!checkpoint || busy) return;
     setBusy(true);
     setError(null);
     try {
       const { sessionId, tabId, seq } = checkpoint;
+      let backupRef: string | null = null;
       if (action === "keep") await api.keepTurn(sessionId, tabId, seq);
       else {
-        const result = await api.undoTurn(sessionId, tabId, seq, confirmed);
-        if (!result.undone) { setOverlap(result); return; }
+        const result = await (action === "restore" ? api.restoreUndo : api.undoTurn)(sessionId, tabId, seq, confirmed);
+        if (!result.undone) { setOverlap({ ...result, action }); return; }
+        backupRef = result.backupRef ?? null;
         window.dispatchEvent(new Event("workspace-files-changed"));
       }
       setOverlap(null);
-      setSaved((value) => value ? { ...value, reviewed: true, undone: action === "undo" } : value);
+      setSaved((value) => value ? { ...value, reviewed: true, undone: action === "undo", restored: action === "restore", backupRef } : value);
     } catch (e) { setError(errorMessage(e)); }
     finally { setBusy(false); }
   };
   const [all, setAll] = useDisclosure("changes");
-  if (!changes.length && !error) return null;
+  if (!changes.length && !error && !saved?.unavailableReason) return null;
   const folded = !all && changes.length > SHOWN + 1;
   const shown = folded ? changes.slice(0, SHOWN) : changes;
   const rest = changes.slice(SHOWN);
@@ -73,21 +75,25 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint }:
           />
         );
       })}
-      {saved && changes.length > 0 && !saved.reviewed && <div className="flex gap-1">
+      {saved && changes.length > 0 && !saved.reviewed && !saved.unavailableReason && <div className="flex gap-1">
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("undo")}>Undo</Button>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("keep")}>Keep</Button>
       </div>}
-      {saved?.reviewed && <span role="status" className="text-xs text-muted-foreground">{saved.undone ? "Undone" : "Kept"}</span>}
+      {saved?.reviewed && <span role="status" className="text-xs text-muted-foreground">{saved.undone ? "Undone" : saved.restored ? "Restored" : "Kept"}</span>}
+      {saved?.undone && saved.backupRef && <Button size="sm" variant="ghost" disabled={busy} title={`Backup: ${saved.backupRef}`} onClick={() => void review("restore")}>Restore what Undo removed</Button>}
+      {saved?.unavailableReason && <p role="status" className="w-full text-xs text-muted-foreground">{saved.unavailableReason}</p>}
       {error && <p role="alert" className="w-full text-xs text-destructive">{error}</p>}
       <Dialog open={!!overlap} onOpenChange={(open) => { if (!open && !busy) setOverlap(null); }}>
         <DialogContent showClose={!busy}>
-          <DialogTitle>Undo turn {saved?.number}?</DialogTitle>
-          <DialogDescription className="mt-2 text-sm text-muted-foreground">Later turns or your own edits changed these files. Undo will replace those changes with the versions from before this turn.</DialogDescription>
+          <DialogTitle>{overlap?.action === "restore" ? "Restore what Undo removed?" : `Undo turn ${saved?.number}?`}</DialogTitle>
+          <DialogDescription className="mt-2 text-sm text-muted-foreground">{overlap?.action === "restore"
+            ? "These files changed after Undo. Restoring the backup will replace those newer changes."
+            : "Other tabs or sessions worked on these files during this turn, or later turns or your own edits changed them. Undo will replace those changes with the versions from before this turn."}</DialogDescription>
           <ul className="mt-3 max-h-48 overflow-auto text-sm font-mono">{overlap?.overlap.map((path) => <li key={path}>{path}</li>)}</ul>
           {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
           <DialogFooter>
             <Button variant="secondary" disabled={busy} onClick={() => setOverlap(null)}>Cancel</Button>
-            <Button variant="destructive" disabled={busy} onClick={() => void review("undo", overlap?.token)}>Undo anyway</Button>
+            <Button variant="destructive" disabled={busy} onClick={() => overlap && void review(overlap.action, overlap.token)}>{overlap?.action === "restore" ? "Restore anyway" : "Undo anyway"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

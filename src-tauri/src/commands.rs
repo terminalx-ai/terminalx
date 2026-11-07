@@ -4951,3 +4951,8 @@ pub async fn keep_turn(session_id: String, tab_id: String, seq: u64) -> CmdResul
 pub async fn undo_turn(session_id: String, tab_id: String, seq: u64, confirmed: Option<String>) -> CmdResult<crate::checkpoints::UndoResult> {
     tauri::async_runtime::spawn_blocking(move || crate::checkpoints::undo(&session_id, &tab_id, seq, confirmed.as_deref()).map_err(err)).await.map_err(err)?
 }
+
+#[tauri::command]
+pub async fn restore_undo(session_id: String, tab_id: String, seq: u64, confirmed: Option<String>) -> CmdResult<crate::checkpoints::UndoResult> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::restore_undo(&session_id, &tab_id, seq, confirmed.as_deref()).map_err(err)).await.map_err(err)?
+}
