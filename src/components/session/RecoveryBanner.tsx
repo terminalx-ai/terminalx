@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import type { ModelInfo } from "@/lib/api";
 import { modelOptionText } from "@/lib/models";
 import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
+import { inputOf, type ActionInput } from "@/lib/recoveryReports";
 
 /** The plan window a refused request ran out of, and when it refills. */
 export type UsageLimit = { status?: string; resetsAt?: number; window?: string };
@@ -21,7 +22,7 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, onResend }: {
+export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, onResend, onPressed }: {
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
@@ -51,7 +52,14 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   onSignIn?: () => void;
   /** Unsent: send the last prompt the agent never received again, as it was sent. */
   onResend?: () => void;
+  /** How a control here was pressed, told before its handler runs, for the tab's recovery incidents (#815). */
+  onPressed?: (input: ActionInput) => void;
 }) {
+  // A button pressed with a key fires a click with no count; a choice made in the model list is not told how.
+  const pressed = (run: () => void) => (event: { detail?: number }) => {
+    onPressed?.(inputOf(event));
+    run();
+  };
   const now = useCountdownNow([kind === "usage_limit" ? limit?.resetsAt ?? null : null]);
   if (!kind && !waiting) return null;
   const reset = kind === "usage_limit" && limit ? usageLimitText(limit, now) : null;
@@ -59,7 +67,7 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   const offer = recoveryOffer(kind, { asks: asks.length, limitReset, canResend: !!onResend, canSendContinue: !!onSendContinue, canSignIn: !!onSignIn, native });
   // Only a request to answer: the request's own card says it all, with stopping in its action bar.
   if (!kind && asks.length) {
-    const stop = <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={onStop}>Stop session</Button>;
+    const stop = <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={pressed(onStop)}>Stop session</Button>;
     return <section aria-label="Session recovery" role="status" className={placement === "composer"
       ? "mx-auto mb-2 flex max-h-[60vh] w-[calc(100%-2rem)] max-w-3xl shrink-0 flex-col gap-2 overflow-auto"
       : "flex max-h-[50vh] shrink-0 flex-col gap-2 overflow-auto border-b border-hairline p-3"}>
@@ -81,16 +89,16 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
       ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
       : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
     <div className="mt-2 flex flex-wrap gap-2">
-      {offer.signIn && <Button size="sm" disabled={busy} onClick={onSignIn}>Sign in</Button>}
-      {offer.resend && <Button size="sm" disabled={busy} onClick={onResend}>Resend last prompt</Button>}
-      {offer.retry && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={() => onRetry()}>{offer.retry}</Button>}
-      {offer.sendContinue && <Button size="sm" variant="outline" disabled={busy} title={'Send "continue" to the agent in this conversation'} onClick={onSendContinue}>Continue here</Button>}
+      {offer.signIn && onSignIn && <Button size="sm" disabled={busy} onClick={pressed(onSignIn)}>Sign in</Button>}
+      {offer.resend && onResend && <Button size="sm" disabled={busy} onClick={pressed(onResend)}>Resend last prompt</Button>}
+      {offer.retry && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={pressed(() => onRetry())}>{offer.retry}</Button>}
+      {offer.sendContinue && onSendContinue && <Button size="sm" variant="outline" disabled={busy} title={'Send "continue" to the agent in this conversation'} onClick={pressed(onSendContinue)}>Continue here</Button>}
       {offer.chooseModel && <select onFocus={onOpenModels} onPointerDown={onOpenModels} aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
         <option value="" disabled>Choose another model</option>
         {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}
       </select>}
-      <Button size="sm" variant="outline" disabled={busy} onClick={onStop}>Stop session</Button>
-      {offer.continueInNewSession && <Button size="sm" variant="ghost" disabled={busy} onClick={onContinue}>Continue in new session</Button>}
+      <Button size="sm" variant="outline" disabled={busy} onClick={pressed(onStop)}>Stop session</Button>
+      {offer.continueInNewSession && <Button size="sm" variant="ghost" disabled={busy} onClick={pressed(onContinue)}>Continue in new session</Button>}
     </div>
   </section>;
 }

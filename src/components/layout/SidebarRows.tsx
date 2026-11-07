@@ -5,7 +5,7 @@ import { actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { formatSize } from "@/lib/workspaceSizes";
 import type { WorkspaceState } from "@/types/session";
 import { cn } from "@/lib/cn";
-import { relativeTime } from "@/lib/time";
+import { recentTime } from "@/lib/time";
 import { TAB_STATUS_LABEL, type TabStatus } from "@/types/session";
 
 /**
@@ -158,11 +158,13 @@ export function DiffStats({ additions, deletions, unpushed }: { additions: numbe
   );
 }
 
-/** Relative age of a row's last activity, which gives way to the row's toolbar. */
+/** Relative age of a row's last activity, up to six days, which gives way to the row's toolbar. Older rows show none. */
 export function RowTime({ at }: { at: string }) {
+  const age = recentTime(at);
+  if (!age) return null;
   return (
     <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>
-      {relativeTime(at)}
+      {age}
     </span>
   );
 }
