@@ -42,6 +42,113 @@ fn stop_delivers_one_held_follow_up_per_finished_turn_in_tray_order() {
 }
 
 #[test]
+fn cli_queued_input_runs_before_held_follow_ups_without_pausing_the_app_queue() {
+    let rig = started();
+    // Enter under "now" types into the CLI; alternate Send holds in the app.
+    // A prompt from another sender that the CLI queues has the same ordering.
+    let sent = rig.manager.send(SESSION, TAB, "CLI first".into(), Vec::new()).unwrap();
+    assert!(sent.queued);
+    rig.wait("the CLI follow-up typed", || rig.typed().contains("CLI first"));
+    for text in ["app second", "app third"] { enqueue(&rig, text); }
+    let expected = queue(&rig);
+
+    hook(&rig, "Stop", json!({}));
+    assert!(matches!(&rig.rt().lock().unwrap().engine, Engine::Cli(cli) if !cli.held.is_empty()));
+    // Exercise the worker before the next echo, independent of scheduling.
+    rig.manager.deliver_held(SESSION, TAB).unwrap();
+    assert_eq!(queue(&rig), expected);
+    assert!(!rig.typed().contains("app second"));
+
+    prompt(&rig, "CLI first");
+    rig.cli_takes("CLI first", "CLI reply");
+    rig.wait("the queued prompt's transcript echo", || matches!(&rig.rt().lock().unwrap().engine,
+        Engine::Cli(cli) if cli.held.is_empty()));
+    // Echoing the CLI prompt only starts its turn; it cannot deliver app input.
+    rig.manager.deliver_held(SESSION, TAB).unwrap();
+    assert_eq!(queue(&rig), expected);
+    for (index, text) in ["app second", "app third"].into_iter().enumerate() {
+        hook(&rig, "Stop", json!({}));
+        prompt(&rig, text);
+        rig.wait("one held item delivered", || queue(&rig).items.len() == 1 - index && queue(&rig).sending.is_none());
+        assert!(!queue(&rig).paused);
+        assert!(queue(&rig).error.is_none());
+    }
+}
+
+#[test]
+fn awaiting_cli_delivery_without_recovery_waits_for_the_next_finished_turn() {
+    let rig = started();
+    enqueue(&rig, "after CLI acceptance");
+    change(&rig, Change::Pause { paused: true });
+    hook(&rig, "Stop", json!({}));
+    {
+        let rt_arc = rig.rt();
+        let mut rt = rt_arc.lock().unwrap();
+        rt.held_queue.paused = false;
+        if let Engine::Cli(cli) = &mut rt.engine { cli.awaiting_delivery = Some(1); }
+    }
+    let expected = queue(&rig);
+    rig.manager.deliver_held(SESSION, TAB).unwrap();
+    assert_eq!(queue(&rig), expected);
+    assert!(!rig.typed().contains("after CLI acceptance"));
+    hook(&rig, "UserPromptSubmit", json!({"prompt":"earlier CLI input"}));
+    hook(&rig, "Stop", json!({}));
+    prompt(&rig, "after CLI acceptance");
+    rig.wait("held item delivered after acceptance", || queue(&rig).items.is_empty() && queue(&rig).sending.is_none());
+    assert!(!queue(&rig).paused);
+}
+
+#[test]
+fn cli_input_appearing_after_a_claim_releases_the_claim_without_pausing() {
+    let rig = started();
+    enqueue(&rig, "after the raced CLI input");
+    change(&rig, Change::Pause { paused: true });
+    hook(&rig, "Stop", json!({}));
+    // Hold the normal send's sharing lock to let CLI state change between
+    // the durable claim and its final send check, without sleeps or hooks.
+    let sharing = rig.manager.sharing.lock().unwrap();
+    rig.rt().lock().unwrap().held_queue.paused = false;
+    let expected = queue(&rig);
+    let manager = rig.manager.clone();
+    let delivery = std::thread::spawn(move || manager.deliver_held(SESSION, TAB));
+    rig.wait("the held delivery claim", || queue(&rig).sending.is_some());
+    if let Engine::Cli(cli) = &mut rig.rt().lock().unwrap().engine { cli.awaiting_delivery = Some(1); }
+    drop(sharing);
+    delivery.join().unwrap().unwrap();
+    assert_eq!(queue(&rig), expected);
+    assert_eq!(Queue::restore(&store::log_path(SESSION, TAB).unwrap()).unwrap(), expected);
+    assert!(!rig.typed().contains("after the raced CLI input"));
+    hook(&rig, "UserPromptSubmit", json!({"prompt":"raced CLI input"}));
+    hook(&rig, "Stop", json!({}));
+    prompt(&rig, "after the raced CLI input");
+    rig.wait("held item delivered after the race", || queue(&rig).items.is_empty() && queue(&rig).sending.is_none());
+    assert!(!queue(&rig).paused);
+}
+
+#[test]
+fn cli_input_does_not_hide_recovery_or_an_explicit_retry_that_cannot_proceed() {
+    for recovery in [false, true] {
+        let rig = started();
+        rig.manager.send(SESSION, TAB, "CLI first".into(), Vec::new()).unwrap();
+        rig.wait("the CLI follow-up typed", || rig.typed().contains("CLI first"));
+        enqueue(&rig, "held retry");
+        hook(&rig, "Stop", json!({}));
+        if recovery {
+            rig.rt().lock().unwrap().recovery = Some(RecoveryKind::UsageLimit);
+            rig.manager.deliver_held(SESSION, TAB).unwrap();
+        } else {
+            change(&rig, Change::SendNow { id: queue(&rig).items[0].id.clone() });
+        }
+        rig.wait("the delivery block's explanation", || queue(&rig).error.is_some());
+        let blocked = queue(&rig);
+        assert!(blocked.paused);
+        assert!(blocked.next.is_none() && blocked.sending.is_none());
+        assert!(blocked.error.unwrap().contains("Earlier messages are still in the agent's queue"));
+        assert!(!rig.typed().contains("held retry"));
+    }
+}
+
+#[test]
 fn edits_reorder_delete_pause_and_attachments_survive_reloading_the_tab_log() {
     let rig = started();
     for text in ["one", "two", "three"] { enqueue(&rig, text); }

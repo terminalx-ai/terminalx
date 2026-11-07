@@ -405,8 +405,11 @@ normal user-message event exists, restart does not resend it. A hard Stop
 pauses and retains held items. After reopening an idle tab, Resume/Send next
 starts the queue; otherwise its next finished turn does. Recovery blocks
 automatic delivery with a visible reason; explicit Resume or Send now retries.
-Unconfirmed CLI input still needs attention in the terminal or a hard Stop
-before retrying. A paused queue does not keep an idle agent or runtime alive.
+Earlier CLI-queued input, or input still awaiting acceptance without a recovery
+warning, keeps automatic delivery waiting without pausing the app queue. After
+that input's turn finishes, held messages continue in order. An explicit retry
+that cannot get past earlier CLI input still reports how to recover. A paused
+queue does not keep an idle agent or runtime alive.
 Cloud mailboxes and messages already typed into the CLI retain their existing
 behavior. The phone does not display or edit this queue, and phone messages
 use their existing delivery path, ahead of held items when the CLI takes them.

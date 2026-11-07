@@ -34,6 +34,14 @@ pub enum Change {
     SendNow { id: String },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum Block {
+    #[error("Waiting for the agent's earlier messages to finish.")]
+    WaitingForCli,
+    #[error("{0}")]
+    NeedsAttention(String),
+}
+
 impl Queue {
     pub fn replay(events: &[AgentEvent]) -> Self {
         let mut queue = Self::default();
@@ -77,22 +85,28 @@ impl Queue {
         self.sending.is_some() || self.enabled()
     }
 
-    pub(super) fn blocked(&self, rt: &TabRuntime) -> Option<String> {
+    pub(super) fn blocked(&self, rt: &TabRuntime) -> Option<Block> {
         let reason = if rt.stopping || rt.stop_in_flight {
             "Stop has not finished. Retry Stop, then resume the queue."
         } else if rt.restart_claim.is_some() || rt.stdio_starting {
             "The agent is starting. Resume the queue once it is ready."
         } else if !rt.pending.is_empty() {
             "The agent needs a response. Answer its pending request, then resume the queue."
-        } else if matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some()) {
-            "The agent has not confirmed an earlier message. Check its terminal or stop the agent, then use Send now to retry."
-        } else if matches!(&rt.engine, Engine::Cli(cli) if !cli.held.is_empty()) {
-            "Earlier messages are still in the agent's queue. Let them finish, or stop the agent, then resume this queue."
+        } else if matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || !cli.held.is_empty()) {
+            // A Stop can arrive before the CLI echoes its next prompt. That
+            // is ordinary queue ordering, not a reason to pause app delivery.
+            // An explicit retry or recovery still needs an actionable error.
+            if rt.recovery.is_none() && self.next.is_none() { return Some(Block::WaitingForCli); }
+            if matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some()) {
+                "The agent has not confirmed an earlier message. Check its terminal or stop the agent, then use Send now to retry."
+            } else {
+                "Earlier messages are still in the agent's queue. Let them finish, or stop the agent, then resume this queue."
+            }
         } else {
             let kind = rt.recovery.filter(|_| self.next.is_none())?;
-            return Some(format!("{} Held follow-ups are paused. When ready, use Resume or Send now to retry.", kind.message()));
+            return Some(Block::NeedsAttention(format!("{} Held follow-ups are paused. When ready, use Resume or Send now to retry.", kind.message())));
         };
-        Some(reason.into())
+        Some(Block::NeedsAttention(reason.into()))
     }
 }
 
@@ -290,6 +304,7 @@ impl SessionManager {
 
     pub(super) fn schedule_held(&self, rt: &TabRuntime) {
         if !rt.held_queue.enabled() || (rt.turn_open_for_prompts() && rt.recovery.is_none()) { return; }
+        if matches!(rt.held_queue.blocked(rt), Some(Block::WaitingForCli)) { return; }
         let (manager, session, tab) = (self.clone(), rt.session_id.clone(), rt.tab_id.clone());
         std::thread::spawn(move || {
             if let Err(error) = manager.deliver_held(&session, &tab) {
@@ -317,13 +332,17 @@ impl SessionManager {
         let rt_arc = self.runtime(session, tab)?;
         let mut rt = rt_arc.lock().unwrap();
         if !rt.held_queue.enabled() { return Ok(()); }
-        if let Some(reason) = rt.held_queue.blocked(&rt) {
-            let mut queue = rt.held_queue.clone();
-            queue.paused = true;
-            queue.next = None;
-            queue.error = Some(reason);
-            self.record_held_outcome(&mut rt, queue);
-            return Ok(());
+        match rt.held_queue.blocked(&rt) {
+            Some(Block::WaitingForCli) => return Ok(()),
+            Some(Block::NeedsAttention(reason)) => {
+                let mut queue = rt.held_queue.clone();
+                queue.paused = true;
+                queue.next = None;
+                queue.error = Some(reason);
+                self.record_held_outcome(&mut rt, queue);
+                return Ok(());
+            }
+            None => {}
         }
         if rt.turn_open_for_prompts() { return Ok(()); }
         let mut queue = rt.held_queue.clone();
@@ -347,6 +366,10 @@ impl SessionManager {
         queue.next = None;
         match outcome {
             Ok(_) => { queue.items.retain(|held| held.id != item.id); queue.error = None; }
+            // The final send lock checks blocked() again. If earlier CLI
+            // input appeared after the claim, release it and wait for the
+            // next boundary, without dropping the item or pausing delivery.
+            Err(error) if matches!(error.downcast_ref::<Block>(), Some(Block::WaitingForCli)) => {}
             Err(error) => {
                 queue.paused = true;
                 let reason = recovery::detail(&error.to_string()).unwrap_or_else(|| "Could not deliver the follow-up.".into());
