@@ -70,4 +70,31 @@ describe("TerminalX account surfaces", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm sign out" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("account_sign_out"));
   });
+
+  it("finishes a sign-in from a pasted link when the browser's button cannot open the app", async () => {
+    let refuse = true;
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "account_status") return signedOut;
+      if (command === "account_sign_in") return signingIn;
+      if (command === "account_paste_callback") { if (refuse) throw "That link belongs to another sign-in. Start signing in again, then paste the new link."; return null; }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    await act(async () => bootAccount());
+    render(<AccountTab />);
+    expect(screen.queryByTestId("paste-sign-in-link")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    const field = await screen.findByLabelText(/Copy Link, and paste it here/);
+    const link = "terminalx-dev://auth/callback?code=abc&state=xyz";
+
+    fireEvent.change(field, { target: { value: link } });
+    fireEvent.click(screen.getByRole("button", { name: "Finish sign-in" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "That link belongs to another sign-in. Start signing in again, then paste the new link.");
+
+    refuse = false;
+    fireEvent.click(screen.getByRole("button", { name: "Finish sign-in" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenLastCalledWith("account_paste_callback", { link }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await act(async () => mocks.onStatus?.({ payload: signedIn }));
+    expect(screen.queryByTestId("paste-sign-in-link")).toBeNull();
+  });
 });

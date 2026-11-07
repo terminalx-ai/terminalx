@@ -6,7 +6,7 @@ import { OrganizationOnboarding } from "./OrganizationOnboarding";
 import { WorkStatusSettings } from "./WorkStatusSettings";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
-import { signIn, signOut, useAccount } from "@/lib/account";
+import { pasteSignInLink, signIn, signOut, useAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { usePairing } from "@/lib/pairing";
 import { openOrganizationSettings } from "@/lib/settingsLinks";
@@ -117,6 +117,7 @@ export function AccountTab() {
           <Loader2 className="size-3.5 animate-spin" /> Finish signing in in your browser, then return here.
         </div>
       )}
+      {signingIn && <PasteSignInLink />}
       {status.lastError && <p className="text-xs text-destructive">{status.lastError}</p>}
       <div>
         <Button size="sm" disabled={account.busy} onClick={() => void signIn()}>
@@ -124,5 +125,50 @@ export function AccountTab() {
         </Button>
       </div>
     </div></RegisteredSetting>
+  );
+}
+
+/**
+ * For when the browser's Open button does not reach this app, as with a
+ * development build (it has no URL scheme registered): copy that button's
+ * link and paste it here to finish the same sign-in.
+ */
+function PasteSignInLink() {
+  const [link, setLink] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const submit = async () => {
+    setSending(true);
+    setProblem(await pasteSignInLink(link));
+    setSending(false);
+  };
+  return (
+    <form
+      className="flex flex-col gap-1.5"
+      data-testid="paste-sign-in-link"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (link.trim()) void submit();
+      }}
+    >
+      <label htmlFor="sign-in-link" className="text-xs text-muted-foreground">
+        Button didn't open the app? Right-click it, choose Copy Link, and paste it here.
+      </label>
+      <div className="flex items-center gap-2">
+        <input
+          id="sign-in-link"
+          value={link}
+          onChange={(event) => { setLink(event.target.value); setProblem(null); }}
+          placeholder="terminalx-dev://auth/callback?…"
+          spellCheck={false}
+          autoComplete="off"
+          className="h-7 min-w-0 flex-1 rounded-md border border-hairline bg-transparent px-2 font-mono text-[11px] outline-none focus:border-ring"
+        />
+        <Button type="submit" size="sm" variant="secondary" disabled={sending || !link.trim()}>
+          {sending ? <Loader2 className="animate-spin" /> : null} Finish sign-in
+        </Button>
+      </div>
+      {problem && <p role="alert" className="text-xs text-destructive">{problem}</p>}
+    </form>
   );
 }

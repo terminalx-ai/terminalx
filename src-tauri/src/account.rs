@@ -996,6 +996,31 @@ impl AccountManager {
             return false;
         }
         let action = self.claim_callback(url);
+        self.act_on_callback(app, action, links);
+        true
+    }
+
+    /// A sign-in link the reader pasted, for when the browser's button could
+    /// not reach this app: a development build run as a bare binary has no
+    /// URL scheme registered with macOS, so `terminalx-dev://` opens nothing.
+    /// It is held to exactly what a delivered link is: this app's own
+    /// callback, for the sign-in under way, within its time.
+    pub fn paste_callback(self: &Arc<Self>, app: &AppHandle, link: &str) -> Result<()> {
+        let url = Url::parse(link.trim()).map_err(|_| anyhow!("That isn't a link. Copy the whole link from the browser's Open button."))?;
+        let links = DesktopLinks::for_identifier(&app.config().identifier);
+        if !links.is_auth_callback(&url) {
+            return Err(anyhow!("That isn't a sign-in link for this app. Copy the link from the Open {} button.", app.package_info().name));
+        }
+        match self.claim_callback(&url) {
+            CallbackAction::Ignore => Err(anyhow!("That link belongs to another sign-in. Start signing in again, then paste the new link.")),
+            action => {
+                self.act_on_callback(app, action, links);
+                Ok(())
+            }
+        }
+    }
+
+    fn act_on_callback(self: &Arc<Self>, app: &AppHandle, action: CallbackAction, links: DesktopLinks) {
         match action {
             CallbackAction::Ignore => {}
             CallbackAction::Failed => self.emit(app),
@@ -1008,7 +1033,6 @@ impl AccountManager {
                 });
             }
         }
-        true
     }
 
     fn claim_callback(&self, url: &Url) -> CallbackAction {

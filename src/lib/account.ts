@@ -431,6 +431,22 @@ export async function signIn(): Promise<void> {
   }
 }
 
+/**
+ * Finishes the sign-in under way with the link the browser's Open button
+ * carries, pasted here because the button could not open this app (a
+ * development build has no URL scheme for it). Resolves to the problem, if
+ * the link was not this sign-in's; the exchange itself reports as a delivered
+ * link's does, through the account status.
+ */
+export async function pasteSignInLink(link: string): Promise<string | null> {
+  try {
+    await api.accountPasteCallback(link);
+    return null;
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
 export async function signOut(): Promise<void> {
   set({ busy: true });
   try {
