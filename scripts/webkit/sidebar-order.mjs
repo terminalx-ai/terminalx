@@ -19,6 +19,9 @@ const drag = async (page, from, to) => {
   await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 20 });
   await page.evaluate(() => new Promise(requestAnimationFrame));
   await page.mouse.up();
+  // dnd-kit retains its document click guard for 50 ms after pointer release.
+  // Let it detach before the next interaction so a fast CI click is not swallowed.
+  await page.waitForTimeout(100);
 };
 const toggle = async (page) => {
   await page.getByTestId("sidebar-filter").click();

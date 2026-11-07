@@ -25,15 +25,16 @@ test('reject target mismatches and malformed flags before generating any executa
 
 const nativeTest = process.platform === 'win32' ? test.skip : test
 let directory, launcher
-// Allow the native compiler to be scheduled alongside other worktree builds.
+// Compiling the native fixture may wait on a cold, contended toolchain. This
+// budget is separate from the launch and signal-delivery assertions below.
 beforeAll(() => {
   if (process.platform === 'win32') return
   directory = mkdtempSync(path.join(tmpdir(), 'tx467-launcher-test-'))
   launcher = path.join(directory, 'terminalx')
-  const result = spawnSync('rustc', ['--edition=2021', 'native/terminalx-launcher/main.rs', '-o', launcher], { encoding: 'utf8' })
-  expect(result.status, result.stderr).toBe(0)
+  const result = spawnSync('rustc', ['--edition=2021', 'native/terminalx-launcher/main.rs', '-o', launcher], { encoding: 'utf8', timeout: 110_000 })
+  expect(result.status, result.stderr || result.error?.message).toBe(0)
   writeFileSync(path.join(directory, 'raccoon'), '#!/usr/bin/python3\nimport os,sys,json,signal,time\nif sys.argv[-1]=="signal":\n print(os.getpid(),flush=True)\n time.sleep(30)\nelse:\n print(json.dumps({"argv":sys.argv[1:],"cwd":os.getcwd(),"env":os.environ.get("TX467_TEST"),"input":sys.stdin.read(),"pid":os.getpid()}))\n print("fixture-stderr",file=sys.stderr)\n sys.exit(23)\n', { mode: 0o755 })
-}, 180000)
+}, 120_000)
 afterAll(() => { if (directory) rmSync(directory, { recursive: true, force: true }) })
 nativeTest('exec preserves argv, stdin/out/err, cwd, environment and exit code through a symlink', () => {
   const link = path.join(directory, 'symlink with spaces')

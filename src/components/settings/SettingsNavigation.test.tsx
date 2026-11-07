@@ -5,6 +5,7 @@ import type { Project } from "@/types/session";
 const mocks = vi.hoisted(() => ({
   projects: [] as Project[],
   saveOrder: vi.fn(async (patch: object) => ({ custom: false, sessions: ["second", "first"], projects: ["/repos/two", "/repos/one"], revision: 1, ...patch })),
+  environmentList: vi.fn(async (_project: string | null) => []),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 vi.mock("@/lib/sessions", async (original) => {
@@ -28,9 +29,14 @@ vi.mock("@/lib/api", async (original) => {
     experimental: { ...actual.experimental, settings: vi.fn(async () => ({ nativeCodex: false })) },
   };
 });
+vi.mock("@/lib/localEnvironment", async (original) => {
+  const actual = await original<typeof import("@/lib/localEnvironment")>();
+  return { ...actual, environment: { ...actual.environment, list: mocks.environmentList } };
+});
 const { SettingsPage } = await import("./SettingsPage");
 
 beforeEach(() => {
+  mocks.environmentList.mockClear();
   mocks.projects = [
     { path: "/repos/one", name: "One", kind: "git" },
     { path: "/repos/two", name: "Two", kind: "git" },
@@ -41,6 +47,23 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("registry navigation", () => {
+  it("opens Environment from its group, keeps repository overrides, and resolves its row link", async () => {
+    const view = render(<SettingsPage onBack={vi.fn()} />);
+    const group = within(screen.getByRole("group", { name: "Agents & environment" }));
+    fireEvent.click(group.getByRole("button", { name: "Environment" }));
+    expect(screen.getByRole("heading", { name: "Environment" })).toBeTruthy();
+    await waitFor(() => expect(mocks.environmentList).toHaveBeenLastCalledWith(null));
+    fireEvent.change(screen.getByLabelText("Scope"), { target: { value: "/repos/two" } });
+    await waitFor(() => expect(mocks.environmentList).toHaveBeenLastCalledWith("/repos/two"));
+    expect(screen.getByRole("button", { name: "Load from .env file" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    view.rerender(<SettingsPage initialTab="environment.variables" openRequest={1} onBack={vi.fn()} />);
+    const row = view.container.querySelector('[data-setting-id="environment.variables"]');
+    expect(row).toBeTruthy();
+    expect(document.activeElement).toBe(row);
+    expect(screen.getByRole("heading", { name: "Environment" })).toBeTruthy();
+  });
+
   it("expands each repository independently and opens its existing cleanup controls", () => {
     const view = render(<SettingsPage onBack={vi.fn()} />);
     const group = within(screen.getByRole("group", { name: "Repositories" }));

@@ -18,6 +18,9 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
     }
     if let Some(method) = command.strip_prefix("runtime.pty.") {
         let terminals = manager.terminals();
+        if method == "environmentReady" {
+            return Ok(json!(crate::store::environment::wait_ready(params["projectPath"].as_str())));
+        }
         if method == "mobileDrivers" { return Ok(serde_json::to_value(manager.mobile.driven_tabs())?); }
         if method == "shells" { return Ok(serde_json::to_value(terminals.shells())?); }
         if method == "stats" { return Ok(serde_json::to_value(terminals.stats())?); }
@@ -90,6 +93,7 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 Ok(Value::Null)
             }
             "resize" => { let (cols, rows) = size()?; manager.mobile.desktop_input(id, || terminals.resize(id, cols, rows))?; Ok(Value::Null) }
+            "environmentChanged" => Ok(json!(manager.environment_changed(id)?)),
             "busy" => Ok(json!(terminals.is_busy(id))),
             "output" => Ok(json!({"data":terminals.read_output(id).map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
                 "running":terminals.is_running(id), "pid":terminals.pid(id)})),

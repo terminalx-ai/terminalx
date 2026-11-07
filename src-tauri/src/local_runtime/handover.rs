@@ -125,6 +125,8 @@ pub struct PaneRecord {
     pub pid: Option<u32>,
     pub group: Option<u32>,
     pub explicit_command: bool,
+    #[serde(default)]
+    pub environment: Option<crate::store::environment::Stamp>,
     pub cwd: String,
     pub created: String,
     pub tty: Option<PathBuf>,
@@ -345,7 +347,7 @@ impl Record {
         let frames = hooks.held.into_iter().map(|(fd, line)| FrameRecord { fd: keep(fd), line }).collect();
         let decisions = hooks.parked.into_iter().map(|(request_id, fd)| ParkedRecord { fd: keep(fd), request_id }).collect();
         let panes = terminals.panes.into_iter().map(|pane| PaneRecord {
-            id: pane.id, fd: keep(pane.master), pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command,
+            id: pane.id, fd: keep(pane.master), pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, environment: Some(pane.environment),
             cwd: pane.cwd, created: pane.created, tty: pane.tty, cols: pane.cols, rows: pane.rows, scrollback: pane.scrollback,
             printed: pane.printed, screen: pane.screen, quiet_ms: pane.quiet.map(|quiet| u64::try_from(quiet.as_millis()).unwrap_or(u64::MAX)),
             title: pane.title, renamed: pane.renamed,

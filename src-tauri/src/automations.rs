@@ -876,6 +876,7 @@ fn start_run(
             Ok(())
         })?;
         emit_run(app, &run);
+        crate::store::environment::prepare_unattended(&entry.cwd, None)?;
         let manager = app.sessions()?;
         let mut prompt = prompt;
         if let Some(options) = automation.pipeline.as_ref().filter(|options| options.auto_merge || options.resolve_conflicts) {

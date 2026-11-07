@@ -27,6 +27,7 @@ export function mergeSidebarOrder(saved: readonly string[], requested: readonly 
 }
 function publish() {
   const optimistic = queued.reduce<SidebarOrder>((order, patch) => ({ ...order, ...patch,
+    // First enable waits for Rust's seeded display order, avoiding a temporary reshuffle.
     custom: confirmed.revision === 0 ? confirmed.custom : patch.custom ?? order.custom,
     sessions: patch.sessions ? mergeSidebarOrder(order.sessions, patch.sessions) : order.sessions,
     projects: patch.projects ? mergeSidebarOrder(order.projects, patch.projects) : order.projects,

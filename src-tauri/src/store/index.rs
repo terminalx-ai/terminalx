@@ -766,14 +766,21 @@ fn reconcile_sidebar_projects(saved: &mut Vec<String>, current: &[String]) {
 pub fn sidebar_order() -> Result<SidebarOrder> {
     let file = load_file()?;
     let Some(mut order) = file.sidebar_order else { return Ok(SidebarOrder::default()) };
-    let projects = sidebar_projects(&file.sessions, &super::projects::list()?.0)?;
-    reconcile_sidebar_projects(&mut order.projects, &projects);
+    match super::projects::list() {
+        Ok((attached, _)) => {
+            let projects = sidebar_projects(&file.sessions, &attached)?;
+            reconcile_sidebar_projects(&mut order.projects, &projects);
+        }
+        // An unavailable project catalog must not hide or prune the saved order.
+        Err(error) => log::warn!("read sidebar projects; keeping saved order: {error:#}"),
+    }
     Ok(order)
 }
 
 pub fn set_sidebar_order(patch: SidebarOrderPatch) -> Result<SidebarOrder> {
-    let attached = super::projects::list()?.0;
     update_file(|file| {
+        // Read after acquiring the index lock so a waiting drop sees newly attached projects.
+        let attached = super::projects::list()?.0;
         // Seed only once, in this transaction, so enabling custom order keeps the
         // pin/message ordering already on screen and cannot overwrite another window.
         if file.sidebar_order.is_none() {
@@ -1084,6 +1091,32 @@ mod tests {
         assert_eq!(get("a").unwrap().modified, sessions[0].modified);
         update(|sessions| { sessions.retain(|s| s.id != "a"); Ok(()) }).unwrap();
         assert_eq!(sidebar_order().unwrap().sessions, ["new", "b", "c"]);
+    }
+
+    #[test]
+    fn sidebar_order_remains_readable_when_the_project_catalog_is_unavailable() {
+        let _home = crate::store::temp_home();
+        let projects_path = crate::store::root().unwrap().join("projects.json");
+        let projects = serde_json::json!({ "projects": [{ "path": "/attached", "name": "Attached" }] });
+        crate::store::write_json(&projects_path, &projects).unwrap();
+        save(&[entry("a"), entry("b")]).unwrap();
+        let saved = set_sidebar_order(SidebarOrderPatch {
+            custom: Some(true), sessions: Some(vec!["b".into(), "a".into()]),
+            projects: Some(vec!["/attached".into(), "/p".into()]),
+        }).unwrap();
+        let index_before = std::fs::read(file_path().unwrap()).unwrap();
+        std::fs::write(&projects_path, b"{invalid").unwrap();
+        assert_eq!(sidebar_order().unwrap(), saved);
+        std::fs::remove_file(&projects_path).unwrap();
+        std::fs::create_dir(&projects_path).unwrap();
+        assert_eq!(sidebar_order().unwrap(), saved);
+        assert_eq!(std::fs::read(file_path().unwrap()).unwrap(), index_before);
+        std::fs::remove_dir(&projects_path).unwrap();
+        crate::store::write_json(&projects_path, &serde_json::json!({ "projects": [] })).unwrap();
+        let restored = sidebar_order().unwrap();
+        assert_eq!(restored.projects, ["/p"]);
+        assert_eq!(restored.sessions, saved.sessions);
+        assert!(restored.custom);
     }
 
     #[test]
