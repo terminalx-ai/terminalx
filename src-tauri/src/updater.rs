@@ -12,7 +12,7 @@ pub struct Available { id: String, version: String }
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "event", content = "data")]
-pub enum Progress {
+pub enum DownloadEvent {
     Started { #[serde(rename = "contentLength")] content_length: Option<u64> },
     Progress { #[serde(rename = "chunkLength")] chunk_length: usize },
     Finished,
@@ -34,7 +34,7 @@ pub async fn app_update_check(app: tauri::AppHandle, channel: String) -> Result<
 }
 
 #[tauri::command]
-pub async fn app_update_install(id: String, progress: tauri::ipc::Channel<Progress>) -> Result<(), String> {
+pub async fn app_update_install(id: String, progress: tauri::ipc::Channel<DownloadEvent>) -> Result<(), String> {
     let result = async {
         let found = {
             let mut found = FOUND.lock().unwrap();
@@ -45,9 +45,9 @@ pub async fn app_update_install(id: String, progress: tauri::ipc::Channel<Progre
         let mut began = false;
         let bytes = crate::data_privacy::transfer(&found.privacy, async {
             Ok(found.update.download(|chunk_length, content_length| {
-                if !began { let _ = progress.send(Progress::Started { content_length }); began = true; }
-                let _ = progress.send(Progress::Progress { chunk_length });
-            }, || { let _ = finished.send(Progress::Finished); }).await?)
+                if !began { let _ = progress.send(DownloadEvent::Started { content_length }); began = true; }
+                let _ = progress.send(DownloadEvent::Progress { chunk_length });
+            }, || { let _ = finished.send(DownloadEvent::Finished); }).await?)
         }).await?;
         // A transfer that activation drained is discarded, never installed
         // or revived after privacy is turned back off.
