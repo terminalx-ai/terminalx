@@ -59,8 +59,26 @@ impl Identity {
     }
 }
 
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshFence {
+    scope: String,
+    revision: String,
+}
+
+impl SshFence {
+    fn matches(&self, account: &AccountManager, identity: &Identity, workspace: &str) -> bool {
+        identity.allowed_by(account.current_scope().as_ref())
+            && account.cloud_revision(&identity.organization_id).as_deref() == Some(self.revision.as_str())
+            && crate::workspace_ssh::scope(&identity.user_id, &identity.organization_id, workspace) == self.scope
+    }
+}
+
 struct Attached {
     supervisor: Supervisor,
+    workspace_id: Option<String>,
+    account_revision: Option<String>,
+    account_generation: u64,
     /// This connection's local port forwards (PRO-28).
     ports: PortForwarder,
     /// None only for a debug-build attach by pairing code, which no account owns.
@@ -175,6 +193,7 @@ impl CloudRemote {
     /// reads the scope as it is.)
     fn drop_previous_identity(&self) -> Vec<String> {
         let Some(scope) = self.account.settled_scope() else { return Vec::new() };
+        let generation = self.account.current_generation();
         // A port forward does not outlive a switch of the active
         // organization, even where the connection itself does (CS-18).
         {
@@ -188,7 +207,7 @@ impl CloudRemote {
             let mut connections = self.connections.lock().unwrap();
             let ids: Vec<String> = connections
                 .iter()
-                .filter(|(_, attached)| attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref())))
+                .filter(|(_, attached)| attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref()) || attached.account_generation != generation))
                 .map(|(id, _)| id.clone())
                 .collect();
             ids.into_iter().filter_map(|id| connections.remove(&id).map(|attached| (id, attached))).collect()
@@ -210,14 +229,17 @@ impl CloudRemote {
         let connection_id = format!("cloud-{}", uuid::Uuid::new_v4().simple());
         let (events, mut receiver) = mpsc::unbounded_channel();
         let supervisor = Supervisor::start(source, activation, events);
+        let account_generation = self.account.current_generation();
+        let account_revision = identity.as_ref().and_then(|who| self.account.cloud_revision(&who.organization_id));
         let ports = {
             // Under the same rule as every frame the web view sends: nothing
             // goes out for an identity that is no longer current, a pending
             // sign-out included.
             let (supervisor, account, made_for) = (supervisor.clone(), self.account.clone(), identity.clone());
-            PortForwarder::new(move |frame| made_for.as_ref().is_none_or(|identity| identity.allowed_by(account.current_scope().as_ref())) && supervisor.send(frame))
+            let revision = account_revision.clone();
+            PortForwarder::new(move |frame| made_for.as_ref().is_none_or(|identity| identity.allowed_by(account.current_scope().as_ref()) && account.cloud_revision(&identity.organization_id) == revision) && supervisor.send(frame))
         };
-        self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), ports: ports.clone(), identity: identity.clone() });
+        self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), ports: ports.clone(), workspace_id: workspace_id.clone(), account_revision, account_generation, identity: identity.clone() });
         let app = app.clone();
         let id = connection_id.clone();
         let agents = self.agents.clone();
@@ -295,22 +317,37 @@ impl CloudRemote {
     /// [`Self::supervisor`].
     fn ports(&self, connection_id: &str) -> Result<PortForwarder, String> {
         let scope = self.scope();
+        let generation = self.account.current_generation();
         let connections = self.connections.lock().unwrap();
         let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
-        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref())) {
+        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref()) || attached.account_generation != generation) {
             return Err("cloud_remote_identity_changed".into());
         }
         Ok(attached.ports.clone())
     }
 
+    fn ssh_ports(&self, connection_id: &str, org: &str, workspace: &str, fence: &SshFence) -> Result<PortForwarder, String> {
+        // Take only a copy under the map lock; account locks stay independent.
+        let (identity, revision, target, ports) = {
+            let connections = self.connections.lock().unwrap();
+            let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
+            (attached.identity.clone(), attached.account_revision.clone(), attached.workspace_id.clone(), attached.ports.clone())
+        };
+        let valid = identity.as_ref().is_some_and(|who| who.organization_id == org && fence.matches(&self.account, who, workspace))
+            && target.as_deref() == Some(workspace) && revision.as_deref() == Some(fence.revision.as_str());
+        if !valid { return Err("ssh_account_changed".into()); }
+        Ok(ports)
+    }
+
     fn supervisor(&self, connection_id: &str) -> Result<Supervisor, String> {
         // Read before the connections are locked: one lock at a time.
         let scope = self.scope();
+        let generation = self.account.current_generation();
         let connections = self.connections.lock().unwrap();
         let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
         // A connection made for another identity is never used, even before
         // the watcher has stopped it.
-        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref())) {
+        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref()) || attached.account_generation != generation) {
             return Err("cloud_remote_identity_changed".into());
         }
         Ok(attached.supervisor.clone())
@@ -323,6 +360,7 @@ struct ApiSource {
     identity: Identity,
     workspace_id: String,
     installation_id: String,
+    expected_revision: Option<String>,
 }
 
 impl AttachSource for ApiSource {
@@ -367,7 +405,7 @@ impl AttachSource for ApiSource {
             WorkspaceState::Ready => {}
         }
         let (organization_id, response) =
-            self.service.open_attachment(organization, &self.workspace_id, &self.installation_id, refresh_pairing).map_err(|e| error(e.code))?;
+            self.service.open_attachment_in_revision(organization, &self.workspace_id, &self.installation_id, refresh_pairing, self.expected_revision.as_deref()).map_err(|e| error(e.code))?;
         if organization_id != self.identity.organization_id {
             anyhow::bail!("cloud_remote_identity_changed");
         }
@@ -406,6 +444,7 @@ pub async fn cloud_remote_attach(
     remote: tauri::State<'_, Arc<CloudRemote>>,
     target: CloudTarget,
     activation: Activation,
+    ssh_fence: Option<SshFence>,
 ) -> Result<String, String> {
     let scope = remote.scope().ok_or("account_signed_out")?;
     // The target's Organization is checked against the membership list (on a
@@ -414,11 +453,15 @@ pub async fn cloud_remote_attach(
         return Err("cloud_remote_organization_mismatch".into());
     }
     let identity = Identity { user_id: scope.user_id, profile_id: scope.profile_id, organization_id: target.organization_id };
+    if ssh_fence.as_ref().is_some_and(|fence| !fence.matches(&remote.account, &identity, &target.workspace_id)) {
+        return Err("ssh_account_changed".into());
+    }
     let source = Arc::new(ApiSource {
         service: remote.service.clone(),
         identity: identity.clone(),
         workspace_id: target.workspace_id,
         installation_id: installation_id()?,
+        expected_revision: ssh_fence.map(|fence| fence.revision),
     });
     let workspace_id = source.workspace_id.clone();
     Ok(remote.start(&app, Some(identity), Some(workspace_id), source, activation))
@@ -497,6 +540,37 @@ pub async fn cloud_port_unforward(remote: tauri::State<'_, Arc<CloudRemote>>, co
 #[tauri::command]
 pub async fn cloud_port_forwards(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<Vec<Forward>, String> {
     Ok(remote.ports(&connection_id)?.forwards())
+}
+
+/// Capture the native transport epoch before asking ssh.info. Reconnection,
+/// replacement and account transitions invalidate it before stream admission.
+#[tauri::command]
+pub async fn cloud_ssh_binding(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, org_id: String, workspace_id: String, fence: SshFence) -> Result<u64, String> {
+    remote.ssh_ports(&connection_id, &org_id, &workspace_id, &fence)?.generation()
+}
+
+#[tauri::command]
+pub async fn cloud_ssh_forward(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, org_id: String, workspace_id: String, fence: SshFence, generation: u64, owner: String, port: u16) -> Result<Forward, String> {
+    let ports = remote.ssh_ports(&connection_id, &org_id, &workspace_id, &fence)?;
+    let forward = ports.forward_owned(port, Some(org_id.clone()), &owner, generation).await?;
+    if remote.ssh_ports(&connection_id, &org_id, &workspace_id, &fence).is_err() || ports.generation() != Ok(generation) {
+        ports.close_owned(&owner);
+        return Err("ssh_connection_changed".into());
+    }
+    Ok(forward)
+}
+
+#[tauri::command]
+pub async fn cloud_ssh_keep(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, org_id: String, workspace_id: String, fence: SshFence, generation: u64, owner: String) -> Result<(), String> {
+    let ports = remote.ssh_ports(&connection_id, &org_id, &workspace_id, &fence)?;
+    if ports.generation() != Ok(generation) { return Err("ssh_connection_changed".into()); }
+    ports.keep_owned(&owner)
+}
+
+#[tauri::command]
+pub async fn cloud_ssh_close(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, owner: String) {
+    // Releasing a resource must still work after identity changes.
+    if let Some(attached) = remote.connections.lock().unwrap().get(&connection_id) { attached.ports.close_owned(&owner); }
 }
 
 /// Keep what `keys.get` answered, for the identity the connection was made for.
@@ -615,6 +689,32 @@ mod intercept_tests {
     }
 
     #[test]
+    fn ssh_stream_admission_checks_attachment_account_profile_workspace_and_revision() {
+        use crate::account::AccountContext;
+        let account = Arc::new(AccountManager::default());
+        let context = AccountContext { access_token: "test".into(), user_id: "user".into(), email: "test@example.com".into(), display_name: "Test".into(), profile_id: "profile".into(), organization_id: "org-a".into(), relay_entitled: true, generation: 1 };
+        account.set_context_for_test(Some(context.clone()));
+        let directory = tempfile::tempdir().unwrap();
+        let agents = Arc::new(CloudAgentClient::with(account.clone(), Arc::new(crate::cloud_agent_client::MemoryKeys::default()), url::Url::parse("http://127.0.0.1:9/").unwrap(), directory.path().join("keys")));
+        let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents);
+        let revision = AccountManager::context_revision(&context);
+        let fence = SshFence { scope: crate::workspace_ssh::scope("user", "org-a", "workspace"), revision: revision.clone() };
+        let (supervisor, _frames) = Supervisor::connected_for_test();
+        let ports = PortForwarder::new(|_| true);
+        ports.set_connected(Some(&["ports/1".into()]));
+        remote.connections.lock().unwrap().insert("connection".into(), Attached { supervisor, ports, identity: Some(made_in("org-a")), workspace_id: Some("workspace".into()), account_revision: Some(revision), account_generation: 1 });
+        assert!(remote.ssh_ports("connection", "org-a", "workspace", &fence).is_ok());
+        assert!(remote.ssh_ports("connection", "org-a", "other-workspace", &fence).is_err());
+        assert!(remote.ssh_ports("connection", "other-org", "workspace", &fence).is_err());
+        for changed in ["user", "profile", "generation"] {
+            let mut replacement = context.clone();
+            match changed { "user" => replacement.user_id = "other".into(), "profile" => replacement.profile_id = "other".into(), _ => replacement.generation += 1 }
+            account.set_context_for_test(Some(replacement));
+            assert!(remote.ssh_ports("connection", "org-a", "workspace", &fence).is_err());
+        }
+    }
+
+    #[test]
     fn typed_relay_closes_reach_the_diagnostics_log() {
         let reconnecting = |close_code| ClientState::Reconnecting { attempt: 1, reason: "4101 stale".into(), retry_in_ms: 250, close_code };
         assert_eq!(close_code(&reconnecting(Some(4101))), Some(4101));
@@ -673,7 +773,7 @@ mod intercept_tests {
         ));
         let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents);
         let (supervisor, mut frames) = Supervisor::connected_for_test();
-        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor, ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
+        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor, workspace_id: None, account_revision: None, account_generation: remote.account.current_generation(), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
 
         store.block_writes();
         let refreshing = {
@@ -741,7 +841,7 @@ mod intercept_tests {
         let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents.clone());
         let attach = |id: &str| {
             let (supervisor, frames) = Supervisor::connected_for_test();
-            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor, ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
+            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor, workspace_id: None, account_revision: None, account_generation: remote.account.current_generation(), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
             frames
         };
         let _frames = attach("cloud-1");

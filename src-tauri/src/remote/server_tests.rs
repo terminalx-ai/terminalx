@@ -3549,7 +3549,10 @@ async fn an_interrupt_needs_no_member_list_and_a_runtime_without_agents_says_so(
 async fn ssh_info_requires_current_approval_even_for_a_stale_manage_attachment() {
     let f = fixture();
     let (peer, _events) = Peer::for_user("ssh-device".into(), Authority::Manage, Some("person".into()));
-    call(&f.rpc, &peer, "rpc.hello", json!({"protocol":PROTOCOL,"want":["ssh/1","ports/1"]})).await.unwrap();
+    let hello = call(&f.rpc, &peer, "rpc.hello", json!({"protocol":PROTOCOL,"want":["ssh/1","ports/1"]})).await.unwrap();
+    assert!(!hello["capabilities"].as_array().unwrap().iter().any(|cap| cap == "ssh/1"), "no SSH advertised before executable/config validation");
+    // Also exercise current-rights defense for a previously negotiated peer.
+    peer.granted.lock().unwrap().as_mut().unwrap().insert("ssh/1".into());
     for (role, approve) in [("viewer", true), ("driver", false), ("none", false)] {
         f.rpc.set_collaboration(members(json!([{"userId":"person","role":role,"canApprove":approve}])));
         assert_eq!(code(call(&f.rpc,&peer,"ssh.info",json!({})).await),"forbidden");

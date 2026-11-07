@@ -9,6 +9,17 @@ use std::sync::{
 };
 use std::time::Duration;
 
+struct ProxyLease(String);
+impl Drop for ProxyLease {
+    fn drop(&mut self) {
+        let _ = crate::control::call(
+            "cloud.ssh-close",
+            json!({"leaseId": self.0}),
+            Duration::from_secs(10),
+        );
+    }
+}
+
 pub fn run(org: &str, workspace: &str, scope: &str, output: &mut dyn Write) -> Result<(), String> {
     let result = crate::control::call(
         "cloud.ssh-open",
@@ -32,6 +43,7 @@ pub fn run(org: &str, workspace: &str, scope: &str, output: &mut dyn Write) -> R
         .as_str()
         .ok_or("Invalid SSH proxy lease")?
         .to_string();
+    let _lease = ProxyLease(lease.clone());
     let stopped = Arc::new(AtomicBool::new(false));
     let stop = stopped.clone();
     let keep = lease.clone();
@@ -58,11 +70,6 @@ pub fn run(org: &str, workspace: &str, scope: &str, output: &mut dyn Write) -> R
     let outcome =
         bridge(std::io::stdin(), output, socket).map_err(|_| "SSH proxy disconnected".to_string());
     stopped.store(true, Ordering::SeqCst);
-    let _ = crate::control::call(
-        "cloud.ssh-close",
-        json!({"leaseId":lease}),
-        Duration::from_secs(10),
-    );
     outcome
 }
 

@@ -18,11 +18,15 @@ Neither enabling nor connecting wakes stopped compute. Key propagation waits
 for the runtime's next member refresh.
 
 The ProxyCommand invokes `terminalx ssh-proxy --organization … --workspace …
---scope …`. The native scope check binds it to the account that configured it.
+--scope …`. The checked account/profile revision travels through attachment acquisition and
+native stream admission. `ssh.info` and the forward must use the same captured
+connection id and native transport epoch; replacement or account transition
+refuses the open.
 The app opens the existing authenticated E2EE `ports/1` stream, and the proxy
-copies raw stdin/stdout with half-close handling. SSH leases expire when the
-CLI stops renewing, and existing connection/account/privacy invalidation
-continues to own the transport. The tunnel never exposes a public SSH port.
+copies raw stdin/stdout with half-close handling. Each proxy owns a separate loopback listener and its streams. Closing it
+releases those resources without touching other proxies, previews or workspace
+leases. A native 45-second renewal deadline also bounds lost control replies
+and vanished CLI/window owners; late stream-open answers are closed. The tunnel never exposes a public SSH port.
 
 Only the Linux cloud runtime starts this SSH implementation. It binds a random
 port on `127.0.0.1`, then gives accepted sockets to isolated `sshd -i` children.
@@ -30,13 +34,20 @@ It never starts/enables the machine's SSH service, reads `/etc/ssh/sshd_config`,
 or edits the user's authorized_keys. Its private runtime directory holds host
 identity, config and a fresh authorized_keys file. Runtime bootstrap extracts
 OpenSSH into `/opt/terminalx/openssh` without running package maintainer scripts.
-The same unprivileged workspace account runs the shell. Forwarding, password
+The shared idempotent setup runs for fresh and existing-user installs,
+headless and AppImage fast/image resumes, required and offered reinstalls, and
+the legacy machine0 installer. It repairs the old nologin account shell and
+resolves the private executable's dependencies. The runtime checks the actual
+executable/config before advertising `ssh/1`. The same unprivileged workspace
+account runs the shell. Forwarding, password
 login, user rc files and user environment files are disabled.
 
 The key list is recomputed on every authoritative member update, including
 key-only changes. Only `manager || (driver && canApprove)` qualifies. Missing,
 malformed or expired SSH grants authorize nothing. A server-issued 60-second
-expiry prevents a cached bootstrap response from extending access. Changing
+absolute expiry is retained with each admitted key and ends new admission
+and live sessions. A monotonic deadline prevents clock rollback or replay
+from extending a grant; the local liveness limit can only shorten it. Changing
 keys closes sessions in the previous key generation; a rejected runtime
 credential clears keys. `ssh.info` and the port stream apply current runtime
 rights, even for previously issued manage attachments.
@@ -58,7 +69,13 @@ refusal and key-update cancellation. The opt-in Linux test
 temporary keys and the actual product listener/sshd to check shell identity,
 non-loopback refusal, viewer refusal and removal. Run only in an existing
 controlled disposable Linux workspace with `TERMINALX_DISPOSABLE_SSH_ACCEPTANCE=1`
-and the product's OpenSSH binary (or `TERMINALX_TEST_SSHD`). It does not modify a
+and the product's OpenSSH binary (or `TERMINALX_TEST_SSHD`). Run it as the
+bootstrapped `terminalx-runtime` account: the fixture refuses another user.
+The server's opt-in `cloudWorkspaceSshSetup.docker.test.ts` covers fresh and
+preexisting nologin accounts with actual private OpenSSH dependency setup.
+Clock-controlled Rust regressions cover short expiry, cached replay, rotation,
+renewal and local liveness; owned-forward regressions cover socket teardown,
+late answers, expiry and preservation of simultaneous proxies/previews. It does not modify a
 host SSH service. These native tests have **not** run under the current host
 startup incident and remain required acceptance gates.
 

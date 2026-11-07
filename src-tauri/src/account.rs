@@ -676,6 +676,15 @@ impl AccountManager {
     /// reach, as last loaded, without a Keychain load or token refresh:
     /// cheap enough to poll, and never waiting on either (the account lock
     /// is not held across them).
+    /// One locked snapshot for account-bound stream admission. No token leaves
+    /// native code, and sign-out/sign-in to the same profile changes revision.
+    pub(crate) fn cloud_revision(&self, organization: &str) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        let session = inner.session.as_ref()?;
+        if !cloud_scope(session).allows(organization) { return None; }
+        Some(format!("{}:{}", context_scope(&session.cloud.user_id, &session.cloud.cloud_profile_id, organization), inner.generation))
+    }
+
     pub(crate) fn current_generation(&self) -> u64 { self.inner.lock().unwrap().generation }
 
     pub(crate) fn current_scope(&self) -> Option<CloudScope> {

@@ -492,8 +492,8 @@ export const api = {
   cloudWorkspaceOperationCancel: (operationId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation_cancel", { operationId, orgId: orgId ?? null }),
   // Remote runtime connections (PRO-13); relay credentials and E2EE keys stay native.
-  cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
-    invoke<string>("cloud_remote_attach", { target, activation }),
+  cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation, sshFence?: SshFence) =>
+    invoke<string>("cloud_remote_attach", { target, activation, sshFence }),
   cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
   /**
    * Forward a port of the connection's workspace to this Mac's loopback (PRO-28,
@@ -2826,6 +2826,8 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
   }
 }
 
+export interface SshFence { scope: string; revision: string }
+
 export interface CloudWorkspaceConnection {
   target: WorkspaceTarget;
   client: WorkspaceRpcClient;
@@ -2844,7 +2846,7 @@ const connections = new Map<string, Promise<CloudWorkspaceConnection>>();
  * connection per target, even for concurrent callers; `connect` never wakes
  * suspended compute.
  */
-export async function workspaceConnection(target: WorkspaceTarget, activation: Activation = "connect"): Promise<CloudWorkspaceConnection | null> {
+export async function workspaceConnection(target: WorkspaceTarget, activation: Activation = "connect", sshFence?: SshFence): Promise<CloudWorkspaceConnection | null> {
   if (target.kind === "local") return null;
   const key = workspaceTargetKey(target);
   const existing = connections.get(key);
@@ -2853,7 +2855,7 @@ export async function workspaceConnection(target: WorkspaceTarget, activation: A
     if (activation === "wake") await connection.activate("wake");
     return connection;
   }
-  const pending = adopt(key, target, (transport) => api.cloudRemoteAttach(target, activation).then((id) => (transport.bind(id), id)));
+  const pending = adopt(key, target, (transport) => api.cloudRemoteAttach(target, activation, sshFence).then((id) => (transport.bind(id), id)));
   connections.set(key, pending);
   pending.catch(() => {
     if (connections.get(key) === pending) connections.delete(key);

@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
@@ -65,14 +65,18 @@ pub struct Forward {
     pub reassigned: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ForwardKey { port: u16, owner: Option<String> }
+
 struct Listening {
     forward: Forward,
     stop: CancellationToken,
+    expires: Option<Instant>,
 }
 
 struct Stream {
     /// The workspace port, so stopping its forward ends it.
-    port: u16,
+    key: ForwardKey,
     to_local: mpsc::UnboundedSender<Vec<u8>>,
     /// Bytes from the runtime not yet written to the local side.
     queued: Arc<AtomicUsize>,
@@ -84,22 +88,30 @@ struct Stream {
 
 #[derive(Default)]
 struct Early {
+    owner: Option<ForwardKey>,
     data: Vec<Vec<u8>>,
     closed: bool,
 }
 
+struct Opening { key: ForwardKey, answer: oneshot::Sender<Result<Value, String>> }
+
 #[derive(Default)]
 struct State {
-    forwards: HashMap<u16, Listening>,
+    forwards: HashMap<ForwardKey, Listening>,
     /// Counts the times the connection was lost: a stream opened on one
     /// connection is never registered on the next.
     epoch: u64,
     /// The active organization when the first forward was made; a forward
     /// does not outlive a switch to another.
     scope: Option<String>,
-    opens: HashMap<String, oneshot::Sender<Result<Value, String>>>,
+    opens: HashMap<String, Opening>,
     streams: HashMap<String, Stream>,
     early: HashMap<String, Early>,
+}
+
+struct PendingOpen { inner: Arc<Inner>, id: String }
+impl Drop for PendingOpen {
+    fn drop(&mut self) { self.inner.state.lock().unwrap().opens.remove(&self.id); }
 }
 
 type Send = Box<dyn Fn(Value) -> bool + std::marker::Send + Sync>;
@@ -191,7 +203,7 @@ impl PortForwarder {
             stream.end.cancel();
         }
         for (_, answer) in state.opens.drain() {
-            let _ = answer.send(Err("disconnected".into()));
+            let _ = answer.answer.send(Err("disconnected".into()));
         }
         state.early.clear();
     }
@@ -208,7 +220,7 @@ impl PortForwarder {
     }
 
     pub fn forwards(&self) -> Vec<Forward> {
-        let mut forwards: Vec<Forward> = self.inner.state.lock().unwrap().forwards.values().map(|listening| listening.forward.clone()).collect();
+        let mut forwards: Vec<Forward> = self.inner.state.lock().unwrap().forwards.iter().filter(|(key, _)| key.owner.is_none()).map(|(_, listening)| listening.forward.clone()).collect();
         forwards.sort_by_key(|forward| forward.port);
         forwards
     }
@@ -221,11 +233,44 @@ impl PortForwarder {
     /// is the active organization, which the forward does not outlive.
     /// Never wakes the workspace: a connection that is not live is refused.
     pub async fn forward(&self, port: u16, local: Option<u16>, exact: bool, scope: Option<String>) -> Result<Forward, String> {
+        self.forward_key(ForwardKey { port, owner: None }, local, exact, scope, None).await
+    }
+
+    pub fn generation(&self) -> Result<u64, String> {
+        let state = self.inner.state.lock().unwrap();
+        if !self.inner.ready.load(Ordering::SeqCst) { return Err("cloud_port_not_connected".into()); }
+        Ok(state.epoch)
+    }
+
+    /// A proxy owns a distinct listener and every stream accepted from it.
+    /// A native deadline bounds resources even when the webview/CLI disappears.
+    pub async fn forward_owned(&self, port: u16, scope: Option<String>, owner: &str, generation: u64) -> Result<Forward, String> {
+        if owner.is_empty() || owner.len() > 64 { return Err("ssh_owner_invalid".into()); }
+        self.forward_key(ForwardKey { port, owner: Some(owner.into()) }, None, false, scope, Some(generation)).await
+    }
+
+    pub fn keep_owned(&self, owner: &str) -> Result<(), String> {
+        let mut state = self.inner.state.lock().unwrap();
+        let listening = state.forwards.iter_mut().find(|(key, _)| key.owner.as_deref() == Some(owner)).map(|(_, listening)| listening).ok_or("ssh_proxy_ended")?;
+        if listening.expires.is_none_or(|until| until <= Instant::now()) { return Err("ssh_proxy_ended".into()); }
+        listening.expires = Some(Instant::now() + Duration::from_secs(45));
+        Ok(())
+    }
+
+    pub fn close_owned(&self, owner: &str) -> bool {
+        let key = self.inner.state.lock().unwrap().forwards.keys().find(|key| key.owner.as_deref() == Some(owner)).cloned();
+        key.is_some_and(|key| self.close_key(&key))
+    }
+
+    async fn forward_key(&self, key: ForwardKey, local: Option<u16>, exact: bool, scope: Option<String>, generation: Option<u64>) -> Result<Forward, String> {
+        let port = key.port;
         if port == 0 {
             return Err("cloud_port_invalid".into());
         }
-        if let Some(listening) = self.inner.state.lock().unwrap().forwards.get(&port) {
-            return Ok(listening.forward.clone());
+        {
+            let state = self.inner.state.lock().unwrap();
+            if generation.is_some_and(|expected| expected != state.epoch) { return Err("ssh_connection_changed".into()); }
+            if let Some(listening) = state.forwards.get(&key) { return Ok(listening.forward.clone()); }
         }
         if !self.inner.ready.load(Ordering::SeqCst) {
             return Err("cloud_port_not_connected".into());
@@ -237,7 +282,7 @@ impl PortForwarder {
         {
             let mut state = self.inner.state.lock().unwrap();
             // Two requests for the same port raced: the first one stands.
-            if let Some(listening) = state.forwards.get(&port) {
+            if let Some(listening) = state.forwards.get(&key) {
                 return Ok(listening.forward.clone());
             }
             // Read again under the lock that a disconnect takes to close
@@ -246,27 +291,45 @@ impl PortForwarder {
             if !self.inner.ready.load(Ordering::SeqCst) {
                 return Err("cloud_port_not_connected".into());
             }
-            if state.scope.is_none() {
-                state.scope = scope;
-            }
-            state.forwards.insert(port, Listening { forward: forward.clone(), stop: stop.clone() });
+            if generation.is_some_and(|expected| expected != state.epoch) { return Err("ssh_connection_changed".into()); }
+            if key.owner.is_some() && state.forwards.keys().filter(|key| key.owner.is_some()).count() >= 16 { return Err("ssh_proxy_limit".into()); }
+            if state.scope.is_none() { state.scope = scope; }
+            state.forwards.insert(key.clone(), Listening { forward: forward.clone(), stop: stop.clone(), expires: key.owner.as_ref().map(|_| Instant::now() + Duration::from_secs(45)) });
         }
         let forwarder = self.clone();
         tokio::spawn(async move {
             loop {
+                let until = forwarder.inner.state.lock().unwrap().forwards.get(&key)
+                    .and_then(|entry| entry.expires).unwrap_or_else(|| Instant::now() + Duration::from_secs(45));
                 let accepted = tokio::select! {
                     _ = stop.cancelled() => return,
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(until)), if key.owner.is_some() => {
+                        let expired = forwarder.inner.state.lock().unwrap().forwards.get(&key)
+                            .is_none_or(|entry| entry.expires.is_some_and(|until| until <= Instant::now()));
+                        if expired { forwarder.close_key(&key); return; }
+                        continue;
+                    }
                     accepted = listener.accept() => accepted,
                 };
                 let Ok((socket, _)) = accepted else { continue };
+                if key.owner.is_some() && forwarder.inner.state.lock().unwrap().forwards.get(&key)
+                    .is_none_or(|entry| entry.expires.is_none_or(|until| until <= Instant::now())) {
+                    forwarder.close_key(&key); return;
+                }
                 // Over the limit, a connection is closed, not queued.
                 if forwarder.inner.carried.fetch_add(1, Ordering::SeqCst) >= MAX_LOCAL_CONNECTIONS {
                     forwarder.inner.carried.fetch_sub(1, Ordering::SeqCst);
                     continue;
                 }
                 let forwarder = forwarder.clone();
+                let key = key.clone();
+                let stop = stop.clone();
                 tokio::spawn(async move {
-                    forwarder.serve(socket, port, local_port).await;
+                    // Covers silent clients, in-flight opens and live streams.
+                    tokio::select! {
+                        _ = stop.cancelled() => {},
+                        _ = forwarder.serve(socket, key, local_port) => {},
+                    }
                     forwarder.inner.carried.fetch_sub(1, Ordering::SeqCst);
                 });
             }
@@ -277,11 +340,17 @@ impl PortForwarder {
     /// Stop forwarding `port`: the listener closes, and so does every
     /// connection it was carrying.
     pub fn unforward(&self, port: u16) -> bool {
+        self.close_key(&ForwardKey { port, owner: None })
+    }
+
+    fn close_key(&self, key: &ForwardKey) -> bool {
         let closed: Vec<String> = {
             let mut state = self.inner.state.lock().unwrap();
-            let Some(listening) = state.forwards.remove(&port) else { return false };
+            let Some(listening) = state.forwards.remove(key) else { return false };
             listening.stop.cancel();
-            let ids: Vec<String> = state.streams.iter().filter(|(_, stream)| stream.port == port).map(|(id, _)| id.clone()).collect();
+            let mut ids: Vec<String> = state.streams.iter().filter(|(_, stream)| &stream.key == key).map(|(id, _)| id.clone()).collect();
+            let answered: Vec<String> = state.early.iter().filter(|(_, early)| early.owner.as_ref() == Some(key)).map(|(id, _)| id.clone()).collect();
+            for id in answered { state.early.remove(&id); ids.push(id); }
             for id in &ids {
                 if let Some(stream) = state.streams.remove(id) {
                     stream.end.cancel();
@@ -303,7 +372,8 @@ impl PortForwarder {
     /// nothing at first gets its stream anyway after [`SILENT_OPEN`], so a
     /// protocol whose server speaks first works; what the client then sends
     /// is still judged before it goes anywhere.
-    async fn serve(&self, mut socket: TcpStream, port: u16, local_port: u16) {
+    async fn serve(&self, mut socket: TcpStream, key: ForwardKey, local_port: u16) {
+        let port = key.port;
         if !self.inner.ready.load(Ordering::SeqCst) {
             answer_and_close(&mut socket, &page("503 Service Unavailable", STOPPED)).await;
             return;
@@ -329,9 +399,10 @@ impl PortForwarder {
         let (answer, answered) = oneshot::channel();
         let epoch = {
             let mut state = self.inner.state.lock().unwrap();
-            state.opens.insert(request.clone(), answer);
+            state.opens.insert(request.clone(), Opening { key: key.clone(), answer });
             state.epoch
         };
+        let _pending = PendingOpen { inner: self.inner.clone(), id: request.clone() };
         let sent = (self.inner.send)(json!({ "id": request, "method": "ports.open", "params": { "port": port } }));
         let opened = if sent { tokio::time::timeout(OPEN_TIMEOUT, answered).await.ok().and_then(Result::ok) } else { None };
         self.inner.state.lock().unwrap().opens.remove(&request);
@@ -361,7 +432,7 @@ impl PortForwarder {
                 // The connection was lost between the answer and here: the
                 // stream died with it, and the local side just ends.
                 None
-            } else if !state.forwards.contains_key(&port) {
+            } else if !state.forwards.contains_key(&key) {
                 // The forward was stopped meanwhile: the stream is given back.
                 state.early.remove(&stream_id);
                 Some(false)
@@ -376,7 +447,7 @@ impl PortForwarder {
                     // The sender is dropped: what came is delivered, then the end.
                     end.cancel();
                 } else {
-                    state.streams.insert(stream_id.clone(), Stream { port, to_local, queued: queued.clone(), in_flight: in_flight.clone(), drained: drained.clone(), end: end.clone() });
+                    state.streams.insert(stream_id.clone(), Stream { key: key.clone(), to_local, queued: queued.clone(), in_flight: in_flight.clone(), drained: drained.clone(), end: end.clone() });
                 }
                 Some(true)
             }
@@ -498,7 +569,7 @@ impl PortForwarder {
         if let Some(id) = message.get("id").and_then(Value::as_str).filter(|id| id.starts_with(REQUEST_PREFIX)) {
             let ok = message.get("ok").and_then(Value::as_bool) == Some(true);
             let mut state = self.inner.state.lock().unwrap();
-            if let Some(answer) = state.opens.remove(id) {
+            if let Some(opening) = state.opens.remove(id) {
                 let result = if ok {
                     Ok(message.get("result").cloned().unwrap_or(Value::Null))
                 } else {
@@ -506,12 +577,30 @@ impl PortForwarder {
                 };
                 // Nobody is waiting any more (the local side gave up): the
                 // stream the runtime opened is closed again.
-                if let Err(Ok(opened)) = answer.send(result) {
+                if let Ok(opened) = &result {
+                    if let Some(stream_id) = opened.get("streamId").and_then(Value::as_str) {
+                        if !state.forwards.contains_key(&opening.key) {
+                            state.early.remove(stream_id);
+                            drop(state);
+                            let _ = opening.answer.send(Err("disconnected".into()));
+                            (self.inner.send)(json!({ "id": self.id("close"), "method": "ports.close", "params": { "streamId": stream_id } }));
+                            return true;
+                        }
+                        state.early.entry(stream_id.into()).or_default().owner = Some(opening.key);
+                    }
+                }
+                if let Err(Ok(opened)) = opening.answer.send(result) {
                     if let Some(stream_id) = opened.get("streamId").and_then(Value::as_str) {
                         state.early.remove(stream_id);
                         drop(state);
                         (self.inner.send)(json!({ "id": self.id("close"), "method": "ports.close", "params": { "streamId": stream_id } }));
                     }
+                }
+            } else if ok && id.starts_with("ports-open-") {
+                if let Some(stream_id) = message.pointer("/result/streamId").and_then(Value::as_str) {
+                    state.early.remove(stream_id);
+                    drop(state);
+                    (self.inner.send)(json!({ "id": self.id("close"), "method": "ports.close", "params": { "streamId": stream_id } }));
                 }
             } else if !ok {
                 // A write the runtime refused ends its stream.
@@ -563,7 +652,7 @@ impl PortForwarder {
                 } else if let Some(early) = state.early.get_mut(stream_id) {
                     early.closed = true;
                 } else if state.early.len() < MAX_EARLY_STREAMS {
-                    state.early.insert(stream_id.to_string(), Early { data: Vec::new(), closed: true });
+                    state.early.insert(stream_id.to_string(), Early { owner: None, data: Vec::new(), closed: true });
                 }
             }
             _ => {}
@@ -764,6 +853,61 @@ mod tests {
 
     fn get(local: u16) -> Vec<u8> {
         format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{local}\r\n\r\n").into_bytes()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_ssh_close_cancels_only_its_socket_and_preserves_other_ssh_and_preview() {
+        let (forwarder, mut requests) = forwarder();
+        let ordinary = forwarder.clone(); // an ordinary workspace lease remains alive
+        let generation = forwarder.generation().unwrap();
+        let preview = forwarder.forward(3000, None, false, None).await.unwrap();
+        let first = forwarder.forward_owned(3000, None, "first", generation).await.unwrap();
+        let second = forwarder.forward_owned(3000, None, "second", generation).await.unwrap();
+        assert_ne!(first.local_port, second.local_port);
+        assert_ne!(preview.local_port, first.local_port);
+        let mut first_socket = connect(first.local_port).await;
+        first_socket.write_all(b"SSH-2.0-test\r\n").await.unwrap();
+        let opened = next(&mut requests, "ports.open").await;
+        forwarder.on_message(&json!({"id":opened["id"],"ok":true,"result":{"streamId":"first-stream"}}));
+        next(&mut requests, "ports.write").await; // registered and live
+        assert!(forwarder.close_owned("first"));
+        assert_eq!(next(&mut requests, "ports.close").await["params"]["streamId"], "first-stream");
+        assert_eq!(read_all(&mut first_socket).await, "");
+        // Let the cancelled listener task drop its socket.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, first.local_port)).await.is_err());
+        assert!(forwarder.keep_owned("second").is_ok());
+        let mut second_socket = connect(second.local_port).await;
+        second_socket.write_all(b"SSH-2.0-second\r\n").await.unwrap();
+        let second_open = next(&mut requests, "ports.open").await;
+        let mut browser = connect(preview.local_port).await;
+        browser.write_all(&get(preview.local_port)).await.unwrap();
+        let preview_open = next(&mut requests, "ports.open").await;
+        assert_ne!(second_open["id"], preview_open["id"]);
+        assert_eq!(ordinary.forwards(), vec![preview]);
+        forwarder.close_owned("second");
+        // Answer after cancellation: the remote stream is returned, not orphaned.
+        forwarder.on_message(&json!({"id":second_open["id"],"ok":true,"result":{"streamId":"late-second"}}));
+        assert_eq!(next(&mut requests, "ports.close").await["params"]["streamId"], "late-second");
+        forwarder.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_proxy_expiry_and_generation_replacement_refuse_resources() {
+        let (forwarder, _requests) = forwarder();
+        let generation = forwarder.generation().unwrap();
+        let preview = forwarder.forward(4000, None, false, None).await.unwrap();
+        let ssh = forwarder.forward_owned(4000, None, "expired", generation).await.unwrap();
+        // Controlled native deadline; no forty-five-second test sleep.
+        forwarder.inner.state.lock().unwrap().forwards.get_mut(&ForwardKey {port:4000, owner:Some("expired".into())}).unwrap().expires = Some(Instant::now());
+        assert!(forwarder.keep_owned("expired").is_err());
+        let mut abandoned = connect(ssh.local_port).await;
+        assert_eq!(read_all(&mut abandoned).await, "");
+        assert_eq!(forwarder.forwards(), vec![preview]);
+        forwarder.set_connected(None);
+        forwarder.set_connected(Some(&["ports/1".into()]));
+        assert!(forwarder.forward_owned(4000, None, "stale", generation).await.is_err());
+        assert!(forwarder.inner.state.lock().unwrap().forwards.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

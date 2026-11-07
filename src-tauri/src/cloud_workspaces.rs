@@ -2734,10 +2734,20 @@ impl CloudWorkspaceService {
         client_installation_id: &str,
         refresh_pairing: bool,
     ) -> Result<(String, Value), CloudWorkspaceClientError> {
+        self.open_attachment_in_revision(org, workspace_id, client_installation_id, refresh_pairing, None)
+    }
+
+    pub(crate) fn open_attachment_in_revision(
+        &self, org: Option<&str>, workspace_id: &str, client_installation_id: &str,
+        refresh_pairing: bool, revision: Option<&str>,
+    ) -> Result<(String, Value), CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
         self.run_in(org, RequestRisk::Mutation, |client, context| {
+            if revision.is_some_and(|expected| expected != AccountManager::context_revision(context)) {
+                return Err(context_changed_error(RequestRisk::Mutation));
+            }
             let mut body = json!({ "clientInstallationId": client_installation_id });
             if refresh_pairing {
                 body["refreshPairing"] = json!(true);
@@ -3709,6 +3719,29 @@ mod tests {
         account.set_memberships_for_test(&["org-1"], true);
         assert!(listing.join().unwrap().is_err(), "an answer for an organization the user left never lands");
         request.join().unwrap();
+    }
+
+    #[test]
+    fn ssh_checked_revision_cannot_acquire_an_attachment_after_account_profile_or_session_switch() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        for changed in ["user", "profile", "generation"] {
+            let (account, service) = test_service(&base);
+            let expected = context();
+            let scope = crate::workspace_ssh::scope(&expected.user_id, "org-1", "ws-1");
+            let revision = service.ssh_check_scope("org-1", "ws-1", &scope).unwrap();
+            let mut replacement = expected;
+            match changed {
+                "user" => replacement.user_id = "other-user".into(),
+                "profile" => replacement.profile_id = "other-profile".into(),
+                _ => replacement.generation += 1,
+            }
+            account.set_context_for_test(Some(replacement));
+            let error = service.open_attachment_in_revision(Some("org-1"), "ws-1", "installation", false, Some(&revision)).unwrap_err();
+            assert_eq!(error.code, "account_context_changed");
+            assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock, "no new-account API attachment request");
+        }
     }
 
     fn feed_service(base: &str, organizations: &[&str]) -> (Arc<AccountManager>, Arc<CloudWorkspaceService>) {

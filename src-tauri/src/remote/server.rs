@@ -844,7 +844,8 @@ impl WorkspaceRpc {
 
     async fn dispatch(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
         if method == "rpc.hello" {
-            let granted = protocol::negotiate(&params)?;
+            let mut granted = protocol::negotiate(&params)?;
+            if self.ssh.get().is_none() { granted.retain(|cap| cap != "ssh/1"); }
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
             peer.phone.store(params["client"]["app"].as_str() == Some(MOBILE_APP), Ordering::SeqCst);
             if self.peers.lock().unwrap().insert(peer.id, Arc::downgrade(peer)).is_none() {

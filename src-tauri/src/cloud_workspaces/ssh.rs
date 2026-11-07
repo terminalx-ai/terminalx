@@ -9,7 +9,7 @@ impl CloudWorkspaceService {
         org: &str,
         workspace: &str,
         scope: &str,
-    ) -> Result<(), CloudWorkspaceClientError> {
+    ) -> Result<String, CloudWorkspaceClientError> {
         self.run_in(Some(org), RequestRisk::Read, |_, context| {
             if crate::workspace_ssh::scope(&context.user_id, org, workspace) != scope {
                 return Err(CloudWorkspaceClientError::local(
@@ -17,7 +17,7 @@ impl CloudWorkspaceService {
                     false,
                 ));
             }
-            Ok(())
+            Ok(crate::account::AccountManager::context_revision(context))
         })
     }
 

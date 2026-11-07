@@ -4949,6 +4949,6 @@ pub fn ssh_private_key_path(path: Option<String>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn cloud_ssh_check_scope(state: tauri::State<'_, crate::AppState>, org_id: String, workspace_id: String, scope: String) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+pub async fn cloud_ssh_check_scope(state: tauri::State<'_, crate::AppState>, org_id: String, workspace_id: String, scope: String) -> Result<String, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.ssh_check_scope(&org_id, &workspace_id, &scope))
 }

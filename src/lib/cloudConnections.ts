@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type Activation, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { hasWorkspaceConnection, workspaceConnection, type CloudWorkspaceConnection } from "@/lib/api";
+import { hasWorkspaceConnection, workspaceConnection, type CloudWorkspaceConnection, type SshFence } from "@/lib/api";
 import { detachCloudTerminals } from "@/lib/cloudTerminals";
 import { cloudWorkspaceKey } from "@/types/target";
 
@@ -420,7 +420,7 @@ function stronger(a: LeaseActivation | null, b: LeaseActivation): boolean {
   return b === "wake" && a !== "wake";
 }
 
-async function open(entry: Entry, activation: LeaseActivation): Promise<CloudWorkspaceConnection> {
+async function open(entry: Entry, activation: LeaseActivation, sshFence?: SshFence): Promise<CloudWorkspaceConnection> {
   // Someone else closed the api's connection underneath (the full-window page): start over.
   if (entry.connection && !hasWorkspaceConnection({ kind: "cloud", organizationId: entry.target.orgId, workspaceId: entry.target.workspaceId })) {
     entry.unwatch?.();
@@ -436,7 +436,7 @@ async function open(entry: Entry, activation: LeaseActivation): Promise<CloudWor
     const target = { kind: "cloud" as const, organizationId: entry.target.orgId, workspaceId: entry.target.workspaceId };
     entry.activation = activation;
     if (activation === "wake") setInfo(entry, { woke: true });
-    const pending = workspaceConnection(target, activation).then((connection) => {
+    const pending = workspaceConnection(target, activation, sshFence).then((connection) => {
       if (!connection) throw new Error("cloud_workspace_not_connected");
       return connection;
     });
@@ -476,7 +476,7 @@ async function open(entry: Entry, activation: LeaseActivation): Promise<CloudWor
  * workspace; `wake` does, once (see `wakeCloudConnection` to share one wake
  * among concurrent callers). Release the lease when done.
  */
-export async function retainCloudConnection(target: CloudTarget, activation: LeaseActivation = "connect"): Promise<CloudLease> {
+export async function retainCloudConnection(target: CloudTarget, activation: LeaseActivation = "connect", sshFence?: SshFence): Promise<CloudLease> {
   const entry = entryFor(target);
   entry.refs++;
   entry.lastUsed = clock();
@@ -485,7 +485,7 @@ export async function retainCloudConnection(target: CloudTarget, activation: Lea
   setInfo(entry, { refs: entry.refs });
   let connection: CloudWorkspaceConnection;
   try {
-    connection = await open(entry, activation);
+    connection = await open(entry, activation, sshFence);
   } catch (error) {
     releaseEntry(entry);
     throw error;
