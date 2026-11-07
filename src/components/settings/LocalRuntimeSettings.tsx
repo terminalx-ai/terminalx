@@ -1,3 +1,4 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
 import { errorMessage, localRuntime, type LocalRuntimeSettings as Settings, type QuitBehavior } from "@/lib/api";
 
@@ -30,7 +31,7 @@ export function LocalRuntimeSettings() {
 
   if (!available) return null;
   return (
-    <section aria-label="Quitting TerminalX" className="space-y-2">
+    <RegisteredSetting setting="general.quitBehavior"><section aria-label="Quitting TerminalX" className="space-y-2">
       <label className="block text-[13px]" htmlFor="local-runtime-quit-behavior">When quitting TerminalX</label>
       <select id="local-runtime-quit-behavior" className="w-full rounded-md border border-hairline bg-background px-2 py-1.5 text-xs" value={settings?.quitBehavior ?? "keepRunning"} disabled={!settings || saving} onChange={(event) => void save(event.target.value as QuitBehavior)}>
         <option value="keepRunning">Quit and keep agents running (default)</option>
@@ -38,6 +39,6 @@ export function LocalRuntimeSettings() {
       </select>
       <p className="text-xs text-muted-foreground">Keeping work running lets agents and terminal commands continue in the background. Reopening TerminalX reconnects to them. You can always stop everything from the app menu or menu-bar item.</p>
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-    </section>
+    </section></RegisteredSetting>
   );
 }
