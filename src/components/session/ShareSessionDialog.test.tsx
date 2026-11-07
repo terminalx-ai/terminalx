@@ -4,7 +4,8 @@ import { LocalShareButton, ShareSessionDialogHost } from "./ShareSessionDialog";
 import { closeSessionShare, EMPTY_SHARE, openSessionShare, type ShareState } from "@/lib/localSharing";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), signedIn: true }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), signedIn: true, sessions: [] as unknown[] }));
+vi.mock("@/lib/sessions", async (original) => ({ ...(await original<typeof import("@/lib/sessions")>()), useSessionStore: () => ({ sessions: mocks.sessions }) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/account", () => ({
@@ -18,6 +19,7 @@ beforeEach(() => {
   mocks.signedIn = true;
   // Most of these are about the link's settings: a host who has shared before, so Share opens on them.
   setPrefs({ shareOnboarded: true });
+  mocks.sessions = [];
 });
 afterEach(() => {
   closeSessionShare();
@@ -31,6 +33,21 @@ const open = async () => {
   await screen.findByRole("button", { name: "Create share link" });
 };
 describe("Share session", () => {
+  it("settles a tab in Bypass beside the link: says why, holds Create, and switches every agent tab", async () => {
+    mocks.sessions = [{ id: "local-session", tabs: [{ id: "a", permissionMode: "bypassPermissions" }, { id: "b", permissionMode: "acceptEdits" }] }];
+    render(<ShareSessionDialogHost />);
+    act(() => openSessionShare("local-session"));
+    expect((await screen.findByTestId("share-unguarded")).textContent).toContain("Bypass permissions");
+    expect(screen.getByRole("button", { name: "Create share link" }).matches(":disabled")).toBe(true);
+    const picker = screen.getByLabelText("Session permissions") as HTMLSelectElement;
+    expect(picker.value).toBe("__mixed__");
+    // Bypass is not offered while sharing.
+    expect([...picker.options].filter((option) => !option.disabled).map((option) => option.value)).not.toContain("bypassPermissions");
+    fireEvent.change(picker, { target: { value: "acceptEdits" } });
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("set_tab_permission_mode", { sessionId: "local-session", tabId: "b", mode: "acceptEdits" }));
+    expect(mocks.invoke).toHaveBeenCalledWith("set_tab_permission_mode", { sessionId: "local-session", tabId: "a", mode: "acceptEdits" });
+  });
+
   it("introduces sharing on the first share, and then opens on the link's settings with the introduction a click away", async () => {
     setPrefs({ shareOnboarded: false });
     render(<ShareSessionDialogHost />);

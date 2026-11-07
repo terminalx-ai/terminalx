@@ -4,6 +4,9 @@ import { Switch } from "@/components/ui/controls";
 import { Fold } from "@/components/ui/Fold";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
+import { agent } from "@/lib/api";
+import { modeIsUnguarded, modeLabel, PERMISSION_MODES } from "@/lib/models";
+import { useSessionStore } from "@/lib/sessions";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { CollaborationScene } from "./CollaborationScene";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -53,6 +56,9 @@ function RolePicker({
  * is chosen now and then waits folded under More settings, with `extra` rows
  * (local network only) at its end.
  */
+/** The session's tabs in different permission modes, as the picker shows it. */
+const MIXED = "__mixed__";
+
 function SettingsForm({ value, set, extra }: { value: ShareSettings; set: (value: ShareSettings) => void; extra?: React.ReactNode }) {
   const patch = (update: Partial<ShareSettings>) => set({ ...value, ...update });
   const minutes = Math.max(1, Math.round((value.expiresAt - Date.now()) / 60_000));
@@ -258,6 +264,13 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
   const onboarded = usePrefs().shareOnboarded;
   const [intro, setIntro] = useState(!onboarded);
   const showIntro = !signedIn || intro;
+  // The session's agent tabs and their permission mode, as the share is about to expose them.
+  const session = useSessionStore().sessions.find((candidate) => candidate.id === sessionId);
+  const agentTabs = (session?.tabs ?? []).filter((tab) => !!tab.permissionMode);
+  const unguarded = agentTabs.some((tab) => modeIsUnguarded(tab.permissionMode) || (!!tab.requestedPermissionMode && modeIsUnguarded(tab.requestedPermissionMode)));
+  const modes = [...new Set(agentTabs.map((tab) => tab.requestedPermissionMode || tab.permissionMode))];
+  const sessionMode = modes.length === 1 ? modes[0] : MIXED;
+  const unguardedMode = sessionMode !== MIXED && modeIsUnguarded(sessionMode);
   const relay = usePairing().status.relay.phase === "connected";
   const [settings, setSettings] = useState(defaultShareSettings);
   const [editing, setEditing] = useState<string | null>(null);
@@ -340,8 +353,38 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
                 </Row>
               )}
             />
-            <div className="flex flex-row-reverse gap-2">
+            {/* The session's permissions, beside the link that shares it: a tab where nothing asks (Bypass, or Codex
+                with no sandbox) would let a guest have the agent do anything here, so the host settles it now. */}
+            {unguarded && !editing && (
+              <p role="status" className="rounded-lg bg-warning/10 px-3 py-2 text-[12px] leading-snug text-warning" data-testid="share-unguarded">
+                A tab here is in Bypass permissions, so a guest who drives could have the agent do anything on this computer.
+                Choose another mode to share.
+              </p>
+            )}
+            <div className="flex items-center gap-2">
+              {!editing && agentTabs.length > 0 && (
+                <label className="flex min-w-0 items-center gap-2 text-[12px] text-muted-foreground">
+                  Permissions
+                  <select
+                    aria-label="Session permissions"
+                    className={field}
+                    value={sessionMode}
+                    onChange={(event) => void run(async () => {
+                      const mode = event.target.value;
+                      for (const tab of agentTabs) await agent.setPermissionMode(sessionId, tab.id, mode);
+                    })}
+                  >
+                    {sessionMode === MIXED && <option value={MIXED} disabled>Mixed</option>}
+                    {unguardedMode && <option value={sessionMode} disabled>{modeLabel(sessionMode)}</option>}
+                    {PERMISSION_MODES.filter((mode) => !modeIsUnguarded(mode.id)).map((mode) => (
+                      <option key={mode.id} value={mode.id}>{mode.label}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <div className="ml-auto flex flex-row-reverse gap-2">
               <Button
+                disabled={unguarded && !editing}
                 onClick={() =>
                   void run(async () => {
                     if (editing) await changeShare(sessionId, "edit", { linkId: editing, settings });
@@ -368,6 +411,7 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
                   Cancel edit
                 </Button>
               )}
+              </div>
             </div>
           </fieldset>
         )}
