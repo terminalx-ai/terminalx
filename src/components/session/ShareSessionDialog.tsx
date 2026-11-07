@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Copy, Eye, Link2, Plus, QrCode, Share, Terminal, Users } from "@/icons";
+import { Copy, Eye, Link2, Plus, QrCode, Terminal, UserPlus, Users } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { CollaborationScene } from "./CollaborationScene";
@@ -507,7 +507,7 @@ export function LocalShareButton({ sessionId }: { sessionId: string }) {
       title={detail || "Share session"}
       onClick={() => openSessionShare(sessionId)}
     >
-      <Share />
+      <UserPlus />
       <span>{share.active ? `${people.length} guests` : "Share"}</span>
     </Button>
   );

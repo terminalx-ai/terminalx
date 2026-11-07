@@ -96,7 +96,8 @@ export const GLYPHS: Record<string, Glyph> = {
   Globe: [["circle", { cx: 8, cy: 8, r: 5.75 }], ["path", { d: "M2.25 8h11.5M8 2.25a8.8 8.8 0 0 1 0 11.5M8 2.25a8.8 8.8 0 0 0 0 11.5" }]],
   Users: [["circle", { cx: 6, cy: 5, r: 2.5 }], ["path", { d: "M1.5 13.5v-.5a3.5 3.5 0 0 1 3.5-3.5h2a3.5 3.5 0 0 1 3.5 3.5v.5M10.8 2.7a2.5 2.5 0 0 1 0 4.6M14.5 13.5v-.5a3.5 3.5 0 0 0-2.5-3.35" }]],
   UserRound: [["circle", { cx: 8, cy: 5.5, r: 3 }], ["path", { d: "M2.5 14a5.5 5.5 0 0 1 11 0" }]],
-  UserPlus: [["circle", { cx: 6.5, cy: 5.5, r: 3 }], ["path", { d: "M1.5 14a5 5 0 0 1 10 0M13 5.5v4M11 7.5h4" }]],
+  // Centred on the grid (head at 2.75, shoulders at 13.5), so it sits level with a label such as Share.
+  UserPlus: [["circle", { cx: 6, cy: 5.25, r: 2.5 }], ["path", { d: "M1.75 13.5a4.25 4.25 0 0 1 8.5 0M12.5 5.5v4M10.5 7.5h4" }]],
   Bot: [["rect", { x: 2.5, y: 5, width: 11, height: 8.5, rx: 2 }], ["path", { d: "M8 5V2.5M5.5 8.5v1.5M10.5 8.5v1.5M6 11.5h4" }], dot(8, 2, 0.6)],
   Brain: [["path", { d: "M8 2.5v11M8 2.5a2.5 2.5 0 0 0-4.6 1.3A2.5 2.5 0 0 0 2 6.5a2.5 2.5 0 0 0 .5 4A2.5 2.5 0 0 0 5 13.5a2.3 2.3 0 0 0 3 0M8 2.5a2.5 2.5 0 0 1 4.6 1.3A2.5 2.5 0 0 1 14 6.5a2.5 2.5 0 0 1-.5 4A2.5 2.5 0 0 1 11 13.5a2.3 2.3 0 0 1-3 0" }]],
   Zap: [["path", { d: "M8.8 1.5 3 9h4.2L7.2 14.5 13 7H8.8z" }]],
