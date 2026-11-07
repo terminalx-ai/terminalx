@@ -547,3 +547,36 @@ body:has([role="alertdialog"]) [data-star-reminder] {
   .cs-cursor-me { left: 0%; top: 30%; }
   .cs-cursor-designer { left: 72%; top: 18%; }
 }
+
+/* Panel motion, one system for every panel that comes and goes beside the
+   main view (PanelPresence.tsx): the left sidebar, the right panel, and any
+   panel added later. Only transform and opacity move, so the compositor
+   draws every frame and the main view is laid out once, not on each frame as
+   animating width would. A panel takes its space at once and glides in from
+   its own edge (`--panel-shift`: negative from the left, positive from the
+   right), fading up on an exponential ease-out: quick to start, a long soft
+   settle. Closing, it glides back toward its edge, easing in, and only then
+   gives its space back. Tune the system here, not per panel. */
+/* Unhurried on purpose: a longer travel and a curve that spends its time
+   evenly, rather than one that does all the moving in the first frames. */
+:root {
+  --panel-shift-in: 120px;
+  --panel-shift-out: 80px;
+  --panel-in-duration: 560ms;
+  --panel-out-duration: 360ms;
+  --panel-in-ease: cubic-bezier(0.22, 0.8, 0.24, 1);
+  --panel-out-ease: cubic-bezier(0.4, 0, 0.7, 0.4);
+}
+@keyframes panel-in {
+  from { transform: translateX(calc(var(--panel-side, 1) * var(--panel-shift-in))); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+@keyframes panel-out {
+  from { transform: none; opacity: 1; }
+  to { transform: translateX(calc(var(--panel-side, 1) * var(--panel-shift-out))); opacity: 0; }
+}
+.animate-panel-in { animation: panel-in var(--panel-in-duration) var(--panel-in-ease) both; will-change: transform, opacity; }
+.animate-panel-out { animation: panel-out var(--panel-out-duration) var(--panel-out-ease) both; will-change: transform, opacity; }
+@media (prefers-reduced-motion: reduce) {
+  .animate-panel-in, .animate-panel-out { animation-duration: 1ms; }
+}
