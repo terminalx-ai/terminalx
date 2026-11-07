@@ -23,11 +23,14 @@ interface InvitationsState {
   error: string | null;
   notice: string | null;
   membershipRefreshNeeded: boolean;
+  membershipRefreshFailed: boolean;
 }
-const empty = (scope: string | null): InvitationsState => ({ scope, invitations: [], loading: false, loaded: false, pending: {}, error: null, notice: null, membershipRefreshNeeded: false });
+const empty = (scope: string | null): InvitationsState => ({ scope, invitations: [], loading: false, loaded: false, pending: {}, error: null, notice: null, membershipRefreshNeeded: false, membershipRefreshFailed: false });
+const membershipWarning = "Your organization membership could not be refreshed. Refresh again to load your organizations.";
 let state = empty(null);
 let epoch = 0;
 let sequence = 0;
+let membershipSequence = 0;
 // List freshness and action feedback have different lifetimes: a membership read
 // may outlive its sibling list, but must never overwrite a later action's outcome.
 let actionVersion = 0;
@@ -44,6 +47,17 @@ const scopeOf = () => {
     ? JSON.stringify([status.context.account, status.context.revision]) : null;
 };
 const emit = (patch: Partial<InvitationsState>) => { state = { ...state, ...patch }; for (const listener of listeners) listener(); };
+const beginMembershipRefresh = () => {
+  const request = ++membershipSequence;
+  emit({ membershipRefreshNeeded: true, membershipRefreshFailed: false, ...(state.error === membershipWarning ? { error: null } : {}) });
+  return request;
+};
+const membershipResult = (fresh: boolean): Partial<InvitationsState> => ({
+  membershipRefreshNeeded: !fresh,
+  membershipRefreshFailed: !fresh,
+  // A membership result owns only this warning, never a separate action/list error.
+  ...(state.error === null || state.error === membershipWarning ? { error: fresh ? null : membershipWarning } : {}),
+});
 const sync = () => {
   const scope = scopeOf();
   if (scope === state.scope) return;
@@ -95,15 +109,16 @@ export function refreshInvitations(): Promise<void> {
   if (state.membershipRefreshNeeded && !Object.values(state.pending).includes("accept")) {
     const recoveringAction = actionVersion;
     const context = getAccount().status.context!;
+    const membershipRequest = beginMembershipRefresh();
     void refreshMembershipsAfterInvite(context).then((fresh) => {
-      if (current(started, scope) && recoveringAction === actionVersion && readingFeedback === feedbackVersion && fresh) emit({ membershipRefreshNeeded: false, notice: "Organizations refreshed.", error: null });
+      if (current(started, scope) && membershipRequest === membershipSequence && recoveringAction === actionVersion && readingFeedback === feedbackVersion) emit({ ...membershipResult(fresh), ...(fresh ? { notice: "Organizations refreshed." } : {}) });
     });
   }
   const work = invitationApi.list(revision).then(({ invites }) => {
     if (current(started, scope) && request === sequence) emit({
       invitations: invites.filter((invite) => invite.expiresAt > Date.now()),
       loaded: true,
-      ...(readingFeedback === feedbackVersion ? { error: state.membershipRefreshNeeded ? "Your organization membership could not be refreshed. Refresh again to check whether the invitation was accepted." : null } : {}),
+      ...(readingFeedback === feedbackVersion ? { error: state.membershipRefreshFailed ? membershipWarning : null } : {}),
     });
   }).catch((error) => {
     if (current(started, scope) && request === sequence && readingFeedback === feedbackVersion) emit({ error: invitationError(error) });
@@ -134,10 +149,10 @@ export async function respondToInvitation(id: string, action: "accept" | "declin
     sequence++;
     emit({ invitations: state.invitations.filter((candidate) => candidate.id !== id) });
     if (action === "accept") {
-      emit({ membershipRefreshNeeded: true });
+      const membershipRequest = beginMembershipRefresh();
       const fresh = await refreshMembershipsAfterInvite(context);
-      if (!current(started, scope) || respondingAction !== actionVersion) return;
-      emit({ membershipRefreshNeeded: !fresh, notice: fresh ? `Joined ${invite.organizationName}.` : `Joined ${invite.organizationName}. Refresh to load your updated organizations.` });
+      if (!current(started, scope) || membershipRequest !== membershipSequence || respondingAction !== actionVersion) return;
+      emit({ ...membershipResult(fresh), notice: fresh ? `Joined ${invite.organizationName}.` : `Joined ${invite.organizationName}. Refresh to load your updated organizations.` });
     }
   } catch (error) {
     if (!current(started, scope)) return;
@@ -151,9 +166,9 @@ export async function respondToInvitation(id: string, action: "accept" | "declin
     // Even a lost response can have committed membership. Preserve read-only recovery
     // until a fresh membership read succeeds; never silently resend the mutation.
     if (action === "accept") {
-      emit({ membershipRefreshNeeded: true });
+      const membershipRequest = beginMembershipRefresh();
       const fresh = await refreshMembershipsAfterInvite(context);
-      if (current(started, scope) && respondingAction === actionVersion) emit({ membershipRefreshNeeded: !fresh });
+      if (current(started, scope) && membershipRequest === membershipSequence && respondingAction === actionVersion) emit(membershipResult(fresh));
     }
     if (current(started, scope) && respondingAction === actionVersion) {
       feedbackVersion++;

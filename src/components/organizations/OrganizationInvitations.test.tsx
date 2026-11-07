@@ -258,4 +258,73 @@ describe("in-app organization invitations", () => {
     await screen.findByText("Organizations refreshed."); expect(mocks.refresh).toHaveBeenCalledTimes(2);
     expect(mocks.invoke.mock.calls.filter(([cmd]) => cmd === "account_invitation_accept")).toHaveLength(1);
   });
+  it.each([true, false].flatMap((fresh) => [false, true].map((newerDecline) => ({ fresh, newerDecline }))))("does not report a failed membership read while Accept reconciliation is pending (fresh=$fresh, newer Decline=$newerDecline)", async ({ fresh, newerDecline }) => {
+    const second = { ...invite("second"), organizationName: "Another team" };
+    mocks.invoke.mockResolvedValueOnce({ invites: [invite(), second] });
+    render(<><OrganizationInvitations sidebar /><OrganizationInvitations /></>);
+    await screen.findAllByText("Join Another team");
+    const membership = deferred<boolean>(); mocks.refresh.mockImplementationOnce(() => membership.promise);
+    let response!: Promise<void>; act(() => { response = respondToInvitation("inv-1", "accept"); });
+    await waitFor(() => expect(mocks.refresh).toHaveBeenCalledOnce());
+    mocks.invoke.mockResolvedValueOnce({ invites: [second] }); await act(() => refreshInvitations());
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    expect(screen.queryAllByText(/^Joined /)).toHaveLength(0);
+    expect(getInvitations().pending["inv-1"]).toBe("accept");
+    if (newerDecline) {
+      mocks.invoke.mockRejectedValueOnce({ code: "forbidden" });
+      await act(() => respondToInvitation(second.id, "decline"));
+    }
+    await act(async () => { membership.resolve(fresh); await response; });
+    expect(getInvitations().pending).toEqual({});
+    expect(mocks.invoke.mock.calls.filter(([cmd]) => cmd === "account_invitation_accept")).toHaveLength(1);
+    if (newerDecline) {
+      expect(screen.getAllByRole("alert").map((alert) => alert.textContent)).toEqual(Array(2).fill("Your account does not have permission to use this invitation. Refresh or sign in again."));
+      expect(screen.queryAllByText(/^Joined /)).toHaveLength(0);
+      expect(getInvitations().membershipRefreshNeeded).toBe(true);
+    } else {
+      expect(screen.getAllByText(fresh ? "Joined Research & Development." : "Joined Research & Development. Refresh to load your updated organizations.")).toHaveLength(2);
+      expect(getInvitations().membershipRefreshNeeded).toBe(!fresh);
+      if (fresh) expect(screen.queryAllByRole("alert")).toHaveLength(0);
+      else expect(screen.getAllByRole("alert").every((alert) => alert.textContent?.includes("Your organization membership could not be refreshed"))).toBe(true);
+    }
+  });
+  it.each([true, false])("shows recovery failure only after the retry completes (fresh=%s)", async (fresh) => {
+    render(<><OrganizationInvitations sidebar /><OrganizationInvitations /></>);
+    await screen.findAllByText("Join Research & Development");
+    mocks.refresh.mockResolvedValueOnce(false);
+    await act(() => respondToInvitation("inv-1", "accept"));
+    const membership = deferred<boolean>(); mocks.refresh.mockImplementationOnce(() => membership.promise);
+    mocks.invoke.mockResolvedValueOnce({ invites: [] }); await act(() => refreshInvitations());
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    await act(async () => { membership.resolve(fresh); await membership.promise; });
+    expect(getInvitations().membershipRefreshNeeded).toBe(!fresh);
+    if (fresh) {
+      expect(screen.queryAllByRole("alert")).toHaveLength(0);
+      expect(screen.getAllByText("Organizations refreshed.")).toHaveLength(2);
+    } else expect(screen.getAllByRole("alert").every((alert) => alert.textContent?.includes("Your organization membership could not be refreshed"))).toBe(true);
+    expect(mocks.invoke.mock.calls.filter(([cmd]) => cmd === "account_invitation_accept")).toHaveLength(1);
+  });
+  it("keeps a separate list permission error when membership recovery succeeds", async () => {
+    render(<><OrganizationInvitations sidebar /><OrganizationInvitations /></>);
+    await screen.findAllByText("Join Research & Development");
+    mocks.refresh.mockResolvedValueOnce(false); await act(() => respondToInvitation("inv-1", "accept"));
+    const membership = deferred<boolean>(); mocks.refresh.mockImplementationOnce(() => membership.promise);
+    mocks.invoke.mockRejectedValueOnce({ code: "forbidden" }); await act(() => refreshInvitations());
+    await act(async () => { membership.resolve(true); await membership.promise; });
+    expect(screen.getAllByRole("alert").every((alert) => alert.textContent?.includes("Your account does not have permission"))).toBe(true);
+    expect(getInvitations().membershipRefreshNeeded).toBe(false);
+  });
+  it("does not restore a recovery warning when an older retry fails after a newer retry succeeds", async () => {
+    render(<OrganizationInvitations />); await screen.findByText("Join Research & Development");
+    mocks.refresh.mockResolvedValueOnce(false); await act(() => respondToInvitation("inv-1", "accept"));
+    const older = deferred<boolean>(); const newer = deferred<boolean>();
+    mocks.refresh.mockImplementationOnce(() => older.promise).mockImplementationOnce(() => newer.promise);
+    mocks.invoke.mockResolvedValue({ invites: [] });
+    await act(() => refreshInvitations()); await act(() => refreshInvitations());
+    await act(async () => { newer.resolve(true); await newer.promise; });
+    await act(async () => { older.resolve(false); await older.promise; });
+    expect(getInvitations().membershipRefreshNeeded).toBe(false);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("Organizations refreshed.")).toBeTruthy();
+  });
 });
