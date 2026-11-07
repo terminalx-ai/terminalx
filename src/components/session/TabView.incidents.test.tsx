@@ -19,6 +19,8 @@ vi.mock("@/lib/tabViews", () => ({
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => null }));
 vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn(), prepareSend: vi.fn(() => vi.fn()) }), useDictationShortcuts: vi.fn() }));
 vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => null }));
+// jsdom has no 2D canvas: the idle raccoon's animation frame would throw after a test ends.
+vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
 
 import { TabView } from "./TabView";
 import { TooltipProvider } from "@/components/ui/tooltip";
