@@ -24,7 +24,7 @@ fn owned_stdio_lifecycle_is_process_bounded() {
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
         "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
-        "mailbox-after-refusal", "mailbox-cli-waiting"] {
+        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -43,6 +43,65 @@ fn owned_stdio_lifecycle_is_process_bounded() {
         };
         assert!(status.success(), "{case}: {}", std::fs::read_to_string(dir.path().join("child.log")).unwrap());
     }
+}
+
+/// Exercise the actual stdout reader and watcher together: activity during a
+/// long turn must renew the silence deadline, and stale launch output cannot.
+#[test]
+fn codex_stdout_renews_activity_and_clears_only_watcher_timeouts() {
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-activity", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    let rt = manager.runtime("stdio-activity", "tab").unwrap();
+    let mut engine = Stdio::new(root.to_string_lossy().into_owned(), String::new(), None, "auto".into(), None);
+    engine.thread = Some("thread".into());
+    engine.ready = true;
+    let launch = engine.launch.clone();
+    let sink = StdioSink { manager: manager.clone(), rt: rt.clone(), launch, startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };
+    let patience = recovery::Patience::DEFAULT;
+    {
+        let mut rt = rt.lock().unwrap();
+        rt.engine = Engine::CodexStdio(engine);
+        rt.open_turn();
+        rt.status = TabStatus::InProgress;
+        rt.last_activity = Instant::now() - patience.stall - Duration::from_secs(1);
+    }
+    // A tool result, rather than assistant text, must count as activity too.
+    let frame = json!({"method":"item/completed", "params":{"threadId":"thread", "turnId":"turn",
+        "item":{"id":"tool", "type":"commandExecution", "status":"completed", "exitCode":0, "aggregatedOutput":"ok"}}}).to_string();
+    sink.stdout_line(frame.clone());
+    manager.watch_tabs(patience, Instant::now(), |_| None);
+    assert_eq!(rt.lock().unwrap().recovery, None, "recent native output must not be called a five-minute stall");
+    assert_eq!(rt.lock().unwrap().status, TabStatus::InProgress);
+
+    // Genuine silence still warns. The next tool result clears that guess
+    // immediately and starts a fresh deadline, without another user prompt.
+    let deadline = rt.lock().unwrap().last_activity + patience.stall;
+    manager.watch_tabs(patience, deadline, |_| None);
+    assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::Timeout));
+    let stale = StdioSink { manager: manager.clone(), rt: rt.clone(), launch: Arc::new(()), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };
+    let before = rt.lock().unwrap().last_activity;
+    stale.stdout_line(frame.clone());
+    assert_eq!(rt.lock().unwrap().last_activity, before);
+    assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::Timeout));
+    sink.stdout_line(frame.clone());
+    assert_eq!(rt.lock().unwrap().recovery, None);
+    manager.watch_tabs(patience, Instant::now(), |_| None);
+    assert_eq!(rt.lock().unwrap().status, TabStatus::InProgress);
+
+    // An explicit provider failure is not a silence guess. Do not erase it
+    // just because more transport output arrives.
+    manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::SignedOut, crate::recovery_log::Source::SignIn);
+    sink.stdout_line(frame);
+    assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::SignedOut));
 }
 
 struct GateSink {
@@ -870,7 +929,7 @@ fn mailbox_fixture(case: &str) {
             std::thread::sleep(Duration::from_millis(20));
         }
         // Waiting on a failure with no turn open, as the native tab below is.
-        manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::SignedOut);
+        manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::SignedOut, crate::recovery_log::Source::SignIn);
         assert!(matches!(rt.lock().unwrap().engine, Engine::Cli(_)));
         assert!(agents.ops.busy("stdio-owner", "tab"));
         let (outcome, receipt) = mailbox_send(&agents, "c1", "hello");
@@ -1093,6 +1152,162 @@ fn streamed_fixture(case: &str) {
     if case == "streamed-reply" { manager.stop("stdio-owner", "tab").unwrap(); }
 }
 
+/// Stands in for Codex through turns that run until the test lets them on:
+/// each `turn/start` starts its turn, then waits while `hold-progress` is
+/// there before it runs a command, and while `hold-finish` is there before
+/// it answers and completes. `turn/interrupt` ends the turn it names as
+/// interrupted once `hold-interrupt` is gone. Turns are named by their
+/// request's id, so a late frame of an interrupted turn is never another's.
+const WORKING_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+held() { while [ -f "$here/$1" ]; do [ -f "$here/cancel-$2" ] && exit 0; sleep 0.02; done; }
+while read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
+      printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
+      ( held hold-progress "turn-$id"
+        printf '{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"commandExecution","id":"c%s"}}}\n' "$id" "$id"
+        printf '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"commandExecution","id":"c%s","status":"completed","exitCode":0,"aggregatedOutput":""}}}\n' "$id" "$id"
+        held hold-finish "turn-$id"
+        printf '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"agentMessage","id":"m%s","text":"done"}}}\n' "$id" "$id"
+        printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$id" ) & ;;
+    *'"method":"turn/interrupt"'*)
+      turn=$(printf '%s' "$line" | sed -n 's/.*"turnId":"\([^"]*\)".*/\1/p')
+      touch "$here/cancel-$turn"
+      printf '{"id":%s,"result":{}}\n' "$id"
+      held hold-interrupt none
+      printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"%s","status":"interrupted"}}}\n' "$turn" ;;
+  esac
+done
+"#;
+
+/// #815: native Codex at work for longer than the watcher's stall limit is
+/// not stalled, and a message sent while it works (or right after an
+/// interrupt, before Codex has ended the turn) is refused as a request: no
+/// error, no warning, no Needs attention, and the running turn goes on. The
+/// watcher still calls real silence, and progress takes that warning back.
+/// What happened is in the incident log, with no message text in it.
+fn busy_fixture() {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), WORKING_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let hold = |name: &str| std::fs::write(bin.join(name), "").unwrap();
+    let release = |name: &str| std::fs::remove_file(bin.join(name)).unwrap();
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "model":"gpt-6-astra", "effort":"xhigh", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(1024)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    let rt_arc = manager.runtime("stdio-owner", "tab").unwrap();
+    let events = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+    let wait = |what: &str, done: &dyn Fn(&[AgentEvent]) -> bool| {
+        let until = Instant::now() + WAIT;
+        while !done(&events()) {
+            assert!(Instant::now() < until, "{what}: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let count = |events: &[AgentEvent], test: &dyn Fn(&Payload) -> bool| events.iter().filter(|event| test(&event.payload)).count();
+    let warned = |events: &[AgentEvent]| count(events, &|payload| matches!(payload, Payload::Error { .. } | Payload::Recovery { kind: Some(_) }));
+    let busy = |what: &str| {
+        let before = warned(&events());
+        let error = manager.send("stdio-owner", "tab", format!("again: {what}"), Vec::new()).expect_err(what);
+        assert!(error.to_string().starts_with(BUSY_WORDS), "{what}: {error:#}");
+        let rt = rt_arc.lock().unwrap();
+        assert!(rt.turn_open && rt.status == TabStatus::InProgress && rt.recovery.is_none(), "{what}: the running turn is left as it was");
+        drop(rt);
+        assert_eq!(warned(&events()), before, "{what}: a refused send raises nothing in the tab");
+        assert!(!events().iter().any(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text.starts_with("again:"))), "{what}: and is not published");
+    };
+    let patience = recovery::Patience { stall: Duration::from_millis(250), settle: Duration::from_secs(10) };
+
+    hold("hold-progress");
+    hold("hold-finish");
+    manager.send("stdio-owner", "tab", "first".into(), Vec::new()).unwrap();
+    wait("the first turn starts", &|events| count(events, &|payload| matches!(payload, Payload::TurnStarted { .. })) == 1);
+    let opened = rt_arc.lock().unwrap().turn_started_at.unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    release("hold-progress");
+    wait("the command runs", &|events| count(events, &|payload| matches!(payload, Payload::ToolCallCompleted { .. })) == 1);
+    let heard = rt_arc.lock().unwrap().last_activity;
+    assert!(heard >= opened + Duration::from_millis(300), "Codex's frames are activity, not only the send");
+    // Longer than the stall limit since the send, not since Codex was last heard.
+    manager.watch_tabs(patience, heard + Duration::from_millis(200), |_| None);
+    assert!(rt_arc.lock().unwrap().recovery.is_none(), "a turn at work is not stalled");
+    busy("while the turn works");
+    busy("again, a moment later");
+
+    // Real silence is still called, and the agent's progress takes it back.
+    manager.watch_tabs(patience, heard + Duration::from_millis(300), |_| None);
+    assert_eq!(rt_arc.lock().unwrap().recovery, Some(RecoveryKind::Timeout));
+    release("hold-finish");
+    wait("the first turn ends", &|events| count(events, &|payload| matches!(payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. })) == 1);
+    assert!(rt_arc.lock().unwrap().recovery.is_none(), "the reply took the guess back");
+
+    // Right after an interrupt Codex has not ended the turn yet: still busy.
+    hold("hold-progress");
+    hold("hold-finish");
+    hold("hold-interrupt");
+    manager.send("stdio-owner", "tab", "second".into(), Vec::new()).unwrap();
+    wait("the second turn starts", &|events| count(events, &|payload| matches!(payload, Payload::TurnStarted { .. })) == 2);
+    assert!(manager.interrupt("stdio-owner", "tab").unwrap());
+    busy("right after an interrupt");
+    release("hold-interrupt");
+    wait("the interrupt ends the turn", &|events| count(events, &|payload| matches!(payload, Payload::TurnCompleted { status: TurnStatus::Aborted, .. })) == 1);
+    // The message the sender kept goes now, as a turn of its own.
+    release("hold-progress");
+    release("hold-finish");
+    manager.send("stdio-owner", "tab", "third".into(), Vec::new()).unwrap();
+    wait("the third turn ends", &|events| count(events, &|payload| matches!(payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. })) == 2);
+    assert_eq!(count(&events(), &|payload| matches!(payload, Payload::Error { .. })), 0, "no error row at any point");
+    manager.stop("stdio-owner", "tab").unwrap();
+
+    let lines = crate::recovery_log::read_all().unwrap();
+    let text = serde_json::to_string(&lines).unwrap();
+    for typed in ["first", "second", "third", "again:"] { assert!(!text.contains(&format!("\"{typed}")), "no message text is recorded: {typed}"); }
+    let sends: Vec<_> = lines.iter().filter(|line| line["kind"] == "send_attempt").map(|line| (line["admission"].as_str().unwrap(), line["found"]["turn_open"].as_bool().unwrap())).collect();
+    assert_eq!(sends, [("admitted", false), ("busy", true), ("busy", true), ("admitted", false), ("busy", true), ("admitted", false)]);
+    assert!(lines.iter().filter(|line| line["kind"] == "send_attempt").all(|line| line["turn_failed"] == false && line["origin"] == "programmatic"));
+    let raised: Vec<_> = lines.iter().filter(|line| line["kind"] == "recovery_raised").collect();
+    assert_eq!(raised.len(), 1, "one warning, the watcher's: {raised:?}");
+    assert_eq!((raised[0]["reason"].as_str(), raised[0]["source"].as_str()), (Some("timeout"), Some("watcher")));
+    assert_eq!(raised[0]["agent"], json!({"harness":"codex","transport":"codex_stdio","model":"gpt-6-astra","effort":"xhigh"}));
+    assert_eq!(raised[0]["last_progress"]["kind"], "tool_completed");
+    let cleared: Vec<_> = lines.iter().filter(|line| line["kind"] == "recovery_cleared").collect();
+    assert_eq!((cleared.len(), cleared[0]["incident"].clone(), cleared[0]["cause"].as_str()), (1, raised[0]["incident"].clone(), Some("progress")));
+    let ended: Vec<_> = lines.iter().filter(|line| line["kind"] == "turn_ended").map(|line| line["status"].as_str().unwrap()).collect();
+    assert_eq!(ended, ["ok", "aborted", "ok"]);
+    let summary = crate::recovery_log::summarize(&lines);
+    assert_eq!(summary["busy_refusals_while_turn_open"], 3);
+    assert_eq!(summary["groups"][0]["outcomes"], json!({"cleared_without_action:progress": 1}));
+    assert_eq!(summary["groups"][0]["visible"]["incidents_shown"], 0, "nothing a window did not report is called seen");
+}
+
+/// What a busy refusal says, which the window recognises it by.
+const BUSY_WORDS: &str = "Codex is still working on this turn, so this message was not sent.";
+
+#[test]
+fn a_busy_refusal_says_the_words_the_window_knows_it_by() {
+    assert!(Busy.to_string().starts_with(BUSY_WORDS));
+    // The window's BUSY_REFUSAL, which `isBusyRefusal` matches.
+    let window = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../packages/portable/src/recovery.ts")).unwrap();
+    assert!(window.contains(&format!("\"{BUSY_WORDS}\"")), "the window's copy of the words drifted");
+}
+
 #[test]
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
@@ -1103,6 +1318,7 @@ fn child_fixture() {
     if case == "cloud-launch" { return cloud_launch_fixture(); }
     if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }
+    if case == "busy-while-working" { return busy_fixture(); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({

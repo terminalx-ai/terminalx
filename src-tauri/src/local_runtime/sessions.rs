@@ -193,6 +193,11 @@ impl Sessions {
         self.quick_tab("terminalViewReport", session, tab, json!({"report":report}))
     }
 
+    /// A window's report of a tab's warning (`SessionManager::note_incident_ui`).
+    pub fn note_incident_ui(&self, session: &str, tab: &str, report: &crate::recovery_log::UiReport) -> Result<()> {
+        self.quick_tab("incidentUi", session, tab, json!({"report": report}))
+    }
+
     pub fn send_confirmed(&self, session: &str, tab: &str, text: String) -> Result<SendOutcome> {
         self.tab("sendConfirmed", session, tab, json!({"text":text}))
     }
@@ -215,6 +220,10 @@ impl Sessions {
 
     pub fn interrupt(&self, session: &str, tab: &str) -> Result<bool> {
         self.quick_tab("interrupt", session, tab, json!({}))
+    }
+
+    pub fn reset_chat(&self, session: &str, tab: &str, end_seq: Option<u64>, reset_files: bool) -> Result<Option<String>> {
+        self.tab("resetChat", session, tab, json!({"endSeq":end_seq,"resetFiles":reset_files}))
     }
 
     pub fn stop(&self, session: &str, tab: &str) -> Result<()> {

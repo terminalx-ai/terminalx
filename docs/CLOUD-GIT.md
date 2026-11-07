@@ -34,10 +34,11 @@ runtime.
 | `git.repositories` | participate | `[{ repo, branch, head, remote, defaultBranch }]` (credentials stripped from `remote`), `truncated`. |
 | `git.status` | participate | Porcelain files, `branch`, `upstream`, `ahead`/`behind`, `defaultBranch`, `aheadOfBase`, `conflicted` (unmerged paths), `operation` (`merge`/`rebase`/`cherry-pick` in progress). `{ repository: false }` when the workspace has none and no `repo` was named. |
 | `git.diff` | participate | Unified diff (≤ 768 KiB, `truncated`). |
-| `git.workingChanges` | participate | The desktop's `working_changes`: HEAD's tree and the changed files against it, untracked included (≤ 2000). |
+| `git.workingChanges` | participate | The desktop's `working_changes`: HEAD's tree and the changed files against it, untracked included (≤ 2000). Optional `hideWhitespace: true` uses `diff -w` for line counts. |
 | `git.reviewRange` | participate | Stable `base` and live snapshot `head` tree ids for workspace review, including untracked files. `uncommitted: true` compares against HEAD (empty tree in an unborn repository); otherwise `target` selects the merge base with HEAD. Without a target, prefer origin/HEAD, then the default local branch. Returns the resolved target name; invalid targets fail. |
-| `git.changesBetween` | participate | Files changed between two tree ids (a commit's changes from `git.log`'s `tree`/`parent`). |
+| `git.changesBetween` | participate | Files changed between two tree ids (a commit's changes from `git.log`'s `tree`/`parent`). Optional `hideWhitespace: true` uses `diff -w` for line counts. |
 | `git.fileContents` | participate | One file at tree `base` and at tree `head` or in the working tree; each side ≤ 384 KiB. A working-tree read never follows a link out of the workspace. |
+| `git.mediaContent` | participate | Binary image/PDF revision at optional `tree` (otherwise the working tree), `{ data: base64, mime }` or null for a missing side. ≤ 512 KiB; the same path containment rules apply. |
 | `git.log` | participate | Commits (`from` a commit id), bodies ≤ 4 KiB. |
 | `git.branches` | participate | Local and remote branches, `current`, `defaultBranch`. |
 | `git.prs` | participate | Pull requests whose head is `branch` (default: current), with checks and `mergeable`. A fork's pull request from a branch of the same name is left out (`isCrossRepository`). |

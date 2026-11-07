@@ -1,0 +1,155 @@
+{
+  "provenance": "gh pr view --json and gh api graphql responses recorded 2026-11-07 from terminalx-ai/terminalx#781; identity/content sanitized, documented state and check permutations added for deterministic coverage.",
+  "pr": {
+    "additions": 680,
+    "author": {
+      "login": "octocat"
+    },
+    "baseRefName": "main",
+    "body": "",
+    "deletions": 39,
+    "headRefName": "feature",
+    "headRefOid": "abc123",
+    "isDraft": false,
+    "mergeStateStatus": "BLOCKED",
+    "mergeable": "MERGEABLE",
+    "number": 7,
+    "reviewDecision": "",
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "name": "build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/acme/widgets/actions/runs/1"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "lint",
+        "status": "COMPLETED",
+        "conclusion": "FAILURE",
+        "detailsUrl": "https://github.com/acme/widgets/actions/runs/2"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "test",
+        "status": "IN_PROGRESS",
+        "conclusion": "",
+        "detailsUrl": "https://github.com/acme/widgets/actions/runs/3"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "docs",
+        "status": "COMPLETED",
+        "conclusion": "SKIPPED",
+        "detailsUrl": ""
+      },
+      {
+        "__typename": "StatusContext",
+        "context": "Vercel – preview",
+        "state": "FAILURE",
+        "targetUrl": "https://preview.example.test"
+      },
+      {
+        "__typename": "StatusContext",
+        "context": "ci/cla",
+        "state": "SUCCESS",
+        "targetUrl": "https://cla.example.test"
+      }
+    ],
+    "title": "PR panel fixture",
+    "url": "https://github.com/acme/widgets/pull/7"
+  },
+  "queue": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "state": "OPEN",
+          "headRefOid": "abc123",
+          "mergeStateStatus": "BLOCKED",
+          "isMergeQueueEnabled": false,
+          "autoMergeRequest": null,
+          "mergeQueueEntry": null
+        }
+      }
+    }
+  },
+  "required": [
+    {
+      "name": "build"
+    }
+  ],
+  "cases": [
+    {
+      "state": "BLOCKED",
+      "mergeState": "BLOCKED",
+      "entry": null
+    },
+    {
+      "state": "BEHIND",
+      "mergeState": "BEHIND",
+      "entry": null
+    },
+    {
+      "state": "UNSTABLE",
+      "mergeState": "UNSTABLE",
+      "entry": null
+    },
+    {
+      "state": "CLEAN",
+      "mergeState": "CLEAN",
+      "entry": null
+    },
+    {
+      "state": "DIRTY",
+      "mergeState": "DIRTY",
+      "entry": null
+    },
+    {
+      "state": "UNKNOWN",
+      "mergeState": "UNKNOWN",
+      "entry": null
+    },
+    {
+      "state": "QUEUED",
+      "mergeState": "BLOCKED",
+      "entry": {
+        "position": 3,
+        "state": "QUEUED"
+      }
+    },
+    {
+      "state": "AWAITING_CHECKS",
+      "mergeState": "BLOCKED",
+      "entry": {
+        "position": 3,
+        "state": "AWAITING_CHECKS"
+      }
+    },
+    {
+      "state": "MERGEABLE",
+      "mergeState": "BLOCKED",
+      "entry": {
+        "position": 3,
+        "state": "MERGEABLE"
+      }
+    },
+    {
+      "state": "UNMERGEABLE",
+      "mergeState": "BLOCKED",
+      "entry": {
+        "position": 3,
+        "state": "UNMERGEABLE"
+      }
+    },
+    {
+      "state": "LOCKED",
+      "mergeState": "BLOCKED",
+      "entry": {
+        "position": 3,
+        "state": "LOCKED"
+      }
+    }
+  ]
+}
