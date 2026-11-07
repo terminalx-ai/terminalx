@@ -138,6 +138,10 @@ esac
     // verbs are observed substitutes, so metadata assertions exercise Git too.
     let git = bin.join("git");
     std::fs::write(&git, r#"#!/bin/sh
+if [ "$1" = cat-file ] && [ -f "$TERMINALX_HOME/media-cat-hold" ]; then
+ printf '%s %s\n' "$$" "${GIT_NO_LAZY_FETCH:-unset}" > "$TERMINALX_HOME/media-cat-entered"
+ while [ -f "$TERMINALX_HOME/media-cat-hold" ]; do /bin/sleep 0.01; done
+fi
 case "$1" in
  fetch|pull|push|ls-remote)
    printf 'git %s\n' "$*" >> "$TERMINALX_HOME/launches"
@@ -239,6 +243,7 @@ fn privacy_entry_points_child() {
     overview_reads_share_authority(&root, &ssh, managed);
     workspace_rpc(&root, &ssh, managed);
     panel::run(&root, &ssh, managed);
+    media::run(&root, managed);
     let fetch = fresh_fixture(&root);
     fresh_runtime(&root, &fetch, managed);
     cleanup_keeps_revoked_branches(&root, &fetch, managed);
@@ -285,6 +290,7 @@ fn queued_commands(root: &Path, cwd: &Path, fetch: &FetchFixture, managed: bool)
     }
     fresh_ipcs(root, fetch, managed, &runtime);
     panel::ipc_queues(root, cwd, managed, &runtime);
+    media::ipc_queues(root, managed, &runtime);
 }
 
 #[cfg(feature = "desktop")]
@@ -753,3 +759,6 @@ mod transport;
 
 #[path = "github_panel_privacy_tests.rs"]
 mod panel;
+
+#[path = "git_media_privacy_tests.rs"]
+mod media;

@@ -103,3 +103,23 @@ it("does not copy a truncation marker as file contents", async () => {
   expect((await screen.findByRole("alert")).textContent).toContain("exceeds the text preview limit");
   expect(screen.queryByRole("button", { name: "Copy file" })).toBeNull();
 });
+
+it.each(["png", "svg"])("reports an unavailable historical %s object without claiming the file was absent, and retries after it is fetched", async (extension) => {
+  const unavailable = new Error("Revision is unavailable locally. Fetch the missing objects in the workspace before comparing this revision.");
+  if (extension === "png") {
+    vi.mocked(source.mediaContentAt!).mockImplementation(async (_path, tree) => {
+      if (tree === "base") throw unavailable;
+      return { data: btoa("after"), mime: "image/png" };
+    });
+  } else vi.mocked(source.fileContentsAt).mockRejectedValueOnce(unavailable);
+  render(<FileDiff {...props} path={`image.${extension}`} />);
+  expect((await screen.findByRole("alert")).textContent).toContain("unavailable locally");
+  expect(screen.queryByText("File does not exist in this revision.")).toBeNull();
+  expect(screen.queryByRole("region", { name: "Before" })).toBeNull();
+  if (extension === "png") {
+    vi.mocked(source.mediaContentAt!).mockImplementation(async (_path, tree) => ({ data: btoa(tree ?? "working"), mime: "image/png" }));
+  } else vi.mocked(source.fileContentsAt).mockResolvedValue({ before: "<svg/>", after: "<svg/>" });
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findAllByRole("img")).toHaveLength(2);
+  expect(screen.queryByRole("alert")).toBeNull();
+});

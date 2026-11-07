@@ -83,6 +83,14 @@ modify/delete a fixture externally and retry; and compare file hashes afterward.
 
 ## Diff revisions (PRO-226)
 
+Diff revision reads use only objects already present in the workspace. In a
+partial clone, a promised object that has not been downloaded produces an
+"unavailable locally" error; it is not shown as an absent side of the diff.
+Fetch the missing objects in the workspace and retry. Previewing media, SVG,
+text or diff statistics never starts an implicit Git fetch, even with privacy
+mode off. Explicit fetch actions keep their existing permissions, and agent Git
+commands keep their own environment.
+
 Changes, Uncommitted and History share `FileDiff`. The diff controls save the
 unified/split choice, whitespace filter and global wrap default in UI preferences.
 An explicit per-file wrap choice is keyed by source and relative path; Default

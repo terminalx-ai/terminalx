@@ -244,6 +244,9 @@ pub(super) fn git_command(dir: &Path) -> Command {
         .current_dir(dir)
         .env("PATH", crate::binpath::login_path())
         .env("GIT_TERMINAL_PROMPT", "0")
+        // A read-only diff/status call must not demand-fetch promised objects.
+        // Explicit network verbs still go through run_network.
+        .env("GIT_NO_LAZY_FETCH", "1")
         // Paths are file names, never pathspec magic such as `:(top)` or `:!x`.
         .env("GIT_LITERAL_PATHSPECS", "1")
         .env("LC_ALL", "C");
@@ -580,7 +583,7 @@ impl WorkspaceGit {
 
     fn diff(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
-        let mut args = vec!["diff", "--no-color", "--no-ext-diff"];
+        let mut args = vec!["diff", "--no-color", "--no-ext-diff", "--no-textconv"];
         if params.get("staged").and_then(Value::as_bool) == Some(true) {
             args.push("--cached");
         }

@@ -19,6 +19,10 @@ fn git() -> Command {
     let mut c = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     c.env("PATH", crate::binpath::login_path());
     c.env("GIT_TERMINAL_PROMPT", "0");
+    // Inspection must not turn a missing partial-clone object into a transfer.
+    // Explicit fetches still use their admission boundary. This environment is
+    // scoped to our Git child, never the application or an agent's process.
+    c.env("GIT_NO_LAZY_FETCH", "1");
     c.env("LC_ALL", "C");
     c
 }
@@ -555,20 +559,50 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
     Ok(out)
 }
 
-/// Contents of `path` at `tree`, or `None` if it doesn't exist there.
-pub fn blob_at(cwd: &Path, tree: &str, path: &str) -> Result<Option<String>> {
+pub(crate) enum BlobContents {
+    Bytes(Vec<u8>),
+    TooLarge,
+}
+
+/// Read only local objects. The tree proves absence; a missing promised blob
+/// (or an unavailable tree) is an error, never the empty side of a comparison.
+/// Shared by text/SVG and binary media so none can implicitly fetch a revision.
+pub(crate) fn blob_bytes_at(cwd: &Path, tree: &str, path: &str, limit: usize) -> Result<Option<BlobContents>> {
     if !is_tree_id(tree) {
         bail!("bad tree id");
     }
-    let spec = format!("{tree}:{path}");
-    let out = git().current_dir(cwd).args(["cat-file", "-p", &spec]).output()?;
-    if !out.status.success() {
-        return Ok(None);
+    if path.is_empty() || path.contains('\0') || !Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        bail!("Invalid repository-relative revision path");
     }
-    if out.stdout.len() > 4 * 1024 * 1024 {
-        return Ok(Some(String::from("<file too large to show>")));
+    // An unborn repository need not have written the well-known empty tree.
+    if tree == EMPTY_TREE { return Ok(None); }
+    let unavailable = || format!("Revision of {path} is unavailable locally. Fetch the missing objects in the workspace before comparing this revision.");
+    let listing = git().current_dir(cwd).env("GIT_LITERAL_PATHSPECS", "1")
+        .args(["ls-tree", "--full-tree", "-z", tree, "--", path]).output()?;
+    if !listing.status.success() { bail!("{}", unavailable()); }
+    if listing.stdout.is_empty() { return Ok(None); }
+    let listing = std::str::from_utf8(&listing.stdout)?;
+    let (header, found) = listing.split_once('\t').context("Invalid revision tree entry")?;
+    let fields: Vec<_> = header.split_whitespace().collect();
+    if found.strip_suffix('\0') != Some(path) || fields.len() != 3 || fields[1] != "blob" {
+        bail!("Not a regular revision blob");
     }
-    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+    let oid = fields[2];
+    let size = git().current_dir(cwd).args(["cat-file", "-s", oid]).output()?;
+    if !size.status.success() { bail!("{}", unavailable()); }
+    let size: usize = std::str::from_utf8(&size.stdout)?.trim().parse()?;
+    if size > limit { return Ok(Some(BlobContents::TooLarge)); }
+    let content = git().current_dir(cwd).args(["cat-file", "blob", oid]).output()?;
+    if !content.status.success() { bail!("{}", unavailable()); }
+    Ok(Some(if content.stdout.len() > limit { BlobContents::TooLarge } else { BlobContents::Bytes(content.stdout) }))
+}
+
+/// Contents of `path` at `tree`, or `None` only if the local tree proves absence.
+pub fn blob_at(cwd: &Path, tree: &str, path: &str) -> Result<Option<String>> {
+    Ok(blob_bytes_at(cwd, tree, path, 4 * 1024 * 1024)?.map(|content| match content {
+        BlobContents::TooLarge => "<file too large to show>".into(),
+        BlobContents::Bytes(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+    }))
 }
 
 pub fn working_file(cwd: &Path, path: &str) -> Option<String> {
