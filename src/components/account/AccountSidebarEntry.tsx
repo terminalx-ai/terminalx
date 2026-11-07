@@ -1,6 +1,7 @@
-import { Loader2, UserRound } from "@/icons";
+import { Loader2, LogOut, Settings, UserRound } from "@/icons";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { Button } from "@/components/ui/button";
-import { openPasteLink, signIn, useAccount } from "@/lib/account";
+import { openPasteLink, signIn, signOut, useAccount } from "@/lib/account";
 import { AccountAvatar } from "./AccountAvatar";
 import { RelayStatus } from "./RelayStatus";
 import { usePairing } from "@/lib/pairing";
@@ -14,21 +15,32 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
   const identity = account.status.identity;
   if (account.status.state === "signed-in" && identity) {
     return (
-      // One line, the picture and the name. Relay's state shows under it only when the relay has dropped, with its
-      // retry; connected, connecting or not configured is the normal case and lives in Settings → Devices.
+      // One line, the picture and the name, opening a menu: the email it is signed in as, Settings, and Log out. Relay's state
+      // shows under it only when the relay has dropped, with its retry; connected, connecting or not configured is the
+      // normal case and lives in Settings → Devices.
       <div className="relative w-full min-w-0">
-        <Button
-          variant="ghost"
-          className={cn("w-full min-w-0 justify-start gap-2 overflow-hidden px-2", relayDropped && "h-auto py-1.5")}
-          onClick={onOpenAccount}
-          title={[identity.email, identity.organization].filter(Boolean).join(" · ")}
-        >
-          <AccountAvatar identity={identity} />
-          <span className="min-w-0 flex-1 text-left">
-            <span className="block truncate">{identity.name ?? identity.email}</span>
-            {relayDropped && <span aria-hidden className="mt-0.5 block h-[15px]" />}
-          </span>
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              className={cn("w-full min-w-0 justify-start gap-2 overflow-hidden px-2", relayDropped && "h-auto py-1.5")}
+              title={[identity.email, identity.organization].filter(Boolean).join(" · ")}
+            >
+              <AccountAvatar identity={identity} />
+              <span className="min-w-0 flex-1 text-left">
+                <span className="block truncate">{identity.name ?? identity.email}</span>
+                {relayDropped && <span aria-hidden className="mt-0.5 block h-[15px]" />}
+              </span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="start" className="w-60">
+            <div className="truncate px-2 py-1.5 text-xs text-muted-foreground" title={identity.email}>{identity.email}</div>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onOpenAccount}><Settings /> Settings</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void signOut()} disabled={account.busy}><LogOut /> Log out</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         {relayDropped && <RelayStatus />}
       </div>
     );

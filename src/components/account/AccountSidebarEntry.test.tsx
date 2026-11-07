@@ -5,7 +5,7 @@ import type { PairingStatus } from "@/types/pairing";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), open: vi.fn(), listener: null as null | ((event: { payload: PairingStatus }) => void) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (_event, listener) => { mocks.listener = listener; return () => {}; }) }));
-vi.mock("@/lib/account", () => ({ signIn: vi.fn(), useAccount: () => ({ ready: true, busy: false, status: { state: "signed-in", identity: { name: "Ada", email: "ada@example.invalid" } } }) }));
+vi.mock("@/lib/account", () => ({ signIn: vi.fn(), signOut: vi.fn(), openPasteLink: vi.fn(), useAccount: () => ({ ready: true, busy: false, status: { state: "signed-in", identity: { name: "Ada", email: "ada@example.invalid" } } }) }));
 
 import { bootPairing } from "@/lib/pairing";
 import { AccountSidebarEntry } from "./AccountSidebarEntry";
@@ -61,7 +61,8 @@ it("is one line, the name alone, while Relay is unconfigured or connected", asyn
     publish({ ...connected, relay });
     render(<AccountSidebarEntry onOpenAccount={mocks.open} />);
     expect(screen.queryByRole("button", { name: /^Relay/ })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Ada" }));
+    fireEvent.keyDown(screen.getByRole("button", { name: "Ada" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Settings" }));
     cleanup();
   }
   expect(mocks.open).toHaveBeenCalledTimes(3);
@@ -77,4 +78,15 @@ it("shows the person's picture from the sign-in service in place of their initia
   expect(container.textContent).toBe("A");
   rerender(<AccountAvatar identity={{ name: "Ada", email: "a@x.io", organization: null }} />);
   expect(screen.queryByTestId("account-picture")).toBeNull();
+});
+
+it("logs out from the account menu", async () => {
+  const { signOut } = await import("@/lib/account");
+  publish(connected);
+  render(<AccountSidebarEntry onOpenAccount={mocks.open} />);
+  fireEvent.keyDown(screen.getByRole("button", { name: "Ada" }), { key: "Enter" });
+  expect(await screen.findByText("ada@example.invalid")).toBeTruthy();
+  fireEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
+  expect(signOut).toHaveBeenCalledOnce();
+  expect(mocks.open).not.toHaveBeenCalled();
 });

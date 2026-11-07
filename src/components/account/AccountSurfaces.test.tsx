@@ -63,7 +63,12 @@ describe("TerminalX account surfaces", () => {
     expect(screen.getByText("owner@terminalx.ai")).toBeTruthy();
     expect(screen.getByText("TerminalX")).toBeTruthy();
 
-    fireEvent.click(screen.getAllByText("Paresh")[0]);
+    // The sidebar's name opens a menu: the email it is signed in as, Settings, and Log out.
+    fireEvent.keyDown(screen.getAllByText("Paresh")[0].closest("button")!, { key: "Enter" });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByText("owner@terminalx.ai")).toBeTruthy();
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Settings", "Log out"]);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Settings" }));
     expect(openAccount).toHaveBeenCalledOnce();
 
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
