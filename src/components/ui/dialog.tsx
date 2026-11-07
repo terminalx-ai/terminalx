@@ -3,6 +3,12 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import { X } from "@/icons";
 import { cn } from "@/lib/cn";
 import { Button } from "./button";
+import { useNoticeDeferral } from "@/lib/noticeDeferral";
+
+function DeferDialogNotices() {
+  useNoticeDeferral(true, "modal");
+  return null;
+}
 
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
@@ -38,6 +44,7 @@ export const DialogContent = React.forwardRef<
       )}
       {...props}
     >
+      <DeferDialogNotices />
       {children}
       {showClose && (
         <DialogPrimitive.Close asChild>

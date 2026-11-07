@@ -6,6 +6,7 @@ import { COMPACTING_LINE, type Transcript } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { SendingMessage, TurnBlock } from "./TurnBlock";
 import { PermissionCard, QuestionCard } from "./AskCards";
+import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { RaccoonRunner, RaccoonScene } from "@/components/raccoon/Raccoon";
 import { READER_SCROLL_EVENT, scrollToInOwnScroller } from "@/lib/shellScroll";
 import { elementWithId, SEEK_ANCHOR_EVENT } from "@/lib/chatLinks";
@@ -88,6 +89,7 @@ export function Chat({
   sessionId,
   checkpointTabId,
   transcript,
+  active = true,
   stream,
   cwd,
   live,
@@ -107,6 +109,8 @@ export function Chat({
   sessionId: string;
   checkpointTabId?: string;
   transcript: Transcript;
+  /** A kept chat can be hidden behind another workspace view. */
+  active?: boolean;
   stream: StreamBlock[];
   cwd?: string;
   live: boolean;
@@ -129,6 +133,9 @@ export function Chat({
   onSendAgain?: (seq: number) => void;
   onReset?: (endSeq: number) => void;
 }) {
+  // Guest and workspace chats render requests here, without a TabView banner.
+  // A kept, hidden workspace chat must not defer the visible view's notices.
+  useNoticeDeferral(active && transcript.pendingAsks.length > 0);
   const root = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
