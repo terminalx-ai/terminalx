@@ -7,6 +7,13 @@ const comment = (props: Partial<ReviewComment> = {}): ReviewComment => ({ id: "c
 beforeEach(() => { invoke.mockClear(); setDraft("tab", ""); });
 
 describe("review draft", () => {
+  it("includes reviewer attribution and sends the shared record's revision", async () => {
+    const agent = comment({ author: { type: "reviewerAgent", sessionId: "review", tabId: "review-tab", name: "Reviewer" } });
+    addReviewsToChat("local:/repo", "tab", [agent]);
+    expect(getDraft("tab")).toContain("src/a.ts:2-3 (after)\nReviewer agent: Reviewer\n> const old = 1;");
+    await markReviewsSent(captureReviewSend("tab", getDraft("tab")));
+    expect(invoke).toHaveBeenCalledWith("review_comments", { workspace: "local:/repo", action: { type: "sent", comments: [{ id: "c1", revision: 1 }] } });
+  });
   it("quotes every original line, identifies side and range, and retains literal note text", () => {
     expect(reviewDraft([comment()])).toBe("src/a.ts:2-3 (after)\n> const old = 1;\n> old++;\n\nRename old.\nKeep the increment.");
     expect(reviewEntry(comment({ side: "before", base: "abcdef1234567890", startLine: 3, outdated: true, lineText: "`</script>`" }))).toContain("src/a.ts:3 (before at abcdef123456, outdated)\n> `</script>`");

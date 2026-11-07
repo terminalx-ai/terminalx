@@ -381,6 +381,8 @@ function cloudHandlers() {
       outbox = [...outbox, entry];
       return entry;
     },
+    // Personal review notes live on this desktop, keyed by workspace, not a local file path.
+    review_comments: () => [],
     // Reading a Git identity is local but pathless: commits carry it.
     git_identity: () => ({ name: "Ada", email: "ada@example.com" }),
   };
