@@ -1,5 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_DASHBOARD_PREFERENCES } from "@terminalx/portable/dashboard";
+import { rememberPeople } from "@/lib/cloudPeople";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
 
@@ -118,7 +120,7 @@ Element.prototype.scrollIntoView ??= function () {};
 Element.prototype.scrollTo ??= function () {} as typeof Element.prototype.scrollTo;
 
 beforeEach(async () => {
-  prefs.setPrefs({ hiddenOrganizations: [], organizationDisplay: "all", selectedOrganization: null });
+  prefs.setPrefs({ dashboard: DEFAULT_DASHBOARD_PREFERENCES, hiddenOrganizations: [], organizationDisplay: "all", selectedOrganization: null });
   mocks.status = {
     state: "signed-in",
     identity: { name: "A", email: "a@example.com", organization: "Acme", organizationId: ORG },
@@ -380,4 +382,26 @@ describe("the command palette", () => {
       expect(screen.queryByRole("option", { name: /New cloud workspace…/ })).toBeNull();
     });
   });
+});
+
+
+it("filters table sessions by cloud owner and archive state and opens an archived row without waking", async () => {
+  rememberPeople([{ userId: "amy", displayName: "Amy" }, { userId: "zoe", displayName: "Zoe" }]);
+  await poll(ORG, [item("ws-1", ORG, { createdBy: "amy", state: "suspended" })]);
+  await poll(OTHER, [item("ws-b", OTHER, { createdBy: "zoe", repositories: [betaSite] })]);
+  act(() => catalog.cacheCloudSessions(ORG, "ws-1", [session("old", "Archived cloud work", "idle", { archived: true })] as never, ["session/2"]));
+  render(<TooltipProvider><AgentDashboard /></TooltipProvider>);
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Table" }));
+  expect(screen.queryByRole("row", { name: "Archived cloud work" })).toBeNull();
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Filter" }), { button: 0, ctrlKey: false });
+  fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Archived" }));
+  fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Amy" }));
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  const row = await screen.findByRole("row", { name: "Archived cloud work" });
+  expect(within(row).getByText("Amy")).toBeTruthy();
+  expect(screen.queryByRole("row", { name: "Landing page copy" })).toBeNull();
+  fireEvent.click(row);
+  expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:ws-1:old`);
+  expectNoWake();
 });
