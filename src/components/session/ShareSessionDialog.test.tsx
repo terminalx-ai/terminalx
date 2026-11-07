@@ -28,7 +28,7 @@ const open = async () => {
 describe("Share session", () => {
   it("creates a read-only link that admits each person only once approved, with a finite expiry (PRO-162)", async () => {
     await open();
-    expect(screen.getByText(/Guests can see the existing transcript/)).toBeTruthy();
+    expect(screen.getByText(/They see the transcript and terminal so far/)).toBeTruthy();
     // The form shows the defaults it will send.
     expect((screen.getByLabelText("Default access") as HTMLSelectElement).value).toBe("viewer");
     expect((screen.getByLabelText("Approve each person") as HTMLInputElement).checked).toBe(true);
@@ -117,5 +117,14 @@ describe("Share session", () => {
     act(() => openSessionShare("signed-out-session"));
     expect(await screen.findByRole("button", { name: "Sign in to share" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Create share link" })).toBeNull();
+  });
+  it("does not repeat the server's sign-in refusal as an error while signed out", async () => {
+    mocks.signedIn = false;
+    mocks.invoke.mockRejectedValue("Sign in to share a session.");
+    render(<ShareSessionDialogHost />);
+    act(() => openSessionShare("signed-out-session"));
+    expect(await screen.findByTestId("share-sign-in")).toBeTruthy();
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalled());
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
