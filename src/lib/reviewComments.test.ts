@@ -8,7 +8,7 @@ beforeEach(() => { invoke.mockClear(); setDraft("tab", ""); });
 
 describe("review draft", () => {
   it("includes reviewer attribution and sends the shared record's revision", async () => {
-    const agent = comment({ author: { type: "reviewerAgent", sessionId: "review", tabId: "review-tab", name: "Reviewer" } });
+    const agent = comment({ author: { kind: "agent", role: "reviewer", sessionId: "review", tabId: "review-tab", name: "Reviewer" } });
     addReviewsToChat("local:/repo", "tab", [agent]);
     expect(getDraft("tab")).toContain("src/a.ts:2-3 (after)\nReviewer agent: Reviewer\n> const old = 1;");
     await markReviewsSent(captureReviewSend("tab", getDraft("tab")));

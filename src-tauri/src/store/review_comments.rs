@@ -125,7 +125,7 @@ pub enum Action {
     },
 }
 
-fn valid_anchor(anchor: &Anchor, note: &str) -> Result<()> {
+pub(crate) fn valid_anchor(anchor: &Anchor, note: &str) -> Result<()> {
     if anchor.base.as_ref().is_some_and(|base| {
         !(7..=64).contains(&base.len()) || !base.bytes().all(|b| b.is_ascii_hexdigit())
     }) {
@@ -253,7 +253,43 @@ fn file(root: &Path, workspace: &str) -> Result<PathBuf> {
 
 const MAX_STORE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Save/retry one authenticated reviewer finding in the shared transaction.
+/// The returned flag distinguishes an inserted note from an unchanged retry.
+pub(crate) fn save_reviewer(
+    root: &Path,
+    workspace: &str,
+    anchor: Anchor,
+    note: String,
+    author: Author,
+    reviewed_commit: &str,
+) -> Result<(Comment, bool)> {
+    let mut saved = None;
+    apply_inner(
+        root,
+        workspace,
+        Action::Save {
+            anchor: Box::new(anchor),
+            note,
+            expected: None,
+            author,
+        },
+        Some(reviewed_commit),
+        &mut saved,
+    )?;
+    saved.context("The saved review comment is missing")
+}
+
 pub fn apply(root: &Path, workspace: &str, action: Action) -> Result<Vec<Comment>> {
+    apply_inner(root, workspace, action, None, &mut None)
+}
+
+fn apply_inner(
+    root: &Path,
+    workspace: &str,
+    action: Action,
+    reviewed_commit: Option<&str>,
+    saved: &mut Option<(Comment, bool)>,
+) -> Result<Vec<Comment>> {
     // A directory-level lock remains stable while individual workspaces are deleted.
     super::transaction::run(
         &root.join("review-comments.lock"),
@@ -333,6 +369,25 @@ pub fn apply(root: &Path, workspace: &str, action: Action) -> Result<Vec<Comment
                             .checked_add(1)
                             .context("Review revision exhausted")?;
                         c.sent = false;
+                    } else if let Some(existing) = comments.iter().find(|c| {
+                        reviewed_commit.is_some()
+                            && c.extra
+                                .get("reviewedCommit")
+                                .and_then(serde_json::Value::as_str)
+                                == reviewed_commit
+                            && matches!(c.author.kind, AuthorKind::Agent)
+                            && c.author.session_id == author.session_id
+                            && c.author.tab_id == author.tab_id
+                            && c.path == anchor.path
+                            && c.side == anchor.side
+                            && c.base == anchor.base
+                            && c.start_line == anchor.start_line
+                            && c.end_line == anchor.end_line
+                            && c.line_text == anchor.line_text
+                            && c.note == note.trim()
+                    }) {
+                        *saved = Some((existing.clone(), false));
+                        changed = false;
                     } else {
                         if anchor.base.is_none() {
                             bail!("A base tree is required for a new review comment");
@@ -368,6 +423,11 @@ pub fn apply(root: &Path, workspace: &str, action: Action) -> Result<Vec<Comment
                             sent: false,
                             outdated: false,
                         });
+                        if let Some(commit) = reviewed_commit {
+                            let comment = comments.last_mut().expect("just inserted");
+                            comment.extra.insert("reviewedCommit".into(), commit.into());
+                            *saved = Some((comment.clone(), true));
+                        }
                     }
                 }
                 Action::Delete { expected } => {

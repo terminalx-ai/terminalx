@@ -10,7 +10,7 @@ afterEach(cleanup);
 const comment: ReviewComment = {
   id: "comment-1", path: "src/foo.ts", side: "after", startLine: 40, endLine: 40,
   note: "High: validate the request before writing.", lineText: "save(request);",
-  author: { type: "reviewerAgent", name: "Reviewer", sessionId: "session-1", tabId: "tab-1" }, revision: 1, sent: false, outdated: false,
+  author: { kind: "agent", role: "reviewer", name: "Reviewer", sessionId: "session-1", tabId: "tab-1" }, revision: 1, sent: false, outdated: false,
 };
 const call: ToolCall = {
   callId: "review-comment:comment-1", name: "terminalx.review.comment", toolType: "other",

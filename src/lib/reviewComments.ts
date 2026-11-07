@@ -34,7 +34,8 @@ export function quotedReviewText(text: string): string {
     + (lines.length > 20 || preview.length > 4000 ? `\n> … (${omitted} omitted)` : "");
 }
 export function reviewEntry(c: ReviewComment): string {
-  return `${reviewLocation(c)} (${reviewVersion(c)}${c.outdated ? ", outdated" : ""})\n${quotedReviewText(c.lineText)}\n\n${c.note}`;
+  const author = c.author?.kind === "agent" && c.author.role === "reviewer" ? `Reviewer agent: ${c.author.name ?? "Reviewer"}\n` : "";
+  return `${reviewLocation(c)} (${reviewVersion(c)}${c.outdated ? ", outdated" : ""})\n${author}${quotedReviewText(c.lineText)}\n\n${c.note}`;
 }
 export function orderedComments(comments: ReviewComment[]): ReviewComment[] {
   return [...comments].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)

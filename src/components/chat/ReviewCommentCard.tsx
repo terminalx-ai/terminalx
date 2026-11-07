@@ -1,11 +1,11 @@
 import { MessageSquare, CircleAlert, Loader2 } from "@/icons";
 import type { ToolCall } from "@/lib/transcript";
 import type { ChatLinkContext } from "@/lib/chatLinks";
-import { reviewLocation, type ReviewAuthor, type ReviewComment } from "@/lib/reviewComments";
+import { reviewLocation, type CommentAuthor, type ReviewComment } from "@/lib/reviewComments";
 import { LinkedText } from "./LinkedText";
 import { useState } from "react";
 
-type ReviewerComment = Pick<ReviewComment, "path" | "startLine" | "endLine" | "note" | "lineText" | "side"> & { author: ReviewAuthor; quoteTruncated?: boolean };
+type ReviewerComment = Pick<ReviewComment, "path" | "startLine" | "endLine" | "note" | "lineText" | "side"> & { author: CommentAuthor & { kind: "agent"; name: string; sessionId: string; tabId: string; role: "reviewer" }; quoteTruncated?: boolean };
 
 /** These are structured control events, never guesses from shell text. */
 export function reviewComment(call: ToolCall): ReviewerComment | null {
@@ -14,7 +14,7 @@ export function reviewComment(call: ToolCall): ReviewerComment | null {
   if (typeof value.path !== "string" || !value.path || typeof value.note !== "string" || typeof value.lineText !== "string"
     || typeof value.startLine !== "number" || !Number.isSafeInteger(value.startLine) || value.startLine < 1
     || typeof value.endLine !== "number" || !Number.isSafeInteger(value.endLine) || value.endLine < value.startLine
-    || value.side !== "after" || value.author?.type !== "reviewerAgent" || typeof value.author.name !== "string"
+    || value.side !== "after" || value.author?.kind !== "agent" || value.author.role !== "reviewer" || typeof value.author.name !== "string"
     || typeof value.author.sessionId !== "string" || typeof value.author.tabId !== "string") return null;
   return value as ReviewerComment;
 }

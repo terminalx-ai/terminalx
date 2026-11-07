@@ -343,12 +343,15 @@ Ranges are limited to 10,000 lines and 1,000,000 bytes of quoted text. Deleted f
 before-side lines are not supported by these commands.
 
 The result includes the saved `comment`, with its quoted `lineText`, range, `note`, revision,
-and `author` tagged `reviewerAgent` with the tab's id and name. It uses the same workspace key
+and shared `author` (`kind: agent`, `role: reviewer`) with the tab's id and name. It uses the same workspace key
 and store as user diff comments. Agent notes appear on their diff lines with the agent's name
 and are included by “Add all to chat”; editing, Sent and Outdated work as for user comments.
 Each new comment also appears as a card in the caller's chat. `review comments` lists all user
 and agent comments in file and line order. Read that list before retrying an uncertain write:
-each successful `review comment` adds a new note. Note text uses the store's whitespace trimming.
+an identical retry for the same reviewer and reviewed commit returns that note with
+`created: false`, preserving its state and avoiding another chat card. Note text uses the
+store's whitespace trimming. The anchor records the PR comparison tree, surrounding source
+lines and `reviewedCommit`; changed checkout commits or quoted lines are refused.
 
 ### Issues
 

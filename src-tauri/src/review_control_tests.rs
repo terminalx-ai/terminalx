@@ -2,6 +2,31 @@ use super::super::tests::headless_service as bare_service;
 use super::*;
 
 fn session(root: &Path) -> SessionEntry {
+    if !crate::git::is_repo(root) {
+        crate::git::run(root, &["init", "-b", "main"]).unwrap();
+        for entry in std::fs::read_dir(root).unwrap().map(Result::unwrap) {
+            if entry.file_type().unwrap().is_file()
+                && entry.metadata().unwrap().len() <= 4 * 1024 * 1024
+            {
+                crate::git::run(root, &["add", "--", entry.file_name().to_str().unwrap()]).unwrap();
+            }
+        }
+        crate::git::run(
+            root,
+            &[
+                "-c",
+                "user.name=Reviewer Test",
+                "-c",
+                "user.email=review@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "reviewed",
+            ],
+        )
+        .unwrap();
+    }
+    let commit = crate::git::head_commit(root).unwrap();
     let mut session = crate::session_ops::create_session_entry(
         serde_json::from_value(json!({
             "projectPath": root, "useWorktree": false, "tab": {"harness": "codex"},
@@ -17,7 +42,7 @@ fn session(root: &Path) -> SessionEntry {
         "id": session.id, "projectPath": session.project_path, "branch": "reviewed",
         "author": {"sessionId": session.id, "tabId": session.tabs[1].id},
         "reviewer": {"sessionId": session.id, "tabId": session.tabs[0].id},
-        "stage": "review", "state": "working", "reviewCommit": "abc1234def",
+        "stage": "review", "state": "working", "reviewCommit": commit, "pr": {"number": 1, "url": "https://example.com/pr/1", "base": "main"},
         "maxRounds": 3, "created": "now", "modified": "now",
     }))
     .unwrap();
@@ -60,7 +85,10 @@ fn saves_the_exact_range_with_tab_attribution_and_a_persisted_chat_card() {
     let result = service
         .execute("review.comment", request.clone(), "one")
         .unwrap();
-    assert_eq!(result["workspace"], format!("local:{}", session.cwd));
+    assert_eq!(
+        result["workspace"],
+        review_comments::workspace_key(Path::new(&session.cwd)).unwrap()
+    );
     let comment = &result["comment"];
     assert_eq!(comment["path"], "foo.ts");
     assert_eq!(comment["side"], "after");
@@ -69,7 +97,7 @@ fn saves_the_exact_range_with_tab_attribution_and_a_persisted_chat_card() {
     assert_eq!(comment["lineText"], "second\nthird");
     assert_eq!(
         comment["author"],
-        json!({"type": "reviewerAgent", "sessionId": session.id, "tabId": session.tabs[0].id, "name": "Reviewer"})
+        json!({"kind": "agent", "role": "reviewer", "sessionId": session.id, "tabId": session.tabs[0].id, "name": "Reviewer"})
     );
     let events = service
         .manager
@@ -98,7 +126,7 @@ fn saves_the_exact_range_with_tab_attribution_and_a_persisted_chat_card() {
     assert_eq!(listed["comments"], json!([comment]));
     let ui_comments = review_comments::apply(
         &crate::store::root().unwrap(),
-        &format!("local:{}", session.cwd),
+        &review_comments::workspace_key(Path::new(&session.cwd)).unwrap(),
         Action::List,
     )
     .unwrap();
@@ -159,9 +187,9 @@ fn user_and_agent_comments_share_edit_sent_and_outdated_lifecycle() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("foo.ts"), "first\nsecond\nthird").unwrap();
     let session = session(root.path());
-    let workspace = format!("local:{}", session.cwd);
+    let workspace = review_comments::workspace_key(Path::new(&session.cwd)).unwrap();
     let store = crate::store::root().unwrap();
-    let anchor = json!({"path": "foo.ts", "side": "after", "startLine": 2, "endLine": 3, "lineText": "second\nthird"});
+    let anchor = json!({"path": "foo.ts", "side": "after", "startLine": 2, "endLine": 3, "lineText": "second\nthird", "base": crate::git::head_tree(root.path()).unwrap()});
     // The existing desktop action has no author field; its record stays a user note.
     let user = serde_json::from_value(
         json!({"type": "save", "anchor": anchor, "note": "User note", "expected": null}),
@@ -175,7 +203,7 @@ fn user_and_agent_comments_share_edit_sent_and_outdated_lifecycle() {
         .clone();
     let listed = review_comments::apply(&store, &workspace, Action::List).unwrap();
     assert_eq!(listed.len(), 2);
-    assert!(listed[0].author.is_none());
+    assert!(matches!(listed[0].author.kind, AuthorKind::User));
     assert_eq!(serde_json::to_value(&listed[1]).unwrap(), saved);
     // The user's Edit action changes the note, while retaining agent attribution.
     let edit = serde_json::from_value(
@@ -207,6 +235,7 @@ fn user_and_agent_comments_share_edit_sent_and_outdated_lifecycle() {
         &workspace,
         Action::Reconcile {
             path: "foo.ts".into(),
+            base: crate::git::head_tree(root.path()).unwrap(),
             before: None,
             after: Some("first\nchanged\nthird".into()),
             comments: vec![revision()],
@@ -423,7 +452,7 @@ fn only_the_authenticated_pipeline_reviewer_can_write() {
     }
     assert!(review_comments::apply(
         &crate::store::root().unwrap(),
-        &format!("local:{}", session.cwd),
+        &review_comments::workspace_key(Path::new(&session.cwd)).unwrap(),
         Action::List
     )
     .unwrap()
@@ -476,4 +505,148 @@ fn transcript_quotes_are_bounded_and_written_only_once() {
         "Reviewer agent"
     );
     assert_eq!(agent_name(&"a".repeat(100)).len(), 80);
+}
+
+#[test]
+fn retries_return_the_original_note_without_duplicating_notes_or_cards() {
+    let _home = crate::store::temp_home();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("foo.ts"), "first\nsecond\nthird").unwrap();
+    let session = session(root.path());
+    let (service, _) = headless_service();
+    let request = params(&session);
+    let first = service
+        .execute("review.comment", request.clone(), "first")
+        .unwrap();
+    let mut different = request.clone();
+    different["body"] = json!("Another finding");
+    service
+        .execute("review.comment", different, "second")
+        .unwrap();
+    let retry = service.execute("review.comment", request, "retry").unwrap();
+    assert_eq!(first["created"], true);
+    assert_eq!(retry["created"], false);
+    assert_eq!(retry["comment"], first["comment"]);
+    assert_eq!(
+        service
+            .manager
+            .load_events(&session.id, &session.tabs[0].id)
+            .unwrap()
+            .len(),
+        4
+    );
+    let comments = service
+        .execute("review.comments", params(&session), "list")
+        .unwrap();
+    assert_eq!(comments["comments"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        first["comment"]["base"],
+        crate::git::head_tree(root.path()).unwrap()
+    );
+    assert_eq!(
+        first["comment"]["reviewedCommit"],
+        crate::git::head_commit(root.path()).unwrap()
+    );
+    assert_eq!(first["comment"]["contextBefore"], json!(["first"]));
+}
+
+#[test]
+fn concurrent_retries_share_the_store_transaction() {
+    let root = tempfile::tempdir().unwrap();
+    let gate = Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2).map(|_| {
+        let gate = gate.clone();
+        let root = root.path().to_owned();
+        std::thread::spawn(move || {
+            let anchor = serde_json::from_value(json!({"path": "foo.ts", "side": "after", "startLine": 2, "endLine": 2, "lineText": "second", "base": "a".repeat(40)})).unwrap();
+            let author = Author { kind: AuthorKind::Agent, session_id: Some("session".into()), tab_id: Some("reviewer".into()), ..Default::default() };
+            gate.wait();
+            review_comments::save_reviewer(&root, "workspace", anchor, "finding".into(), author, &"b".repeat(40)).unwrap()
+        })
+    }).collect();
+    let saved: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(saved[0].0.id, saved[1].0.id);
+    assert_eq!(saved.iter().filter(|(_, created)| *created).count(), 1);
+}
+
+#[test]
+fn refuses_lines_that_no_longer_describe_the_reviewed_commit() {
+    let _home = crate::store::temp_home();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("foo.ts"), "first\nsecond\nthird").unwrap();
+    let session = session(root.path());
+    let (service, _) = headless_service();
+    std::fs::write(root.path().join("foo.ts"), "first\nchanged\nthird").unwrap();
+    assert!(service
+        .execute("review.comment", params(&session), "dirty")
+        .unwrap_err()
+        .message
+        .contains("changed since"));
+    crate::git::run(
+        root.path(),
+        &[
+            "-c",
+            "user.name=Reviewer Test",
+            "-c",
+            "user.email=review@example.com",
+            "commit",
+            "-am",
+            "changed",
+        ],
+    )
+    .unwrap();
+    assert!(service
+        .execute("review.comment", params(&session), "moved")
+        .unwrap_err()
+        .message
+        .contains("checkout moved"));
+    assert!(service
+        .manager
+        .load_events(&session.id, &session.tabs[0].id)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn branch_comments_use_the_pr_comparison_tree_and_renamed_path() {
+    let _home = crate::store::temp_home();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("foo.ts"), "first\nsecond\nthird").unwrap();
+    let session = session(root.path());
+    let base = crate::git::head_tree(root.path()).unwrap();
+    crate::git::run(root.path(), &["checkout", "-b", "feature"]).unwrap();
+    crate::git::run(root.path(), &["mv", "foo.ts", "renamed.ts"]).unwrap();
+    crate::git::run(
+        root.path(),
+        &[
+            "-c",
+            "user.name=Reviewer Test",
+            "-c",
+            "user.email=review@example.com",
+            "commit",
+            "-m",
+            "rename",
+        ],
+    )
+    .unwrap();
+    let mut pipeline = crate::issue_pipeline::store::get(&session.id).unwrap();
+    pipeline.review_commit = crate::git::head_commit(root.path());
+    crate::issue_pipeline::store::commit(&mut pipeline).unwrap();
+    let (service, _) = headless_service();
+    let mut request = params(&session);
+    request["file"] = json!("renamed.ts");
+    let saved = service
+        .execute("review.comment", request, "rename")
+        .unwrap();
+    assert_eq!(saved["comment"]["base"], base);
+    assert_ne!(
+        saved["comment"]["base"],
+        crate::git::head_tree(root.path()).unwrap()
+    );
+    assert_eq!(saved["comment"]["originalPath"], "foo.ts");
+    assert_eq!(saved["comment"]["path"], "renamed.ts");
+    assert_eq!(
+        saved["comment"]["reviewedCommit"],
+        pipeline.review_commit.unwrap()
+    );
 }
