@@ -25,10 +25,11 @@ export interface GitSource {
   cloud: boolean;
   /** False for a read-only (participate) attachment. */
   canWrite: boolean;
-  workingChanges(): Promise<{ head: string | null; files: ChangedFile[] }>;
+  workingChanges(hideWhitespace?: boolean): Promise<{ head: string | null; files: ChangedFile[] }>;
   reviewRange(target: string | null, uncommitted: boolean): Promise<{ target: string; base: string; head: string }>;
-  changesBetween(base: string, head: string | null): Promise<ChangedFile[]>;
+  changesBetween(base: string, head: string | null, hideWhitespace?: boolean): Promise<ChangedFile[]>;
   fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }>;
+  mediaContentAt?(path: string, tree: string | null): Promise<{ data: string; mime: string } | null>;
   workStatus(): Promise<SourceStatus>;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;
   prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean }>;
@@ -53,11 +54,11 @@ export interface GitSource {
   prAccess?(association: PrAssociation): {
     read(): Promise<PullRequest>;
     ready(): Promise<void>;
-    merge(method: "merge" | "squash" | "rebase"): Promise<void>;
+    merge(method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
   };
   createPr(input: { title: string; body: string; base: string | null; draft: boolean; sessionId?: string }): Promise<string | null>;
   readyPr(number: number): Promise<void>;
-  mergePr(number: number, method: "merge" | "squash" | "rebase"): Promise<void>;
+  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
   errorMessage(error: unknown): string;
 }
 
@@ -71,10 +72,11 @@ export function localGitSource(cwd: string): GitSource {
     key: `local:${cwd}`,
     cloud: false,
     canWrite: true,
-    workingChanges: () => git.workingChanges(cwd).then(([head, files]) => ({ head, files })),
+    workingChanges: (hideWhitespace) => git.workingChanges(cwd, hideWhitespace).then(([head, files]) => ({ head, files })),
     reviewRange: (target, uncommitted) => api.reviewRange(cwd, target, uncommitted),
-    changesBetween: (base, head) => api.changesBetween(cwd, base, head),
+    changesBetween: (base, head, hideWhitespace) => api.changesBetween(cwd, base, head, hideWhitespace),
     fileContentsAt: (path, base, head) => api.fileContentsAt(cwd, path, base, head),
+    mediaContentAt: (path, tree) => api.diffMediaContent(cwd, path, tree),
     workStatus: () => api.workStatus(cwd),
     landed: () => gh.landed(cwd),
     logCommits: (from, limit) => api.logCommits(cwd, from, limit),
@@ -140,13 +142,14 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     key: `${input.workspaceKey}|${remote.repo}`,
     cloud: true,
     canWrite: input.canWrite,
-    workingChanges: () => remote.workingChanges().then(({ head, files }) => ({ head, files })),
+    workingChanges: (hideWhitespace) => remote.workingChanges(hideWhitespace).then(({ head, files }) => ({ head, files })),
     reviewRange: (target, uncommitted) => remote.reviewRange(target, uncommitted),
-    changesBetween: (base, head) => remote.changesBetween(base, head).then((answer) => {
+    changesBetween: (base, head, hideWhitespace) => remote.changesBetween(base, head, hideWhitespace).then((answer) => {
       if (answer.truncated) throw new WorkspaceRpcError("response_truncated", "Too many changed files to load a complete comparison.", "git.changesBetween");
       return answer.files;
     }),
     fileContentsAt: (path, base, head) => remote.fileContents(path, base, head),
+    mediaContentAt: (path, tree) => remote.mediaContent(path, tree),
     workStatus: statusOf,
     landed: input.canWrite ? async () => {
       try { return await remote.prLanded(); }
