@@ -27,7 +27,7 @@ afterEach(cleanup);
 it("offers automation for an issue's session that has none with both switches on, as an issue's start has them (#700)", async () => {
   render(<SessionPipelineControls session={session({ issue })} project={project} tabId="tab-1" />);
   expect(switches()).toEqual(["true", "true"]);
-  fireEvent.click(screen.getByRole("button", { name: "Enable automation" }));
+  fireEvent.click(screen.getByRole("button", { name: "Turn on autopilot" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("issue_pipeline_set_resolve_conflicts", { id: "p1", value: true }));
   expect(invoke).toHaveBeenCalledWith("issue_pipeline_start", { sessionId: "session-1", tabId: "tab-1", autoMerge: true });
 });
@@ -35,5 +35,5 @@ it("offers automation for an issue's session that has none with both switches on
 it("offers it for any other session with both off, as before", () => {
   render(<SessionPipelineControls session={session({})} project={project} tabId="tab-1" />);
   expect(switches()).toEqual(["false", "false"]);
-  expect(screen.getByRole("button", { name: "Enable automation" }).hasAttribute("disabled")).toBe(true);
+  expect(screen.getByRole("button", { name: "Turn on autopilot" }).hasAttribute("disabled")).toBe(true);
 });
