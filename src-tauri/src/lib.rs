@@ -563,6 +563,7 @@ pub fn run() {
             commands::project_start_defaults,
             commands::project_create,
             commands::list_sessions,
+            commands::session_row_statuses,
             commands::local_sections,
             commands::edit_local_section,
             commands::automations_list,

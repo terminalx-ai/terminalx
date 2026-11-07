@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
-import { Pressable, RefreshControl, SectionList, StyleSheet, Text, TextInput, View } from "react-native";
-import { useRouter } from "expo-router";
+import { SessionStatus } from "@mobile/ui/SessionStatus";
+import { useCallback, useMemo, useState } from "react";
+import { AppState, Pressable, RefreshControl, SectionList, StyleSheet, Text, TextInput, View } from "react-native";
+import { useFocusEffect, useRouter } from "expo-router";
 import { ChevronRight, Plus, Search } from "lucide-react-native";
 import type { ColumnId } from "@terminalx/portable/dashboard";
-import { conversationRows, statusLabel, type ConversationRow } from "@mobile/data/conversations";
+import { conversationRows, type ConversationRow } from "@mobile/data/conversations";
 import { useApp } from "@mobile/state/AppProvider";
 import { useHostFeatures } from "@mobile/state/host-features";
 import { Button, Card, EmptyState, StatusDot } from "@mobile/ui/primitives";
@@ -17,6 +18,12 @@ export default function SessionsScreen() {
   const { palette } = useTheme();
   const router = useRouter();
   const [query, setQuery] = useState("");
+  useFocusEffect(useCallback(() => {
+    const timer = setInterval(() => {
+      if (AppState.currentState === "active" && app.connectionStage === "connected") void app.refreshSessions(true);
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [app.connectionStage, app.refreshSessions]));
   // Removing the computer from here goes back to the device list.
   const menu = useDeviceMenu({ onRemoved: () => router.navigate("/(tabs)") });
   const rows = useMemo(() => conversationRows(app.sessions, query), [app.sessions, query]);
@@ -36,11 +43,11 @@ export default function SessionsScreen() {
 }
 
 function SessionRow({ session: row, onPress }: { session: ConversationRow; onPress(): void }) {
-  const { session, tab, label } = row;
+  const { session, label } = row;
   const { palette } = useTheme();
   const status = row.column;
   const color = status === "needs" ? palette.warning : status === "working" ? palette.accent : palette.success;
-  return <Card style={styles.sessionCard}><Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.sessionRow, pressed && { backgroundColor: palette.raised }]}><View style={[styles.statusBar, { backgroundColor: color }]} /><View style={styles.flex}><View style={styles.titleLine}><Text numberOfLines={1} style={[styles.sessionTitle, { color: palette.ink }]}>{session.title}</Text>{session.issueRef ? <Text style={[styles.issue, { color: palette.accent }]}>{session.issueRef}</Text> : null}</View><Text numberOfLines={1} style={[styles.meta, { color: palette.muted }]}>{session.project} · {session.worktree}</Text><Text style={[styles.prompt, { color: palette.ink }]}>{label}</Text><Text style={[styles.reply, { color }]}>{statusLabel(tab.status)}</Text></View><ChevronRight size={18} color={palette.faint} /></Pressable></Card>;
+  return <Card style={styles.sessionCard}><Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.sessionRow, pressed && { backgroundColor: palette.raised }]}><View style={[styles.statusBar, { backgroundColor: color }]} /><View style={styles.flex}><View style={styles.titleLine}><Text numberOfLines={1} style={[styles.sessionTitle, { color: palette.ink }]}>{session.title}</Text>{session.issueRef ? <Text style={[styles.issue, { color: palette.accent }]}>{session.issueRef}</Text> : null}</View><Text numberOfLines={1} style={[styles.meta, { color: palette.muted }]}>{session.project} · {session.worktree}</Text><Text style={[styles.prompt, { color: palette.ink }]}>{label}</Text><SessionStatus input={session.rowStatus ?? session} /></View><ChevronRight size={18} color={palette.faint} /></Pressable></Card>;
 }
 
 function connectionCopy(stage: string, attempt: number): { title: string; hint?: string } {

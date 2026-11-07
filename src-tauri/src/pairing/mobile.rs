@@ -392,7 +392,7 @@ pub(super) fn dispatch(
     let result = match method {
         "sync.capabilities" => no_params(&params).map(|_| capabilities(connection.owner.build())),
         "transport.negotiate" => parse_params(params).map(|params| negotiate(connection, params)),
-        "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries()?, params.version)),
+        "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries(connection)?, params.version)),
         "session.sync" => parse_params(params).and_then(|params| session_sync(connection, request_id(request), params)),
         "session.tail" => parse_params(params).and_then(|params| session_tail(connection, request_id(request), params)),
         "session.subscribe" => sink
@@ -588,7 +588,8 @@ fn require_driver(device: &DeviceEntry) -> Result<()> {
 /// The group a paired phone files quick chats under.
 const QUICK_CHATS_PROJECT: &str = "Quick chats";
 
-fn session_summaries() -> Result<Value> {
+fn session_summaries(connection: &MobileConnection) -> Result<Value> {
+    let row_statuses = connection.call("rowStatuses", json!({})).unwrap_or(Value::Null);
     let snippets: HashMap<_, _> = summaries::collect(None)?
         .into_iter()
         .map(|summary| (summary.session_id.clone(), summary))
@@ -619,6 +620,7 @@ fn session_summaries() -> Result<Value> {
             "lastPrompt": summary.and_then(|row| row.last_prompt.clone()),
             "lastReply": summary.and_then(|row| row.last_reply.clone()),
             "issueRef": session.issue.as_ref().map(|issue| issue.identifier.clone()),
+            "rowStatus": row_statuses[&session.id],
             "tabs": session.tabs.into_iter().map(|tab| json!({
                 "id": tab.id,
                 "title": tab.title,

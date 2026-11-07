@@ -406,7 +406,7 @@ describe("the conversation list", () => {
     expect(within(web).queryByText("Talk m1")).toBeNull();
     expect(within(web).queryByText("Talk m2")).toBeNull();
     // The row's state is the most pressing among them.
-    expect(within(main).getByRole("img", { name: "Needs you" })).toBeTruthy();
+    expect(within(main).getByText("Needs attention")).toBeTruthy();
     fireEvent.click(main);
     expect(within(web).getByRole("button", { name: "main, 2 sessions" }).getAttribute("aria-current")).toBe("true");
     expect(within(web).queryByText("Talk m1")).toBeNull();

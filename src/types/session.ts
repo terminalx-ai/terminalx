@@ -106,6 +106,8 @@ export interface RemovedWorkspace {
 export type SessionKind = "project" | "quick";
 
 export interface SessionEntry {
+  /** Live presentation facts supplied by the owning runtime. */
+  rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
   id: string;
   kind?: SessionKind;
   /**
