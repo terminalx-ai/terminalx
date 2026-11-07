@@ -584,7 +584,7 @@ function ProjectGroup({
             aria-label={group.project ? `${group.name} overview` : undefined}
             className="flex h-full min-w-0 flex-1 items-center rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
-            <span className="min-w-0 flex-1 truncate text-[13px]">{group.name}</span>
+            <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{group.name}</span>
           </button>
           <RowActions>
             <WithTooltip label={`New chat in ${group.name}`}>
@@ -787,7 +787,7 @@ function BranchRow({
     <li>
       <ContextMenu>
       <ContextMenuTrigger asChild>
-      <div className={cn(actionRow, "relative -mx-2 flex h-8 items-center pr-3 text-foreground/85 hover:bg-selected/50")}>
+      <div className={cn(actionRow, "relative -mx-2 flex h-8 items-center pr-3 text-foreground/90 hover:bg-selected/50")}>
         <button
           type="button"
           onClick={toggle}
@@ -834,10 +834,10 @@ function BranchRow({
 
 /** A branch row's icon; a merged branch has a tick drawn into its empty corner, in the icon's own stroke. */
 function BranchGlyph({ merged }: { merged: boolean }) {
-  if (!merged) return <GitBranch className="size-3.5 shrink-0 text-faint" />;
+  if (!merged) return <GitBranch className="size-4 shrink-0 text-muted-foreground" />;
   return (
     <span className="flex shrink-0" title="Merged: its commits are in the default branch">
-      <GitBranch className="size-3.5 text-faint">
+      <GitBranch className="size-4 text-muted-foreground">
         <path d="M9.25 12.25l1.75 1.75 3.5-3.75" className="text-info" />
       </GitBranch>
       <span className="sr-only">merged</span>
@@ -1064,7 +1064,7 @@ function ConversationRow({
             actionRow,
             // Edge to edge: the row reaches past the list's 8px gutter, and its content keeps to it.
             "relative -mx-2 flex h-8 items-center gap-2 pl-[calc(1rem+var(--indent,0px))] pr-3",
-            selected ? "bg-selected text-foreground" : "text-foreground/85 hover:bg-selected/50",
+            selected ? "bg-selected text-foreground" : "text-foreground/90 hover:bg-selected/50",
             picked && "bg-info/12 ring-1 ring-inset ring-info/45",
           )}
           title={location ?? (branchName ? `${branchName} · ${title}` : title)}
