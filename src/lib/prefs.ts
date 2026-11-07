@@ -30,6 +30,11 @@ export interface Prefs {
    */
   branchSessions: "tabs" | "sidebar";
   panelWidth: number;
+  diffMode: "unified" | "split";
+  diffHideWhitespace: boolean;
+  diffWrap: boolean;
+  /** Explicit per-source, per-path choices. Missing keys follow diffWrap. */
+  diffWrapFiles: Record<string, boolean>;
   /** The right panel's terminal dock: shown below the panel's tabs, and its height. */
   panelTerminalOpen: boolean;
   panelTerminalHeight: number;
@@ -141,6 +146,10 @@ const DEFAULTS: Prefs = {
   tabStrip: true,
   branchSessions: "tabs",
   panelWidth: 400,
+  diffMode: "unified",
+  diffHideWhitespace: false,
+  diffWrap: true,
+  diffWrapFiles: {},
   panelTerminalOpen: false,
   panelTerminalHeight: 260,
   editorPaneWidth: 520,
@@ -222,6 +231,11 @@ function load(): Prefs {
     prefs.sidebarLayout = prefs.sidebarLayout === "list" ? "list" : "simple";
     prefs.autocorrect = prefs.autocorrect === true;
     prefs.followUps = prefs.followUps === "hold" ? "hold" : "now";
+    prefs.diffMode = prefs.diffMode === "split" ? "split" : "unified";
+    prefs.diffHideWhitespace = prefs.diffHideWhitespace === true;
+    prefs.diffWrap = prefs.diffWrap !== false;
+    prefs.diffWrapFiles = prefs.diffWrapFiles && typeof prefs.diffWrapFiles === "object" && !Array.isArray(prefs.diffWrapFiles)
+      ? Object.fromEntries(Object.entries(prefs.diffWrapFiles).filter(([, value]) => typeof value === "boolean")) : {};
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
     prefs.issueCloudProject = typeof prefs.issueCloudProject === "string" && prefs.issueCloudProject.startsWith("cloud:") ? prefs.issueCloudProject : null;
     const pipelines = prefs.cloudIssuePipelines;
