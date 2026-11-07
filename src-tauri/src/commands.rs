@@ -247,6 +247,57 @@ pub async fn organization_github_app(
 }
 
 #[tauri::command]
+pub async fn organization_git_settings(
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<crate::organization_github_app::GitSettings> {
+    github_app_call(state, |service| service.git_settings()).await
+}
+
+#[tauri::command]
+pub async fn organization_git_identity_save(
+    identity: Option<crate::git_identity::GitIdentity>,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<()> {
+    github_app_call(state, move |service| {
+        service.save_identity(identity, &context_revision)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn organization_github_token_save(
+    token: String,
+    shared_use: String,
+    confirm_organization_sharing: bool,
+    confirm_machine_installation: bool,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<()> {
+    github_app_call(state, move |service| {
+        service.save_token(
+            &token,
+            &shared_use,
+            confirm_organization_sharing,
+            confirm_machine_installation,
+            &context_revision,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn organization_github_token_remove(
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> GithubAppResult<()> {
+    github_app_call(state, move |service| {
+        service.remove_token(&context_revision)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn organization_github_app_connect(
     context_revision: String,
     app: tauri::AppHandle,
@@ -1370,6 +1421,21 @@ pub async fn cloud_workspace_preflight(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.preflight(org_id.as_deref(), repositories, agent))
 }
 
+#[tauri::command]
+pub async fn cloud_git_identity(
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<
+    Option<crate::git_identity::GitIdentity>,
+    crate::cloud_workspaces::CloudWorkspaceClientError,
+> {
+    cloud_command!(
+        state,
+        crate::cloud_workspaces::RequestRisk::Read,
+        move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+            .git_identity(org_id.as_deref())
+    )
+}
 #[tauri::command]
 pub async fn cloud_workspace_repositories(
     state: tauri::State<'_, crate::AppState>,

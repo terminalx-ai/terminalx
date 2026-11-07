@@ -52,6 +52,7 @@ mod codex_device_login;
 mod cloud_workspaces;
 #[cfg(feature = "desktop")]
 mod organization_github_app;
+mod git_identity;
 #[cfg(feature = "desktop")]
 mod organization_members;
 #[cfg(feature = "desktop")]
@@ -438,6 +439,10 @@ pub fn run() {
             commands::organization_compute_policy_update,
             commands::organization_compute_provisioning_pause,
             commands::organization_github_app,
+            commands::organization_git_settings,
+            commands::organization_git_identity_save,
+            commands::organization_github_token_save,
+            commands::organization_github_token_remove,
             commands::organization_github_app_connect,
             commands::organization_github_app_attempt,
             commands::organization_github_app_attempt_cancel,
@@ -494,6 +499,7 @@ pub fn run() {
             commands::cloud_workspace_create,
             commands::cloud_workspace_preflight,
             commands::cloud_workspace_repositories,
+            commands::cloud_git_identity,
             commands::cloud_workspaces,
             commands::cloud_catalog_feed,
             commands::cloud_workspace_suspend,

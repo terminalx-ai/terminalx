@@ -16,7 +16,7 @@ import { PrPanel } from "@/components/changes/PrPanel";
 import { RepoPanel, type RepoView } from "@/components/changes/RepoPanel";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
-import { cloudGitSource, desktopGitIdentity } from "@/lib/gitSource";
+import { cloudGitSource, cloudGitIdentity } from "@/lib/gitSource";
 import { repositoryLabel } from "@/lib/cloudLifecycle";
 
 type Panel = "repo" | "pr";
@@ -73,12 +73,15 @@ export function CloudGitView({
 
   useEffect(() => {
     if (!active) return;
-    void desktopGitIdentity().then(setAuthor);
-  }, [active]);
+    let cancelled = false;
+    setAuthor(undefined);
+    void cloudGitIdentity(workspaceKey).then((identity) => { if (!cancelled) setAuthor(identity); }).catch((error) => { if (!cancelled) setError(gitErrorMessage(error)); });
+    return () => { cancelled = true; };
+  }, [active, workspaceKey, tick]);
 
   const remote = useMemo(() => (selected ? new RemoteGit(client, selected) : null), [client, selected]);
   const source = useMemo(
-    () => (remote ? cloudGitSource({ workspaceKey, remote, canWrite: manage, author: desktopGitIdentity }) : null),
+    () => (remote ? cloudGitSource({ workspaceKey, remote, canWrite: manage, author: () => cloudGitIdentity(workspaceKey) }) : null),
     [workspaceKey, remote, manage],
   );
 

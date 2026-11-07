@@ -19,12 +19,24 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::account::{AccountContext, AccountManager};
+use crate::git_identity::GitIdentity;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 /// The server refuses a larger selection (§16.3).
 pub const MAX_SELECTED_REPOSITORIES: usize = 100;
 const MAX_QUERY_CHARS: usize = 200;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSettings {
+    pub identity: Option<GitIdentity>,
+    pub token_configured: bool,
+    pub token_shared_use: Option<String>,
+    pub can_manage: bool,
+    #[serde(default)]
+    pub context_revision: String,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -183,6 +195,9 @@ fn known_error_code(code: &str) -> bool {
             | "invalid_request"
             | "cloud_workspace_request_invalid"
             | "organization_admin_required"
+            | "cloud_workspace_credential_invalid"
+            | "cloud_workspace_credential_verification_unavailable"
+            | "cloud_workspace_credential_required"
             | "github_app_not_configured"
             | "github_app_unavailable"
             | "github_installation_unverified"
@@ -351,6 +366,65 @@ impl OrganizationGithubAppService {
             return Err(GithubAppError::local(if mutation { "account_context_changed_after_send" } else { "account_context_changed" }));
         }
         Ok((result?, revision))
+    }
+
+    pub fn git_settings(&self) -> Result<GitSettings, GithubAppError> {
+        let (mut settings, revision) =
+            self.run::<GitSettings>(None, Method::Get, &["git-settings"], &[], None)?;
+        settings.context_revision = revision;
+        Ok(settings)
+    }
+
+    pub fn save_identity(
+        &self,
+        identity: Option<GitIdentity>,
+        revision: &str,
+    ) -> Result<(), GithubAppError> {
+        if identity.as_ref().is_some_and(|identity| !identity.valid()) {
+            return Err(GithubAppError::local("invalid_request"));
+        }
+        self.run::<GitSettings>(
+            Some(revision),
+            Method::Put,
+            &["git-settings"],
+            &[],
+            Some(json!({ "identity": identity })),
+        )?;
+        Ok(())
+    }
+
+    pub fn save_token(
+        &self,
+        token: &str,
+        shared_use: &str,
+        sharing: bool,
+        installation: bool,
+        revision: &str,
+    ) -> Result<(), GithubAppError> {
+        if token.is_empty()
+            || token.len() > 8192
+            || token.chars().any(|c| c.is_whitespace() || c.is_control())
+            || !matches!(shared_use, "managers" | "organization")
+            || !sharing
+            || !installation
+        {
+            return Err(GithubAppError::local("invalid_request"));
+        }
+        self.run::<GitSettings>(Some(revision), Method::Put, &["token"], &[], Some(json!({
+            "token": token, "sharedUse": shared_use, "confirmOrganizationSharing": sharing, "confirmMachineInstallation": installation
+        })))?;
+        Ok(())
+    }
+
+    pub fn remove_token(&self, revision: &str) -> Result<(), GithubAppError> {
+        self.run::<GitSettings>(
+            Some(revision),
+            Method::Delete,
+            &["token"],
+            &[],
+            Some(json!({})),
+        )?;
+        Ok(())
     }
 
     pub fn summary(&self) -> Result<GithubAppSummary, GithubAppError> {

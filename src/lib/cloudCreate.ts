@@ -14,6 +14,7 @@ import {
   type CloudWorkspaceSnapshot,
 } from "@/lib/api";
 import { roleRefusedMessage } from "@/lib/accountRoles";
+import { parseGithubRepository } from "@/lib/cloudRepositories";
 import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
 import { formatDuration } from "@/lib/time";
 
@@ -77,6 +78,7 @@ export function validateForm(form: CreateForm): FormErrors {
   if (form.repositories.length > MAX_REPOSITORIES) errors.repositories = `At most ${MAX_REPOSITORIES} repositories.`;
   const seen = new Set<string>();
   form.repositories.forEach((repository, index) => {
+    if (!parseGithubRepository(repository.cloneUrl)) errors.repositories = "Use a GitHub HTTPS repository URL without credentials, a query or a fragment.";
     const key = repository.cloneUrl.toLowerCase().replace(/\.git$/, "");
     if (seen.has(key)) errors.repositories = `${repository.fullName} is listed twice.`;
     seen.add(key);

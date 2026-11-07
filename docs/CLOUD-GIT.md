@@ -18,9 +18,9 @@ runtime.
   nothing until the person chooses.
 - **Authorship is the person's; credentials are the workspace's.**
   `git.commit` requires `author: { name, email }`, which the desktop takes from
-  the person's global Git config (`git_identity`). It is both author and
+  the workspace organization's commit override in Settings → Git, or the person's global Git config (`git_identity`) when no override is set. It is both author and
   committer; the runtime has no identity of its own. Push, fetch and pull
-  requests authenticate with the workspace's GitHub App token through the
+  requests authenticate with the workspace's GitHub App token or its explicitly selected, encrypted organisation PAT through the
   PRO-14 credential helper and `gh` shim; no credential crosses the RPC.
 - **Uncertain outcomes are reconciled, never repeated blindly.** See below.
 - **Participants read.** Status, diffs, history, branches, pull requests and
@@ -139,9 +139,11 @@ exited.
   `scripts/remote-runtime/fake-gh`.
 - The archive/delete dialog (PRO-34) shows the same facts before an
   archive or delete; see [CLOUD-LIFECYCLE.md](CLOUD-LIFECYCLE.md).
-- The author is the global `user.name`/`user.email`; an identity set only
-  under `includeIf "gitdir:…"` on the desktop is not used (the cloud
-  checkout has no local path to match). A per-organization identity is a
-  follow-up.
+- Settings → Git stores the organisation's commit name/email on the server.
+  Cloud commit controls resolve it afresh for the workspace's organisation on
+  every commit. Removing it restores that computer's global identity. The Mac's
+  Git config is never written. Agent launches receive author/committer environment
+  variables from their workspace's refreshed configuration; existing agent sessions
+  need a restart after an override changes or is removed.
 - The running app has not been checked by hand (computer use is blocked on
   this machine); the views are covered by component tests.

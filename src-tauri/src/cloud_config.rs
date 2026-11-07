@@ -181,6 +181,8 @@ pub struct Fetched {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
+    pub git_identity: Option<crate::git_identity::GitIdentity>,
+    #[serde(default)]
     pub prompts: Vec<Prompt>,
     #[serde(default)]
     pub mcp_servers: Vec<Value>,
@@ -236,6 +238,7 @@ impl std::fmt::Debug for Secrets {
 #[derive(Debug, Clone, Default)]
 struct Resolved {
     revision: String,
+    git_identity: Option<crate::git_identity::GitIdentity>,
     env: BTreeMap<String, String>,
     prompts: Vec<String>,
     mcp_servers: Vec<McpServer>,
@@ -304,7 +307,11 @@ impl ConfigStore {
     fn env_names(&self) -> Vec<String> {
         let state = self.state();
         let Some(config) = state.config.as_ref() else { return Vec::new() };
-        config.env.keys().cloned().chain(config.secret_env.iter().map(|(name, _)| name.clone())).collect()
+        let mut names: Vec<String> = config.env.keys().cloned().chain(config.secret_env.iter().map(|(name, _)| name.clone())).collect();
+        if config.git_identity.is_some() {
+            names.extend(["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"].map(String::from));
+        }
+        names
     }
 
     /// Stop injecting anything: the runtime was fenced or its key refused.
@@ -421,7 +428,11 @@ impl ConfigStore {
                 Err(_) => log::warn!("skipping malformed MCP server #{index}"),
             }
         }
+        if fetched.git_identity.as_ref().is_some_and(|identity| !identity.valid()) {
+            bail!("invalid organization Git identity");
+        }
         let resolved = Resolved {
+            git_identity: fetched.git_identity.clone(),
             revision: fetched.revision.clone(),
             env,
             prompts: fetched.prompts.iter().map(|prompt| prompt.text.clone()).filter(|text| !text.trim().is_empty()).collect(),
@@ -589,6 +600,10 @@ impl ConfigStore {
             return LaunchConfig::default();
         };
         let mut env: Vec<(String, String)> = config.env.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
+        if let Some(identity) = &config.git_identity {
+            for key in ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"] { env.push((key.into(), identity.name.clone())); }
+            for key in ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"] { env.push((key.into(), identity.email.clone())); }
+        }
         for (name, secret) in &config.secret_env {
             if let Some(value) = self.secret(&state, secret, now) {
                 env.push((name.clone(), value.to_string()));
@@ -826,6 +841,51 @@ mod tests {
         let api = fake(&grants, move |thumbprint| Ok(response(&inner, thumbprint, "rev-1", env.clone(), secrets.clone())));
         store.sync(&api, &api, Instant::now(), 0).unwrap();
         store
+    }
+
+    #[test]
+    fn organization_git_identity_is_workspace_scoped_and_removable() {
+        let (store, grants) = store("identity", None);
+        let inner = grants.clone();
+        let api = fake(&grants, move |thumbprint| {
+            let mut value = response(
+                &inner,
+                thumbprint,
+                "identity-1",
+                json!({ "GIT_AUTHOR_EMAIL": "injected@example.com" }),
+                None,
+            );
+            value["gitIdentity"] = json!({ "name": "Work", "email": "work@example.com" });
+            Ok(value)
+        });
+        store.sync(&api, &api, Instant::now(), 0).unwrap();
+        let config = store.launch_config("codex", "first", Instant::now());
+        assert!(config
+            .env
+            .contains(&("GIT_AUTHOR_EMAIL".into(), "work@example.com".into())));
+        assert!(config
+            .env
+            .contains(&("GIT_COMMITTER_NAME".into(), "Work".into())));
+        assert!(!config
+            .env
+            .iter()
+            .any(|(_, value)| value == "injected@example.com"));
+        let other = synced("unrelated", json!({}), None, None);
+        assert!(!other
+            .launch_config("codex", "other", Instant::now())
+            .env
+            .iter()
+            .any(|(key, _)| key.starts_with("GIT_")));
+        let inner = grants.clone();
+        let removed = fake(&grants, move |thumbprint| {
+            Ok(response(&inner, thumbprint, "identity-2", json!({}), None))
+        });
+        store.sync(&removed, &removed, Instant::now(), 0).unwrap();
+        assert!(!store
+            .launch_config("codex", "second", Instant::now())
+            .env
+            .iter()
+            .any(|(key, _)| key.starts_with("GIT_")));
     }
 
     #[test]

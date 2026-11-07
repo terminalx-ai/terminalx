@@ -16,6 +16,7 @@ export const SETTINGS_SECTIONS = {
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
+  git: { title: "Git", group: "Repositories", entry: "git.organizationIdentity" },
   repositories: { title: "Workspace cleanup", group: "Repositories", entry: "repositories.mergedCleanup" },
   organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar" },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup" },
@@ -395,6 +396,12 @@ export const SETTINGS_ROWS = [
     id: "organizations.console", section: "organizations", title: "Organization console",
     description: "API keys and webhooks in the organization console.",
     searchTerms: ["organizations", "organization", "console"], scope: "organization",
+    storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
+  }),
+  defineSetting({
+    id: "git.organizationIdentity", section: "git", title: "Organization commit author",
+    description: "Cloud commit identity and GitHub token fallback.",
+    searchTerms: ["git", "name", "email", "author", "token"], scope: "organization",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({

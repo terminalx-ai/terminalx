@@ -1,3 +1,4 @@
+import { clonePaths, parseGithubRepository, repositoryGroups } from "@/lib/cloudRepositories";
 import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Circle, GitBranch, Loader2, Plus, RotateCcw, X } from "@/icons";
@@ -113,16 +114,21 @@ export function CloudCreateWorkspace({
     if (snapshot) progress.current?.(snapshot);
   }, []);
 
+  const [repositoryUrl, setRepositoryUrl] = useState("");
+  const [urlError, setUrlError] = useState<string | null>(null);
   const [repositoriesError, setRepositoriesError] = useState<string | null>(null);
+  const repositoryLoad = useRef(0);
   const loadRepositories = useCallback(() => {
+    const sequence = ++repositoryLoad.current;
     setRepositoriesError(null);
     api
-      .cloudWorkspaceRepositories()
-      .then((result) => setSelected(result.repositories.filter((repository) => repository.cloneUrl)))
-      .catch((e: unknown) => setRepositoriesError(errorCode(e)));
-  }, []);
+      .cloudWorkspaceRepositories(cloudOrgArg(organizationId))
+      .then((result) => { if (sequence === repositoryLoad.current) setSelected(result.repositories.filter((repository) => repository.cloneUrl)); })
+      .catch((e: unknown) => { if (sequence === repositoryLoad.current) setRepositoriesError(errorCode(e)); });
+  }, [organizationId]);
 
   useEffect(() => {
+    setSelected(null);
     loadRepositories();
     api
       .cloudProviders()
@@ -132,6 +138,7 @@ export function CloudCreateWorkspace({
         setForm((current) => (current.provider || !usable[0] ? current : { ...current, provider: usable[0].id }));
       })
       .catch((e: unknown) => setLoadError(errorCode(e)));
+    return () => { repositoryLoad.current += 1; };
   }, [loadRepositories]);
 
   const keep = useCallback(
@@ -160,7 +167,7 @@ export function CloudCreateWorkspace({
   const showPrice = async () => {
     setError(null);
     try {
-      setQuoted(await quoteCreate(api, request, { onStep: setStep }));
+      setQuoted(await quoteCreate(api, request, { onStep: setStep, orgId: cloudOrgArg(organizationId) }));
     } catch (e) {
       fail(e);
     } finally {
@@ -174,6 +181,7 @@ export function CloudCreateWorkspace({
     setQuoted(null);
     try {
       const snapshot = await createWorkspace(api, request, {
+        orgId: cloudOrgArg(organizationId),
         pending: confirmed,
         onStep: setStep,
         onPending: keep,
@@ -202,9 +210,11 @@ export function CloudCreateWorkspace({
 
   const usable = providers ? creatableProviders(providers) : [];
   const available = (selected ?? []).filter((repository) => !form.repositories.some((chosen) => chosen.cloneUrl === repository.cloneUrl));
+  const paths = clonePaths(form.repositories);
+  const groups = repositoryGroups(available);
   const addRepository = (cloneUrl: string) => {
     const repository = selected?.find((item) => item.cloneUrl === cloneUrl);
-    if (!repository?.cloneUrl) return;
+    if (!repository?.cloneUrl || repository.state !== "accessible" || form.repositories.length >= 5) return;
     setForm((current) => ({
       ...current,
       name: current.name || (current.repositories.length === 0 ? repository.fullName.split("/").pop() ?? "" : current.name),
@@ -267,7 +277,7 @@ export function CloudCreateWorkspace({
         {form.repositories.map((repository, index) => (
           <div key={repository.cloneUrl} className="flex items-center gap-2" data-testid="cloud-create-repository">
             <span className="w-16 shrink-0 text-muted-foreground">{index === 0 ? "Primary" : "Also"}</span>
-            <span className="min-w-0 flex-1 truncate">{repository.fullName}</span>
+            <span className="min-w-0 flex-1"><span className="block truncate">{repository.fullName}</span><span className="block truncate font-mono text-[10px] text-muted-foreground" title={paths[index]}>Clone path: {paths[index]}</span></span>
             <GitBranch className="size-3.5 text-muted-foreground" />
             <input
               aria-label={`Base branch of ${repository.fullName}`}
@@ -304,15 +314,30 @@ export function CloudCreateWorkspace({
               onChange={(event) => addRepository(event.target.value)}
             >
               <option value="">{form.repositories.length === 0 ? "Choose a repository…" : "Add another repository…"}</option>
-              {available.map((repository) => (
+              {groups.map((group) => <optgroup key={group.name} label={group.name}>{group.repositories.map((repository) => (
                 <option key={repository.cloneUrl} value={repository.cloneUrl!} disabled={repository.state !== "accessible"}>
-                  {repository.fullName}
-                  {repository.state !== "accessible" ? ` (${repository.state})` : ""}
+                  {repository.fullName}{repository.state !== "accessible" ? ` (${repository.state})` : ""}
                 </option>
-              ))}
+              ))}</optgroup>)}
             </select>
           </div>
         )}
+        {groups.map((group) => <div key={group.name} className="flex items-center justify-between rounded-md bg-well px-2 py-1">
+          <h4 className="font-medium">{group.name} <span className="text-muted-foreground">({group.repositories.length})</span></h4>
+          {group.name !== "Not connected" && <Button type="button" size="xs" variant="ghost" aria-label={`Select all ${group.name}`} disabled={busy || form.repositories.length + group.repositories.length > 5} onClick={() => setForm((current) => ({ ...current, repositories: [...current.repositories, ...group.repositories.filter((repository) => !current.repositories.some((chosen) => chosen.cloneUrl === repository.cloneUrl)).map((repository) => ({ cloneUrl: repository.cloneUrl!, fullName: repository.fullName, ref: "" }))].slice(0, 5) }))}>Select all</Button>}
+        </div>)}
+        <details><summary className="cursor-pointer">Advanced: paste a repository URL</summary>
+          <div className="mt-2 flex gap-2"><input aria-label="Repository URL" type="url" className={`${inputClass} flex-1`} placeholder="https://github.com/acme/api" value={repositoryUrl} onChange={(event) => { setRepositoryUrl(event.target.value); setUrlError(null); }} />
+            <Button type="button" size="sm" disabled={busy || form.repositories.length >= 5} onClick={() => {
+              const repository = parseGithubRepository(repositoryUrl);
+              if (!repository) { setUrlError("Use a GitHub HTTPS repository URL without credentials, a query or a fragment."); return; }
+              if (form.repositories.some((chosen) => chosen.cloneUrl.toLowerCase() === repository.cloneUrl.toLowerCase())) { setUrlError("This repository is already selected."); return; }
+              setForm((current) => ({ ...current, name: current.name || repository.fullName.split("/").pop()!, repositories: [...current.repositories, { ...repository, ref: "" }] }));
+              setRepositoryUrl(""); setUrlError(null);
+            }}>Add repository</Button></div>
+          {urlError && <p role="alert" className="text-red-500">{urlError}</p>}
+          <p className="mt-1 text-muted-foreground">For a private repository without the App, an admin saves a personal access token in Settings → Git. Clones and pushes will act as the token's owner.</p>
+        </details>
         {errors.repositories && <span className="text-red-500">{errors.repositories}</span>}
         <p className="text-muted-foreground">Each repository gets a new branch of its own for this workspace, made from its base branch.</p>
       </fieldset>

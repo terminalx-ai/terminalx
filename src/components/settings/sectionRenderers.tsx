@@ -10,6 +10,7 @@ import { StorageTab } from "./StorageTab";
 import { RecoveryIncidentSettings } from "./RecoveryIncidentSettings";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
+import { GitSettingsTab } from "./OrganizationGitSettings";
 import { EnvironmentSettings } from "./EnvironmentSettings";
 
 interface SectionContext {
@@ -30,6 +31,7 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   environment: () => <EnvironmentSettings />,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
+  git: () => <GitSettingsTab />,
   repositories: ({ projectPath }) => projectPath ? <MergedCleanupSettings projectPath={projectPath} /> : <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>,
   storage: () => <><MergedCleanupSettings /><div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div><StorageTab /><RecoveryIncidentSettings /></>,
   shortcuts: () => <ShortcutsTab />,

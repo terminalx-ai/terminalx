@@ -126,6 +126,7 @@ function mount(fake: FakeRuntime, state: WorkspaceConnectionState = manage) {
 
 beforeEach(() => {
   mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "cloud_git_identity") return null;
     if (command === "git_identity") return { name: "Ada Lovelace", email: "ada@example.com" };
     throw new Error(`unexpected ${command}`);
   });
@@ -153,6 +154,25 @@ describe("Git in a cloud workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Commit/ }));
     await waitFor(() => expect(fake.calls("git.commit")).toHaveLength(1));
     expect(fake.calls("git.commit")[0]).toMatchObject({ repo: "libs/core", message: "Fix core", author: { name: "Ada Lovelace", email: "ada@example.com" } });
+  });
+
+  it("uses the workspace organization's override, then rereads removal on the next commit", async () => {
+    let override: { name: string; email: string } | null = { name: "Acme", email: "work@example.com" };
+    mocks.invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "cloud_git_identity") { expect(args).toEqual({ orgId: "org-1" }); return override; }
+      if (command === "git_identity") return { name: "Personal", email: "personal@example.com" };
+      throw new Error(`unexpected ${command}`);
+    });
+    const fake = runtime({ "git.repositories": () => ({ repositories: [{ repo: "app", branch: "feature/x" }] }) });
+    mount(fake);
+    await screen.findByText("Committing as Acme <work@example.com>");
+    for (const message of ["First", "Second"]) {
+      fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: message } });
+      fireEvent.click(screen.getByRole("button", { name: /Commit/ }));
+      await waitFor(() => expect(fake.calls("git.commit")).toHaveLength(message === "First" ? 1 : 2));
+      override = null;
+    }
+    expect(fake.calls("git.commit").map((call) => call.author)).toEqual([{ name: "Acme", email: "work@example.com" }, { name: "Personal", email: "personal@example.com" }]);
   });
 
   it("says what a reconciled push found, and why a refused one failed", async () => {

@@ -2589,6 +2589,31 @@ impl CloudWorkspaceService {
 
     /// The organization's selected GitHub repositories (PRO-14), the ones a
     /// workspace can be created from.
+    pub fn git_identity(
+        &self,
+        org: Option<&str>,
+    ) -> Result<Option<crate::git_identity::GitIdentity>, CloudWorkspaceClientError>
+    {
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            let settings: crate::organization_github_app::GitSettings = client.request(
+                context,
+                &["github-app", "git-settings"],
+                None,
+                None,
+                None,
+                RequestRisk::Read,
+            )?;
+            if settings
+                .identity
+                .as_ref()
+                .is_some_and(|identity| !identity.valid())
+            {
+                return Err(invalid_response());
+            }
+            Ok(settings.identity)
+        })
+    }
+
     pub fn selected_repositories(&self, org: Option<&str>) -> Result<SelectedRepositories, CloudWorkspaceClientError> {
         self.run_in(org, RequestRisk::Read, |client, context| {
             client.request(context, &["github-app"], None, None, None, RequestRisk::Read)

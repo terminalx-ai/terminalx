@@ -376,6 +376,10 @@ export function OrganizationGithubApp({
             else draft.add(id);
             setChooser({ ...chooser, draft });
           }}
+          onSelectAll={() => {
+            if (!chooser.live) return;
+            setChooser({ ...chooser, draft: new Set([...(chooser.draft ?? []), ...chooser.live.repositories.map((repository) => repository.githubRepositoryId)]) });
+          }}
           onOpen={openOnGithub}
           onSave={() => void saveSelection()}
           onClose={() => {
@@ -465,7 +469,7 @@ function InstallationRow({
     <li className="py-2" aria-label={installation.accountLogin}>
       <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-xs font-medium">{installation.accountLogin}</div>
+          <h3 className="truncate text-xs font-medium">{installation.accountLogin}</h3>
           <div className="text-[11px] text-muted-foreground">
             {state} · {installation.repositorySelection === "all" ? "All repositories" : "Selected repositories"}
           </div>
@@ -524,7 +528,7 @@ function RepositoryRow({ repository, manageUrl, onOpen }: { repository: Selected
   return (
     <li aria-label={repository.fullName} className="rounded-md bg-well px-2 py-1.5">
       <div className="flex items-center gap-2 text-[11px]">
-        <span className="min-w-0 flex-1 truncate font-mono">{repository.fullName}</span>
+        <span className="min-w-0 flex-1 truncate font-mono">{repository.fullName}<span className="block text-[10px] text-faint">Clone path: /var/lib/terminalx/workspace/{repository.fullName.split("/").pop()}</span></span>
         <span className={repository.state === "accessible" ? "text-muted-foreground" : "text-destructive"}>
           {REPOSITORY_STATE_LABEL[repository.state] ?? repository.state}
         </span>
@@ -547,6 +551,7 @@ function RepositoryChooser({
   onSearch,
   onRefresh,
   onToggle,
+  onSelectAll,
   onOpen,
   onSave,
   onClose,
@@ -558,6 +563,7 @@ function RepositoryChooser({
   onSearch: () => void;
   onRefresh: () => void;
   onToggle: (githubRepositoryId: number) => void;
+  onSelectAll: () => void;
   onOpen: (url: string) => void;
   onSave: () => void;
   onClose: () => void;
@@ -607,6 +613,7 @@ function RepositoryChooser({
       {chooser.error && <p className="mt-2 text-xs text-destructive">{chooser.error}</p>}
       {live && (
         <>
+          <Button size="xs" variant="ghost" disabled={Boolean(busy) || chooser.loading} onClick={onSelectAll}>Select all {live.installation.accountLogin}</Button>
           {live.repositories.length === 0 ? (
             <p className="mt-2 text-[11px] text-muted-foreground">No repositories match.</p>
           ) : (
@@ -633,6 +640,7 @@ function RepositoryChooser({
           )}
           {live.missing.length > 0 && (
             <div className="mt-2 text-[11px] text-muted-foreground">
+              <h4 className="font-medium">Not connected</h4>
               <p>
                 These chosen repositories are no longer granted to the installation and are removed when you save:{" "}
                 {live.missing.map((repository) => repository.fullName).join(", ")}. To keep them, grant them on GitHub, then refresh.

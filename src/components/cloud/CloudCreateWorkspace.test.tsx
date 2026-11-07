@@ -476,3 +476,27 @@ describe("CloudCreateWorkspace launch settings", () => {
     expect((await createdLaunch()).mode).toBe("bypassPermissions");
   });
 });
+
+it("groups owners, keeps missing repositories unselectable, and previews manual clone paths", async () => {
+  mocked.cloudWorkspaceRepositories.mockResolvedValue({ configured: true, repositories: [
+    { fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", state: "accessible", private: true },
+    { fullName: "beta/web", cloneUrl: "https://github.com/beta/web.git", state: "accessible", private: true },
+    { fullName: "lost/app", cloneUrl: "https://github.com/lost/app.git", state: "missing", private: true },
+  ] });
+  render(<CloudCreateWorkspace organizationId="org-1" onOpen={vi.fn()} />);
+  await screen.findByRole("heading", { name: /acme/ });
+  expect(screen.getByRole("heading", { name: /beta/ })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: /Not connected/ })).toBeTruthy();
+  expect((screen.getByRole("option", { name: "lost/app (missing)" }) as HTMLOptionElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Select all acme" }));
+  expect(screen.getAllByTestId("cloud-create-repository")).toHaveLength(1);
+  expect(screen.getByText("Clone path: /var/lib/terminalx/workspace/api")).toBeTruthy();
+  fireEvent.click(screen.getByText("Advanced: paste a repository URL"));
+  fireEvent.change(screen.getByLabelText("Repository URL"), { target: { value: "https://github.com/beta/api" } });
+  fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
+  expect(screen.getByText("Clone path: /var/lib/terminalx/workspace/api-2")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Repository URL"), { target: { value: "https://synthetic-secret@github.com/beta/private" } });
+  fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
+  expect(screen.getByRole("alert").textContent).toContain("without credentials");
+  expect(screen.getAllByTestId("cloud-create-repository")).toHaveLength(2);
+});

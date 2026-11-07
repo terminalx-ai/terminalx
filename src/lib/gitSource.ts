@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
@@ -227,4 +228,12 @@ export function desktopGitIdentity(): Promise<GitAuthor | null> {
     });
   }
   return identity;
+}
+
+/** Resolve each time so removing an override takes effect on the next commit. */
+export async function cloudGitIdentity(workspaceKey: string): Promise<GitAuthor | null> {
+  const workspace = parseCloudWorkspaceKey(workspaceKey);
+  if (!workspace) throw new Error("Unknown cloud workspace.");
+  const override = await invoke<GitAuthor | null>("cloud_git_identity", { orgId: workspace.orgId });
+  return override ?? api.gitIdentity();
 }

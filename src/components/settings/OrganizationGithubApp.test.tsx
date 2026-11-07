@@ -318,3 +318,16 @@ it("prefers the server's canManage over the member roster", async () => {
   expect(members.list).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: /Connect/ })).toBeNull();
 });
+
+it("selects all only in the chosen installation and retains other selections", async () => {
+  api.summary.mockResolvedValue(summary({ installations: [installation(), installation({ id: "ghinst_2", accountLogin: "other" })], repositories: [...summary().repositories, { ...summary().repositories[0]!, id: "r2", installationId: "ghinst_2", githubRepositoryId: 90, fullName: "other/tool" }] }));
+  api.repositories.mockResolvedValue(live());
+  members.list.mockResolvedValue(roster(true));
+  await renderPanel();
+  expect(screen.getByRole("heading", { name: "acme" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "other" })).toBeTruthy();
+  fireEvent.click(within(screen.getByRole("listitem", { name: "acme" })).getByRole("button", { name: "Choose repositories" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Select all acme" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save selection" }));
+  await waitFor(() => expect(api.saveRepositories).toHaveBeenCalledWith([{ installationId: "ghinst_2", githubRepositoryId: 90 }, { installationId: "ghinst_1", githubRepositoryId: 7 }, { installationId: "ghinst_1", githubRepositoryId: 8 }], "rev-1"));
+});

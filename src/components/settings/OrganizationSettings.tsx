@@ -15,6 +15,7 @@ import { OrganizationConsoleLink } from "./OrganizationConsoleLink";
 import { OrganizationCompute } from "./OrganizationCompute";
 import { OrganizationDiagnostics } from "./OrganizationDiagnostics";
 import { OrganizationEnvironment } from "./OrganizationEnvironment";
+import { OrganizationGitSettings } from "./OrganizationGitSettings";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
 import { OrganizationWorkspaceConfig } from "./OrganizationWorkspaceConfig";
@@ -88,7 +89,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
           {logins}
           {routes}
           {consoleLink}
-          <RegisteredSetting setting="organizations.github" instance={organization.id}><div className="contents"><OrganizationGithubApp contextRevision={contextRevision} /></div></RegisteredSetting>
+          <RegisteredSetting setting="organizations.github" instance={organization.id}><div className="contents"><OrganizationGithubApp contextRevision={contextRevision} /><OrganizationGitSettings contextRevision={contextRevision} tokenOnly /></div></RegisteredSetting>
           {workStatus}
           <RegisteredSetting setting="organizations.workspace" instance={organization.id}><div className="contents"><OrganizationWorkspaceConfig contextRevision={contextRevision} /></div></RegisteredSetting>
           <RegisteredSetting setting="organizations.environment" instance={organization.id}><div className="contents"><OrganizationEnvironment contextRevision={contextRevision} organizationId={organization.id} /></div></RegisteredSetting>
