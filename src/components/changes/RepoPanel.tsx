@@ -1,3 +1,4 @@
+import { useReviewComments } from "./ReviewComments";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, RotateCcw, TriangleAlert } from "@/icons";
 import { useGitWorkingChanges, type ChangeRange } from "@/lib/changes";
@@ -41,6 +42,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const review = useReviewComments();
+  useEffect(() => { review?.refresh(); }, [files, head, review?.refresh]);
   const current = files.find((file) => file.path === selected);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -188,7 +191,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
             </div>
           </div>}
           <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[35%] border-b border-hairline" : "flex-1")}>
-            <FileList
+            <FileList base={head ?? undefined}
               files={files}
               selected={selected}
               onSelect={(p) => {
@@ -241,6 +244,8 @@ function CommitRow({ source, commit, open, onToggle }: { source: GitSource; comm
   const [selected, setSelected] = useState<string | null>(null);
   const [base, setBase] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const review = useReviewComments();
+  useEffect(() => { review?.refresh(); }, [files, base, review?.refresh]);
   const current = files.find((file) => file.path === selected);
   const EMPTY = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
   useEffect(() => {
@@ -278,7 +283,7 @@ function CommitRow({ source, commit, open, onToggle }: { source: GitSource; comm
       {open && (
         <div className="ml-3 border-l border-hairline">
           {commit.body && <div className="px-3 py-1 text-xs text-muted-foreground whitespace-pre-wrap select-text">{commit.body}</div>}
-          <FileList files={files} selected={selected} onSelect={setSelected} empty="No files." />
+          <FileList base={base ?? undefined} files={files} selected={selected} onSelect={setSelected} empty="No files." />
           {error && <p role="alert" className="p-2 text-xs text-destructive">{error}</p>}
           {current && base && <div className="h-96 border-t border-hairline">
             <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={base} head={commit.tree} />

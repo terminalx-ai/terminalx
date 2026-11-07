@@ -103,3 +103,13 @@ it("does not copy a truncation marker as file contents", async () => {
   expect((await screen.findByRole("alert")).textContent).toContain("exceeds the text preview limit");
   expect(screen.queryByRole("button", { name: "Copy file" })).toBeNull();
 });
+
+it("recovers a turn rename and passes the original path and base through to comments", async () => {
+  const onText = vi.fn();
+  const renamed = { ...source, changesBetween: vi.fn(async () => [{ path: "new.ts", oldPath: "old.ts", status: "renamed" as const, additions: 1, deletions: 1 }]) };
+  vi.mocked(source.fileContentsAt).mockImplementation(async (path) => ({ before: path === "old.ts" ? "original" : null, after: "updated" }));
+  render(<FileDiff source={renamed} path="new.ts" base="base" head="head" recoverRename onText={onText} />);
+  await screen.findByRole("button", { name: "Copy file" });
+  expect(source.fileContentsAt).toHaveBeenCalledWith("old.ts", "base", "head");
+  expect(onText).toHaveBeenCalledWith({ before: "original", after: "updated", deleted: false, originalPath: "old.ts" });
+});

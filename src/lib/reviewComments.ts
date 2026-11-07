@@ -1,24 +1,40 @@
 import { invoke } from "@/lib/api";
 import { getDraft, setDraft, subscribeDrafts } from "@/lib/drafts";
 
-export type ReviewSide = "before" | "after";
-export interface ReviewAnchor { path: string; side: ReviewSide; startLine: number; endLine: number; lineText: string; base?: string; originalPath?: string }
-export interface ReviewComment extends ReviewAnchor { id: string; revision: number; note: string; sent: boolean; outdated: boolean }
+export type LineCommentSide = "before" | "after";
+export interface ReviewAnchor { path: string; side: LineCommentSide; startLine: number; endLine: number; lineText: string; base?: string; originalPath?: string; contextBefore?: string[]; contextAfter?: string[] }
+export interface CommentAuthor { kind: "user" | "agent" | "github"; sessionId?: string; tabId?: string; name?: string; login?: string; [key: string]: unknown }
+export interface ReviewComment extends ReviewAnchor { author?: CommentAuthor; createdAt?: string; textHash?: string; anchorHash?: string; id: string; revision: number; note: string; sent: boolean; outdated: boolean }
 export interface ReviewRevision { id: string; revision: number }
 export type ReviewAction = { type: "list" }
-  | { type: "save"; anchor: ReviewAnchor; note: string; expected: ReviewRevision | null }
+  | { type: "save"; anchor: ReviewAnchor; note: string; expected: ReviewRevision | null; author?: CommentAuthor }
   | { type: "delete"; expected: ReviewRevision }
   | { type: "sent"; comments: ReviewRevision[] }
-  | { type: "reconcile"; path: string; before: string | null; after: string | null; comments: ReviewRevision[] };
+  | { type: "reconcile"; path: string; base: string; before: string | null; after: string | null; comments: ReviewRevision[] };
 
 export function reviewComments(workspace: string, action: ReviewAction): Promise<ReviewComment[]> {
-  return invoke("review_comments", { workspace, action });
+  return invoke<ReviewComment[]>("review_comments", { workspace, action }).then((comments) => {
+    if (action.type !== "list" && action.type !== "reconcile") notifyReviewsChanged(workspace);
+    return comments;
+  });
 }
 export function reviewLocation(c: ReviewAnchor): string {
   return `${c.path}:${c.startLine}${c.endLine === c.startLine ? "" : `-${c.endLine}`}`;
 }
+export function reviewVersion(c: ReviewAnchor): string {
+  return c.side === "before" ? `before${c.base ? ` at ${c.base.slice(0, 12)}` : "; original version unknown"}` : "after";
+}
+/** Limit both multi-line selections and single minified lines in chat drafts. */
+export function quotedReviewText(text: string): string {
+  const lines = text.split("\n");
+  const preview = lines.slice(0, 20).join("\n");
+  const clipped = preview.slice(0, 4000);
+  const omitted = preview.length <= 4000 && lines.length > 20 ? `${lines.length - 20} more lines` : "remaining text";
+  return clipped.split("\n").map((line) => `> ${line}`).join("\n")
+    + (lines.length > 20 || preview.length > 4000 ? `\n> … (${omitted} omitted)` : "");
+}
 export function reviewEntry(c: ReviewComment): string {
-  return `${reviewLocation(c)} (${c.side}${c.outdated ? ", outdated" : ""})\n${c.lineText.split("\n").map((line) => `> ${line}`).join("\n")}\n\n${c.note}`;
+  return `${reviewLocation(c)} (${reviewVersion(c)}${c.outdated ? ", outdated" : ""})\n${quotedReviewText(c.lineText)}\n\n${c.note}`;
 }
 export function orderedComments(comments: ReviewComment[]): ReviewComment[] {
   return [...comments].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
@@ -85,13 +101,13 @@ export function captureReviewSend(tabId: string, text: string): DraftReview[] {
     return !e.location || entry.startsWith(e.location) || entry.includes(`\n${e.location}`);
   });
 }
-const listeners = new Set<() => void>();
-export function onReviewsChanged(listener: () => void): () => void { listeners.add(listener); return () => { listeners.delete(listener); }; }
+const listeners = new Set<(workspace?: string) => void>();
+export function onReviewsChanged(listener: (workspace?: string) => void): () => void { listeners.add(listener); return () => { listeners.delete(listener); }; }
+export function notifyReviewsChanged(workspace?: string) { for (const listener of listeners) listener(workspace); }
 export async function markReviewsSent(entries: DraftReview[]): Promise<void> {
   for (const workspace of new Set(entries.map((e) => e.workspace))) {
     await reviewComments(workspace, { type: "sent", comments: entries.filter((e) => e.workspace === workspace).map(({ id, revision }) => ({ id, revision })) });
   }
-  for (const listener of listeners) listener();
 }
 export function restoreReviewSend(tabId: string, text: string, entries: DraftReview[]) {
   const draft = getDraft(tabId);

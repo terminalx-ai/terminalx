@@ -1,4 +1,4 @@
-import { ReviewCommentsProvider } from "./ReviewComments";
+import { ReviewCommentsProvider, useReviewComments } from "./ReviewComments";
 import { useEffect, useId, useMemo, useState } from "react";
 import { openDiff } from "@/lib/editors";
 import { changeRange, type ChangeRange } from "@/lib/changes";
@@ -59,6 +59,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   live: boolean;
   workingTree?: boolean;
 }) {
+  const review = useReviewComments();
   const targetId = useId();
   const { hideWhitespace } = useDiffOptions();
   const [choice, setChoice] = useState(() => readChoice(source));
@@ -134,6 +135,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
     scope: choice.scope === "turn" ? "turn" : "all", range, oldPath: file.oldPath,
     target: choice.target, uncommitted: choice.scope === "uncommitted",
   }) : undefined;
+  useEffect(() => { if (result) review?.refresh(); }, [result, review?.refresh]);
   const label = choice.scope === "all" ? "All changes" : choice.scope === "uncommitted" ? "Uncommitted changes" : live ? "This turn" : "Last turn";
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -220,9 +222,9 @@ function ChangesBody({
         {groups?.length ? groups.map((group) => (
           <section key={group.key} aria-label={group.title}>
             <h3 className="px-3 pt-2 text-[11px] font-medium text-faint">{group.title} · {group.files.length}</h3>
-            <FileList files={group.files} selected={selected} onSelect={select} empty={empty} />
+            <FileList base={range.base} files={group.files} selected={selected} onSelect={select} empty={empty} />
           </section>
-        )) : <FileList files={files} selected={selected} onSelect={select} empty={empty} />}
+        )) : <FileList base={range.base} files={files} selected={selected} onSelect={select} empty={empty} />}
       </div>
       {current && <div className="min-h-0 flex-1">
         <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={range.base} head={range.head} />

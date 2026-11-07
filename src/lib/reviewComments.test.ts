@@ -9,7 +9,7 @@ beforeEach(() => { invoke.mockClear(); setDraft("tab", ""); });
 describe("review draft", () => {
   it("quotes every original line, identifies side and range, and retains literal note text", () => {
     expect(reviewDraft([comment()])).toBe("src/a.ts:2-3 (after)\n> const old = 1;\n> old++;\n\nRename old.\nKeep the increment.");
-    expect(reviewEntry(comment({ side: "before", startLine: 3, outdated: true, lineText: "`</script>`" }))).toContain("src/a.ts:3 (before, outdated)\n> `</script>`");
+    expect(reviewEntry(comment({ side: "before", base: "abcdef1234567890", startLine: 3, outdated: true, lineText: "`</script>`" }))).toContain("src/a.ts:3 (before at abcdef123456, outdated)\n> `</script>`");
   });
   it("includes every unsent comment in file and line order without changing the input", () => {
     const comments = [comment({ id: "z", path: "z.ts" }), comment({ id: "a2", startLine: 20, endLine: 20 }), comment({ id: "sent", sent: true }), comment({ id: "a1", outdated: true })];
@@ -71,4 +71,14 @@ describe("review draft", () => {
     expect(moveReviewRanges("abcDEF", "abcXDEF", [entry])[0]).toMatchObject({ from: 4, to: 7 });
     expect(moveReviewRanges("abcDEF", "abcXYZ", [entry])).toEqual([]);
   });
+});
+
+it("caps long quotes by lines and characters while retaining the location and note", () => {
+  const long = reviewEntry(comment({ lineText: Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n") }));
+  expect(long).toContain("> line 19\n> … (30 more lines omitted)");
+  expect(long).not.toContain("> line 20");
+  const minified = reviewEntry(comment({ lineText: "x".repeat(100000) }));
+  expect(minified.length).toBeLessThan(4200);
+  expect(minified).toContain("remaining text omitted");
+  expect(minified).toContain("Rename old.");
 });
