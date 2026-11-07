@@ -199,6 +199,7 @@ export interface StatsUsageState {
 }
 
 export interface NewSession {
+  sectionId?: string | null;
   projectPath: string;
   /** Run in this existing workspace instead of creating a worktree. */
   cwd?: string | null;
@@ -225,6 +226,7 @@ export interface WorkspaceRename {
 }
 
 export interface NewQuickChat {
+  sectionId?: string | null;
   title?: string | null;
   cwd?: string | null;
   tab?: NewTab | null;
