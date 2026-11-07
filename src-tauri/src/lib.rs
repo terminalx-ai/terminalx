@@ -83,6 +83,7 @@ mod media_types;
 mod branch_overview;
 mod git;
 mod checkpoints;
+mod git_media;
 mod github;
 mod unfinished_merge;
 mod pr_associations;
@@ -625,6 +626,7 @@ pub fn run() {
             commands::changes_between,
             commands::review_range,
             commands::file_contents_at,
+            commands::diff_media_content,
             commands::log_commits,
             commands::load_tab_events,
             commands::prepare_continuation,

@@ -79,7 +79,7 @@ export function useWorkingChanges(cwd: string | undefined, active: boolean, tick
 }
 
 /** Uncommitted changes of a local checkout or a cloud repository. */
-export function useGitWorkingChanges(source: GitSource | undefined, active: boolean, tick = 0) {
+export function useGitWorkingChanges(source: GitSource | undefined, active: boolean, tick = 0, hideWhitespace = false) {
   const [state, setState] = useState<{ key: string | null; head: string | null; files: ChangedFile[] }>({ key: null, head: null, files: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -88,7 +88,7 @@ export function useGitWorkingChanges(source: GitSource | undefined, active: bool
     let cancelled = false;
     setLoading(true);
     source
-      .workingChanges()
+      .workingChanges(hideWhitespace)
       .then(({ head, files }) => {
         if (cancelled) return;
         setState({ key: source.key, head, files });
@@ -99,7 +99,7 @@ export function useGitWorkingChanges(source: GitSource | undefined, active: bool
     return () => {
       cancelled = true;
     };
-  }, [source, active, tick]);
+  }, [source, active, tick, hideWhitespace]);
   // Never show one repository's changes under another.
   const current = state.key === (source?.key ?? null);
   return { head: current ? state.head : null, files: current ? state.files : [], loading, error };
