@@ -468,9 +468,11 @@ describe("the pickers show what the agent is running (#404)", () => {
   it("keeps showing the mode the agent is in while another waits for the restart (#417)", async () => {
     show({ ...onSol, permissionMode: "plan", requestedPermissionMode: "auto" }, { busy: true });
     expect(pending()).toBe("Switching to Auto after this turn");
-    // Plan mode marks the options button, so it is seen without opening the menu.
-    expect(screen.getByTestId("permission-mode-dot").className).toContain("bg-info");
-    expect((await permissionEntry()).getAttribute("title")).toBe("Permission mode: Plan");
+    // The options button is named after the mode in its tooltip; the menu's row wears plan's shield.
+    expect(screen.queryByTestId("permission-mode-dot")).toBeNull();
+    const entry = await permissionEntry();
+    expect(entry.getAttribute("title")).toBe("Permission mode: Plan");
+    expect(within(entry).getByTestId("permission-mode-icon").getAttribute("class")).toContain("text-info");
     expect(screen.getByTestId("permission-mode-label").textContent).toBe("Plan");
     const menu = await openPermissionModes();
     expect(ticked(menu)).toEqual([]);
