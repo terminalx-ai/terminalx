@@ -70,6 +70,12 @@ afterEach(() => {
 const target = (workspaceId: string) => ({ orgId: "org", workspaceId });
 
 describe("leases", () => {
+  it("carries the expected SSH scope and account revision into attachment acquisition", async () => {
+    const fence = { scope: "account-bound-scope", revision: "profile-revision:7" };
+    const lease = await manager.retainCloudConnection(target("w1"), "connect", fence);
+    expect(mocks.workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: "org", workspaceId: "w1" }, "connect", fence);
+    lease.release();
+  });
   it("shares one connection among every surface that holds it", async () => {
     const [a, b] = await Promise.all([manager.retainCloudConnection(target("w1")), manager.retainCloudConnection(target("w1"))]);
     expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);

@@ -436,7 +436,7 @@ async function open(entry: Entry, activation: LeaseActivation, sshFence?: SshFen
     const target = { kind: "cloud" as const, organizationId: entry.target.orgId, workspaceId: entry.target.workspaceId };
     entry.activation = activation;
     if (activation === "wake") setInfo(entry, { woke: true });
-    const pending = workspaceConnection(target, activation, sshFence).then((connection) => {
+    const pending = (sshFence ? workspaceConnection(target, activation, sshFence) : workspaceConnection(target, activation)).then((connection) => {
       if (!connection) throw new Error("cloud_workspace_not_connected");
       return connection;
     });

@@ -493,7 +493,7 @@ export const api = {
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation_cancel", { operationId, orgId: orgId ?? null }),
   // Remote runtime connections (PRO-13); relay credentials and E2EE keys stay native.
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation, sshFence?: SshFence) =>
-    invoke<string>("cloud_remote_attach", { target, activation, sshFence }),
+    invoke<string>("cloud_remote_attach", { target, activation, ...(sshFence ? { sshFence } : {}) }),
   cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
   /**
    * Forward a port of the connection's workspace to this Mac's loopback (PRO-28,
