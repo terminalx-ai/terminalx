@@ -71,7 +71,8 @@ export const GLYPHS: Record<string, Glyph> = {
   Folders: [["path", { d: "M5.5 10.5V4.5A1.5 1.5 0 0 1 7 3h1.8l1.2 1.2h3A1.5 1.5 0 0 1 14.5 5.7v4.8a1.5 1.5 0 0 1-1.5 1.5H7a1.5 1.5 0 0 1-1.5-1.5zM2.5 6v6.5A1.5 1.5 0 0 0 4 14h7" }]],
   FileText: [["path", { d: "M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5zM9 1.5v4h4M5.5 8.5h5M5.5 11h5" }]],
   FileCode2: [["path", { d: "M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5zM9 1.5v4h4M6.5 8l-1.5 1.5L6.5 11M9.5 8l1.5 1.5-1.5 1.5" }]],
-  GitBranch: [["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 4, r: 1.5 }], ["path", { d: "M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11" }]],
+  // A trunk with a dot at each end, and a branch that leaves its dot and joins the trunk.
+  GitBranch: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 3.5, r: 1.5 }], ["path", { d: "M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5" }]],
   GitMerge: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 12, cy: 8, r: 1.5 }], ["path", { d: "M4.5 5v6M4.5 5a5.5 5.5 0 0 0 6 3" }]],
   GitPullRequest: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 12.5, r: 1.5 }], ["path", { d: "M4.5 5v6M11.5 11V6a2 2 0 0 0-2-2H8M9.5 2.5 8 4l1.5 1.5" }]],
   GitPullRequestDraft: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 12.5, r: 1.5 }], ["path", { d: "M4.5 5v6M11.5 11V9.5M11.5 7V5.5" }]],

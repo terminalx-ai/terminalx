@@ -74,16 +74,21 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -686,16 +691,21 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -1608,16 +1618,21 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -1943,16 +1958,21 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -2231,16 +2251,21 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -2529,16 +2554,21 @@ exports[`sidebar tree DOM > draws archived sessions when archived sessions are s
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -2957,16 +2987,21 @@ exports[`sidebar tree DOM > draws archived sessions when archived sessions are s
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -3879,16 +3914,21 @@ exports[`sidebar tree DOM > draws archived sessions when archived sessions are s
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -4088,16 +4128,21 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -4700,16 +4745,21 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -5622,16 +5672,21 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -5957,16 +6012,21 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
@@ -6245,16 +6305,21 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
         >
           <circle
             cx="4.5"
+            cy="3.5"
+            r="1.5"
+          />
+          <circle
+            cx="4.5"
             cy="12.5"
             r="1.5"
           />
           <circle
             cx="11.5"
-            cy="4"
+            cy="3.5"
             r="1.5"
           />
           <path
-            d="M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11"
+            d="M4.5 5v6M11.5 5v1a3 3 0 0 1-3 3H4.5"
           />
         </svg>
         <button
