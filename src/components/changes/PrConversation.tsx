@@ -5,6 +5,7 @@ import type { SessionPr } from "@/lib/sessionPrs";
 import { usePref } from "@/lib/prefs";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 /** Shared with branch discovery: hidden windows never poll GitHub. */
 export function useDocumentVisible() {
@@ -22,7 +23,7 @@ const stateLabel = (state: string) => labels[state] ?? state.toLowerCase().repla
 
 /** Keyed by selection + PR identity by the caller, so drafts and requests cannot cross PRs. */
 export function PrConversation({ source, row, active, refresh, onEdited }: {
-  source: Pick<GitSource, "conversation" | "canWrite" | "errorMessage">; row: SessionPr; active: boolean; refresh: number;
+  source: Pick<GitSource, "conversation" | "cloud" | "canWrite" | "errorMessage">; row: SessionPr; active: boolean; refresh: number;
   onEdited: (title: string, body: string) => void;
 }) {
   const [data, setData] = useState<Conversation | null>(null);
@@ -32,6 +33,8 @@ export function PrConversation({ source, row, active, refresh, onEdited }: {
   const [working, setWorking] = useState(false);
   const [revision, setRevision] = useState(0);
   const [editing, setEditing] = useState(false);
+  const [editBase, setEditBase] = useState<{ title: string; body: string } | null>(null);
+  const [approval, setApproval] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [query, setQuery] = useState("");
@@ -43,6 +46,8 @@ export function PrConversation({ source, row, active, refresh, onEdited }: {
   const alive = useRef(true);
   const sequence = useRef(0);
   const busy = useRef(false);
+  const completed = useRef<{ client: PrConversationAccess; state: string; rowState: string; refresh: number; revision: number } | null>(null);
+  const rowState = row.pr!.state;
   const canRefresh = active && visible;
   const changed = useRef(onEdited);
   changed.current = onEdited;
@@ -60,14 +65,19 @@ export function PrConversation({ source, row, active, refresh, onEdited }: {
 
   useEffect(() => {
     if (!canRefresh || !access.client || working) return;
+    const previous = completed.current;
+    if (previous?.client === access.client && previous.state !== "OPEN" && previous.rowState === rowState && previous.refresh === refresh && previous.revision === revision) return;
     let cancelled = false;
     let timer: number | undefined;
     const load = async () => {
       const request = ++sequence.current;
+      let poll = rowState === "OPEN";
       setLoading(true);
       try {
         const next = await access.client!.read();
         if (cancelled || request !== sequence.current) return;
+        completed.current = { client: access.client!, state: next.state, rowState, refresh, revision };
+        poll = poll && next.state === "OPEN";
         setData(next);
         changed.current(next.title, next.body);
         setError(null);
@@ -76,13 +86,13 @@ export function PrConversation({ source, row, active, refresh, onEdited }: {
       } finally {
         if (!cancelled && request === sequence.current) {
           setLoading(false);
-          timer = window.setTimeout(() => void load(), 30_000);
+          if (poll) timer = window.setTimeout(() => void load(), 60_000);
         }
       }
     };
     void load();
     return () => { cancelled = true; sequence.current++; window.clearTimeout(timer); };
-  }, [access, canRefresh, source, refresh, revision, working]);
+  }, [access, canRefresh, source, refresh, revision, working, rowState]);
 
   useEffect(() => {
     setResults([]);
@@ -103,6 +113,7 @@ export function PrConversation({ source, row, active, refresh, onEdited }: {
 
   const act = async (action: PrConversationAction) => {
     if (!access.client || busy.current || !source.canWrite) return;
+    if (action.kind === "approve" && (!canApprove || action.viewer !== data?.viewer)) return;
     busy.current = true;
     sequence.current++;
     setWorking(true);
@@ -128,6 +139,7 @@ export function PrConversation({ source, row, active, refresh, onEdited }: {
 
   const editable = source.canWrite && !!access.client && !!data?.canEdit;
   const open = data?.state === "OPEN";
+  const canApprove = !!(open && source.canWrite && access.client && !source.cloud && row.association?.scope.kind !== "cloud" && data.viewer && !data.viewer.toLowerCase().endsWith("[bot]") && data.viewer.toLowerCase() !== data.author.toLowerCase());
   const candidates = results.filter((login) => login.toLowerCase() !== data?.author.toLowerCase());
   const items = useMemo(() => order === "oldest" ? data?.activity ?? [] : [...(data?.activity ?? [])].reverse(), [data?.activity, order]);
   if (!source.conversation) return null;
@@ -139,8 +151,17 @@ export function PrConversation({ source, row, active, refresh, onEdited }: {
       <section aria-label="Reviewers">
         <div className="flex items-center justify-between gap-2">
           <h3 className="font-medium">Reviewers · {data.reviewers.length}</h3>
-          {open && source.canWrite && access.client && data.viewer && data.viewer.toLowerCase() !== data.author.toLowerCase() && <Button size="xs" variant="secondary" disabled={working} onClick={() => void act({ kind: "approve" })}>Approve</Button>}
+          {canApprove && <Button size="xs" variant="secondary" disabled={working} onClick={() => setApproval(data.viewer)}>Approve</Button>}
         </div>
+        <Dialog open={approval !== null && approval === data.viewer && canApprove} onOpenChange={(show) => { if (!show) setApproval(null); }}>
+          <DialogContent>
+            <DialogHeader><DialogTitle>Approve pull request #{row.pr!.number}?</DialogTitle>
+              <DialogDescription>This submits an approving review on GitHub as {approval}.</DialogDescription>
+            </DialogHeader>
+            <p className="text-sm">{data.title}</p>
+            <DialogFooter><Button variant="ghost" onClick={() => setApproval(null)}>Cancel</Button><Button variant="accent" disabled={working} onClick={() => { const viewer = approval; setApproval(null); if (viewer) void act({ kind: "approve", viewer }); }}>Confirm approval</Button></DialogFooter>
+          </DialogContent>
+        </Dialog>
         <p className="mt-1 text-faint">{["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "PENDING", ...(data.reviewers.some((reviewer) => reviewer.state === "DISMISSED") ? ["DISMISSED"] : [])].map((state) => `${data.reviewers.filter((reviewer) => reviewer.state === state).length} ${stateLabel(state).toLowerCase()}`).join(" · ")}</p>
         <p className="mt-1 text-muted-foreground">{data.unresolvedThreads} unresolved {data.unresolvedThreads === 1 ? "thread" : "threads"}</p>
         <ul className="mt-2 space-y-1">
@@ -167,13 +188,13 @@ export function PrConversation({ source, row, active, refresh, onEdited }: {
       </section>
       <section aria-label="Description">
         <div className="mb-2 flex items-center justify-between gap-2"><h3 className="font-medium">Description</h3>
-          {editable && !editing && <Button size="xs" variant="ghost" onClick={() => { setTitle(data.title); setBody(data.body); setEditing(true); }}>Edit title and description</Button>}
+          {editable && !editing && <Button size="xs" variant="ghost" onClick={() => { setTitle(data.title); setBody(data.body); setEditBase({ title: data.title, body: data.body }); setEditing(true); }}>Edit title and description</Button>}
         </div>
-        {editing ? <form className="flex flex-col gap-2" onSubmit={(event) => { event.preventDefault(); void act({ kind: "edit", title: title.trim(), body }); }}>
+        {editing ? <form className="flex flex-col gap-2" onSubmit={(event) => { event.preventDefault(); if (editBase) void act({ kind: "edit", title: title.trim(), body, expectedTitle: editBase.title, expectedBody: editBase.body }); }}>
           <input aria-label="Pull request title" value={title} onChange={(event) => setTitle(event.target.value)} disabled={working} className="h-8 rounded-md border border-hairline bg-transparent px-2" />
           <textarea aria-label="Pull request description" value={body} onChange={(event) => setBody(event.target.value)} disabled={working} rows={8} className="rounded-md border border-hairline bg-transparent p-2" />
           <div className="flex gap-1"><Button type="submit" size="xs" variant="accent" disabled={!title.trim() || working || !editable}>Save</Button><Button type="button" size="xs" variant="ghost" disabled={working} onClick={() => setEditing(false)}>Cancel</Button></div>
-        </form> : data.body ? <Markdown text={data.body} /> : <p className="text-faint">No description.</p>}
+        </form> : data.body ? <Markdown text={data.body} remoteImages={false} webLinksOnly /> : <p className="text-faint">No description.</p>}
       </section>
       <section aria-label="Activity">
         <div className="mb-2 flex items-center justify-between gap-2"><h3 className="font-medium">Activity · {items.length}</h3>
@@ -210,7 +231,7 @@ const ActivityItem = memo(function ActivityItem({ item }: { item: PrActivity }) 
       <time dateTime={item.at} title={item.at}>{new Date(item.at).toLocaleString()}</time>
     </div>
     {item.kind === "force_push" ? <p className="font-mono text-faint">{item.before?.slice(0, 7) ?? "unknown"} → {item.after?.slice(0, 7) ?? "unknown"}</p>
-      : nearby ? <Markdown text={long && !expanded ? `${preview}\n\n…` : item.body} /> : <div className="h-16" />}
+      : nearby ? <Markdown text={long && !expanded ? `${preview}\n\n…` : item.body} remoteImages={false} webLinksOnly /> : <div className="h-16" />}
     {long && <Button size="xs" variant="ghost" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? "Show less" : "Show more"}</Button>}
   </div>;
 });

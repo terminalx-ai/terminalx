@@ -176,20 +176,33 @@ fn parse(value: &Value) -> Result<Conversation> {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Action {
-    Edit { title: String, body: String },
+    Edit { title: String, body: String, #[serde(rename = "expectedTitle")] expected_title: String, #[serde(rename = "expectedBody")] expected_body: String },
     Request { login: String, team: bool },
     Remove { login: String, team: bool },
-    Approve,
+    Approve { viewer: String },
 }
 
 pub fn act_with(target: &Target, action: Action, mut run: impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
     match action {
-        Action::Edit { title, body } => {
+        Action::Edit { title, body, expected_title, expected_body } => {
             let title = title.trim();
             if title.is_empty() || title.len() > 1024 || body.len() > 65536 { bail!("Enter a title and a description of at most 64 KB."); }
+            let current: Value = serde_json::from_str(&run(&["pr", "view", &target.url, "--json", "title,body"])?)?;
+            if current["title"].as_str() != Some(&expected_title) || current["body"].as_str() != Some(&expected_body) {
+                bail!("The title or description changed on GitHub. Copy your draft, cancel, then edit the latest version.");
+            }
             run(&["pr", "edit", &target.url, "--title", title, "--body", &body])?;
         }
-        Action::Approve => { run(&["pr", "review", &target.url, "--approve"])?; }
+        Action::Approve { viewer } => {
+            // Recheck the acting account immediately before writing: a local
+            // gh token can also be an App token, or have changed since reading.
+            let account: Value = serde_json::from_str(&run(&["api", "--hostname", &target.host, "user"])?)?;
+            let login = string(&account, "login");
+            if account["type"] != "User" || login.is_empty() || login.ends_with("[bot]") || !login.eq_ignore_ascii_case(&viewer) {
+                bail!("Approve with the personal GitHub account shown in the confirmation. Refresh after switching accounts.");
+            }
+            run(&["pr", "review", &target.url, "--approve"])?;
+        }
         Action::Request { ref login, team } | Action::Remove { ref login, team } => {
             let remove = matches!(action, Action::Remove { .. });
             let name = if team {
@@ -211,9 +224,11 @@ pub fn search_with(target: &Target, query: &str, mut run: impl FnMut(&[&str]) ->
     let query = query.trim();
     if query.len() < 2 { return Ok(Vec::new()); }
     if query.len() > 100 { bail!("Search is too long."); }
-    let out = run(&["api", "--hostname", &target.host, "--method", "GET", "search/users", "-f", &format!("q={query} type:user"), "-f", "per_page=10"])?;
-    let value: Value = serde_json::from_str(&out)?;
-    Ok(value["items"].as_array().context("GitHub omitted search results")?.iter().filter_map(|user| user["login"].as_str().map(str::to_string)).collect())
+    // Search within this repository, rather than the global user directory.
+    const SEARCH: &str = "query($owner: String!, $name: String!, $search: String!) { repository(owner: $owner, name: $name) { assignableUsers(first: 10, query: $search) { nodes { login } } } }";
+    let out = run(&["api", "graphql", "--hostname", &target.host, "-f", &format!("query={SEARCH}"), "-f", &format!("owner={}", target.owner), "-f", &format!("name={}", target.name), "-f", &format!("search={query}")])?;
+    let value = response(&out)?;
+    Ok(value["data"]["repository"]["assignableUsers"]["nodes"].as_array().context("GitHub omitted search results")?.iter().filter_map(|user| user["login"].as_str().filter(|login| !login.ends_with("[bot]")).map(str::to_string)).collect())
 }
 
 #[cfg(test)]
@@ -349,22 +364,57 @@ mod tests {
     fn edits_approvals_and_reviewer_actions_are_literal_and_host_scoped() {
         let target = Target::new("https://git.example.com/owner/repo/pull/42").unwrap();
         let mut calls = Vec::new();
-        let mut run = |args: &[&str]| { calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>()); Ok(String::new()) };
-        act_with(&target, Action::Edit { title: " A title ".into(), body: "$(secret)\n`literal`".into() }, &mut run).unwrap();
-        act_with(&target, Action::Approve, &mut run).unwrap();
+        let mut run = |args: &[&str]| {
+            calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+            Ok(if args.starts_with(&["pr", "view"]) { json!({"title":"Before","body":"Original"}).to_string() }
+                else if args.last() == Some(&"user") { json!({"type":"User","login":"ada"}).to_string() }
+                else { String::new() })
+        };
+        act_with(&target, Action::Edit { title: " A title ".into(), body: "$(secret)\n`literal`".into(), expected_title: "Before".into(), expected_body: "Original".into() }, &mut run).unwrap();
+        act_with(&target, Action::Approve { viewer: "ada".into() }, &mut run).unwrap();
         act_with(&target, Action::Request { login: "ada".into(), team: false }, &mut run).unwrap();
         act_with(&target, Action::Remove { login: "OWNER/core".into(), team: true }, &mut run).unwrap();
-        assert_eq!(calls[0], ["pr", "edit", &target.url, "--title", "A title", "--body", "$(secret)\n`literal`"]);
-        assert_eq!(calls[1], ["pr", "review", &target.url, "--approve"]);
-        assert_eq!(calls[2], ["api", "--hostname", "git.example.com", "--method", "POST", "repos/owner/repo/pulls/42/requested_reviewers", "-f", "reviewers[]=ada"]);
-        assert_eq!(calls[3].last().unwrap(), "team_reviewers[]=core");
-        assert!(calls[3].iter().any(|arg| arg == "DELETE"));
+        assert_eq!(calls[0], ["pr", "view", &target.url, "--json", "title,body"]);
+        assert_eq!(calls[1], ["pr", "edit", &target.url, "--title", "A title", "--body", "$(secret)\n`literal`"]);
+        assert_eq!(calls[2], ["api", "--hostname", "git.example.com", "user"]);
+        assert_eq!(calls[3], ["pr", "review", &target.url, "--approve"]);
+        assert_eq!(calls[4], ["api", "--hostname", "git.example.com", "--method", "POST", "repos/owner/repo/pulls/42/requested_reviewers", "-f", "reviewers[]=ada"]);
+        assert_eq!(calls[5].last().unwrap(), "team_reviewers[]=core");
+        assert!(calls[5].iter().any(|arg| arg == "DELETE"));
         for login in ["--admin", "a/b", "a?b", "", "$(bad)"] {
             assert!(act_with(&target, Action::Request { login: login.into(), team: false }, |_| panic!("invalid request ran")).is_err());
         }
         assert!(act_with(&target, Action::Remove { login: "other/core".into(), team: true }, |_| panic!("wrong org ran")).is_err());
         for url in ["https://github.com/a/b/pull/0", "https://u:p@github.com/a/b/pull/1", "https://github.com/a%2fb/c/pull/1", "https://github.com/a/b/pull/1?x=1"] {
             assert!(Target::new(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn approval_requires_the_confirmed_personal_account() {
+        for account in [json!({"type":"Bot","login":"app"}), json!({"type":"User","login":"app[bot]"}), json!({"type":"User","login":"someone-else"}), json!({})] {
+            let mut calls = 0;
+            let error = act_with(&target(), Action::Approve { viewer: "reviewer".into() }, |args| {
+                calls += 1;
+                assert_eq!(args, ["api", "--hostname", "github.com", "user"]);
+                Ok(account.to_string())
+            }).unwrap_err();
+            assert!(error.to_string().contains("personal GitHub account"));
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn editing_refuses_a_concurrent_change_without_writing() {
+        for current in [json!({"title":"Changed","body":"Original"}), json!({"title":"Before","body":"Changed"}), json!({})] {
+            let mut calls = 0;
+            let error = act_with(&target(), Action::Edit { title: "New".into(), body: "Draft".into(), expected_title: "Before".into(), expected_body: "Original".into() }, |args| {
+                calls += 1;
+                assert!(args.starts_with(&["pr", "view"]));
+                Ok(current.to_string())
+            }).unwrap_err();
+            assert!(error.to_string().contains("changed on GitHub"));
+            assert_eq!(calls, 1);
         }
     }
 
@@ -386,9 +436,11 @@ mod tests {
     #[test]
     fn user_search_is_bounded_and_encoded_by_gh() {
         let users = search_with(&target(), "ad & q=other", |args| {
-            assert!(args.contains(&"q=ad & q=other type:user"));
-            assert!(args.contains(&"per_page=10"));
-            Ok(json!({"items":[{"login":"ada"},{"login":"adam"}]}).to_string())
+            assert!(args.contains(&"search=ad & q=other"));
+            assert!(args.contains(&"owner=acme"));
+            assert!(args.contains(&"name=widgets"));
+            assert!(args.iter().any(|arg| arg.contains("assignableUsers(first: 10")));
+            Ok(json!({"data":{"repository":{"assignableUsers":{"nodes":[{"login":"ada"},{"login":"adam"}]}}}}).to_string())
         }).unwrap();
         assert_eq!(users, ["ada", "adam"]);
         assert!(search_with(&target(), "a", |_| panic!("short search ran")).unwrap().is_empty());

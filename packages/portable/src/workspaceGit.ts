@@ -122,9 +122,9 @@ export interface PrConversation {
   activity: PrActivity[];
 }
 export type PrConversationAction =
-  | { kind: "edit"; title: string; body: string }
+  | { kind: "edit"; title: string; body: string; expectedTitle: string; expectedBody: string }
   | { kind: "request" | "remove"; login: string; team: boolean }
-  | { kind: "approve" };
+  | { kind: "approve"; viewer: string };
 export interface PrConversationAccess {
   read(): Promise<PrConversation>;
   act(action: PrConversationAction): Promise<void>;

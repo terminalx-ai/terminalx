@@ -6,12 +6,12 @@ import type { SessionPr } from "@/lib/sessionPrs";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { PrConversation } from "./PrConversation";
 
-vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div data-testid="markdown">{text}</div> }));
+vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text, remoteImages, webLinksOnly }: { text: string; remoteImages?: boolean; webLinksOnly?: boolean }) => <div data-testid="markdown" data-remote-images={String(remoteImages)} data-web-links-only={String(webLinksOnly)}>{text}</div> }));
 const row: SessionPr = { identity: "https://github.com/acme/repo/pull/1", current: true, pr: { number: 1, url: "https://github.com/acme/repo/pull/1", title: "Title", body: "Body", author: "author", state: "OPEN", base: "main", head: "feature", additions: 1, deletions: 0, checks: [], mergeable: "MERGEABLE", isDraft: false, reviewDecision: null } };
 const initial = (): Conversation => ({ url: row.identity, title: "Title", body: "**Description**", author: "author", viewer: "reviewer", state: "OPEN", canEdit: true, reviewers: [{ login: "ada", kind: "user", state: "APPROVED", requested: false }], unresolvedThreads: 2, activity: [] });
 let data: Conversation;
 let access: PrConversationAccess;
-let source: Pick<GitSource, "conversation" | "canWrite" | "errorMessage">;
+let source: Pick<GitSource, "conversation" | "cloud" | "canWrite" | "errorMessage">;
 const onEdited = vi.fn();
 function view(active = true, key = "first") { return <PrConversation key={key} source={source} row={row} active={active} refresh={0} onEdited={onEdited} />; }
 
@@ -26,7 +26,7 @@ beforeEach(() => {
     }),
     search: vi.fn(async () => ["author", "ben"]),
   };
-  source = { canWrite: true, conversation: () => access, errorMessage: (error: unknown) => String(error) };
+  source = { cloud: false, canWrite: true, conversation: () => access, errorMessage: (error: unknown) => String(error) };
   setPrefs({ prActivityOrder: "newest" });
   onEdited.mockReset();
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
@@ -52,11 +52,14 @@ it("edits title and body, preserves unsaved drafts on refresh, and updates the c
   fireEvent.click(await screen.findByRole("button", { name: "Edit title and description" }));
   fireEvent.change(screen.getByLabelText("Pull request title"), { target: { value: "New title" } });
   fireEvent.change(screen.getByLabelText("Pull request description"), { target: { value: "New **body**" } });
+  data.title = "Concurrent title";
+  data.body = "Concurrent body";
   rendered.rerender(<PrConversation source={source} row={row} active refresh={1} onEdited={onEdited} key="first" />);
+  await waitFor(() => expect(onEdited).toHaveBeenCalledWith("Concurrent title", "Concurrent body"));
   expect((screen.getByLabelText("Pull request title") as HTMLInputElement).value).toBe("New title");
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await screen.findByText("New **body**");
-  expect(access.act).toHaveBeenCalledWith({ kind: "edit", title: "New title", body: "New **body**" });
+  expect(access.act).toHaveBeenCalledWith({ kind: "edit", title: "New title", body: "New **body**", expectedTitle: "Title", expectedBody: "**Description**" });
   expect(onEdited).toHaveBeenCalledWith("New title", "New **body**");
 });
 
@@ -75,7 +78,13 @@ it("keeps a failed edit and its error visible after a successful background read
 it("offers approval to a non-author and prevents writes on a read-only source", async () => {
   const rendered = render(view());
   fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
-  await waitFor(() => expect(access.act).toHaveBeenCalledWith({ kind: "approve" }));
+  expect(access.act).not.toHaveBeenCalled();
+  expect(screen.getByRole("dialog").textContent).toContain("as reviewer");
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(access.act).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm approval" }));
+  await waitFor(() => expect(access.act).toHaveBeenCalledWith({ kind: "approve", viewer: "reviewer" }));
   data.viewer = "AUTHOR";
   rendered.rerender(view(true, "author"));
   await screen.findByText("2 unresolved threads");
@@ -87,11 +96,31 @@ it("offers approval to a non-author and prevents writes on a read-only source", 
   expect(screen.queryByLabelText("Search reviewers")).toBeNull();
 });
 
+it.each([[true, "app[bot]"], [true, "personal-looking-login"], [false, "app[bot]"]])("does not offer approval for cloud=%s and viewer=%s", async (cloud, viewer) => {
+  source = { ...source, cloud };
+  data.viewer = viewer;
+  render(view());
+  await screen.findByText("2 unresolved threads");
+  expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  expect(access.act).not.toHaveBeenCalled();
+});
+
+it("does not approve a cloud association through a personal-looking source", async () => {
+  const associated: SessionPr = { ...row, association: { url: row.identity, number: 1, head: "feature", scope: { kind: "cloud", workspace: "workspace", repo: "app" } } };
+  render(<PrConversation source={source} row={associated} active refresh={0} onEdited={onEdited} />);
+  await screen.findByText("2 unresolved threads");
+  expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+});
+
 it("shows 200 activities, folds long comments, and persists sort across remounts", async () => {
   data.activity = Array.from({ length: 200 }, (_, i) => ({ id: String(i), kind: "comment", author: `person-${i}`, body: i === 199 ? "x".repeat(1800) : `comment-${i}`, at: "2026-11-07T00:00:00Z", url: null, state: null, before: null, after: null }));
   const rendered = render(view());
   await screen.findByText("Activity · 200");
   expect(screen.getAllByTestId("pr-activity-item")).toHaveLength(200);
+  for (const markdown of screen.getAllByTestId("markdown")) {
+    expect(markdown.dataset.remoteImages).toBe("false");
+    expect(markdown.dataset.webLinksOnly).toBe("true");
+  }
   expect(screen.getAllByTestId("pr-activity-item")[0].textContent).toContain("person-199");
   expect(screen.queryByText("x".repeat(1800))).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Show more" }));
@@ -130,7 +159,7 @@ describe("visibility and late responses", () => {
     rendered.rerender(view());
     await act(async () => {});
     expect(access.read).toHaveBeenCalledTimes(1);
-    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(access.read).toHaveBeenCalledTimes(2);
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
     fireEvent(document, new Event("visibilitychange"));
@@ -145,6 +174,30 @@ describe("visibility and late responses", () => {
     expect(access.read).toHaveBeenCalledTimes(3);
   });
 
+  it.each(["MERGED", "CLOSED"] as const)("reads a %s PR once, including after hiding, but allows explicit refresh and reopening", async (state) => {
+    vi.useFakeTimers();
+    data.state = state;
+    const terminalRow: SessionPr = { ...row, pr: { ...row.pr!, state } };
+    const renderPr = (active: boolean, refresh = 0, selected = terminalRow) => <PrConversation source={source} row={selected} active={active} refresh={refresh} onEdited={onEdited} />;
+    const rendered = render(renderPr(true));
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(180_000); });
+    expect(access.read).toHaveBeenCalledTimes(1);
+    rendered.rerender(renderPr(false));
+    rendered.rerender(renderPr(true));
+    await act(async () => { await vi.advanceTimersByTimeAsync(180_000); });
+    expect(access.read).toHaveBeenCalledTimes(1);
+    rendered.rerender(renderPr(true, 1));
+    await act(async () => {});
+    expect(access.read).toHaveBeenCalledTimes(2);
+    data.state = "OPEN";
+    rendered.rerender(renderPr(true, 1, row));
+    await act(async () => {});
+    expect(access.read).toHaveBeenCalledTimes(3);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(access.read).toHaveBeenCalledTimes(4);
+  });
+
   it("ignores a load superseded by a mutation and an action completing after unmount", async () => {
     let finishRead!: (value: Conversation) => void;
     vi.mocked(access.read).mockImplementationOnce(() => new Promise((resolve) => { finishRead = resolve; }));
@@ -156,6 +209,7 @@ describe("visibility and late responses", () => {
     let finishAction!: () => void;
     vi.mocked(access.act).mockImplementationOnce(() => new Promise((resolve) => { finishAction = resolve; }));
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm approval" }));
     rendered.unmount();
     const reads = vi.mocked(access.read).mock.calls.length;
     await act(async () => finishAction());

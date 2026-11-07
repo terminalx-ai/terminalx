@@ -99,7 +99,7 @@ describe("workspace git", () => {
     const access = new RemoteGit(client, "libs/core").prConversation(url);
     expect((await access.read()).title).toBe("A pull request");
     expect(await access.search("ada")).toEqual(["ada"]);
-    const action = { kind: "approve" } as const;
+    const action = { kind: "request", login: "ada", team: false } as const;
     const pending = access.act(action);
     runtime.setState({ state: "reconnecting", attempt: 1 });
     runtime.setState(connected);

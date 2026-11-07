@@ -920,7 +920,16 @@ impl WorkspaceGit {
     }
 
     fn pr_conversation(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
-        use crate::github::conversation::{self, Target};
+        use crate::github::conversation::{self, Action, Target};
+        // Cloud gh uses an organisation App installation token, never the
+        // caller's personal identity. It must not satisfy required reviews.
+        let action = if method == "git.prConversationAction" {
+            let action = serde_json::from_value(params["action"].clone()).map_err(|_| RpcError::invalid("Invalid PR action"))?;
+            if matches!(action, Action::Approve { .. }) {
+                return Err(RpcError::forbidden("Approve from GitHub with your personal account. Cloud workspaces cannot approve as the organisation App."));
+            }
+            Some(action)
+        } else { None };
         let repo = self.repo(params)?;
         let target = Target::new(required_str(params, "url")?).map_err(RpcError::internal)?;
         // Resolve through this repository's gh routing before allowing a supplied
@@ -937,8 +946,7 @@ impl WorkspaceGit {
             "git.prConversation" => conversation::read_with(&target, run).map(|value| json!(value)),
             "git.prReviewerSearch" => conversation::search_with(&target, required_str(params, "query")?, run).map(|value| json!(value)),
             _ => {
-                let action = serde_json::from_value(params["action"].clone()).map_err(|_| RpcError::invalid("Invalid PR action"))?;
-                conversation::act_with(&target, action, run).map(|()| Value::Null)
+                conversation::act_with(&target, action.ok_or_else(|| RpcError::invalid("Invalid PR action"))?, run).map(|()| Value::Null)
             }
         }.map_err(RpcError::internal)
     }

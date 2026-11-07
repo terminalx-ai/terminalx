@@ -628,8 +628,24 @@ fn conversation_uses_workspace_credentials_and_rejects_unrelated_repositories() 
     assert!(f.gh_calls().contains("graphql"));
     let calls = f.gh_calls().lines().count();
     for method in ["git.prConversation", "git.prReviewerSearch", "git.prConversationAction"] {
-        assert_eq!(f.code(method, json!({ "repo": "app", "url": "https://github.com/other/private/pull/799", "query": "ada", "action": {"kind":"approve"} })), "invalid_params");
+        assert_eq!(f.code(method, json!({ "repo": "app", "url": "https://github.com/other/private/pull/799", "query": "ada", "action": {"kind":"request","login":"ada","team":false} })), "invalid_params");
     }
     // Only the repository identity lookup ran; no query, search or write did.
     assert_eq!(f.gh_calls().lines().count(), calls + 3);
+}
+
+#[test]
+fn cloud_approval_is_refused_before_running_gh_even_with_a_personal_viewer_claim() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    for viewer in ["author", "reviewer", "organisation-app[bot]"] {
+        let error = f.call("git.prConversationAction", json!({
+            "repo":"app", "url":"https://github.com/acme/widgets/pull/799",
+            "action":{"kind":"approve","viewer":viewer}
+        })).unwrap_err();
+        assert_eq!(error.code, "forbidden");
+        assert!(error.message.contains("personal account"));
+    }
+    assert!(f.gh_calls().is_empty(), "approval must never use the App token");
 }

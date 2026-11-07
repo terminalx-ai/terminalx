@@ -98,6 +98,8 @@ export function PrPanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [working, setWorking] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  // Conversation pagination is independent of check/discovery polling.
+  const [conversationRefresh, setConversationRefresh] = useState(0);
   const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
   useEffect(() => {
@@ -241,7 +243,7 @@ export function PrPanel({
       {/* Inline, the tab's own refresh reads it again, and it is read every 30 seconds besides. */}
       {!inline && (
         <div className="flex items-center justify-end px-3 pt-2">
-          <Button size="xs" variant="ghost" disabled={loading || !!working} onClick={() => setTick((t) => t + 1)} aria-label="Refresh pull requests">
+          <Button size="xs" variant="ghost" disabled={loading || !!working} onClick={() => { setTick((t) => t + 1); setConversationRefresh((value) => value + 1); }} aria-label="Refresh pull requests">
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
           </Button>
         </div>
@@ -273,7 +275,8 @@ export function PrPanel({
           <button type="button" onClick={() => void openUrl(row.identity)} className="hover:underline">{row.identity}</button>
           <div className="text-destructive">Could not refresh: {row.error}</div>
         </div>;
-        const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={tick} onEdited={(title, body) => {
+        // This owns the description as well as its editor, including in a PR tab.
+        const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={conversationRefresh} onEdited={(title, body) => {
           setRows((previous) => previous.map((entry) => entry.identity === row.identity && entry.pr && (entry.pr.title !== title || entry.pr.body !== body) ? { ...entry, pr: { ...entry.pr, title, body } } : entry));
         }} />;
         const ready = mergeReadiness(pr);
