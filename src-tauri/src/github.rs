@@ -253,6 +253,23 @@ pub fn list_prs(cwd: &Path, flags: &[&str]) -> Result<Vec<Value>> {
     Ok(serde_json::from_str::<Value>(&out)?.as_array().cloned().unwrap_or_default())
 }
 
+/// `owner/repo` of a remote, for matching it to a pull request's head
+/// repository: any GitHub spelling, and also an SSH host alias from
+/// `~/.ssh/config` (`git@github-work:owner/repo.git`), which only names the
+/// host differently. Only compared with heads `gh` itself returned.
+fn remote_repo(url: &str) -> Option<String> {
+    if let Some(repo) = crate::issues::github_repo_from_url(url) {
+        return Some(repo);
+    }
+    let url = url.trim().trim_end_matches('/');
+    // scp-like SSH: `user@alias:owner/repo`, with no scheme.
+    let (_, path) = url.split_once('@').filter(|_| !url.contains("://"))?.1.split_once(':')?;
+    let path = path.trim_end_matches(".git");
+    let mut parts = path.split('/');
+    let (owner, repo) = (parts.next()?, parts.next()?);
+    (parts.next().is_none() && crate::issues::is_github_repo(&format!("{owner}/{repo}"))).then(|| format!("{owner}/{repo}"))
+}
+
 /// Every PR whose head is `branch`, open first then newest.
 pub fn prs_for_branch(cwd: &Path, branch: &str) -> Result<Vec<PullRequest>> {
     prs_for_branch_with(cwd, branch, run)
@@ -262,15 +279,22 @@ fn prs_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]
     let fields = format!("{FIELDS},isCrossRepository,headRepository,headRepositoryOwner");
     let out = run(cwd, &["pr", "list", "--head", branch, "--state", "all", "--json", &fields, "--limit", "1000"])?;
     let v: Value = serde_json::from_str(&out)?;
-    let origin = crate::git::remote_url(cwd).as_deref().and_then(crate::issues::github_repo_from_url);
+    // The repositories this branch's head can be ours in: origin, and the one
+    // the branch is pushed to, which is a fork when the work goes to origin by
+    // pull request from it.
+    let ours: Vec<String> = [crate::git::remote_url(cwd), crate::git::push_remote_url(cwd, branch)]
+        .into_iter()
+        .flatten()
+        .filter_map(|url| remote_repo(&url))
+        .collect();
     let mut prs: Vec<PullRequest> = v.as_array().map(|a| a.iter().filter(|pr| {
-        // Another fork can reuse the same branch name. Only explicit identity
-        // associations may bring in a PR whose head repository isn't ours.
-        pr["isCrossRepository"].as_bool() != Some(true) || origin.as_ref().is_some_and(|origin| {
+        // Another fork can reuse the same branch name, so a PR from another
+        // repository counts only when its head is one of ours.
+        pr["isCrossRepository"].as_bool() != Some(true) || {
             let owner = pr["headRepositoryOwner"]["login"].as_str().unwrap_or_default();
             let repo = pr["headRepository"]["name"].as_str().unwrap_or_default();
-            origin.eq_ignore_ascii_case(&format!("{owner}/{repo}"))
-        })
+            ours.iter().any(|ours| ours.eq_ignore_ascii_case(&format!("{owner}/{repo}")))
+        }
     }).map(parse_pr).collect()).unwrap_or_default();
     prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
     // Lookup is also used by workspace deletion checks, and runs while Stats
@@ -1245,6 +1269,34 @@ mod tests {
             ]).to_string())
         }).unwrap();
         assert_eq!(prs.iter().map(|pr| pr.number).collect::<Vec<_>>(), [2, 1]);
+    }
+
+    /// A branch pushed to the reader's own fork, with its pull request into
+    /// origin opened from there: the Branch tab finds that PR rather than
+    /// offering to open another. Another fork's PR on the same branch name
+    /// is still not ours.
+    #[test]
+    fn branch_discovery_finds_the_pr_opened_from_the_fork_the_branch_is_pushed_to() {
+        let _home = crate::store::temp_home();
+        let cwd = crate::store::root().unwrap();
+        crate::git::run(&cwd, &["init", "-q"]).unwrap();
+        crate::git::run(&cwd, &["remote", "add", "origin", "https://github.com/acme/widgets.git"]).unwrap();
+        // An SSH host alias, as people with two GitHub accounts write it.
+        crate::git::run(&cwd, &["remote", "add", "fork", "git@github-work:me/widgets.git"]).unwrap();
+        crate::git::run(&cwd, &["config", "branch.feature.remote", "fork"]).unwrap();
+        let listed = serde_json::json!([
+            {"number":9,"url":"https://github.com/acme/widgets/pull/9","headRefName":"feature","state":"OPEN","isCrossRepository":true,"headRepositoryOwner":{"login":"me"},"headRepository":{"name":"widgets"}},
+            {"number":8,"url":"https://github.com/acme/widgets/pull/8","headRefName":"feature","state":"OPEN","isCrossRepository":true,"headRepositoryOwner":{"login":"someone"},"headRepository":{"name":"widgets"}}
+        ]).to_string();
+        let prs = prs_for_branch_with(&cwd, "feature", |_, _| Ok(listed.clone())).unwrap();
+        assert_eq!(prs.iter().map(|pr| pr.number).collect::<Vec<_>>(), [9]);
+        // Not pushed anywhere of its own: a fork's PR is nobody's but that fork's.
+        let prs = prs_for_branch_with(&cwd, "other", |_, _| Ok(listed.clone())).unwrap();
+        assert!(prs.is_empty());
+        assert_eq!(remote_repo("git@github-work:me/widgets.git").as_deref(), Some("me/widgets"));
+        assert_eq!(remote_repo("https://github.com/acme/widgets.git").as_deref(), Some("acme/widgets"));
+        assert_eq!(remote_repo("https://gitlab.com/acme/widgets.git"), None);
+        assert_eq!(remote_repo("git@host:a/b/c.git"), None);
     }
 
     #[test]
