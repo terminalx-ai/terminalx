@@ -71,10 +71,13 @@ try {
     await page.getByRole("dialog").waitFor({ state: "detached" });
     assert.equal(await section("Fixes").getByRole("button", { name: "Fixes", exact: true }).evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the section heading");
     assert.equal(await page.getByTestId("conversation-list").evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the sidebar");
-    await page.getByRole("button", { name: "New section…", exact: true }).click();
+    assert.equal(await page.getByRole("button", { name: "New section…", exact: true }).count(), 0);
+    await page.locator('[data-row-sessions~="three"]').click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Move to section", exact: true }).hover();
+    await page.getByRole("menuitem", { name: "New section…", exact: true }).click();
     await page.getByLabel("Section name", { exact: true }).fill("Refactor");
     await page.getByRole("button", { name: "Create", exact: true }).click();
-    await section("Refactor").waitFor();
+    await section("Refactor").getByText("Simplify the parser", { exact: true }).waitFor();
     await section("Fixes").getByRole("button", { name: "Fixes", exact: true }).click();
     await page.reload();
     await section("Fixes").waitFor();

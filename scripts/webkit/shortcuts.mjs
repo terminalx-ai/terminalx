@@ -126,9 +126,10 @@ const fits = (layout) => ({
   await sidebar(page);
   await page.keyboard.press("Meta+B");
   await page.waitForTimeout(150);
-  const afterOld = await sidebarShown();
+  const afterOld = await sidebarShown() && await page.locator('[data-testid="panel-presence"][data-side="left"]').getAttribute("data-state") === "open";
   await page.keyboard.press("Meta+Shift+Y");
-  await page.waitForTimeout(150);
+  // The sidebar remains mounted until its closing animation finishes.
+  await page.getByTestId("sidebar-rail").waitFor({ state: "hidden" });
   const afterNew = await sidebarShown();
   await page.keyboard.press("Meta+Shift+Y");
   await sidebar(page);
