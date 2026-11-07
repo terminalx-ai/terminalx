@@ -517,3 +517,48 @@ it("forwards capability-only native account announcements without inventing supp
   mocks.listeners.get("account_status")!({ payload: { ...before, workClaims: false } });
   expect(account.getAccount().status.workClaims).toBe(false);
 });
+
+describe("refresh membership after accepting an invitation", () => {
+  const listing = (account = "invite-user", joined = false) => ({
+    state: "signed-in" as const, identity: { name: "Member", email: "member@example.com", organization: "", organizationId: "" },
+    expiresAt: null, lastError: null, context: { account, scope: account, revision: `${account}:1` }, multiOrg: true,
+    organizations: joined ? [{ id: "joined", name: "Joined team", role: "member", isPersonal: false, cloud: { enabled: true, flags: {} } }] : [],
+  });
+  it("forces a new server read after an older in-flight read and notifies catalog subscribers without restarting", async () => {
+    vi.resetModules(); let current = listing();
+    mocks.invoke.mockReset().mockImplementation(async (command: string) => {
+      if (command === "account_status") return current;
+      if (command === "account_refresh_roles") return { status: current, fresh: true };
+      if (command === "cloud_mirror_list") return [];
+      return 0;
+    });
+    const account = await import("./account"); await account.bootAccount(); await account.refreshAccountRoles(true);
+    let finish!: (value: { status: typeof current; fresh: boolean }) => void;
+    mocks.invoke.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const older = account.refreshAccountRoles(true);
+    const refresh = account.refreshMembershipsAfterInvite(current.context);
+    current = listing("invite-user", true);
+    const changed = vi.fn(); const off = account.subscribeAccount(changed);
+    finish({ status: listing(), fresh: true }); await older;
+    expect(await refresh).toBe(true);
+    expect(account.getAccount().status.organizations?.map((org) => org.id)).toEqual(["joined"]);
+    expect(changed).toHaveBeenCalled(); off();
+  });
+  it("rejects a stale membership response after logout or replacement", async () => {
+    vi.resetModules(); const current = listing(); let pending: Promise<unknown> | null = null;
+    mocks.invoke.mockReset().mockImplementation(async (command: string) => {
+      if (command === "account_status") return current;
+      if (command === "account_refresh_roles") return pending ?? { status: current, fresh: true };
+      if (command === "cloud_mirror_list") return [];
+      return 0;
+    });
+    const account = await import("./account"); await account.bootAccount(); await account.refreshAccountRoles(true);
+    let finish!: (value: unknown) => void; pending = new Promise((resolve) => { finish = resolve; });
+    const refresh = account.refreshMembershipsAfterInvite(current.context);
+    await Promise.resolve(); await Promise.resolve();
+    mocks.listeners.get("account_status")!({ payload: listing("different") });
+    finish({ status: listing("invite-user", true), fresh: true });
+    expect(await refresh).toBe(false); expect(account.getAccount().status.context?.account).toBe("different");
+    expect(account.getAccount().status.organizations).toEqual([]);
+  });
+});

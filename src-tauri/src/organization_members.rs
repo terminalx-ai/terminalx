@@ -76,6 +76,35 @@ pub struct OrganizationRoster {
     pub context_revision: String,
 }
 
+/// Invitations addressed to the signed-in account, independent of membership.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountInvite {
+    pub id: String,
+    pub organization_name: String,
+    pub role: String,
+    pub expires_at: i64,
+    pub invited_by: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AccountInvites {
+    pub invites: Vec<AccountInvite>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptedInvite {
+    pub organization_id: String,
+    pub organization_name: String,
+    pub role: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeclinedInvite {
+    pub declined: bool,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OrganizationMembersError {
@@ -108,6 +137,9 @@ fn known_error_code(code: &str) -> bool {
             | "already_member"
             | "personal_org_no_invites"
             | "organization_requires_pro"
+            | "invite_expired"
+            | "invite_requires_pro"
+            | "email_unverified"
             | "invite_rate_limited"
             | "invite_recently_sent"
             | "cannot_change_own_role"
@@ -133,11 +165,22 @@ impl Client {
         tail: &[&str],
         body: Option<Value>,
     ) -> Result<T, OrganizationMembersError> {
+        let mut path = vec!["orgs", context.organization_id.as_str()];
+        path.extend(tail);
+        self.account_request(context, &path, body)
+    }
+
+    fn account_request<T: DeserializeOwned>(
+        &self,
+        context: &AccountContext,
+        path: &[&str],
+        body: Option<Value>,
+    ) -> Result<T, OrganizationMembersError> {
         let mut url = self.base.clone();
         url.path_segments_mut()
             .map_err(|_| OrganizationMembersError::local("organization_members_unavailable"))?
-            .extend(["v1", "desktop", "orgs", context.organization_id.as_str()])
-            .extend(tail.iter().copied());
+            .extend(["v1", "desktop"])
+            .extend(path.iter().copied());
         // Once a mutation is sent, a lost or unreadable response says nothing
         // about whether the server applied it.
         let lost = if body.is_some() { "organization_members_outcome_unknown" } else { "organization_members_unavailable" };
@@ -245,6 +288,33 @@ impl OrganizationMembersService {
         Ok(roster)
     }
 
+    fn invitations<T: DeserializeOwned>(&self, revision: &str, path: &[&str], mutation: bool) -> Result<T, OrganizationMembersError> {
+        // Unlike member management, an invite can be read/accepted with no organization yet.
+        let context = self.account.context().ok_or_else(|| OrganizationMembersError::local("account_signed_out"))?;
+        if AccountManager::context_revision(&context) != revision {
+            return Err(OrganizationMembersError::local("account_context_changed"));
+        }
+        let result = self.client.account_request(&context, path, mutation.then(|| json!({})));
+        if !self.account.is_current(&context) {
+            return Err(OrganizationMembersError::local(if mutation { "account_context_changed_after_send" } else { "account_context_changed" }));
+        }
+        result
+    }
+
+    pub fn my_invites(&self, revision: &str) -> Result<AccountInvites, OrganizationMembersError> {
+        self.invitations(revision, &["invites"], false)
+    }
+
+    pub fn accept_invite(&self, id: &str, revision: &str) -> Result<AcceptedInvite, OrganizationMembersError> {
+        validate_invite_id(id)?;
+        self.invitations(revision, &["invites", id, "accept"], true)
+    }
+
+    pub fn decline_invite(&self, id: &str, revision: &str) -> Result<DeclinedInvite, OrganizationMembersError> {
+        validate_invite_id(id)?;
+        self.invitations(revision, &["invites", id, "decline"], true)
+    }
+
     pub fn list(&self) -> Result<OrganizationRoster, OrganizationMembersError> {
         self.run(None, &["members"], None)
     }
@@ -323,6 +393,13 @@ impl OrganizationMembersService {
     }
 }
 
+fn validate_invite_id(id: &str) -> Result<(), OrganizationMembersError> {
+    if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) {
+        return Err(OrganizationMembersError::local("invalid_request"));
+    }
+    Ok(())
+}
+
 fn assignable(role: &str) -> bool {
     role == "admin" || role == "member"
 }
@@ -394,6 +471,45 @@ mod tests {
     }
 
     const ROSTER: &str = r#"{"members":[{"userId":"user-1","email":"owner@example.com","role":"owner"}],"pendingInvites":[{"email":"new@example.com","role":"member","createdAt":1,"expiresAt":2,"status":"pending"}],"viewerRole":"owner","canManageMembers":true}"#;
+
+    #[test]
+    fn account_invites_use_account_routes_and_never_return_tokens() {
+        let (base, server) = serve_once("200 OK", "", r#"{"invites":[{"id":"invite-1","organizationName":"Team","role":"member","expiresAt":1234}]}"#);
+        let mut no_org = context();
+        no_org.organization_id.clear();
+        let service = service(&base);
+        service.account.set_context_for_test(Some(no_org.clone()));
+        let list = service.my_invites(&AccountManager::context_revision(&no_org)).unwrap();
+        assert_eq!(list.invites[0].organization_name, "Team");
+        assert!(!serde_json::to_string(&list).unwrap().contains("native-secret-token"));
+        assert!(server.join().unwrap().starts_with("GET /v1/desktop/invites "));
+    }
+
+    #[test]
+    fn invite_actions_validate_ids_and_context_before_sending() {
+        let service = service("http://127.0.0.1:9");
+        let revision = AccountManager::context_revision(&context());
+        assert_eq!(service.my_invites("old").unwrap_err().code, "account_context_changed");
+        assert_eq!(service.accept_invite("invite-1", "old").unwrap_err().code, "account_context_changed");
+        assert_eq!(service.decline_invite("../other", &revision).unwrap_err().code, "invalid_request");
+        for (action, body) in [("accept", r#"{"organizationId":"org-2","organizationName":"Team","role":"member"}"#), ("decline", r#"{"declined":true}"#)] {
+            let (base, server) = serve_once("200 OK", "", body);
+            let client = OrganizationMembersService::for_test(service.account.clone(), &base);
+            if action == "accept" { assert_eq!(client.accept_invite("invite-1", &revision).unwrap().organization_id, "org-2"); }
+            else { assert!(client.decline_invite("invite-1", &revision).unwrap().declined); }
+            assert!(server.join().unwrap().starts_with(&format!("POST /v1/desktop/invites/invite-1/{action} ")));
+        }
+    }
+
+    #[test]
+    fn invitation_expiration_and_verification_errors_are_safe_codes() {
+        for code in ["invite_expired", "email_unverified", "invite_requires_pro"] {
+            let (base, server) = serve_once("403 Forbidden", "", &format!(r#"{{"error":"{code}"}}"#));
+            let error = service(&base).accept_invite("invite-1", &AccountManager::context_revision(&context())).unwrap_err();
+            server.join().unwrap();
+            assert_eq!(error.code, code);
+        }
+    }
 
     #[test]
     fn lists_a_member_organizations_roster_by_its_own_path_without_a_revision() {
@@ -516,6 +632,27 @@ mod tests {
         let error = service(&base).list().unwrap_err();
         server.join().unwrap();
         assert_eq!(error.code, "organization_members_unavailable");
+    }
+
+    #[test]
+    fn accepted_invitation_response_is_dropped_after_sign_out() {
+        let account = Arc::new(AccountManager::default());
+        account.set_context_for_test(Some(context()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signer = account.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            signer.set_context_for_test(None);
+            let body = r#"{"organizationId":"org-2","organizationName":"Team","role":"member"}"#;
+            let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let error = OrganizationMembersService::for_test(account, &base).accept_invite("invite-1", &AccountManager::context_revision(&context())).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.code, "account_context_changed_after_send");
     }
 
     #[test]

@@ -1913,7 +1913,11 @@ impl CloudWorkspaceService {
     }
 
     pub fn providers(&self) -> Result<CloudProviderSummaryResponse, CloudWorkspaceClientError> {
-        self.run(RequestRisk::Read, |client, context| {
+        self.providers_in(None)
+    }
+
+    pub fn providers_in(&self, org: Option<&str>) -> Result<CloudProviderSummaryResponse, CloudWorkspaceClientError> {
+        self.run_in(org, RequestRisk::Read, |client, context| {
             client.request(
                 context,
                 &["cloud-providers"],
@@ -3667,6 +3671,27 @@ mod tests {
         let mut snapshot: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
         snapshot["workspace"]["orgId"] = json!("org-2");
         json!({ "workspaces": [{ "workspace": snapshot["workspace"], "latestOperation": snapshot["operation"] }] }).to_string()
+    }
+
+    #[test]
+    fn welcome_compute_read_preserves_the_servers_active_organization_requirement() {
+        let (base, _, request) = serve_once(response("403 Forbidden", r#"{"error":"active_organization_required"}"#, ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.providers_in(Some("org-2")).unwrap_err().code, "active_organization_required");
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-2/cloud-providers HTTP/1.1"));
+    }
+
+    #[test]
+    fn welcome_compute_read_is_scoped_and_membership_authorized() {
+        let (base, _, request) = serve_once(response("200 OK", r#"{"providers":[]}"#, ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert!(service.providers_in(Some("org-2")).unwrap().providers.is_empty());
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-2/cloud-providers HTTP/1.1"));
+        assert_eq!(service.providers_in(Some("org-3")).unwrap_err().code, "cloud_organization_unavailable");
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        assert_eq!(service.providers_in(Some("org-2")).unwrap_err().code, "cloud_organization_unavailable");
     }
 
     #[test]

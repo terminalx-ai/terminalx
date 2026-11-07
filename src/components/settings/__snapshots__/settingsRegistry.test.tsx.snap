@@ -53,6 +53,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "integrations.linear",
   "organizations.sidebar",
   "organizations.organization",
+  "organizations.invitations",
   "organizations.members",
   "organizations.compute",
   "organizations.agentLogins",

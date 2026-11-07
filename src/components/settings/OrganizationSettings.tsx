@@ -1,3 +1,4 @@
+import { OrganizationWelcome } from "@/components/organizations/OrganizationWelcome";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useState } from "react";
 import { ArrowLeft, Loader2 } from "@/icons";
@@ -81,6 +82,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
           change on this page applies to {name} only.
         </p>
       </div></RegisteredSetting>
+      <OrganizationWelcome organization={organization} />
       {active ? (
         <>
           <RegisteredSetting setting="organizations.members" instance={organization.id}><div className="contents"><OrganizationMembers accountEmail={accountEmail} contextRevision={contextRevision} /></div></RegisteredSetting>

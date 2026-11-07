@@ -368,6 +368,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "localStorage", location: "raccoon.prefs#hiddenOrganizations" },
   }),
   defineSetting({
+    id: "organizations.invitations", section: "organizations", title: "Invitations",
+    description: "Accept or decline invitations sent to your account.",
+    searchTerms: ["organizations", "invitation", "join", "accept", "decline"], scope: "user",
+    storage: { kind: "service", location: "TerminalX account invitations" }, layout: "content",
+  }),
+  defineSetting({
     id: "organizations.members", section: "organizations", title: "Members",
     description: "Members, invitations and roles.",
     searchTerms: ["organizations", "members"], scope: "organization",

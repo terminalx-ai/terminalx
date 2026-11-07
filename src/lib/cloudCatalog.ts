@@ -1,3 +1,4 @@
+import { bootInvitations, refreshInvitations } from "./organizationInvitations";
 import { useSyncExternalStore } from "react";
 import type { RuntimeIssuePipeline, RuntimeSession } from "@terminalx/portable/workspace";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
@@ -557,6 +558,7 @@ export function catalogErrorText(error: string): string {
  * on a server with the capability, else the default one alone.
  */
 export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccount().status), now: () => number = Date.now): Promise<void> {
+  void refreshInvitations();
   if (!orgId || !liveCloudOrgIds(getAccount().status).includes(orgId)) return Promise.resolve();
   const running = flights.get(orgId);
   if (running) return running;
@@ -697,6 +699,7 @@ export function mergeFeedDelta(current: readonly CloudWorkspaceListItem[], entry
  * showed, with the error; a failed request keeps everything.
  */
 export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
+  void refreshInvitations();
   if (!usesCatalogFeed()) return Promise.resolve();
   if (feedFlight) return feedFlight;
   const owner = state.owner;
@@ -1200,6 +1203,7 @@ function dropLeftOrganizations(status: AccountStatus) {
 }
 
 export function bootCloudCatalog() {
+  bootInvitations();
   if (booted) return;
   booted = true;
   unsubscribe = subscribeAccount(syncAccount);

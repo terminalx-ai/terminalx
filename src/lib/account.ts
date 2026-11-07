@@ -366,6 +366,19 @@ export function refreshAccountRoles(force = false): Promise<void> {
   return flight;
 }
 
+/** A successful invite is followed by a fresh membership read, even if an older read is in flight. */
+export async function refreshMembershipsAfterInvite(expected: NonNullable<AccountStatus["context"]>): Promise<boolean> {
+  const matches = () => state.status.state === "signed-in" && state.status.context?.account === expected.account && state.status.context?.revision === expected.revision;
+  await Promise.all([rolesFlight, statusFlight]);
+  if (!matches()) return false;
+  try {
+    const result = await api.accountRefreshRoles(true);
+    if (!matches() || result.status.context?.account !== expected.account || !result.fresh) return false;
+    applyStatus(result.status);
+    return true;
+  } catch { return false; }
+}
+
 /** Per organization, what a workspace list newer than the account's roles says: whether this person manages it. */
 const roleHints = new Map<string, { manages: boolean; at: number }>();
 

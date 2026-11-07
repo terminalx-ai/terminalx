@@ -355,7 +355,7 @@ export const api = {
 
   // provider-aware Cloud Workspaces; authentication and Organization scope
   // are resolved natively, so account tokens never cross this boundary.
-  cloudProviders: () => invoke<CloudProviderSummaryResponse>("cloud_providers"),
+  cloudProviders: (orgId?: string | null) => invoke<CloudProviderSummaryResponse>("cloud_providers", { orgId: orgId ?? null }),
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
   cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "archive" | "destroy") =>
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),

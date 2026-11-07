@@ -1,3 +1,4 @@
+import { getAccount } from "./account";
 /**
  * The way from a message elsewhere in the app to an organization's page in
  * Settings → Organizations (PRO-107), and on it to its Agent logins. The
@@ -6,6 +7,9 @@
  * into view when it takes the request, which may be after it has mounted.
  */
 import type { AgentLoginProvider } from "@/lib/api";
+
+type OrganizationSettingsRow = "organizations.overview" | "organizations.agentLogins" | "organizations.agentRoutes";
+let wantedAccount: string | null = null;
 
 const OPEN_ORGANIZATION_SETTINGS = "terminalx:open-organization-settings";
 
@@ -17,6 +21,7 @@ let wantedLogins: { organizationId: string | null; signIn: AgentLoginProvider | 
 let wantedSignIn: { organizationId: string; agent: AgentLoginProvider } | null = null;
 
 function request(organizationId: string | null, logins: boolean, signIn: AgentLoginProvider | null = null): void {
+  wantedAccount = null;
   wantedOrganization = organizationId;
   // A request replaces whatever an earlier one asked for, the logins coming into view included.
   wantedLogins = logins ? { organizationId, signIn } : null;
@@ -37,15 +42,36 @@ export function openAgentLogins(organizationId: string | null, signIn: AgentLogi
   request(organizationId, true, signIn);
 }
 
-export function onOpenOrganizationSettings(listener: (row: "organizations.overview" | "organizations.agentLogins") => void): () => void {
-  const handler = (event: Event) => listener((event as CustomEvent<"organizations.overview" | "organizations.agentLogins">).detail);
+/** Optional personal routes, scoped to the account and organization that offered the link. */
+export function openOwnModelRoutes(organizationId: string, account: string): void {
+  openScopedOrganizationSettings(organizationId, account, "organizations.agentRoutes");
+}
+
+/** A welcome link never selects an organization implicitly. Settings retains its explicit selection action. */
+export function openWelcomeOrganizationSettings(organizationId: string, account: string): void {
+  openScopedOrganizationSettings(organizationId, account, "organizations.overview");
+}
+
+function openScopedOrganizationSettings(organizationId: string, account: string, row: OrganizationSettingsRow): void {
+  const { status } = getAccount();
+  if (status.state !== "signed-in" || status.context?.account !== account || !status.organizations?.some((org) => org.id === organizationId)) return;
+  wantedAccount = account;
+  wantedOrganization = organizationId;
+  wantedLogins = null;
+  wantedSignIn = null;
+  window.dispatchEvent(new CustomEvent(OPEN_ORGANIZATION_SETTINGS, { detail: row }));
+}
+
+export function onOpenOrganizationSettings(listener: (row: OrganizationSettingsRow) => void): () => void {
+  const handler = (event: Event) => listener((event as CustomEvent<OrganizationSettingsRow>).detail);
   window.addEventListener(OPEN_ORGANIZATION_SETTINGS, handler);
   return () => window.removeEventListener(OPEN_ORGANIZATION_SETTINGS, handler);
 }
 
 /** The page asked for, once per request: an organization's id, null for the active one, undefined when none was. */
 export function takeOrganizationRequest(): string | null | undefined {
-  const was = wantedOrganization;
+  const was = wantedAccount && getAccount().status.context?.account !== wantedAccount ? undefined : wantedOrganization;
+  wantedAccount = null;
   wantedOrganization = undefined;
   return was;
 }

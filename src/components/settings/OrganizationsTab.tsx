@@ -1,3 +1,4 @@
+import { OrganizationInvitations } from "@/components/organizations/OrganizationInvitations";
 import { RegisteredSetting, settingById } from "./settingsRegistry";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -47,7 +48,7 @@ export function OrganizationsTab({ initialRow, openRequest = 0 }: { initialRow?:
     setPage(organizationId);
   };
   const organization = page ? memberships.find((org) => org.id === page) : undefined;
-  if (organization) return <OrganizationSettings key={organization.id} organization={organization} onBack={() => setPage(null)} />;
+  if (organization) return <OrganizationSettings key={`${status.context?.account}:${organization.id}`} organization={organization} onBack={() => setPage(null)} />;
   const settingsButton = (org: (typeof memberships)[number]) => (
     // Its own page: agent logins and the organization's other settings (PRO-107).
     <Button size="xs" variant="outline" aria-label={`Settings for ${organizationName(org)}`} onClick={() => openPage(org.id)}>
@@ -56,6 +57,7 @@ export function OrganizationsTab({ initialRow, openRequest = 0 }: { initialRow?:
   );
   return (
     <div className="flex flex-col">
+      <RegisteredSetting setting="organizations.invitations"><div><OrganizationInvitations /></div></RegisteredSetting>
       <RegisteredSetting setting="organizations.sidebar"
         control={
           <div className="flex flex-wrap items-center justify-end gap-2">

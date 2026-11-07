@@ -116,6 +116,27 @@ pub async fn organization_delete(
         .await.map_err(|_| crate::account::organization_delete::DeleteError::local("organization_delete_outcome_unknown"))?
 }
 
+#[tauri::command]
+pub async fn account_invitations(context_revision: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::organization_members::AccountInvites, crate::organization_members::OrganizationMembersError> {
+    let service = state.organization_members.clone();
+    tauri::async_runtime::spawn_blocking(move || service.my_invites(&context_revision)).await
+        .map_err(|_| crate::organization_members::OrganizationMembersError::local("organization_members_unavailable"))?
+}
+
+#[tauri::command]
+pub async fn account_invitation_accept(invite_id: String, context_revision: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::organization_members::AcceptedInvite, crate::organization_members::OrganizationMembersError> {
+    let service = state.organization_members.clone();
+    tauri::async_runtime::spawn_blocking(move || service.accept_invite(&invite_id, &context_revision)).await
+        .map_err(|_| crate::organization_members::OrganizationMembersError::local("organization_members_outcome_unknown"))?
+}
+
+#[tauri::command]
+pub async fn account_invitation_decline(invite_id: String, context_revision: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::organization_members::DeclinedInvite, crate::organization_members::OrganizationMembersError> {
+    let service = state.organization_members.clone();
+    tauri::async_runtime::spawn_blocking(move || service.decline_invite(&invite_id, &context_revision)).await
+        .map_err(|_| crate::organization_members::OrganizationMembersError::local("organization_members_outcome_unknown"))?
+}
+
 type MembersResult = Result<crate::organization_members::OrganizationRoster, crate::organization_members::OrganizationMembersError>;
 
 async fn members_call(
@@ -505,9 +526,10 @@ macro_rules! cloud_command {
 
 #[tauri::command]
 pub async fn cloud_providers(
+    org_id: Option<String>,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<crate::cloud_workspaces::CloudProviderSummaryResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.providers())
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| match org_id { Some(org) => service.providers_in(Some(&org)), None => service.providers() })
 }
 
 #[tauri::command]

@@ -1,3 +1,5 @@
+import { OrganizationInvitations } from "@/components/organizations/OrganizationInvitations";
+import { OrganizationWelcome } from "@/components/organizations/OrganizationWelcome";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowLeftRight, ArrowUp, Check, ChevronDown, Ellipsis, EyeOff, Folder, FolderGit2, FolderPlus, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -74,10 +76,11 @@ export function CloudOrganizations({ onOpenOrganizations }: { onOpenOrganization
   // Live session lists follow the connections other surfaces open; a local mirror (PRO-25) too. Neither opens one.
   useEffect(() => bootCloudSessions(), []);
   useEffect(() => bootCloudMirrors(), []);
-  if (!cloud.all.length) return null;
+  if (!cloud.all.length) return <OrganizationInvitations sidebar />;
   const hiddenRunning = cloud.hidden.reduce((count, org) => count + organizationRunningCount(org.id, catalog), 0);
   return (
     <>
+      <OrganizationInvitations sidebar />
       <PurgeNotices />
       {cloud.orgs.map((org) => (
         <OrganizationSection
@@ -347,6 +350,7 @@ function OrganizationSection({
       data-testid="cloud-org-list"
       data-org={org.id}
     >
+      <OrganizationWelcome organization={org} />
       {live && !unloaded && (
         <div className={cn("min-w-0", offline && "opacity-70")}>
           <OrgProjects orgId={org.id} projects={placed.projects} archived={placed.archived} sections={sections} filtered={filter.active} empty={filter.empty} mayCreate={mayCreate} onLifecycle={onLifecycle} />
