@@ -1,17 +1,17 @@
 import { useEffect, useState } from "react";
 import { errorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { rerunSetup, setupLog, type WorkspaceSetup } from "@/lib/workspaceSetup";
+import { rerunSetup, stopSetup, setupLog, type WorkspaceSetup } from "@/lib/workspaceSetup";
 import { TerminalView } from "./TerminalView";
 import { disposeInstance } from "@/lib/terminal";
 
-export const setupStatus = (run: WorkspaceSetup) => ({ pending: "Setup running", running: "Setup running", succeeded: "Setup succeeded", failed: "Setup failed" })[run.status];
+export const setupStatus = (run: WorkspaceSetup) => ({ pending: "Setup queued", running: "Setup running", stopping: "Stopping setup…", stopped: "Setup stopped", succeeded: "Setup succeeded", failed: "Setup failed" })[run.status];
 
 export function WorkspaceSetupPane({ run }: { run: WorkspaceSetup }) {
   const [log, setLog] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  const running = run.status === "pending" || run.status === "running";
+  const running = run.status === "pending" || run.status === "running" || run.status === "stopping";
   useEffect(() => () => { disposeInstance(run.paneId); }, [run.paneId]);
   useEffect(() => {
     let current = true;
@@ -21,6 +21,11 @@ export function WorkspaceSetupPane({ run }: { run: WorkspaceSetup }) {
   return <div className="flex h-full flex-col">
     <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-1">
       <span role="status" className="flex-1 text-xs text-muted-foreground">{setupStatus(run)}{run.exitCode != null && ` · Exit ${run.exitCode}`}</span>
+      {running && <Button size="xs" variant="ghost" disabled={starting || run.status === "stopping"} onClick={async () => {
+        setStarting(true); setError(null);
+        try { await stopSetup(run.sessionId, run.paneId); } catch (error) { setError(errorMessage(error)); }
+        finally { setStarting(false); }
+      }}>{run.status === "stopping" ? "Stopping…" : "Stop"}</Button>}
       <Button size="xs" variant="ghost" disabled={running || starting} onClick={async () => {
         setStarting(true); setError(null);
         try { await rerunSetup(run.sessionId); } catch (error) { setError(errorMessage(error)); }

@@ -1885,14 +1885,6 @@ pub async fn create_session(state: State<'_, AppState>, mut req: NewSession) -> 
 }
 
 #[tauri::command]
-pub async fn repository_setup_script(project_path: String, command: Option<String>) -> CmdResult<Option<String>> {
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Some(command) = command { crate::workspace_setup::save_script(&project_path, &command).map_err(err)?; }
-        crate::workspace_setup::read_script(&project_path).map_err(err)
-    }).await.map_err(err)?
-}
-
-#[tauri::command]
 pub async fn workspace_setup(state: State<'_, AppState>, operation: String, session_id: Option<String>, pane_id: Option<String>) -> CmdResult<serde_json::Value> {
     let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.workspace_setup(&operation, session_id.as_deref(), pane_id.as_deref()).map_err(err)).await.map_err(err)?

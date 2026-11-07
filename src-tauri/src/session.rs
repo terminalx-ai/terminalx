@@ -1734,7 +1734,6 @@ impl SessionManager {
             "pty_exit",
             Box::new(move |payload| {
                 if let Ok(exit) = serde_json::from_str::<pty::PtyExit>(payload) {
-                    crate::workspace_setup::finished(&exited, &exit);
                     exited.pane_exited(&exit.id, exit.code);
                 }
             }),

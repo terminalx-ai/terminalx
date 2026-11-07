@@ -78,3 +78,21 @@ it("bounds an attached log and explicitly identifies a truncated tail", () => {
   expect(prompt).toContain("Earlier output omitted");
   expect(prompt).toContain("failure at end");
 });
+
+it("stops the exact running or queued attempt and keeps rerun disabled while stopping", async () => {
+  const view = render(<WorkspaceSetupPane run={{ ...run, status: "pending", hasPane: false }} />);
+  expect(screen.getByRole("status").textContent).toContain("Setup queued");
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Stop" })));
+  expect(mocks.invoke).toHaveBeenCalledWith("workspace_setup", { operation: "stop", sessionId: "s1", paneId: run.paneId });
+  view.rerender(<WorkspaceSetupPane run={{ ...run, status: "stopping" }} />);
+  expect((screen.getByRole("button", { name: "Stopping…" }) as HTMLButtonElement).disabled).toBe(true);
+  view.rerender(<WorkspaceSetupPane run={{ ...run, status: "stopped" }} />);
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  expect((screen.getByRole("button", { name: "Rerun" }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("shows the timeout failure in the retained result", () => {
+  render(<WorkspaceSetupPane run={{ ...run, exitCode: 124, error: "Setup timed out after 30 minutes. Rerun to try again." }} />);
+  expect(screen.getByRole("alert").textContent).toContain("timed out after 30 minutes");
+  expect(screen.getByRole("button", { name: "Rerun" })).toBeTruthy();
+});

@@ -310,7 +310,11 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
     });
 
     index::local_sections::insert_session(&entry, req.section_id.as_deref()).map_err(err)?;
-    crate::workspace_setup::prepare(&entry).map_err(err)?;
+    // The checkout and index entry already exist. Setup bookkeeping must not
+    // turn a successful creation into an error that invites a duplicate retry.
+    if let Err(error) = crate::workspace_setup::prepare(&entry) {
+        log::warn!("Record workspace setup for {}: {error:#}", entry.id);
+    }
     Ok(entry)
 }
 
@@ -1376,6 +1380,21 @@ mod tests {
         assert!(super::automatic_title("New session", ""));
         assert!(super::automatic_title("We can work on PRD", "We can work on PRD here\nand more"));
         assert!(!super::automatic_title("Pricing notes", "We can work on PRD here"));
+    }
+
+    #[test]
+    fn setup_persistence_failure_does_not_fail_an_existing_worktree_creation() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        projects::update(&project.path, projects::ProjectPatch {
+            scripts: Some(projects::RepositoryScripts { setup: "exit 0".into(), archive: String::new() }), ..Default::default()
+        }).unwrap();
+        // Setup cannot create its status directory after the index has landed.
+        std::fs::write(store::root().unwrap().join("sessions"), "not a directory").unwrap();
+        let entry = create_session_entry(named_request(dir.path(), Some("setup save failure"))).unwrap();
+        assert!(Path::new(&entry.cwd).is_dir());
+        assert_eq!(index::get(&entry.id).unwrap(), entry);
     }
 
     #[test]

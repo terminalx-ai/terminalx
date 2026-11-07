@@ -105,7 +105,7 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
             type="button" role="tab" aria-selected={open && showingSetup} title={setupStatus(setup)}
             onClick={() => { setPicked("setup"); setPrefs({ panelTerminalOpen: true }); }}
             className={cn("shrink-0 border-b text-xs", open && showingSetup ? "border-foreground/60 text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}
-          >Setup<span aria-label={setupStatus(setup)} className={cn("ml-1.5 inline-block size-1.5 rounded-full", setup.status === "failed" ? "bg-destructive" : setup.status === "succeeded" ? "bg-add" : "bg-warning animate-pulse")} /></button>}
+          >Setup<span aria-label={setupStatus(setup)} className={cn("ml-1.5 inline-block size-1.5 rounded-full", setup.status === "failed" ? "bg-destructive" : setup.status === "succeeded" ? "bg-add" : setup.status === "stopped" ? "bg-muted-foreground" : "bg-warning animate-pulse")} /></button>}
           {!panes.length && !setup && (
             <button type="button" onClick={toggle} className="text-xs text-muted-foreground hover:text-foreground">
               Terminal

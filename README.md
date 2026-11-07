@@ -69,31 +69,32 @@ TerminalX brings no compute of its own: it drives the `claude` and `codex` CLIs 
 
 ## Workspace setup
 
-Set `scripts.setup` in `terminalx.json` at the attached repository's root, or
-edit it in Settings → Repositories → your repository → Workspace settings:
+Save a setup command in Settings → Repositories → your repository → Scripts,
+for example `bun install`. This uses the local `scripts.setup` field in the
+project store. Repository files, including `terminalx.json`, never supply
+commands; committed or managed configuration with trust is deferred to PRO-136.
 
-```json
-{
-  "scripts": {
-    "setup": "bun install && cp \"$TERMINALX_REPO_ROOT/.env\" .env"
-  }
-}
-```
+New worktrees run the saved command through the same private-file `/bin/sh`
+runner as archive scripts, independently of the login shell. Scripts receive
+Settings environment variables and `TERMINALX_WORKSPACE_PATH`,
+`TERMINALX_REPO_ROOT`, `TERMINALX_BRANCH`, and their owning `TERMINALX_SESSION_ID`.
+Inherited agent attribution is removed. Setup is scheduled after worktree
+creation: the file-copy step from #804 completes first when that dependency
+is present. Agent tabs can start during setup; their first turn is not delayed
+and may encounter files or dependencies that setup has not finished preparing.
 
-TerminalX runs the command once when it creates a worktree, in a dedicated
-PTY with that worktree as its working directory. macOS and Linux use `/bin/sh`;
-Windows uses your configured shell. The command receives
-`TERMINALX_WORKSPACE_PATH`, `TERMINALX_REPO_ROOT` and `TERMINALX_BRANCH`.
-Agent tabs can start while setup runs.
+At most two setup scripts run concurrently per runtime; additional attempts
+queue. A run times out after 30 minutes. The terminal dock's **Setup** tab keeps
+status and output, with **Stop** (including queued attempts) and **Rerun**.
+The Scripts page also offers **Run setup now** for an existing worktree.
+Rerun reads the current local setting, and queued work is cancelled if that
+setting changes. Opening an existing checkout never runs setup automatically.
 
-The terminal dock's **Setup** tab keeps the result and output. **Rerun** reads
-the current command from the attached repository's `terminalx.json`. Failed
-setup offers **Show log** and **Ask agent to fix**; the latter sends the log
-with a diagnostic prompt to the selected agent. Output retains the most recent
-512 KiB; a fix prompt includes at most the last 64 KiB of text. Finished logs
-survive a runtime restart, and an interrupted attempt requires an explicit rerun.
-Missing or empty `scripts.setup` disables setup for new worktrees. Opening an
-existing checkout does not run setup.
+Failures offer **Show log** and **Ask agent to fix**, which attaches a bounded
+log to a diagnostic prompt. Live terminal output retains up to 512 KiB; saved
+logs and fix attachments use the most recent 32 KiB. Finished logs survive a
+runtime restart; an interrupted attempt is stopped and requires an explicit
+rerun. Clearing the local setup script disables it for new worktrees.
 
 ## What leaves your machine
 

@@ -130,6 +130,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "workspaceSetup" => return match string(&params, "operation")? {
             "list" => Ok(serde_json::to_value(crate::workspace_setup::list(manager)?)?),
             "rerun" => Ok(serde_json::to_value(crate::workspace_setup::start(manager, string(&params, "sessionId")?, true)?)?),
+            "stop" => Ok(serde_json::to_value(crate::workspace_setup::stop(manager, string(&params, "sessionId")?, string(&params, "paneId")?)?)?),
             "log" => Ok(json!(crate::workspace_setup::log(manager, string(&params, "sessionId")?, string(&params, "paneId")?)?)),
             _ => bail!("Unknown workspace setup operation"),
         },

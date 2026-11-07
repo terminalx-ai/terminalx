@@ -688,7 +688,7 @@ export function TabView({
           </div>
         )}
         <Composer
-          setupRunning={setup?.status === "running" || setup?.status === "pending"}
+          setupRunning={setup?.status === "running" || setup?.status === "pending" || setup?.status === "stopping"}
           sendScope={sendScope}
           tab={tab}
           cwd={local ? session.cwd : undefined}
