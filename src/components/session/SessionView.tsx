@@ -559,7 +559,6 @@ export function SessionView({
                 <span className="truncate text-foreground" title={[`On ${own.branch}, a name drawn for the workspace`, workspaceTitle].join("\n")} data-testid="session-title">
                   {session.title}
                 </span>
-                <BranchSize additions={own.branchAdditions ?? 0} deletions={own.branchDeletions ?? 0} />
                 <WorkspaceMenu session={session} branch={own.branch} folder={session.worktreeName ?? null} base={baseNote} onContinue={continueTab} />
               </>
             ) : local && workspaceLabel ? (
@@ -593,7 +592,6 @@ export function SessionView({
                 )}
                 {session.worktreeRemoved && <span className="shrink-0 text-[11px] text-faint">· workspace removed</span>}
               </span>
-              {own && <BranchSize additions={own.branchAdditions ?? 0} deletions={own.branchDeletions ?? 0} />}
               <WorkspaceMenu session={session} branch={movedTo ?? session.branch} folder={session.worktreeName && !session.worktreeRemoved ? session.worktreeName : null} base={baseNote} onContinue={continueTab} />
               </>
             ) : (
@@ -931,17 +929,6 @@ export function SessionView({
         </>
       )}
     </div>
-  );
-}
-
-/** What the branch changes against the default branch, as its pull request would count it. Nothing for a branch that changes nothing. */
-function BranchSize({ additions, deletions }: { additions: number; deletions: number }) {
-  if (!additions && !deletions) return null;
-  return (
-    <span className="ml-1 flex shrink-0 items-center gap-1 font-mono text-[12px] tabular-nums" title="Lines changed on this branch against the default branch, committed or not" data-testid="session-branch-size">
-      {additions > 0 && <span className="text-add">+{additions}</span>}
-      {deletions > 0 && <span className="text-destructive">−{deletions}</span>}
-    </span>
   );
 }
 
