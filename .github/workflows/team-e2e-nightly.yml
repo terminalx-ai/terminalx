@@ -1,0 +1,59 @@
+name: Two-account local Docker E2E
+
+# Enabling this requires reviewed two-Mac configuration and recovered host execution.
+# No local schedule is installed by the harness. Never run PR code on these machines.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: two-account-local-docker
+  cancel-in-progress: false
+
+jobs:
+  two-account:
+    if: github.ref == 'refs/heads/main' && vars.TEAM_E2E_ENABLED == 'true'
+    environment: team-e2e-local
+    runs-on: [self-hosted, macOS, terminalx-team-e2e]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Run all required scenarios
+        run: node scripts/team-e2e/run.mjs --config "$TEAM_E2E_CONFIG" --artifacts artifacts/team-e2e
+        env:
+          TEAM_E2E_CONFIG: ${{ vars.TEAM_E2E_CONFIG }}
+      - name: Post results to the job summary
+        if: always()
+        run: |
+          node --input-type=module <<'JS'
+          import { readdir, readFile, appendFile } from 'node:fs/promises';
+          import { postResult } from './scripts/team-e2e/post-result.mjs';
+          let found = false;
+          for (const dir of await readdir('artifacts/team-e2e').catch(() => [])) {
+            const path = `artifacts/team-e2e/${dir}/result.json`;
+            const report = await readFile(path, 'utf8').then(JSON.parse).catch(() => null);
+            if (!report) continue;
+            found = true;
+            await postResult(report, { append: (text) => appendFile(process.env.GITHUB_STEP_SUMMARY, text) });
+          }
+          if (!found) {
+            await appendFile(process.env.GITHUB_STEP_SUMMARY, 'Two-account E2E failed before producing a result. No scenario passed.\n');
+            process.exitCode = 1;
+          }
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: two-account-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/team-e2e/
+          retention-days: 14
+          if-no-files-found: error

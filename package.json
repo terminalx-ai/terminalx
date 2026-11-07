@@ -10,6 +10,8 @@
   },
   "type": "module",
   "scripts": {
+    "test:team-e2e": "node --test scripts/team-e2e/*.test.mjs",
+    "e2e:team": "node scripts/team-e2e/run.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "build:computer-macos": "node scripts/build-computer-macos.mjs",
