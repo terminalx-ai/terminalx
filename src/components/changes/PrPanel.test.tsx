@@ -369,6 +369,23 @@ it("keeps a merged cloud PR visible without offering creation when landed verifi
   expect(screen.queryByText(/Could not refresh/)).toBeNull();
 });
 
+it.each([false, true])("loads review threads for the selected PR URL (inline=%s)", async (inline) => {
+  const { reviewSnapshot } = await import("@/test/reviewThreads");
+  const pr = { ...followup, url: reviewSnapshot.url, number: 1 };
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "gh_available") return true;
+    if (command === "pr_associations") return [association(pr)];
+    if (command === "work_status") return workStatus(pr.head);
+    if (command === "pr_list") return [pr];
+    if (command === "pr_review_threads") return { ...reviewSnapshot, threads: [] };
+    throw Error(command);
+  });
+  render(<PrPanel cwd={cwd} sessionId="author" branch={pr.head} active busy={false} inline={inline} />);
+  fireEvent.click(await screen.findByRole("button", { name: /^▸ Review threads/ }));
+  await screen.findByText("No review threads.");
+  expect(mocks.invoke).toHaveBeenCalledWith("pr_review_threads", { url: pr.url });
+});
+
 const { mergeReadiness, checkCounts, checkSummary } = await import("./PrPanel");
 const openPr: PullRequest = { ...followup, mergeState: "CLEAN", checks: [], requiredChecks: [] };
 
