@@ -29,12 +29,12 @@ export function FileList({
       {files.map((f) => {
         const [glyph, color] = STATUS_GLYPH[f.status];
         return (
+          <div key={f.path} className="group flex items-center">
           <button
-            key={f.path}
             type="button"
             onClick={() => onSelect(f.path)}
             className={cn(
-              "group flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+              "flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
               selected === f.path ? "bg-selected" : "hover:bg-selected/50",
             )}
           >
@@ -45,8 +45,9 @@ export function FileList({
               {f.additions > 0 && <span className="text-add">+{f.additions}</span>}{" "}
               {f.deletions > 0 && <span className="text-destructive">−{f.deletions}</span>}
             </span>
-            {trailing?.(f)}
           </button>
+          {trailing?.(f)}
+          </div>
         );
       })}
     </div>

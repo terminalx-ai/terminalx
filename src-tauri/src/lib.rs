@@ -82,6 +82,7 @@ mod media;
 mod media_types;
 mod branch_overview;
 mod git;
+mod checkpoints;
 mod github;
 mod unfinished_merge;
 mod pr_associations;
@@ -673,6 +674,9 @@ pub fn run() {
             commands::git_push,
             commands::git_pull,
             commands::git_discard,
+            commands::turn_checkpoint,
+            commands::keep_turn,
+            commands::undo_turn,
             commands::unfinished_merge,
             commands::commit_merge,
             commands::abort_merge,

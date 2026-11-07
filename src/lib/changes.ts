@@ -20,7 +20,11 @@ export function changeRange(events: AgentEvent[], fallbackBase?: string | null):
   let baseSeq = -1;
   for (const ev of events) {
     const p = ev.payload;
-    if (p.type === "user_message" && !p.queued && p.baseline) {
+    if (p.type === "turn_checkpoint") {
+      base = p.base;
+      head = p.head;
+      baseSeq = ev.seq;
+    } else if (p.type === "user_message" && !p.queued && p.baseline) {
       base = p.baseline;
       baseSeq = ev.seq;
       head = null;

@@ -44,6 +44,7 @@ export const TurnBlock = memo(function TurnBlock(props: TurnProps) {
 interface TurnProps {
   turn: Turn;
   sessionId: string;
+  checkpointTabId?: string;
   cwd?: string;
   stream: StreamBlock[];
   working: boolean;
@@ -59,6 +60,7 @@ interface TurnProps {
 function TurnBody({
   turn,
   sessionId,
+  checkpointTabId,
   cwd,
   stream,
   working,
@@ -152,7 +154,7 @@ function TurnBody({
         </div>
       )}
 
-      {changes.length > 0 && <TurnChanges changes={changes} cwd={cwd} linkContext={linkContext} />}
+      {prefs.turnChanges && turn.completed && <TurnChanges changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} />}
 
       {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} />}
     </div>

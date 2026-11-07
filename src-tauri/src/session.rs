@@ -1847,6 +1847,13 @@ impl SessionManager {
             recovery::diagnose(&rt.diagnostics_path(), &payload);
             recovery::sanitize(&mut payload);
         }
+        if subagent.is_none() {
+            match crate::checkpoints::observe(&rt.session_id, &rt.tab_id, rt.seq + 1, &mut payload) {
+                Ok(Some(checkpoint)) => { self.publish(rt, Payload::TurnCheckpoint { seq: checkpoint.seq, base: checkpoint.base, head: checkpoint.head }, None); }
+                Err(error) => log::warn!("capture turn checkpoint: {error:#}"),
+                _ => {}
+            }
+        }
         rt.seq += 1;
         let mut ts = rt.source_timestamp.clone().unwrap_or_else(index::now);
         let block_key = |block: &BlockRef| format!("{}:{}:{}", subagent.as_ref().map_or("", |agent| agent.id.as_str()), block.message_id, block.index);
@@ -2803,14 +2810,28 @@ impl SessionManager {
     /// answer is waiting for (#725).
     #[allow(clippy::too_many_arguments)]
     fn send_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, prompt: PromptText,
+        session_id: &str, tab_id: &str, mut prompt: PromptText,
         images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
+        // Serialize note delivery with other sends; failed admission leaves the note pending.
+        let revert_send = crate::checkpoints::send_lock(session_id, tab_id);
+        let _revert_send = revert_send.lock().unwrap();
+        let notes = if tui::is_slash_command(&prompt.agent) { Vec::new() } else { crate::checkpoints::pending(session_id, tab_id)? };
+        if !notes.is_empty() {
+            let context = format!("\n\n{}", crate::checkpoints::context(&notes));
+            prompt.agent.push_str(&context);
+            // Keep it with the persisted prompt too: Resend after failed asynchronous
+            // CLI delivery must carry the same context without consuming it twice.
+            prompt.display.push_str(&context);
+        }
         // What the send found, before it changed anything.
         let found = self.runtime(session_id, tab_id).ok().map(|rt| { let rt = rt.lock().unwrap(); (rt.turn_open, rt.pending.len()) });
         let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt);
         self.note_send(session_id, tab_id, origin, found, &outcome);
         let outcome = outcome?;
+        if let Err(error) = crate::checkpoints::acknowledge(session_id, tab_id, &notes) {
+            log::warn!("acknowledge revert context: {error:#}");
+        }
         self.observer.answered(session_id, tab_id);
         Ok(outcome)
     }
@@ -6019,6 +6040,27 @@ impl SessionManager {
                     self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                     self.set_status(&mut rt, TabStatus::InProgress);
                 }
+                if frame.event == "UserPromptSubmit" && !frame.payload["prompt"].as_str().is_some_and(tui::is_slash_command) {
+                    // Prompts typed directly into a CLI bypass send_admitted. Its blocking
+                    // hook can deliver pending revert context before the model sees them.
+                    // A composer send already carries the note and owns this lock until admitted.
+                    let send_lock = crate::checkpoints::send_lock(&frame.session, &frame.tab);
+                    if let Ok(_sending) = send_lock.try_lock() {
+                        match crate::checkpoints::pending(&frame.session, &frame.tab) {
+                            Ok(notes) if !notes.is_empty() => {
+                                reply.output = Some(serde_json::json!({ "hookSpecificOutput": {
+                                    "hookEventName": "UserPromptSubmit",
+                                    "additionalContext": crate::checkpoints::context(&notes),
+                                }}));
+                                if let Err(error) = crate::checkpoints::acknowledge(&frame.session, &frame.tab, &notes) {
+                                    log::warn!("acknowledge CLI revert context: {error:#}");
+                                }
+                            }
+                            Err(error) => log::warn!("read CLI revert context: {error:#}"),
+                            _ => {}
+                        }
+                    };
+                }
                 if frame.event == "PreToolUse" {
                     // This authenticated, still-current launch only reported a
                     // tool. Explicitly acknowledge it: the local-owner bridge
@@ -6482,7 +6524,7 @@ impl SessionManager {
         }
         let payload = match payload {
             Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, detail, .. } => {
-                let head = index::get(&rt.session_id).ok().and_then(|e| git::snapshot_tree(Path::new(&e.cwd)).ok());
+                let head = None; // The publication path captures and pins the completed tree.
                 if let Some(u) = &usage {
                     let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
                     let (cu, cm) = (u.context_used, u.context_max);

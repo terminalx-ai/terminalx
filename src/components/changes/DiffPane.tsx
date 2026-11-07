@@ -1,3 +1,4 @@
+import { DiscardButton } from "./DiscardDialog";
 import { useEffect, useRef } from "react";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
@@ -10,7 +11,7 @@ import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
  * they highlight, collapse unchanged regions and never freeze the page on a
  * large file.
  */
-export function DiffPane({ path, before, after, mode }: { path: string; before: string; after: string; mode: "unified" | "split" }) {
+export function DiffPane({ path, before, after, mode, onDiscard }: { path: string; before: string; after: string; mode: "unified" | "split"; onDiscard?: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = host.current;
@@ -42,5 +43,11 @@ export function DiffPane({ path, before, after, mode }: { path: string; before: 
     }
     return () => dispose();
   }, [path, before, after, mode]);
-  return <div ref={host} className="diff-pane h-full min-h-0 overflow-auto scrollbar-thin select-text" />;
+  return <div className="flex h-full min-h-0 flex-col">
+    <div className="flex shrink-0 items-center justify-between gap-2 border-b border-hairline px-3 py-1 text-xs">
+      <span className="truncate font-mono" title={path}>{path}</span>
+      {onDiscard && <DiscardButton path={path} onClick={onDiscard} />}
+    </div>
+    <div ref={host} className="diff-pane min-h-0 flex-1 overflow-auto scrollbar-thin select-text" />
+  </div>;
 }

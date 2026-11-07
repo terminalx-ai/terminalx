@@ -1,3 +1,4 @@
+import { DiscardDialog, DiscardButton } from "./DiscardDialog";
 import { useEffect, useId, useMemo, useState } from "react";
 import { Columns2, Rows2 } from "@/icons";
 import { changeRange, type ChangeRange } from "@/lib/changes";
@@ -84,7 +85,8 @@ function ScopedChanges({ source, events, version, active, live, workingTree }: {
     const id = window.setInterval(() => setTick((t) => t + 1), 4000);
     const refresh = () => setTick((t) => t + 1);
     window.addEventListener("focus", refresh);
-    return () => { window.clearInterval(id); window.removeEventListener("focus", refresh); };
+    window.addEventListener("workspace-files-changed", refresh);
+    return () => { window.clearInterval(id); window.removeEventListener("focus", refresh); window.removeEventListener("workspace-files-changed", refresh); };
   }, [active, loading, reads]);
   useEffect(() => {
     if (!active || !reads) return;
@@ -150,7 +152,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree }: {
         {repo ? <RepoPanel source={source} active={active} view={repo} onViewChange={(view) => choose({ ...choice, scope: view })} embedded /> : <ChangesBody key={`${choice.scope}:${choice.target}`} source={source} files={result?.files ?? []} loading={loading} error={error} range={result?.range ?? null}
           groups={choice.scope === "uncommitted" && result?.merge ? mergeGroups(result.merge, result.files) : null}
           label={label} empty={loading ? "Loading changes…" : error ? "Changes unavailable." : "No changes in this scope."}
-          noRange={loading ? "Loading changes…" : "Changes unavailable."} />}
+          noRange={loading ? "Loading changes…" : "Changes unavailable."} onChanged={() => setTick((t) => t + 1)} />}
       </div>
     </div>
   );
@@ -166,6 +168,7 @@ function ChangesBody({
   label,
   empty,
   noRange,
+  onChanged,
 }: {
   source: GitSource;
   files: ChangedFile[];
@@ -177,7 +180,9 @@ function ChangesBody({
   label: string;
   empty: string;
   noRange: string;
+  onChanged: () => void;
 }) {
+  const [discarding, setDiscarding] = useState<ChangedFile | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [mode, setMode] = useState<"unified" | "split">("unified");
   const [pair, setPair] = useState<{ path: string; before: string; after: string } | null>(null);
@@ -203,6 +208,7 @@ function ChangesBody({
   }, [source, current?.path, current?.oldPath, range?.base, range?.head]);
 
   const totals = sumChanges(files);
+  const discardAction = source.discard && source.canWrite ? (file: ChangedFile) => <DiscardButton path={file.path} onClick={() => setDiscarding(file)} /> : undefined;
 
   if (!range) return <div role={error ? "alert" : "status"} className="px-3 py-4 text-xs text-muted-foreground">{error ?? noRange}</div>;
 
@@ -228,20 +234,21 @@ function ChangesBody({
           </WithTooltip>
         </div>
       </div>
+      <DiscardDialog source={source} file={discarding} base={range.base} onClose={() => setDiscarding(null)} onDiscarded={() => { setSelected(null); onChanged(); }} />
       {error && <div className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
       <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", pair ? "max-h-[40%] border-b border-hairline" : "flex-1")}>
         {groups?.length ? groups.map((group) => (
           <section key={group.key} aria-label={group.title}>
             <h3 className="px-3 pt-2 text-[11px] font-medium text-faint">{group.title} · {group.files.length}</h3>
-            <FileList files={group.files} selected={selected} onSelect={(p) => setSelected((s) => (s === p ? null : p))} empty={empty} />
+            <FileList files={group.files} selected={selected} onSelect={(p) => setSelected((s) => (s === p ? null : p))} empty={empty} trailing={discardAction} />
           </section>
-        )) : <FileList files={files} selected={selected} onSelect={(p) => setSelected((s) => (s === p ? null : p))} empty={empty} />}
+        )) : <FileList files={files} selected={selected} onSelect={(p) => setSelected((s) => (s === p ? null : p))} empty={empty} trailing={discardAction} />}
       </div>
       {pairError && <div role="alert" className="px-3 py-2 text-xs text-destructive">{pairError}</div>}
       {current && !pair && !pairError && <div role="status" className="px-3 py-2 text-xs">Loading file diff…</div>}
       {pair && (
         <div className="min-h-0 flex-1">
-          <DiffPane path={pair.path} before={pair.before} after={pair.after} mode={mode} />
+          <DiffPane path={pair.path} before={pair.before} after={pair.after} mode={mode} onDiscard={discardAction && current ? () => setDiscarding(current) : undefined} />
         </div>
       )}
     </div>

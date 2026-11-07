@@ -951,6 +951,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
 /// Record that the workspace these sessions ran in is gone: they keep their
 /// conversations and work from the project root from now on.
 pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[SessionEntry]) -> Result<Vec<SessionEntry>> {
+    for session in affected { crate::checkpoints::prune(session); }
     let affected_ids: std::collections::HashSet<_> = affected.iter().map(|session| session.id.clone()).collect();
     let branch = git::current_branch(project);
     index::update(|sessions| {
@@ -983,6 +984,7 @@ pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
     let sessions_dir = store::sessions_dir().ok();
     let attachments_dir = store::root().ok().map(|root| root.join("attachments"));
     for session in doomed {
+        crate::checkpoints::prune(session);
         if let Some(dir) = &sessions_dir {
             let _ = std::fs::remove_dir_all(dir.join(&session.id));
         }
