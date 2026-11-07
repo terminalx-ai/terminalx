@@ -53,6 +53,8 @@ try {
   await restart.evaluate((saved) => window.__PW_STUB__.emit("sidebar_order_changed", { ...saved, projects: ["/repos/p0", "/repos/p1"], revision: saved.revision + 1 }), saved);
   await restart.waitForFunction(() => document.querySelector('[data-testid="conversation-list"] [role="group"]')?.getAttribute("aria-label") === "local-0");
 
+  await restart.close();
+
   // The real keyboard flow and live-region content, including cancellation.
   const handle = page.getByRole("button", { name: "Reorder local-1", exact: true });
   await handle.focus();
@@ -67,6 +69,8 @@ try {
   await page.keyboard.press("Space");
   await page.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.projects[0] === "/repos/p0");
   assert.deepEqual(await projectNames(page), ["local-0", "local-1"]);
+  await page.getByRole("status").filter({ hasText: "Dropped local-1. Position 2 of 2." }).waitFor();
+  await page.close();
   // The flat sidebar shares the persisted session order, and a new session leads.
   const flat = await open(browser, server.url, fixture, { width: 1100, height: 900 }, { extra: `localStorage.setItem("raccoon.prefs", JSON.stringify({ sidebarLayout: "list", animations: false }));
     window.__PW_STUB__.answers.sidebar_order = { custom: true, sessions: ["many-s4", "many-s0", "many-s2", "many-s1", "many-s3", "many-s5"], projects: [], revision: 1 };` });
@@ -90,6 +94,28 @@ try {
   const archive = flat.getByTestId("archived-sessions");
   await drag(flat, archive.getByRole("button", { name: "Reorder Chat 3", exact: true }), archive.getByRole("button", { name: "Reorder Chat 5", exact: true }));
   await flat.waitForFunction(() => document.querySelector('[data-testid="archived-sessions"] [data-row-sessions]')?.getAttribute("data-row-sessions") === "many-s3");
+  await flat.close();
+  // Custom order preserves the existing branch fold and the new Settings registry switch.
+  const folded = await open(browser, server.url, { ...fixture, localSessions: 10 }, { width: 1100, height: 900 }, { extra: `${extra}
+    window.__PW_STUB__.answers.sidebar_order = { custom: true, sessions: [], projects: [], revision: 1 };` });
+  await sidebar(folded);
+  const group = folded.getByRole("group", { name: "local-0", exact: true });
+  await group.getByRole("button", { name: "View all", exact: true }).waitFor();
+  assert.equal((await rows(folded, "local-0")).length, 3);
+  await group.getByRole("button", { name: "View all", exact: true }).click();
+  assert.equal((await rows(folded, "local-0")).length, 5);
+  await group.getByRole("button", { name: "Show less", exact: true }).click();
+  assert.equal((await rows(folded, "local-0")).length, 3);
+  await folded.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = folded.getByRole("main", { name: "Settings", exact: true });
+  await settings.getByRole("button", { name: "Appearance", exact: true }).click();
+  const custom = settings.getByRole("switch", { name: "Custom order" });
+  assert.equal(await custom.getAttribute("aria-checked"), "true");
+  assert.equal(await settings.locator('[data-setting-id="appearance.customOrder"]').count(), 1);
+  await custom.click();
+  await folded.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.custom === false);
+  await custom.click();
+  await folded.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.custom === true);
   console.log("ok: WebKit session/project pointer drag, saved order reload, toggle, cross-window event, keyboard and announcements");
 } finally {
   await browser.close();

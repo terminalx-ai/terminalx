@@ -4,7 +4,7 @@ import type { SessionEntry } from "@/types/session";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), handlers: new Map<string, (event: { payload: unknown }) => void>() }));
 vi.mock("@/lib/api", () => ({ invoke: mocks.invoke, errorMessage: String }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name, handler) => { mocks.handlers.set(name, handler); return () => {}; }) }));
-import { bySavedOrder, customSessionOrder, DEFAULT_SIDEBAR_ORDER, bootSidebarOrder, saveSidebarOrder, useSidebarOrder } from "./sidebarOrder";
+import { bySavedOrder, customSessionOrder, DEFAULT_SIDEBAR_ORDER, mergeSidebarOrder, getSidebarOrder, bootSidebarOrder, saveSidebarOrder, useSidebarOrder } from "./sidebarOrder";
 import { act, renderHook } from "@testing-library/react";
 
 const entry = (id: string, created: string, extra: Partial<SessionEntry> = {}) => ({ id, created, ...extra }) as SessionEntry;
@@ -42,4 +42,31 @@ describe("custom sidebar ordering", () => {
     expect(hook.result.current).toMatchObject({ ...remote, revision: 4 });
     hook.unmount();
   });
+});
+
+it("keeps new and hidden projects in place through a partial reorder", () => {
+  expect(mergeSidebarOrder(["a", "hidden", "b"], ["new", "b", "a"])).toEqual(["new", "b", "hidden", "a"]);
+});
+
+it("applies consecutive drops immediately and rolls back only failed writes", async () => {
+  const hook = renderHook(useSidebarOrder);
+  const original = { custom: true, sessions: ["a", "b", "c"], projects: ["/a", "/b"], revision: 20 };
+  act(() => mocks.handlers.get("sidebar_order_changed")!({ payload: original }));
+  let answer!: (value: unknown) => void;
+  mocks.invoke.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+  let first!: Promise<void>;
+  act(() => { first = saveSidebarOrder({ sessions: ["b", "a", "c"] }); });
+  expect(getSidebarOrder().sessions).toEqual(["b", "a", "c"]);
+  await act(async () => { await Promise.resolve(); });
+  mocks.invoke.mockRejectedValueOnce(new Error("save failed"));
+  let second!: Promise<void>;
+  act(() => { second = saveSidebarOrder({ sessions: ["b", "c", "a"] }); });
+  expect(getSidebarOrder().sessions).toEqual(["b", "c", "a"]);
+  // An unrelated remote edit cannot erase the queued local moves.
+  act(() => mocks.handlers.get("sidebar_order_changed")!({ payload: { ...original, projects: ["/b", "/a"], revision: 21 } }));
+  expect(getSidebarOrder().sessions).toEqual(["b", "c", "a"]);
+  await act(async () => { answer({ ...original, sessions: ["b", "a", "c"], projects: ["/b", "/a"], revision: 22 }); await first; await second; });
+  expect(getSidebarOrder()).toMatchObject({ sessions: ["b", "a", "c"], projects: ["/b", "/a"], pending: false });
+  expect(getSidebarOrder().error).toContain("save failed");
+  hook.unmount();
 });

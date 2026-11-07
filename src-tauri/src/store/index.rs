@@ -703,8 +703,8 @@ fn merge_sidebar_order(saved: &mut Vec<String>, requested: Vec<String>) {
     saved.retain(|id| unique.insert(id.clone()));
     let mut seen = std::collections::HashSet::new();
     let requested: Vec<_> = requested.into_iter().filter(|id| seen.insert(id.clone())).collect();
-    let missing: Vec<_> = requested.iter().filter(|id| !saved.contains(id)).cloned().collect();
-    saved.extend(missing);
+    let missing: Vec<_> = requested.iter().filter(|id| !unique.contains(*id)).cloned().collect();
+    saved.splice(0..0, missing);
     let mut next = requested.iter();
     for id in saved.iter_mut() {
         if seen.contains(id) {
@@ -722,20 +722,82 @@ fn reconcile_sidebar_sessions(saved: &mut Vec<String>, sessions: &[SessionEntry]
     saved.splice(0..0, new.into_iter().map(|s| s.id.clone()));
 }
 
+/// Project groups include attached projects and repositories still represented by
+/// conversations, including archives and linked chats. Forget only vanished groups.
+fn sidebar_projects(sessions: &[SessionEntry], attached: &[super::projects::Project]) -> Result<Vec<String>> {
+    let chats = super::root()?.join("Chats");
+    let chats = chats.canonicalize().unwrap_or(chats).to_string_lossy().trim_end_matches('/').to_string();
+    let mut groups: BTreeMap<String, (bool, String, bool)> = attached.iter()
+        .filter(|p| p.path.trim_end_matches('/') != chats)
+        .map(|p| (p.path.trim_end_matches('/').to_string(), (p.pinned, p.last_opened.clone().unwrap_or_default(), false)))
+        .collect();
+    for session in sessions.iter().filter(|s| !s.is_quick()) {
+        let path = if session.project_path.trim_end_matches('/') == chats {
+            let Some(link) = &session.link else { continue };
+            &link.path
+        } else { &session.project_path };
+        let group = groups.entry(path.trim_end_matches('/').to_string()).or_default();
+        if !session.archived {
+            let time = sidebar_message_time(session);
+            if !group.2 || time > group.1 { group.1 = time; }
+            group.2 = true;
+        }
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by(|(a, av), (b, bv)| bv.0.cmp(&av.0).then(bv.1.cmp(&av.1)).then(a.cmp(b)));
+    Ok(groups.into_iter().map(|(path, _)| path).collect())
+}
+
+fn sidebar_message_time(session: &SessionEntry) -> String {
+    super::message_activity::last_message_at(session)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| session.created.clone())
+}
+
+fn reconcile_sidebar_projects(saved: &mut Vec<String>, current: &[String]) {
+    let current: std::collections::HashSet<_> = current.iter().collect();
+    let mut seen = std::collections::HashSet::new();
+    saved.retain(|id| current.contains(id) && seen.insert(id.clone()));
+    let mut new: Vec<_> = current.into_iter().filter(|id| !seen.contains(*id)).cloned().collect();
+    new.sort();
+    saved.splice(0..0, new);
+}
+
 pub fn sidebar_order() -> Result<SidebarOrder> {
-    Ok(load_file()?.sidebar_order.unwrap_or_default())
+    let file = load_file()?;
+    let Some(mut order) = file.sidebar_order else { return Ok(SidebarOrder::default()) };
+    let projects = sidebar_projects(&file.sessions, &super::projects::list()?.0)?;
+    reconcile_sidebar_projects(&mut order.projects, &projects);
+    Ok(order)
 }
 
 pub fn set_sidebar_order(patch: SidebarOrderPatch) -> Result<SidebarOrder> {
+    let attached = super::projects::list()?.0;
     update_file(|file| {
-        let order = file.sidebar_order.get_or_insert_with(SidebarOrder::default);
+        // Seed only once, in this transaction, so enabling custom order keeps the
+        // pin/message ordering already on screen and cannot overwrite another window.
+        if file.sidebar_order.is_none() {
+            let mut sessions = file.sessions.clone();
+            super::message_activity::project(&mut sessions)?;
+            let projects = sidebar_projects(&sessions, &attached)?;
+            sessions.sort_by_cached_key(|s| (std::cmp::Reverse(s.pinned), std::cmp::Reverse(sidebar_message_time(s)), s.id.clone()));
+            file.sidebar_order = Some(SidebarOrder { sessions: sessions.into_iter().map(|s| s.id).collect(), projects, ..Default::default() });
+        }
+        let projects = sidebar_projects(&file.sessions, &attached)?;
+        let project_ids: std::collections::HashSet<_> = projects.iter().collect();
+        let session_ids: std::collections::HashSet<_> = file.sessions.iter().map(|s| &s.id).collect();
+        let order = file.sidebar_order.as_mut().expect("initialized above");
         reconcile_sidebar_sessions(&mut order.sessions, &file.sessions);
+        reconcile_sidebar_projects(&mut order.projects, &projects);
         if let Some(custom) = patch.custom { order.custom = custom; }
         if let Some(mut sessions) = patch.sessions {
-            sessions.retain(|id| file.sessions.iter().any(|s| &s.id == id));
+            sessions.retain(|id| session_ids.contains(id));
             merge_sidebar_order(&mut order.sessions, sessions);
         }
-        if let Some(projects) = patch.projects { merge_sidebar_order(&mut order.projects, projects); }
+        if let Some(mut projects) = patch.projects {
+            projects.retain(|id| project_ids.contains(id));
+            merge_sidebar_order(&mut order.projects, projects);
+        }
         order.revision = order.revision.saturating_add(1);
         Ok(order.clone())
     })
@@ -999,7 +1061,7 @@ mod tests {
     fn sidebar_order_survives_updates_and_new_sessions_lead_even_while_off() {
         let _home = crate::store::temp_home();
         let mut sessions = vec![entry("a"), entry("b"), entry("c")];
-        for session in &mut sessions { session.created = "2026-01-01".into(); }
+        for session in &mut sessions { session.created = "2026-01-01".into(); session.project_path = if session.id == "b" { "/b" } else { "/a" }.into(); }
         save(&sessions).unwrap();
         assert_eq!(sidebar_order().unwrap(), SidebarOrder::default());
         let saved = set_sidebar_order(SidebarOrderPatch {
@@ -1011,7 +1073,7 @@ mod tests {
         set_sidebar_order(SidebarOrderPatch { custom: Some(false), ..Default::default() }).unwrap();
         update_session("b", |session| { session.modified = "later".into(); Ok(()) }).unwrap();
         assert_eq!(sidebar_order().unwrap().sessions, saved.sessions);
-        update(|sessions| { sessions.push(entry("new")); Ok(()) }).unwrap();
+        update(|sessions| { let mut new = entry("new"); new.project_path = "/a".into(); sessions.push(new); Ok(()) }).unwrap();
         assert_eq!(sidebar_order().unwrap().sessions, ["new", "c", "a", "b"]);
         // A filtered drop preserves the unseen rows and another group's order.
         set_sidebar_order(SidebarOrderPatch { sessions: Some(vec!["b".into(), "c".into()]), ..Default::default() }).unwrap();
@@ -1027,13 +1089,60 @@ mod tests {
     #[test]
     fn sidebar_project_reorder_keeps_other_groups_and_index_fields() {
         let _home = crate::store::temp_home();
-        save(&[entry("a")]).unwrap();
+        let mut sessions = vec![entry("a"), entry("hidden"), entry("b")];
+        for session in &mut sessions { session.project_path = format!("/{}", session.id); }
+        save(&sessions).unwrap();
         set_tab_layout("/a", layout(&["agent:tab"])).unwrap();
         set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/a".into(), "/hidden".into(), "/b".into()]), ..Default::default() }).unwrap();
         set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/b".into(), "/a".into(), "/a".into()]), ..Default::default() }).unwrap();
         assert_eq!(sidebar_order().unwrap().projects, ["/b", "/hidden", "/a"]);
         assert_eq!(tab_state().unwrap().workspaces["/a"].order, ["agent:tab"]);
-        assert_eq!(load().unwrap().len(), 1);
+        assert_eq!(load().unwrap().len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidebar_recognizes_the_canonical_chats_directory() {
+        let _home = crate::store::temp_home();
+        let root = crate::store::root().unwrap();
+        let real = crate::store::ensure_dir(root.join("chat-target")).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("Chats")).unwrap();
+        let mut chat = entry("chat");
+        chat.project_path = real.canonicalize().unwrap().to_string_lossy().into_owned();
+        chat.link = Some(ChatLink { path: "/linked".into(), branch: None });
+        save(&[chat]).unwrap();
+        let order = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(order.projects, ["/linked"]);
+        assert_eq!(sidebar_order().unwrap().projects, ["/linked"]);
+    }
+
+    #[test]
+    fn sidebar_starts_in_display_order_and_reconciles_projects_before_filtered_drops() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("pinned"), entry("newest"), entry("active")];
+        for session in &mut sessions {
+            session.project_path = if session.id == "newest" { "/b" } else { "/z" }.into();
+            session.created = "2026-01-01T00:00:00Z".into();
+        }
+        sessions[0].pinned = true;
+        sessions[1].created = "2026-02-01T00:00:00Z".into();
+        sessions[2].unknown.insert("lastMessageAt".into(), "2026-03-01T00:00:00Z".into());
+        crate::store::write_json(&crate::store::root().unwrap().join("projects.json"), &serde_json::json!({
+            "projects": [{ "path": "/b", "name": "B", "pinned": true }, { "path": "/z", "name": "Z" }]
+        })).unwrap();
+        save(&sessions).unwrap();
+        let first = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(first.sessions, ["pinned", "active", "newest"]);
+        assert_eq!(first.projects, ["/b", "/z"]);
+        update(|sessions| { let mut new = entry("fresh"); new.project_path = "/new".into(); sessions.push(new); Ok(()) }).unwrap();
+        let reordered = set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/z".into(), "/b".into(), "/gone".into()]), ..Default::default() }).unwrap();
+        assert_eq!(reordered.projects, ["/new", "/z", "/b"]);
+        update(|sessions| { sessions.retain(|s| s.id != "fresh"); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().projects, ["/z", "/b"]);
+        set_sidebar_order(SidebarOrderPatch { custom: Some(false), ..Default::default() }).unwrap();
+        let restored = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(restored.sessions, first.sessions);
+        assert_eq!(restored.projects, ["/z", "/b"]);
     }
 
     #[test]

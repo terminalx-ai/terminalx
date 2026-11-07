@@ -1929,13 +1929,13 @@ pub fn tab_state() -> CmdResult<index::TabState> {
 }
 
 #[tauri::command]
-pub fn sidebar_order() -> CmdResult<index::SidebarOrder> {
-    index::sidebar_order().map_err(err)
+pub async fn sidebar_order() -> CmdResult<index::SidebarOrder> {
+    tauri::async_runtime::spawn_blocking(index::sidebar_order).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
-pub fn set_sidebar_order(app: AppHandle, patch: index::SidebarOrderPatch) -> CmdResult<index::SidebarOrder> {
-    let saved = index::set_sidebar_order(patch).map_err(err)?;
+pub async fn set_sidebar_order(app: AppHandle, patch: index::SidebarOrderPatch) -> CmdResult<index::SidebarOrder> {
+    let saved = tauri::async_runtime::spawn_blocking(move || index::set_sidebar_order(patch)).await.map_err(err)?.map_err(err)?;
     let _ = app.emit("sidebar_order_changed", &saved);
     Ok(saved)
 }

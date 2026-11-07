@@ -52,7 +52,7 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
       const merge = (saved, requested) => {
         if (!requested) return saved;
         const ids = [...new Set(requested)];
-        const slots = [...saved, ...ids.filter((id) => !saved.includes(id))];
+        const slots = [...ids.filter((id) => !saved.includes(id)), ...saved];
         let at = 0;
         return slots.map((id) => ids.includes(id) ? ids[at++] : id);
       };

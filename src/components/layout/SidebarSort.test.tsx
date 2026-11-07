@@ -26,7 +26,8 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("sidebar keyboard drag with the real dnd-kit sensors", () => {
   it.each(["sessions", "projects"] as const)("picks up, moves and drops %s with announcements", async (kind) => {
-    mount(kind);
+    const view = mount(kind);
+    expect(view.container.querySelector("ul > :not(li)")).toBeNull();
     const handle = screen.getByRole("button", { name: "Reorder Alpha" });
     handle.focus();
     await key(handle, "Space");
@@ -65,5 +66,7 @@ describe("sidebar keyboard drag with the real dnd-kit sensors", () => {
     mocks.state.custom = false;
     mount();
     expect(screen.queryByRole("button", { name: /Reorder/ })).toBeNull();
+    expect(document.querySelector('[role="status"]')).toBeNull();
+    expect(document.querySelector('[id^="DndDescribedBy"]')).toBeNull();
   });
 });

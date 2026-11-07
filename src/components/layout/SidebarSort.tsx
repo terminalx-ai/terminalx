@@ -1,4 +1,4 @@
-import { createContext, useContext, useRef, type CSSProperties, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors, type Announcements, type KeyboardCoordinateGetter } from "@dnd-kit/core";
 import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -7,13 +7,21 @@ import { usePrefs } from "@/lib/prefs";
 import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
 
 export interface SidebarSortItem { id: string; name: string; members?: string[] }
-const Items = createContext<SidebarSortItem[]>([]);
+const EMPTY_ITEMS = new Map<string, SidebarSortItem>();
+const Items = createContext<ReadonlyMap<string, SidebarSortItem>>(EMPTY_ITEMS);
+type ListProps = { items: SidebarSortItem[]; kind?: "sessions" | "projects"; children: ReactNode };
 
 /** A sortable scope never moves a session into another project or branch. */
-export function SidebarSortList({ items, kind = "sessions", children }: { items: SidebarSortItem[]; kind?: "sessions" | "projects"; children: ReactNode }) {
-  const order = useSidebarOrder();
+export function SidebarSortList(props: ListProps) {
+  const { custom } = useSidebarOrder();
+  return custom ? <SortableList {...props} /> : <Items.Provider value={EMPTY_ITEMS}>{props.children}</Items.Provider>;
+}
+
+function SortableList({ items, kind = "sessions", children }: ListProps) {
+  const byId = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
   const latest = useRef(items);
   latest.current = items;
+  const dragRows = useRef(items);
   // Move by row, not pixels: handles variable-height project groups and gives
   // every arrow press exactly one step, including Left/Right for VoiceOver.
   const coordinates: KeyboardCoordinateGetter = (event, { currentCoordinates, context }) => {
@@ -31,12 +39,13 @@ export function SidebarSortList({ items, kind = "sessions", children }: { items:
   };
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor, { coordinateGetter: coordinates, keyboardCodes: { start: ["Space"], end: ["Space"], cancel: ["Escape", "Tab"] }, scrollBehavior: "auto" }));
   const description = (id: string | number, over = id) => {
-    const rows = latest.current;
+    const rows = dragRows.current;
     return `${rows.find((item) => item.id === id)?.name ?? "row"}. Position ${rows.findIndex((item) => item.id === over) + 1} of ${rows.length}.`;
   };
   const announced = useRef<string | number | null>(null);
   const announcements: Announcements = {
     onDragStart: ({ active }) => {
+      dragRows.current = latest.current;
       announced.current = active.id;
       return `Picked up ${description(active.id)}`;
     },
@@ -49,9 +58,9 @@ export function SidebarSortList({ items, kind = "sessions", children }: { items:
     onDragCancel: ({ active }) => `Cancelled. ${description(active.id)}`,
   };
   return (
-    <Items.Provider value={order.custom ? items : []}>
-      <DndContext sensors={sensors} collisionDetection={closestCenter} accessibility={{ announcements, screenReaderInstructions: { draggable: "To reorder, press Space to pick up. Use the arrow keys to move, Space to drop, or Escape to cancel." } }} onDragEnd={({ active, over }) => {
-        if (!order.custom || !over || active.id === over.id) return;
+    <Items.Provider value={byId}>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} accessibility={{ container: document.body, announcements, screenReaderInstructions: { draggable: "To reorder, press Space to pick up. Use the arrow keys to move, Space to drop, or Escape to cancel." } }} onDragEnd={({ active, over }) => {
+        if (!over || active.id === over.id) return;
         const from = items.findIndex((item) => item.id === active.id);
         const to = items.findIndex((item) => item.id === over.id);
         if (from < 0 || to < 0) return;
@@ -65,7 +74,7 @@ export function SidebarSortList({ items, kind = "sessions", children }: { items:
 
 export function useSidebarSortable(id: string) {
   const items = useContext(Items);
-  const item = items.find((item) => item.id === id);
+  const item = items.get(id);
   const { animations } = usePrefs();
   const sortable = useSortable({ id, disabled: !item, transition: animations ? undefined : null });
   const style: CSSProperties = { transform: CSS.Translate.toString(sortable.transform), transition: sortable.transition, position: "relative", zIndex: sortable.isDragging ? 10 : undefined };

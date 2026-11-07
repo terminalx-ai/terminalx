@@ -476,7 +476,6 @@ function ProjectGroup({
   const renameBranch = (branch: string) => (branch && group.project && group.project.kind !== "folder" ? () => setRenaming(branch) : null);
   const nav = useSessionStore();
   const sort = useSidebarSortable(canon(group.path));
-  const order = useSidebarOrder();
   const overviewOpen = nav.view === "project" && !!nav.selectedProject && canon(nav.selectedProject) === canon(group.path);
   const [all, toggleAll] = useFold(`project-all:${canon(group.path)}`, false);
   // The project folds its branches away: its picture turns into a chevron on hover, and stays one while folded.
@@ -506,8 +505,8 @@ function ProjectGroup({
   // under a fold of their own (#696): left in the list, they sat beside live work for good.
   const live = branches.filter((entry) => !entry.key.startsWith("removed:"));
   const removed = branches.filter((entry) => entry.key.startsWith("removed:"));
-  const shown = all || filtered || order.custom ? live : live.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
-  const more = !order.custom && !filtered && (live.length > shown.length || (all && live.length > PEEK));
+  const shown = all || filtered ? live : live.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
+  const more = !filtered && (live.length > shown.length || (all && live.length > PEEK));
   const sortBranch = ({ key, branch, sessions }: { key: string; branch: string; sessions: SessionEntry[] }) => {
     const tabbed = asTabs ? sessions.filter((session) => session.tabs.length > 0) : sessions;
     const represented = tabbed.length ? tabbed : sessions;

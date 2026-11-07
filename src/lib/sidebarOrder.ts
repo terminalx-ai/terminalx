@@ -1,7 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { errorMessage, invoke } from "@/lib/api";
-import type { SessionEntry } from "@/types/session";
 
 export interface SidebarOrder {
   custom: boolean;
@@ -12,13 +11,34 @@ export interface SidebarOrder {
 export const DEFAULT_SIDEBAR_ORDER: SidebarOrder = { custom: false, sessions: [], projects: [], revision: 0 };
 type Patch = Partial<Pick<SidebarOrder, "custom" | "sessions" | "projects">>;
 let state = { ...DEFAULT_SIDEBAR_ORDER, error: null as string | null, pending: false, loaded: false };
+let confirmed: SidebarOrder = DEFAULT_SIDEBAR_ORDER;
+const queued: Patch[] = [];
 const listeners = new Set<() => void>();
+export const getSidebarOrder = () => state;
+
+/** Merge only the named slots, including newly encountered rows at the top. */
+export function mergeSidebarOrder(saved: readonly string[], requested: readonly string[]): string[] {
+  const wanted = [...new Set(requested)];
+  const seen = new Set(saved);
+  const slots = [...wanted.filter((id) => !seen.has(id)), ...seen];
+  const moving = new Set(wanted);
+  let at = 0;
+  return slots.map((id) => moving.has(id) ? wanted[at++] : id);
+}
+function publish() {
+  const optimistic = queued.reduce<SidebarOrder>((order, patch) => ({ ...order, ...patch,
+    custom: confirmed.revision === 0 ? confirmed.custom : patch.custom ?? order.custom,
+    sessions: patch.sessions ? mergeSidebarOrder(order.sessions, patch.sessions) : order.sessions,
+    projects: patch.projects ? mergeSidebarOrder(order.projects, patch.projects) : order.projects,
+  }), confirmed);
+  set({ ...optimistic, pending: queued.length > 0 });
+}
 function set(patch: Partial<typeof state>) {
   state = { ...state, ...patch };
   for (const listener of listeners) listener();
 }
 function receive(order: SidebarOrder | null | undefined) {
-  if (order && order.revision >= state.revision) set(order);
+  if (order && order.revision >= confirmed.revision) { confirmed = order; publish(); }
 }
 let booted: Promise<void> | undefined;
 export function bootSidebarOrder() {
@@ -47,11 +67,13 @@ export function useSidebarOrder() {
 // named by a drop; another window's unrelated group is preserved.
 let writes = Promise.resolve();
 export function saveSidebarOrder(patch: Patch): Promise<void> {
+  queued.push(patch);
+  set({ error: null });
+  publish();
   const write = writes.then(async () => {
-    set({ pending: true, error: null });
     try { receive(await invoke<SidebarOrder>("set_sidebar_order", { patch })); }
     catch (error) { set({ error: `Could not save custom order: ${errorMessage(error)}` }); }
-    finally { set({ pending: false }); }
+    finally { queued.shift(); publish(); }
   });
   writes = write;
   return write;
@@ -62,6 +84,6 @@ export function bySavedOrder<T>(items: readonly T[], saved: readonly string[], k
   const rank = new Map(saved.map((id, index) => [id, index]));
   return [...items].sort((a, b) => (rank.get(key(a)) ?? -1) - (rank.get(key(b)) ?? -1) || fallback(a, b));
 }
-export function customSessionOrder(sessions: readonly SessionEntry[], order: SidebarOrder): SessionEntry[] {
+export function customSessionOrder<T extends { id: string; created: string }>(sessions: readonly T[], order: SidebarOrder): T[] {
   return bySavedOrder(sessions, order.sessions, (s) => s.id, (a, b) => (Date.parse(b.created) || 0) - (Date.parse(a.created) || 0) || a.id.localeCompare(b.id));
 }
