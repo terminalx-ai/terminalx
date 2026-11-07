@@ -122,13 +122,14 @@ const fits = (layout) => ({
   await page.keyboard.press("Meta+Shift+Y");
   await page.getByTestId("shortcut-editor").getByRole("button", { name: "Save", exact: true }).click();
   const shown = await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').textContent();
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
   await sidebar(page);
   await page.keyboard.press("Meta+B");
   await page.waitForTimeout(150);
   const afterOld = await sidebarShown();
   await page.keyboard.press("Meta+Shift+Y");
-  await page.waitForTimeout(150);
+  // The sidebar slides out (PanelPresence, --panel-out-duration) and is drawn until it has gone: wait out the motion.
+  await page.waitForTimeout(600);
   const afterNew = await sidebarShown();
   await page.keyboard.press("Meta+Shift+Y");
   await sidebar(page);

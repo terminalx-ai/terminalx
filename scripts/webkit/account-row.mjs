@@ -87,20 +87,22 @@ for (const mode of ["light", "dark"]) {
     const tip = (await tooltip.count()) ? await tooltip.first().textContent() : "";
     checks["hovering the gear says Settings and its shortcut"] = /Settings/.test(tip ?? "") && /,/.test(tip ?? "");
     if (fixture.cloud) {
+      // The relay line shows only while the relay is down, with its explanation and Retry; once back, it goes.
       const relay = row.getByRole("button", { name: "Relay unavailable" });
-      await relay.hover();
       const explanation = page.getByRole("dialog", { name: "Relay connection" });
+      await relay.focus();
+      await explanation.waitFor();
+      checks["keyboard focus opens the Relay explanation"] = (await explanation.textContent()).includes(REASON);
+      await page.keyboard.press("Escape");
+      await explanation.waitFor({ state: "hidden" });
+      await relay.hover();
       await explanation.waitFor();
       checks["hovering Relay explains the cause"] = (await explanation.textContent()).includes(REASON);
       // Moving from the status to its portalled Retry button must keep it open.
       await explanation.getByRole("button", { name: "Retry", exact: true }).click();
-      await row.getByRole("button", { name: "Relay connected" }).waitFor();
+      await row.getByRole("button", { name: /^Relay/ }).waitFor({ state: "detached" });
       checks["Retry reconnects exactly once"] = await page.evaluate(() => window.__PW_RETRIES__ === 1);
-      await page.keyboard.press("Escape");
-      await explanation.waitFor({ state: "hidden" });
-      await row.getByRole("button", { name: "Relay connected" }).focus();
-      await explanation.waitFor();
-      checks["keyboard focus opens the Relay explanation"] = (await explanation.textContent()).includes("Local terminals keep running");
+      checks["once reconnected, the relay line goes"] = (await row.getByRole("button", { name: /^Relay/ }).count()) === 0;
     }
     failed += report(`${mode}, ${name}`, checks, layout);
     await page.close();

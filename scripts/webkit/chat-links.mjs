@@ -78,7 +78,7 @@ try {
   assert.equal(await preference.getByRole("radio", { name: "TerminalX Browser" }).getAttribute("aria-checked"), "true");
   await page.keyboard.press("ArrowRight"); // TerminalX -> Ask
   assert.equal(await preference.getByRole("radio", { name: "Ask every time" }).getAttribute("aria-checked"), "true");
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
   await link.click();
   await chooser.waitFor();
   await page.mouse.click(800, 45);

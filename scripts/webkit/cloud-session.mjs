@@ -534,8 +534,9 @@ for (const { viewport, collapsed, terminalSwitch = false } of [
 // The permission mode in a narrow composer. It used to be a picker in the
 // toolbar whose label was cut to "B" at 960 px with the side panel open; since
 // #584 it is a submenu of More options, so what must hold at every width is
-// that the button stays in the toolbar and pressable, shows the mode's dot for
-// an unguarded or plan mode, and that its menu names the mode in full.
+// that the button stays in the toolbar and pressable, carries no dot (the mode
+// is named in its tooltip, and its menu row leads with the mode's shield), and
+// that its menu names the mode in full.
 const permissionButton = (page) =>
   page.evaluate(() => {
     const button = document.querySelector('main [data-composer-toolbar] [data-testid="composer-options"]');
@@ -560,16 +561,15 @@ const permissionMenuItem = (page) =>
     const item = document.querySelector('[role="menu"] [data-testid="permission-mode"]');
     const label = item?.querySelector('[data-testid="permission-mode-label"]');
     if (!item || !label) return null;
-    return { name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1 };
+    return { name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1, shield: !!item.querySelector('[data-testid="permission-mode-icon"]') };
   });
 
 function permissionChecks(measured, mode) {
   if (!measured) return { "the More options button is there": false };
-  const marked = mode !== "manual";
   return {
     "the More options button is inside the composer toolbar": measured.inToolbar,
     "it keeps its icon and is wide enough to press": measured.icon && measured.width >= 20,
-    [marked ? "it carries the mode's dot" : "a guarded mode shows no dot"]: marked ? measured.dot === true : measured.dot === null,
+    "it carries no dot, whatever the mode": measured.dot === null,
   };
 }
 
@@ -594,6 +594,7 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
       ...permissionChecks(measured, permissionMode),
       "the More options menu names the mode, whole": !!item && item.label === MODE_LABEL[permissionMode] && item.whole,
       "the menu item's accessible name says which mode is in force": !!item && item.name === `Permission mode: ${MODE_LABEL[permissionMode]}`,
+      "the menu item leads with the mode's shield": !!item?.shield,
     },
     { button: measured, item },
   );
@@ -614,7 +615,7 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   failed += report(
     `permission mode (960 to 1400 px, side panel open, ${permissionMode})`,
     {
-      "at every width the button stays in the toolbar, pressable, with its icon and the mode's dot": failures.length === 0,
+      "at every width the button stays in the toolbar, pressable, with its icon": failures.length === 0,
       "with room (1680 px) the same holds": Object.values(permissionChecks(measured, permissionMode)).every(Boolean),
     },
     { failures, wide: measured },
