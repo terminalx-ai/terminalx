@@ -2939,15 +2939,16 @@ impl SessionManager {
         let mut bytes = write.line.as_bytes().to_vec();
         bytes.push(b'\n');
         let mut offset = 0;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stalled_until = Instant::now() + Duration::from_secs(5);
         let result = (|| -> Result<()> {
             lease.as_ref().map_err(|error| anyhow!("{error}"))?;
             frame.as_ref().map_err(|error| anyhow!("{error}"))?;
             while offset < bytes.len() {
+                let mut wait_for_capacity = false;
                 {
                     let _admission = crate::issue_pipeline::admission::lock_for(&session, &tab);
                     anyhow::ensure!(privacy.is_none_or(|ticket| ticket.valid()), crate::data_privacy::MESSAGE);
-                    anyhow::ensure!(Instant::now() < deadline, "ACP input pipe timed out; input will not be replayed");
+                    anyhow::ensure!(Instant::now() < stalled_until, "ACP input pipe timed out; input will not be replayed");
                     let mut sharing = (write.delivery.mobile.is_some() || write.delivery.shared.is_some()).then(|| self.sharing.lock().unwrap());
                     let mut attachment = None;
                     if let Some(permit) = &write.delivery.shared {
@@ -2966,8 +2967,16 @@ impl SessionManager {
                     crate::issue_pipeline::admission::check(&session, &tab)?;
                     match child.as_ref().context("ACP child is missing")?.try_write_stdin(&bytes[offset..]) {
                         Ok(0) => bail!("ACP input pipe closed"),
-                        Ok(written) => { offset += written; attempted = true; }
+                        Ok(written) => {
+                            offset += written;
+                            attempted = true;
+                            // Bound a stalled pipe, not the total size of an
+                            // image/prompt. Cancellation is checked on every
+                            // chunk even while the provider keeps reading.
+                            stalled_until = Instant::now() + Duration::from_secs(5);
+                        }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            wait_for_capacity = true;
                             #[cfg(test)]
                             if let Some(observed) = ACP_FULL_PIPE.lock().unwrap().take() { let _ = observed.send(()); }
                         },
@@ -2981,7 +2990,7 @@ impl SessionManager {
                         self.apply(&mut rt, Payload::ModelRequestStarted, None);
                     }
                 }
-                if offset < bytes.len() { std::thread::sleep(Duration::from_millis(5)); }
+                if wait_for_capacity { std::thread::sleep(Duration::from_millis(5)); }
             }
             Ok(())
         })();
