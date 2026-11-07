@@ -787,3 +787,53 @@ describe("the archive (#718)", () => {
     expect(selection.getPickedSessions()).toEqual([]);
   });
 });
+
+describe("custom order (PRO-169)", () => {
+  it("uses the saved order inside the archive and restores recency when off", async () => {
+    const { archivedConversations, groupConversations } = await import("./SessionSidebar");
+    const entries = [session("recent", "/repos/web", "2026-11-02", { archived: true }), session("older", "/repos/web", "2026-11-01", { archived: true })];
+    const order = { custom: true, sessions: ["older", "recent"], projects: [], revision: 1 };
+    expect(archivedConversations(entries, order).map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(archivedConversations(entries, { ...order, custom: false }).map((s) => s.id)).toEqual(["recent", "older"]);
+    expect(groupConversations(entries, projects, chatsPath, {}, null, true, true, order).groups[0].archived.map((s) => s.id)).toEqual(["older", "recent"]);
+  });
+  it("restores recency when off without losing either saved order, and keeps new sessions first", async () => {
+    const { groupConversations } = await import("./SessionSidebar");
+    const order = { custom: true, sessions: ["older", "recent"], projects: ["/repos/other", "/repos/web"], revision: 1 };
+    const entries = [session("recent", "/repos/web", "2026-11-02"), session("older", "/repos/web", "2026-11-01"), session("other", "/repos/other", "2026-11-01")];
+    const attached = [...projects, { path: "/repos/other", name: "other", kind: "git" as const }];
+    const grouped = (custom: boolean, list = entries) => groupConversations(list, attached, chatsPath, {}, null, true, false, { ...order, custom });
+    expect(grouped(true).groups.map((g) => g.path)).toEqual(["/repos/other", "/repos/web"]);
+    expect(grouped(true).groups[1].sessions.map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(grouped(false).groups[0].sessions.map((s) => s.id)).toEqual(["recent", "older"]);
+    expect(grouped(true).groups[1].sessions.map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(grouped(true, [...entries, session("new", "/repos/web", "2026-11-03")]).groups[1].sessions.map((s) => s.id)).toEqual(["new", "older", "recent"]);
+  });
+  it("uses the View menu switch in both sidebar layouts", async () => {
+    const ordering = await import("@/lib/sidebarOrder");
+    let saved = { custom: false, sessions: ["older", "recent"], projects: [], revision: 10 };
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "set_sidebar_order") {
+        saved = { ...saved, ...(args as { patch: object }).patch, revision: saved.revision + 1 };
+        return saved;
+      }
+      return base(command, args);
+    });
+    await boot([session("recent", "/repos/web", "2026-11-02", { branch: "recent" }), session("older", "/repos/web", "2026-11-01", { branch: "raccoon/quiet-amber-fox" })]);
+    await act(async () => { await ordering.saveSidebarOrder({ custom: false }); });
+    mount();
+    fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Custom order" }));
+    // The handle names the displayed conversation, not its hidden generated branch.
+    await screen.findByRole("button", { name: "Reorder Talk older" });
+    const rowIds = () => [...screen.getByTestId("conversation-list").querySelectorAll("[data-row-sessions]")].map((row) => row.getAttribute("data-row-sessions"));
+    expect(rowIds()).toEqual(["older", "recent"]);
+    act(() => prefs.setPrefs({ sidebarLayout: "list" }));
+    await screen.findByRole("button", { name: "Reorder Talk older" });
+    expect(rowIds()).toEqual(["older", "recent"]);
+    await act(async () => { await ordering.saveSidebarOrder({ custom: false }); });
+    expect(rowIds()).toEqual(["recent", "older"]);
+    expect(screen.queryByRole("button", { name: /Reorder/ })).toBeNull();
+  });
+});

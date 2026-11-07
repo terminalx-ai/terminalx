@@ -1,3 +1,5 @@
+import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
+import { SidebarOrderError } from "@/components/layout/SidebarSort";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "@/icons";
@@ -121,6 +123,7 @@ export function GeneralTab() {
 }
 
 export function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
+  const order = useSidebarOrder();
   const { theme, mode, resolvedMode } = useTheme();
   const prefs = usePrefs();
   const light = hasLightMode(theme);
@@ -213,6 +216,10 @@ export function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
           />
         }
       />
+      <RegisteredSetting setting="appearance.customOrder"
+        control={<Switch aria-label="Custom order" checked={order.custom} disabled={!order.loaded || order.pending} onCheckedChange={(custom) => void saveSidebarOrder({ custom })} />}
+      />
+      <SidebarOrderError />
       <RegisteredSetting setting="appearance.tabBar"
         control={<Switch aria-label="Tab bar" checked={prefs.tabStrip} onCheckedChange={(v) => setPrefs({ tabStrip: v })} />}
       />

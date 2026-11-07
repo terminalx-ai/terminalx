@@ -176,6 +176,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "localStorage", location: "raccoon.prefs#transcriptLayout" },
   }),
   defineSetting({
+    id: "appearance.customOrder", section: "appearance", title: "Custom order",
+    description: "Arrange sessions and projects with their drag handles. Press Space to pick up, arrows to move, Space to drop, or Escape to cancel. Pins do not change custom order. Off restores pin and recency order and keeps your arrangement.",
+    searchTerms: ["appearance", "custom order", "drag", "reorder", "sidebar", "sessions", "projects"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/sessions/index.json#sidebarOrder" },
+  }),
+  defineSetting({
     id: "appearance.tabBar", section: "appearance", title: "Tab bar",
     description: "A session's agents, terminals and browser pages as a row of tabs under the title bar, in the same order as the sidebar. Off leaves them in the sidebar only.",
     searchTerms: ["appearance", "tab", "bar"], scope: "user",

@@ -4,6 +4,7 @@ import type { Project } from "@/types/session";
 
 const mocks = vi.hoisted(() => ({
   projects: [] as Project[],
+  saveOrder: vi.fn(async (patch: object) => ({ custom: false, sessions: ["second", "first"], projects: ["/repos/two", "/repos/one"], revision: 1, ...patch })),
   environmentList: vi.fn(async (_project: string | null) => []),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
@@ -19,7 +20,14 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@/lib/api", async (original) => {
   const actual = await original<typeof import("@/lib/api")>();
-  return { ...actual, experimental: { ...actual.experimental, settings: vi.fn(async () => ({ nativeCodex: false })) } };
+  return { ...actual,
+    invoke: (command: string, args?: { patch?: object }) => {
+      if (command === "sidebar_order") return Promise.resolve({ custom: false, sessions: ["second", "first"], projects: ["/repos/two", "/repos/one"], revision: 0 });
+      if (command === "set_sidebar_order") return mocks.saveOrder(args?.patch ?? {});
+      return actual.invoke(command, args);
+    },
+    experimental: { ...actual.experimental, settings: vi.fn(async () => ({ nativeCodex: false })) },
+  };
 });
 vi.mock("@/lib/localEnvironment", async (original) => {
   const actual = await original<typeof import("@/lib/localEnvironment")>();
@@ -100,4 +108,19 @@ it("lists folder projects and explains why Git cleanup does not apply to them", 
   expect(screen.getByRole("heading", { name: "Notes" })).toBeTruthy();
   expect(screen.getByText("Workspace cleanup is available for Git repositories. This project is a folder.")).toBeTruthy();
   expect(screen.queryByRole("radiogroup", { name: "Delete merged workspaces of Notes" })).toBeNull();
+});
+
+it("opens the custom order registry row and keeps it connected to the shared Rust preference", async () => {
+  const view = render(<SettingsPage initialTab="appearance.customOrder" onBack={vi.fn()} />);
+  const row = view.container.querySelector('[data-setting-id="appearance.customOrder"]');
+  expect(row).not.toBeNull();
+  expect(document.activeElement).toBe(row);
+  const toggle = screen.getByRole("switch", { name: "Custom order" });
+  await waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
+  expect(mocks.saveOrder).toHaveBeenCalledWith({ custom: true });
+  act(() => mocks.listeners.get("sidebar_order_changed")!({ payload: { custom: false, sessions: ["second", "first"], projects: [], revision: 2 } }));
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
 });
