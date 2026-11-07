@@ -25,7 +25,7 @@ jobs:
   legacy-runtime-probe:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [instabox-medium, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
@@ -143,7 +143,7 @@ jobs:
   # The headless runtime a cloud workspace boots. The runner has no WebView,
   # GTK or ALSA development packages, so a GUI dependency fails the build.
   headless-serve:
-    runs-on: ubuntu-latest
+    runs-on: instabox-medium
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -194,7 +194,7 @@ jobs:
         # windows-latest is off until a Windows runner is set up: the job never
         # got a runner and left every run unfinished. Add it back here; the
         # Windows-only steps below are still in place.
-        os: [ubuntu-latest]
+        os: [instabox-medium]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
