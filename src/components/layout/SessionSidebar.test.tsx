@@ -59,6 +59,12 @@ async function boot(list: SessionEntry[]) {
 }
 
 describe("new-chat entry points", () => {
+  it("announces manual status alongside the branch row's accessible name", async () => {
+    await boot([session("here", "/repos/web", new Date().toISOString(), { manualStatus: "in_review" })]);
+    mount();
+    expect(screen.getByRole("button", { name: "main, Talk here", description: "Status: In review" })).toBeTruthy();
+  });
+
   it("opens the same composer from the sidebar plus menu and its project option without creating a session", async () => {
     await boot([session("here", "/repos/web", new Date().toISOString())]);
     mount();
@@ -476,7 +482,7 @@ describe("renaming from the sidebar", () => {
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Move to section", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {

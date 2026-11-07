@@ -307,6 +307,59 @@ describe("cloud pipeline switches saved by a newer version", () => {
 });
 
 
+describe("sidebar choices per window (PRO-164)", () => {
+  it("removes closed chat records, retaining live, newly opened and persistent windows", async () => {
+    for (const label of ["main", "floating", "chat-live", "chat-closed"]) localStorage.setItem(`raccoon.prefs.sidebar.${label}`, "{}");
+    const prefs = await import("./prefs");
+    const candidates = prefs.sidebarChatWindowLabels();
+    localStorage.setItem("raccoon.prefs.sidebar.chat-new", "{}");
+    prefs.pruneSidebarWindows(["main", "floating", "chat-live"], candidates);
+    expect(localStorage.getItem("raccoon.prefs.sidebar.chat-closed")).toBeNull();
+    for (const label of ["main", "floating", "chat-live", "chat-new"]) expect(localStorage.getItem(`raccoon.prefs.sidebar.${label}`)).not.toBeNull();
+    prefs.forgetSidebarWindow("chat-live");
+    prefs.forgetSidebarWindow("main");
+    expect(localStorage.getItem("raccoon.prefs.sidebar.chat-live")).toBeNull();
+    expect(localStorage.getItem("raccoon.prefs.sidebar.main")).not.toBeNull();
+  });
+
+  it("preserves inherited views when another window saves its first choices", async () => {
+    const legacy = { sidebarLayout: "list", sidebarFilters: { local: "unread" }, sidebarSections: { chats: "collapsed" } };
+    localStorage.setItem("raccoon.prefs", JSON.stringify(legacy));
+    const main = await import("./prefs");
+    vi.resetModules();
+    (await import("./appWindow")).setAppWindowForTest("chat-secondary");
+    const second = await import("./prefs");
+    second.setPrefs({ sidebarLayout: "status", sounds: false });
+    window.dispatchEvent(new StorageEvent("storage", { key: "raccoon.prefs", storageArea: localStorage }));
+    expect(main.getPrefs()).toMatchObject({ ...legacy, sounds: false });
+    expect(second.getPrefs().sidebarLayout).toBe("status");
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs()).toMatchObject({ ...legacy, sounds: false });
+  });
+
+  it("remembers each window independently across a reload and shared preference changes", async () => {
+    const main = await import("./prefs");
+    main.setPrefs({ sidebarLayout: "status", sidebarSort: "created", sidebarProject: "/a", sidebarFilters: { local: "needs" }, sidebarSections: { "status:local:done": "collapsed" }, sidebarShowArchived: true });
+    vi.resetModules();
+    (await import("./appWindow")).setAppWindowForTest("chat-secondary");
+    const second = await import("./prefs");
+    expect(second.getPrefs()).toMatchObject({ sidebarLayout: "simple", sidebarSort: "updated", sidebarProject: null, sidebarFilters: {}, sidebarSections: {}, sidebarShowArchived: false });
+    second.setPrefs({ sidebarLayout: "list", sidebarProject: "/b", sounds: false });
+    vi.resetModules();
+    const again = await import("./prefs");
+    expect(again.getPrefs()).toMatchObject({ sidebarLayout: "status", sidebarSort: "created", sidebarProject: "/a", sidebarFilters: { local: "needs" }, sidebarSections: { "status:local:done": "collapsed" }, sidebarShowArchived: true, sounds: false });
+    vi.resetModules();
+    (await import("./appWindow")).setAppWindowForTest("chat-secondary");
+    expect((await import("./prefs")).getPrefs()).toMatchObject({ sidebarLayout: "list", sidebarProject: "/b" });
+  });
+
+  it("ignores malformed view choices without losing shared preferences", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ sounds: false }));
+    localStorage.setItem("raccoon.prefs.sidebar.main", JSON.stringify({ sidebarSort: "random", sidebarProject: 42, sidebarLayout: "invalid", sidebarSections: [], sidebarFilters: null }));
+    expect((await import("./prefs")).getPrefs()).toMatchObject({ sounds: false, sidebarSort: "updated", sidebarProject: null, sidebarLayout: "simple", sidebarSections: {}, sidebarFilters: {} });
+  });
+});
+
 describe("dashboard preferences", () => {
   it("restores the view, sorting and hidden columns after a restart", async () => {
     const saved = { view: "table" as const, sort: { column: "pr" as const, direction: "asc" as const }, hiddenColumns: ["owner" as const, "branch" as const] };

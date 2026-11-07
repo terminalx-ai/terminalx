@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./manualStatus": "./src/manualStatus.ts",
     "./agentSettings": "./src/agentSettings.ts",
     "./codexCitations": "./src/codexCitations.ts",
     "./continuation": "./src/continuation.ts",

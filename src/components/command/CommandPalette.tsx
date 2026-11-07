@@ -1,3 +1,5 @@
+import { MANUAL_STATUSES, manualStatusLabel, normalizeManualStatus, type ManualStatus } from "@terminalx/portable/manualStatus";
+import { ManualStatusIcon } from "@/components/session/ManualStatus";
 import { conversationTitle } from "@/lib/sessions";
 import { openSectionDialog } from "@/lib/localSections";
 import {
@@ -123,6 +125,7 @@ interface FileEntry extends PaletteEntityBase {
 }
 
 interface PaletteRow {
+  manualStatus?: ManualStatus;
   id: string;
   kind: "session" | "workspace" | "project" | "file" | "command" | "smart-session" | "smart-start" | "smart-workspace";
   primary: string;
@@ -263,6 +266,8 @@ export function CommandPalette({
   const deferredQuery = useDeferredValue(query);
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
+  const [statusSessionId, setStatusSessionId] = useState<string | null>(null);
+  const [settingStatus, setSettingStatus] = useState(false);
   const [selected, setSelected] = useState(0);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
@@ -304,6 +309,7 @@ export function CommandPalette({
     if (!open) return;
     setQuery("");
     setScope("all");
+    setStatusSessionId(null);
     setFileHits([]);
     setSelected(0);
     setExpanded({});
@@ -438,6 +444,12 @@ export function CommandPalette({
       }, keymap[shortcut.id]),
     );
     const extras: CommandEntry[] = [
+      ...(selectedSession ? [indexPaletteItem({
+        id: "command:session-status", group: "commands" as const, primary: "Set status…",
+        secondary: `${selectedSession.title} · ${manualStatusLabel(selectedSession.manualStatus)}`,
+        recentAt: 25, icon: CircleDot, keepOpen: true,
+        run: () => { setStatusSessionId(selectedSession.id); setQuery(""); setSelected(0); setError(null); },
+      }, ["session backlog progress review done canceled workflow"])] : []),
       indexPaletteItem({
         id: "command:status-toggle",
         group: "commands" as const,
@@ -604,6 +616,23 @@ export function CommandPalette({
   }, [store.paletteIndex, cloudSessions, cloudProjects, store.harnesses, visibleIds, deferredQuery]);
 
   const groups = useMemo<PaletteGroup[]>(() => {
+    if (statusSessionId) {
+      const session = store.sessions.find((entry) => entry.id === statusSessionId);
+      return [{ id: "statuses", label: `Set status · ${session?.title ?? "Session"}`, rows: MANUAL_STATUSES
+        .filter((status) => manualStatusLabel(status).toLocaleLowerCase().includes(deferredQuery.toLocaleLowerCase()))
+        .map((status) => ({
+          id: `status:${status}`, kind: "command", primary: manualStatusLabel(status),
+          secondary: status === normalizeManualStatus(session?.manualStatus) ? "Current status" : "", primaryRanges: [], secondaryRanges: [], manualStatus: status,
+          closeBefore: false,
+          run: async () => {
+            if (settingStatus) return;
+            setSettingStatus(true); setError(null);
+            try { await api.setSessionStatus(statusSessionId, status); setOpen(false); }
+            catch (cause) { setError(errorMessage(cause)); }
+            finally { setSettingStatus(false); }
+          },
+        })) }];
+    }
     const settingsMatches = searchSettingsSections(deferredQuery);
     const settingsGroup: PaletteGroup = {
       id: "settings",
@@ -709,7 +738,7 @@ export function CommandPalette({
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
       ...(settingsFirst ? [settingsGroup, commandGroup] : [commandGroup, settingsGroup]),
     ];
-  }, [scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
+  }, [statusSessionId, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
 
   const renderedGroups = useMemo(() => {
     let offset = 0;
@@ -760,6 +789,8 @@ export function CommandPalette({
       event.preventDefault();
       const row = selectableRows[selected];
       if (row && !startingWorkItem) choose(row);
+    } else if (event.key === "Backspace" && statusSessionId && !query) {
+      setStatusSessionId(null);
     } else if (event.key === "Backspace" && scope !== "all" && !query) {
       // Backspace on an empty search returns to every group.
       setScope("all");
@@ -900,7 +931,7 @@ function PaletteResultRow({
       )}
     >
       <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-veil-raised text-muted-foreground">
-        {busy ? <Loader2 className="size-3.5 animate-spin" /> : row.agentId ? <AgentMark id={row.agentId} className="size-4" decorative /> : row.project ? <ProjectGlyph project={row.project} /> : <Icon className="size-4" />}
+        {busy ? <Loader2 className="size-3.5 animate-spin" /> : row.manualStatus ? <ManualStatusIcon status={row.manualStatus} /> : row.agentId ? <AgentMark id={row.agentId} className="size-4" decorative /> : row.project ? <ProjectGlyph project={row.project} /> : <Icon className="size-4" />}
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[13px] font-medium text-foreground">

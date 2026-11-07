@@ -108,10 +108,15 @@ impl MobileRuntime {
         let _ = self.codex_models.set(cache);
     }
 
-    pub(super) fn configure(&self, sink: Arc<dyn EventSink>) -> Result<()> {
-        self.sink
-            .set(sink)
-            .map_err(|_| anyhow!("mobile runtime was already configured"))
+    pub(super) fn configure(self: &Arc<Self>, sink: Arc<dyn EventSink>) -> Result<()> {
+        self.sink.set(sink.clone()).map_err(|_| anyhow!("mobile runtime was already configured"))?;
+        for event in ["tab_status", "session_created", "session_updated", crate::session_ops::SESSION_DELETED_EVENT] {
+            let runtime = Arc::downgrade(self);
+            sink.listen(event, Box::new(move |_| {
+                if let Some(runtime) = runtime.upgrade() { runtime.broadcast_sessions_changed(); }
+            }));
+        }
+        Ok(())
     }
 
     fn register_client(&self, id: &str, outbound: mpsc::Sender<Value>, overflowed: Arc<std::sync::atomic::AtomicBool>) {
@@ -613,6 +618,7 @@ fn session_summaries() -> Result<Value> {
             "id": session.id,
             "kind": if quick { "quick" } else { "project" },
             "title": session.title,
+            "manualStatus": session.manual_status,
             "project": project,
             "worktree": worktree,
             "modified": summary.map(|row| row.updated_at.clone()).unwrap_or(session.modified),
@@ -1690,6 +1696,30 @@ fn collapse_notification_text(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::events::TurnStatus;
+
+    #[test]
+    fn manual_status_changes_notify_the_phone_and_change_its_summary() {
+        let _home = store::temp_home();
+        let session: SessionEntry = serde_json::from_value(json!({
+            "id":"manual", "projectPath":"/repo", "cwd":"/repo", "title":"Review", "created":"2026-01-01", "modified":"2026-01-01"
+        })).unwrap();
+        index::save(&[session]).unwrap();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(16));
+        let runtime = Arc::new(MobileRuntime::new());
+        runtime.configure(sink.clone()).unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        runtime.register_client("phone", tx, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let before = session_summaries().unwrap();
+        assert!(before["sessions"][0]["manualStatus"].is_null());
+        let patch = crate::session_ops::SessionPatch { manual_status: Some(index::ManualStatus::InReview), ..Default::default() };
+        let updated = crate::session_ops::update_session_meta("manual", &patch).unwrap();
+        sink.emit("session_updated", &updated);
+        assert_eq!(rx.try_recv().unwrap(), json!({"method":"sessions.changed"}));
+        let after = session_summaries().unwrap();
+        assert_eq!(after["sessions"][0]["manualStatus"], "in_review");
+        // Conditional summary reads must also see the metadata change.
+        assert_ne!(conditional(before, None).unwrap()["version"], conditional(after, None).unwrap()["version"]);
+    }
 
     fn device(provenance: DeviceProvenance, bound_user_id: Option<&str>) -> DeviceEntry {
         DeviceEntry {
