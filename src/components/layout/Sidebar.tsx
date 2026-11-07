@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { ProjectRail } from "./ProjectRail";
+import { AnnouncementCard } from "@/components/announcements/AnnouncementCard";
 import { StarReminder } from "@/components/ui/StarReminder";
 
 /** How narrow and how wide the sidebar can be dragged. */
@@ -80,6 +81,7 @@ export function Sidebar({
         />
       </div>
       {/* Sidebar space never reduces the height available for input or approvals. */}
+      <AnnouncementCard />
       <StarReminder />
       <div
         role="separator"

@@ -60,6 +60,7 @@ const ACTIONS = [
   { id: "app.previousSession", label: "Previous session", group: "App", keys: ["mod+alt+up"], menu: { section: "go", order: 4, label: "Previous Session" } },
   { id: "app.docs", label: "Documentation", group: "App", keys: [], menu: { section: "help", order: 0, label: "Documentation" } },
   { id: "app.shortcuts", label: "Keyboard shortcuts", group: "App", keys: [], menu: { section: "help", order: 1, label: "Keyboard Shortcuts" } },
+  { id: "app.introduction", label: "Introduction", group: "App", keys: [], menu: { section: "help", order: 3, label: "Introduction" } },
   { id: "app.reportIssue", label: "Report an issue", group: "App", keys: [], menu: { section: "help", order: 2, label: "Report an Issue…" } },
 
   { id: "app.commandPalette", label: "Command palette", group: "App", keys: ["mod+k"] },

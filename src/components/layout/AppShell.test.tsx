@@ -2,6 +2,7 @@ import "@testing-library/dom";
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { finishIntro } from "@/lib/intro";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 
 vi.mock("@/components/session/LocalSectionDialogs", () => ({ LocalSectionDialogs: () => null }));
@@ -46,6 +47,7 @@ const { sessionStore } = vi.hoisted(() => ({
 
 vi.mock("@/lib/sessions", () => ({
   bootSessions: vi.fn(),
+  openWelcome: vi.fn(() => { sessionStore.view = "welcome"; sessionStore.selectedSessionId = null; }),
   openHome: vi.fn(() => { sessionStore.view = "home"; sessionStore.selectedSessionId = null; }),
   openAgents: vi.fn(),
   openAutomations: vi.fn(),
@@ -90,6 +92,8 @@ vi.mock("@/lib/cloudConnections", async (importOriginal) => ({
 }));
 vi.mock("@/lib/models", () => ({ loadModels: vi.fn() }));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
+const announcementChecks = vi.hoisted(() => ({ stop: vi.fn(), start: vi.fn() }));
+vi.mock("@/lib/announcements", () => ({ startAnnouncementChecks: () => { announcementChecks.start(); return announcementChecks.stop; } }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn() }));
 vi.mock("@/lib/cloudCatalog", () => ({ bootCloudCatalog: vi.fn() }));
 vi.mock("@/lib/cloudSelection", () => ({ bootCloudSelection: vi.fn() }));
@@ -156,6 +160,9 @@ const { closeAllEditors, openFile } = await import("@/lib/editors");
 const { claimCloudMirrorOwner, cloudMirrorState, resetCloudMirrors } = await import("@/lib/cloudMirror");
 
 beforeEach(() => {
+  finishIntro();
+  announcementChecks.start.mockClear();
+  announcementChecks.stop.mockClear();
   sessionStore.projects = [{ path: "/repo", name: "Raccoon" }];
   sessionStore.lastProject = "/repo";
   sessionStore.selectedProject = "/repo";
@@ -470,4 +477,38 @@ describe("welcome routing", () => {
     expect(screen.getByTestId(view)).toBeTruthy();
     expect(screen.queryByTestId("welcome")).toBeNull();
   });
+});
+
+
+it("shows the intro before the zero-project start screen and restores the start actions on completion", () => {
+  localStorage.removeItem("terminalx.intro.v1");
+  window.dispatchEvent(new StorageEvent("storage", { key: "terminalx.intro.v1" }));
+  sessionStore.view = "welcome";
+  sessionStore.projects = [];
+  render(<AppShell />);
+  expect(screen.getByTestId("welcome")).toBeTruthy();
+  expect(screen.queryByTestId("start-screen")).toBeNull();
+  act(finishIntro);
+  expect(screen.getByTestId("start-screen")).toBeTruthy();
+});
+
+it("replays the intro through Help from Settings even without a project", async () => {
+  sessionStore.projects = [];
+  const view = render(<AppShell />);
+  act(() => shortcuts.get("app.settings")!());
+  await screen.findByTestId("settings-page");
+  act(() => shortcuts.get("app.introduction")!());
+  view.rerender(<AppShell />);
+  expect(screen.queryByTestId("settings-page")).toBeNull();
+  expect(screen.getByTestId("welcome")).toBeTruthy();
+  expect(JSON.parse(localStorage.getItem("terminalx.intro.v1")!).completed).toBe(true);
+});
+
+it("owns announcement polling while the sidebar is hidden and stops on unmount", () => {
+  setPrefs({ sidebarOpen: false });
+  const view = render(<AppShell />);
+  expect(screen.queryByTestId("sidebar")).toBeNull();
+  expect(announcementChecks.start).toHaveBeenCalledOnce();
+  view.unmount();
+  expect(announcementChecks.stop).toHaveBeenCalledOnce();
 });

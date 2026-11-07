@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { finishIntro } from "@/lib/intro";
 import { setPrefs } from "@/lib/prefs";
 import { keycaps } from "@/lib/shortcuts";
 import { WelcomeScreen } from "./WelcomeScreen";
@@ -12,7 +13,7 @@ vi.mock("@tauri-apps/api/app", () => ({ getName: async () => mocks.name }));
 vi.mock("@/lib/sessions", () => ({ openNewSession: mocks.openNewSession, useSessionStore: () => ({ sessions: mocks.sessions }) }));
 vi.mock("@/lib/projectStart", () => ({ openLocalProject: mocks.openLocalProject }));
 
-beforeEach(() => { mocks.sessions = []; mocks.openLocalProject.mockResolvedValue(null); setPrefs({ shortcuts: {} }); });
+beforeEach(() => { finishIntro(); mocks.sessions = []; mocks.openLocalProject.mockResolvedValue(null); setPrefs({ shortcuts: {} }); });
 afterEach(cleanup);
 
 it.each(["TerminalX", "TerminalX Dev", "TerminalX Legacy"])("uses the build name %s", async (name) => {

@@ -7,9 +7,17 @@ import { errorMessage } from "@/lib/api";
 import { openNewSession, useSessionStore } from "@/lib/sessions";
 import { keycaps, shortcutAction, useKeymap, type ShortcutId } from "@/lib/shortcuts";
 
+import { useIntro } from "@/lib/intro";
+import { IntroSlides } from "./IntroSlides";
+
 const SHORTCUTS: ShortcutId[] = ["app.newSession", "app.commandPalette", "app.toggleSidebar", "app.quickChat"];
 
 export function WelcomeScreen() {
+  const intro = useIntro();
+  return intro.visible ? <IntroSlides /> : <WelcomeActions />;
+}
+
+function WelcomeActions() {
   const store = useSessionStore();
   const keymap = useKeymap();
   const [error, setError] = useState<string | null>(null);

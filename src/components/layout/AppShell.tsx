@@ -68,6 +68,9 @@ import { EditorSplit } from "@/components/editor/EditorSplit";
 import { openLocalProject } from "@/lib/projectStart";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { REPO_URL, repoFile } from "@/lib/repo";
+import { replayIntro, useIntro } from "@/lib/intro";
+import { startAnnouncementChecks } from "@/lib/announcements";
+import { openWelcome } from "@/lib/sessions";
 import { stepVisibleSession } from "@/lib/sessionNavigation";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
@@ -110,6 +113,7 @@ export function AppShell() {
 
   // An update is looked for in the background, so it is seen without going to Settings for it.
   useEffect(() => startUpdateChecks(), []);
+  useEffect(() => startAnnouncementChecks(), []);
   useEffect(() => {
     void subscribeAgentEvents();
     void subscribeTabPty();
@@ -199,6 +203,7 @@ export function AppShell() {
   useShortcut("app.openRecent", () => setPaletteOpen(true));
   useShortcut("app.nextSession", () => { setSettingsOpen(false); stepVisibleSession(1); });
   useShortcut("app.previousSession", () => { setSettingsOpen(false); stepVisibleSession(-1); });
+  useShortcut("app.introduction", () => { setSettingsOpen(false); replayIntro(); openWelcome(); });
   useShortcut("app.docs", () => { void openUrl(repoFile("README.md")).catch(console.error); });
   useShortcut("app.reportIssue", () => { void openUrl(`${REPO_URL}/issues/new`).catch(console.error); });
   useShortcut("app.toggleSidebar", toggleSidebar);
@@ -359,6 +364,7 @@ function UnselectedWorkspace({
   const [issueProjectPath, setIssueProjectPath] = useState<string | null>(null);
 
   const preset = store.newSessionPreset;
+  const intro = useIntro();
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject ?? store.lastProject;
   const newProject = store.projects.find((project) => project.path === wanted) ?? store.projects[0] ?? null;
   const issueProject = store.projects.find((project) => project.path === issueProjectPath) ?? null;
@@ -437,6 +443,8 @@ function UnselectedWorkspace({
                 projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
                 initialAgent={store.skillsFilter?.agent ?? null}
               />
+            ) : (startScreen || view === "welcome") && intro.visible ? (
+              <WelcomeScreen />
             ) : startScreen ? (
               <StartScreen onOpenSettings={onOpenSettings} />
             ) : view === "welcome" ? (

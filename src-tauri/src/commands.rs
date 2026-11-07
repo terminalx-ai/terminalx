@@ -21,6 +21,13 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 }
 
 
+/// Public release information. The shared native client applies the privacy policy.
+#[tauri::command]
+pub async fn announcements_current(app_version: String) -> CmdResult<Option<crate::announcements::Announcement>> {
+    tauri::async_runtime::spawn_blocking(move || crate::announcements::current(&app_version))
+        .await.map_err(err)?.map_err(err)
+}
+
 // ------------------------------------------------------------------ account
 
 #[tauri::command]

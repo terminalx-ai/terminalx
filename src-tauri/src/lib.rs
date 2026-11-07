@@ -7,6 +7,8 @@
 
 #[cfg(feature = "desktop")]
 mod account;
+#[cfg(feature = "desktop")]
+mod announcements;
 mod agent_data;
 mod project_overview;
 #[cfg(feature = "desktop")]
@@ -419,6 +421,7 @@ pub fn run() {
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
             commands::account_status,
+            commands::announcements_current,
             commands::account_refresh_roles,
             commands::account_sign_in,
             commands::organization_console_open,

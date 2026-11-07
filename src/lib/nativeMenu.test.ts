@@ -22,7 +22,7 @@ describe("native menus and the action registry", () => {
       ["file", ["app.newSession", "app.newWindow", "app.addProject", "app.openRecent", "session.closeTab", "app.closeWindow"]],
       ["view", ["app.toggleSidebar", "app.togglePanel", "session.latestShell", "session.toggleTerminalView", "app.zoomIn", "app.zoomOut", "app.zoomReset", "app.fullscreen"]],
       ["go", ["app.agentDashboard", "app.issues", "app.automations", "app.nextSession", "app.previousSession"]],
-      ["help", ["app.docs", "app.shortcuts", "app.reportIssue"]],
+      ["help", ["app.docs", "app.shortcuts", "app.reportIssue", "app.introduction"]],
     ]);
     const ids = leaves(groups.flatMap((group) => group.items)).map((item) => item.id.split(":").at(-1));
     expect(ids.slice().sort()).toEqual(SHORTCUT_ACTIONS.filter((action) => action.menu).map((action) => action.id).sort());

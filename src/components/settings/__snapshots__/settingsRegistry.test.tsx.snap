@@ -120,6 +120,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "shortcuts.app.previousSession",
   "shortcuts.app.docs",
   "shortcuts.app.shortcuts",
+  "shortcuts.app.introduction",
   "shortcuts.app.reportIssue",
   "shortcuts.app.commandPalette",
   "shortcuts.app.home",
