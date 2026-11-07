@@ -92,6 +92,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     resultsRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
   }, [selected, query]);
 
+
   useHotkey("escape", () => {
     if (hasEscapeOverlay(resultsRef.current)) return false;
     if (query) {
@@ -113,21 +114,56 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     changeQuery("");
     setSelectionRequest((request) => request + 1);
   };
+  // The project sidebar's rows: 32px, edge to edge with square corners, text 16px in.
   const navClass = (selected: boolean) => cn(
-    "w-full min-w-0 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-    selected ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
+    "-mx-2 flex h-8 w-[calc(100%+1rem)] min-w-0 items-center px-4 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
+    selected ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-selected/50 hover:text-foreground",
   );
 
   return (
-    <main className="flex h-full min-w-0 flex-1 flex-col bg-background" aria-label="Settings">
-      <header data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-[78px] pr-3">
-        <Button variant="ghost" size="icon-sm" aria-label="Back to previous page" onClick={onBack}><ArrowLeft /></Button>
-        <h1 className="px-1 text-sm font-medium">Settings</h1>
-        <Button variant="outline" size="icon-sm" aria-label="Close" onClick={onBack} className="ml-auto shrink-0 bg-raised hover:bg-[color-mix(in_oklab,var(--surface-raised),var(--foreground)_8%)] active:bg-[color-mix(in_oklab,var(--surface-raised),var(--foreground)_14%)]"><X /></Button>
-      </header>
-      <div className="shrink-0 border-b border-hairline px-4 py-3">
-        <div className="mx-auto flex max-w-[48rem] items-center gap-2 rounded-md bg-well px-3 hairline focus-within:ring-1 focus-within:ring-ring/40">
-          <Search className="size-4 shrink-0 text-faint" />
+    // The settings menu stands where the project sidebar stands, at its width and in its row style, so opening Settings
+    // reads as the sidebar changing what it lists rather than a different screen.
+    <main className="flex h-full min-w-0 flex-1 bg-background" aria-label="Settings">
+      <aside className="flex h-full min-h-0 w-(--sidebar-w) shrink-0 flex-col border-r border-hairline">
+        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 pl-[78px] pr-2">
+          <Button variant="ghost" size="icon-sm" aria-label="Back to previous page" onClick={onBack}><ArrowLeft /></Button>
+          <h1 className="px-1 text-sm font-medium">Settings</h1>
+        </div>
+        <nav aria-label="Settings sections" className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pt-2 scrollbar-thin">
+          {SETTINGS_GROUPS.map((group, index) => (
+            <div key={group} role="group" aria-labelledby={`settings-group-${index}`}>
+              <div id={`settings-group-${index}`} className="flex h-6 items-center px-2 text-[12px] text-faint">{group}</div>
+              {group === "Repositories" ? (
+                repositories.length ? repositories.map((repository, repositoryIndex) => {
+                  const isExpanded = expanded.has(repository.path);
+                  const selected = section === "repositories" && projectPath === repository.path;
+                  const childrenId = `settings-repository-${repositoryIndex}`;
+                  return <div key={repository.path}>
+                    <button type="button" aria-expanded={isExpanded} aria-controls={childrenId} title={repository.path} className={cn(navClass(false), "flex items-center gap-1.5")} onClick={() => setExpanded((previous) => {
+                      const next = new Set(previous);
+                      if (next.has(repository.path)) next.delete(repository.path); else next.add(repository.path);
+                      return next;
+                    })}>
+                      <ChevronRight aria-hidden className={cn("size-3 shrink-0 transition-transform", isExpanded && "rotate-90")} />
+                      <span className="truncate">{repository.name}</span>
+                    </button>
+                    <div id={childrenId} hidden={!isExpanded} className="pl-4">
+                      <button type="button" aria-current={selected ? "page" : undefined} className={navClass(selected)} onClick={() => choose("repositories", repository.path)}>Workspace cleanup</button>
+                    </div>
+                  </div>;
+                }) : <p className="px-2 py-2 text-xs text-faint">No repositories added.</p>
+              ) : Object.entries(SETTINGS_SECTIONS).filter(([, entry]) => entry.group === group).map(([key, entry]) => (
+                <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => choose(key as SettingsSection)} className={navClass(section === key)}>{entry.title}</button>
+              ))}
+            </div>
+          ))}
+        </nav>
+      </aside>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Search sits in the top bar itself, not a bar of its own. */}
+        <header data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-2 border-b border-hairline px-3">
+          <div className="flex h-7 w-full max-w-[24rem] items-center gap-2 rounded-md bg-well px-2.5 hairline focus-within:ring-1 focus-within:ring-ring/40">
+          <Search className="size-3.5 shrink-0 text-faint" />
           <input
             ref={inputRef}
             role="combobox"
@@ -151,41 +187,13 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                 choose(results[selected].item.tab);
               }
             }}
-            className="h-9 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
+            className="h-7 min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-faint"
           />
-          {query && <Button variant="ghost" size="icon-sm" aria-label="Clear settings search" onClick={() => { changeQuery(""); inputRef.current?.focus(); }}><X /></Button>}
-        </div>
-      </div>
-      <div className="flex min-h-0 flex-1">
-        <nav aria-label="Settings sections" className="flex w-52 shrink-0 flex-col gap-4 overflow-y-auto border-r border-hairline p-3 scrollbar-thin">
-          {SETTINGS_GROUPS.map((group, index) => (
-            <div key={group} role="group" aria-labelledby={`settings-group-${index}`}>
-              <div id={`settings-group-${index}`} className="px-2.5 pb-1 text-[11px] font-medium text-faint">{group}</div>
-              {group === "Repositories" ? (
-                repositories.length ? repositories.map((repository, repositoryIndex) => {
-                  const isExpanded = expanded.has(repository.path);
-                  const selected = section === "repositories" && projectPath === repository.path;
-                  const childrenId = `settings-repository-${repositoryIndex}`;
-                  return <div key={repository.path}>
-                    <button type="button" aria-expanded={isExpanded} aria-controls={childrenId} title={repository.path} className={cn(navClass(false), "flex items-center gap-1.5")} onClick={() => setExpanded((previous) => {
-                      const next = new Set(previous);
-                      if (next.has(repository.path)) next.delete(repository.path); else next.add(repository.path);
-                      return next;
-                    })}>
-                      <ChevronRight aria-hidden className={cn("size-3 shrink-0 transition-transform", isExpanded && "rotate-90")} />
-                      <span className="truncate">{repository.name}</span>
-                    </button>
-                    <div id={childrenId} hidden={!isExpanded} className="pl-4">
-                      <button type="button" aria-current={selected ? "page" : undefined} className={navClass(selected)} onClick={() => choose("repositories", repository.path)}>Workspace cleanup</button>
-                    </div>
-                  </div>;
-                }) : <p className="px-2.5 py-2 text-xs text-faint">No repositories added.</p>
-              ) : Object.entries(SETTINGS_SECTIONS).filter(([, entry]) => entry.group === group).map(([key, entry]) => (
-                <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => choose(key as SettingsSection)} className={navClass(section === key)}>{entry.title}</button>
-              ))}
-            </div>
-          ))}
-        </nav>
+          {query && <Button variant="ghost" size="icon-sm" aria-label="Clear settings search" className="-mr-1.5 size-6" onClick={() => { changeQuery(""); inputRef.current?.focus(); }}><X /></Button>}
+          </div>
+          <Button variant="ghost" size="icon-sm" aria-label="Close" onClick={onBack} className="ml-auto shrink-0"><X /></Button>
+        </header>
+        <div className="flex min-h-0 flex-1">
         <section ref={content} className="min-w-0 flex-1 overflow-y-auto scrollbar-thin" aria-labelledby={searching ? "settings-results-title" : "settings-section-title"}>
           {searching && <div className="mx-auto w-full max-w-[48rem] p-6">
             <h2 id="settings-results-title" className="mb-3 text-sm font-medium">Settings sections</h2>
@@ -213,6 +221,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, row: target, openRequest })}
           </div>
         </section>
+        </div>
       </div>
     </main>
   );
