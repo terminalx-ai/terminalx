@@ -1,10 +1,33 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { FolderOpen, RotateCcw, ZoomIn, ZoomOut } from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { fs, type MediaFile } from "@/lib/api";
 import type { EditorEntry } from "@/lib/editors";
 import { changedSince, fileErrorText, useFileSource, type FileState } from "@/lib/workspaceFiles";
+
+const PdfSurface = lazy(() => import("./PdfSurface"));
+
+/** An immutable revision, shared by the before/after diff surfaces. SVG stays
+ * in an image document: its scripts, links and external resources never run. */
+export function MediaPreview({ data, svg, mime, name }: { data?: string; svg?: string; mime: string; name: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setError(null);
+    setUrl(null);
+    if (mime === "application/pdf") return;
+    try {
+      const content = svg ?? Uint8Array.from(atob(data ?? ""), (c) => c.charCodeAt(0));
+      const next = URL.createObjectURL(new Blob([content], { type: mime }));
+      setUrl(next);
+      return () => URL.revokeObjectURL(next);
+    } catch { setError("The media revision could not be decoded."); }
+  }, [data, svg, mime]);
+  if (error) return <p role="alert" className="p-3 text-xs text-destructive">Cannot preview {name}: {error}</p>;
+  if (mime === "application/pdf") return <Suspense fallback={<p role="status" className="p-3 text-xs">Loading PDF viewer…</p>}><PdfSurface data={data ?? ""} name={name} /></Suspense>;
+  return url ? <ImageSurface key={url} src={url} name={name} onError={() => setError("The image format is unsupported or the file is damaged.")} /> : <p role="status" className="p-3 text-xs">Loading {name}…</p>;
+}
 
 /** A media tab never mounts CodeMirror or registers a saveable buffer. */
 export function MediaPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
@@ -186,7 +209,7 @@ function ImageSurface({ src, name, onError }: { src: string; name: string; onErr
     setZoom((z) => Math.max(0.05, Math.min(8, (z ?? fit) * factor)));
   };
   return <>
-    <div className="flex h-8 shrink-0 items-center gap-1 border-b border-hairline px-2 text-xs">
+    <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-1 border-b border-hairline px-2 py-1 text-xs">
       <Button variant="ghost" size="xs" onClick={() => { setZoom(null); host.current?.scrollTo(0, 0); }}>Fit</Button>
       <Button variant="ghost" size="xs" onClick={() => setZoom(1)}>Actual size</Button>
       <Button variant="ghost" size="icon-xs" aria-label="Zoom out" disabled={!size} onClick={() => changeZoom(1 / 1.25)}><ZoomOut /></Button>

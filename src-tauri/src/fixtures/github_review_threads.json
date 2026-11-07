@@ -1,0 +1,250 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "url": "https://github.com/cli/cli/pull/14920",
+        "headRefOid": "2cbd5515878542a5125ec412045d2b3e365659b6",
+        "baseRefOid": "eeb44bc432c0107de002dadd34a61b4e2bd15882",
+        "reviewThreads": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMS0wM1QyMToxNToxNFrOs1W0DA=="
+          },
+          "nodes": [
+            {
+              "id": "PRRT_kwDODKw3uc6zVbM6",
+              "path": "git/client.go",
+              "line": 177,
+              "originalLine": 177,
+              "startLine": 174,
+              "originalStartLine": 174,
+              "diffSide": "RIGHT",
+              "startDiffSide": "RIGHT",
+              "isOutdated": false,
+              "isResolved": false,
+              "viewerCanResolve": false,
+              "viewerCanUnresolve": false,
+              "viewerCanReply": true,
+              "comments": {
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMS0wM1QyMToxNToxMVrPAAAAAQneMjY="
+                },
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDODKw3uc8AAAABCd4yNg",
+                    "author": {
+                      "login": "copilot-pull-request-reviewer"
+                    },
+                    "body": "Recorded review comment (text redacted).",
+                    "url": "https://github.com/cli/cli/pull/14920#discussion_r4460524086",
+                    "createdAt": "2026-11-03T21:15:11Z",
+                    "diffHunk": "@@ -138,28 +148,46 @@ func CredentialPatternFromHost(host string) CredentialPattern {\n recorded code\n recorded code\n recorded code\n-recorded code\n-recorded code\n+recorded code\n+recorded code\n recorded code\n recorded code\n recorded code\n recorded code\n recorded code\n recorded code\n recorded code\n+recorded code\n+recorded code\n recorded code\n-recorded code\n+recorded code\n+recorded code\n recorded code\n-recorded code\n+recorded code\n recorded code\n recorded code\n-recorded code\n+recorded code\n recorded code\n recorded code\n recorded code\n recorded code\n-recorded code\n-recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDODKw3uc6zVbOA",
+              "path": "internal/identity/credentials.go",
+              "line": 25,
+              "originalLine": 25,
+              "startLine": 23,
+              "originalStartLine": 23,
+              "diffSide": "RIGHT",
+              "startDiffSide": "RIGHT",
+              "isOutdated": false,
+              "isResolved": false,
+              "viewerCanResolve": false,
+              "viewerCanUnresolve": false,
+              "viewerCanReply": true,
+              "comments": {
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMS0wM1QyMToxNToxMlrPAAAAAQneMpw="
+                },
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDODKw3uc8AAAABCd4ynA",
+                    "author": {
+                      "login": "copilot-pull-request-reviewer"
+                    },
+                    "body": "Recorded review comment (text redacted).",
+                    "url": "https://github.com/cli/cli/pull/14920#discussion_r4460524188",
+                    "createdAt": "2026-11-03T21:15:12Z",
+                    "diffHunk": "@@ -0,0 +1,44 @@\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDODKw3uc6zVbOr",
+              "path": "pkg/cmd/root/account.go",
+              "line": 98,
+              "originalLine": 98,
+              "startLine": 98,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "startDiffSide": null,
+              "isOutdated": false,
+              "isResolved": false,
+              "viewerCanResolve": false,
+              "viewerCanUnresolve": false,
+              "viewerCanReply": true,
+              "comments": {
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMS0wM1QyMToxNToxMlrPAAAAAQneMt0="
+                },
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDODKw3uc8AAAABCd4y3Q",
+                    "author": {
+                      "login": "copilot-pull-request-reviewer"
+                    },
+                    "body": "Recorded review comment (text redacted).",
+                    "url": "https://github.com/cli/cli/pull/14920#discussion_r4460524253",
+                    "createdAt": "2026-11-03T21:15:12Z",
+                    "diffHunk": "@@ -0,0 +1,162 @@\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDODKw3uc6zVbPG",
+              "path": "pkg/cmd/root/account.go",
+              "line": 119,
+              "originalLine": 119,
+              "startLine": 117,
+              "originalStartLine": 117,
+              "diffSide": "RIGHT",
+              "startDiffSide": "RIGHT",
+              "isOutdated": false,
+              "isResolved": false,
+              "viewerCanResolve": false,
+              "viewerCanUnresolve": false,
+              "viewerCanReply": true,
+              "comments": {
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMS0wM1QyMToxNToxM1rPAAAAAQneMws="
+                },
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDODKw3uc8AAAABCd4zCw",
+                    "author": {
+                      "login": "copilot-pull-request-reviewer"
+                    },
+                    "body": "Recorded review comment (text redacted).",
+                    "url": "https://github.com/cli/cli/pull/14920#discussion_r4460524299",
+                    "createdAt": "2026-11-03T21:15:13Z",
+                    "diffHunk": "@@ -0,0 +1,162 @@\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDODKw3uc6zVbPY",
+              "path": "pkg/cmd/root/account.go",
+              "line": 121,
+              "originalLine": 121,
+              "startLine": 121,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "startDiffSide": null,
+              "isOutdated": false,
+              "isResolved": false,
+              "viewerCanResolve": false,
+              "viewerCanUnresolve": false,
+              "viewerCanReply": true,
+              "comments": {
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMS0wM1QyMToxNToxM1rPAAAAAQneMyw="
+                },
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDODKw3uc8AAAABCd4zLA",
+                    "author": {
+                      "login": "copilot-pull-request-reviewer"
+                    },
+                    "body": "Recorded review comment (text redacted).",
+                    "url": "https://github.com/cli/cli/pull/14920#discussion_r4460524332",
+                    "createdAt": "2026-11-03T21:15:13Z",
+                    "diffHunk": "@@ -0,0 +1,162 @@\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDODKw3uc6zVbPy",
+              "path": "pkg/cmd/root/account.go",
+              "line": 152,
+              "originalLine": 152,
+              "startLine": 150,
+              "originalStartLine": 150,
+              "diffSide": "RIGHT",
+              "startDiffSide": "RIGHT",
+              "isOutdated": false,
+              "isResolved": false,
+              "viewerCanResolve": false,
+              "viewerCanUnresolve": false,
+              "viewerCanReply": true,
+              "comments": {
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMS0wM1QyMToxNToxM1rPAAAAAQneM10="
+                },
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDODKw3uc8AAAABCd4zXQ",
+                    "author": {
+                      "login": "copilot-pull-request-reviewer"
+                    },
+                    "body": "Recorded review comment (text redacted).",
+                    "url": "https://github.com/cli/cli/pull/14920#discussion_r4460524381",
+                    "createdAt": "2026-11-03T21:15:13Z",
+                    "diffHunk": "@@ -0,0 +1,162 @@\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDODKw3uc6zVbQM",
+              "path": "pkg/cmd/root/account.go",
+              "line": 158,
+              "originalLine": 158,
+              "startLine": 158,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "startDiffSide": null,
+              "isOutdated": false,
+              "isResolved": false,
+              "viewerCanResolve": false,
+              "viewerCanUnresolve": false,
+              "viewerCanReply": true,
+              "comments": {
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMS0wM1QyMToxNToxNFrPAAAAAQneM5I="
+                },
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDODKw3uc8AAAABCd4zkg",
+                    "author": {
+                      "login": "copilot-pull-request-reviewer"
+                    },
+                    "body": "Recorded review comment (text redacted).",
+                    "url": "https://github.com/cli/cli/pull/14920#discussion_r4460524434",
+                    "createdAt": "2026-11-03T21:15:14Z",
+                    "diffHunk": "@@ -0,0 +1,162 @@\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code\n+recorded code"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

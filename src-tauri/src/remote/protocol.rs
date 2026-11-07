@@ -187,6 +187,7 @@ pub const METHODS: &[Method] = &[
     method("git.reviewRange", "git/1", Participate, false),
     method("git.changesBetween", "git/1", Participate, false),
     method("git.fileContents", "git/1", Participate, false),
+    method("git.mediaContent", "git/1", Participate, false),
     method("git.log", "git/1", Participate, false),
     method("git.branches", "git/1", Participate, false),
     method("git.prs", "git/1", Participate, false),
