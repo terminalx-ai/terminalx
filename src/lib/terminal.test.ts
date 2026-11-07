@@ -21,8 +21,6 @@ async function loadTerminalStore() {
 }
 
 beforeEach(() => {
-  // Reset persisted selections as well as modules: each test starts a new window.
-  localStorage.clear();
   vi.clearAllMocks();
   // Module resets restore saved selections; each test starts with a fresh desktop.
   localStorage.removeItem("terminalx:selected-tabs:v1");
