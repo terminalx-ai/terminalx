@@ -1,3 +1,4 @@
+import { reviewFileReader } from "./reviewThreads";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
@@ -49,6 +50,8 @@ export interface GitSource {
   abortMerge?(merge: UnfinishedMerge): Promise<void>;
   ghAvailable(): Promise<boolean>;
   prs(branch: string): Promise<PullRequest[]>;
+  /** Review threads through this source's GitHub credentials, when supported. */
+  reviewThreads?(url: string): import("./reviewThreads").ReviewThreadAccess;
   /** Durable transport locator, separate from the repository/PR URL identity. */
   prScope?: PrScope;
   prAccess?(association: PrAssociation): {
@@ -90,6 +93,12 @@ export function localGitSource(cwd: string): GitSource {
     abortMerge: (merge) => git.abortMerge(cwd, merge.head, merge.mergeHead),
     ghAvailable: () => gh.available(),
     prs: (branch) => gh.list(cwd, branch),
+    reviewThreads: (url) => ({
+      read: () => gh.reviewThreads(url),
+      file: reviewFileReader((snapshot) => gh.reviewFiles(url, snapshot.headOid, snapshot.baseOid)),
+      resolve: (id, resolved) => gh.resolveReview(url, id, resolved),
+      reply: (id, body) => gh.replyReview(url, id, body),
+    }),
     prScope: { kind: "local", cwd },
     prAccess: (association) => {
       if (association.scope.kind !== "local") throw new Error("Reconnect this PR's cloud workspace to refresh it.");
