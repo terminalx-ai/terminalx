@@ -10,6 +10,7 @@ import { RepositoriesTab } from "./RepositoriesTab";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
+import { EnvironmentSettings } from "./EnvironmentSettings";
 
 interface SectionContext {
   onOpenSkills?: () => void;
@@ -26,6 +27,7 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   appearance: ({ onOpenUsage }) => <AppearanceTab onOpenUsage={onOpenUsage} />,
   organizations: ({ row, openRequest }) => <OrganizationsTab initialRow={row} openRequest={openRequest} />,
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} />,
+  environment: () => <EnvironmentSettings />,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
   repositories: ({ projectPath, row }) => <RepositoriesTab projectPath={projectPath} row={row} />,
