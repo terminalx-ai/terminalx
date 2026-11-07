@@ -44,6 +44,7 @@ const share = (fields: Partial<CloudWorkspaceShare> = {}): CloudWorkspaceShare =
 let listed: CloudWorkspaceShares;
 
 beforeEach(() => {
+  account.status = { identity: { organizationId: "org-1", email: "me@example.com" } };
   listed = { shares: [share()], you: { role: "manager", canApprove: true, canManageShares: true } };
   mocks.shares.mockReset().mockImplementation(async () => listed);
   mocks.put.mockReset().mockImplementation(async (_ws: string, userId: string, role: string, canApprove: boolean) => {
@@ -234,7 +235,7 @@ describe("share dialog", () => {
     expect(yourAccessText(manager, "owner")).toMatch(/^Owner \(/);
     expect(yourAccessText(manager, "admin")).toMatch(/^Admin \(/);
     // Not known which: neither is claimed.
-    expect(yourAccessText(manager, null)).toBe("Owner or admin of the organization (manages this workspace and who it is shared with)");
+    expect(yourAccessText(manager, null)).toBe("Admin (manages this workspace and who it is shared with), can approve permissions");
     // A plain member who created the workspace drives it and manages its shares.
     expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: true }, "member")).toMatch(/^Creator \(you created this workspace/);
     expect(yourAccessText({ role: "driver", canApprove: false, canManageShares: false }, "member")).toBe("Driver (can send to agents; typing in terminals also needs the right to approve permissions)");
@@ -532,7 +533,7 @@ describe("when making it visible and sharing do not both succeed", () => {
 // Review D4: the creator of a workspace who is a plain member manages its shares, not its visibility.
 describe("a creator who is not an owner or admin", () => {
   const creator = { role: "driver", canApprove: true, canManageShares: true } as const;
-  const reason = "Only this workspace's creator or an organization owner or admin can change whether it is private or visible to the organization";
+  const reason = "Only a workspace admin, its creator or an organization owner or admin can change whether it is private or visible to the organization";
 
   it("cannot share a private workspace, and is told who can make it visible", async () => {
     listed = { shares: [], you: creator };
@@ -568,5 +569,66 @@ describe("a creator who is not an owner or admin", () => {
     fireEvent.click(within(row).getByRole("button", { name: "Revoke Alice" }));
     await waitFor(() => expect(mocks.revoke).toHaveBeenCalledWith("ws-1", "u-alice", "org-1"));
     expect(mocks.access).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("workspace Admin sharing", () => {
+  it("grants Admin without changing the separate approval value", async () => {
+    dialog();
+    await screen.findByTestId("cloud-share-row");
+    await waitFor(() => expect(screen.getByLabelText("Add person").textContent).toContain("Bob"));
+    fireEvent.change(screen.getByLabelText("Role for Alice"), { target: { value: "manager" } });
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith("ws-1", "u-alice", "manager", false, "org-1"));
+    expect((screen.getByLabelText("Role for Alice") as HTMLSelectElement).value).toBe("manager");
+    expect(screen.getByRole("switch", { name: "Can approve permissions: Alice" }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("keeps the last Admin when the server refuses removal, with the exact rule", async () => {
+    listed.shares = [share({ role: "manager" })];
+    mocks.revoke.mockRejectedValue({ code: "cloud_workspace_last_admin" });
+    dialog();
+    await screen.findByTestId("cloud-share-row");
+    fireEvent.click(screen.getByRole("button", { name: "Revoke Alice" }));
+    expect(await screen.findByText("A workspace must have at least one admin.")).toBeTruthy();
+    expect((screen.getByLabelText("Role for Alice") as HTMLSelectElement).value).toBe("manager");
+  });
+
+  it("resets role and approval when a draft changes recipients", async () => {
+    dialog();
+    await waitFor(() => expect(screen.getByLabelText("Add person").textContent).toContain("Bob"));
+    fireEvent.change(screen.getByLabelText("Add person"), { target: { value: "u-bob" } });
+    fireEvent.change(screen.getByLabelText("New person's role"), { target: { value: "manager" } });
+    fireEvent.click(screen.getByRole("switch", { name: "New person can approve permissions" }));
+    fireEvent.change(screen.getByLabelText("Add person"), { target: { value: "u-erin" } });
+    expect((screen.getByLabelText("New person's role") as HTMLSelectElement).value).toBe("viewer");
+    expect(screen.getByRole("switch", { name: "New person can approve permissions" }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("ignores a late share response after the workspace changes", async () => {
+    let finish!: (value: CloudWorkspaceShares) => void;
+    mocks.shares.mockImplementation((workspace: string) => workspace === "ws-1" ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ shares: [], you: { role: "viewer", canApprove: false, canManageShares: false } }));
+    const view = dialog();
+    view.rerender(<CloudShareDialog orgId="org-1" workspaceId="ws-2" name="Other" onClose={() => undefined} />);
+    await screen.findByText(/Your access: Viewer/);
+    await act(async () => finish(listed));
+    expect(screen.queryByLabelText("Role for Alice")).toBeNull();
+    expect(screen.queryByLabelText("Add person")).toBeNull();
+  });
+
+  it("does not finish a private-to-shared grant after the account changes", async () => {
+    let finish!: (value: unknown) => void;
+    mocks.access.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const view = render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" accessMode="private" onClose={() => undefined} />);
+    await waitFor(() => expect(screen.getByLabelText("Add person").textContent).toContain("Bob"));
+    fireEvent.change(screen.getByLabelText("Add person"), { target: { value: "u-bob" } });
+    fireEvent.change(screen.getByLabelText("New person's role"), { target: { value: "manager" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Share$/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Make visible and share" }));
+    await waitFor(() => expect(mocks.access).toHaveBeenCalled());
+    account.status = { identity: { organizationId: "org-1", email: "other@example.com" }, context: { account: "another-account" } };
+    view.rerender(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" accessMode="private" onClose={() => undefined} />);
+    await act(async () => finish({ accessMode: "organization" }));
+    expect(mocks.put).not.toHaveBeenCalled();
   });
 });

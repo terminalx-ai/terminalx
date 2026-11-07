@@ -881,3 +881,11 @@ and attachments may carry `userId`. The file is re-read on every refresh.
   the new role. The revocation closes the connection, drops the queued
   follow-up and rotates the key. An outsider (not a member) never gets an
   attachment; that is the API's 404 and is tested there.
+
+### PRO-167 source checkpoint
+
+The pending Admin implementation and unanswered General-access alternatives are
+specified in [WORKSPACE-ADMIN-ACCESS.md](WORKSPACE-ADMIN-ACCESS.md). An explicit
+workspace Admin is not an organization admin, and its approval grant is separate.
+The checkpoint is held from publication pending the product answer, integration,
+required execution and the paired server/runtime release gates.

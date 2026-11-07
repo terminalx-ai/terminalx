@@ -3544,3 +3544,24 @@ async fn an_interrupt_needs_no_member_list_and_a_runtime_without_agents_says_so(
     assert_eq!(call(&f.rpc, &manager, "session.interrupt", params).await.unwrap()["interrupted"], true);
     assert_eq!(ops.interrupts.lock().unwrap().len(), 1);
 }
+
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_admin_is_not_an_approver_and_direct_rpc_loses_management_on_downgrade() {
+    let f = fixture();
+    let _agents = with_tab(&f);
+    let list = |role: &str| Some(serde_json::from_value(json!({ "v": 2, "members": [
+        { "userId": "alice", "role": role, "canApprove": false }
+    ] })).unwrap());
+    f.rpc.set_collaboration(list("manager"));
+    let (admin, _events, hello) = person(&f.rpc, "explicit-admin", Authority::Manage, "alice").await;
+    assert_eq!(hello["authority"], "manage");
+    assert_eq!(hello["you"]["canApprove"], false);
+    assert!(!admin.counts_as_approver());
+    assert!(call(&f.rpc, &admin, "fs.write", json!({ "path": "admin.txt", "text": "granted", "clientRequestId": "admin-write-1" })).await.is_ok());
+    f.rpc.set_collaboration(list("driver"));
+    assert_eq!(code(call(&f.rpc, &admin, "fs.write", json!({ "path": "admin.txt", "text": "forbidden", "clientRequestId": "admin-write-2" })).await), "forbidden");
+    assert_eq!(code(call(&f.rpc, &admin, "pty.create", json!({ "clientRequestId": "admin-pty-3" })).await), "forbidden");
+    f.rpc.set_collaboration(list("none"));
+    assert_eq!(code(call(&f.rpc, &admin, "keys.get", json!({})).await), "forbidden");
+}

@@ -33,6 +33,7 @@ pub const MAX_MEMBERS: usize = 512;
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     #[default]
+    #[serde(other)]
     None,
     Viewer,
     Driver,
@@ -92,7 +93,7 @@ impl Members {
     /// The map the runtime answers from; `None` for a version it does not
     /// know (fail closed: participants get nothing).
     pub fn into_map(self) -> Option<HashMap<String, Access>> {
-        if self.v != 1 || self.members.len() > MAX_MEMBERS {
+        if !matches!(self.v, 1 | 2) || self.members.len() > MAX_MEMBERS {
             return None;
         }
         Some(
@@ -100,8 +101,8 @@ impl Members {
                 .into_iter()
                 .filter(|member| member.role != Role::None && !member.user_id.is_empty())
                 .map(|member| {
-                    // Managers always approve (contract §21.1).
-                    let can_approve = member.can_approve || member.role == Role::Manager;
+                    // Version 1 only had implicit managers. Version 2 separates an Admin grant from approval.
+                    let can_approve = member.can_approve || (self.v == 1 && member.role == Role::Manager);
                     (member.user_id, Access { role: member.role, can_approve })
                 })
                 .collect(),
@@ -253,10 +254,7 @@ impl Collaboration {
     /// `manage` attachment without a person has no access (review N1).
     pub fn access_for(&self, authority: Authority, user_id: Option<&str>) -> Access {
         match (authority, user_id) {
-            (Authority::Manage, Some(user)) if self.known() => match self.access_of(Some(user)) {
-                access if access.role == Role::Manager => Access::MANAGER,
-                access => access,
-            },
+            (Authority::Manage, Some(user)) if self.known() => self.access_of(Some(user)),
             // A manage attachment saved before attachments named their person
             // (an older device record): once the API has listed who has
             // access, nobody can be matched to it, so it gets nothing.
@@ -495,7 +493,7 @@ impl Notes {
 /// before PRO-30).
 pub fn stamped_access(role: Option<&str>, can_approve: Option<bool>) -> Option<Access> {
     let role = serde_json::from_value::<Role>(Value::String(role?.to_string())).ok()?;
-    Some(Access { role, can_approve: can_approve.unwrap_or(false) || role == Role::Manager })
+    Some(Access { role, can_approve: can_approve.unwrap_or(role == Role::Manager) })
 }
 
 #[cfg(test)]
@@ -528,19 +526,35 @@ mod tests {
     }
 
     #[test]
-    fn members_parse_and_managers_always_approve() {
-        let members: Members = serde_json::from_value(serde_json::json!({ "v": 1, "members": [
+    fn members_keep_approval_independent_of_admin_role() {
+        let members: Members = serde_json::from_value(serde_json::json!({ "v": 2, "members": [
             { "userId": "a", "role": "manager", "canApprove": false },
             { "userId": "b", "role": "viewer", "canApprove": true },
             { "userId": "c", "role": "none" },
         ] }))
         .unwrap();
         let map = members.into_map().unwrap();
-        assert_eq!(map["a"], Access::MANAGER);
+        assert_eq!(map["a"], Access { role: Role::Manager, can_approve: false });
         assert_eq!(map["b"], Access { role: Role::Viewer, can_approve: true });
         assert!(!map.contains_key("c"));
-        let future: Members = serde_json::from_value(serde_json::json!({ "v": 2, "members": [] })).unwrap();
+        let future: Members = serde_json::from_value(serde_json::json!({ "v": 3, "members": [] })).unwrap();
         assert!(future.into_map().is_none());
+    }
+
+    #[test]
+    fn explicit_admin_never_gains_approval_from_a_manage_attachment_or_stamp() {
+        let collab = Collaboration::new();
+        let admin = Access { role: Role::Manager, can_approve: false };
+        collab.set_members(map(&[("admin", Role::Manager, false)]));
+        assert_eq!(collab.access_for(Authority::Manage, Some("admin")), admin);
+        assert_eq!(stamped_access(Some("manager"), Some(false)), Some(admin));
+        assert_eq!(collab.actor_access("manage", "admin", Some(Access::MANAGER)), admin);
+        collab.set_members(map(&[("admin", Role::Driver, false)]));
+        assert_eq!(collab.access_for(Authority::Manage, Some("admin")).role, Role::Driver);
+        assert_eq!(collab.actor_access("manage", "admin", Some(admin)).role, Role::Driver);
+        collab.set_members(HashMap::new());
+        assert_eq!(collab.access_for(Authority::Manage, Some("admin")), Access::NONE);
+        assert_eq!(collab.actor_access("manage", "admin", Some(admin)), Access::NONE);
     }
 
     #[test]

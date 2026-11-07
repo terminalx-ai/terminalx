@@ -1225,7 +1225,7 @@ export interface CloudWorkspaceDisposition {
 }
 
 /** What a share grants (contract §21.2). */
-export type CloudShareRole = "viewer" | "driver";
+export type CloudShareRole = "viewer" | "driver" | "manager";
 /** A person's effective role on a workspace (§21.1); `none` sees no content. */
 export type CloudCollaborationRole = "manager" | "driver" | "viewer" | "none";
 

@@ -93,7 +93,7 @@ export function noteCallFailure(error: unknown) {
 /** A refusal for lack of role, in the words of what was attempted, for what only an owner or admin does. The app only offers these to one, so the role it held has changed. */
 /** The same for a workspace: its creator manages it too (PRO-73), so the refusal names both. */
 export function managerRefusedMessage(action: string): string {
-  return `Only this workspace's creator or an organization owner or admin can ${action}.`;
+  return `Only a workspace admin, its creator or an organization owner or admin can ${action}.`;
 }
 
 export function roleRefusedMessage(action: string): string {

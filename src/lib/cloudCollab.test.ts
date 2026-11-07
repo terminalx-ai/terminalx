@@ -72,6 +72,7 @@ describe("one agent tab's lease and approvals", () => {
     expect(tabGate(you("manager"), lease("u-alice", now + 1), now, true, nameOf).mayStop).toBe(true);
     expect(tabGate(you("driver"), null, now, false, nameOf).approveBlocked).toBe(APPROVE_BLOCKED_REASON);
     expect(tabGate(you("driver", { canApprove: true }), null, now, false, nameOf).approveBlocked).toBeNull();
+    expect(tabGate(you("manager", { canApprove: false }), null, now, false, nameOf)).toMatchObject({ approveBlocked: APPROVE_BLOCKED_REASON, mayStop: true });
     expect(tabGate(you("viewer"), null, now, false, nameOf)).toMatchObject({ blocked: VIEWER_REASON, mayStop: false });
     // Sharing does not apply: nothing is gated here.
     expect(tabGate(null, lease("u-alice", now + 1), now, true, nameOf)).toMatchObject({ blocked: null, mayStop: true, approveBlocked: null });

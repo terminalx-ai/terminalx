@@ -1350,6 +1350,7 @@ pub struct SelectedRepositories {
 pub enum ShareRole {
     Viewer,
     Driver,
+    Manager,
 }
 
 /// Someone's effective role on a workspace (§21.1).

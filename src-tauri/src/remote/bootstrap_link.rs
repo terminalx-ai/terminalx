@@ -42,14 +42,9 @@ impl RuntimeLink for BootstrapLink {
             .iter()
             .filter_map(|value| serde_json::from_value::<Revocation>(value.clone()).map_err(|error| log::warn!("skipping a revocation: {error}")).ok())
             .collect();
-        // An unreadable list fails closed: participants have no access
-        // until a readable one arrives.
-        let collaboration = session.collaboration.as_ref().map(|value| {
-            serde_json::from_value::<Members>(value.clone()).unwrap_or_else(|error| {
-                log::warn!("an unreadable collaboration list gives participants no access: {error}");
-                Members { v: 0, members: Vec::new() }
-            })
-        });
+        // Cloud authority is always server-backed. Missing or malformed membership
+        // cannot reuse legacy local manage authority or a previously granted role.
+        let collaboration = Some(cloud_members(session.collaboration.as_ref()));
         Ok(RelaySession {
             relay_token: session.relay_token.clone(),
             director_url: session.director_url.clone(),
@@ -73,5 +68,28 @@ impl RuntimeLink for BootstrapLink {
             Err(CallError::Rejected) => Err(anyhow!("the API refused to complete revocation {attachment_id}")),
             Err(CallError::Transient(error)) => Err(error),
         }
+    }
+}
+
+
+fn cloud_members(value: Option<&serde_json::Value>) -> Members {
+    value.and_then(|value| serde_json::from_value::<Members>(value.clone()).ok()).unwrap_or(Members { v: 0, members: Vec::new() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::collab::{Access, Role};
+    use serde_json::json;
+
+    #[test]
+    fn missing_malformed_and_unknown_cloud_membership_fail_closed() {
+        for value in [None, Some(json!({})), Some(json!({ "v": 99, "members": [] }))] {
+            assert!(cloud_members(value.as_ref()).into_map().is_none());
+        }
+        let legacy = json!({ "v": 1, "members": [{ "userId": "owner", "role": "manager" }] });
+        assert_eq!(cloud_members(Some(&legacy)).into_map().unwrap()["owner"], Access::MANAGER);
+        let explicit = json!({ "v": 2, "members": [{ "userId": "admin", "role": "manager", "canApprove": false }] });
+        assert_eq!(cloud_members(Some(&explicit)).into_map().unwrap()["admin"], Access { role: Role::Manager, can_approve: false });
     }
 }

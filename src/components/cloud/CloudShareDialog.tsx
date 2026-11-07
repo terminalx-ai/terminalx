@@ -11,9 +11,8 @@ import type { OrganizationMember } from "@/lib/organizationMembers";
 
 /**
  * This person's access in words: Owner, Admin, Creator, Driver or Viewer.
- * The API's `manager` role is an organization owner's or admin's, so the
- * organization role says which of the two it is; the one person who manages
- * the shares without being a manager is the workspace's creator.
+ * The API's `manager` role includes owners, organization admins, the
+ * creator, and explicit workspace Admin shares. Approval remains separate.
  */
 export function yourAccessText(
   you: CloudWorkspaceShares["you"],
@@ -27,7 +26,8 @@ export function yourAccessText(
     case "manager":
       if (orgRole === "owner") return "Owner (the organization's owner: manages this workspace and who it is shared with)";
       if (orgRole === "admin") return "Admin (an organization admin: manages this workspace and who it is shared with)";
-      return "Owner or admin of the organization (manages this workspace and who it is shared with)";
+      if (creator) return "Creator (you created this workspace: manages it and can approve permissions)";
+      return `Admin (manages this workspace and who it is shared with)${approves}`;
     case "driver":
       if (you.canManageShares || creator) return "Creator (you created this workspace: can send to agents, type in terminals, approve permissions and manage who it is shared with)";
       // Typing in a terminal (a shell, or an agent's own) needs the approval right too (PRO-88).
@@ -66,15 +66,17 @@ export function shareErrorMessage(error: unknown, who?: string): string {
     case "cloud_workspace_share_limit":
       return "This workspace is already shared with the maximum number of people (64). Revoke someone first.";
     case "cloud_workspace_share_forbidden":
-      return "Only organization admins and the workspace's creator can change who it is shared with.";
+      return "Only workspace admins, organization admins and the workspace's creator can change who it is shared with.";
     case "organization_member_not_found":
       return `${who ?? "This person"} is no longer a member of this organization.`;
+    case "cloud_workspace_last_admin":
+      return "A workspace must have at least one admin.";
     case "cloud_workspace_share_not_found":
       return "That share was already revoked.";
     case "cloud_workspace_not_found":
       return "This workspace no longer exists.";
     case "cloud_workspace_manager_required":
-      return "Only this workspace's creator or an organization owner or admin can change whether it is private or visible to the organization. Ask one of them to change it.";
+      return "Only a workspace admin, its creator or an organization owner or admin can change whether it is private or visible to the organization. Ask one of them to change it.";
     case "organization_admin_required":
       return "Only an organization owner or admin can change whether a workspace is private or visible to the organization. Ask one to change it.";
     case "cloud_workspace_request_outcome_unknown":
@@ -101,12 +103,19 @@ const OUTCOME_UNKNOWN = "cloud_workspace_request_outcome_unknown";
  * first person makes it visible in the organization's sidebar, after the
  * person confirms that here; "Make private again" hides it and revokes every
  * share. Both go through the API's `/access` route, which is for whoever
- * manages the workspace: its creator, or an organization owner or admin
+ * manages the workspace: its creator, a workspace Admin, or an organization owner or admin
  * (PRO-73). Against a server from before that rule a creator who is a plain
  * member only manages the shares of a workspace that is already
  * organization-visible, and is told who can change its visibility.
  */
-export function CloudShareDialog({
+export function CloudShareDialog(props: Parameters<typeof ScopedCloudShareDialog>[0]) {
+  const { status } = useAccount();
+  const orgId = props.orgId ?? status.identity?.organizationId ?? null;
+  const scope = JSON.stringify([status.context?.account ?? status.identity?.email, status.context?.revision, status.state, orgId, props.workspaceId]);
+  return <ScopedCloudShareDialog key={scope} {...props} orgId={orgId} />;
+}
+
+function ScopedCloudShareDialog({
   orgId = null,
   workspaceId,
   name,
@@ -127,6 +136,12 @@ export function CloudShareDialog({
   onClose: () => void;
 }) {
   const { status } = useAccount();
+  const active = useRef(true);
+  const sharesRead = useRef(0);
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; sharesRead.current++; };
+  }, []);
   // The default organization's roster comes with the account; another
   // organization's (every one is live, PRO-71) is read by its own id.
   const defaultOrg = !orgId || !status.identity?.organizationId || status.identity.organizationId === orgId;
@@ -145,13 +160,18 @@ export function CloudShareDialog({
   const org = orgId ?? status.identity?.organizationId;
 
   const reload = useCallback(async () => {
+    const read = ++sharesRead.current;
+    const latest = () => active.current && read === sharesRead.current;
     try {
       const next = await api.cloudWorkspaceShares(workspaceId, orgId);
+      if (!latest()) return false;
       rememberPeople(next.shares);
       setListed(next);
       setLoadError(null);
       return true;
     } catch (e) {
+      if (!latest()) return false;
+      setListed(null);
       setLoadError(codeOf(e));
       return false;
     }
@@ -162,7 +182,7 @@ export function CloudShareDialog({
   const membersRead = useRef(0);
   const loadMembers = useCallback(() => {
     const read = ++membersRead.current;
-    const latest = () => read === membersRead.current;
+    const latest = () => active.current && read === membersRead.current;
     setRosterError(null);
     if (defaultOrg) return void loadRoster({ fresh: true }).then((next) => latest() && setMembers(next));
     void loadRosterIn(orgId!, { fresh: true }).then(
@@ -185,7 +205,20 @@ export function CloudShareDialog({
   }, [reload, loadMembers]);
 
   const manage = listed?.you.canManageShares ?? false;
-  // Private or organization-visible is the API's owner-or-admin switch; the list says who this is up front.
+  useEffect(() => {
+    if (adding.userId && !members.some((member) => member.userId === adding.userId)) {
+      setAdding({ userId: "", role: "viewer", canApprove: false });
+      setConfirming(null);
+    }
+  }, [members, adding.userId]);
+  useEffect(() => {
+    if (!manage) {
+      setAdding({ userId: "", role: "viewer", canApprove: false });
+      setConfirming(null);
+      setUnshared(null);
+    }
+  }, [manage]);
+  // The authoritative share list identifies who can change visibility.
   const mayChangeVisibility = listed?.you.role === "manager";
   const isPrivate = access === "private";
   const shared = useMemo(() => new Set(listed?.shares.map((share) => share.userId) ?? []), [listed]);
@@ -205,6 +238,7 @@ export function CloudShareDialog({
   const readAccess = async (): Promise<AccessMode | null> => {
     try {
       const list = await api.cloudWorkspaces(orgId);
+      if (!active.current) return null;
       return list.workspaces.find((item) => item.workspace.id === workspaceId)?.workspace.accessMode ?? null;
     } catch {
       return null;
@@ -220,15 +254,18 @@ export function CloudShareDialog({
   const switchAccess = async (mode: AccessMode): Promise<boolean> => {
     try {
       const workspace = await api.cloudWorkspaceSetAccess(workspaceId, mode, orgId);
+      if (!active.current) return false;
       setAccess(workspace.accessMode);
       notifyAccessChanged(org);
       return workspace.accessMode === mode;
     } catch (e) {
+      if (!active.current) return false;
       if (codeOf(e) !== OUTCOME_UNKNOWN) {
         setError(shareErrorMessage(e, name));
         return false;
       }
       const now = await readAccess();
+      if (!active.current) return false;
       notifyAccessChanged(org);
       if (now === null) {
         // Private and unlisted look the same to someone who is not its creator; say only what is known.
@@ -247,38 +284,55 @@ export function CloudShareDialog({
     setError(null);
     try {
       await run();
+      if (!active.current) return false;
       await reload();
+      if (!active.current) return false;
       // The sidebar's rows, chips and share counts follow at once.
       notifyAccessChanged(org);
       return true;
     } catch (e) {
+      if (!active.current) return false;
       setError(shareErrorMessage(e, who));
+      if (["cloud_workspace_share_forbidden", "cloud_workspace_manager_required", "cloud_workspace_not_found", OUTCOME_UNKNOWN].includes(codeOf(e))) void reload();
       if (userId) leftOrganization(e, userId);
       return false;
     } finally {
-      setBusy(null);
+      if (active.current) setBusy(null);
     }
   };
 
-  const put = (share: Pick<CloudWorkspaceShare, "userId" | "role" | "canApprove">) =>
-    change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove, orgId), share.userId);
+  const put = (share: Pick<CloudWorkspaceShare, "userId" | "role" | "canApprove">) => {
+    if (!active.current || !manage) return Promise.resolve(false);
+    return change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove, orgId), share.userId);
+  };
 
   /** Grant the share that a visibility change was made for; a refusal leaves the workspace visible but unshared, and says so. */
   const shareAfterVisible = async (person: Person) => {
+    if (!active.current) return;
+    const currentMembers = await (defaultOrg ? loadRoster({ fresh: true }) : loadRosterIn(org!, { fresh: true })).catch(() => null);
+    if (!active.current) return;
+    if (!currentMembers?.some((member) => member.userId === person.userId)) {
+      setAdding({ userId: "", role: "viewer", canApprove: false });
+      setUnshared(null);
+      setError("This person is no longer available in this organization. Reload before sharing.");
+      return;
+    }
     try {
       await api.cloudWorkspaceSharePut(workspaceId, person.userId, person.role, person.canApprove, orgId);
+      if (!active.current) return;
       setUnshared(null);
       setAdding({ userId: "", role: "viewer", canApprove: false });
     } catch (e) {
+      if (!active.current) return;
       setUnshared({ person, why: shareErrorMessage(e, nameOf(person.userId)) });
       leftOrganization(e, person.userId);
     }
     await reload();
-    notifyAccessChanged(org);
+    if (active.current) notifyAccessChanged(org);
   };
 
   const add = async () => {
-    if (!adding.userId) return;
+    if (!active.current || !manage || !candidates.some((member) => member.userId === adding.userId)) return;
     if (!isPrivate) {
       if (await put(adding)) setAdding({ userId: "", role: "viewer", canApprove: false });
       return;
@@ -294,20 +348,20 @@ export function CloudShareDialog({
     setBusy(`put:${person.userId}`);
     setError(null);
     try {
-      if (await switchAccess("organization")) await shareAfterVisible(person);
+      if (await switchAccess("organization") && active.current) await shareAfterVisible(person);
     } finally {
-      setBusy(null);
+      if (active.current) setBusy(null);
     }
   };
 
   const retryShare = async () => {
-    if (!unshared) return;
+    if (!active.current || !manage || !unshared) return;
     setBusy(`put:${unshared.person.userId}`);
     setError(null);
     try {
       await shareAfterVisible(unshared.person);
     } finally {
-      setBusy(null);
+      if (active.current) setBusy(null);
     }
   };
 
@@ -317,12 +371,12 @@ export function CloudShareDialog({
     setError(null);
     try {
       // The server revokes every share and closes their connections in the same transaction.
-      if (!(await switchAccess("private"))) return;
+      if (!(await switchAccess("private")) || !active.current) return;
       setUnshared(null);
       // Private is its creator's alone: anyone else has nothing left to read here.
-      if (creator === false || !(await reload())) onClose();
+      if ((creator === false || !(await reload())) && active.current) onClose();
     } finally {
-      setBusy(null);
+      if (active.current) setBusy(null);
     }
   };
 
@@ -331,11 +385,12 @@ export function CloudShareDialog({
     setError(null);
     try {
       const now = await readAccess();
+      if (!active.current) return false;
       if (now === null) setError("The workspace still could not be read. It may be private to its creator now, or the server is not answering.");
       else setAccess(now);
       await reload();
     } finally {
-      setBusy(null);
+      if (active.current) setBusy(null);
     }
   };
 
@@ -353,8 +408,8 @@ export function CloudShareDialog({
           <DialogTitle>{manages ? `Share ${name}` : "Who has access"}</DialogTitle>
           <DialogDescription>
             {manages
-              ? "People you share with see this workspace's agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions."
-              : `People with access to ${name} see its agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions.`}
+              ? "People you share with see this workspace's agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions. Admins can stop, archive and manage access to this workspace."
+              : `People with access to ${name} see its agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions. Admins can stop, archive and manage access to this workspace.`}
           </DialogDescription>
         </DialogHeader>
         {!listed && !loadError && <Loader2 className="size-4 animate-spin" />}
@@ -420,6 +475,7 @@ export function CloudShareDialog({
                         >
                           <option value="viewer">Viewer</option>
                           <option value="driver">Driver</option>
+                          <option value="manager">Admin</option>
                         </select>
                         <label className="flex items-center gap-1.5 text-muted-foreground">
                           <Switch
@@ -443,7 +499,7 @@ export function CloudShareDialog({
                       </>
                     ) : (
                       <span className="text-muted-foreground">
-                        {share.role === "driver" ? "Driver" : "Viewer"}
+                        {share.role === "manager" ? "Admin" : share.role === "driver" ? "Driver" : "Viewer"}
                         {share.canApprove ? " · can approve" : ""}
                       </span>
                     )}
@@ -469,7 +525,7 @@ export function CloudShareDialog({
                   aria-label="Add person"
                   className={`${select} min-w-0 flex-1`}
                   value={adding.userId}
-                  onChange={(e) => setAdding((current) => ({ ...current, userId: e.target.value }))}
+                  onChange={(e) => { setConfirming(null); setAdding({ userId: e.target.value, role: "viewer", canApprove: false }); }}
                 >
                   <option value="">Add person…</option>
                   {candidates.map((member) => (
@@ -486,6 +542,7 @@ export function CloudShareDialog({
                 >
                   <option value="viewer">Viewer</option>
                   <option value="driver">Driver</option>
+                          <option value="manager">Admin</option>
                 </select>
                 <label className="flex items-center gap-1.5 text-muted-foreground">
                   <Switch
