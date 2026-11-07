@@ -733,6 +733,7 @@ pub struct Restored {
 /// old path, the branch on the remote if this deleted it, and the sessions
 /// that have not been used since. The workspace is held afterwards.
 pub fn restore(host: &Host<'_>, sink: &dyn EventSink, id: &str, now: DateTime<Utc>) -> anyhow::Result<Restored> {
+    let _request = crate::github_process::scope();
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut ledger = Ledger::load()?;
     let record = ledger.removed.iter().find(|record| record.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no such removal is recorded here"))?;

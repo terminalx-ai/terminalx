@@ -181,7 +181,7 @@ printf '%s\n' "$0" "$@" >> "$TERMINALX_HOME/ssh-arguments"
 # The wrapper's own identity/proxy configuration is retained too.
 printf 'wrapper-identity-kept\n' >> "$TERMINALX_HOME/ssh-arguments"
 for arg do
- if [ "$arg" = -G ]; then exit 0; fi
+ if [ "$arg" = -G ]; then printf 'hostname fixture.invalid\nuser configured-user\nport 2222\nproxycommand none\nproxyjump none\nforkafterauthentication no\npermitlocalcommand no\n'; exit 0; fi
  last="$arg"
 done
 if [ -f "$TERMINALX_HOME/hold-ssh" ]; then
@@ -199,8 +199,8 @@ exec /bin/sh -c "$last"
     unrelated_socket.set_nonblocking(true).unwrap();
     let mut unrelated = UnrelatedTransport(Command::new(&wrapper).arg("--unrelated").process_group(0).spawn().unwrap());
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-    let command = format!("{} -i {} -p 2222 -o {} -o ControlMaster=auto -o ControlPersist=yes -S {}",
-        quote(wrapper.to_str().unwrap()), quote("/configured/key with spaces"), quote("ProxyCommand=configured-proxy %h %p"), quote(socket_path.to_str().unwrap()));
+    let command = format!("{} -i {} -p 2222 -o ControlMaster=auto -o ControlPersist=yes -S {}",
+        quote(wrapper.to_str().unwrap()), quote("/configured/key with spaces"), quote(socket_path.to_str().unwrap()));
     let remote = root.join("fetch-origin.git");
     real_git(&fixture.project, &["remote", "set-url", "origin", &format!("ssh://configured-user@fixture.invalid{}", remote.display())]);
     let fetch = || {
@@ -239,7 +239,7 @@ exec /bin/sh -c "$last"
         assert!(arguments.contains("configured-user@fixture.invalid"));
         if setting != "path" {
             assert!(arguments.contains("-i\n/configured/key with spaces\n-p\n2222\n"), "identity and port changed: {arguments}");
-            assert!(arguments.contains("ProxyCommand=configured-proxy %h %p"));
+            assert!(arguments.contains("ProxyCommand=none"));
             assert!(arguments.contains(socket_path.to_str().unwrap()), "configured arguments are preserved; final -S none overrides only sharing");
         }
         let before = ssh_launches(root);

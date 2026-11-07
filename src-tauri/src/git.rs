@@ -49,14 +49,14 @@ fn transfer_args(args: &[&str]) -> bool {
 
 /// Refresh this project's comparison branch for landed/cleanup verification.
 /// Submodules are outside that check (and prevent a verified safe deletion).
-/// Never recurse: our repository-specific SSH environment must not override a
-/// child's own transport. Ordinary fetches and agent processes keep their own
-/// runners; this one retains admission until the whole group is drained.
+/// Never recurse: child repositories are outside this verification contract.
+/// The SSH boundary is shared with ordinary transfers, including its proxy
+/// refusal; agent processes keep their own runners.
 pub(crate) fn fetch_admitted(cwd: &Path, branch: &str, timeout: std::time::Duration) -> Result<()> {
     let _request = crate::github_process::scope();
     let mut command = git();
     command.current_dir(cwd).args(["fetch", "--quiet", "--no-recurse-submodules", "origin", branch]);
-    let _transport = ssh::contain(cwd, &mut command)?;
+    let _transport = ssh::prepare(&mut command)?;
     let output = crate::github_process::output(command, timeout, None)?;
     if !output.status.success() {
         bail!("git fetch: {}", String::from_utf8_lossy(&output.stderr).trim());
@@ -71,6 +71,13 @@ pub fn raw(cwd: &Path, args: &[&str]) -> Option<(i32, String)> {
     let out = if transfer_args(args) { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket()).ok()? }
         else { command.output().ok()? };
     Some((out.status.code()?, String::from_utf8_lossy(&out.stdout).into_owned()))
+}
+
+/// Inspect local objects while retaining exit status and diagnostic output.
+/// Missing promised objects are errors, never an implicit network request.
+pub(crate) fn inspect_output(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
+    anyhow::ensure!(!transfer_args(args), "a transfer is not a local Git inspection");
+    git().current_dir(cwd).args(args).output().with_context(|| format!("git {}", args.join(" ")))
 }
 
 /// Why `run_within` did not succeed.

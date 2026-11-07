@@ -146,6 +146,7 @@ fn recursive(root: &Path, managed: bool) {
 }
 
 pub(super) fn run(root: &Path, managed: bool) {
+    merge_inputs(root, managed);
     pipeline::run(root, managed);
     putty(root, managed);
     recursive(root, managed);
@@ -199,11 +200,67 @@ pub(super) fn run(root: &Path, managed: bool) {
     }
 }
 
+fn merge_inputs(root: &Path, managed: bool) {
+    for cycle in [false, true] {
+        let _environment = Environment::new(root);
+        policy(false, managed);
+        let f = Fixture::new(root, &format!("merge-inputs-{cycle}"));
+        git(&f.cwd, &["checkout", "-qb", "privacy-conflict"]);
+        git(&f.cwd, &["config", "user.name", "Privacy Fixture"]);
+        git(&f.cwd, &["config", "user.email", "local@example.test"]);
+        std::fs::write(f.cwd.join(FILE), b"diverged\0local picture\n").unwrap();
+        git(&f.cwd, &["add", "."]);
+        git(&f.cwd, &["-c", "commit.gpgsign=false", "commit", "-qm", "Diverged local input"]);
+        let local = git(&f.cwd, &["rev-parse", "HEAD"]);
+        f.missing();
+        let compare = || crate::issue_pipeline::host::privacy_resolution(&f.cwd);
+        let before = f.transfers();
+        policy(true, managed);
+        assert!(compare().unwrap_err().to_string().contains(data_privacy::MESSAGE));
+        assert_eq!(f.transfers(), before);
+        policy(false, managed);
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *crate::github_process::AFTER_OUTPUT.lock().unwrap() = Some(Box::new(move || {
+            arrived_tx.send(()).unwrap(); release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(crate::github_process::queued(compare));
+            arrived_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            // The filtered fetch is complete and its process/lease drained.
+            assert_eq!(git(&f.cwd, &["rev-parse", "origin/main"]), f.after);
+            f.missing();
+            let fetched = f.transfers();
+            assert!(fetched > before);
+            policy(true, managed);
+            if cycle { policy(false, managed); }
+            release_tx.send(()).unwrap();
+            let error = worker.join().unwrap().unwrap_err().to_string();
+            assert!(error.contains("locally available base objects"), "missing input must not be reported as clean/conflicting: {error}");
+            assert_eq!(f.transfers(), fetched, "merge-tree demanded a promised blob after fetch admission drained");
+        });
+        f.missing();
+        assert_eq!(git(&f.cwd, &["rev-parse", "HEAD"]), local);
+        assert_eq!(std::fs::read(f.cwd.join(FILE)).unwrap(), b"diverged\0local picture\n");
+        // Agent-owned Git can acquire the absent object, even with mode on.
+        policy(true, managed);
+        let fetched = f.transfers();
+        let object = Command::new("/usr/bin/git").current_dir(&f.cwd).args(["cat-file", "blob", &f.blob])
+            .env_remove("GIT_NO_LAZY_FETCH").output().unwrap();
+        assert!(object.status.success()); assert_eq!(object.stdout, NEW); assert!(f.transfers() > fetched);
+        policy(false, managed);
+        let resolution = compare().unwrap().expect("cached binary conflicts remain real conflicts");
+        assert_eq!(resolution.head, local); assert_eq!(resolution.base_commit, f.after);
+        assert_eq!(std::fs::read(f.cwd.join(FILE)).unwrap(), b"diverged\0local picture\n");
+    }
+}
+
 #[path = "git_pipeline_transfer_privacy_tests.rs"]
 mod pipeline;
 
 #[cfg(feature = "desktop")]
 pub(super) fn ipc(root: &Path, managed: bool, runtime: &tokio::runtime::Runtime) {
+    restore::run(root, managed, runtime);
     use std::future::Future;
     use std::task::{Context, Waker};
     for action in ["branch", "clone"] {
@@ -241,3 +298,7 @@ pub(super) fn ipc(root: &Path, managed: bool, runtime: &tokio::runtime::Runtime)
         if action == "clone" { assert!(!progress.lock().unwrap().is_empty(), "real clone progress must still be emitted"); }
     }
 }
+
+#[cfg(feature = "desktop")]
+#[path = "git_restore_privacy_tests.rs"]
+mod restore;

@@ -4683,9 +4683,14 @@ pub async fn merged_cleanup_records(app: AppHandle) -> CmdResult<serde_json::Val
 /// Undo one removal: the worktree, its branch and what else can be put back.
 #[tauri::command]
 pub async fn merged_cleanup_restore(app: AppHandle, id: String) -> CmdResult<serde_json::Value> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<crate::AppState>();
-        state.sessions().map_err(err)?.workspace("mergedRestore", serde_json::json!({"id":id})).map_err(err)
+    merged_cleanup_restore_work(id, move || app.state::<crate::AppState>().sessions().map_err(err)).await
+}
+
+/// The command's actual queue boundary. Resolve the attached owner inside the
+/// captured request, so waiting for either the pool or owner cannot renew it.
+pub(crate) async fn merged_cleanup_restore_work(id: String, sessions: impl FnOnce() -> CmdResult<crate::local_runtime::sessions::Sessions> + Send + 'static) -> CmdResult<serde_json::Value> {
+    github_work(move || {
+        sessions()?.workspace("mergedRestore", serde_json::json!({"id":id})).map_err(err)
     }).await.map_err(err)?
 }
 

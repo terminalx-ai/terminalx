@@ -86,9 +86,9 @@ impl Settings {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Variant { Ssh, Simple, Putty, Tortoise, Detect }
+pub(super) enum Variant { Ssh, Simple, Putty, Tortoise, Detect }
 
-fn variant(explicit: Option<&OsStr>, word: Option<&OsStr>) -> Variant {
+pub(super) fn variant(explicit: Option<&OsStr>, word: Option<&OsStr>) -> Variant {
     match explicit.map(OsStr::as_bytes) {
         Some(b"simple") => return Variant::Simple,
         Some(b"putty" | b"plink") => return Variant::Putty,
@@ -112,6 +112,26 @@ fn transport(effective: &OsStr, shell: bool) -> Command {
     command
 }
 
+fn direct_configuration(bytes: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(bytes).context("SSH did not report readable effective configuration")?;
+    let values: Vec<_> = text.lines().filter_map(|line| line.split_once(char::is_whitespace))
+        .map(|(key, value)| (key.to_ascii_lowercase(), value.trim())).collect();
+    for required in ["hostname", "user", "port"] {
+        anyhow::ensure!(values.iter().any(|(key, value)| key == required && !value.is_empty()),
+            "Cannot verify the configured SSH transport: missing {required} in ssh -G output");
+    }
+    for (key, value) in values {
+        match key.as_str() {
+            "proxyjump" | "proxycommand" if !value.eq_ignore_ascii_case("none") =>
+                bail!("App Git transfers cannot safely contain this SSH {key} route. Run Git in your terminal or agent, or configure a direct SSH connection; the app has not changed the route or started a transfer."),
+            "forkafterauthentication" | "permitlocalcommand" if value != "no" =>
+                bail!("App Git transfers cannot safely contain SSH {key}. Run Git in your terminal or agent, or disable that option for the app's SSH command."),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn execute(settings: Settings, args: Vec<OsString>) -> Result<()> {
     anyhow::ensure!(args.len() >= 2, "missing Git SSH destination");
     let configured = match settings.env("GIT_SSH_COMMAND") { Some(v) => Some(v), None => settings.config("core.sshCommand")? };
@@ -129,10 +149,19 @@ fn execute(settings: Settings, args: Vec<OsString>) -> Result<()> {
     }
     let mut command = transport(&effective, shell);
     if selected == Variant::Ssh {
+        // Probe the actual command too (Match command can select routing).
+        // This runs inside the parent's original admitted/cancellable group.
+        // A nested proxy can detach or reuse a master outside that group: do
+        // not silently reroute it to a direct connection or kill its master.
+        let configuration = transport(&effective, shell).arg("-G").args(&args)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output()?;
+        anyhow::ensure!(configuration.status.success(), "Cannot verify configured SSH transport: {}", String::from_utf8_lossy(&configuration.stderr));
+        direct_configuration(&configuration.stdout)?;
         // Last -S wins even when configured arguments supplied -S or -o
         // ControlPath earlier. No socket means neither reuse nor persistence;
-        // keys, ports, ProxyCommand/Jump and other settings remain effective.
-        command.args(["-S", "none"]).args(&args);
+        // direct keys/ports remain effective. Pin the verified absence of a
+        // proxy/fork/local command before config is read again at execution.
+        command.args(["-S", "none", "-o", "ProxyCommand=none", "-o", "ForkAfterAuthentication=no", "-o", "PermitLocalCommand=no"]).args(&args);
     } else {
         // The outer Git uses ssh grammar solely for this adapter. Reconstruct
         // the selected transport's grammar, including simple's refusals.

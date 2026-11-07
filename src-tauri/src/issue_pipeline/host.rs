@@ -156,6 +156,11 @@ pub(crate) fn privacy_transfer_entry(cwd: &Path, action: &str) -> Result<()> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn privacy_resolution(cwd: &Path) -> Result<Option<super::Resolution>> {
+    resolution_needed(cwd, "privacy-conflict", "main", false)
+}
+
 /// Push the checkout's branch, setting its upstream the first time. Never
 /// forced, and with a deadline: a push that hangs must not hold the pipeline.
 fn push(cwd: &Path) -> Result<()> {
@@ -208,11 +213,11 @@ fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool) -> Re
     let behind_count = crate::git::run(cwd, &["rev-list", "--count", &format!("{head}..{base_commit}")])?;
     if ahead.trim() == "0" || behind_count.trim() == "0" { return Ok(None); }
     // merge-tree computes conflicts without changing the index or checkout.
-    let output = std::process::Command::new("git").args(["merge-tree", "--write-tree", &head, &base_commit]).current_dir(cwd).output()?;
+    let output = crate::git::inspect_output(cwd, &["merge-tree", "--write-tree", &head, &base_commit])?;
     let conflicting = match output.status.code() {
         Some(0) => false,
         Some(1) => true,
-        _ => bail!("Could not compare the branch with its base: {}", String::from_utf8_lossy(&output.stderr)),
+        _ => bail!("Could not compare the branch with its locally available base objects: {}", String::from_utf8_lossy(&output.stderr)),
     };
     if !conflicting && !required { return Ok(None); }
     Ok(Some(super::Resolution { head, remote_head: remote_head(cwd, branch)?, base: base.to_string(), base_commit, return_stage: super::Stage::Work, waiting_since: None }))

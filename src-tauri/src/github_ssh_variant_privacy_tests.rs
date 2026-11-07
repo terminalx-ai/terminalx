@@ -15,18 +15,18 @@ fn fetch(fixture: &FetchFixture) -> bool {
     fresh
 }
 
-fn restored(root: &Path, fixture: &FetchFixture, probe: bool) {
+fn restored(root: &Path, fixture: &FetchFixture, probes: usize) {
     let before = (count(root, "probe"), count(root, "transfer"));
     let expected = fixture.advance();
     assert!(fetch(fixture), "configured transport must complete a real Fresh fetch");
     assert_eq!(real_git(&fixture.project, &["rev-parse", "origin/main"]), expected);
-    assert_eq!(count(root, "probe"), before.0 + usize::from(probe));
+    assert_eq!(count(root, "probe"), before.0 + probes);
     assert_eq!(count(root, "transfer"), before.1 + 1);
 }
 
-fn exercise(root: &Path, fixture: &FetchFixture, managed: bool, probe: bool) {
+fn exercise(root: &Path, fixture: &FetchFixture, managed: bool, probes: usize) {
     policy(false, managed);
-    restored(root, fixture, probe);
+    restored(root, fixture, probes);
     let before = count(root, "");
     policy(true, managed);
     assert!(!fetch(fixture));
@@ -37,10 +37,10 @@ fn exercise(root: &Path, fixture: &FetchFixture, managed: bool, probe: bool) {
     policy(false, managed);
     assert!(!stale());
     assert_eq!(count(root, ""), before, "queued request revived after on/off");
-    restored(root, fixture, probe);
+    restored(root, fixture, probes);
 
     for phase in ["probe", "transfer"] {
-        if phase == "probe" && !probe { continue; }
+        if phase == "probe" && probes == 0 { continue; }
         let before_transfer = count(root, "transfer");
         std::fs::write(root.join("hold-variant"), phase).unwrap();
         std::thread::scope(|scope| {
@@ -65,7 +65,7 @@ fn exercise(root: &Path, fixture: &FetchFixture, managed: bool, probe: bool) {
         let after = count(root, "");
         policy(false, managed);
         assert_eq!(count(root, ""), after, "restoration replayed cancelled work");
-        restored(root, fixture, probe);
+        restored(root, fixture, probes);
     }
 }
 
@@ -88,7 +88,7 @@ if [ "$phase" = probe ]; then
     : > "$TERMINALX_HOME/held-$$"
     exec /bin/sleep 30
   fi
-  case "$mode" in simple) exit 1 ;; ssh) exit 0 ;; *) exit 99 ;; esac
+  case "$mode" in simple) exit 1 ;; ssh) printf 'hostname fixture.invalid\nuser configured-user\nport 22\nproxycommand none\nproxyjump none\nforkafterauthentication no\npermitlocalcommand no\n'; exit 0 ;; *) exit 99 ;; esac
 fi
 case "$mode" in
  simple)
@@ -103,7 +103,7 @@ case "$mode" in
    while [ "$#" -gt 2 ]; do
      case "$1" in
        -S) [ "$2" = none ] || exit 94; contained=yes; shift 2 ;;
-       -o) [ "$2" = SendEnv=GIT_PROTOCOL ] || exit 95; shift 2 ;;
+       -o) case "$2" in SendEnv=GIT_PROTOCOL|ProxyCommand=none|ForkAfterAuthentication=no|PermitLocalCommand=no) ;; *) exit 95 ;; esac; shift 2 ;;
        *) exit 96 ;;
      esac
    done
@@ -118,20 +118,20 @@ fi
 exec /bin/sh -c "$remote"
 "#;
     let remote = root.join("fetch-origin.git");
-    // (name, env variant, config variant, command source, basename, grammar, probe)
-    for (name, env, config, source, basename, grammar, probe) in [
-        ("simple-unset-path", None, None, "path", "strict wrapper", "simple", true),
-        ("simple-auto-path", Some("auto"), Some("ssh"), "path", "strict wrapper", "simple", true),
-        ("simple-auto-core", None, Some("auto"), "core", "strict wrapper", "simple", true),
-        ("simple-unset-command", None, None, "command", "strict wrapper", "simple", true),
-        ("simple-explicit", Some("simple"), None, "command", "strict wrapper", "simple", false),
-        ("ssh-auto", Some("auto"), None, "command", "strict wrapper", "ssh", true),
-        ("ssh-unknown-env", Some("future-variant"), Some("simple"), "command", "strict wrapper", "ssh", false),
-        ("ssh-unknown-config", None, Some("future-variant"), "core", "strict wrapper", "ssh", false),
-        ("ssh-basename", None, None, "path", "ssh", "ssh", false),
-        ("plink-basename", None, None, "path", "plink", "plink", false),
-        ("tortoiseplink-basename", Some("auto"), None, "core", "TortoisePlink.exe", "tortoiseplink", false),
-        ("putty-explicit", Some("putty"), None, "command", "putty", "plink", false),
+    // (name, env variant, config variant, command source, basename, grammar, probes)
+    for (name, env, config, source, basename, grammar, probes) in [
+        ("simple-unset-path", None, None, "path", "strict wrapper", "simple", 1),
+        ("simple-auto-path", Some("auto"), Some("ssh"), "path", "strict wrapper", "simple", 1),
+        ("simple-auto-core", None, Some("auto"), "core", "strict wrapper", "simple", 1),
+        ("simple-unset-command", None, None, "command", "strict wrapper", "simple", 1),
+        ("simple-explicit", Some("simple"), None, "command", "strict wrapper", "simple", 0),
+        ("ssh-auto", Some("auto"), None, "command", "strict wrapper", "ssh", 2),
+        ("ssh-unknown-env", Some("future-variant"), Some("simple"), "command", "strict wrapper", "ssh", 1),
+        ("ssh-unknown-config", None, Some("future-variant"), "core", "strict wrapper", "ssh", 1),
+        ("ssh-basename", None, None, "path", "ssh", "ssh", 1),
+        ("plink-basename", None, None, "path", "plink", "plink", 0),
+        ("tortoiseplink-basename", Some("auto"), None, "core", "TortoisePlink.exe", "tortoiseplink", 0),
+        ("putty-explicit", Some("putty"), None, "command", "putty", "plink", 0),
     ] {
         println!("privacy SSH variant: managed={managed}/{name}");
         for (key, _) in &saved { std::env::remove_var(key); }
@@ -153,7 +153,7 @@ exec /bin/sh -c "$remote"
         }
         let port = if matches!(grammar, "plink" | "tortoiseplink") { ":2222" } else { "" };
         real_git(&fixture.project, &["remote", "set-url", "origin", &format!("ssh://configured-user@fixture.invalid{port}{}", remote.display())]);
-        exercise(root, fixture, managed, probe);
+        exercise(root, fixture, managed, probes);
     }
     real_git(&fixture.project, &["remote", "set-url", "origin", remote.to_str().unwrap()]);
     for key in ["core.sshCommand", "ssh.variant"] {
