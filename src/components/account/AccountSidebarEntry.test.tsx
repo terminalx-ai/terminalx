@@ -73,11 +73,15 @@ it("shows the person's picture from the sign-in service in place of their initia
   const { container, rerender } = render(<AccountAvatar identity={{ name: "Ada", email: "a@x.io", organization: null, picture: "https://img.example/ada.png" }} />);
   const picture = screen.getByTestId("account-picture");
   expect(picture.getAttribute("src")).toBe("https://img.example/ada.png");
-  // A picture that will not load falls back to the initial.
+  // One that will not load gives way to the GitHub picture for the email, then to the initial.
   fireEvent.error(picture);
+  const github = screen.getByTestId("account-picture");
+  expect(github.getAttribute("src")).toBe("https://avatars.githubusercontent.com/u/e?email=a%40x.io&s=64");
+  fireEvent.error(github);
   expect(container.textContent).toBe("A");
-  rerender(<AccountAvatar identity={{ name: "Ada", email: "a@x.io", organization: null }} />);
-  expect(screen.queryByTestId("account-picture")).toBeNull();
+  // Without one from the sign-in service, GitHub's is tried first.
+  rerender(<AccountAvatar identity={{ name: "Bo", email: "b@x.io", organization: null }} />);
+  expect(screen.getByTestId("account-picture").getAttribute("src")).toContain("email=b%40x.io");
 });
 
 it("logs out from the account menu", async () => {
