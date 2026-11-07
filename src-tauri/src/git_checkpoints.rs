@@ -3,7 +3,8 @@ use super::*;
 use std::collections::BTreeSet;
 #[path = "checkpoint_retention.rs"]
 mod retention;
-pub use retention::LimitExceeded;
+#[cfg(test)]
+pub use retention::enforce_for_test as enforce_retention;
 
 pub fn reference(session: &str, turn: &str, edge: &str) -> Result<String> {
     for part in [session, turn, edge] {
@@ -14,11 +15,22 @@ pub fn reference(session: &str, turn: &str, edge: &str) -> Result<String> {
     Ok(format!("refs/raccoon-checkpoints/{session}/{turn}/{edge}"))
 }
 
+#[cfg(test)]
 pub fn pin(cwd: &Path, session: &str, turn: &str, edge: &str, tree: &str) -> Result<()> {
-    if !is_tree_id(tree) {
-        bail!("Invalid checkpoint tree");
-    }
-    retention::pin(cwd, &reference(session, turn, edge)?, tree)
+    pin_many(cwd, session, turn, &[(edge, tree)])
+}
+
+pub fn pin_many(cwd: &Path, session: &str, turn: &str, snapshots: &[(&str, &str)]) -> Result<()> {
+    let updates = snapshots
+        .iter()
+        .map(|(edge, tree)| {
+            if !is_tree_id(tree) {
+                bail!("Invalid checkpoint tree");
+            }
+            Ok((reference(session, turn, edge)?, *tree))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    retention::pin(cwd, &updates)
 }
 
 pub fn exists(cwd: &Path, session: &str, turn: &str, edge: &str) -> Result<bool> {

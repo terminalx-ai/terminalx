@@ -67,6 +67,9 @@ pub struct Checkpoint {
     /// Retained even when a concurrent conversation is subsequently deleted.
     #[serde(default)]
     concurrent_paths: BTreeSet<String>,
+    /// A concurrent turn had incomplete evidence; all of this turn's paths overlap.
+    #[serde(default)]
+    concurrent_unknown: bool,
     #[serde(default)]
     backup: Option<Backup>,
     #[serde(default)]
@@ -101,7 +104,7 @@ pub struct UndoResult {
 
 fn file(session: &str, tab: &str) -> Result<PathBuf> {
     trees::reference(session, tab, "start")?;
-    Ok(store::session_dir(session)?.join(format!("checkpoints-{tab}.json")))
+    Ok(store::root()?.join("sessions").join(session).join(format!("checkpoints-{tab}.json")))
 }
 fn load(session: &str, tab: &str) -> Result<State> {
     match std::fs::read(file(session, tab)?) {
@@ -111,21 +114,15 @@ fn load(session: &str, tab: &str) -> Result<State> {
     }
 }
 fn save(session: &str, tab: &str, state: &State) -> Result<()> {
-    store::write_json(&file(session, tab)?, state)
+    let path = file(session, tab)?;
+    store::ensure_dir(path.parent().unwrap().to_path_buf())?;
+    store::write_json(&path, state)
 }
 fn root(cwd: &str) -> Result<String> {
     Ok(git::run(Path::new(cwd), &["rev-parse", "--show-toplevel"])?.trim().into())
 }
 fn index_tree(cwd: &Path) -> Result<String> {
     Ok(git::run(cwd, &["write-tree"])?.trim().into())
-}
-
-fn retention_result(result: Result<()>) -> Result<Option<String>> {
-    match result {
-        Ok(()) => Ok(None),
-        Err(error) if error.is::<trees::LimitExceeded>() => Ok(Some(error.to_string())),
-        Err(error) => Err(error),
-    }
 }
 
 fn file_paths(turn: &Checkpoint) -> BTreeSet<String> {
@@ -137,9 +134,20 @@ fn file_paths(turn: &Checkpoint) -> BTreeSet<String> {
 
 /// Atomic state files include closed tabs; the index includes archived sessions.
 fn workspace_states(cwd: &str) -> Result<Vec<(String, String, State)>> {
+    workspace_states_in(cwd, &index::load()?)
+}
+
+fn workspace_states_in(cwd: &str, sessions: &[index::SessionEntry]) -> Result<Vec<(String, String, State)>> {
     let mut states = Vec::new();
-    for session in index::load()? {
-        for entry in std::fs::read_dir(store::session_dir(&session.id)?)? {
+    let directory = store::root()?.join("sessions");
+    for session in sessions {
+        trees::reference(&session.id, "validate", "start")?;
+        let entries = match std::fs::read_dir(directory.join(&session.id)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -155,16 +163,58 @@ fn workspace_states(cwd: &str) -> Result<Vec<(String, String, State)>> {
     Ok(states)
 }
 
-/// Recover ownership of refs created before the retention ledger existed.
-pub(crate) fn ref_groups(cwd: &str) -> Result<BTreeSet<String>> {
-    let mut groups = BTreeSet::new();
-    for (session, tab, state) in workspace_states(cwd)? {
+pub(crate) struct RetentionState {
+    pub owned: BTreeSet<String>,
+    pub protected: BTreeSet<String>,
+    pub discard_prefixes: Vec<String>,
+    pub running: bool,
+}
+
+/// One read per batch of refs, under the workspace lock. Protect the complete
+/// overlap window, not just the active turn: newer completed turns may include
+/// the active agent's edits, and must remain available for its eventual diff.
+pub(crate) fn retention_state(cwd: &str) -> Result<RetentionState> {
+    let sessions = index::load()?;
+    let states = workspace_states_in(cwd, &sessions)?;
+    let oldest_running = states
+        .iter()
+        .flat_map(|(_, _, state)| &state.turns)
+        .filter(|turn| turn.cwd == cwd && turn.end.is_none())
+        .map(|turn| turn.started_at.unwrap_or(i64::MIN))
+        .min();
+    let mut owned = BTreeSet::new();
+    let mut protected = BTreeSet::new();
+    for (session, tab, state) in states {
         for turn in state.turns.iter().filter(|turn| turn.cwd == cwd) {
             let name = trees::reference(&session, &format!("{tab}-{}", turn.seq), "start")?;
-            groups.insert(name.trim_end_matches("/start").to_string());
+            let group = name.trim_end_matches("/start").to_string();
+            if turn.end.is_none()
+                || oldest_running.is_some_and(|oldest| turn.started_at.unwrap_or(i64::MAX) >= oldest || turn.ended_at.unwrap_or(i64::MAX) >= oldest)
+            {
+                protected.insert(group.clone());
+            }
+            owned.insert(group);
         }
     }
-    Ok(groups)
+    let discard_prefixes = sessions
+        .iter()
+        .filter(|session| in_workspace(&session.cwd, cwd))
+        .map(|session| format!("refs/raccoon-checkpoints/{}/discard-", session.id))
+        .collect();
+    Ok(RetentionState {
+        owned,
+        protected,
+        discard_prefixes,
+        running: oldest_running.is_some(),
+    })
+}
+
+/// Missing refs are uncertain even if their objects have not been collected yet.
+/// Never interpret a lost/unfinished checkpoint's empty file list as no edits.
+fn uncertain(session: &str, tab: &str, turn: &Checkpoint) -> Result<bool> {
+    let id = format!("{tab}-{}", turn.seq);
+    let cwd = Path::new(&turn.cwd);
+    Ok(turn.end.is_none() || turn.unavailable_reason.is_some() || !trees::exists(cwd, session, &id, "start")? || !trees::exists(cwd, session, &id, "end")?)
 }
 
 fn not_before(peer: &Checkpoint, target: &Checkpoint) -> bool {
@@ -181,15 +231,20 @@ fn concurrent(peer: &Checkpoint, target: &Checkpoint) -> bool {
 fn remember_concurrent(session: &str, tab: &str, turn: &mut Checkpoint) -> Result<()> {
     let own_paths = file_paths(turn);
     let target = turn.clone();
+    let unknown = uncertain(session, tab, turn)?;
     for (owner, peer_tab, mut state) in workspace_states(&turn.cwd)? {
         if owner == session && peer_tab == tab {
             continue;
         }
         let mut changed = false;
         for peer in state.turns.iter_mut().filter(|p| p.cwd == target.cwd && concurrent(p, &target)) {
-            peer.concurrent_paths.extend(own_paths.iter().cloned());
-            if peer.end.is_none() {
-                turn.concurrent_paths.extend(own_paths.iter().cloned());
+            if unknown {
+                peer.concurrent_unknown = true;
+            } else {
+                peer.concurrent_paths.extend(own_paths.iter().cloned());
+            }
+            if uncertain(&owner, &peer_tab, peer)? {
+                turn.concurrent_unknown = true;
             } else {
                 turn.concurrent_paths.extend(file_paths(peer));
             }
@@ -209,17 +264,15 @@ fn finish(session: &str, tab: &str, turn: &mut Checkpoint) -> Result<()> {
     let id = format!("{tab}-{}", turn.seq);
     if trees::exists(cwd, session, &id, "start")? {
         turn.files = git::changes_between(cwd, &turn.start, Some(&end))?;
-        let limited = retention_result((|| {
-            trees::pin(cwd, session, &id, "end", &end)?;
-            if let Some(index) = &end_index {
-                trees::pin(cwd, session, &id, "end-index", index)?;
-            }
-            Ok(())
-        })())?;
-        if limited.is_some() {
-            turn.unavailable_reason = limited;
+        let mut snapshots = vec![("end", end.as_str())];
+        if let Some(index) = &end_index {
+            snapshots.push(("end-index", index));
         }
+        trees::pin_many(cwd, session, &id, &snapshots)?;
     } else {
+        // An old version or external cleanup may have removed the ref. Keep a
+        // best-effort summary, but propagate uncertainty even if the diff works.
+        turn.files = git::changes_between(cwd, &turn.start, Some(&end)).unwrap_or_default();
         turn.unavailable_reason
             .get_or_insert_with(|| "This checkpoint has expired under the workspace retention limit.".into());
     }
@@ -268,13 +321,11 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
             let start = git::snapshot_tree(Path::new(&cwd))?;
             let index = index_tree(Path::new(&cwd)).ok();
             let id = format!("{tab}-{seq}");
-            let unavailable_reason = retention_result((|| {
-                trees::pin(Path::new(&cwd), session, &id, "start", &start)?;
-                if let Some(index) = &index {
-                    trees::pin(Path::new(&cwd), session, &id, "index", index)?;
-                }
-                Ok(())
-            })())?;
+            let mut snapshots = vec![("start", start.as_str())];
+            if let Some(index) = &index {
+                snapshots.push(("index", index));
+            }
+            trees::pin_many(Path::new(&cwd), session, &id, &snapshots)?;
             if let Payload::UserMessage { baseline, .. } = payload {
                 *baseline = Some(start.clone());
             }
@@ -292,10 +343,11 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
                 started_at,
                 ended_at: None,
                 concurrent_paths: BTreeSet::new(),
+                concurrent_unknown: false,
                 backup: None,
                 restored: false,
                 backup_ref: None,
-                unavailable_reason,
+                unavailable_reason: None,
             });
         } else if let Payload::TurnCompleted { head, .. } = payload {
             if let Some(turn) = state.turns.last_mut().filter(|t| t.end.is_none()) {
@@ -416,8 +468,14 @@ pub fn undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>) -> Resu
         let mut changed = trees::paths(cwd, turn.end.as_deref().unwrap(), &now)?;
         changed.extend(trees::paths(cwd, turn.end_index.as_deref().unwrap_or(start_index), &now_index)?);
         changed.extend(turn.concurrent_paths.iter().cloned());
+        if turn.concurrent_unknown {
+            changed.extend(paths.iter().cloned());
+        }
         for later in &state.turns[at + 1..] {
             changed.extend(file_paths(later));
+            if uncertain(session, tab, later)? {
+                changed.extend(paths.iter().cloned());
+            }
         }
         // Whole-checkout snapshots include other agents' work already present at end.
         // Include every conversation in this checkout, including closed tabs and turns
@@ -428,7 +486,7 @@ pub fn undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>) -> Resu
             }
             for peer in peer_state.turns.iter().filter(|peer| peer.cwd == turn.cwd && not_before(peer, turn)) {
                 changed.extend(file_paths(peer));
-                if peer.end.is_none() {
+                if uncertain(&owner, &peer_tab, peer)? {
                     changed.extend(paths.iter().cloned());
                 }
             }
@@ -444,8 +502,7 @@ pub fn undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>) -> Resu
         }
         // Retain the current contents too, so an I/O error never makes them unreachable.
         let id = format!("{tab}-{seq}");
-        trees::pin(cwd, session, &id, "before-undo", &now)?;
-        trees::pin(cwd, session, &id, "before-undo-index", &now_index)?;
+        trees::pin_many(cwd, session, &id, &[("before-undo", &now), ("before-undo-index", &now_index)])?;
         trees::restore_with_backup(cwd, &turn.start, start_index, &paths, &now, &now_index)?;
         let number = turn.number;
         let revert_note = note(&paths, Some(number));
@@ -511,8 +568,7 @@ pub fn discard(cwd: &str, path: &str, base: Option<&str>, old_path: Option<&str>
         if let Some(session) = &backup_owner {
             // One bounded recovery slot, rather than an unbounded ref pair per discard.
             let id = "discard-backup";
-            trees::pin(p, session, id, "start", &before)?;
-            trees::pin(p, session, id, "index", &before_index)?;
+            trees::pin_many(p, session, id, &[("start", &before), ("index", &before_index)])?;
         }
         trees::restore_with_backup(p, &base, &base, &paths, &before, &before_index)?;
         if let Some(session) = &backup_owner {
@@ -579,8 +635,7 @@ pub fn restore_undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>)
                 backup_ref: None,
             });
         }
-        trees::pin(cwd, session, &id, "before-restore", &now)?;
-        trees::pin(cwd, session, &id, "before-restore-index", &now_index)?;
+        trees::pin_many(cwd, session, &id, &[("before-restore", &now), ("before-restore-index", &now_index)])?;
         trees::restore_with_backup(cwd, &backup.tree, &backup.index, &paths, &now, &now_index)?;
         let number = turn.number;
         state.turns[at].undone = false;
@@ -654,22 +709,32 @@ pub fn acknowledge(session: &str, tab: &str, notes: &[Note]) -> Result<()> {
     })
 }
 
-pub fn prune(session: &index::SessionEntry) {
-    let result = workspace_locked(&session.cwd, || {
+pub fn prune(session: &index::SessionEntry) -> Result<()> {
+    workspace_locked(&session.cwd, || {
         // Git stores these refs in the common directory, which outlives a removed worktree.
         // Keep its location even for quick chats, which have no project_path fallback.
         let mut repositories = std::collections::BTreeSet::new();
         let mut metadata = Vec::new();
         // Closed tabs can still own refs. Their metadata goes with the workspace too.
         trees::reference(&session.id, "validate", "start")?;
-        for entry in std::fs::read_dir(store::session_dir(&session.id)?)? {
+        let entries = match std::fs::read_dir(store::root()?.join("sessions").join(&session.id)) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries.into_iter().flatten() {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if !name.starts_with("checkpoints-") || !name.ends_with(".json") {
+            let Some(tab) = name.strip_prefix("checkpoints-").and_then(|name| name.strip_suffix(".json")) else {
                 continue;
+            };
+            let mut state: State = serde_json::from_slice(&std::fs::read(entry.path())?)?;
+            // Deleting a conversation can remove a running checkpoint without a
+            // TurnCompleted event. Preserve that uncertainty before its evidence goes.
+            for turn in state.turns.iter_mut().filter(|turn| turn.end.is_none()) {
+                remember_concurrent(&session.id, tab, turn)?;
             }
-            let state: State = serde_json::from_slice(&std::fs::read(entry.path())?)?;
             if let Some(repository) = state.repository {
                 repositories.insert(repository);
             }
@@ -693,10 +758,7 @@ pub fn prune(session: &index::SessionEntry) {
             }
         }
         Ok(())
-    });
-    if let Err(error) = result {
-        log::warn!("prune turn checkpoints: {error:#}");
-    }
+    })
 }
 
 #[cfg(test)]
@@ -788,7 +850,7 @@ mod tests {
                 git::run(repo.path(), &["cat-file", "-e", tree]).unwrap();
             }
         }
-        prune(&session);
+        prune(&session).unwrap();
         assert!(git::run(repo.path(), &["for-each-ref", "refs/raccoon-checkpoints"]).unwrap().is_empty());
         assert!(get(&session.id, tab, 1).unwrap().is_none());
     }
@@ -893,7 +955,7 @@ mod tests {
         observe_at(&session, 1, prompt(false));
         observe_at(&session, 2, done());
         git::run(repo.path(), &["worktree", "remove", wt.to_str().unwrap()]).unwrap();
-        prune(&session);
+        prune(&session).unwrap();
         assert!(git::run(repo.path(), &["for-each-ref", "refs/raccoon-checkpoints"]).unwrap().is_empty());
     }
     fn second_tab(session: &index::SessionEntry, other_session: bool) -> index::SessionEntry {
@@ -1089,5 +1151,132 @@ mod tests {
         assert!(get(&session.id, tab, 1).unwrap().unwrap().unavailable_reason.is_some());
         assert!(undo(&session.id, tab, 1, None).is_err());
         assert_eq!(std::fs::read_to_string(repo.path().join("a.txt")).unwrap(), "agent\n");
+    }
+
+    #[test]
+    fn retention_protects_running_turns_and_newer_completed_turns_until_the_window_closes() {
+        let _home = store::temp_home();
+        let (repo, session) = fixture();
+        let peer = second_tab(&session, true);
+        let tab = &session.tabs[0].id;
+        let peer_tab = &peer.tabs[0].id;
+        observe_at(&session, 1, prompt(false));
+        observe_at(&session, 2, done()); // eligible, before the oldest running turn
+        observe_at(&session, 3, prompt(false));
+        observe_at(&peer, 1, prompt(false));
+        std::fs::write(repo.path().join("b.txt"), "concurrent work\n").unwrap();
+        observe_at(&peer, 2, done());
+        observe_at(&peer, 3, prompt(false));
+        observe_at(&peer, 4, done());
+        // Both count and byte pressure must preserve A and every newer checkpoint,
+        // including completed turns, even when that exceeds the configured limits.
+        trees::enforce_retention(repo.path(), 1, 0).unwrap();
+        assert!(!trees::exists(repo.path(), &session.id, &format!("{tab}-1"), "start").unwrap());
+        for (owner, id) in [
+            (&session.id, format!("{tab}-3")),
+            (&peer.id, format!("{peer_tab}-1")),
+            (&peer.id, format!("{peer_tab}-3")),
+        ] {
+            assert!(trees::exists(repo.path(), owner, &id, "start").unwrap());
+        }
+        git::run(repo.path(), &["gc", "--prune=now"]).unwrap();
+        observe_at(&session, 4, done());
+        let completed = get(&session.id, tab, 3).unwrap().unwrap();
+        assert!(completed.unavailable_reason.is_none());
+        assert!(file_paths(&completed).contains("b.txt"));
+        // Once the interval is closed, retention resumes and evicts whole groups.
+        trees::enforce_retention(repo.path(), 1, u64::MAX).unwrap();
+        assert!(trees::exists(repo.path(), &session.id, &format!("{tab}-3"), "end").unwrap());
+        assert!(!trees::exists(repo.path(), &peer.id, &format!("{peer_tab}-1"), "start").unwrap());
+        assert!(!trees::exists(repo.path(), &peer.id, &format!("{peer_tab}-3"), "end").unwrap());
+    }
+
+    #[test]
+    fn a_peer_checkpoint_lost_mid_turn_requires_confirmation_even_after_gc_or_session_deletion() {
+        let _home = store::temp_home();
+        for (other_session, collect) in [(false, false), (false, true), (true, true)] {
+            let (repo, session) = fixture();
+            let peer = second_tab(&session, other_session);
+            let tab = &session.tabs[0].id;
+            let peer_tab = &peer.tabs[0].id;
+            // Make the peer's start tree unreachable from both HEAD and the target
+            // turn, so GC really removes the evidence rather than leaving a diff.
+            std::fs::write(repo.path().join("before.txt"), "only in peer start\n").unwrap();
+            observe_at(&peer, 1, prompt(false));
+            let start = load(&peer.id, peer_tab).unwrap().turns[0].start.clone();
+            std::fs::remove_file(repo.path().join("before.txt")).unwrap();
+            observe_at(&session, 1, prompt(false));
+            std::fs::write(repo.path().join("b.txt"), "peer work\n").unwrap();
+            trees::prune_turn(repo.path(), &peer.id, &format!("{peer_tab}-1")).unwrap();
+            if collect {
+                git::run(repo.path(), &["gc", "--prune=now"]).unwrap();
+                assert!(git::run(repo.path(), &["cat-file", "-e", &start]).is_err());
+            }
+            observe_at(&peer, 2, done());
+            let lost = load(&peer.id, peer_tab).unwrap();
+            assert_eq!(lost.turns[0].files.is_empty(), collect);
+            assert!(lost.turns[0].unavailable_reason.is_some());
+            if other_session {
+                crate::session_ops::remove_session_entries(std::slice::from_ref(&peer)).unwrap();
+            }
+            observe_at(&session, 2, done());
+            let preview = undo(&session.id, tab, 1, None).unwrap();
+            assert!(!preview.undone);
+            assert_eq!(preview.overlap, vec!["b.txt"]);
+            assert_eq!(std::fs::read_to_string(repo.path().join("b.txt")).unwrap(), "peer work\n");
+            assert!(pending(&session.id, tab).unwrap().is_empty());
+            assert!(undo(&session.id, tab, 1, Some(&preview.token)).unwrap().undone);
+            assert!(!repo.path().join("b.txt").exists());
+            assert!(restore_undo(&session.id, tab, 1, None).unwrap().undone);
+            assert_eq!(std::fs::read_to_string(repo.path().join("b.txt")).unwrap(), "peer work\n");
+        }
+    }
+
+    #[test]
+    fn losing_a_completed_peers_refs_is_uncertain_even_with_an_empty_file_list() {
+        let _home = store::temp_home();
+        let (repo, session) = fixture();
+        let peer = second_tab(&session, false);
+        let tab = &session.tabs[0].id;
+        observe_at(&session, 1, prompt(false));
+        observe_at(&peer, 1, prompt(false));
+        observe_at(&peer, 2, done());
+        std::fs::write(repo.path().join("a.txt"), "target edit\n").unwrap();
+        observe_at(&session, 2, done());
+        trees::prune_turn(repo.path(), &peer.id, &format!("{}-1", peer.tabs[0].id)).unwrap();
+        let preview = undo(&session.id, tab, 1, None).unwrap();
+        assert!(!preview.undone);
+        assert_eq!(preview.overlap, vec!["a.txt"]);
+        assert_eq!(std::fs::read_to_string(repo.path().join("a.txt")).unwrap(), "target edit\n");
+    }
+
+    #[test]
+    fn reading_checkpoint_metadata_does_not_create_session_directories() {
+        let _home = store::temp_home();
+        let (_repo, session) = fixture();
+        let directory = store::root().unwrap().join("sessions").join(&session.id);
+        if directory.exists() {
+            std::fs::remove_dir_all(&directory).unwrap();
+        }
+        assert!(get(&session.id, &session.tabs[0].id, 1).unwrap().is_none());
+        assert!(workspace_states(&session.cwd).unwrap().is_empty());
+        assert!(retention_state(&session.cwd).unwrap().owned.is_empty());
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn deleting_a_running_peer_preserves_uncertainty_before_removing_its_checkpoint() {
+        let _home = store::temp_home();
+        let (repo, session) = fixture();
+        let peer = second_tab(&session, true);
+        observe_at(&peer, 1, prompt(false));
+        observe_at(&session, 1, prompt(false));
+        std::fs::write(repo.path().join("b.txt"), "peer work\n").unwrap();
+        crate::session_ops::remove_session_entries(std::slice::from_ref(&peer)).unwrap();
+        observe_at(&session, 2, done());
+        let preview = undo(&session.id, &session.tabs[0].id, 1, None).unwrap();
+        assert!(!preview.undone);
+        assert_eq!(preview.overlap, vec!["b.txt"]);
+        assert_eq!(std::fs::read_to_string(repo.path().join("b.txt")).unwrap(), "peer work\n");
     }
 }

@@ -1,14 +1,11 @@
 //! Bounded retention per checkout. Callers hold the checkpoint workspace lock.
 use super::*;
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::process::Stdio;
 
-pub const MAX_TREE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_GROUPS: usize = 50;
-
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct LimitExceeded(pub &'static str);
 
 #[derive(Default, Serialize, Deserialize)]
 struct Ledger {
@@ -18,33 +15,68 @@ struct Ledger {
 #[derive(Default, Serialize, Deserialize)]
 struct Group {
     touched: u64,
+    // Keep the old ledger shape readable. Values used to be logical tree sizes;
+    // only the ref names matter now. Git counts unique on-disk objects below.
     refs: BTreeMap<String, u64>,
 }
 
-fn tree_bytes(cwd: &Path, tree: &str) -> Result<u64> {
-    let entries = run(cwd, &["ls-tree", "-r", "-l", "-z", tree])?;
-    Ok(entries
-        .split('\0')
-        .filter_map(|entry| entry.split('\t').next()?.split_whitespace().nth(3)?.parse::<u64>().ok())
-        .fold(0, u64::saturating_add))
-}
-
-pub fn pin(cwd: &Path, name: &str, tree: &str) -> Result<()> {
-    pin_with_tree_limit(cwd, name, tree, MAX_TREE_BYTES)
-}
-
-fn pin_with_tree_limit(cwd: &Path, name: &str, tree: &str, max_tree_bytes: u64) -> Result<()> {
-    let bytes = tree_bytes(cwd, tree)?;
-    if bytes > max_tree_bytes {
-        return Err(LimitExceeded("This checkpoint exceeds the 256 MiB snapshot limit.").into());
+fn run_input(cwd: &Path, args: &[&str], input: &str) -> Result<String> {
+    let mut child = git()
+        .current_dir(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let written = child.stdin.take().unwrap().write_all(input.as_bytes());
+    let output = child.wait_with_output()?;
+    written?;
+    if !output.status.success() {
+        bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr));
     }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+fn disk_bytes(cwd: &Path, ledger: &Ledger) -> Result<u64> {
+    let refs: Vec<_> = ledger.groups.values().flat_map(|group| group.refs.keys().map(String::as_str)).collect();
+    if refs.is_empty() {
+        return Ok(0);
+    }
+    // Tree refs share unchanged blobs and subtrees. Count their union once, using
+    // Git's on-disk sizes, rather than charging the whole checkout for every ref.
+    Ok(run_input(cwd, &["rev-list", "--objects", "--disk-usage", "--stdin"], &refs.join("\n"))?
+        .trim()
+        .parse()?)
+}
+
+fn ledger_path(cwd: &Path) -> Result<PathBuf> {
     let dir = run(cwd, &["rev-parse", "--absolute-git-dir"])?;
-    let path = Path::new(dir.trim()).join("raccoon-checkpoint-retention.json");
-    let mut ledger: Ledger = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ledger::default(),
-        Err(e) => return Err(e.into()),
-    };
+    Ok(Path::new(dir.trim()).join("raccoon-checkpoint-retention.json"))
+}
+
+fn load(path: &Path) -> Result<Ledger> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Ledger::default()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn protected_groups(ledger: &Ledger, state: &crate::checkpoints::RetentionState) -> BTreeSet<String> {
+    let mut protected = state.protected.clone();
+    if state.running {
+        // Unknown legacy groups cannot be safely dated relative to a running turn.
+        protected.extend(ledger.groups.keys().filter(|group| !state.owned.contains(*group)).cloned());
+    }
+    protected
+}
+
+pub fn pin(cwd: &Path, updates: &[(String, &str)]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let path = ledger_path(cwd)?;
+    let mut ledger = load(&path)?;
     let refs = run(cwd, &["for-each-ref", "--format=%(refname)", "refs/raccoon-checkpoints/"])?;
     let present: BTreeSet<_> = refs.lines().collect();
     ledger.groups.retain(|group_name, group| {
@@ -55,81 +87,135 @@ fn pin_with_tree_limit(cwd: &Path, name: &str, tree: &str, max_tree_bytes: u64) 
         });
         !group.refs.is_empty()
     });
-    let group_name = name.rsplit_once('/').ok_or_else(|| anyhow!("Invalid checkpoint ref"))?.0.to_string();
     let root = run(cwd, &["rev-parse", "--show-toplevel"])?;
-    let mut owned = crate::checkpoints::ref_groups(root.trim())?;
-    owned.insert(group_name.clone());
-    let mut discard_prefixes = Vec::new();
-    for session in crate::store::index::load()? {
-        if run(Path::new(&session.cwd), &["rev-parse", "--show-toplevel"]).is_ok_and(|p| p.trim() == root.trim()) {
-            discard_prefixes.push(format!("refs/raccoon-checkpoints/{}/discard-", session.id));
-        }
-    }
-    // Refs are shared by Git worktrees; adopt only metadata belonging to this checkout.
+    let state = crate::checkpoints::retention_state(root.trim())?;
+    let mut owned = state.owned.clone();
+    let current: BTreeSet<_> = updates.iter().map(|(name, _)| name.rsplit_once('/').unwrap().0.to_string()).collect();
+    owned.extend(current.iter().cloned());
+    // Git worktrees share refs. Adopt only refs owned by this checkout.
     for name in present {
         let Some((parent, _)) = name.rsplit_once('/') else { continue };
-        if owned.contains(parent) || discard_prefixes.iter().any(|prefix| name.starts_with(prefix)) {
-            let group = ledger.groups.entry(parent.to_string()).or_default();
-            if !group.refs.contains_key(name) {
-                group.refs.insert(name.to_string(), tree_bytes(cwd, name)?);
-            }
+        if owned.contains(parent) || state.discard_prefixes.iter().any(|prefix| name.starts_with(prefix)) {
+            ledger.groups.entry(parent.to_string()).or_default().refs.insert(name.to_string(), 0);
         }
     }
     ledger.clock = ledger.clock.saturating_add(1);
-    let group = ledger.groups.entry(group_name.clone()).or_default();
-    group.touched = ledger.clock;
-    group.refs.insert(name.to_string(), bytes);
-    if group.refs.values().copied().fold(0, u64::saturating_add) > MAX_BYTES {
-        return Err(LimitExceeded("Checkpoint exceeds the workspace retention limit").into());
+    let mut input = String::from("start\n");
+    for (name, tree) in updates {
+        let group = ledger.groups.entry(name.rsplit_once('/').unwrap().0.to_string()).or_default();
+        group.touched = ledger.clock;
+        group.refs.insert(name.clone(), 0);
+        input.push_str(&format!("update {name} {tree}\n"));
     }
-    run(cwd, &["update-ref", name, tree])?;
-    trim(cwd, &mut ledger, &group_name, MAX_GROUPS, MAX_BYTES)?;
+    input.push_str("prepare\ncommit\n");
+    // Record ownership before publishing refs so a failed write cannot orphan them.
+    crate::store::write_json(&path, &ledger)?;
+    run_input(cwd, &["update-ref", "--stdin"], &input)?;
+    let mut protected = protected_groups(&ledger, &state);
+    protected.extend(current);
+    trim(cwd, &mut ledger, &protected, MAX_GROUPS, MAX_BYTES)?;
     crate::store::write_json(&path, &ledger)
 }
 
-fn trim(cwd: &Path, ledger: &mut Ledger, current: &str, max_groups: usize, max_bytes: u64) -> Result<()> {
-    while ledger.groups.len() > max_groups || ledger.groups.values().flat_map(|g| g.refs.values()).copied().fold(0, u64::saturating_add) > max_bytes {
-        let oldest = ledger
-            .groups
-            .iter()
-            .filter(|(name, _)| name.as_str() != current)
-            .min_by_key(|(_, group)| group.touched)
-            .map(|(name, _)| name.clone())
-            .ok_or_else(|| anyhow!("Checkpoint exceeds the workspace retention limit"))?;
-        let group = ledger.groups.remove(&oldest).unwrap();
-        for name in group.refs.keys() {
-            run(cwd, &["update-ref", "-d", name])?;
+fn evict_oldest(cwd: &Path, ledger: &mut Ledger, protected: &BTreeSet<String>) -> Result<bool> {
+    let Some(oldest) = ledger
+        .groups
+        .iter()
+        .filter(|(name, _)| !protected.contains(*name))
+        .min_by_key(|(_, group)| group.touched)
+        .map(|(name, _)| name.clone())
+    else {
+        return Ok(false);
+    };
+    let group = &ledger.groups[&oldest];
+    let mut input = String::from("start\n");
+    for name in group.refs.keys() {
+        input.push_str(&format!("delete {name}\n"));
+    }
+    input.push_str("prepare\ncommit\n");
+    run_input(cwd, &["update-ref", "--stdin"], &input)?;
+    ledger.groups.remove(&oldest);
+    Ok(true)
+}
+
+fn trim(cwd: &Path, ledger: &mut Ledger, protected: &BTreeSet<String>, max_groups: usize, max_bytes: u64) -> Result<()> {
+    // These are soft limits while a turn runs. Never sacrifice overlap evidence
+    // or the current operation's backup to meet a storage target. A later pin
+    // resumes eviction once the running window closes.
+    while ledger.groups.len() > max_groups {
+        if !evict_oldest(cwd, ledger, protected)? {
+            break;
+        }
+    }
+    while disk_bytes(cwd, ledger)? > max_bytes {
+        if !evict_oldest(cwd, ledger, protected)? {
+            break;
         }
     }
     Ok(())
 }
 
 #[cfg(test)]
+pub fn enforce_for_test(cwd: &Path, max_groups: usize, max_bytes: u64) -> Result<()> {
+    let path = ledger_path(cwd)?;
+    let mut ledger = load(&path)?;
+    let root = run(cwd, &["rev-parse", "--show-toplevel"])?;
+    let state = crate::checkpoints::retention_state(root.trim())?;
+    let protected = protected_groups(&ledger, &state);
+    trim(cwd, &mut ledger, &protected, max_groups, max_bytes)?;
+    crate::store::write_json(&path, &ledger)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn oversized_trees_are_not_pinned_and_legacy_refs_are_accounted_for() {
+    fn counts_shared_objects_once_and_adopts_legacy_refs_without_other_worktrees() {
         let _home = crate::store::temp_home();
         let repo = super::super::super::tests::repo();
-        std::fs::write(repo.path().join("large.txt"), "more than one byte").unwrap();
+        std::fs::write(repo.path().join("large.txt"), vec![b'x'; 1024 * 1024]).unwrap();
         let tree = snapshot_tree(repo.path()).unwrap();
         let start = "refs/raccoon-checkpoints/session/tab-1/start";
         let foreign = "refs/raccoon-checkpoints/another-worktree/tab-1/start";
         run(repo.path(), &["update-ref", foreign, &tree]).unwrap();
-        assert!(pin_with_tree_limit(repo.path(), start, &tree, 1).is_err());
-        assert!(!run_ok(repo.path(), &["show-ref", "--verify", start]));
         run(repo.path(), &["update-ref", start, &tree]).unwrap();
-        pin(repo.path(), "refs/raccoon-checkpoints/session/tab-1/end", &tree).unwrap();
-        let ledger: Ledger = serde_json::from_slice(&std::fs::read(repo.path().join(".git/raccoon-checkpoint-retention.json")).unwrap()).unwrap();
-        let group = &ledger.groups["refs/raccoon-checkpoints/session/tab-1"];
-        assert_eq!(group.refs.len(), 2);
-        assert!(group.refs.values().all(|bytes| *bytes >= 18));
-        assert_eq!(ledger.groups.len(), 1, "another checkout's refs are excluded");
+        pin(repo.path(), &[("refs/raccoon-checkpoints/session/tab-1/end".into(), &tree)]).unwrap();
+        let ledger = load(&ledger_path(repo.path()).unwrap()).unwrap();
+        assert_eq!(ledger.groups["refs/raccoon-checkpoints/session/tab-1"].refs.len(), 2);
+        let single: u64 = run(repo.path(), &["rev-list", "--objects", "--disk-usage", &tree])
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            disk_bytes(repo.path(), &ledger).unwrap(),
+            single,
+            "two refs must not count identical objects twice"
+        );
+        assert!(single < 1024 * 1024, "use disk storage, not logical file size");
+        std::fs::write(repo.path().join("a.txt"), "a new version\n").unwrap();
+        let changed = snapshot_tree(repo.path()).unwrap();
+        pin(repo.path(), &[("refs/raccoon-checkpoints/session/tab-2/end".into(), &changed)]).unwrap();
+        let combined = load(&ledger_path(repo.path()).unwrap()).unwrap();
+        let changed_bytes: u64 = run(repo.path(), &["rev-list", "--objects", "--disk-usage", &changed])
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let shared_bytes = disk_bytes(repo.path(), &combined).unwrap();
+        assert!(shared_bytes > single);
+        assert!(
+            shared_bytes < single + changed_bytes,
+            "different snapshots must share the unchanged objects too"
+        );
+        assert_eq!(ledger.groups.len(), 1);
+        assert_eq!(combined.groups.len(), 2);
         assert!(run_ok(repo.path(), &["show-ref", "--verify", foreign]));
     }
 
     #[test]
-    fn retention_evicts_whole_oldest_groups_for_count_and_bytes() {
+    fn retention_evicts_whole_oldest_groups_for_count_and_unique_bytes() {
         let _home = crate::store::temp_home();
         let repo = super::super::super::tests::repo();
         let cwd = repo.path();
@@ -145,17 +231,18 @@ mod tests {
                 group,
                 Group {
                     touched: i,
-                    refs: BTreeMap::from([(name, 5), (end, 5)]),
+                    refs: BTreeMap::from([(name, 0), (end, 0)]),
                 },
             );
         }
         let current = "refs/raccoon-checkpoints/session/tab-3";
-        trim(cwd, &mut ledger, current, 3, 100).unwrap();
+        let protected = BTreeSet::from([current.to_string()]);
+        trim(cwd, &mut ledger, &protected, 3, u64::MAX).unwrap();
         assert_eq!(ledger.groups.len(), 3);
         assert!(!run_ok(cwd, &["show-ref", "--verify", "refs/raccoon-checkpoints/session/tab-0/start"]));
         assert!(!run_ok(cwd, &["show-ref", "--verify", "refs/raccoon-checkpoints/session/tab-0/end"]));
-        trim(cwd, &mut ledger, current, 3, 15).unwrap();
-        assert_eq!(ledger.groups.len(), 1);
+        trim(cwd, &mut ledger, &protected, 3, 0).unwrap();
+        assert_eq!(ledger.groups.len(), 1, "even an undersized budget cannot evict the protected current group");
         assert!(run_ok(cwd, &["show-ref", "--verify", &format!("{current}/start")]));
     }
 }
