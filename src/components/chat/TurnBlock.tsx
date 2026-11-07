@@ -54,6 +54,7 @@ interface TurnProps {
   onSendAgain?: (seq: number) => void;
   /** The time line above the turn when it opens a new sitting ("Yesterday, 5:21 PM"); see \`turnDivider\`. */
   divider?: string | null;
+  onReset?: (endSeq: number) => void;
 }
 
 function TurnBody({
@@ -66,6 +67,7 @@ function TurnBody({
   onSendQueuedNow,
   onSendAgain,
   divider,
+  onReset,
 }: TurnProps) {
   const prefs = usePrefs();
   const [expanded, setExpanded] = useDisclosure("fold");
@@ -154,7 +156,7 @@ function TurnBody({
 
       {changes.length > 0 && <TurnChanges changes={changes} cwd={cwd} linkContext={linkContext} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} />}
+      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} onReset={onReset} />}
     </div>
   );
 }
@@ -200,7 +202,7 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
  * A settled turn's one footer row: when the answer came, how the turn went
  * when no header said so, and a copy of the answer on hover.
  */
-function TurnFooter({ turn, outcome }: { turn: Turn; outcome: Outcome | null }) {
+function TurnFooter({ turn, outcome, onReset }: { turn: Turn; outcome: Outcome | null; onReset?: (endSeq: number) => void }) {
   const answer = turn.work.flatMap((w) => (w.kind === "text" && w.text.trim() ? [w] : []));
   const ts = answer.at(-1)?.messageTs;
   const text = answer.map((w) => w.text).join("\n\n");
@@ -211,10 +213,13 @@ function TurnFooter({ turn, outcome }: { turn: Turn; outcome: Outcome | null }) 
     return () => window.clearTimeout(id);
   }, [copied]);
   const quiet = outcome?.tone === "ok";
-  if (!messageTime(ts) && !outcome && !text) return null;
+  if (!messageTime(ts) && !outcome && !text && !onReset) return null;
   return (
     <div className="flex min-h-7 flex-wrap items-center gap-x-1.5 text-xs text-faint" data-testid="turn-footer">
       <MessageTime ts={ts} inline />
+      {onReset && turn.completed?.status === "ok" && turn.completed.seq != null && (
+        <button type="button" onClick={() => onReset(turn.completed!.seq!)} className="rounded px-1.5 py-1 hover:bg-veil-raised focus-visible:outline">Reset to here</button>
+      )}
       {outcome && (
         <span className={cn("flex items-center gap-1.5", outcome.tone === "failed" && "text-destructive")}>
           {!quiet && <OutcomeIcon tone={outcome.tone} />}

@@ -65,7 +65,7 @@ export interface Turn {
   finalText?: string;
   /** Under a failed turn's `finalText`: the agent's last line, when it exited before it ever worked (#667). */
   detail?: string;
-  completed?: { status: string; durationMs?: number; ts: string; head?: string };
+  completed?: { seq?: number; status: string; durationMs?: number; ts: string; head?: string };
   usage?: { contextUsed?: number; contextMax?: number };
   toolCount: number;
   editedFiles: number;
@@ -538,7 +538,7 @@ export class TranscriptReducer {
       case "turn_completed": {
         const turn = this.ensureTurn(event);
         this.abandonUnresolved();
-        turn.completed = { status: payload.status, durationMs: payload.durationMs, ts: event.ts, head: payload.head };
+        turn.completed = { seq: event.seq, status: payload.status, durationMs: payload.durationMs, ts: event.ts, head: payload.head };
         const lastText = [...turn.work].reverse().find((item) => item.kind === "text");
         if (payload.finalText && (!lastText || (lastText.kind === "text" && lastText.text.trim() !== payload.finalText.trim()))) {
           if (payload.status !== "ok") turn.finalText = payload.finalText;

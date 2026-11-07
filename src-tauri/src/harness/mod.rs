@@ -17,6 +17,7 @@ pub mod host;
 pub mod opencode;
 pub mod readiness;
 pub mod read_only;
+pub mod reset;
 pub mod settings;
 pub mod setup;
 pub mod tui;

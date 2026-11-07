@@ -2321,6 +2321,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
         // Claude can fork a conversation; Codex starts a new thread over the copied log.
         new_tab.fork_from = if tab.harness == "claude" { tab.provider_session_id.clone() } else { None };
         new_tab.provider_session_id = None;
+        for key in ["resetLogId", "resetBackupId", "resetSeq"] { new_tab.unknown.remove(key); }
         // A quick chat's fork is a quick chat with a scratch directory of its
         // own: sharing the parent's would have either one's deletion take the
         // other's files. What the parent had there is copied, since the
@@ -2373,7 +2374,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
         }
         // Copy the log, re-stamping envelopes so the new tab owns them.
         if let Ok(dir) = store::sessions_dir() {
-            let from = dir.join(&src.id).join(format!("{}.jsonl", tab.id));
+            let from = store::log_path(&src.id, &tab.id).map_err(err)?;
             if let Ok(text) = std::fs::read_to_string(&from) {
                 let to_dir = dir.join(&id);
                 let _ = std::fs::create_dir_all(&to_dir);
@@ -2650,6 +2651,12 @@ pub async fn ensure_tab_started(state: State<'_, AppState>, session_id: String, 
 pub async fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.stop(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn reset_chat(state: State<'_, AppState>, session_id: String, tab_id: String, end_seq: Option<u64>, reset_files: bool) -> CmdResult<Option<String>> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.reset_chat(&session_id, &tab_id, end_seq, reset_files).map_err(err)).await.map_err(err)?
 }
 
 /// Send a message the CLI holds behind its running turn now: interrupt, then type it.
