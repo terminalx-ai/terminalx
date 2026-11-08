@@ -610,8 +610,8 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(screen.getByTestId("session-project").textContent).toBe("project");
     expect(screen.getByTestId("session-branch").textContent).toBe("main");
     expect(screen.queryByTestId("session-title")).toBeNull();
-    // Asked about the folder the session works in, once.
-    expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: "/Users/me/shop", refresh: false }]);
+    // Asked about the folder once, refreshing native metadata for this privacy generation.
+    expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: "/Users/me/shop", refresh: true }]);
   });
 
   it.each([
