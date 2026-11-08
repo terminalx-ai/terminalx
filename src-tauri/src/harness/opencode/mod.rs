@@ -156,6 +156,15 @@ impl OpenCode {
         self.begin_turn(&text, &images)
     }
 
+    /// A remote HTTP action lost admission before it could write. Forget the
+    /// startup stash as well, so neither a late opening reply nor restart can
+    /// revive it. The owner verifies this is still the same child.
+    pub fn withdraw_prompt(&mut self, tag: &str) -> Vec<Action> {
+        if !matches!(tag, "session_get" | "session_new" | "prompt") { return Vec::new(); }
+        if self.stashed.take().is_some() { self.turn_open = true; }
+        self.end_turn(TurnStatus::Aborted, None, false)
+    }
+
     /// Abort the open turn; the server keeps running. The turn ends when the
     /// session goes idle (`idle`), not here.
     pub fn interrupt(&mut self) -> Vec<Action> {
@@ -587,6 +596,20 @@ mod tests {
     }
     fn https(actions: &[Action]) -> Vec<(String, String, Option<Value>)> {
         actions.iter().filter_map(|a| if let Action::Http { tag, url, body, .. } = a { Some((tag.clone(), url.clone(), body.clone())) } else { None }).collect()
+    }
+
+    #[test]
+    fn withdrawn_remote_opening_cannot_replay_on_a_late_reply() {
+        for tag in ["session_new", "session_get"] {
+            let mut o = OpenCode::new(4321, "/tmp/x", None, None, "default");
+            o.start("expired remote".into(), vec![]);
+            let withdrawn = o.withdraw_prompt(tag);
+            assert!(emits(&withdrawn).iter().any(|payload| matches!(payload, Payload::TurnCompleted { status: TurnStatus::Aborted, .. })));
+            let reply = o.on_http(tag, 200, &json!({"id":"late-session"}));
+            assert!(https(&reply).is_empty(), "a late opening reply must not revive the prompt");
+            let fresh = o.prompt("fresh local".into(), vec![]);
+            assert_eq!(https(&fresh)[0].2.as_ref().unwrap()["parts"][0]["text"], "fresh local");
+        }
     }
 
     #[test]

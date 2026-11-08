@@ -626,26 +626,27 @@ fn fresh_runtime(root: &Path, fixture: &FetchFixture, managed: bool) {
     assert_eq!(runtime.block_on(rpc.handle(&peer, &json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["workspace/1"]}})))["ok"], true);
     let request = || json!({"id":"fetch","method":"workspace.disposition","params":{"sessionId":fixture.session,"fetch":true}});
     let check = |answer: serde_json::Value, fresh: bool| {
-        if answer["ok"] == false {
-            assert!(!fresh, "fresh remote disposition was refused: {answer}");
-            assert_eq!(answer["error"]["code"], "forbidden");
-            assert_eq!(answer["error"]["message"], data_privacy::MESSAGE);
-            // Local inspection still produces useful, explicitly unverified facts.
-            let local = crate::session_ops::workspace_disposition(&fixture.project, &fixture.worktree, false).unwrap();
-            fixture.disposition(&serde_json::to_value(local).unwrap(), false);
-        } else {
-            fixture.disposition(&answer["result"]["disposition"], fresh);
-        }
+        assert_eq!(answer["ok"], true, "{answer}");
+        fixture.disposition(&answer["result"]["disposition"], fresh);
+    };
+    let refused = |answer: serde_json::Value| {
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(answer["error"]["code"], "forbidden");
+        assert_eq!(answer["error"]["message"], data_privacy::MESSAGE);
+        // Local inspection remains useful without authorizing a replacement request.
+        let local = super::with_ticket(data_privacy::Ticket::denied(), ||
+            crate::session_ops::workspace_disposition(&fixture.project, &fixture.worktree, false)).unwrap();
+        fixture.disposition(&serde_json::to_value(local).unwrap(), false);
     };
     policy(true, managed);
     let before = launches(root);
-    check(runtime.block_on(rpc.handle_owned(peer.clone(), request())), false);
+    refused(runtime.block_on(rpc.handle_owned(peer.clone(), request())));
     assert_eq!(launches(root), before);
     policy(false, managed);
     let queued = rpc.handle_owned(peer.clone(), request());
     policy(true, managed);
     policy(false, managed);
-    check(runtime.block_on(queued), false);
+    refused(runtime.block_on(queued));
     assert_eq!(launches(root), before, "first async queue must retain the fetch ticket");
 
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -661,7 +662,7 @@ fn fresh_runtime(root: &Path, fixture: &FetchFixture, managed: bool) {
     policy(false, managed);
     release_tx.send(()).unwrap();
     runtime.block_on(blocker).unwrap();
-    check(runtime.block_on(pending), false);
+    refused(runtime.block_on(pending));
     assert_eq!(launches(root), before, "blocking queue must retain the fetch ticket");
 
     std::fs::write(root.join("hold"), "fetch\n").unwrap();

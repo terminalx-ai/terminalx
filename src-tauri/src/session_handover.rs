@@ -61,7 +61,7 @@ pub(crate) struct TabRecord {
     #[serde(default)]
     pub pending: Vec<AskRecord>,
     #[serde(default)]
-    pub queued: Vec<QueuedMessage>,
+    pub queued: Vec<PendingMessage>,
     #[serde(default)]
     pub turn_open: bool,
     #[serde(default)]

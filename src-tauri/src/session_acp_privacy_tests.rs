@@ -185,6 +185,15 @@ fn phone_startup_prompt_requires_privacy_and_sender_authority_at_real_acp_write(
             for policy in ["on", "cycle"] { cases.push(format!("edit-{stage}-{setting}-{policy}")); }
         }
     }
+    startup_cases(cases);
+}
+
+#[test]
+fn privacy_relay_acp_queue_retains_authority_and_local_messages() {
+    startup_cases(["relay-queued-on", "relay-queued-cycle", "relay-queued-off"].into_iter().map(String::from));
+}
+
+fn startup_cases(cases: impl IntoIterator<Item = String>) {
     for case in cases {
         println!("ACP startup case: {case}");
         let dir = tempfile::tempdir().unwrap();
@@ -252,7 +261,19 @@ fn startup_child() {
         rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
     };
     launch();
-    let local = case == "local-on" || case.starts_with("edit-");
+    let relay = case.starts_with("relay-queued-");
+    let local = case == "local-on" || case.starts_with("edit-") || relay;
+    let relay_send = |text: &str| {
+        use crate::remote::{protocol::{Authority, PROTOCOL}, server::{Peer, WorkspaceRpc}};
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let rpc = WorkspaceRpc::new(rig._dir.path(), 1, rig.manager.sink.clone(), rig.manager.terminals.clone(), Some(rig.manager.clone())).unwrap();
+        let (peer, _events) = Peer::new("relay-acp".into(), Authority::Manage);
+        assert_eq!(runtime.block_on(rpc.handle(&peer, &json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["session/1"]}})))["ok"], true);
+        let sent = runtime.block_on(rpc.handle(&peer, &json!({"id":"send","method":"session.send","params":{
+            "clientRequestId":uuid::Uuid::new_v4().to_string(),"sessionId":SESSION,"tabId":TAB,"text":text}})));
+        assert_eq!(sent["ok"], true, "{sent}");
+        sent
+    };
     let seq = if local {
         rig.manager.send(SESSION, TAB, "local startup".into(), vec![]).unwrap().events[0].seq
     } else {
@@ -264,6 +285,14 @@ fn startup_child() {
     let withdrawn = || rig.events().iter().any(|e| matches!(&e.payload, Payload::PromptWithdrawn { prompt_seq } if *prompt_seq == seq));
     if case == "phone-init-error" { wait_for("initialization failure withdraws the stash", withdrawn); }
     else { wait_for("real provider paused before opening reply", || rig._dir.path().join("opening").exists()); }
+    let remote_seq = if relay {
+        let sent = relay_send("queued remote");
+        assert_eq!(sent["result"]["outcome"]["queued"], true, "{sent}");
+        assert!(rig.manager.send(SESSION, TAB, "queued local".into(), vec![]).unwrap().queued);
+        let public = serde_json::to_value(rig.manager.queued(SESSION, TAB)).unwrap();
+        assert!(public.as_array().unwrap().iter().all(|message| message.get("privacy").is_none()));
+        Some(sent["result"]["outcome"]["events"][0]["seq"].as_u64().expect("relay queued event"))
+    } else { None };
     let editing = case.starts_with("edit-");
     if editing {
         let mode = case.contains("mode-");
@@ -302,6 +331,22 @@ fn startup_child() {
     std::fs::remove_file(&blocked).unwrap();
     let requests = || store::read_lines::<serde_json::Value>(&rig._dir.path().join("requests")).unwrap_or_default();
     let prompts = || requests().into_iter().filter(|v| v["method"] == "session/prompt").collect::<Vec<_>>();
+    if relay {
+        let expected = if case.ends_with("-off") { 3 } else { 2 };
+        wait_for("queued local work completes after remote admission decision", || prompts().len() == expected && !rig.rt.lock().unwrap().turn_open);
+        assert!(rig.manager.queued(SESSION, TAB).is_empty());
+        let texts = prompts().iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(texts.contains("local startup") && texts.contains("queued local"));
+        assert_eq!(texts.contains("queued remote"), expected == 3);
+        assert_eq!(rig.events().iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq } if Some(prompt_seq) == remote_seq)).count(), usize::from(expected == 2));
+        store::write_json(&store::root().unwrap().join("data-privacy.json"), &json!({"enabled":false})).unwrap();
+        assert!(!crate::data_privacy::refresh().enabled);
+        relay_send("fresh restored relay");
+        wait_for("fresh relay ACP prompt physically delivered", || prompts().len() == expected + 1 && !rig.rt.lock().unwrap().turn_open);
+        assert!(prompts().last().unwrap().to_string().contains("fresh restored relay"));
+        rig.manager.stop(SESSION, TAB).unwrap();
+        return;
+    }
     if editing {
         wait_for("local startup survives opening setting admission", || !rig.rt.lock().unwrap().turn_open);
         let mode = case.contains("mode-");

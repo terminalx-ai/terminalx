@@ -108,6 +108,18 @@ pub struct QueuedMessage {
     pub images: Vec<(String, String)>,
 }
 
+/// Private queue state; public list/cancel responses expose only the message.
+/// Handover retains the original ticket, never mints one for remote work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PendingMessage {
+    #[serde(flatten)]
+    message: QueuedMessage,
+    #[serde(default)]
+    privacy: Option<crate::data_privacy::Ticket>,
+    #[serde(default)]
+    seq: u64,
+}
+
 /// What the reader chose, in terms every CLI's hooks can express. The hook
 /// thread that parked turns it into that CLI's own reply shape.
 #[derive(Debug, Clone)]
@@ -888,7 +900,7 @@ pub struct TabRuntime {
     pub environment: crate::store::environment::Stamp,
     pub engine: Engine,
     pub pending: HashMap<String, PendingAsk>,
-    pub queued: Vec<QueuedMessage>,
+    pub queued: Vec<PendingMessage>,
     pub turn_open: bool,
     /// Allowlisted labels only; never retain prompt or hook payload text.
     turn_opener: Option<(&'static str, &'static str)>,
@@ -2431,7 +2443,7 @@ impl SessionManager {
     }
 
     pub fn queued(&self, session_id: &str, tab_id: &str) -> Vec<QueuedMessage> {
-        self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().queued.clone()).unwrap_or_default()
+        self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().queued.iter().map(|q| q.message.clone()).collect()).unwrap_or_default()
     }
 
     fn archive_images(session_id: &str, images: &[ImageInput]) -> Result<ArchivedImages> {
@@ -2948,7 +2960,6 @@ impl SessionManager {
                 text: prompt.agent.clone(),
                 images: wire_images,
             };
-            rt.queued.push(q);
             let ev = self.publish(
                 &mut rt,
                 Payload::UserMessage { author: prompt.author.clone(),
@@ -2960,6 +2971,7 @@ impl SessionManager {
                 },
                 None,
             );
+            rt.queued.push(PendingMessage { message: q, privacy: crate::data_privacy::remote_ticket(), seq: ev.seq });
             return Ok(SendOutcome { queued: true, events: vec![ev], in_input: false });
         }
 
@@ -3276,8 +3288,18 @@ impl SessionManager {
                     let manager = self.clone();
                     let me = rt.me.clone();
                     let privacy = crate::data_privacy::remote_ticket();
+                    let child = rt.child.clone();
                     std::thread::spawn(move || {
-                        let Ok(_privacy) = privacy.as_ref().map(|ticket| ticket.scope()).transpose() else { return };
+                        let Ok(_privacy) = privacy.as_ref().map(|ticket| ticket.scope()).transpose() else {
+                            if let Some(runtime) = me.upgrade() {
+                                let mut rt = runtime.lock().unwrap();
+                                if child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live)) {
+                                    let actions = if let Engine::OpenCode(o) = &mut rt.engine { o.withdraw_prompt(&tag) } else { Vec::new() };
+                                    manager.apply_actions(&mut rt, actions);
+                                }
+                            }
+                            return;
+                        };
                         let line = opencode::perform(&tag, &method, &url, body);
                         if let Some(r) = me.upgrade() {
                             manager.on_line(&r, &line);
@@ -3454,8 +3476,8 @@ impl SessionManager {
     pub fn cancel_queued(&self, session_id: &str, tab_id: &str, message_id: &str) -> Result<Option<QueuedMessage>> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        let pos = rt.queued.iter().position(|q| q.id == message_id);
-        Ok(pos.map(|p| rt.queued.remove(p)))
+        let pos = rt.queued.iter().position(|q| q.message.id == message_id);
+        Ok(pos.map(|p| rt.queued.remove(p).message))
     }
 
     /// Kill the agent but keep resume state, so the next prompt resumes.
@@ -5575,7 +5597,7 @@ impl SessionManager {
                 None => Ok(()),
             };
             if let Some(ready) = &ready {
-                let readiness = manager.wait_ready(&pane, ready, shared.as_ref(), mobile.as_ref(), || stopped(&rt_arc.lock().unwrap()));
+                let readiness = manager.wait_ready(&pane, ready, shared.as_ref(), mobile.as_ref(), || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || stopped(&rt_arc.lock().unwrap()));
                 stage("ready", serde_json::json!({ "readiness": readiness.as_str() }));
                 let mut rt = rt_arc.lock().unwrap();
                 // Stop or a restart may have replaced the CLI while waiting.
@@ -5589,6 +5611,7 @@ impl SessionManager {
                 if readiness == Readiness::Cancelled {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -5606,6 +5629,7 @@ impl SessionManager {
                     if seq.is_none() { manager.command_not_typed(&mut rt, &text); }
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -5711,9 +5735,10 @@ impl SessionManager {
                     manager.command_not_typed(&mut rt, &text);
                     return;
                 }
-                if !admitted_to_writer && (shared.is_some() || mobile.is_some()) {
+                if !admitted_to_writer && (privacy.is_some() || shared.is_some() || mobile.is_some()) {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -6876,10 +6901,16 @@ impl SessionManager {
             // An interrupted turn hands over to the next queued message like
             // one that finished (#427): Escape stops a turn, not the queue. A
             // hard stop has emptied the queue before it closes the turn.
-            if !rt.stopping && rt.recovery.is_none() && !rt.queued.is_empty() {
-                let q = rt.queued.remove(0);
+            while !rt.stopping && rt.recovery.is_none() && !rt.queued.is_empty() {
+                let pending = rt.queued.remove(0);
+                let Ok(_privacy) = pending.privacy.as_ref().map(|ticket| ticket.scope()).transpose() else {
+                    self.publish(rt, Payload::PromptWithdrawn { prompt_seq: pending.seq }, None);
+                    continue;
+                };
+                let q = pending.message;
+                let delivery = pending.privacy.map(|privacy| acp::Delivery { seq: pending.seq, privacy: Some(privacy), mobile: None, shared: None });
                 let actions = match &mut rt.engine {
-                    Engine::Acp(a) => a.prompt(q.text.clone(), q.images.clone()),
+                    Engine::Acp(a) => a.prompt_with_delivery(q.text.clone(), q.images.clone(), delivery),
                     Engine::OpenCode(o) => o.prompt(q.text.clone(), q.images.clone()),
                     // A PTY tab never queues here: the CLI holds typed input
                     // itself, so the message went in when it was written.
