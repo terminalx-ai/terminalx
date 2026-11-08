@@ -31,6 +31,7 @@ fn privacy_transport_entry_points_child() {
     fixture(&root);
     policy(false, managed);
     let fetch = fresh_fixture(&root);
+    store::projects::add(fetch.project.to_str().unwrap()).unwrap();
     // The bridge being frozen must also own discovery. Earlier entrypoint
     // fixtures retain listeners, so give this handover its own process/home.
     transport::run(&root, &fetch, managed);
