@@ -13,6 +13,7 @@ import { bootLocalSharing, onJoinRequest, openSessionShare, shownShareDialog, ty
 import { sessionStatus, type SessionEntry, type TabEntry, type TabStatus } from "@/types/session";
 import type { AutomationRun } from "@/types/automations";
 import type { IssuePipeline } from "@/types/issuePipeline";
+import { noticesDeferred, subscribeNoticeDeferral } from "./noticeDeferral";
 
 /**
  * Attention, graded by where the reader is. A turn finishing or an agent
@@ -46,10 +47,34 @@ export interface Notice {
 }
 
 let notices: Notice[] = [];
+const NO_NOTICES: Notice[] = [];
+const expiryTimers = new Map<string, number>();
 const listeners = new Set<() => void>();
 function emit() {
+  // A replacement no longer owns a timer, even when it arrived during a decision.
+  for (const [id, timer] of expiryTimers) {
+    if (notices.some(n => n.id === id)) continue;
+    window.clearTimeout(timer);
+    expiryTimers.delete(id);
+  }
   for (const l of listeners) l();
 }
+
+function expireNotice(id: string) {
+  if (noticesDeferred()) return;
+  window.clearTimeout(expiryTimers.get(id));
+  expiryTimers.set(id, window.setTimeout(() => dismissNotice(id), 8000));
+}
+
+subscribeNoticeDeferral(() => {
+  for (const timer of expiryTimers.values()) window.clearTimeout(timer);
+  expiryTimers.clear();
+  // Give retained notices a full reading interval after the last decision closes.
+  if (!noticesDeferred()) for (const notice of notices) expireNotice(notice.id);
+  emit();
+});
+
+const visibleNotices = () => noticesDeferred() ? NO_NOTICES : notices;
 
 export function useNotices(): Notice[] {
   return useSyncExternalStore(
@@ -57,8 +82,8 @@ export function useNotices(): Notice[] {
       listeners.add(cb);
       return () => listeners.delete(cb);
     },
-    () => notices,
-    () => notices,
+    visibleNotices,
+    visibleNotices,
   );
 }
 
@@ -83,7 +108,7 @@ export function noteSessionStarted(sessionId: string, tabId: string, harness: st
     id, sessionId, tabId, kind: "started", harness, title: "Session started", body, at,
   }];
   emit();
-  window.setTimeout(() => dismissNotice(id), 8000);
+  expireNotice(id);
 }
 
 // ---- focus tracking
@@ -260,7 +285,7 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   const id = `${session.id}:${tab.id}:${Date.now()}`;
   notices = [...notices.filter((n) => !(n.sessionId === session.id && n.tabId === tab.id)), { id, sessionId: session.id, tabId: tab.id, kind, title, body, at: Date.now() }];
   emit();
-  window.setTimeout(() => dismissNotice(id), 8000);
+  expireNotice(id);
 }
 
 /** Automation failures use the same focus-aware path as agent attention. */
@@ -284,7 +309,7 @@ export function noteAutomationFailure(name: string, run: AutomationRun) {
     at: Date.now(),
   }];
   emit();
-  window.setTimeout(() => dismissNotice(id), 8000);
+  expireNotice(id);
 }
 
 /**
@@ -309,7 +334,7 @@ export function notePipelineState(pipeline: IssuePipeline) {
   const id = `pipeline:${pipeline.id}:${Date.now()}`;
   notices = [...notices.filter((notice) => !notice.id.startsWith(`pipeline:${pipeline.id}:`) && !(notice.kind === "started" && notice.sessionId === sessionId && notice.tabId === tabId)), { id, sessionId, tabId, kind, title, body, at: Date.now() }];
   emit();
-  window.setTimeout(() => dismissNotice(id), 8000);
+  expireNotice(id);
 }
 
 /**
@@ -334,7 +359,7 @@ export function noteShareRequest({ sessionId, person }: JoinRequest) {
   const id = `${key}${Date.now()}`;
   notices = [...notices.filter((notice) => !notice.id.startsWith(key)), { id, sessionId, tabId: "", kind: "waiting", opens: "share", title, body, at: Date.now() }];
   emit();
-  window.setTimeout(() => dismissNotice(id), 8000);
+  expireNotice(id);
 }
 
 // ---- cloud sessions (PRO-23 CS-19)
@@ -360,7 +385,7 @@ export function raiseCloudAttention({ kind, session, tab }: CloudAttention) {
   const id = `${session.key}:${tab.tabId}:${Date.now()}`;
   notices = [...notices.filter((n) => !(n.sessionId === session.key && n.tabId === tab.tabId)), { id, sessionId: session.key, tabId: tab.tabId, kind, harness: tab.harness, title, body, at: Date.now() }];
   emit();
-  window.setTimeout(() => dismissNotice(id), 8000);
+  expireNotice(id);
 }
 
 function onCloudSessions() {

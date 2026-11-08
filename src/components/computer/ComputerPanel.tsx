@@ -27,7 +27,7 @@ export function ComputerPanel({ active }: { active: boolean }) {
   const [place, setPlace] = useState<Place>("local");
   return (
     <div className="flex h-full flex-col" data-testid="panel-computer">
-      <div role="radiogroup" aria-label="Computer" className="flex shrink-0 gap-3 border-b border-hairline px-3 text-xs">
+      <div role="radiogroup" aria-label="Computer" className="flex h-[37px] shrink-0 items-stretch gap-1 border-b border-hairline px-2 text-xs">
         {(["local", "cloud"] as const).map((id) => (
           <button
             key={id}
@@ -35,7 +35,11 @@ export function ComputerPanel({ active }: { active: boolean }) {
             role="radio"
             aria-checked={place === id}
             onClick={() => setPlace(id)}
-            className={cn("border-b py-1.5", place === id ? "border-foreground/60 text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}
+            // The same height and underline as the chat's tab row, so the two lines meet.
+            className={cn(
+              "relative flex items-center px-2 transition-colors",
+              place === id ? "text-foreground after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-t-full after:bg-foreground" : "text-muted-foreground hover:text-foreground",
+            )}
           >
             {id === "local" ? "Local VM" : "Cloud VM"}
           </button>

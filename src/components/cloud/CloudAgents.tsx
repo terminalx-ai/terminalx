@@ -198,6 +198,7 @@ export function CloudAgentsView({
       {active ? (
         <CloudAgentPane
           key={active.tabId}
+          active={shown}
           scope={scope}
           tab={active}
           client={client}
@@ -518,6 +519,7 @@ export function commandError(e: unknown): string {
 }
 
 function CloudAgentPane({
+  active,
   scope,
   tab,
   client,
@@ -528,6 +530,7 @@ function CloudAgentPane({
   collabKey,
   you,
 }: {
+  active: boolean;
   scope: CloudAgentScope;
   tab: CloudAgentTab;
   client: WorkspaceRpcClient;
@@ -725,6 +728,7 @@ function CloudAgentPane({
         />
         <div className="flex min-h-0 flex-1 flex-col">
           <Chat
+            active={active}
             sessionId={info.sessionId}
             transcript={transcript}
             stream={log.stream}

@@ -1,3 +1,4 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -79,7 +80,7 @@ export function TranscriptionNoiseGuard() {
       }
     }
   }
-  return <div className="space-y-2 text-xs text-muted-foreground">
+  return <RegisteredSetting setting="transcription.detector"><div className="space-y-2 text-xs text-muted-foreground">
     <p>The local-model noise guard uses a separate 1.24 MB speech detector. Recording never downloads it. Apple keeps its own speech detection. Quiet speech and environmental sounds can still be misclassified; use Test dictation to check results.</p>
     {error && <p role="alert" className="text-destructive">{error}</p>}
     {model && <div className="flex flex-wrap items-center gap-2">
@@ -91,5 +92,5 @@ export function TranscriptionNoiseGuard() {
             : <Button size="xs" variant="outline" disabled={busy} onClick={() => void action("transcription_download")}>{model.readiness === "invalid" ? "Reinstall speech detector" : "Download speech detector"}</Button>}
     </div>}
     <p>File verification checks size and checksum only; it does not confirm native loading or speech detection. Missing, damaged or failed detection keeps the recognized text. The test result reports the detector status.</p>
-  </div>;
+  </div></RegisteredSetting>;
 }

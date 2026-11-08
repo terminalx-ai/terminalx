@@ -360,18 +360,13 @@ describe("the conversation list", () => {
     expect(screen.queryByRole("group", { name: "web" })).toBeNull();
   });
 
-  it("marks each row with its agent only once the conversations use more than one", async () => {
+  it("draws no agent mark on a row, even when the conversations use more than one agent", async () => {
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
     const codex = (entry: SessionEntry) => ({ ...entry, tabs: entry.tabs.map((tab) => ({ ...tab, harness: "codex" })) });
-    await boot([session("one", chatsPath, at(1)), session("two", chatsPath, at(2))]);
-    mount();
-    expect(document.querySelectorAll("[data-agent-id]")).toHaveLength(0);
-    cleanup();
-
+    // A row is its name and its age; which agent runs it is in the chat.
     await boot([session("one", chatsPath, at(1)), codex(session("two", chatsPath, at(2)))]);
     mount();
-    const chats = screen.getByRole("region", { name: "Chats" });
-    expect([...chats.querySelectorAll("[data-agent-id]")].map((mark) => mark.getAttribute("data-agent-id"))).toEqual(["codex", "claude"]);
+    expect(screen.getByRole("region", { name: "Chats" }).querySelectorAll("[data-agent-id]")).toHaveLength(0);
   });
 
   it("gathers the conversations on one branch under it, and shows a project's latest few branches before View all", async () => {
@@ -476,7 +471,7 @@ describe("renaming from the sidebar", () => {
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Move to section", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {

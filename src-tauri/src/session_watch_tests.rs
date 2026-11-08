@@ -84,7 +84,7 @@ struct Rig {
 }
 
 #[test]
-fn sharing_blocks_bypass_before_changing_the_saved_tab_or_runtime() {
+fn a_shared_session_may_switch_to_bypass_at_the_hosts_choice() {
     let rig = Rig::new();
     let entry: index::SessionEntry = serde_json::from_value(json!({
         "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
@@ -94,14 +94,11 @@ fn sharing_blocks_bypass_before_changing_the_saved_tab_or_runtime() {
     index::save(&[entry]).unwrap();
     rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
         crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
-    assert!(rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").is_err());
-    assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().permission_mode, "default");
-    let rt = rig.rt.lock().unwrap();
-    assert!(matches!(&rt.engine, Engine::Cli(p) if p.mode == "default"));
+    assert!(rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").is_ok());
 }
 
 #[test]
-fn a_shared_session_takes_no_new_bypass_tab_and_an_unshared_one_still_does() {
+fn a_shared_session_takes_a_bypass_tab_at_the_hosts_choice() {
     let rig = Rig::new();
     let entry: index::SessionEntry = serde_json::from_value(json!({
         "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
@@ -112,8 +109,7 @@ fn a_shared_session_takes_no_new_bypass_tab_and_an_unshared_one_still_does() {
     let tab = |mode: &str| crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some(mode.into()) };
     rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
         crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
-    assert!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).is_err());
-    assert_eq!(index::get(SESSION).unwrap().tabs.len(), 1);
+    assert_eq!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).unwrap().permission_mode, "bypassPermissions");
     assert_eq!(rig.manager.add_tab(SESSION, &tab("plan")).unwrap().permission_mode, "plan");
     rig.manager.sharing.lock().unwrap().sessions.clear();
     assert_eq!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).unwrap().permission_mode, "bypassPermissions");
@@ -209,6 +205,7 @@ impl Rig {
             status: TabStatus::Idle,
             child: None,
             child_pid: None,
+            environment: Default::default(),
             engine: Engine::Cli(CliTab {
                 usage_account: None,
                 harness: kind,
@@ -256,6 +253,7 @@ impl Rig {
             signed_out_in_turn: false,
             last_activity: now,
             recovery: None,
+            incidents: Default::default(),
             stalled_at: None,
             last_settings_report: None,
             reported_mode_to_judge: None,
@@ -1358,7 +1356,7 @@ fn cloud_counts_distinguish_silence_from_errors_and_unconfirmed_delivery() {
     for kind in [RecoveryKind::Timeout, RecoveryKind::DeliveryUnconfirmed, RecoveryKind::Disconnected] {
         let rig = Rig::with_live_pane();
         rig.start_turn();
-        rig.manager.needs_recovery(&mut rig.rt.lock().unwrap(), kind);
+        rig.manager.needs_recovery(&mut rig.rt.lock().unwrap(), kind, crate::recovery_log::Source::AgentError);
         assert_eq!(rig.counts(), (0, 0), "a reported {kind:?} is not a silence guess");
         if kind == RecoveryKind::DeliveryUnconfirmed {
             rig.rt.lock().unwrap().stalled_at = Some(rig.now.get());
@@ -2355,45 +2353,16 @@ fn bypass_chosen_in_the_terminal_is_shown_when_nothing_forbids_it() {
     assert!(!rig.released());
 }
 
-/// A shared session may not be in Bypass, and a guest's prompt must never be
-/// typed into a CLI that is. Showing the mode would not undo it: the CLI is
-/// let go of at once and brought back in the mode the tab was in.
+/// A shared session may be in Bypass, at the host's choice: a switch to it in
+/// the terminal is taken as reported, as any other mode is, and the CLI kept.
 #[test]
-fn a_shared_session_is_restarted_out_of_a_mode_it_may_not_be_in() {
-    // Codex: "Full Access" confirmed in the TUI's `/permissions`.
-    let rig = Rig::in_mode(CliKind::Codex, "auto");
-    rig.share();
-    rig.rt.lock().unwrap().turn_open = true;
-    for record in CODEX_PERMISSIONS.lines() {
-        rig.append(&format!("{record}\n"));
-    }
-    assert_eq!(rig.mode(), now_in("auto"), "never stored");
-    assert!(rig.mode_changes().iter().all(|mode| mode != "bypassPermissions"));
-    assert!(rig.released(), "the CLI that was in it is gone before anything else is typed");
-    assert!(!rig.turn_open());
-    assert_eq!(
-        rig.notices(),
-        ["Codex was switched to Bypass in the terminal. A shared session cannot be in Bypass, so Codex was restarted in Auto. Stop sharing this session before switching to Bypass."]
-    );
-
-    // Claude Code, and a stance with no sandbox under any other name.
-    // One rig at a time: each holds the test home.
-    drop(rig);
+fn a_shared_session_takes_a_switch_to_bypass_in_the_terminal_as_reported() {
     let rig = Rig::in_mode(CliKind::Claude, "plan");
     rig.share();
     rig.hook("PreToolUse", json!({ "permission_mode": "bypassPermissions", "tool_name": "Bash", "tool_input": {}, "tool_use_id": "t1" }));
-    assert_eq!(rig.mode(), now_in("plan"));
-    assert!(rig.released());
+    assert_eq!(rig.mode(), now_in("bypassPermissions"));
+    assert!(!rig.released());
 
-    // One rig at a time: each holds the test home.
-    drop(rig);
-    let rig = Rig::in_mode(CliKind::Codex, "plan");
-    rig.share();
-    rig.append("{\"type\":\"turn_context\",\"payload\":{\"approval_policy\":\"on-request\",\"sandbox_policy\":{\"type\":\"danger-full-access\"}}}\n");
-    assert_eq!(rig.mode(), now_in("plan"));
-    assert!(rig.released());
-
-    // Any other mode changed in the terminal of a shared session is just shown.
     // One rig at a time: each holds the test home.
     drop(rig);
     let rig = Rig::in_mode(CliKind::Claude, "plan");

@@ -85,6 +85,14 @@ export interface RemotePullRequest {
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  /** Absent on older workspace runtimes. */
+  mergeState?: string;
+  mergeQueueEnabled?: boolean | null;
+  mergeQueueEntry?: { position: number; state: string } | null;
+  autoMergeEnabled?: boolean;
+  requiredChecks?: string[] | null;
+  deployments?: { name: string; state: string; url?: string | null }[];
+  detailsError?: string | null;
   reviewDecision: string | null;
   checks: { name: string; state: string; url?: string | null }[];
   body: string;
@@ -189,20 +197,24 @@ export class RemoteGit {
     return this.read("git.status");
   }
 
-  workingChanges(): Promise<{ head: string; files: RemoteChangedFile[]; truncated: boolean }> {
-    return this.read("git.workingChanges");
+  workingChanges(hideWhitespace = false): Promise<{ head: string; files: RemoteChangedFile[]; truncated: boolean }> {
+    return this.read("git.workingChanges", hideWhitespace ? { hideWhitespace } : {});
   }
 
   reviewRange(target: string | null, uncommitted: boolean): Promise<{ target: string; base: string; head: string }> {
     return this.read("git.reviewRange", { target, uncommitted });
   }
 
-  changesBetween(base: string, head: string | null): Promise<{ files: RemoteChangedFile[]; truncated?: boolean }> {
-    return this.read("git.changesBetween", head ? { base, head } : { base });
+  changesBetween(base: string, head: string | null, hideWhitespace = false): Promise<{ files: RemoteChangedFile[]; truncated?: boolean }> {
+    return this.read("git.changesBetween", { base, ...(head ? { head } : {}), ...(hideWhitespace ? { hideWhitespace } : {}) });
   }
 
   fileContents(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }> {
     return this.read("git.fileContents", head ? { path, base, head } : { path, base });
+  }
+
+  mediaContent(path: string, tree: string | null): Promise<{ data: string; mime: string } | null> {
+    return this.read("git.mediaContent", { path, ...(tree ? { tree } : {}) });
   }
 
   async log(limit = 60, from?: string | null): Promise<RemoteCommit[]> {
@@ -266,7 +278,7 @@ export class RemoteGit {
     return this.write("git.prReady", { number });
   }
 
-  mergePr(number: number, method: "merge" | "squash" | "rebase"): Promise<unknown> {
+  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<unknown> {
     return this.write("git.prMerge", { number, method });
   }
 }

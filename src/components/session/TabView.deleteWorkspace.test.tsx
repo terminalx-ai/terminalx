@@ -115,7 +115,7 @@ describe("the chat's Delete workspace action", () => {
   });
 
   it("sits alongside Commit, Create PR and Run it after a turn that changed files", () => {
-    const done = { turns: [{ completed: { status: "ok" } }] } as unknown as Transcript;
+    const done = { turns: Array.from({ length: 5 }, () => ({ completed: { status: "ok" } })) } as unknown as Transcript;
     const run = vi.fn();
     expect(handoffsFor(done, true)?.map((step) => step.label)).toEqual(["Commit", "Create PR", "Run it"]);
     expect(handoffsFor(done, true, run)?.map((step) => step.label)).toEqual(["Commit", "Create PR", "Run it", "Delete workspace"]);
@@ -124,6 +124,10 @@ describe("the chat's Delete workspace action", () => {
     // It needs neither a finished turn nor changes.
     expect(handoffsFor({ turns: [] } as unknown as Transcript, false, run)).toEqual([{ label: "Delete workspace", run }]);
     expect(handoffsFor(done, false)).toBeUndefined();
+    // Not before the conversation has had five prompts.
+    const early = { turns: Array.from({ length: 4 }, () => ({ completed: { status: "ok" } })) } as unknown as Transcript;
+    expect(handoffsFor(early, true)).toBeUndefined();
+    expect(handoffsFor(early, true, run)).toEqual([{ label: "Delete workspace", run }]);
   });
 
   it("is absent for a session in the project's main directory, which is never read as a worktree", async () => {

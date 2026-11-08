@@ -1,748 +1,241 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
-import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "@/icons";
-import { getVersion } from "@tauri-apps/api/app";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
+import { SettingsFileError } from "./SettingsFile";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, Bot, Building2, FlaskConical, HardDrive, Info, Keyboard, KeyRound, Mic, Palette, Plug, Search, Settings2, Smartphone, UserRound, X } from "@/icons";
+import type { LucideIcon } from "lucide-react";
+import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { Button } from "@/components/ui/button";
-import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
-import { AgentSetupCard } from "./AgentSetupCard";
-import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
-import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
-import { CLOUD_CONTROL_HAS_SETTING, CLOUD_CONTROL_POLICY, CLOUD_CONTROL_SETTING, cloudControlEnabled, loadCloudControlSetting, requestCloudControlSetting, subscribeCloudControlSetting } from "@/lib/cloudControl";
-import { setPrefs, usePrefs } from "@/lib/prefs";
-import { repoFile } from "@/lib/repo";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
-import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
-import { api, errorMessage, gh, issues, USAGE_REFRESH_MINUTES, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
-import { forgetIssueViewers } from "@/lib/issueViewer";
-import { ComputerUseRows } from "./ComputerUseSettings";
-import changelog from "../../../CHANGELOG.md?raw";
-import { TranscriptionTab } from "./TranscriptionTab";
-import { setStatusSettings, useStatus } from "@/lib/status";
-import { AccountTab } from "./AccountTab";
-import { DevicesTab } from "./DevicesTab";
-import { MergedCleanupSettings } from "./MergedCleanupSettings";
-import { AgentIdleSettings } from "./AgentIdleSettings";
-import { CommandApprovalSettings } from "./CommandApprovalSettings";
-import { ArchiveIdleSettings } from "./ArchiveIdleSettings";
-import { StorageTab } from "./StorageTab";
-import { ShortcutsTab } from "./ShortcutsTab";
-import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
-import { QuickChatSettings } from "./FloatingWindowSettings";
-import { OrganizationsTab } from "./OrganizationsTab";
-import { ExperimentalTab } from "./ExperimentalSettings";
+import { useSessionStore } from "@/lib/sessions";
+import { resolveSetting, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
+import { settingsSectionRenderers } from "./sectionRenderers";
+import { HighlightedText } from "@/components/ui/HighlightedText";
+import { movePaletteSelection, type PaletteNavigationKey } from "@/lib/commandPalette";
+import { searchSettingsSections } from "@/lib/settingsSections";
 
-const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "transcription", "integrations", "storage", "shortcuts", "experimental", "about"] as const;
-export type SettingsTab = (typeof TABS)[number];
-/** The section Settings opens on when nothing asks for a particular one (PRO-81). */
+/** Legacy section names and stable row ids are both accepted by every existing entry point. */
+export type SettingsTab = SettingsSection | SettingId;
 export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
-type Tab = SettingsTab;
-const TAB_LABEL: Record<Tab, string> = {
-  account: "Account",
-  devices: "Devices",
-  general: "General",
-  appearance: "Appearance",
-  organizations: "Organizations",
-  agents: "Agents",
-  transcription: "Transcription",
-  integrations: "Integrations",
-  storage: "Storage",
-  shortcuts: "Shortcuts",
-  experimental: "Experimental",
-  about: "About",
+
+/** Each section's icon in the menu: a row is an icon and a word, read at a glance. */
+const SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
+  account: UserRound,
+  devices: Smartphone,
+  general: Settings2,
+  appearance: Palette,
+  agents: Bot,
+  environment: KeyRound,
+  transcription: Mic,
+  integrations: Plug,
+  repositories: HardDrive,
+  organizations: Building2,
+  storage: HardDrive,
+  shortcuts: Keyboard,
+  experimental: FlaskConical,
+  about: Info,
 };
 
-export function SettingsPage({
-  onBack,
-  initialTab = DEFAULT_SETTINGS_TAB,
-  openRequest = 0,
-  onOpenSkills,
-  onOpenUsage,
-}: {
+export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initialProjectPath, openRequest = 0, onOpenSkills, onOpenUsage }: {
   onBack: () => void;
   initialTab?: SettingsTab;
-  /** Open the Skills page (leaving Settings); the Agents section offers it. */
-  onOpenSkills?: () => void;
-  /** Open the usage page (leaving Settings); the Appearance section offers it, beside the status bar's usage switch. */
-  onOpenUsage?: () => void;
-  /**
-   * Counts each time Settings is asked for. Asking again while it is open
-   * goes to `initialTab` even when that is the section it opened on and the
-   * reader has since picked another by hand.
-   */
+  /** The repository instance for a repository-scoped row link. */
+  initialProjectPath?: string;
+  /** Repeated requests return to the requested row even after navigation within Settings. */
   openRequest?: number;
+  onOpenSkills?: () => void;
+  onOpenUsage?: () => void;
 }) {
-  // Settings always opens on a section: a value that names none is the default one.
-  const initial: Tab = TABS.includes(initialTab) ? initialTab : DEFAULT_SETTINGS_TAB;
-  const [tab, setTab] = useState<Tab>(initial);
+  const initial = resolveSetting(initialTab);
+  const [section, setSection] = useState<SettingsSection>(initial.section);
+  const [projectPath, setProjectPath] = useState<string | undefined>(initial.section === "repositories" ? initialProjectPath : undefined);
+  const [target, setTarget] = useState<string | null>(() => initialTab === initial.id ? initial.id : null);
+  const content = useRef<HTMLElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(0);
+  const [selectionRequest, setSelectionRequest] = useState(0);
+  const results = useMemo(() => searchSettingsSections(query), [query]);
+  const searching = !!query.trim();
+  const changeQuery = (value: string) => {
+    setQuery(value);
+    setSelected(0);
+  };
+  const { projects } = useSessionStore();
+  const repositories = projects.filter((project) => !project.archived);
+  const project = repositories.find((candidate) => candidate.path === projectPath);
+
   useEffect(() => {
-    setTab(initial);
-  }, [initial, openRequest]);
+    setSection(initial.section);
+    setProjectPath(initial.section === "repositories" ? initialProjectPath : undefined);
+    setTarget(initialTab === initial.id ? initial.id : null);
+    setQuery("");
+    setSelected(0);
+    setSelectionRequest((request) => request + 1);
+  }, [initial.id, initial.section, initialTab, initialProjectPath, openRequest]);
+
+  // Rows can appear after account/native settings load. Resolve only inside this
+  // page and stop observing on navigation, so a late response cannot steal focus.
+  useEffect(() => {
+    const root = content.current;
+    if (!root) return;
+    root.scrollTop = 0;
+    if (!target) {
+      if (!hasEscapeOverlay(resultsRef.current)) headingRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    const reveal = () => {
+      // Starting a search cancels any deferred row focus while its section loads.
+      if (resultsRef.current) return true;
+      const row = [...root.querySelectorAll<HTMLElement>("[data-setting-id]")].find((element) => element.dataset.settingId === target);
+      if (!row) return false;
+      for (let parent: HTMLElement | null = row; parent && parent !== root; parent = parent.parentElement) {
+        if (parent instanceof HTMLDetailsElement) parent.open = true;
+      }
+      // Organization sections retain their layout with a display:contents boundary.
+      const visible = getComputedStyle(row).display === "contents" ? row.firstElementChild as HTMLElement | null : row;
+      if (!visible) return false;
+      visible.scrollIntoView?.({ block: "start" });
+      // Sign-in links may also open their existing consent dialog. Keep focus there.
+      if (!hasEscapeOverlay()) { visible.tabIndex = -1; visible.focus({ preventScroll: true }); }
+      return true;
+    };
+    if (reveal()) return;
+    const observer = new MutationObserver(() => { if (reveal()) observer.disconnect(); });
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [section, projectPath, target, openRequest, selectionRequest]);
+
+  useEffect(() => {
+    resultsRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
+  }, [selected, query]);
+
 
   useHotkey("escape", () => {
-    if (hasEscapeOverlay()) return false;
+    if (hasEscapeOverlay(resultsRef.current)) return false;
+    if (query) {
+      changeQuery("");
+      inputRef.current?.focus();
+      return;
+    }
     onBack();
   });
+  useHotkey("mod+f", () => {
+    if (hasEscapeOverlay(resultsRef.current)) return false;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, { global: true });
+  const choose = (next: SettingsSection, path?: string, row?: SettingId) => {
+    setSection(next);
+    setProjectPath(path);
+    setTarget(row ?? null);
+    changeQuery("");
+    setSelectionRequest((request) => request + 1);
+  };
+  // The project sidebar's rows: 32px, edge to edge with square corners, text 16px in.
+  const navClass = (selected: boolean) => cn(
+    "-mx-2 flex h-8 w-[calc(100%+1rem)] min-w-0 items-center gap-2.5 px-4 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
+    selected ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-selected/50 hover:text-foreground",
+  );
 
   return (
-    <main className="flex h-full min-w-0 flex-1 flex-col bg-background" aria-label="Settings">
-      <header data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-[78px] pr-3">
-        <Button variant="ghost" size="icon-sm" aria-label="Back to previous page" onClick={onBack}>
-          <ArrowLeft />
-        </Button>
-        <h1 className="px-1 text-sm font-medium">Settings</h1>
-        {/* Keep the surface opaque in glass mode and outside the scroll viewport. */}
-        <Button
-          variant="outline"
-          size="icon-sm"
-          aria-label="Close"
-          onClick={onBack}
-          className="ml-auto shrink-0 bg-raised hover:bg-[color-mix(in_oklab,var(--surface-raised),var(--foreground)_8%)] active:bg-[color-mix(in_oklab,var(--surface-raised),var(--foreground)_14%)]"
-        >
-          <X />
-        </Button>
-      </header>
-      <div className="flex min-h-0 flex-1">
-        <nav aria-label="Settings sections" className="flex w-48 shrink-0 flex-col gap-0.5 border-r border-hairline p-4">
-          {TABS.map((t) => (
-            <button
-              key={t}
-              type="button"
-              aria-current={tab === t ? "page" : undefined}
-              onClick={() => setTab(t)}
-              className={cn(
-                "rounded-md px-2.5 py-2 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                tab === t ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
-              )}
-            >
-              {TAB_LABEL[t]}
-            </button>
+    // The settings menu stands where the project sidebar stands, at its width and in its row style, so opening Settings
+    // reads as the sidebar changing what it lists rather than a different screen.
+    <main className="flex h-full min-w-0 flex-1 bg-background" aria-label="Settings">
+      <aside className="flex h-full min-h-0 w-(--sidebar-w) shrink-0 flex-col border-r border-hairline">
+        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 pl-[78px] pr-2">
+          <Button variant="ghost" size="icon-sm" aria-label="Back to previous page" onClick={onBack}><ArrowLeft /></Button>
+          <h1 className="px-1 text-sm font-medium">Settings</h1>
+        </div>
+        {/* Search heads the menu, as it does the things it searches. */}
+          <div className="mx-2 mb-1 flex h-8 shrink-0 items-center gap-2 rounded-md bg-well px-2.5 hairline focus-within:ring-1 focus-within:ring-ring/40">
+          <Search className="size-3.5 shrink-0 text-faint" />
+          <input
+            ref={inputRef}
+            role="combobox"
+            aria-label="Search settings"
+            aria-autocomplete="list"
+            aria-expanded={searching}
+            aria-controls={searching ? "settings-search-results" : undefined}
+            aria-activedescendant={searching ? results[selected]?.item.id : undefined}
+            placeholder="Search settings…"
+            autoComplete="off"
+            spellCheck={false}
+            value={query}
+            onChange={(event) => changeQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229 || !searching) return;
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                setSelected((current) => movePaletteSelection(current, results.length, event.key as PaletteNavigationKey));
+              } else if (event.key === "Enter" && results[selected]) {
+                event.preventDefault();
+                choose(results[selected].item.tab);
+              }
+            }}
+            className="h-7 min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-faint"
+          />
+          {!query && <kbd className="shrink-0 rounded border border-hairline px-1 font-sans text-[10px] text-faint">⌘F</kbd>}
+          {query && <Button variant="ghost" size="icon-sm" aria-label="Clear settings search" className="-mr-1.5 size-6" onClick={() => { changeQuery(""); inputRef.current?.focus(); }}><X /></Button>}
+          </div>
+        <nav aria-label="Settings sections" className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pt-2 scrollbar-thin">
+          {SETTINGS_GROUPS.map((group, index) => (
+            <div key={group} role="group" aria-labelledby={`settings-group-${index}`}>
+              <div id={`settings-group-${index}`} className="flex h-6 items-center px-2 text-[12px] text-faint">{group}</div>
+              {group === "Repositories" ? (
+                // One row a repository, its badge and name, opening its settings: no expander holding a single item.
+                repositories.length ? repositories.map((repository) => {
+                  const selected = section === "repositories" && projectPath === repository.path;
+                  return (
+                    <button key={repository.path} type="button" title={repository.path} aria-current={selected ? "page" : undefined} className={navClass(selected)} onClick={() => choose("repositories", repository.path)}>
+                      <ProjectGlyph project={repository} size={16} />
+                      <span className="truncate">{repository.name}</span>
+                    </button>
+                  );
+                }) : <p className="px-2 py-2 text-xs text-faint">No repositories added.</p>
+              ) : Object.entries(SETTINGS_SECTIONS).filter(([, entry]) => entry.group === group).map(([key, entry]) => (
+                <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => choose(key as SettingsSection)} className={navClass(section === key)}>
+                  {(() => { const Icon = SECTION_ICONS[key as SettingsSection]; return <Icon aria-hidden className="size-4 shrink-0" />; })()}
+                  <span className="truncate">{entry.title}</span>
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
-        <section className="min-w-0 flex-1 overflow-y-auto scrollbar-thin" aria-labelledby="settings-section-title">
-          <div className="mx-auto w-full max-w-[48rem] p-6 pb-12">
-            <h2 id="settings-section-title" className="mb-5 text-xl font-semibold tracking-tight">
-              {TAB_LABEL[tab]}
-            </h2>
-            {tab === "account" && <AccountTab />}
-            {tab === "devices" && <DevicesTab />}
-            {tab === "general" && <GeneralTab />}
-            {tab === "appearance" && <AppearanceTab onOpenUsage={onOpenUsage} />}
-            {tab === "organizations" && <OrganizationsTab />}
-            {tab === "agents" && <AgentsTab onOpenSkills={onOpenSkills} />}
-            {tab === "transcription" && <TranscriptionTab />}
-            {tab === "integrations" && <IntegrationsTab />}
-            {tab === "storage" && (
-              <>
-                <MergedCleanupSettings />
-                <div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div>
-                <StorageTab />
-              </>
-            )}
-            {tab === "shortcuts" && <ShortcutsTab />}
-            {tab === "experimental" && <ExperimentalTab />}
-            {tab === "about" && <AboutTab />}
+      </aside>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1">
+        <section ref={content} className="min-w-0 flex-1 overflow-y-auto scrollbar-thin" aria-labelledby={searching ? "settings-results-title" : "settings-section-title"}>
+          <div className="mx-auto w-full max-w-[48rem] px-6 pt-6 empty:hidden"><SettingsFileError /></div>
+          {searching && <div className="mx-auto w-full max-w-[48rem] p-6">
+            <h2 id="settings-results-title" className="mb-3 text-sm font-medium">Settings sections</h2>
+            <div ref={resultsRef} id="settings-search-results" role="listbox" aria-label="Settings search results">
+              {results.map((match, index) => (
+                <button
+                  key={match.item.id}
+                  id={match.item.id}
+                  type="button"
+                  role="option"
+                  aria-selected={selected === index}
+                  onMouseEnter={() => setSelected(index)}
+                  onClick={() => choose(match.item.tab)}
+                  className={cn("flex w-full flex-col gap-1 rounded-md px-3 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40", selected === index ? "bg-selected" : "hover:bg-veil-raised")}
+                >
+                  <span className="text-sm"><HighlightedText text={match.item.primary} ranges={match.primaryRanges} /></span>
+                  <span className="text-xs text-muted-foreground"><HighlightedText text={match.item.secondary} ranges={match.secondaryRanges} /></span>
+                </button>
+              ))}
+            </div>
+            {!results.length && <p role="status" className="py-6 text-sm text-muted-foreground">No settings match {query.trim()}</p>}
+          </div>}
+          <div hidden={searching} className="mx-auto w-full max-w-[48rem] p-6 pb-12" key={`${section}:${project?.path ?? ""}`}>
+            <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="mb-5 break-words text-xl font-semibold tracking-tight outline-none">{section === "repositories" && project ? project.name : SETTINGS_SECTIONS[section].title}</h2>
+            {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, row: target, openRequest })}
           </div>
         </section>
+        </div>
       </div>
     </main>
-  );
-}
-
-function GeneralTab() {
-  const prefs = usePrefs();
-  // PRO-40: the switch lives in native code (the control socket reads it itself); this shows what it says.
-  const cloudControlOn = useSyncExternalStore(subscribeCloudControlSetting, cloudControlEnabled, cloudControlEnabled);
-  const [cloudControlReason, setCloudControlReason] = useState<string | null>(null);
-  useEffect(() => {
-    void loadCloudControlSetting();
-  }, []);
-  const [cli, setCli] = useState<CliToolStatus | null>(null);
-  const [cliBusy, setCliBusy] = useState(false);
-  const [cliError, setCliError] = useState<string | null>(null);
-  useEffect(() => {
-    api.cliToolStatus().then(setCli).catch((error) => setCliError(errorMessage(error)));
-  }, []);
-  const installCli = async () => {
-    setCliBusy(true);
-    setCliError(null);
-    try {
-      setCli(await api.installCliTool());
-    } catch (error) {
-      setCliError(errorMessage(error));
-    } finally {
-      setCliBusy(false);
-    }
-  };
-  return (
-    <div className="flex flex-col">
-      <SettingRow label="Website links" description="Choose a browser for website links, or ask each time." control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v, linkBrowserChosen: true })} options={[{ value: "ask", label: "Ask every time" }, { value: "system", label: "System Browser" }, { value: "terminalx", label: "TerminalX Browser" }]} />} />
-      <SettingRow label="Link actions" description="Show both browser destinations in the link action menu." control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
-      {/* PRO-40: unless the app ships the in-window confirmation alone. */}
-      {CLOUD_CONTROL_HAS_SETTING && (
-        <SettingRow
-          label={CLOUD_CONTROL_SETTING}
-          description={`Off: the terminalx command line cannot see or change cloud workspaces. On: agents in local sessions can list workspaces, read conversations, send messages, launch sessions, and resume or create workspaces within your permissions. This authorizes billed compute without another confirmation. ${CLOUD_CONTROL_POLICY === "both" ? "Stopping a workspace still asks you each time." : "Stopping is also allowed."}`}
-          control={
-            <Switch
-              aria-label={CLOUD_CONTROL_SETTING}
-              checked={cloudControlOn}
-              onCheckedChange={(v) => {
-                setCloudControlReason(null);
-                void requestCloudControlSetting(v).then((result) => setCloudControlReason(result.reason));
-              }}
-            />
-          }
-        />
-      )}
-      {/* Why the switch did not turn on (refused, not answered, or asked again too soon): never a silent no. */}
-      {CLOUD_CONTROL_HAS_SETTING && cloudControlReason && (
-        <p role="status" data-testid="cloud-control-reason" className="pb-2 text-[11px] text-amber-600 dark:text-amber-400">
-          {cloudControlReason}
-        </p>
-      )}
-      <SettingRow
-        label="Command line tool"
-        description={
-          cli?.installed
-            ? `terminalx and tnx are installed in ${cli.directory}.`
-            : "Install terminalx and its tnx alias in ~/.local/bin so shells and agents can control this app."
-        }
-        control={
-          <Button size="sm" variant="outline" disabled={cliBusy || cli?.installed} onClick={() => void installCli()}>
-            {cliBusy ? <Loader2 className="animate-spin" /> : cli?.installed ? <Check /> : null}
-            {cli?.installed ? "Installed" : "Install"}
-          </Button>
-        }
-      />
-      {cliError && <div className="-mt-2 mb-3 text-xs text-destructive">{cliError}</div>}
-      <ComputerUseRows />
-      <BrowserRuntimeRow />
-      <SettingRow
-        label="Sounds"
-        description="A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there."
-        control={<Switch checked={prefs.sounds} onCheckedChange={(v) => setPrefs({ sounds: v })} />}
-      />
-      <SettingRow
-        label="Pixel raccoon"
-        description="The raccoon forages in an empty session and runs along the composer while an agent is working. Off follows your system's reduced-motion setting automatically."
-        control={<Switch checked={prefs.animations} onCheckedChange={(v) => setPrefs({ animations: v })} />}
-      />
-      <SettingRow
-        label="Fold tool calls"
-        description="Once an agent starts answering, the tool calls it made collapse under one line. Off keeps every call expanded."
-        control={<Switch checked={prefs.foldToolCalls} onCheckedChange={(v) => setPrefs({ foldToolCalls: v })} />}
-      />
-      <SettingRow
-        label="Show files changed"
-        description="Under each finished turn, the files the agent changed with the lines it added and removed. Click a file to open it."
-        control={<Switch aria-label="Show files changed" checked={prefs.turnChanges} onCheckedChange={(v) => setPrefs({ turnChanges: v })} />}
-      />
-      <SettingRow
-        label="Prompt map"
-        description="A mark for each of your prompts down the right edge of a conversation. Hover one to read it, click to go back to it."
-        control={<Switch aria-label="Prompt map" checked={prefs.promptMap} onCheckedChange={(v) => setPrefs({ promptMap: v })} />}
-      />
-      <SettingRow
-        label="Autocorrect"
-        description="Your keyboard's spelling correction, smart quotes and dashes, and text replacements apply in prompts, answers to an agent's questions, and notes. Off leaves what you type exactly as typed."
-        control={<Switch aria-label="Autocorrect" checked={prefs.autocorrect} onCheckedChange={(v) => setPrefs({ autocorrect: v })} />}
-      />
-      <SettingRow
-        label="New sessions use a worktree"
-        description="Each session gets its own git worktree so agents never step on each other. Off runs sessions in the project's own checkout."
-        control={<Switch checked={prefs.useWorktree} onCheckedChange={(v) => setPrefs({ useWorktree: v })} />}
-      />
-      <QuickChatSettings />
-      <LocalRuntimeSettings />
-    </div>
-  );
-}
-
-function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
-  const { theme, mode, resolvedMode } = useTheme();
-  const prefs = usePrefs();
-  const light = hasLightMode(theme);
-  const status = useStatus();
-  return (
-    <div className="flex flex-col">
-      <SettingRow
-        id="theme-label"
-        label="Theme"
-        stacked
-        control={
-          <div role="radiogroup" aria-labelledby="theme-label" className="grid grid-cols-4 gap-2">
-            {THEMES.map((t) => {
-              const swatchMode = hasLightMode(t.id) ? resolvedMode : "dark";
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={theme === t.id}
-                  onClick={() => setTheme(t.id as ThemeId)}
-                  className={cn(
-                    "group flex flex-col gap-1.5 rounded-lg border p-1.5 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                    theme === t.id ? "border-ring" : "border-transparent hover:border-border",
-                  )}
-                >
-                  <div
-                    data-theme={t.id}
-                    data-mode={swatchMode}
-                    className="relative h-14 w-full overflow-hidden rounded-md"
-                    style={{ background: "var(--surface-page)" }}
-                  >
-                    <div
-                      className="absolute left-2 top-2 h-8 w-[60%] rounded-sm"
-                      style={{ background: "var(--surface-card)", boxShadow: "inset 0 0 0 1px var(--hairline-strong)" }}
-                    />
-                    <div className="absolute bottom-2 left-2 h-1.5 w-8 rounded-full" style={{ background: "var(--accent)" }} />
-                    <div className="absolute bottom-2 left-11 h-1.5 w-4 rounded-full" style={{ background: "var(--ink-muted)" }} />
-                  </div>
-                  <div className="flex items-center justify-between px-0.5">
-                    <span className="text-xs font-medium">{t.name}</span>
-                    {t.darkOnly && <span className="text-[10px] text-faint">dark</span>}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        }
-      />
-      <SettingRow
-        label="Mode"
-        description={light ? "System follows macOS and switches with it." : "This theme has no light palette, so the mode control is disabled."}
-        disabled={!light}
-        control={
-          <Segmented<Mode>
-            aria-label="Mode"
-            disabled={!light}
-            value={mode}
-            onChange={setMode}
-            options={[
-              { value: "system", label: "System" },
-              { value: "light", label: "Light" },
-              { value: "dark", label: "Dark" },
-            ]}
-          />
-        }
-      />
-      <SettingRow
-        label="Text size"
-        description="Scales the transcript and composer. Chrome stays the same size."
-        control={
-          <Segmented
-            aria-label="Text size"
-            value={prefs.fontScale}
-            onChange={(v) => setPrefs({ fontScale: v })}
-            options={[
-              { value: "sm", label: "Small" },
-              { value: "md", label: "Default" },
-              { value: "lg", label: "Large" },
-            ]}
-          />
-        }
-      />
-      <SettingRow
-        label="Transcript layout"
-        description="Wide puts your prompt as a full-width card. Chat right-aligns it like a message."
-        control={
-          <Segmented
-            aria-label="Transcript layout"
-            value={prefs.transcriptLayout}
-            onChange={(v) => setPrefs({ transcriptLayout: v })}
-            options={[
-              { value: "wide", label: "Wide" },
-              { value: "chat", label: "Chat" },
-            ]}
-          />
-        }
-      />
-      <SettingRow
-        label="Tab bar"
-        description="A session's agents, terminals and browser pages as a row of tabs under the title bar, in the same order as the sidebar. Off leaves them in the sidebar only."
-        control={<Switch aria-label="Tab bar" checked={prefs.tabStrip} onCheckedChange={(v) => setPrefs({ tabStrip: v })} />}
-      />
-      <SettingRow
-        label="Sessions on a branch"
-        description="Several sessions on one branch: as tabs beside each other in the tab bar, with one row for the branch in the sidebar; or listed under the branch in the sidebar, with the tab bar holding only the open session's tabs. Without the tab bar they are in the sidebar."
-        control={
-          <Segmented<"tabs" | "sidebar">
-            aria-label="Sessions on a branch"
-            value={prefs.tabStrip ? prefs.branchSessions : "sidebar"}
-            disabled={!prefs.tabStrip}
-            onChange={(v) => setPrefs({ branchSessions: v })}
-            options={[
-              { value: "tabs", label: "Tabs" },
-              { value: "sidebar", label: "Sidebar" },
-            ]}
-          />
-        }
-      />
-      {onOpenUsage && (
-        <SettingRow
-          label="Usage"
-          description="Tokens, cost and rate limits across every agent, by day and by project."
-          control={
-            <Button size="sm" variant="outline" onClick={onOpenUsage}>
-              Open usage <ExternalLink />
-            </Button>
-          }
-        />
-      )}
-      <SettingRow
-        label="Status bar"
-        description="Show app-wide agent usage and the resources used by live tabs along the bottom edge."
-        control={<Switch checked={status.settings.visible} onCheckedChange={(visible) => void setStatusSettings({ visible })} />}
-      />
-      <SettingRow
-        label="Usage"
-        description="Show the tightest usage window and its reset countdown."
-        disabled={!status.settings.visible}
-        control={<Switch checked={status.settings.usage} disabled={!status.settings.visible} onCheckedChange={(usage) => void setStatusSettings({ usage })} />}
-      />
-      <SettingRow
-        label="Resources"
-        description="Show the live agent count and the most recently sampled memory total."
-        disabled={!status.settings.visible}
-        control={<Switch checked={status.settings.resources} disabled={!status.settings.visible} onCheckedChange={(resources) => void setStatusSettings({ resources })} />}
-      />
-      <SettingRow
-        label="Usage display"
-        description="Meters can show what has been used or what remains; urgency always follows usage."
-        disabled={!status.settings.visible || !status.settings.usage}
-        control={
-          <Segmented
-            aria-label="Usage display"
-            disabled={!status.settings.visible || !status.settings.usage}
-            value={status.settings.percent}
-            onChange={(percent) => void setStatusSettings({ percent })}
-            options={[
-              { value: "used", label: "Used" },
-              { value: "remaining", label: "Remaining" },
-            ]}
-          />
-        }
-      />
-      <SettingRow
-        label="Usage auto-refresh interval"
-        description="How often usage is fetched again while the app is on screen. Off still refreshes when you return to the app or press Refresh."
-        disabled={!status.settings.visible || !status.settings.usage}
-        control={
-          <Segmented
-            aria-label="Usage auto-refresh interval"
-            disabled={!status.settings.visible || !status.settings.usage}
-            value={String(status.settings.usageRefreshMinutes)}
-            onChange={(minutes) => void setStatusSettings({ usageRefreshMinutes: Number(minutes) })}
-            options={USAGE_REFRESH_MINUTES.map((minutes) => ({ value: String(minutes), label: minutes === 0 ? "Off" : `${minutes} min` }))}
-          />
-        }
-      />
-    </div>
-  );
-}
-
-/**
- * The built-in browser runtime: the bundled agent-browser and the Chromium it
- * drives. A system Chrome is used when present; otherwise agent-browser can
- * download its own.
- */
-function BrowserRuntimeRow() {
-  const [status, setStatus] = useState<BrowserRuntimeStatus | null>(null);
-  const [busy, setBusy] = useState<"check" | "install" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const refresh = async () => {
-    setBusy("check");
-    setError(null);
-    try {
-      setStatus(await api.browserRuntimeStatus());
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-  useEffect(() => {
-    void refresh();
-  }, []);
-  const install = async () => {
-    setBusy("install");
-    setError(null);
-    try {
-      setStatus(await api.browserInstallBrowser());
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-  const description = !status
-    ? "Checking the agent-browser runtime…"
-    : !status.binary
-      ? "The agent-browser runtime is not bundled with this build. Agents cannot open browser tabs until it is."
-      : !status.browser
-        ? `agent-browser ${status.version ?? "?"} is ready, but no Chrome or Chromium was found. Install one for agents to drive.`
-        : `agent-browser ${status.version ?? "?"} drives ${status.browser}. Agents open tabs with terminalx tab create.`;
-  return (
-    <>
-      <SettingRow
-        label="Built-in browser"
-        description={description}
-        control={
-          status?.binary && !status.browser ? (
-            <Button size="sm" variant="outline" disabled={busy != null} onClick={() => void install()}>
-              {busy === "install" ? <Loader2 className="animate-spin" /> : null}
-              Install Chromium
-            </Button>
-          ) : (
-            <Button size="sm" variant="outline" disabled={busy != null} onClick={() => void refresh()}>
-              {busy === "check" ? <Loader2 className="animate-spin" /> : status?.browser ? <Check /> : <RefreshCw />}
-              {status?.browser ? "Ready" : "Re-check"}
-            </Button>
-          )
-        }
-      />
-      {error && <div className="-mt-2 mb-3 text-xs text-destructive">{error}</div>}
-    </>
-  );
-}
-
-/** What is installed, where, and how to get the rest. Nothing is installed by the app. */
-function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
-  const store = useSessionStore();
-  const [busy, setBusy] = useState(false);
-  const [checkRun, setCheckRun] = useState(0);
-  const [skill, setSkill] = useState<SkillInstallStatus | null>(null);
-  const [skillBusy, setSkillBusy] = useState(false);
-  const [skillError, setSkillError] = useState<string | null>(null);
-  useEffect(() => {
-    api.cliSkillStatus().then(setSkill).catch((error) => setSkillError(errorMessage(error)));
-  }, []);
-  const installSkill = async () => {
-    setSkillBusy(true);
-    setSkillError(null);
-    try {
-      setSkill(await api.installCliSkill());
-    } catch (error) {
-      setSkillError(errorMessage(error));
-    } finally {
-      setSkillBusy(false);
-    }
-  };
-  return (
-    <div className="flex flex-col gap-3">
-      {onOpenSkills && (
-        <SettingRow
-          label="Skills"
-          description="The skills your agents can use: what is installed, and what to add."
-          control={
-            <Button size="sm" variant="outline" onClick={onOpenSkills}>
-              Open skills <ExternalLink />
-            </Button>
-          }
-        />
-      )}
-      <div className="flex items-center justify-between gap-3 rounded-lg bg-well px-3 py-2.5">
-        <div className="min-w-0">
-          <div className="text-sm font-medium">TerminalX agent skill</div>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            Install the terminalx-cli and computer-use discovery stubs for Claude Code and Codex. The CLI serves the complete version-matched guides.
-          </p>
-          {skillError && <div className="mt-1 text-xs text-destructive">{skillError}</div>}
-        </div>
-        <Button size="sm" variant="outline" disabled={skillBusy || skill?.installed} onClick={() => void installSkill()}>
-          {skillBusy ? <Loader2 className="animate-spin" /> : skill?.installed ? <Check /> : null}
-          {skill?.installed ? "Installed" : "Install skill"}
-        </Button>
-      </div>
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">Set up an agent on this computer. Local work does not require a TerminalX account.</p>
-        <Button
-          size="xs"
-          variant="ghost"
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true);
-            try {
-              await refreshHarnesses();
-              setCheckRun((run) => run + 1);
-            } catch {
-              setSkillError("Could not re-check installed agents. Try again.");
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />} Re-check
-        </Button>
-      </div>
-      <ul className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
-        {store.harnesses.map((h) => (
-          <AgentSetupCard key={`${h.id}:${checkRun}`} harness={h} />
-        ))}
-        {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
-      </ul>
-      <AgentIdleSettings />
-      <CommandApprovalSettings />
-      <ArchiveIdleSettings />
-    </div>
-  );
-}
-
-/** Trackers the issues view can read. Keys live in the app's own settings file. */
-function IntegrationsTab() {
-  const [linear, setLinear] = useState<LinearStatus | null>(null);
-  const [key, setKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [ghOk, setGhOk] = useState<boolean | null>(null);
-  useEffect(() => {
-    issues.linearStatus().then(setLinear).catch(() => setLinear({ connected: false }));
-    gh.available().then(setGhOk).catch(() => setGhOk(false));
-  }, []);
-  const save = async (value: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const s = await issues.linearSetApiKey(value);
-      forgetIssueViewers("linear");
-      setLinear(s);
-      setKey("");
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <div className="text-sm font-medium">GitHub</div>
-        <p className="mt-0.5 text-xs text-muted-foreground">Issues and pull requests go through the GitHub CLI, which holds its own login.</p>
-        <div className="mt-2 flex items-center gap-2 text-xs">
-          {ghOk == null ? (
-            <Loader2 className="size-3.5 animate-spin text-faint" />
-          ) : ghOk ? (
-            <span className="flex items-center gap-1 text-add">
-              <Check className="size-3.5" /> gh is installed and signed in
-            </span>
-          ) : (
-            <span className="flex items-center gap-1 text-warning">
-              <CircleAlert className="size-3.5" /> Install gh and run <code className="font-mono">gh auth login</code>
-            </span>
-          )}
-        </div>
-      </div>
-      <div>
-        <div className="text-sm font-medium">Linear</div>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          A personal API key from Linear → Settings → Security &amp; access. It is stored in TerminalX's settings file, readable only by you, and sent only to api.linear.app.
-        </p>
-        <div className="mt-2 flex items-center gap-2 text-xs">
-          {linear?.connected ? (
-            <span className="flex items-center gap-1 text-add">
-              <Check className="size-3.5" /> Connected as {linear.viewer ?? "you"}
-            </span>
-          ) : (
-            <span className="flex items-center gap-1 text-faint">
-              <CircleAlert className="size-3.5" /> Not connected
-            </span>
-          )}
-        </div>
-        <div className="mt-2 flex items-center gap-2">
-          <input
-            type="password"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && key.trim() && void save(key)}
-            placeholder={linear?.connected ? "Paste a new key to replace" : "lin_api_…"}
-            spellCheck={false}
-            className="h-8 min-w-0 flex-1 rounded-md bg-well px-2 font-mono text-xs outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/40"
-          />
-          <Button size="sm" variant="outline" disabled={busy || !key.trim()} onClick={() => void save(key)}>
-            {busy ? <Loader2 className="animate-spin" /> : null} Save
-          </Button>
-          {linear?.connected && (
-            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void save("")}>
-              Disconnect
-            </Button>
-          )}
-        </div>
-        {error && <div className="mt-2 text-xs text-destructive">{error}</div>}
-      </div>
-    </div>
-  );
-}
-
-function AboutTab() {
-  const prefs = usePrefs();
-  const [version, setVersion] = useState("");
-  const { state } = useUpdate();
-  useEffect(() => {
-    getVersion().then(setVersion).catch(() => setVersion("dev"));
-  }, []);
-  const checkNow = () => void checkForUpdate();
-
-  return (
-    <div className="flex flex-col gap-4 text-sm">
-      <div>
-        <div className="text-base font-semibold">TerminalX</div>
-        <div className="text-muted-foreground">Version {version || "…"}</div>
-        <p className="mt-1 text-muted-foreground">A workbench for coding agents. Every session is a git worktree; every tab is an agent.</p>
-        <p className="mt-2 text-xs text-faint">
-          MIT licensed.{" "}
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 underline decoration-hairline-strong underline-offset-2 hover:text-foreground"
-            onClick={() => void openUrl(repoFile("THIRD-PARTY-NOTICES.md"))}
-          >
-            Third-party notices <ExternalLink className="size-3" />
-          </button>
-        </p>
-      </div>
-
-      <SettingRow
-        label="Updates"
-        description="Beta gets builds earlier. Either way nothing installs without your say-so."
-        control={
-          <Segmented
-            aria-label="Update channel"
-            value={prefs.updateChannel}
-            onChange={(v) => setPrefs({ updateChannel: v })}
-            options={[
-              { value: "stable", label: "Stable" },
-              { value: "beta", label: "Beta" },
-            ]}
-          />
-        }
-      />
-      <div className="flex items-center gap-2">
-        <Button size="sm" variant="outline" onClick={checkNow} disabled={state.kind === "checking" || state.kind === "installing"}>
-          {state.kind === "checking" ? <Loader2 className="animate-spin" /> : <RefreshCw />} Check for updates
-        </Button>
-        {state.kind === "none" && <span className="text-xs text-muted-foreground">You have the latest version.</span>}
-        {state.kind === "error" && <span className="text-xs text-destructive">{state.message}</span>}
-        {state.kind === "available" && (
-          <>
-            <span className="text-xs text-foreground">Version {state.update.version} is available.</span>
-            <Button size="sm" onClick={() => void installUpdate()}>
-              Install and relaunch
-            </Button>
-          </>
-        )}
-        {state.kind === "choosing" && (
-          <span className="text-xs text-foreground">Version {state.update.version} would stop work in progress: choose when to update in the card below.</span>
-        )}
-        {state.kind === "installing" && <span className="text-xs text-muted-foreground">Installing… {state.pct}%</span>}
-      </div>
-
-      <div>
-        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">What's new</div>
-        <div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
-          <Markdown text={changelog.replace(/^# TerminalX changelog\s*/m, "")} />
-        </div>
-      </div>
-    </div>
   );
 }

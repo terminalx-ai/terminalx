@@ -165,7 +165,7 @@ impl SessionManager {
             // Said when the CLI was last started, or when the tab was opened
             // (`load_events`), and still standing.
             Restart::Unsent(_) if rt.recovery == Some(RecoveryKind::Unsent) => {}
-            Restart::Unsent(_) => self.needs_recovery(rt, RecoveryKind::Unsent),
+            Restart::Unsent(_) => self.needs_recovery(rt, RecoveryKind::Unsent, crate::recovery_log::Source::Unsent),
         }
     }
 
@@ -173,7 +173,16 @@ impl SessionManager {
     /// it was: no second message is published, and the CLI's record of it is
     /// that message's echo. Delivery is held to the same proof as any
     /// composer prompt's.
-    fn redeliver(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, sent: Sent) {
+    fn redeliver(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, mut sent: Sent) {
+        match crate::checkpoints::sent_context(&rt.session_id, &rt.tab_id, sent.seq) {
+            Ok(context) if !context.is_empty() => sent.text.push_str(&format!("\n\n{context}")),
+            Err(error) => {
+                log::warn!("read resend context: {error:#}");
+                self.needs_recovery(rt, RecoveryKind::Unsent, crate::recovery_log::Source::Unsent);
+                return;
+            }
+            _ => {}
+        }
         let Engine::Cli(p) = &rt.engine else { return };
         let (pane, ready, stops) = (p.pane_id.clone(), p.ready.clone(), p.input.stops);
         let queued = rt.turn_open && !rt.turn_by_command;
@@ -188,8 +197,8 @@ impl SessionManager {
     /// sends nothing again by itself, so its unanswered brief (Continue in New
     /// Session) goes first, as a PTY launch would send it.
     pub fn resend_unsent(&self, session_id: &str, tab_id: &str) -> Result<SendOutcome> {
-        let (text, images) = self.unsent_prompt(session_id, tab_id)?;
-        self.send(session_id, tab_id, text, images)
+        let sent = self.unsent_saved(session_id, tab_id)?;
+        self.resend_message(session_id, tab_id, sent.seq)
     }
 
     /// "Send again" on a message the agent dropped unanswered, taking
@@ -200,12 +209,19 @@ impl SessionManager {
         let log = store::log_path(session_id, tab_id)?;
         let sent = sent_at(&log, seq).ok_or_else(|| anyhow!("That message is no longer in this conversation's record."))?;
         let images = sent.images.iter().map(image_input).collect::<Result<Vec<_>>>()?;
+        crate::checkpoints::requeue_sent(session_id, tab_id, seq)?;
         self.send(session_id, tab_id, sent.text, images)
     }
 
     /// The last prompt the tab's agent never answered, as it was sent: what
     /// "Resend last prompt" sends again, from the desktop or a phone.
     pub fn unsent_prompt(&self, session_id: &str, tab_id: &str) -> Result<(String, Vec<ImageInput>)> {
+        let last = self.unsent_saved(session_id, tab_id)?;
+        let images = last.images.iter().map(image_input).collect::<Result<Vec<_>>>()?;
+        Ok((last.text, images))
+    }
+
+    fn unsent_saved(&self, session_id: &str, tab_id: &str) -> Result<Sent> {
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?;
         let log = store::log_path(session_id, tab_id)?;
@@ -216,9 +232,7 @@ impl SessionManager {
                 _ => None,
             }
         } else { said.since.pop() };
-        let last = last.ok_or_else(|| anyhow!("There is no unanswered prompt to send again."))?;
-        let images = last.images.iter().map(image_input).collect::<Result<Vec<_>>>()?;
-        Ok((last.text, images))
+        last.ok_or_else(|| anyhow!("There is no unanswered prompt to send again."))
     }
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { BranchPanel } from "./BranchPanel";
 import { PrPanel } from "./PrPanel";
+import { BranchAutopilot } from "./BranchAutopilot";
 
 /**
  * Where the work stands, in one scroll: the branch, the one thing to do next,
@@ -8,6 +9,8 @@ import { PrPanel } from "./PrPanel";
  * commit, push…) comes first; the pull request's (open one, mark ready,
  * merge) is offered only once the branch has none. A cloud workspace has no
  * branch picture (it reads this computer's checkout), so only its pull request.
+ * Autopilot, that same path run for the reader, sits between the next step
+ * and the pull request (docs/AUTOPILOT-PLACEMENT.md).
  * `focusPr` grows each time the pull request is asked for, and scrolls to it.
  */
 export function BranchTab({ branch, pr, focusPr = 0 }: {
@@ -29,10 +32,15 @@ export function BranchTab({ branch, pr, focusPr = 0 }: {
     <div className="h-full overflow-y-auto scrollbar-thin" data-testid="branch-tab">
       {branch ? (
         <BranchPanel {...branch} inline onStep={setHeld}>
+          <BranchAutopilot sessionId={branch.sessionId} offer />
           {section}
         </BranchPanel>
       ) : (
-        section
+        <>
+          {/* A cloud workspace's pipeline is shown here, but started from its own session. */}
+          <div className="px-6 pt-4 empty:hidden"><BranchAutopilot sessionId={pr.sessionId} offer={false} /></div>
+          {section}
+        </>
       )}
     </div>
   );

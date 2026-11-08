@@ -280,6 +280,8 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         initiating_prompt: Option<String>,
     },
+    /// The durable checkpoint belonging to the turn that is about to complete.
+    TurnCheckpoint { seq: u64, base: String, head: String },
     TurnCompleted {
         status: TurnStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,3 +1,5 @@
+import { conversationTitle } from "@/lib/sessions";
+import { openSectionDialog } from "@/lib/localSections";
 import {
   useCallback,
   useDeferredValue,
@@ -5,7 +7,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
 import {
   AtSign,
@@ -39,6 +40,8 @@ import {
   Trash2,
 } from "@/icons";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { HighlightedText } from "@/components/ui/HighlightedText";
+import { searchSettingsSections } from "@/lib/settingsSections";
 import { AgentMark } from "@/components/AgentMark";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { cn } from "@/lib/cn";
@@ -99,6 +102,7 @@ const GROUP_CAPS: Record<string, number> = {
   projects: 4,
   files: 8,
   commands: 8,
+  settings: 30,
 };
 
 interface CommandEntry extends PaletteEntityBase {
@@ -179,23 +183,6 @@ function directory(path: string): string {
   return at > 0 ? path.slice(0, at) : ".";
 }
 
-function HighlightedText({ text, ranges }: { text: string; ranges: MatchRange[] }) {
-  if (!ranges.length) return <>{text}</>;
-  const parts: ReactNode[] = [];
-  let cursor = 0;
-  for (const range of ranges) {
-    if (range.start > cursor) parts.push(text.slice(cursor, range.start));
-    parts.push(
-      <mark key={`${range.start}:${range.end}`} className="bg-transparent font-semibold text-foreground">
-        {text.slice(range.start, range.end)}
-      </mark>,
-    );
-    cursor = range.end;
-  }
-  if (cursor < text.length) parts.push(text.slice(cursor));
-  return <>{parts}</>;
-}
-
 function insertComposerText(text: string): boolean {
   const active = document.activeElement;
   const textarea = active instanceof HTMLTextAreaElement && active.matches("[data-composer]")
@@ -272,8 +259,7 @@ export function CommandPalette({
   const status = useStatus();
   const theme = useTheme();
   const [query, setQuery] = useState("");
-  // "Go to cloud session…": only cloud sessions are listed, searched by what is typed next.
-  const [cloudOnly, setCloudOnly] = useState(false);
+  const [scope, setScope] = useState<"all" | "cloud" | "settings">("all");
   const deferredQuery = useDeferredValue(query);
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
@@ -305,7 +291,7 @@ export function CommandPalette({
   const presetRoot = preset?.projectPath === activeProject?.path ? (preset?.cwd ?? null) : null;
   const mainWorkspace = activeProject ? (store.workspaces[activeProject.path] ?? []).find((workspace) => workspace.isMain) : null;
   const fileRoot = selectedSession?.cwd ?? presetRoot ?? mainWorkspace?.path ?? activeProject?.path ?? null;
-  const smartInput = useMemo(() => parseSmartInput(query), [query]);
+  const smartInput = useMemo(() => scope === "all" ? parseSmartInput(query) : null, [query, scope]);
 
   useHotkey("escape", () => {
     if (!open) return false;
@@ -317,7 +303,7 @@ export function CommandPalette({
   useEffect(() => {
     if (!open) return;
     setQuery("");
-    setCloudOnly(false);
+    setScope("all");
     setFileHits([]);
     setSelected(0);
     setExpanded({});
@@ -400,7 +386,7 @@ export function CommandPalette({
   }, [lookupWorkItem, open, smartInput, smartProject]);
 
   useEffect(() => {
-    if (!open || !fileRoot || !deferredQuery.trim() || smartInput) {
+    if (!open || scope !== "all" || !fileRoot || !deferredQuery.trim() || smartInput) {
       setFileHits([]);
       setFileLoading(false);
       return;
@@ -418,7 +404,7 @@ export function CommandPalette({
       live = false;
       window.clearTimeout(timer);
     };
-  }, [deferredQuery, fileRoot, open, smartInput]);
+  }, [deferredQuery, fileRoot, open, scope, smartInput]);
 
   const runAction = useCallback(
     (action: ShortcutAction) => dispatchShortcut(action, previousFocusRef.current),
@@ -493,9 +479,11 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:mode:system", group: "commands" as const, primary: "Appearance: System", secondary: theme.mode === "system" ? "Current appearance" : "Follow the system appearance", recentAt: 5, icon: Palette, run: () => setMode("system") }),
       indexPaletteItem({ id: "command:mode:light", group: "commands" as const, primary: "Appearance: Light", secondary: theme.mode === "light" ? "Current appearance" : "Use the light appearance", recentAt: 4, icon: Sun, run: () => setMode("light") }),
       indexPaletteItem({ id: "command:mode:dark", group: "commands" as const, primary: "Appearance: Dark", secondary: theme.mode === "dark" ? "Current appearance" : "Use the dark appearance", recentAt: 3, icon: Moon, run: () => setMode("dark") }),
-      indexPaletteItem({ id: "command:settings:appearance", group: "commands" as const, primary: "Open Appearance settings", secondary: "Themes, type and transcript layout", recentAt: 2, icon: Settings, run: () => onOpenSettings("appearance") }),
+      indexPaletteItem({ id: "command:settings:search", group: "commands" as const, primary: "Search settings…", secondary: "Find a settings section", recentAt: 2, icon: Settings, keepOpen: true, run: () => { setScope("settings"); setQuery(""); setSelected(0); } }, ["preferences options configure"]),
       indexPaletteItem({ id: "command:new-issue", group: "commands" as const, primary: "New issue…", secondary: "Create a GitHub or Linear issue for the project", recentAt: 2, icon: CircleDot, run: () => openNewIssue() }, ["issue create new bug feature github linear ticket"]),
       indexPaletteItem({ id: "command:worktree-cleanup", group: "commands" as const, primary: "Clean up worktrees…", secondary: "Review and remove safe worktrees across open projects, here and on cloud workspaces", recentAt: 2, icon: Trash2, run: () => openWorktreeCleanup() }, ["worktree workspace cleanup disk space remove delete prune"]),
+      indexPaletteItem({ id: "command:local-section:create", group: "commands" as const, primary: "New local section…", secondary: "Group sessions across local projects", recentAt: 2, icon: FolderPlus, run: () => openSectionDialog({ kind: "create" }) }, ["create sidebar section"]),
+      ...(selectedSession && !store.selectedCloudWorkspace ? [indexPaletteItem({ id: "command:local-section:move", group: "commands" as const, primary: "Move to section…", secondary: conversationTitle(selectedSession), recentAt: 3, icon: FolderPlus, run: () => openSectionDialog({ kind: "move", sessionIds: [selectedSession.id] }) }, ["move session sidebar section"])] : []),
       // The start screen's three ways to a project, for after the first one exists.
       ...START_ACTIONS.map((action, index) =>
         indexPaletteItem({
@@ -511,7 +499,7 @@ export function CommandPalette({
       ),
       // Narrows the palette to cloud sessions (by kind, not by the word "cloud"). Choosing one only selects it.
       ...(cloud.live
-        ? [indexPaletteItem({ id: "command:cloud-go", group: "commands" as const, primary: "Go to cloud session…", secondary: "List the sessions in your organizations' cloud workspaces", recentAt: 1, icon: Cloud, keepOpen: true, run: () => { setCloudOnly(true); setQuery(""); setSelected(0); } }, ["cloud workspace session open"])]
+        ? [indexPaletteItem({ id: "command:cloud-go", group: "commands" as const, primary: "Go to cloud session…", secondary: "List the sessions in your organizations' cloud workspaces", recentAt: 1, icon: Cloud, keepOpen: true, run: () => { setScope("cloud"); setQuery(""); setSelected(0); } }, ["cloud workspace session open"])]
         : []),
       // Creating a workspace is an owner's or admin's; nobody else is offered it.
       ...(cloud.mayCreate
@@ -519,7 +507,7 @@ export function CommandPalette({
         : []),
     ];
     return [...shortcutEntries, ...extras];
-  }, [cloud.live, cloud.mayCreate, cloud.orgName, onOpenSettings, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
+  }, [selectedSession, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({
@@ -616,6 +604,18 @@ export function CommandPalette({
   }, [store.paletteIndex, cloudSessions, cloudProjects, store.harnesses, visibleIds, deferredQuery]);
 
   const groups = useMemo<PaletteGroup[]>(() => {
+    const settingsMatches = searchSettingsSections(deferredQuery);
+    const settingsGroup: PaletteGroup = {
+      id: "settings",
+      label: "Settings",
+      rows: settingsMatches.map((match) => entityRow(
+        { ...match, item: { ...match.item, id: `palette:${match.item.id}` } },
+        "command",
+        () => onOpenSettings(match.item.tab),
+        { icon: Settings },
+      )),
+    };
+    if (scope === "settings") return [settingsGroup];
     const entityMatches = searchPaletteIndex(paletteIndex, deferredQuery);
     const commandMatches = rankPaletteItems(commandEntries, deferredQuery);
     const rankedFiles = deferredQuery.trim() ? rankPaletteItems(fileEntries, deferredQuery) : [];
@@ -693,19 +693,23 @@ export function CommandPalette({
       restoreFocus: !!match.item.shortcut,
     }));
 
-    if (cloudOnly) {
+    if (scope === "cloud") {
       const cloudRows = entityMatches.sessions.flatMap((match, index) => (match.item.cloudKey ? [sessionRows[index]] : []));
       return [{ id: "sessions", label: "Cloud sessions", rows: cloudRows }];
     }
+    // A strong settings match ("font") should beat a fuzzy command; an exact
+    // command ("Home") should still win over incidental settings keywords.
+    const commandGroup: PaletteGroup = { id: "commands", label: "Views and commands", rows: commandRows };
+    const settingsFirst = deferredQuery.trim() && (settingsMatches[0]?.score ?? Infinity) < (commandMatches[0]?.score ?? Infinity);
     return [
       { id: "smart", label: "Smart input", rows: smartRows },
       { id: "sessions", label: deferredQuery.trim() ? "Sessions" : "Recent sessions", rows: sessionRows },
       { id: "workspaces", label: deferredQuery.trim() ? "Workspaces" : "Recent workspaces", rows: workspaceRows },
       { id: "projects", label: deferredQuery.trim() ? "Projects" : "Recent projects", rows: projectRows },
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
-      { id: "commands", label: "Views and commands", rows: commandRows },
+      ...(settingsFirst ? [settingsGroup, commandGroup] : [commandGroup, settingsGroup]),
     ];
-  }, [cloudOnly, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
+  }, [scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
 
   const renderedGroups = useMemo(() => {
     let offset = 0;
@@ -724,7 +728,7 @@ export function CommandPalette({
     setSelected(0);
     setExpanded({});
     listRef.current?.scrollTo(0, 0);
-  }, [query]);
+  }, [query, scope]);
 
   useEffect(() => {
     if (selected >= selectableRows.length) setSelected(Math.max(0, selectableRows.length - 1));
@@ -748,6 +752,7 @@ export function CommandPalette({
   );
 
   const onInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       event.preventDefault();
       setSelected((current) => movePaletteSelection(current, selectableRows.length, event.key as PaletteNavigationKey));
@@ -755,13 +760,14 @@ export function CommandPalette({
       event.preventDefault();
       const row = selectableRows[selected];
       if (row && !startingWorkItem) choose(row);
-    } else if (event.key === "Backspace" && cloudOnly && !query) {
-      // Backspace on an empty search leaves the cloud-only list.
-      setCloudOnly(false);
+    } else if (event.key === "Backspace" && scope !== "all" && !query) {
+      // Backspace on an empty search returns to every group.
+      setScope("all");
     }
   };
 
-  const empty = !selectableRows.length && !fileLoading && !workItemLoading && !reposLoading;
+  const searching = scope !== "settings" && (fileLoading || workItemLoading || reposLoading);
+  const empty = !selectableRows.length && !searching;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -780,7 +786,7 @@ export function CommandPalette({
         }}
       >
         <DialogTitle className="sr-only">Command palette</DialogTitle>
-        <DialogDescription className="sr-only">Search sessions, workspaces, projects, files, views and commands</DialogDescription>
+        <DialogDescription className="sr-only">Search sessions, workspaces, projects, files, settings, views and commands</DialogDescription>
         <div className="mx-3 mt-3 flex items-center gap-2 rounded-lg bg-well px-3 hairline focus-within:ring-1 focus-within:ring-ring/40">
           <Search className="size-4 shrink-0 text-faint" />
           <input
@@ -788,7 +794,7 @@ export function CommandPalette({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={onInputKeyDown}
-            placeholder={cloudOnly ? "Search cloud sessions…" : "Search sessions, workspaces, projects, files and commands…"}
+            placeholder={scope === "settings" ? "Search settings…" : scope === "cloud" ? "Search cloud sessions…" : "Search sessions, workspaces, projects, files, settings and commands…"}
             aria-label="Command palette search"
             aria-controls="command-palette-results"
             aria-activedescendant={selectableRows[selected]?.id}
@@ -796,7 +802,8 @@ export function CommandPalette({
             spellCheck={false}
             className="h-11 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
           />
-          {(fileLoading || workItemLoading || reposLoading) && <Loader2 className="size-3.5 shrink-0 animate-spin text-faint" aria-label="Searching" />}
+          {scope === "settings" && <button type="button" aria-label="Search everything" className="shrink-0 rounded bg-selected px-2 py-1 text-xs text-muted-foreground" onClick={() => { setScope("all"); inputRef.current?.focus(); }}>Settings ×</button>}
+          {searching && <Loader2 className="size-3.5 shrink-0 animate-spin text-faint" aria-label="Searching" />}
           <kbd className="rounded-md bg-veil-raised px-1.5 py-0.5 text-[10px] text-faint">Esc</kbd>
         </div>
 
@@ -838,8 +845,8 @@ export function CommandPalette({
           ))}
           {empty && (
             <div className="px-5 py-10 text-center">
-              <p className="text-sm text-muted-foreground">No results match this search.</p>
-              <p className="mt-1 text-xs text-faint">Try a session, branch, project, file path, issue, pull request or command.</p>
+              <p role="status" className="text-sm text-muted-foreground">{scope === "settings" ? `No settings match ${query.trim()}` : "No results match this search."}</p>
+              {scope !== "settings" && <p className="mt-1 text-xs text-faint">Try a session, branch, project, file path, setting, issue, pull request or command.</p>}
             </div>
           )}
         </div>

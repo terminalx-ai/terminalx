@@ -50,6 +50,14 @@ impl Terminals {
         self.0.call("runtime.pty.kill", json!({"id":id}))
     }
 
+    pub fn environment_changed(&self, id: &str) -> Result<crate::store::environment::Status> {
+        self.0.quick("runtime.pty.environmentChanged", json!({"id":id}))
+    }
+
+    pub fn environment_ready(&self, project: Option<&str>) -> Result<bool> {
+        self.0.quick("runtime.pty.environmentReady", json!({"projectPath":project}))
+    }
+
     pub fn shells(&self) -> Result<Vec<crate::pty::ShellPane>> {
         self.0.quick("runtime.pty.visibleShells", json!({}))
     }

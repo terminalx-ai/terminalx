@@ -1,6 +1,7 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
+import { Segmented, Switch } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { bootFloating, saveFloatingSettings, useFloating } from "@/lib/floating";
@@ -80,7 +81,7 @@ export function SystemShortcutSection() {
   // Registered for every app, it is pressed before the window's own shortcuts see it.
   const shadowed = shortcut ? conflictOf(shortcut, "app.quickChat", keymap) : null;
   return (
-    <section aria-label="System-wide shortcuts" data-testid="system-shortcuts">
+    <RegisteredSetting setting="shortcuts.systemWide"><section aria-label="System-wide shortcuts" data-testid="system-shortcuts">
       <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">System-wide</div>
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-1.5" data-system-shortcut="floating.toggle">
         <div className="min-w-0 flex-1 basis-56">
@@ -136,7 +137,7 @@ export function SystemShortcutSection() {
           {bindingText(shortcut)} is also “{shadowed.label}” inside TerminalX. The system-wide shortcut is pressed first, so that one will not run.
         </p>
       )}
-    </section>
+    </section></RegisteredSetting>
   );
 }
 
@@ -164,14 +165,10 @@ export function QuickChatSettings() {
   return (
     <div data-testid="quick-chat-settings">
       <div className="mb-1 mt-3 text-xs font-medium uppercase tracking-wide text-faint">Quick chats</div>
-      <SettingRow
-        label="Keep the floating window on top"
-        description="The floating chat window stays above other apps’ windows. Off lets it go behind them like any other window; the pin in the window does the same."
+      <RegisteredSetting setting="general.floatingOnTop"
         control={<Switch checked={status?.alwaysOnTop ?? true} disabled={!status} onCheckedChange={(value) => save({ alwaysOnTop: value })} />}
       />
-      <SettingRow
-        label="Keep idle quick chats for"
-        description="A quick chat nobody has touched for this long is deleted with its scratch folder. Pinned and archived chats, and one with a terminal still running, are kept. You can always delete one by hand."
+      <RegisteredSetting setting="general.quickChatRetention"
         stacked
         control={<Segmented value={String(days)} options={options.map((option) => ({ value: option.id, label: option.label }))} onChange={(value) => save({ retentionDays: Number(value) })} />}
       />

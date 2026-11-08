@@ -14,10 +14,11 @@ pub mod conversation_titles;
 pub mod projects;
 pub mod quick;
 pub mod settings;
+pub mod environment;
 // Dormant transactional journal primitive; no live event publisher uses it.
 #[allow(dead_code)]
 pub(crate) mod batch_journal;
-mod transaction;
+pub(crate) mod transaction;
 
 use std::fs;
 use std::io::Write;
@@ -70,7 +71,31 @@ pub fn attachments_dir(session_id: &str) -> Result<PathBuf> {
 }
 
 pub fn log_path(session_id: &str, tab_id: &str) -> Result<PathBuf> {
-    Ok(session_dir(session_id)?.join(format!("{tab_id}.jsonl")))
+    session_dir(session_id)?;
+    log_path_in(&root()?, session_id, tab_id)
+}
+
+/// The index selects an immutable log generation together with its provider
+/// conversation. A reset never exposes half of that switch after a crash.
+/// Read the raw index here: projecting message activity would recurse.
+pub(crate) fn log_path_in(root: &Path, session_id: &str, tab_id: &str) -> Result<PathBuf> {
+    let index: serde_json::Value = read_json(&root.join("sessions/index.json"))?.unwrap_or_default();
+    let generation = index["sessions"].as_array().into_iter().flatten()
+        .find(|s| s["id"] == session_id)
+        .and_then(|s| s["tabs"].as_array()).into_iter().flatten()
+        .find(|t| t["id"] == tab_id)
+        .or_else(|| index["closedTabs"].as_array().into_iter().flatten()
+            .find(|closed| closed["sessionId"] == session_id && closed["tab"]["id"] == tab_id).map(|closed| &closed["tab"]))
+        .and_then(|t| t.get("resetLogId"));
+    let name = match generation {
+        Some(serde_json::Value::String(id)) => {
+            anyhow::ensure!(uuid::Uuid::parse_str(id).is_ok(), "Invalid reset log id.");
+            format!("{tab_id}.reset-{id}.jsonl")
+        }
+        None | Some(serde_json::Value::Null) => format!("{tab_id}.jsonl"),
+        _ => anyhow::bail!("Invalid reset log id."),
+    };
+    Ok(root.join("sessions").join(session_id).join(name))
 }
 
 /// Rewrite `path` atomically. Readers never see a torn file: the temp file is
@@ -276,5 +301,30 @@ mod tests {
         append_line(&p, "{\"seq\":2}").unwrap();
         let v: Vec<serde_json::Value> = read_lines(&p).unwrap();
         assert_eq!(v.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod reset_log_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn generation_pointer_is_atomic_and_survives_closing_a_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let id = "11111111-1111-4111-8111-111111111111";
+        let tab = json!({"id":"t","resetLogId":id});
+        let index = root.join("sessions/index.json");
+        write_json(&index, &json!({"sessions":[{"id":"s","tabs":[{"id":"t"}]}]})).unwrap();
+        assert_eq!(log_path_in(root, "s", "t").unwrap(), root.join("sessions/s/t.jsonl"));
+        write_json(&index, &json!({"sessions":[{"id":"s","tabs":[tab]}]})).unwrap();
+        let selected = log_path_in(root, "s", "t").unwrap();
+        assert_eq!(selected, root.join(format!("sessions/s/t.reset-{id}.jsonl")));
+        write_json(&index, &json!({"sessions":[{"id":"s","tabs":[]}],"closedTabs":[{"sessionId":"s","tab":tab}]})).unwrap();
+        assert_eq!(log_path_in(root, "s", "t").unwrap(), selected);
+        write_json(&index, &json!({"sessions":[{"id":"s","tabs":[{"id":"t","resetLogId":"../../outside"}]}]})).unwrap();
+        assert!(log_path_in(root, "s", "t").is_err());
     }
 }

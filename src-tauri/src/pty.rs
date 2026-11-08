@@ -169,6 +169,7 @@ struct Pane {
     /// A shell tab launched directly into a command has no interactive shell
     /// beneath it; its original foreground group is work too.
     explicit_command: bool,
+    environment: crate::store::environment::Stamp,
     alive: Arc<Mutex<bool>>,
     group: Arc<OwnedGroup>,
     /// When this pane last wrote something. A caller that has to type into a
@@ -469,7 +470,7 @@ pub fn is_shell_id(id: &str) -> bool {
 
 pub fn shell_session(id: &str) -> Option<&str> {
     let (session, _) = id.split_once(':')?;
-    (session != "tab" && session != crate::harness::setup::PANE_NAMESPACE && !session.is_empty()).then_some(session)
+    (session != "tab" && session != "archive" && session != crate::harness::setup::PANE_NAMESPACE && !session.is_empty()).then_some(session)
 }
 
 #[derive(Default)]
@@ -522,6 +523,13 @@ pub struct PtyData {
 pub struct PtyExit {
     pub id: String,
     pub code: Option<i32>,
+}
+
+#[derive(Clone, Copy)]
+struct PaneProgram<'a> {
+    executable: &'a std::ffi::OsStr,
+    args: &'a [&'a std::ffi::OsStr],
+    started: &'a dyn Fn(),
 }
 
 /// What a pane runs and where.
@@ -605,6 +613,11 @@ impl Terminals {
         Self::default()
     }
 
+    pub fn environment_changed(&self, id: &str) -> Result<Option<crate::store::environment::Status>> {
+        let stamp = self.panes.lock().unwrap().get(id).filter(|p| *p.alive.lock().unwrap()).map(|p| p.environment.clone());
+        stamp.map(|stamp| stamp.status()).transpose()
+    }
+
     /// `command`, when given, replaces the interactive shell: the login shell
     /// execs it so PATH and rc files still apply, and the pane exits with it.
     /// That exit is the signal a terminal-view tab relies on, so there is no
@@ -615,7 +628,7 @@ impl Terminals {
     /// grandchild of this shell — which tab it belongs to.
     pub fn spawn(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
         let printed = self.retained.lock().unwrap().get(id).map(|history| history.data.clone()).unwrap_or_default();
-        let result = self.spawn_after(sink, id, spec, printed);
+        let result = self.spawn_after(sink, id, spec, printed, None);
         if result.is_ok() { self.retained.lock().unwrap().remove(id); }
         result
     }
@@ -629,12 +642,17 @@ impl Terminals {
         if let Some(pane) = self.panes.lock().unwrap().remove(id) {
             pane.group.terminate();
         }
-        let result = self.spawn_after(sink, id, spec, printed);
+        let result = self.spawn_after(sink, id, spec, printed, None);
         if result.is_ok() { self.retained.lock().unwrap().remove(id); }
         result
     }
 
-    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>) -> Result<()> {
+    /// A program with literal argv, independent of the user's shell syntax.
+    pub(crate) fn spawn_program(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, program: &std::ffi::OsStr, args: &[&std::ffi::OsStr], started: &dyn Fn()) -> Result<()> {
+        self.spawn_after(sink, id, spec, Vec::new(), Some(PaneProgram { executable: program, args, started }))
+    }
+
+    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>, executable: Option<PaneProgram<'_>>) -> Result<()> {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
@@ -646,18 +664,29 @@ impl Terminals {
         let PaneSpec { cwd, cols, rows, command, env } = spec;
         // A bare shell is still an interactive shell (also used by disposable
         // PTY fixtures). Shell scripts/arguments are work until the pane exits.
-        let explicit_command = command.is_some_and(|command| {
+        let explicit_command = executable.is_some() || command.is_some_and(|command| {
             let command = command.trim();
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
         });
+        let environment = crate::store::environment::launch(cwd);
+        // Lifecycle hooks must not perform cleanup with missing credentials
+        // or endpoints. Check the exact snapshot that this process receives.
+        if executable.is_some() {
+            environment.require_available().context("Archive script was not started")?;
+        }
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
-        let mut cmd = CommandBuilder::new(&sh);
+        let mut cmd = CommandBuilder::new(executable.map_or(std::ffi::OsStr::new(&sh), |program| program.executable));
         // A login shell so PATH and prompts match the reader's own terminal.
         let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh") && !sh.ends_with("pwsh");
-        match command {
+        if let Some(program) = executable {
+            for arg in program.args { cmd.arg(arg); }
+            // A lifecycle hook is not a provider/CLI call on behalf of an agent.
+            cmd.env_remove("RACCOON_SESSION_ID");
+            cmd.env_remove("TERMINALX_SESSION_ID");
+        } else { match command {
             Some(c) if known_shell => {
                 cmd.arg("-l");
                 cmd.arg("-c");
@@ -671,8 +700,9 @@ impl Terminals {
                 cmd.arg("-l");
             }
             None => {}
-        }
+        } }
         cmd.cwd(cwd);
+        environment.inject(&mut cmd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "Raccoon");
@@ -689,6 +719,9 @@ impl Terminals {
             cmd.env(k, v);
         }
         let child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
+        // Report actual execution even if setting up the reader or writer
+        // subsequently fails. Lifecycle callers must not repeat its effects.
+        if let Some(program) = executable { (program.started)(); }
         drop(pair.slave);
         let pid = child.process_id();
         let mut screen = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
@@ -703,6 +736,7 @@ impl Terminals {
             pid,
             group: pid,
             explicit_command,
+            environment: environment.stamp,
             cwd: cwd.to_string(),
             created: crate::store::index::now(),
             scrollback,
@@ -715,7 +749,7 @@ impl Terminals {
     /// Run a pane's reader, emitter and waiter, and list it: one opened here
     /// or one handed over by the runtime this one replaced (#765).
     fn start(&self, sink: Arc<dyn EventSink>, id: &str, parts: Parts) -> Result<()> {
-        let Parts { master, reader, writer, mut waiter, pid, group, explicit_command, cwd, created, scrollback, printed, screen, last_output } = parts;
+        let Parts { master, reader, writer, mut waiter, pid, group, explicit_command, environment, cwd, created, scrollback, printed, screen, last_output } = parts;
         #[cfg(unix)]
         let reader = Arc::new(Mutex::new(reader));
         #[cfg(not(unix))]
@@ -929,7 +963,7 @@ impl Terminals {
             room,
             stalled: false,
         }));
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, alive, group, last_output, scrollback, printed: own, screen, output_size, output, cwd, created, hold,
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, environment, alive, group, last_output, scrollback, printed: own, screen, output_size, output, cwd, created, hold,
             #[cfg(unix)] reader });
         self.keep_slot(id, &tap);
         self.changed();
@@ -1202,6 +1236,14 @@ impl Terminals {
         }
         self.drop_slot_if_unused(id);
         self.changed();
+    }
+
+    /// Stop a lifecycle script's entire process group, retaining its terminal log.
+    pub(crate) fn stop_keep_output(&self, id: &str, timeout: Duration) -> bool {
+        let group = self.panes.lock().unwrap().get(id).map(|pane| pane.group.clone());
+        let Some(group) = group else { return true };
+        group.signal(false);
+        StoppingPane { id: id.to_string(), group }.wait(timeout)
     }
 
     /// Kill the pane and wait for its process to really be gone.

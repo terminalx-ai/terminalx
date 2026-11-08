@@ -897,7 +897,7 @@ impl SessionManager {
                 self.sign_in_refused(&rt);
             }
             self.release_cli(&mut rt);
-            self.needs_recovery(&mut rt, exit.recovery());
+            self.needs_recovery(&mut rt, exit.recovery(), crate::recovery_log::Source::Connection);
         } else if !follows {
             if by_hand {
                 // Followed, and closed by the app with its pane. If the tab
@@ -921,7 +921,7 @@ impl SessionManager {
                 self.publish(&mut rt, Payload::Status { text }, None);
             }
             if let Some(kind) = recovery {
-                self.needs_recovery(&mut rt, kind);
+                self.needs_recovery(&mut rt, kind, crate::recovery_log::Source::Connection);
             }
         } else {
             self.became_terminal(&mut rt, Gone::Exited, said.as_deref());
@@ -987,7 +987,7 @@ impl SessionManager {
     }
 
     /// Tell every window what the tab is now.
-    fn announce_tab(&self, rt: &TabRuntime) {
+    pub(super) fn announce_tab(&self, rt: &TabRuntime) {
         if let Ok(session) = index::get(&rt.session_id) {
             self.sink.emit("session_updated", &session);
         }
