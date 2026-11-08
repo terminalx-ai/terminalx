@@ -6,6 +6,7 @@ import type { AgentEvent, Payload } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
 import { page as browserPage } from "@/test/tabsBackend";
 import { refreshBrowserPages } from "@/lib/browser";
+import { refreshDataPrivacy } from "@/lib/dataPrivacy";
 import { guardedApi } from "@/test/guardedApi";
 
 // PRO-86: the chat / terminal switch on local and cloud agent tabs. The cloud
@@ -144,11 +145,12 @@ function CloudHarness() {
 }
 const wrap = (node: React.ReactNode) => <TooltipProvider>{node}</TooltipProvider>;
 
-beforeEach(() => {
+beforeEach(async () => {
   guard.reset();
   enqueued = [];
   cache = {};
   guard.handlers = {
+    data_privacy_status: () => ({ enabled: false, managed: false }),
     cloud_agent_cache_load: () => ({ tabs: cache }),
     cloud_agent_cache_save: () => undefined,
     cloud_agent_outbox: () => [],
@@ -161,6 +163,8 @@ beforeEach(() => {
     },
     organization_members: () => ({ members: [{ userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }], pendingInvites: [], viewerRole: "member", canManageMembers: false, removedOnDelete: [], runtimeFacts: { available: true }, contextRevision: "r" }),
   };
+  // App startup settles native privacy before mounting the session header.
+  await refreshDataPrivacy();
   runtime = new FakeAgentRuntime();
   runtime.events = [ev({ type: "user_message", text: "why does login loop?", queued: false })];
   client = new WorkspaceRpcClient(runtime);
