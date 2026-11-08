@@ -90,6 +90,11 @@ fn blocked_pipe_child() {
     let Ok(case) = std::env::var(CASE) else { return };
     let coordination = PathBuf::from(std::env::var(DIRECTORY).unwrap());
     let rig = Rig::on(CliKind::Claude, "original-model", None);
+    if case.starts_with("relay-queued-") {
+        // WorkspaceRpc scopes visibility to the canonical workspace root.
+        let root = rig._dir.path().canonicalize().unwrap().to_string_lossy().into_owned();
+        index::update_session(SESSION, |session| { session.project_path = root.clone(); session.cwd = root; Ok(()) }).unwrap();
+    }
     index::update_tab(SESSION, TAB, |tab| { tab.harness = "cursor".into(); tab.permission_mode = "auto".into(); Ok(()) }).unwrap();
     {
         let mut rt = rig.rt.lock().unwrap();
