@@ -11,6 +11,7 @@ const NEW: &[u8] = b"new\0promised image\n";
 struct Environment {
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
     marker: PathBuf,
+    owns_marker: bool,
 }
 
 impl Environment {
@@ -22,14 +23,20 @@ impl Environment {
             (key, value)
         }).collect();
         let marker = root.join("real-pull");
-        std::fs::write(&marker, "").unwrap();
-        Self { saved, marker }
+        // Nested SSH/transfer fixtures share the enclosing real-Git scope.
+        // Only its creator may remove the marker on exit.
+        let owns_marker = match std::fs::OpenOptions::new().write(true).create_new(true).open(&marker) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => panic!("real-Git fixture marker: {error}"),
+        };
+        Self { saved, marker, owns_marker }
     }
 }
 
 impl Drop for Environment {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.marker);
+        if self.owns_marker { let _ = std::fs::remove_file(&self.marker); }
         for (key, value) in self.saved.drain(..) {
             if let Some(value) = value { std::env::set_var(key, value); }
             else { std::env::remove_var(key); }
