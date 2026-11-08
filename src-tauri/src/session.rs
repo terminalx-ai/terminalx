@@ -7029,6 +7029,9 @@ mod idle_tests;
 mod send_tests;
 
 #[cfg(test)]
+static BEFORE_OPENCODE_HTTP: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -7309,6 +7312,3 @@ mod tests {
         assert_eq!(pty_first("opencode"), None);
     }
 }
-
-#[cfg(test)]
-static BEFORE_OPENCODE_HTTP: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
