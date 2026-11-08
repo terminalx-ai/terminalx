@@ -309,6 +309,10 @@ export interface TabState {
 
 /** How a workspace is removed. */
 export interface WorkspaceRemoveOptions {
+  /** Receipt for the failed archive run the person explicitly chose to bypass. */
+  archiveFailure?: string;
+  /** Receipt for the failed run the person explicitly chose to retry. */
+  archiveRetry?: string;
   /** Settling: the conversations stay and move to the project. */
   keepSessions: boolean;
   deleteBranch: boolean;
@@ -344,6 +348,7 @@ export const api = {
    */
   accountRefreshRoles: (force: boolean) => invoke<{ status: AccountStatus; fresh: boolean }>("account_refresh_roles", { force }),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
+  accountPasteCallback: (link: string) => invoke<void>("account_paste_callback", { link }),
   /** Opens the organization's page in the web console, in the system browser. */
   organizationConsoleOpen: (organizationId: string) => invoke<void>("organization_console_open", { organizationId }),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
@@ -696,6 +701,10 @@ export const api = {
   /** The person's global Git identity; it authors their commits in cloud workspaces. */
   gitIdentity: () => invoke<{ name: string; email: string } | null>("git_identity"),
   listBranches: (cwd: string) => invoke<BranchInfo[]>("list_branches", { cwd }),
+  turnCheckpoint: (sessionId: string, tabId: string, seq: number) => invoke<TurnCheckpoint | null>("turn_checkpoint", { sessionId, tabId, seq }),
+  keepTurn: (sessionId: string, tabId: string, seq: number) => invoke<void>("keep_turn", { sessionId, tabId, seq }),
+  restoreUndo: (sessionId: string, tabId: string, seq: number, confirmed: string | null = null) => invoke<TurnUndoResult>("restore_undo", { sessionId, tabId, seq, confirmed }),
+  undoTurn: (sessionId: string, tabId: string, seq: number, confirmed: string | null = null) => invoke<TurnUndoResult>("undo_turn", { sessionId, tabId, seq, confirmed }),
   snapshotTree: (cwd: string) => invoke<string>("snapshot_tree", { cwd }),
   headTree: (cwd: string) => invoke<string | null>("head_tree", { cwd }),
   reviewRange: (cwd: string, target: string | null, uncommitted: boolean) =>
@@ -726,6 +735,8 @@ export interface AccountIdentity {
   organization: string | null;
   /** The active (default) organization's id. */
   organizationId?: string | null;
+  /** The person's picture from the sign-in service, an https: URL; absent when it sends none. */
+  picture?: string | null;
 }
 
 export interface AccountStatus {
@@ -2006,6 +2017,8 @@ export const agent = {
     invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId }),
   /** The hard stop: ends the tab's agent process, keeping what it needs to resume. */
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
+  resetChat: (sessionId: string, tabId: string, endSeq: number | null, resetFiles: boolean) =>
+    invoke<string | null>("reset_chat", { sessionId, tabId, endSeq, resetFiles }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
   /** Send a message the CLI holds behind its running turn now: the turn is interrupted and the message typed again. */
@@ -2124,7 +2137,7 @@ export const git = {
   commit: (cwd: string, message: string, paths?: string[]) => invoke<string>("git_commit", { cwd, message, paths: paths ?? null }),
   push: (cwd: string) => invoke<string>("git_push", { cwd }),
   pull: (cwd: string) => invoke<string>("git_pull", { cwd }),
-  discard: (cwd: string, path: string) => invoke<void>("git_discard", { cwd, path }),
+  discard: (cwd: string, path: string, base: string | null = null, oldPath: string | null = null) => invoke<void>("git_discard", { cwd, path, base, oldPath }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
   workingChanges: (cwd: string, hideWhitespace = false) => invoke<[string, ChangedFile[]]>("working_changes", { cwd, hideWhitespace }),
   /** The merge left in progress in the checkout, with what each uncommitted file is; null when none is. */
@@ -2144,6 +2157,10 @@ export interface PrAssociation {
 }
 
 export const gh = {
+  reviewFiles: (url: string, head: string, base: string) => invoke<import("./reviewThreads").ReviewFile[]>("pr_review_files", { url, head, base }),
+  reviewThreads: (url: string) => invoke<import("./reviewThreads").ReviewThreads>("pr_review_threads", { url }),
+  resolveReview: (url: string, threadId: string, resolved: boolean) => invoke<void>("pr_review_resolve", { url, threadId, resolved }),
+  replyReview: (url: string, threadId: string, body: string) => invoke<void>("pr_review_reply", { url, threadId, body }),
   landed: (cwd: string) => invoke<import("@/types/session").Landed>("pr_landed", { cwd }),
   available: () => invoke<boolean>("gh_available"),
   associationsBatch: (sessionIds: string[]) => invoke<Record<string, PrAssociation[]>>("pr_associations_batch", { sessionKeys: sessionIds }),
@@ -2940,3 +2957,6 @@ export function closeWorkspaceConnectionsIn(orgId: string): void {
     void pending.then((connection) => connection.close()).catch(() => undefined);
   }
 }
+
+export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null }
+export interface TurnUndoResult { overlap: string[]; token: string; undone: boolean; backupRef?: string | null }

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { GitMerge, Loader2, ShieldCheck, Trash2, Undo2, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
-import { openWorktreeCleanup } from "@/lib/dialogs";
+import { openWorkspaceRemove, openWorktreeCleanup } from "@/lib/dialogs";
 import { branchOutcome, dismissMergedNotice, holdMergedWorkspace, mergedDue, restoreMergedRemoval, useMergedCleanup, type MergedNotice } from "@/lib/mergedCleanup";
 
 /** How many notices are shown at once; the rest are in Settings → Storage. */
@@ -53,10 +53,11 @@ function NoticeCard({ notice }: { notice: MergedNotice }) {
                   variant="secondary"
                   onClick={() => {
                     dismissMergedNotice(notice.id);
-                    openWorktreeCleanup();
+                    if (status.archiveBlocked && notice.hostId === "local") openWorkspaceRemove({ projectPath: status.projectPath, path: status.path, name: status.name, mode: "settle", archiveNotice: status.detail ?? undefined });
+                    else openWorktreeCleanup();
                   }}
                 >
-                  Review in clean-up
+                  {status.archiveBlocked && notice.hostId === "local" ? "Review removal" : "Review in clean-up"}
                 </Button>
               ) : removed ? (
                 <Button size="sm" variant="secondary" disabled={busy} onClick={() => act(() => restoreMergedRemoval(notice.hostId, notice.id).then((restored) => restored.notes))}>

@@ -987,7 +987,7 @@ impl SessionManager {
     }
 
     /// Tell every window what the tab is now.
-    fn announce_tab(&self, rt: &TabRuntime) {
+    pub(super) fn announce_tab(&self, rt: &TabRuntime) {
         if let Ok(session) = index::get(&rt.session_id) {
             self.sink.emit("session_updated", &session);
         }

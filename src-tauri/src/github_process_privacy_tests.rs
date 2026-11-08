@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::{data_privacy, github_identity, issue_ops, issues, store};
 
-const OPERATIONS: &[&str] = &["ssh", "https", "list", "legacy-read", "legacy-write", "details", "write", "repositories", "overview", "disposition"];
+const OPERATIONS: &[&str] = &["ssh", "https", "list", "legacy-read", "legacy-write", "details", "write", "repositories", "overview", "disposition", "review-list", "review-files", "review-resolve", "review-reply"];
 
 #[test]
 fn privacy_covers_identity_and_issue_entry_points() {
@@ -39,6 +39,10 @@ fn invoke(operation: &str, cwd: &Path) -> bool {
             assert_eq!(answer.remote_host.as_deref(), Some("github"));
             answer.login.as_deref() == Some("privacy-reader")
         }
+        "review-list" => crate::github::reviews::list("https://github.com/privacy/fixture/pull/7").is_ok(),
+        "review-files" => crate::github::reviews::files("https://github.com/privacy/fixture/pull/7", "head", "base").is_ok(),
+        "review-resolve" => crate::github::reviews::resolve("https://github.com/privacy/fixture/pull/7", "thread", true).is_ok(),
+        "review-reply" => crate::github::reviews::reply("https://github.com/privacy/fixture/pull/7", "thread", "hello").is_ok(),
         "list" => issues::github_list(cwd, &issues::IssueFilter::default()).is_ok(),
         "legacy-read" => issues::github_details(cwd, "7").is_ok(),
         "legacy-write" => issues::github_comment(cwd, "privacy/fixture", 7, "hello").is_ok(),
@@ -97,6 +101,12 @@ case "${0##*/}" in
  ssh) printf "Hi privacy-reader! You've successfully authenticated.\n" >&2; exit 1 ;;
 esac
 case "$*" in
+ *'query=query($owner:'*) printf '{"data":{"repository":{"pullRequest":{"url":"https://github.com/privacy/fixture/pull/7","headRefOid":"head","baseRefOid":"base","reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}\n'; exit 0 ;;
+ *'query=query($id:'*) printf '{"data":{"node":{"id":"thread","pullRequest":{"url":"https://github.com/privacy/fixture/pull/7"}}}}\n'; exit 0 ;;
+ *'resolveReviewThread(input:'*) printf '{"data":{"resolveReviewThread":{"thread":{"id":"thread","isResolved":true}}}}\n'; exit 0 ;;
+ *'addPullRequestReviewThreadReply(input:'*) printf '{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"reply"}}}}\n'; exit 0 ;;
+ *'pulls/7/files?'*) printf '[]\n'; exit 0 ;;
+ 'pr view '*'url,headRefOid,baseRefOid') printf '{"url":"https://github.com/privacy/fixture/pull/7","headRefOid":"head","baseRefOid":"base"}\n'; exit 0 ;;
  'auth status '*) printf 'Logged in to github.com account privacy-reader\n  Active account: true\n'; exit 0 ;;
 esac
 if [ -f "$TERMINALX_HOME/panel-pr" ]; then
@@ -244,6 +254,19 @@ fn privacy_entry_points_child() {
         assert!(invoke(operation, cwd), "{operation} did not restore without sign-in");
         assert!(launches(&root) > after, "{operation} restoration didn't exercise a real process");
     }
+    for operation in ["review-files", "review-resolve", "review-reply"] {
+        policy(false, managed);
+        let before = launches(&root);
+        let (arrived, release) = after_output_barrier();
+        let worker = std::thread::spawn({ let cwd = ssh.clone(); move || invoke(operation, &cwd) });
+        arrived.recv_timeout(Duration::from_secs(10)).unwrap();
+        policy(true, managed);
+        policy(false, managed);
+        release.send(()).unwrap();
+        assert!(!worker.join().unwrap(), "{operation} renewed authority between its read and delivery");
+        assert_eq!(launches(&root), before + 1);
+        assert!(invoke(operation, &ssh));
+    }
     overview_reads_share_authority(&root, &ssh, managed);
     workspace_rpc(&root, &ssh, managed);
     panel::run(&root, &ssh, managed);
@@ -269,7 +292,7 @@ fn queued_commands(root: &Path, cwd: &Path, fetch: &FetchFixture, managed: bool)
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2)
         .max_blocking_threads(1).enable_all().build().unwrap();
     tauri::async_runtime::set(runtime.handle().clone());
-    for operation in ["identity", "issue", "overview", "disposition"] {
+    for operation in ["identity", "issue", "overview", "disposition", "review-list", "review-files", "review-resolve", "review-reply"] {
         policy(true, managed);
         let before = launches(root);
         assert!(!runtime.block_on(ipc(operation, cwd)));
@@ -303,6 +326,10 @@ fn queued_commands(root: &Path, cwd: &Path, fetch: &FetchFixture, managed: bool)
 async fn ipc(operation: &str, cwd: &Path) -> bool {
     let path = cwd.to_string_lossy().into_owned();
     match operation {
+        "review-list" => crate::commands::pr_review_threads("https://github.com/privacy/fixture/pull/7".into()).await.is_ok(),
+        "review-files" => crate::commands::pr_review_files("https://github.com/privacy/fixture/pull/7".into(), "head".into(), "base".into()).await.is_ok(),
+        "review-resolve" => crate::commands::pr_review_resolve("https://github.com/privacy/fixture/pull/7".into(), "thread".into(), true).await.is_ok(),
+        "review-reply" => crate::commands::pr_review_reply("https://github.com/privacy/fixture/pull/7".into(), "thread".into(), "hello".into()).await.is_ok(),
         "identity" => crate::commands::github_identity(path, Some(true)).await.unwrap().login.is_some(),
         "issue" => crate::commands::issue_details(path, issue_ops::Provider::Github, "7".into()).await.is_ok(),
         "overview" => overview_network(crate::commands::project_overview(path).await.unwrap()),

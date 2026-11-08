@@ -270,10 +270,18 @@ impl Client {
     }
 
     pub(crate) fn workspace<T: DeserializeOwned>(&self, operation: &str, params: Value, origin: crate::data_privacy::Ticket) -> Result<T> {
-        self.network_call("runtime.session.workspace", operation, params, origin)
+        self.workspace_within(operation, params, origin, CALL_TIMEOUT)
+    }
+
+    pub(crate) fn workspace_within<T: DeserializeOwned>(&self, operation: &str, params: Value, origin: crate::data_privacy::Ticket, timeout: Duration) -> Result<T> {
+        self.network_call_within("runtime.session.workspace", operation, params, origin, timeout)
     }
 
     pub(crate) fn network_call<T: DeserializeOwned>(&self, command: &str, operation: &str, params: Value, origin: crate::data_privacy::Ticket) -> Result<T> {
+        self.network_call_within(command, operation, params, origin, CALL_TIMEOUT)
+    }
+
+    fn network_call_within<T: DeserializeOwned>(&self, command: &str, operation: &str, params: Value, origin: crate::data_privacy::Ticket, timeout: Duration) -> Result<T> {
         let authority = origin.forwarded(&self.epoch);
         let params = json!({"operation":operation,"params":params,"networkAuthority":authority,"networkAllowed":authority.is_some()});
         // The immutable owner-issued generation travels all the way through
@@ -284,7 +292,7 @@ impl Client {
             let pause = BEFORE_WORKSPACE_SEND.lock().unwrap().take();
             if let Some(pause) = pause { pause(); }
         }
-        self.call(command, params)
+        self.call_within(command, params, timeout)
     }
 
     pub fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {

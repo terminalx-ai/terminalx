@@ -15,6 +15,9 @@ pub(crate) mod ssh;
 
 pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+#[path = "git_checkpoints.rs"]
+pub mod checkpoints;
+
 fn git() -> Command {
     let mut c = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     c.env("PATH", crate::binpath::login_path());
@@ -358,8 +361,14 @@ pub fn list_branches(cwd: &Path) -> Result<Vec<BranchInfo>> {
 
 /// Tree id of the working tree right now, via a temp index so the real index,
 /// working tree and stash are untouched. Copying the index rather than starting
-/// empty keeps this fast: the copy carries git's stat cache.
+/// empty keeps this fast: the copy carries git's stat cache. Only paths under
+/// cwd are refreshed; checkpoint callers explicitly pass the checkout root.
 pub fn snapshot_tree(cwd: &Path) -> Result<String> {
+    snapshot_tree_including(cwd, &[])
+}
+
+/// Include a checkpoint's paths even if later edits added them to .gitignore.
+fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
     let index = run(cwd, &["rev-parse", "--git-path", "index"])?.trim().to_string();
     let index_path = if Path::new(&index).is_absolute() { PathBuf::from(&index) } else { cwd.join(&index) };
     let tmp = std::env::temp_dir().join(format!("raccoon-index-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
@@ -372,6 +381,17 @@ pub fn snapshot_tree(cwd: &Path) -> Result<String> {
         let o = c.output()?;
         if !o.status.success() {
             bail!("snapshot add: {}", String::from_utf8_lossy(&o.stderr));
+        }
+        for path in paths {
+            let mut c = git();
+            c.current_dir(cwd).env("GIT_INDEX_FILE", &tmp).arg("--literal-pathspecs");
+            if std::fs::symlink_metadata(cwd.join(path)).is_ok() {
+                c.args(["add", "-f", "--", path]);
+            } else {
+                c.args(["update-index", "--force-remove", "--", path]);
+            }
+            let output = c.output()?;
+            if !output.status.success() { bail!("snapshot file: {}", String::from_utf8_lossy(&output.stderr)); }
         }
         let mut c = git();
         c.current_dir(cwd).env("GIT_INDEX_FILE", &tmp).args(["write-tree"]);
@@ -1366,21 +1386,6 @@ fn transfer(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-pub fn discard_file(cwd: &Path, path: &str) -> Result<()> {
-    // Tracked: restore from HEAD. Untracked: delete.
-    if run_ok(cwd, &["ls-files", "--error-unmatch", "--", path]) {
-        run(cwd, &["checkout", "HEAD", "--", path])?;
-    } else {
-        let p = cwd.join(path);
-        if p.is_dir() {
-            std::fs::remove_dir_all(p)?;
-        } else if p.exists() {
-            std::fs::remove_file(p)?;
-        }
-    }
-    Ok(())
-}
-
 pub fn checkout_branch(cwd: &Path, name: &str, create: bool) -> Result<()> {
     if name.starts_with('-') {
         bail!("bad branch name");
@@ -1411,6 +1416,17 @@ pub fn remote_url(cwd: &Path) -> Option<String> {
     run(cwd, &["remote", "get-url", "origin"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// The URL `branch` is pushed to, as `git push` picks the remote: the branch's
+/// `pushRemote`, else `remote.pushDefault`, else the branch's `remote`. Often
+/// a fork when the work goes to someone else's repository by pull request.
+pub fn push_remote_url(cwd: &Path, branch: &str) -> Option<String> {
+    let config = |key: String| run(cwd, &["config", "--get", &key]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let remote = config(format!("branch.{branch}.pushRemote"))
+        .or_else(|| config("remote.pushDefault".into()))
+        .or_else(|| config(format!("branch.{branch}.remote")))?;
+    run(cwd, &["remote", "get-url", &remote]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1439,7 +1455,7 @@ mod tests {
         }
     }
 
-    fn repo() -> tempfile::TempDir {
+    pub(super) fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         run(p, &["init", "-q", "-b", "main"]).unwrap();

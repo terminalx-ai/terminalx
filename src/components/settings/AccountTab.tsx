@@ -9,6 +9,7 @@ import { WorkStatusSettings } from "./WorkStatusSettings";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
 import { signIn, signOut, useAccount } from "@/lib/account";
+import { PasteSignInLink } from "@/components/account/PasteSignInLink";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { usePairing } from "@/lib/pairing";
 import { openOrganizationSettings } from "@/lib/settingsLinks";
@@ -127,6 +128,8 @@ export function AccountTab() {
           <Loader2 className="size-3.5 animate-spin" /> Finish signing in in your browser, then return here.
         </div>
       )}
+      {/* The dev app asks for the link in a dialog as sign-in starts; a built app shows the field as a fallback. */}
+      {signingIn && !import.meta.env.DEV && <PasteSignInLink />}
       {status.lastError && <p className="text-xs text-destructive">{status.lastError}</p>}
       <div>
         <Button size="sm" disabled={account.busy} onClick={() => void signIn()}>

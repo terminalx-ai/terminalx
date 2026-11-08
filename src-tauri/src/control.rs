@@ -1170,13 +1170,15 @@ impl ControlService {
             expected_sessions: expected.as_deref(),
             direct: crate::git::DirectDelete::Never,
             fetch: crate::landed::Fetch::Fresh,
-            guard: None,
+            guard: None, archive: Some(crate::archive_script::Runner { terminals: self.manager.terminals(), sink: &self.sink, unattended: false }), archive_failure: None, archive_retry: None, archive_started: None,
         };
         let removed = crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &stop).map_err(|error| {
             if error.starts_with(crate::session_ops::NEEDS_CONFIRMATION) {
                 ControlError::new("needs_force", error, Some("Nothing was removed. Repeat with --force only if losing this work is intended.".into()))
             } else if error.starts_with(crate::session_ops::SESSIONS_CHANGED) {
                 sessions_changed(error, &worktree.path)
+            } else if let Some(failure) = crate::archive_script::Failure::from_error(&error) {
+                ControlError::new("archive_script_failed", failure.message(), Some("Open the workspace removal dialog to review the log and choose whether to remove anyway.".into()))
             } else {
                 ControlError::internal(error)
             }

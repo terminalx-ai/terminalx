@@ -775,6 +775,11 @@ impl Sink for StdioSink {
         rt.last_activity = Instant::now();
         let Engine::CodexStdio(engine) = &mut rt.engine else { return };
         let actions = engine.handle(&line);
+        // The watcher judges this transport by events, not a PTY pane. Renew
+        // its silence clock on current-launch output, even when a frame has
+        // no visible chat action, and withdraw only a watcher-raised stall.
+        rt.last_activity = Instant::now();
+        self.manager.stall_disproved(&mut rt);
         let result = actions.and_then(|actions| self.manager.apply_codex_actions(&mut rt, actions));
         if let Err(error) = result { self.manager.codex_stdio_failed(&mut rt, &error, None); }
     }

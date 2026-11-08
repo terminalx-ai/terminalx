@@ -58,6 +58,7 @@ export type WorkItem =
 export interface Turn {
   key: string;
   seq: number;
+  checkpointSeq?: number;
   /** Time of the event that opened this turn, even without a prompt or completion. */
   ts: string;
   prompt?: { author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; messageTs?: string; seq: number } & Delivery;
@@ -65,7 +66,7 @@ export interface Turn {
   finalText?: string;
   /** Under a failed turn's `finalText`: the agent's last line, when it exited before it ever worked (#667). */
   detail?: string;
-  completed?: { status: string; durationMs?: number; ts: string; head?: string };
+  completed?: { seq?: number; status: string; durationMs?: number; ts: string; head?: string };
   usage?: { contextUsed?: number; contextMax?: number };
   toolCount: number;
   editedFiles: number;
@@ -535,10 +536,14 @@ export class TranscriptReducer {
         }
         break;
       }
+      case "turn_checkpoint": {
+        if (!event.subagent) this.ensureTurn(event).checkpointSeq = payload.seq;
+        break;
+      }
       case "turn_completed": {
         const turn = this.ensureTurn(event);
         this.abandonUnresolved();
-        turn.completed = { status: payload.status, durationMs: payload.durationMs, ts: event.ts, head: payload.head };
+        turn.completed = { seq: event.seq, status: payload.status, durationMs: payload.durationMs, ts: event.ts, head: payload.head };
         const lastText = [...turn.work].reverse().find((item) => item.kind === "text");
         if (payload.finalText && (!lastText || (lastText.kind === "text" && lastText.text.trim() !== payload.finalText.trim()))) {
           if (payload.status !== "ok") turn.finalText = payload.finalText;

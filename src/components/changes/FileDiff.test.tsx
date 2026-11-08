@@ -123,3 +123,13 @@ it.each(["png", "svg"])("reports an unavailable historical %s object without cla
   expect(await screen.findAllByRole("img")).toHaveLength(2);
   expect(screen.queryByRole("alert")).toBeNull();
 });
+
+it.each(["file.ts", "image.png"])("keeps Discard in the %s diff header alongside its viewer", async (path) => {
+  vi.mocked(source.mediaContentAt!).mockResolvedValue({ data: btoa("image"), mime: "image/png" });
+  const onDiscard = vi.fn();
+  render(<FileDiff {...props} path={path} onDiscard={onDiscard} />);
+  if (path.endsWith(".ts")) await screen.findByRole("button", { name: "Copy file" });
+  else await screen.findByRole("region", { name: "After" });
+  fireEvent.click(screen.getByRole("button", { name: `Discard changes to ${path}` }));
+  expect(onDiscard).toHaveBeenCalledTimes(1);
+});

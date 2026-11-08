@@ -547,30 +547,43 @@ impl Drop for ComputerService {
 
 // ------------------------------------------------------- settings UI commands
 
-#[tauri::command]
-pub fn computer_permission_status(
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<permissions::PermissionStatusResult, String> {
-    permissions::status(state.computer.helper().map_err(|e| e.to_string())?.as_ref()).map_err(|e| e.to_string())
+// These reach the Computer Use helper, starting it when it is not running,
+// which takes seconds. A synchronous command runs on the app's main thread,
+// the one that draws the window, so they run on a blocking thread instead:
+// Settings → General froze for over four seconds while one did.
+
+/// Runs `work` against the computer service off the main thread.
+async fn off_main<T: Send + 'static>(state: tauri::State<'_, crate::AppState>, work: impl FnOnce(&ComputerService) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    let computer = state.computer.clone();
+    tauri::async_runtime::spawn_blocking(move || work(&computer)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn computer_open_permission(
+pub async fn computer_permission_status(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<permissions::PermissionStatusResult, String> {
+    off_main(state, |computer| permissions::status(computer.helper().map_err(|e| e.to_string())?.as_ref()).map_err(|e| e.to_string())).await
+}
+
+#[tauri::command]
+pub async fn computer_open_permission(
     state: tauri::State<'_, crate::AppState>,
     id: Option<permissions::PermissionId>,
 ) -> Result<permissions::PermissionSetupResult, String> {
-    permissions::open_setup(state.computer.helper().map_err(|e| e.to_string())?.as_ref(), id).map_err(|e| e.to_string())
+    off_main(state, move |computer| permissions::open_setup(computer.helper().map_err(|e| e.to_string())?.as_ref(), id).map_err(|e| e.to_string())).await
 }
 
 #[tauri::command]
-pub fn computer_reset_permissions(
+pub async fn computer_reset_permissions(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<permissions::PermissionResetResult, String> {
-    let result = permissions::reset(state.computer.helper().map_err(|e| e.to_string())?.as_ref()).map_err(|e| e.to_string())?;
-    // A helper that already holds a session keeps its old TCC decision
-    // cached; restart it so the next call sees the reset.
-    state.computer.shutdown();
-    Ok(result)
+    off_main(state, |computer| {
+        let result = permissions::reset(computer.helper().map_err(|e| e.to_string())?.as_ref()).map_err(|e| e.to_string())?;
+        // A helper that already holds a session keeps its old TCC decision
+        // cached; restart it so the next call sees the reset.
+        computer.shutdown();
+        Ok(result)
+    }).await
 }
 
 /// Every action must say how it was verified. A helper that reports the
