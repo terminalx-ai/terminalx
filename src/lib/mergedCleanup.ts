@@ -331,7 +331,7 @@ function apply(swept: Map<string, MergedSwept | null>) {
       }
       // A merge first seen that the pass did not act on: the row alone is easy to miss (#476).
       const said = `${key}\n${status.pr.number}\n${status.reason ?? ""}`;
-      if (status.phase === "kept" && status.fresh && !keptSaid.has(said)) {
+      if (status.phase === "kept" && (status.fresh || status.archiveBlocked) && !keptSaid.has(said)) {
         keptSaid.add(said);
         pushed.push({ id: `kept:${key}`, hostId, kind: "kept", status });
       }

@@ -309,6 +309,12 @@ impl WindowControl {
 
     #[cfg(unix)]
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
+        if command == "environment.snapshot" {
+            let key = params["key"].as_str().ok_or_else(|| ControlError::invalid("Environment scope required."))?;
+            let revision = params["revision"].as_str().ok_or_else(|| ControlError::invalid("Environment revision required."))?;
+            return crate::store::environment::desktop_snapshot(key, revision)
+                .and_then(|snapshot| Ok(serde_json::to_value(snapshot)?)).map_err(|_| ControlError::internal("Environment overrides are unavailable."));
+        }
         if let Some(action) = command.strip_prefix("share.") {
             let pairing = self.pairing.as_ref().ok_or_else(|| ControlError::internal("Sharing is unavailable."))?;
             let session = params["sessionId"].as_str().ok_or_else(|| ControlError::internal("Session id required."))?;
@@ -857,7 +863,7 @@ impl ControlService {
             None => {
                 // The title a quick chat started from the window gets: the prompt's first line.
                 let title = p.title.or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
-                let quick = crate::session_ops::NewQuickChat { title, cwd: p.cwd, tab: Some(first_tab) };
+                let quick = crate::session_ops::NewQuickChat { section_id: None, title, cwd: p.cwd, tab: Some(first_tab) };
                 crate::session_ops::create_quick_chat_blocking(&*self.sink, quick).map_err(ControlError::invalid)?
             }
             Some(selector) => {
@@ -873,6 +879,7 @@ impl ControlService {
                 crate::session_ops::create_named_session_blocking(
                     &*self.sink,
                     NewSession {
+                        section_id: None,
                         project_path: project.path,
                         title: p.title,
                         use_worktree: p.use_worktree,
@@ -1150,13 +1157,15 @@ impl ControlService {
             expected_sessions: expected.as_deref(),
             direct: crate::git::DirectDelete::Never,
             fetch: crate::landed::Fetch::Fresh,
-            guard: None,
+            guard: None, archive: Some(crate::archive_script::Runner { terminals: self.manager.terminals(), sink: &self.sink, unattended: false }), archive_failure: None, archive_retry: None, archive_started: None,
         };
         let removed = crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &stop).map_err(|error| {
             if error.starts_with(crate::session_ops::NEEDS_CONFIRMATION) {
                 ControlError::new("needs_force", error, Some("Nothing was removed. Repeat with --force only if losing this work is intended.".into()))
             } else if error.starts_with(crate::session_ops::SESSIONS_CHANGED) {
                 sessions_changed(error, &worktree.path)
+            } else if let Some(failure) = crate::archive_script::Failure::from_error(&error) {
+                ControlError::new("archive_script_failed", failure.message(), Some("Open the workspace removal dialog to review the log and choose whether to remove anyway.".into()))
             } else {
                 ControlError::internal(error)
             }
@@ -1784,6 +1793,7 @@ mod tests {
         })).unwrap()).unwrap();
         // Pointed at the project's own folder: still not one of the project's sessions.
         let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            section_id: None,
             title: Some("Quick question".into()), cwd: Some(project.path.clone()), tab: None,
         }).unwrap();
         let (service, _sink) = headless_service();
@@ -1894,6 +1904,7 @@ mod tests {
             "projectPath": other.path, "title": "Another project's", "useWorktree": false, "cwd": cwd,
         })).unwrap()).unwrap();
         let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            section_id: None,
             title: Some("Quick look".into()), cwd: Some(cwd.clone()), tab: None,
         }).unwrap();
         let everyone: std::collections::BTreeSet<String> = [&own, &foreign, &quick].iter().map(|s| s.id.clone()).collect();

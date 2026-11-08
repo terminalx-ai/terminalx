@@ -12,7 +12,7 @@
  * are the ones the rest of the app imports (the same as the lucide icon
  * each one stands in for), so a glyph here replaces that icon everywhere.
  */
-import { dot, FOLDER, FOLDER_FOLD, type Glyph } from "./shared";
+import { dot, FOLDER, type Glyph } from "./shared";
 
 export const GLYPHS: Record<string, Glyph> = {
   // ---- navigation and chrome
@@ -32,11 +32,8 @@ export const GLYPHS: Record<string, Glyph> = {
   Ellipsis: [dot(3.5, 8), dot(8, 8), dot(12.5, 8)],
   PanelLeft: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M6 3v10" }]],
   PanelRight: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M10 3v10" }]],
-  Settings: [
-    ["path", { d: "M2.5 4.5h5.5M11.5 4.5h2M2.5 11.5h2M8 11.5h5.5" }],
-    ["circle", { cx: 9.5, cy: 4.5, r: 1.6 }],
-    ["circle", { cx: 6, cy: 11.5, r: 1.6 }],
-  ],
+  // A gear: six rounded teeth around a hole, in the set's stroke. (Settings2 keeps the sliders, for options.)
+  Settings: [["path", { d: "M6.29 3.41 L6.29 1.62 L9.71 1.62 L9.71 3.41 L11.12 4.22 L12.67 3.33 L14.38 6.29 L12.83 7.18 L12.83 8.82 L14.38 9.71 L12.67 12.67 L11.12 11.78 L9.71 12.59 L9.71 14.38 L6.29 14.38 L6.29 12.59 L4.88 11.78 L3.33 12.67 L1.62 9.71 L3.17 8.82 L3.17 7.18 L1.62 6.29 L3.33 3.33 L4.88 4.22Z" }], ["circle", { cx: 8, cy: 8, r: 2 }]],
   ExternalLink: [["path", { d: "M9 2.5h4.5V7M13.5 2.5 7.5 8.5M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3" }]],
   Copy: [["rect", { x: 6, y: 6, width: 8, height: 8, rx: 1.5 }], ["path", { d: "M10 6V3.5A1.5 1.5 0 0 0 8.5 2h-5A1.5 1.5 0 0 0 2 3.5v5A1.5 1.5 0 0 0 3.5 10H6" }]],
   Pin: [["path", { d: "M6 2.5h4v3.6l1.9 1.9a.6.6 0 0 1-.42 1.02H4.52A.6.6 0 0 1 4.1 8L6 6.1zM8 9v4.5" }]],
@@ -71,7 +68,8 @@ export const GLYPHS: Record<string, Glyph> = {
   Folders: [["path", { d: "M5.5 10.5V4.5A1.5 1.5 0 0 1 7 3h1.8l1.2 1.2h3A1.5 1.5 0 0 1 14.5 5.7v4.8a1.5 1.5 0 0 1-1.5 1.5H7a1.5 1.5 0 0 1-1.5-1.5zM2.5 6v6.5A1.5 1.5 0 0 0 4 14h7" }]],
   FileText: [["path", { d: "M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5zM9 1.5v4h4M5.5 8.5h5M5.5 11h5" }]],
   FileCode2: [["path", { d: "M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5zM9 1.5v4h4M6.5 8l-1.5 1.5L6.5 11M9.5 8l1.5 1.5-1.5 1.5" }]],
-  GitBranch: [["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 4, r: 1.5 }], ["path", { d: "M4.5 2.5V11M11.5 5.5A5.5 5.5 0 0 1 6 11" }]],
+  // A trunk with a dot at each end, and a branch that leaves it and runs down to its own dot: read top to bottom, a branch made from another.
+  GitBranch: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 12.5, r: 1.5 }], ["path", { d: "M4.5 5v6M4.5 7h4a3 3 0 0 1 3 3v1" }]],
   GitMerge: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 12, cy: 8, r: 1.5 }], ["path", { d: "M4.5 5v6M4.5 5a5.5 5.5 0 0 0 6 3" }]],
   GitPullRequest: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 12.5, r: 1.5 }], ["path", { d: "M4.5 5v6M11.5 11V6a2 2 0 0 0-2-2H8M9.5 2.5 8 4l1.5 1.5" }]],
   GitPullRequestDraft: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 12.5, r: 1.5 }], ["path", { d: "M4.5 5v6M11.5 11V9.5M11.5 7V5.5" }]],
@@ -95,7 +93,8 @@ export const GLYPHS: Record<string, Glyph> = {
   Globe: [["circle", { cx: 8, cy: 8, r: 5.75 }], ["path", { d: "M2.25 8h11.5M8 2.25a8.8 8.8 0 0 1 0 11.5M8 2.25a8.8 8.8 0 0 0 0 11.5" }]],
   Users: [["circle", { cx: 6, cy: 5, r: 2.5 }], ["path", { d: "M1.5 13.5v-.5a3.5 3.5 0 0 1 3.5-3.5h2a3.5 3.5 0 0 1 3.5 3.5v.5M10.8 2.7a2.5 2.5 0 0 1 0 4.6M14.5 13.5v-.5a3.5 3.5 0 0 0-2.5-3.35" }]],
   UserRound: [["circle", { cx: 8, cy: 5.5, r: 3 }], ["path", { d: "M2.5 14a5.5 5.5 0 0 1 11 0" }]],
-  UserPlus: [["circle", { cx: 6.5, cy: 5.5, r: 3 }], ["path", { d: "M1.5 14a5 5 0 0 1 10 0M13 5.5v4M11 7.5h4" }]],
+  // Centred on the grid (head at 2.75, shoulders at 13.5), so it sits level with a label such as Share.
+  UserPlus: [["circle", { cx: 6, cy: 5.25, r: 2.5 }], ["path", { d: "M1.75 13.5a4.25 4.25 0 0 1 8.5 0M12.5 5.5v4M10.5 7.5h4" }]],
   Bot: [["rect", { x: 2.5, y: 5, width: 11, height: 8.5, rx: 2 }], ["path", { d: "M8 5V2.5M5.5 8.5v1.5M10.5 8.5v1.5M6 11.5h4" }], dot(8, 2, 0.6)],
   Brain: [["path", { d: "M8 2.5v11M8 2.5a2.5 2.5 0 0 0-4.6 1.3A2.5 2.5 0 0 0 2 6.5a2.5 2.5 0 0 0 .5 4A2.5 2.5 0 0 0 5 13.5a2.3 2.3 0 0 0 3 0M8 2.5a2.5 2.5 0 0 1 4.6 1.3A2.5 2.5 0 0 1 14 6.5a2.5 2.5 0 0 1-.5 4A2.5 2.5 0 0 1 11 13.5a2.3 2.3 0 0 1-3 0" }]],
   Zap: [["path", { d: "M8.8 1.5 3 9h4.2L7.2 14.5 13 7H8.8z" }]],
@@ -103,15 +102,18 @@ export const GLYPHS: Record<string, Glyph> = {
   Activity: [["path", { d: "M1.5 8h2.8l2-5 3.4 10 2-5h2.8" }]],
 
   // ---- chat and agents
-  MessageSquare: [["path", { d: "M2.5 4A1.5 1.5 0 0 1 4 2.5h8A1.5 1.5 0 0 1 13.5 4v6a1.5 1.5 0 0 1-1.5 1.5H6l-3.5 2.5z" }]],
-  MessageSquarePlus: [["path", { d: "M2.5 4A1.5 1.5 0 0 1 4 2.5h8A1.5 1.5 0 0 1 13.5 4v6a1.5 1.5 0 0 1-1.5 1.5H6l-3.5 2.5zM8 5v4M6 7h4" }]],
+  MessageSquare: [["path", { d: "M3.5 3h9A1.5 1.5 0 0 1 14 4.5v6a1.5 1.5 0 0 1-1.5 1.5H7l-3 2.25V12h-.5A1.5 1.5 0 0 1 2 10.5v-6A1.5 1.5 0 0 1 3.5 3z" }]],
+  // The header's family: the panel's 12×10 frame and 1.5 corner, here a bubble with its tail under the left.
+  MessageSquarePlus: [["path", { d: "M3.5 3h9A1.5 1.5 0 0 1 14 4.5v6a1.5 1.5 0 0 1-1.5 1.5H7l-3 2.25V12h-.5A1.5 1.5 0 0 1 2 10.5v-6A1.5 1.5 0 0 1 3.5 3zM8 5.5v4M6 7.5h4" }]],
   MessageCircle: [["path", { d: "M8 13.5a5.75 5.75 0 1 0-5.1-3.1L2.25 13.75l3.4-.7A5.7 5.7 0 0 0 8 13.5z" }]],
   MessageCirclePlus: [["path", { d: "M8 13.5a5.75 5.75 0 1 0-5.1-3.1L2.25 13.75l3.4-.7A5.7 5.7 0 0 0 8 13.5zM8 5.5v4M6 7.5h4" }]],
   MessageCircleQuestion: [["path", { d: "M8 13.5a5.75 5.75 0 1 0-5.1-3.1L2.25 13.75l3.4-.7A5.7 5.7 0 0 0 8 13.5zM6.3 6.3a1.8 1.8 0 1 1 2.5 1.7c-.5.2-.8.6-.8 1.1" }], dot(8, 11, 0.7)],
   MessagesSquare: [["path", { d: "M2 3.5A1.5 1.5 0 0 1 3.5 2h5A1.5 1.5 0 0 1 10 3.5v3.5A1.5 1.5 0 0 1 8.5 8.5H5L2 11zM10 6h2.5A1.5 1.5 0 0 1 14 7.5V14l-3-2.5H7.5A1.5 1.5 0 0 1 6 10V8.5" }]],
   Terminal: [["path", { d: "M3 4l4 4-4 4M8.5 12H13" }]],
   TerminalSquare: [["rect", { x: 2, y: 2.5, width: 12, height: 11, rx: 1.5 }], ["path", { d: "M5 6l2.5 2L5 10M8.5 10h2.5" }]],
-  SquareTerminal: [["rect", { x: 2, y: 2.5, width: 12, height: 11, rx: 1.5 }], ["path", { d: "M5 6l2.5 2L5 10M8.5 10h2.5" }]],
+  // Continue in a new session: a session card in front of the one it came from, an arrow carrying into it.
+  SessionContinue: [["path", { d: "M5 3h7.5A1.5 1.5 0 0 1 14 4.5V10" }], ["rect", { x: 2, y: 5.5, width: 10, height: 8.5, rx: 1.5 }], ["path", { d: "M4.75 9.75h4M7.25 8.25l1.5 1.5-1.5 1.5" }]],
+  SquareTerminal: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M5 6.5l2 1.5-2 1.5M8.5 9.5H11" }]],
   Play: [["path", { d: "M4.5 3.2v9.6a.5.5 0 0 0 .76.43l7.7-4.8a.5.5 0 0 0 0-.86l-7.7-4.8a.5.5 0 0 0-.76.43z" }]],
   Pause: [["path", { d: "M5 3v10M11 3v10" }]],
   Square: [["rect", { x: 3.5, y: 3.5, width: 9, height: 9, rx: 1.5 }]],
@@ -165,7 +167,7 @@ export const GLYPHS: Record<string, Glyph> = {
   Command: [["path", { d: "M5.5 5.5h5v5h-5zM5.5 5.5H4a2 2 0 1 1 1.5-1.5zM10.5 5.5H12a2 2 0 1 0-1.5-1.5zM5.5 10.5H4a2 2 0 1 0 1.5 1.5zM10.5 10.5H12a2 2 0 1 1-1.5 1.5z" }]],
   Database: [["path", { d: "M13.5 4c0 1.1-2.5 2-5.5 2S2.5 5.1 2.5 4s2.5-2 5.5-2 5.5.9 5.5 2zM2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4M2.5 8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2" }]],
   EyeOff: [["path", { d: "M2.5 2.5l11 11M6.7 6.8a1.8 1.8 0 0 0 2.5 2.5M4.4 4.5A8.2 8.2 0 0 0 1.5 8c1.3 2.6 3.7 4 6.5 4a6.6 6.6 0 0 0 2.6-.5M7 4.1A6.9 6.9 0 0 1 8 4c2.8 0 5.2 1.4 6.5 4a8.4 8.4 0 0 1-1.6 2.2" }]],
-  Folder: [["path", { d: FOLDER }], ["path", { d: FOLDER_FOLD }]],
+  Folder: [["path", { d: FOLDER }]],
   Gauge: [["path", { d: "M3.2 12.5a6 6 0 1 1 9.6 0M8 9.5l2.5-3.5" }], dot(8, 9.5, 0.9)],
   GitFork: [["circle", { cx: 4, cy: 3.5, r: 1.5 }], ["circle", { cx: 12, cy: 3.5, r: 1.5 }], ["circle", { cx: 8, cy: 12.5, r: 1.5 }], ["path", { d: "M4 5v1a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V5M8 8v3" }]],
   Moon: [["path", { d: "M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z" }]],

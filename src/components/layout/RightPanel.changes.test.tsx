@@ -4,7 +4,7 @@ import type { AgentEvent } from "@/types/events";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@/lib/prefs", () => ({ usePrefs: () => ({ panelWidth: 360 }), setPrefs: vi.fn() }));
+vi.mock("@/lib/prefs", () => ({ usePrefs: () => ({ panelWidth: 360, diffMode: "unified", diffHideWhitespace: false, diffWrap: true, diffWrapFiles: {} }), setPrefs: vi.fn() }));
 vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), keycaps: () => [], useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/dialogs", () => ({ openSettle: vi.fn(), openWorkspaceDelete: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
@@ -39,14 +39,20 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); localStorage.clear(); vi.clearAllMocks(); });
 
-/** The panel opens on Branch; these are about Changes. */
-const openChanges = () => fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+/** The panel opens on Branch's Overview; these are about its Changes view. */
+const openChanges = () => fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
 
-it("opens on the Branch tab", () => {
+it("opens on the Branch tab's Overview, and reopens Branch on the view last shown", () => {
   render(<RightPanel cwd={cwd} branch="fix/test" />);
   expect(screen.getByText("Branch overview")).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
   openChanges();
   expect(screen.queryByText("Branch overview")).toBeNull();
+  // Away to Files and back to Branch: Changes again.
+  fireEvent.click(screen.getByRole("button", { name: "Files" }));
+  expect(screen.queryByRole("tab", { name: "Changes" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Branch" }));
+  expect(screen.getByRole("tab", { name: "Changes" }).getAttribute("aria-selected")).toBe("true");
 });
 
 it("shows workspace work after a status-only turn, and commits from its Uncommitted scope", async () => {
@@ -58,8 +64,8 @@ it("shows workspace work after a status-only turn, and commits from its Uncommit
   expect(invoke).not.toHaveBeenCalledWith("working_changes", expect.anything());
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
 
-  await waitFor(() => expect(screen.getAllByRole("button", { name: /modified.ts/ })).toHaveLength(1));
-  expect(invoke).toHaveBeenCalledWith("working_changes", { cwd });
+  await waitFor(() => expect(screen.getAllByTitle("Modified · src/modified.ts")).toHaveLength(1));
+  expect(invoke).toHaveBeenCalledWith("working_changes", { cwd, hideWhitespace: false });
 
   // History and back keep a commit draft.
   fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: "Keep my draft" } });
@@ -73,7 +79,7 @@ it("offers workspace changes before there is a turn snapshot", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" />);
   openChanges();
   expect(await screen.findByText("All changes · 2 files")).toBeTruthy();
-  expect(await screen.findByRole("button", { name: /untracked.json/ })).toBeTruthy();
+  expect(await screen.findByTitle("Added · fixtures/untracked.json")).toBeTruthy();
 });
 
 it("uses live-turn wording while an agent is running", async () => {
@@ -81,12 +87,12 @@ it("uses live-turn wording while an agent is running", async () => {
   openChanges();
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
   expect(await screen.findByText("This turn · 2 files")).toBeTruthy();
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("changes_between", { cwd, base: "snapshot", head: "live-snapshot" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("changes_between", { cwd, base: "snapshot", head: "live-snapshot", hideWhitespace: false }));
 });
 
 it("keeps the working-tree view scoped to the workspace", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" workingTree />);
   openChanges();
   expect(await screen.findByText("All changes · 2 files")).toBeTruthy();
-  expect(screen.getByRole("button", { name: /untracked.json/ })).toBeTruthy();
+  expect(screen.getByTitle("Added · fixtures/untracked.json")).toBeTruthy();
 });

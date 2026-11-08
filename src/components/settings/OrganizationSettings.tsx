@@ -1,3 +1,4 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useState } from "react";
 import { ArrowLeft, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -61,14 +62,14 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
     }
   };
 
-  const logins = <OrganizationAgentLogins key={organization.id} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} />;
-  const routes = <OrganizationAgentRoutes key={`routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} />;
-  const workStatus = <OrganizationWorkStatusSettings key={organization.id} organization={organization} />;
-  const consoleLink = <OrganizationConsoleLink organizationId={organization.id} organizationName={name} member={member} />;
+  const logins = <RegisteredSetting setting="organizations.agentLogins" key={`agentLogins-${organization.id}`} instance={organization.id}><div className="contents"><OrganizationAgentLogins key={organization.id} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} /></div></RegisteredSetting>;
+  const routes = <RegisteredSetting setting="organizations.agentRoutes" key={`agentRoutes-${organization.id}`} instance={organization.id}><div className="contents"><OrganizationAgentRoutes key={`routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} /></div></RegisteredSetting>;
+  const workStatus = <RegisteredSetting setting="organizations.workStatus" key={`workStatus-${organization.id}`} instance={organization.id}><div className="contents"><OrganizationWorkStatusSettings key={organization.id} organization={organization} /></div></RegisteredSetting>;
+  const consoleLink = <RegisteredSetting setting="organizations.console" instance={organization.id}><div className="contents"><OrganizationConsoleLink organizationId={organization.id} organizationName={name} member={member} /></div></RegisteredSetting>;
 
   return (
     <div className="flex flex-col gap-4" data-testid="organization-settings" data-organization={organization.id}>
-      <div>
+      <RegisteredSetting setting="organizations.overview" instance={organization.id}><div>
         <Button variant="ghost" size="sm" className="-ml-2" onClick={onBack}>
           <ArrowLeft /> All organizations
         </Button>
@@ -79,20 +80,20 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
           You are {ROLE[organization.role] ?? organization.role} of {name}. {active ? `It is your ${activeLabel}.` : `It is not your ${activeLabel}.`} What you
           change on this page applies to {name} only.
         </p>
-      </div>
+      </div></RegisteredSetting>
       {active ? (
         <>
-          <OrganizationMembers accountEmail={accountEmail} contextRevision={contextRevision} organizationId={organization.id} />
-          <OrganizationCompute contextRevision={contextRevision} />
+          <RegisteredSetting setting="organizations.members" instance={organization.id}><div className="contents"><OrganizationMembers accountEmail={accountEmail} contextRevision={contextRevision} organizationId={organization.id} /></div></RegisteredSetting>
+          <RegisteredSetting setting="organizations.compute" instance={organization.id}><div className="contents"><OrganizationCompute contextRevision={contextRevision} /></div></RegisteredSetting>
           {logins}
           {routes}
           {consoleLink}
-          <OrganizationGithubApp contextRevision={contextRevision} />
+          <RegisteredSetting setting="organizations.github" instance={organization.id}><div className="contents"><OrganizationGithubApp contextRevision={contextRevision} /></div></RegisteredSetting>
           {workStatus}
-          <OrganizationWorkspaceConfig contextRevision={contextRevision} />
-          <OrganizationEnvironment contextRevision={contextRevision} organizationId={organization.id} />
-          <OrganizationDiagnostics contextRevision={contextRevision} member={member} />
-          <OrganizationCloudTeardown contextRevision={contextRevision} organizationId={organization.id} organizationName={name} member={member} />
+          <RegisteredSetting setting="organizations.workspace" instance={organization.id}><div className="contents"><OrganizationWorkspaceConfig contextRevision={contextRevision} /></div></RegisteredSetting>
+          <RegisteredSetting setting="organizations.environment" instance={organization.id}><div className="contents"><OrganizationEnvironment contextRevision={contextRevision} organizationId={organization.id} /></div></RegisteredSetting>
+          <RegisteredSetting setting="organizations.diagnostics" instance={organization.id}><div className="contents"><OrganizationDiagnostics contextRevision={contextRevision} member={member} /></div></RegisteredSetting>
+          <RegisteredSetting setting="organizations.teardown" instance={organization.id}><div className="contents"><OrganizationCloudTeardown contextRevision={contextRevision} organizationId={organization.id} organizationName={name} member={member} /></div></RegisteredSetting>
         </>
       ) : (
         <>
@@ -100,7 +101,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
           {routes}
           {consoleLink}
           {workStatus}
-          <div className="rounded-lg border border-hairline p-3" data-testid="organization-settings-inactive">
+          <RegisteredSetting setting="organizations.activate"><div className="rounded-lg border border-hairline p-3" data-testid="organization-settings-inactive">
             <div className="text-sm font-medium">Other settings of {name}</div>
             <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
               Members, compute, GitHub, workspace settings, environment, diagnostics and teardown of {name} are changed while it is your {activeLabel}.
@@ -115,12 +116,12 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
                 {error}
               </p>
             )}
-          </div>
+          </div></RegisteredSetting>
         </>
       )}
-      <OrganizationDelete organization={organization} contextRevision={contextRevision}
+      <RegisteredSetting setting="organizations.delete" instance={organization.id}><div className="contents"><OrganizationDelete organization={organization} contextRevision={contextRevision}
         unavailableReason={organization.isPersonal ? "Personal/default organizations cannot be deleted." : undefined}
-        remove={deleteOrganization} onDeleted={onBack} />
+        remove={deleteOrganization} onDeleted={onBack} /></div></RegisteredSetting>
     </div>
   );
 }

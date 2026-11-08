@@ -212,6 +212,32 @@ fn working_changes_and_file_contents_mirror_the_desktop_commands() {
 }
 
 #[test]
+fn review_options_and_media_reads_use_the_selected_repository() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "app");
+    std::fs::write(repo.join("README.md"), "  hello \n").unwrap();
+    let changes = f.call("git.workingChanges", json!({ "repo": "app", "hideWhitespace": true })).unwrap();
+    assert_eq!(changes["files"][0]["additions"], 0);
+    assert_eq!(changes["files"][0]["deletions"], 0);
+    std::fs::write(repo.join("image.png"), b"\0\xffPNG").unwrap();
+    let live = f.call("git.mediaContent", json!({ "repo": "app", "path": "image.png" })).unwrap();
+    assert_eq!(live, json!({ "data": "AP9QTkc=", "mime": "image/png" }));
+    let base = crate::git::snapshot_tree(&repo).unwrap();
+    std::fs::write(repo.join("image.png"), b"updated").unwrap();
+    assert_eq!(f.call("git.mediaContent", json!({ "repo": "app", "path": "image.png", "tree": base })).unwrap(), live);
+    assert!(f.call("git.mediaContent", json!({ "repo": "app", "path": "missing.pdf", "tree": base })).unwrap().is_null());
+    assert_eq!(f.code("git.mediaContent", json!({ "repo": "app", "path": "../escape.png" })), "path_forbidden");
+    std::fs::write(repo.join("large.pdf"), vec![0; 512 * 1024 + 1]).unwrap();
+    assert!(f.call("git.mediaContent", json!({ "repo": "app", "path": "large.pdf" })).is_err());
+    #[cfg(unix)] {
+        std::fs::write(f.base.join("secret.png"), "secret").unwrap();
+        std::os::unix::fs::symlink(f.base.join("secret.png"), repo.join("leak.png")).unwrap();
+        assert_eq!(f.code("git.mediaContent", json!({ "repo": "app", "path": "leak.png" })), "path_forbidden");
+    }
+}
+
+#[test]
 fn push_publishes_a_new_branch_and_a_repeat_is_reconciled_without_pushing_again() {
     let f = fixture();
     let remote = f.remote("origin");
@@ -396,6 +422,39 @@ fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
     f.fault("auth-expired");
     assert_eq!(f.code("git.prs", json!({ "repo": "app" })), "auth_failed");
     assert_eq!(f.code("git.prCreate", json!({ "repo": "app", "title": "again" })), "auth_failed");
+}
+
+#[test]
+fn panel_queue_details_and_actions_follow_the_selected_repository() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    let pr = json!({
+        "number": 7, "title": "Queued work", "url": "https://github.test/octo/repo/pull/7",
+        "state": "OPEN", "headRefName": "main", "baseRefName": "develop", "headRefOid": "fake-head",
+        "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED",
+        "statusCheckRollup": [{"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":""}],
+        "requiredChecks": ["build"]
+    });
+    std::fs::write(f.state.join("pr-7.json"), pr.to_string()).unwrap();
+    // A queue click cannot silently enable auto-merge on a non-queue base.
+    assert_eq!(f.code("git.prMerge", json!({"repo":"app","number":7,"method":"queue"})), "conflict");
+    assert!(!f.gh_calls().contains("\"--auto\""));
+    f.fault("merge-queue");
+    let listed = f.call("git.prs", json!({"repo":"app"})).unwrap();
+    assert_eq!(listed["prs"][0]["mergeQueueEnabled"], true);
+    assert_eq!(listed["prs"][0]["requiredChecks"], json!(["build"]));
+    assert!(listed["prs"][0]["detailsError"].is_null());
+    f.call("git.prMerge", json!({"repo":"app","number":7,"method":"queue"})).unwrap();
+    assert!(f.gh_calls().contains("[\"pr\", \"merge\", \"7\", \"--auto\"]"));
+    let listed = f.call("git.prs", json!({"repo":"app","number":7})).unwrap();
+    assert_eq!(listed["prs"][0]["state"], "OPEN");
+    assert_eq!(listed["prs"][0]["mergeQueueEntry"], json!({"position":2,"state":"QUEUED"}));
+    f.fault("queue-offline");
+    let listed = f.call("git.prs", json!({"repo":"app","number":7})).unwrap();
+    assert_eq!(listed["prs"][0]["number"], 7);
+    assert!(listed["prs"][0]["detailsError"].as_str().unwrap().contains("connecting"));
+    assert!(listed["prs"][0]["mergeQueueEntry"].is_null());
 }
 
 #[test]

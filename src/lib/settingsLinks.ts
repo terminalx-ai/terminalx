@@ -21,7 +21,7 @@ function request(organizationId: string | null, logins: boolean, signIn: AgentLo
   // A request replaces whatever an earlier one asked for, the logins coming into view included.
   wantedLogins = logins ? { organizationId, signIn } : null;
   wantedSignIn = null;
-  window.dispatchEvent(new Event(OPEN_ORGANIZATION_SETTINGS));
+  window.dispatchEvent(new CustomEvent(OPEN_ORGANIZATION_SETTINGS, { detail: logins ? "organizations.agentLogins" : "organizations.overview" }));
 }
 
 /** Open `organizationId`'s page in Settings (the active organization's when null). */
@@ -37,9 +37,10 @@ export function openAgentLogins(organizationId: string | null, signIn: AgentLogi
   request(organizationId, true, signIn);
 }
 
-export function onOpenOrganizationSettings(listener: () => void): () => void {
-  window.addEventListener(OPEN_ORGANIZATION_SETTINGS, listener);
-  return () => window.removeEventListener(OPEN_ORGANIZATION_SETTINGS, listener);
+export function onOpenOrganizationSettings(listener: (row: "organizations.overview" | "organizations.agentLogins") => void): () => void {
+  const handler = (event: Event) => listener((event as CustomEvent<"organizations.overview" | "organizations.agentLogins">).detail);
+  window.addEventListener(OPEN_ORGANIZATION_SETTINGS, handler);
+  return () => window.removeEventListener(OPEN_ORGANIZATION_SETTINGS, handler);
 }
 
 /** The page asked for, once per request: an organization's id, null for the active one, undefined when none was. */

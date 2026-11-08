@@ -42,6 +42,8 @@ use crate::{git, pty, store};
 
 #[path = "session_follow.rs"]
 pub mod follow;
+#[path = "session_reset.rs"]
+mod reset;
 #[path = "session_unsent.rs"]
 mod unsent;
 #[path = "session_retire.rs"]
@@ -877,6 +879,7 @@ pub struct TabRuntime {
     pub status: TabStatus,
     pub child: Option<Arc<LiveChild>>,
     pub child_pid: Option<u32>,
+    pub environment: crate::store::environment::Stamp,
     pub engine: Engine,
     pub pending: HashMap<String, PendingAsk>,
     pub queued: Vec<QueuedMessage>,
@@ -897,6 +900,8 @@ pub struct TabRuntime {
     signed_out_in_turn: bool,
     pub last_activity: Instant,
     pub recovery: Option<RecoveryKind>,
+    /// The warnings this tab raised and what became of them (#815).
+    pub incidents: crate::recovery_log::Tracker,
     /// When the session watcher raised a silence/delivery warning, if it did.
     /// A timeout the provider reported is a different fact and is not
     /// cleared by the terminal drawing again.
@@ -998,6 +1003,46 @@ impl TabRuntime {
         self.harness == "claude" && prompt.split_whitespace().next() == Some("/compact") && self.compact_completed
             && self.source_timestamp.as_deref().and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
                 .zip(self.compact_boundary_at).is_some_and(|(prompt, boundary)| prompt <= boundary)
+    }
+
+    /// Note something about this tab's warnings (#815), with what it is
+    /// doing as it is noted.
+    fn incident(&mut self, note: impl FnOnce(&mut crate::recovery_log::Tracker, &crate::recovery_log::Ctx)) {
+        let state = self.incident_state();
+        let ctx = crate::recovery_log::Ctx { session: &self.session_id, tab: &self.tab_id, state };
+        note(&mut self.incidents, &ctx);
+    }
+
+    /// What the runtime knows of the tab right now, as labels and counts.
+    fn incident_state(&self) -> crate::recovery_log::State {
+        let (engine, connection) = match &self.engine {
+            Engine::Cli(_) => ("cli", None),
+            Engine::CodexStdio(e) => ("codex_stdio", Some(if e.failed() { "failed" } else if e.exited || e.blocked { "exited" } else if e.ready { "ready" } else { "starting" })),
+            Engine::Acp(_) => ("acp", None),
+            Engine::OpenCode(_) => ("opencode", None),
+            Engine::None => ("none", None),
+        };
+        let process = match &self.child {
+            _ if self.stdio_starting => "starting",
+            Some(child) if child.terminal_receipt().is_some() => "exited",
+            Some(_) => "running",
+            // A PTY tab's CLI runs in its pane, not as a child of the tab.
+            None if matches!(self.engine, Engine::Cli(_)) => "running",
+            None => "none",
+        };
+        crate::recovery_log::State {
+            turn_open: self.turn_open, pending_asks: self.pending.len(), queued: self.queued.len(),
+            displayed: match self.status { TabStatus::Idle => "idle", TabStatus::InProgress => "in_progress", TabStatus::Completed => "completed", TabStatus::Waiting => "waiting" },
+            recovery: self.recovery, stalled: self.stalled_at.is_some(), engine, process, connection,
+        }
+    }
+
+    /// The agent the tab's incident lines name, read from its entry.
+    fn incident_agent(&mut self) {
+        let Some(tab) = index::get(&self.session_id).ok().and_then(|entry| entry.tab(&self.tab_id).cloned()) else { return };
+        use crate::store::index::AgentTransport;
+        let transport = match tab.transport { AgentTransport::Pty => "pty", AgentTransport::ExperimentalCodexStdio => "codex_stdio" };
+        self.incidents.set_agent(crate::recovery_log::Agent::new(&tab.harness, transport, Some(&tab.model), tab.effort.as_deref()));
     }
 
     /// The tab's private diagnostics, beside its log.
@@ -1142,6 +1187,15 @@ struct PromptText {
     author: Option<crate::local_sharing::Person>,
     agent: String,
     display: String,
+}
+
+impl PromptText {
+    fn append_agent_context(&mut self, context: &str) {
+        if !context.is_empty() {
+            self.agent.push_str("\n\n");
+            self.agent.push_str(context);
+        }
+    }
 }
 
 /// The checkout's tree for a prompt's `baseline`, read before it was admitted.
@@ -1537,7 +1591,7 @@ impl SessionManager {
             if let Some((seq, sent_at)) = overdue {
                 if rt.recovery.is_none() && rt.pending.is_empty() {
                     recovery::diagnose_delivery(&rt.diagnostics_path(), seq, "unconfirmed", now.saturating_duration_since(sent_at), serde_json::json!({ "queued": false }));
-                    self.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed);
+                    self.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery);
                     continue;
                 }
             }
@@ -1556,6 +1610,7 @@ impl SessionManager {
             let drawn = pane.and_then(|pane| drawn_at(&pane));
             if let Some(at) = rt.stalled_at {
                 if drawn.is_some_and(|drawn| drawn > at) {
+                    rt.incidents.progress("terminal_output");
                     self.stall_disproved(&mut rt);
                 }
                 continue;
@@ -1572,7 +1627,8 @@ impl SessionManager {
                     RecoveryKind::Timeout
                 };
                 recovery::diagnose_stall(&rt.diagnostics_path(), rt.turn_opener, quiet);
-                self.needs_recovery(&mut rt, kind);
+                let source = if kind == RecoveryKind::Timeout { crate::recovery_log::Source::Watcher } else { crate::recovery_log::Source::Delivery };
+                self.needs_recovery(&mut rt, kind, source);
                 rt.stalled_at = Some(now);
             }
         }
@@ -1719,6 +1775,22 @@ impl SessionManager {
         crate::automations::RuntimeHost { sink: self.sink.clone(), sessions: self.clone() }
     }
 
+    pub fn environment_changed(&self, id: &str) -> Result<crate::store::environment::Status> {
+        if let Some(status) = self.terminals.environment_changed(id)? { return Ok(status); }
+        let Some(tab_id) = id.strip_prefix("tab:") else { return Ok(Default::default()); };
+        let tab = self.tabs.lock().unwrap().iter()
+            .find(|(key, _)| key.rsplit_once('/').is_some_and(|(_, id)| id == tab_id))
+            .map(|(_, tab)| tab.clone());
+        if let Some(tab) = tab {
+            let stamp = {
+                let rt = tab.lock().unwrap();
+                rt.child.as_ref().filter(|child| child.terminal_receipt().is_none()).map(|_| rt.environment.clone())
+            };
+            if let Some(stamp) = stamp { return stamp.status(); }
+        }
+        Ok(Default::default())
+    }
+
     pub fn terminals(&self) -> &Arc<pty::Terminals> {
         &self.terminals
     }
@@ -1734,7 +1806,7 @@ impl SessionManager {
             let entry = index::get(session_id)?;
             let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
             let log_path = store::log_path(session_id, tab_id)?;
-            let seq = store::last_seq(&log_path)?;
+            let seq = store::last_seq(&log_path)?.max(tab.unknown.get("resetSeq").and_then(Value::as_u64).unwrap_or(0));
             let rt = Arc::new(Mutex::new(TabRuntime {
                 session_id: session_id.into(),
                 tab_id: tab_id.into(),
@@ -1743,6 +1815,7 @@ impl SessionManager {
                 status: TabStatus::Idle,
                 child: None,
                 child_pid: None,
+                environment: Default::default(),
                 engine: Engine::None,
                 pending: HashMap::new(),
                 queued: Vec::new(),
@@ -1759,6 +1832,7 @@ impl SessionManager {
                 signed_out_in_turn: false,
                 last_activity: Instant::now(),
                 recovery: None,
+                incidents: Default::default(),
                 stalled_at: None,
                 last_settings_report: None,
                 reported_mode_to_judge: None,
@@ -1783,6 +1857,13 @@ impl SessionManager {
             || matches!(&payload, Payload::ToolCallCompleted { result, .. } if result.is_error) {
             recovery::diagnose(&rt.diagnostics_path(), &payload);
             recovery::sanitize(&mut payload);
+        }
+        if subagent.is_none() {
+            match crate::checkpoints::observe(&rt.session_id, &rt.tab_id, rt.seq + 1, &mut payload) {
+                Ok(Some(checkpoint)) => { self.publish(rt, Payload::TurnCheckpoint { seq: checkpoint.seq, base: checkpoint.base, head: checkpoint.head }, None); }
+                Err(error) => log::warn!("capture turn checkpoint: {error:#}"),
+                _ => {}
+            }
         }
         rt.seq += 1;
         let mut ts = rt.source_timestamp.clone().unwrap_or_else(index::now);
@@ -1839,6 +1920,21 @@ impl SessionManager {
             Ok(None) => {}
             Err(error) => log::warn!("record message activity: {error:#}"),
         }
+        // The turns incidents are told against (#815), as the log has them.
+        if ev.subagent.is_none() {
+            match &ev.payload {
+                Payload::UserMessage { queued: false, .. } if !rt.incidents.turn_open() => {
+                    rt.incident_agent();
+                    rt.incident(|incidents, ctx| incidents.turn_started(ctx, ev.seq, "prompt"));
+                }
+                Payload::TurnStarted { .. } if !rt.incidents.turn_open() => {
+                    rt.incident_agent();
+                    rt.incident(|incidents, ctx| incidents.turn_started(ctx, ev.seq, "agent"));
+                }
+                Payload::TurnCompleted { status, .. } => rt.incident(|incidents, ctx| incidents.turn_ended(ctx, ev.seq, *status)),
+                _ => {}
+            }
+        }
         self.observer.agent_event(&ev);
         self.sink.emit("agent_event", &ev);
         ev
@@ -1851,13 +1947,23 @@ impl SessionManager {
         crate::cloud_grants::reject_launch(&rt.launch_key());
     }
 
-    fn needs_recovery(&self, rt: &mut TabRuntime, kind: RecoveryKind) {
+    /// `source`: the evidence the warning stands on, for its incident (#815).
+    fn needs_recovery(&self, rt: &mut TabRuntime, kind: RecoveryKind, source: crate::recovery_log::Source) {
         rt.recovery = Some(kind);
         // Whatever is reported here replaces the watcher's guess, if there
         // was one; the watcher marks its own after this returns.
         rt.stalled_at = None;
-        self.publish(rt, Payload::Recovery { kind: Some(kind) }, None);
+        let event = self.publish(rt, Payload::Recovery { kind: Some(kind) }, None);
+        rt.incident_agent();
+        rt.incident(|incidents, ctx| incidents.raised(ctx, kind, source, event.seq));
         self.set_status(rt, TabStatus::Waiting);
+    }
+
+    /// Take the tab's warning down, published and noted with `cause` (#815).
+    /// The caller has already let go of `rt.recovery`.
+    fn recovery_cleared(&self, rt: &mut TabRuntime, cause: &'static str) {
+        let event = self.publish(rt, Payload::Recovery { kind: None }, None);
+        rt.incident(|incidents, ctx| incidents.cleared(ctx, cause, event.seq));
     }
 
     /// Take back a stall the watcher called, now that something has shown
@@ -1872,7 +1978,7 @@ impl SessionManager {
             self.set_status(rt, TabStatus::InProgress);
         } else if rt.recovery.take().is_some() {
             // Still waiting, on an ask or on nothing: only the warning goes.
-            self.publish(rt, Payload::Recovery { kind: None }, None);
+            self.recovery_cleared(rt, "stall_disproved");
         }
     }
 
@@ -1899,7 +2005,7 @@ impl SessionManager {
                 self.set_status(rt, TabStatus::InProgress);
             } else {
                 rt.recovery = None;
-                self.publish(rt, Payload::Recovery { kind: None }, None);
+                self.recovery_cleared(rt, "delivery_confirmed");
             }
         }
     }
@@ -1914,7 +2020,7 @@ impl SessionManager {
         if unsent.is_empty() || rt.turn_open || rt.recovery.is_some() {
             return false;
         }
-        self.needs_recovery(rt, RecoveryKind::DeliveryUnconfirmed);
+        self.needs_recovery(rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery);
         true
     }
 
@@ -1922,7 +2028,17 @@ impl SessionManager {
         if status != TabStatus::Waiting {
             rt.stalled_at = None;
             if rt.recovery.take().is_some() {
-                self.publish(rt, Payload::Recovery { kind: None }, None);
+                // What took it down, as far as this can tell: the agent's
+                // own progress a moment ago, a send or a recovery that set
+                // it working again, or its turn's end.
+                let recent = rt.incidents.last_progress().is_some_and(|(age, _)| age < Duration::from_secs(2));
+                let cause = match status {
+                    TabStatus::InProgress if recent => "progress",
+                    TabStatus::InProgress => "resumed",
+                    _ if !rt.turn_open => "turn_ended",
+                    _ => "status",
+                };
+                self.recovery_cleared(rt, cause);
             }
         }
         // CLI work starts require a live hook (or a delivered permission
@@ -1989,7 +2105,7 @@ impl SessionManager {
                     Some(tab) if codex_stdio::selected(tab) => codex_stdio::recovery_on_open(tab, &path, kind),
                     _ => kind,
                 };
-                self.needs_recovery(&mut rt, kind);
+                self.needs_recovery(&mut rt, kind, crate::recovery_log::Source::History);
             }
         }
         Ok(events)
@@ -2335,12 +2451,14 @@ impl SessionManager {
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         self.accepting_work()?;
         let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
-        let mut env = vec![
+        let environment = crate::store::environment::launch(cwd);
+        let mut env: Vec<_> = environment.values.into_iter().collect();
+        env.extend([
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
             ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
             (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
-        ];
+        ]);
         // A cloud workspace's agent credentials (`cloud_grants`). Only Cursor
         // runs this way, and its grant only sets a variable.
         let harness = program.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
@@ -2349,6 +2467,7 @@ impl SessionManager {
         env.extend(crate::cloud_config::launch_config(&harness, &rt.key()).env);
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
         let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &[] }, sink)?;
+        rt.environment = environment.stamp;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
         Ok(())
@@ -2391,12 +2510,13 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
             drop(sharing);
-            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images)
+            let origin = if pressed_at.is_some() { crate::recovery_log::Origin::Composer } else { crate::recovery_log::Origin::Programmatic };
+            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, origin)
         };
         drop(admission);
         self.forget_baseline(session_id, tab_id);
@@ -2456,6 +2576,14 @@ impl SessionManager {
         Ok(())
     }
 
+    /// What a window showed of a tab's warning, or what was done in it
+    /// (#815), noted with the incident the runtime knows it by.
+    pub fn note_incident_ui(&self, session_id: &str, tab_id: &str, report: &crate::recovery_log::UiReport) -> Result<()> {
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        rt_arc.lock().unwrap().incident(|incidents, ctx| incidents.ui(ctx, report));
+        Ok(())
+    }
+
     /// Continuations use the normal send path, but only acknowledge delivery
     /// when the provider echoes the prompt or runs its UserPromptSubmit hook.
     ///
@@ -2484,7 +2612,7 @@ impl SessionManager {
             let _sharing = self.sharing.lock().unwrap();
             let _admitted = permit.enter()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx))
+            self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -2614,19 +2742,32 @@ impl SessionManager {
 
     /// Send one prompt to the agent while publishing a different, user-facing
     /// representation to the transcript.
+    #[allow(clippy::too_many_arguments)]
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>,
+        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
             return outcome;
         }
+        // Native Codex still on its turn refused the request, not the turn
+        // (#815): the turn goes on, nothing is raised in the tab, and the
+        // sender is told why in words of its own.
+        if outcome.as_ref().is_err_and(|error| error.is::<codex_stdio::Busy>()) {
+            return outcome;
+        }
         if let Err(error) = &outcome {
             if let Ok(rt) = self.runtime(session_id, tab_id) {
+                let mut rt = rt.lock().unwrap();
                 let message = format!("{error:#}");
-                self.apply(&mut rt.lock().unwrap(), Payload::Error { detail: recovery::detail(&message), message, fatal: false }, None);
+                let kind = RecoveryKind::classify(&message);
+                rt.signed_out_in_turn |= kind == RecoveryKind::SignedOut && rt.turn_open;
+                // As `apply` raises an agent's error, but standing on the
+                // refused request, so its incident says what it was.
+                self.needs_recovery(&mut rt, kind, crate::recovery_log::Source::RequestRefused);
+                self.publish(&mut rt, Payload::Error { detail: recovery::detail(&message), message, fatal: false }, None);
             }
         }
         outcome.map_err(|error| anyhow!(RecoveryKind::classify(&error.to_string()).message()))
@@ -2645,7 +2786,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             permit.check_mode(session_id, tab_id)?;
             self.send_admitted(&admission, session_id, tab_id, PromptText { mobile:Some(permit.clone()),
-                shared_connection:None,author:None,agent:text,display }, images, None)
+                shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         outcome
@@ -2653,7 +2794,7 @@ impl SessionManager {
 
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
-        self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None)
+        self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
     #[cfg(test)]
@@ -2668,7 +2809,8 @@ impl SessionManager {
     ) -> Result<SendOutcome> {
         self.prepare_baseline(session_id, tab_id);
         let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
-        let outcome = self.send_admitted(&admission, session_id, tab_id, prompt, images, receipt);
+        let origin = if receipt.is_some() { crate::recovery_log::Origin::Continuation } else { crate::recovery_log::Origin::Programmatic };
+        let outcome = self.send_admitted(&admission, session_id, tab_id, prompt, images, receipt, origin);
         drop(admission);
         self.forget_baseline(session_id, tab_id);
         outcome
@@ -2677,13 +2819,50 @@ impl SessionManager {
     /// Every send, from wherever it came, passes here. One the tab took is a
     /// message its agent now has, which an issue pipeline stopped on its
     /// answer is waiting for (#725).
+    #[allow(clippy::too_many_arguments)]
     fn send_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, prompt: PromptText,
-        images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>,
+        session_id: &str, tab_id: &str, mut prompt: PromptText,
+        images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
-        let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt)?;
+        // Serialize note delivery with other sends; failed admission leaves the note pending.
+        let revert_send = crate::checkpoints::send_lock(session_id, tab_id);
+        let _revert_send = revert_send.lock().unwrap();
+        let notes = if tui::is_slash_command(&prompt.agent) { Vec::new() } else { crate::checkpoints::pending(session_id, tab_id)? };
+        prompt.append_agent_context(&crate::checkpoints::context(&notes));
+        // What the send found, before it changed anything.
+        let found = self.runtime(session_id, tab_id).ok().map(|rt| { let rt = rt.lock().unwrap(); (rt.turn_open, rt.pending.len()) });
+        let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt);
+        self.note_send(session_id, tab_id, origin, found, &outcome);
+        let outcome = outcome?;
+        if let Some(event) = outcome.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. })) {
+            if let Err(error) = crate::checkpoints::acknowledge_sent(session_id, tab_id, event.seq, &notes) {
+                log::warn!("acknowledge revert context: {error:#}");
+            }
+        }
         self.observer.answered(session_id, tab_id);
         Ok(outcome)
+    }
+
+    /// What became of a send, in the tab's incidents (#815): admitted with
+    /// its prompt's seq, which its turn is told by, or refused and why. A
+    /// refusal is the request's: the turn it met is not failed by it.
+    fn note_send(&self, session_id: &str, tab_id: &str, origin: crate::recovery_log::Origin, found: Option<(bool, usize)>, outcome: &Result<SendOutcome>) {
+        use crate::recovery_log::{Admission, Refusal};
+        let Ok(rt_arc) = self.runtime(session_id, tab_id) else { return };
+        let (admission, refusal, prompt_seq) = match outcome {
+            Ok(sent) => (if sent.queued { Admission::Queued } else { Admission::Admitted }, None,
+                sent.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. })).map(|event| event.seq)),
+            Err(error) if error.is::<codex_stdio::Busy>() || error.is::<crate::local_runtime::mobile::Busy>() => (Admission::Busy, Some(Refusal::Busy), None),
+            Err(error) => {
+                let said = error.to_string();
+                let refusal = if error.is::<follow::Refusal>() { Refusal::LeftTerminal }
+                    else if said.starts_with("Stop has not confirmed") { Refusal::Stopping }
+                    else if said.contains("restarting to apply its settings") { Refusal::Restarting }
+                    else { Refusal::Other };
+                (Admission::Refused, Some(refusal), None)
+            }
+        };
+        rt_arc.lock().unwrap().incident(|incidents, ctx| incidents.send(ctx, origin, admission, refusal, prompt_seq, found));
     }
 
     fn deliver_admitted(&self, _admission: &crate::issue_pipeline::admission::Admitted,
@@ -3251,7 +3430,7 @@ impl SessionManager {
             if Instant::now() >= deadline {
                 let mut rt = rt_arc.lock().unwrap();
                 rt.stop_in_flight = false;
-                self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+                self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
                 bail!("Local process exit could not be confirmed. Retry Stop before resuming.");
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -3387,7 +3566,7 @@ impl SessionManager {
         if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
             rt.pending.remove(request_id);
             self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
-            self.needs_recovery(&mut rt, RecoveryKind::PermissionExpired);
+            self.needs_recovery(&mut rt, RecoveryKind::PermissionExpired, crate::recovery_log::Source::PermissionLapsed);
             bail!("the agent is no longer running; the request lapsed");
         }
         let ask = rt.pending.get(request_id).cloned().ok_or_else(|| anyhow!("that request is no longer open"))?;
@@ -4458,7 +4637,7 @@ impl SessionManager {
         if !matches!(rt.engine, Engine::None) || self.terminals.is_live(&work.pane) { return Ok(None); }
         if !exited {
             rt.stopping = true;
-            self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+            self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
             bail!("Local process exit could not be confirmed. Retry Stop before resuming.");
         }
         rt.stopping_pid = None;
@@ -4590,6 +4769,7 @@ impl SessionManager {
             p.recorded = true;
         }
         if !payloads.is_empty() {
+            rt.incidents.progress("transcript");
             self.stall_disproved(&mut rt);
         }
         let turn_open = rt.turn_open;
@@ -5285,7 +5465,7 @@ impl SessionManager {
                     // the watcher closes the turn this prompt opened and
                     // says the agent went.
                 } else if ready.is_some() && matches!(&rt.engine, Engine::Cli(p) if p.awaiting_delivery.is_some()) {
-                    manager.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed);
+                    manager.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery);
                     rt.stalled_at = Some(Instant::now());
                 }
             }
@@ -5867,6 +6047,27 @@ impl SessionManager {
                     self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                     self.set_status(&mut rt, TabStatus::InProgress);
                 }
+                if frame.event == "UserPromptSubmit" {
+                    // Prompts typed directly into a CLI bypass send_admitted. Its blocking
+                    // hook can deliver pending revert context before the model sees them.
+                    // A composer send already carries the note and owns this lock until admitted.
+                    let send_lock = crate::checkpoints::send_lock(&frame.session, &frame.tab);
+                    if let Ok(_sending) = send_lock.try_lock() {
+                        match crate::checkpoints::pending(&frame.session, &frame.tab) {
+                            Ok(notes) if !notes.is_empty() => {
+                                reply.output = Some(serde_json::json!({ "hookSpecificOutput": {
+                                    "hookEventName": "UserPromptSubmit",
+                                    "additionalContext": crate::checkpoints::context(&notes),
+                                }}));
+                                if let Err(error) = crate::checkpoints::acknowledge(&frame.session, &frame.tab, &notes) {
+                                    log::warn!("acknowledge CLI revert context: {error:#}");
+                                }
+                            }
+                            Err(error) => log::warn!("read CLI revert context: {error:#}"),
+                            _ => {}
+                        }
+                    };
+                }
                 if frame.event == "PreToolUse" {
                     // This authenticated, still-current launch only reported a
                     // tool. Explicitly acknowledge it: the local-owner bridge
@@ -6194,7 +6395,7 @@ impl SessionManager {
                 // The CLI has stopped waiting on us and will ask in its own
                 // TUI; the card must stop offering buttons that go nowhere.
                 self.apply(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
-                self.needs_recovery(&mut rt, RecoveryKind::PermissionExpired);
+                self.needs_recovery(&mut rt, RecoveryKind::PermissionExpired, crate::recovery_log::Source::PermissionLapsed);
                 HookReply::default()
             }
         }
@@ -6244,6 +6445,7 @@ impl SessionManager {
             Engine::OpenCode(o) => o.handle(line),
             Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => return,
         };
+        rt.incidents.progress("agent_output");
         self.stall_disproved(&mut rt);
         self.apply_actions(&mut rt, actions);
     }
@@ -6268,6 +6470,9 @@ impl SessionManager {
             self.provider_settings(rt, Signal::Current { model: Some(model.clone()), effort: None });
         }
         if subagent.is_none() {
+            // Before anything below reads it: a warning this progress takes
+            // down is taken down by progress (#815).
+            if let Some(kind) = crate::recovery_log::progress_of(&payload) { rt.incidents.progress(kind); }
             if matches!(&payload, Payload::ModelRequestStarted | Payload::Reasoning { .. } | Payload::Delta(Delta::ThinkingDelta { .. }) | Payload::ToolCallCompleted { .. }) {
                 self.delivery_confirmed(rt);
             }
@@ -6281,11 +6486,11 @@ impl SessionManager {
             // turn that has ended is not. A failed ending raises its own
             // recovery just below.
             if payload.is_turn_boundary() && rt.stalled_at.take().is_some() && rt.recovery.take().is_some() {
-                self.publish(rt, Payload::Recovery { kind: None }, None);
+                self.recovery_cleared(rt, "turn_ended");
             }
             if let Some(kind) = recovery::failure(&payload) {
                 rt.signed_out_in_turn |= kind == RecoveryKind::SignedOut && rt.turn_open;
-                self.needs_recovery(rt, kind);
+                self.needs_recovery(rt, kind, crate::recovery_log::source_of(&payload));
             }
         }
         match &payload {
@@ -6326,7 +6531,7 @@ impl SessionManager {
         }
         let payload = match payload {
             Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, detail, .. } => {
-                let head = index::get(&rt.session_id).ok().and_then(|e| git::snapshot_tree(Path::new(&e.cwd)).ok());
+                let head = None; // The publication path captures and pins the completed tree.
                 if let Some(u) = &usage {
                     let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
                     let (cu, cm) = (u.context_used, u.context_max);
@@ -6355,7 +6560,7 @@ impl SessionManager {
         if sign_in_refused {
             // A reply drawn after the refusal may have taken the recovery back.
             if rt.recovery != Some(RecoveryKind::SignedOut) {
-                self.needs_recovery(rt, RecoveryKind::SignedOut);
+                self.needs_recovery(rt, RecoveryKind::SignedOut, crate::recovery_log::Source::SignIn);
             }
             self.sign_in_refused(rt);
         } else if worked {
@@ -6439,7 +6644,7 @@ impl SessionManager {
             self.publish(&mut rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false, detail: None }, None);
         }
         rt.queued.clear();
-        if let Some(kind) = recovery { self.needs_recovery(&mut rt, kind); }
+        if let Some(kind) = recovery { self.needs_recovery(&mut rt, kind, crate::recovery_log::Source::Connection); }
         else { self.set_status(&mut rt, TabStatus::Idle); }
     }
 }
@@ -6550,6 +6755,16 @@ mod tests {
 
         assert_eq!(projected.len(), 2, "one projected record per real submission");
         assert!(projected.iter().all(|p| matches!(p, Payload::UserMessage { text, images, .. } if text == "describe this" && images.as_slice() == std::slice::from_ref(&image))));
+    }
+
+    #[test]
+    fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
+        let mut prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        prompt.append_agent_context("The user reverted a.txt from turn 1.");
+        let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
+        assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));
+        assert!(matches!(message, Payload::UserMessage { text, .. } if text == "Continue"));
+        assert!(echo.matches(&prompt.agent), "the provider echo of the augmented prompt must be deduplicated");
     }
 
     #[test]

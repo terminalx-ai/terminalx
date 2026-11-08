@@ -1,10 +1,12 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { CONVERSATION_DELETION } from "@/lib/conversationRetention";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Loader2, Undo2 } from "@/icons";
 import type { MergedRemovalView } from "@terminalx/portable/workspace";
+import { openWorkspaceRemove } from "@/lib/dialogs";
 import { Button } from "@/components/ui/button";
-import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
+import { Segmented, Switch } from "@/components/ui/controls";
 import { MERGED_GRACE_MINUTES, errorMessage, mergedCleanup as native, type HeadBranchSetting, type MergedCleanupSettings as Settings } from "@/lib/api";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useCloudConnectionsVersion } from "@/lib/cloudConnections";
@@ -172,7 +174,7 @@ function RemovedList({ changes }: { changes: number }) {
   };
 
   return (
-    <div data-testid="merged-cleanup-records">
+    <RegisteredSetting setting="storage.removed"><div data-testid="merged-cleanup-records">
       <div className="mb-1 mt-4 text-xs font-medium uppercase tracking-wide text-faint">Removed automatically</div>
       {hosts === null ? <p className="text-xs text-muted-foreground">Looking…</p> : null}
       {hosts !== null && rows.length === 0 ? <p className="text-xs text-muted-foreground">Nothing has been removed yet.</p> : null}
@@ -222,7 +224,7 @@ function RemovedList({ changes }: { changes: number }) {
           Show all {rows.length}
         </Button>
       ) : null}
-    </div>
+    </div></RegisteredSetting>
   );
 }
 
@@ -231,8 +233,8 @@ function RemovedList({ changes }: { changes: number }) {
  * merged: the default, each project's own answer, the grace period, whether
  * conversations go too, and what has been removed so far.
  */
-export function MergedCleanupSettings() {
-  const { settings, ready, notices, unreadable } = useMergedCleanup();
+export function MergedCleanupSettings({ projectPath }: { projectPath?: string } = {}) {
+  const { settings, ready, notices, unreadable, statuses } = useMergedCleanup();
   const store = useSessionStore();
   const catalog = useCloudCatalog();
   const connections = useCloudConnectionsVersion();
@@ -256,19 +258,44 @@ export function MergedCleanupSettings() {
   const unread = (reason: string | undefined) => (reason ? `Its pull requests could not be read: ${reason}` : null);
   const cloudUnread = (key: string) => Object.entries(unreadable).find(([entry]) => entry.startsWith(`${key}\n`))?.[1];
 
+  const pausedArchives = Object.values(statuses)
+    .filter((status) => status.hostId === LOCAL_HOST && status.archiveBlocked && (!projectPath || status.projectPath === projectPath))
+    .map((status) => <div key={status.path} className="mt-3 rounded-lg bg-well p-3 text-xs">
+      <p className="font-medium">Archive cleanup paused: {status.name}</p>
+      <p className="mt-1 text-muted-foreground">{status.detail}</p>
+      <Button className="mt-2" size="xs" variant="outline" onClick={() => openWorkspaceRemove({ projectPath: status.projectPath, path: status.path, name: status.name, mode: "settle", archiveNotice: status.detail ?? undefined })}>Review removal</Button>
+    </div>);
+
+  if (projectPath) {
+    const project = store.projects.find((candidate) => !candidate.archived && candidate.path === projectPath);
+    return project ? (
+      <RegisteredSetting setting="repositories.mergedCleanup" instance={project.path}>
+        <section className="flex flex-col gap-3" aria-label="Repository workspace cleanup">
+          <p className="break-all font-mono text-xs text-faint">{project.path}</p>
+          {project.kind === "folder" ? <p className="text-xs text-muted-foreground">Workspace cleanup is available for Git repositories. This project is a folder.</p> : <ul className="divide-y divide-hairline rounded-lg bg-well">
+            <ProjectChoice settings={settings} name={project.name} where={project.path} storedAs={project.path}
+              problem={mergedCleanupOn(settings, project.path) ? unread(unreadable[statusKey(LOCAL_HOST, project.path)]) : null}
+              disabled={!ready} onChoose={choose}>
+              {mergedCleanupOn(settings, project.path) ? <HeadBranchOffer projectPath={project.path} /> : null}
+            </ProjectChoice>
+          </ul>}
+          {pausedArchives}
+          <p className="text-xs text-muted-foreground">The default, waiting period and conversation cleanup are in Settings → Storage.</p>
+          {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+        </section>
+      </RegisteredSetting>
+    ) : null;
+  }
+
   return (
     <section data-testid="merged-cleanup-settings" aria-labelledby="merged-cleanup-title" className="flex flex-col">
       <div id="merged-cleanup-title" className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">
         When a pull request is merged
       </div>
-      <SettingRow
-        label="Delete the workspace when its pull request is merged"
-        description="For workspaces TerminalX created. Once a workspace's pull request is merged, its worktree and local branch are deleted, and its branch on the remote too while that still points at the merged commit. Nothing is forced: a workspace with uncommitted or unmerged work, ignored local files, a turn running or a terminal open stays, and its row says why."
+      <RegisteredSetting setting="storage.mergedCleanup"
         control={<Switch aria-label="Delete the workspace when its pull request is merged" checked={settings.enabled} disabled={!ready} onCheckedChange={(enabled) => save({ enabled })} />}
       />
-      <SettingRow
-        label="Wait before deleting"
-        description="Counted from when the merge is first seen, and from the last thing done in the workspace's sessions if that is later. A notice offers to keep the workspace, and a removal can be undone while its commit is still in the repository."
+      <RegisteredSetting setting="storage.gracePeriod"
         disabled={!anywhere}
         stacked
         control={
@@ -281,8 +308,7 @@ export function MergedCleanupSettings() {
           />
         }
       />
-      <SettingRow
-        label="Also delete its conversations"
+      <RegisteredSetting setting="storage.deleteConversations"
         description={`Off: conversations stay under the project with their original workspace context. On: ${CONVERSATION_DELETION}`}
         disabled={!anywhere}
         control={<Switch aria-label="Also delete its conversations" checked={settings.deleteConversations} disabled={!ready || !anywhere} onCheckedChange={(deleteConversations) => save({ deleteConversations })} />}
@@ -296,7 +322,7 @@ export function MergedCleanupSettings() {
       {projects.length + cloud.length > 0 ? (
         <>
           <div className="mb-1 mt-4 text-xs font-medium uppercase tracking-wide text-faint">Projects</div>
-          <ul aria-label="Projects" className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
+          <RegisteredSetting setting="storage.projects"><ul aria-label="Projects" className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
             {projects.map((project) => (
               <ProjectChoice
                 key={project.path}
@@ -324,10 +350,11 @@ export function MergedCleanupSettings() {
                 onChoose={choose}
               />
             ))}
-          </ul>
+          </ul></RegisteredSetting>
         </>
       ) : null}
 
+      {pausedArchives}
       <RemovedList changes={removals} />
     </section>
   );

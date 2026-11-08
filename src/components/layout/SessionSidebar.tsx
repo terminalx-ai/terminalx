@@ -1,4 +1,7 @@
-import { Fragment, createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
+import { LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
+import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
+import { Fragment, createContext, useMemo, useState, type ReactNode } from "react";
 import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -52,7 +55,6 @@ import { StatusMark } from "@/components/ui/StatusMark";
 import { AppDestinations, ProjectAppearance, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations, useHasCloudOrganizations } from "./CloudOrganizations";
-import { AgentMark } from "@/components/AgentMark";
 import { RenameBranchDialog } from "./RenameBranchDialog";
 import { isPlaceholderBranch } from "@/lib/worktreeNames";
 import { IssueLinkContextItems, IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
@@ -225,9 +227,11 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   const listed = useMemo(() => (filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions), [filter, store.sessions]);
   // Archived conversations never pass a filter, so Show archived shows nothing more while one is on.
   const showArchived = store.showArchived && !filter.active;
+  const { sections: localSections } = useLocalSections();
+  const sectionedSessions = useMemo(() => groupLocalSessions(listed, localSections), [listed, localSections]);
   const { groups, chats, archivedChats } = useMemo(
-    () => groupConversations(listed, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived),
-    [listed, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived],
+    () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived),
+    [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived],
   );
 
   const run = (action: () => Promise<unknown>) => () => {
@@ -274,11 +278,19 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
       <ShowAgents.Provider value={showAgents}>
-      <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-2" aria-label="Conversations" data-testid="conversation-list">
+      <nav className="mt-3 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 pb-2 pt-3" aria-label="Conversations" data-testid="conversation-list">
+        <LocalSidebarSections
+          groups={sectionedSessions.sections.map(({ section, items }) => ({ section, items: [...orderConversations(items, store.selectedSessionId, showArchived), ...(showArchived ? archivedConversations(items) : [])] }))}
+          filtered={filter.active}
+          renderSession={(session) => {
+            const link = conversationLink(session, store.projects, chatsPath, store.workspaces);
+            return link ? <ConversationRow key={session.id} session={session} selected={store.selectedSessionId === session.id} branch={link.branch} locationLabel={[link.name, link.branch].filter(Boolean).join(" · ")} linkTo={null} /> : chatRow(session);
+          }}
+        />
         {groups.length === 0 && chats.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
           filter.count === 0 ? <FilteredEmpty text={filter.empty} /> : null
-        ) : groups.length === 0 && chats.length === 0 && archivedChats.length === 0 ? (
+        ) : groups.length === 0 && chats.length === 0 && archivedChats.length === 0 && localSections.length === 0 ? (
           <button
             type="button"
             onClick={newChat}
@@ -295,6 +307,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                   <ProjectGroup
                     key={group.path}
                     group={group}
+                    hasSections={localSections.length > 0}
                     filtered={filter.active}
                     selectedId={store.selectedSessionId}
                     workspaces={store.workspaces[group.path] ?? []}
@@ -305,7 +318,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
             )}
             {(chats.length > 0 || archivedChats.length > 0) && (
               <ListSection id="chats" label="Chats">
-                <ul className="flex flex-col gap-px">
+                <ul className="flex flex-col gap-0.5">
                   {chats.map(chatRow)}
                   {archivedChats.length > 0 && (
                     <ArchivedSessions id="chats" count={archivedChats.length} opened={archivedChats.some((session) => session.id === store.selectedSessionId)}>
@@ -332,7 +345,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
       )}
 
       <SidebarBulkBar sessions={store.sessions} />
-      <div className="flex shrink-0 items-center gap-1 border-t border-hairline px-2 pb-2 pt-1" data-testid="sidebar-account-row">
+      <div className="flex shrink-0 items-center gap-1 border-t border-hairline px-2 py-2" data-testid="sidebar-account-row">
         {/* The account; Settings keeps the far end. */}
         <div className="min-w-0 max-w-[70%]">
           <AccountSidebarEntry onOpenAccount={onOpenAccount} />
@@ -391,9 +404,9 @@ export function ListSection({
   const [expanded, toggle] = useFold(`list:${id}`, true);
   const open = expanded || forceOpen;
   return (
-    <section aria-labelledby={`list-${id}`} className="mb-3" {...rest}>
+    <section aria-labelledby={`list-${id}`} className="mb-5" {...rest}>
       <div
-        className={cn(actionRow, "flex h-6 min-w-0 items-center gap-1 pr-1")}
+        className={cn(actionRow, "mb-1 flex h-6 min-w-0 items-center gap-1 pr-1")}
         onContextMenu={onMenu && ((event) => { event.preventDefault(); onMenu(); })}
         onKeyDown={onMenu && ((event) => {
           if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
@@ -423,12 +436,14 @@ export function ListSection({
 /** A project, then its conversations along a guide line: the latest few, the open one, and "View all". */
 function ProjectGroup({
   group,
+  hasSections = false,
   filtered = false,
   selectedId,
   workspaces,
   onNewSession,
 }: {
   group: ConversationGroup;
+  hasSections?: boolean;
   /** The sidebar's filter is on: the project shows everything that passed, opened. */
   filtered?: boolean;
   selectedId: string | null;
@@ -553,9 +568,9 @@ function ProjectGroup({
       />
     );
   return (
-    <div role="group" aria-label={group.name} className="mb-1">
+    <div role="group" aria-label={group.name} className="mb-3 last:mb-0">
       <DropdownMenu {...menu.root}>
-        <div {...menu.surface} className={cn(actionRow, "relative flex h-8 items-center gap-2 rounded-md px-2 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
+        <div {...menu.surface} className={cn(actionRow, "relative -mx-2 flex h-9 items-center gap-2 px-4 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
           {/* Only the picture (a chevron on hover) folds the project; its name opens the project's overview. */}
           <button
             type="button"
@@ -584,7 +599,7 @@ function ProjectGroup({
             aria-label={group.project ? `${group.name} overview` : undefined}
             className="flex h-full min-w-0 flex-1 items-center rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
-            <span className="min-w-0 flex-1 truncate text-[13px]">{group.name}</span>
+            <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{group.name}</span>
           </button>
           <RowActions>
             <WithTooltip label={`New chat in ${group.name}`}>
@@ -641,16 +656,17 @@ function ProjectGroup({
         inert={!open}
         data-testid="project-branches"
       >
-        <div className="min-h-0 overflow-hidden">
-      <ul className="ml-[15px] flex flex-col gap-px pl-1.5">
+        <div className="-mx-2 min-h-0 overflow-hidden px-2">
+      {/* Rows run the full width, so a selection spans it; their content is indented by `--indent` instead. */}
+      <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:10px] [--indent-2:24px]">
         {shown.map(row)}
-        {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center px-2 text-[12px] text-faint">No chats yet</li>}
+        {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint">{hasSections ? "No chats in the main list" : "No chats yet"}</li>}
         {more && (
           <li>
             <button
               type="button"
               onClick={toggleAll}
-              className="flex h-7 w-full items-center rounded-md px-2 text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="flex h-7 w-full items-center rounded-md pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               {all ? "Show less" : "View all"}
             </button>
@@ -704,12 +720,12 @@ export function RemovedWorkspaces({ id, count, opened, children }: { id: string;
         onClick={toggle}
         aria-expanded={expanded}
         title="Their workspaces were removed. The conversations are kept, and a message resumes one in its project's folder."
-        className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md px-2 text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
       >
         <span className="min-w-0 truncate">Removed workspaces ({count})</span>
         <ChevronDown className={cn("size-3 shrink-0 transition-transform", !expanded && "-rotate-90")} />
       </button>
-      {expanded && <ul className="flex flex-col gap-px">{children}</ul>}
+      {expanded && <ul className="flex flex-col gap-0.5">{children}</ul>}
     </li>
   );
 }
@@ -729,13 +745,13 @@ export function ArchivedSessions({ id, count, opened, children }: { id: string; 
         onClick={toggle}
         aria-expanded={expanded}
         title="Archived: out of the list and kept whole. Unarchive puts one back, and so does a message to it."
-        className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md px-2 text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
       >
         <Archive className="size-3 shrink-0" />
         <span className="min-w-0 truncate">Archived ({count})</span>
         <ChevronDown className={cn("size-3 shrink-0 transition-transform", !expanded && "-rotate-90")} />
       </button>
-      {expanded && <ul className="flex flex-col gap-px">{children}</ul>}
+      {expanded && <ul className="flex flex-col gap-0.5">{children}</ul>}
     </li>
   );
 }
@@ -786,13 +802,13 @@ function BranchRow({
     <li>
       <ContextMenu>
       <ContextMenuTrigger asChild>
-      <div className={cn(actionRow, "relative flex h-8 items-center rounded-md pr-1 text-foreground/85 hover:bg-selected/50")}>
+      <div className={cn(actionRow, "relative -mx-2 flex h-9 items-center pr-3 text-foreground/90 hover:bg-selected/50")}>
         <button
           type="button"
           onClick={toggle}
           aria-expanded={expanded}
           title={named ? `${named} · ${branch}` : label}
-          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2 pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-sm pl-[calc(1rem+var(--indent,0px))] pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <BranchGlyph merged={merged} />
           <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branch || "No branch"}</span>
@@ -821,7 +837,7 @@ function BranchRow({
       </ContextMenuContent>
       </ContextMenu>
       {expanded && (
-        <ul className="ml-[13px] flex flex-col gap-px pl-1.5">
+        <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:var(--indent-2)]">
           {sessions.map((session) => (
             <ConversationRow key={session.id} session={session} selected={selectedId === session.id} branch={null} linkTo={null} />
           ))}
@@ -833,11 +849,11 @@ function BranchRow({
 
 /** A branch row's icon; a merged branch has a tick drawn into its empty corner, in the icon's own stroke. */
 function BranchGlyph({ merged }: { merged: boolean }) {
-  if (!merged) return <GitBranch className="size-3.5 shrink-0 text-faint" />;
+  if (!merged) return <GitBranch className="size-4 shrink-0 text-muted-foreground" />;
   return (
     <span className="flex shrink-0" title="Merged: its commits are in the default branch">
-      <GitBranch className="size-3.5 text-faint">
-        <path d="M9.25 12.25l1.75 1.75 3.5-3.75" className="text-info" />
+      <GitBranch className="size-4 text-muted-foreground">
+        <path d="M9.25 3.75l1.75 1.75 3.5-3.75" className="text-info" />
       </GitBranch>
       <span className="sr-only">merged</span>
     </span>
@@ -956,6 +972,7 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
           <Separator />
         </>
       )}
+      <MoveToLocalSectionItems sessionIds={ids} contextMenu={contextMenu} />
       <Item onSelect={() => void pinSession(session.id, !session.pinned)}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
       </Item>
@@ -996,7 +1013,7 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
 }
 
 export function RowContextMenu(props: ConversationMenuProps) {
-  return <ContextMenuContent className="w-56"><ConversationMenuItems {...props} contextMenu /></ContextMenuContent>;
+  return <ContextMenuContent className="w-56" onCloseAutoFocus={keepFocusForNameField}><ConversationMenuItems {...props} contextMenu /></ContextMenuContent>;
 }
 
 /** The state that matters most among several: a question waiting, then work in progress, then work done. */
@@ -1011,6 +1028,7 @@ function ConversationRow({
   selected,
   branch,
   named = "title",
+  locationLabel,
   merged = false,
   onNewSession = null,
   label,
@@ -1024,6 +1042,8 @@ function ConversationRow({
   selected: boolean;
   /** What the row is called: the conversation's title, or (alone on its branch in a project) the branch. */
   named?: "title" | "branch";
+  /** Cross-project sections name the project too, without changing branch actions. */
+  locationLabel?: string;
   /** The branch's commits are in the default branch. */
   merged?: boolean;
   /** Start another session on the row's branch, where it is checked out (or a workspace from it). */
@@ -1048,9 +1068,8 @@ function ConversationRow({
   const removed = session.worktreeRemoved;
   const location = removed ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null;
   const status = pressingStatus(peers.map(sessionStatus));
-  const agent = useContext(ShowAgents) ? conversationAgent(session) : null;
-  const mark = agent && <AgentMark id={agent} className={cn("size-3 text-faint", yieldsToRowActions)} />;
-  const branchName = label ?? branch;
+  // A row is its name and its age: which agent runs it is in the chat, not repeated on every row.
+  const branchName = locationLabel ?? label ?? branch;
   // Rename is of what the row shows: its branch's label, or its conversation's title.
   const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
   return (
@@ -1061,8 +1080,9 @@ function ConversationRow({
         <div
           className={cn(
             actionRow,
-            "relative flex h-8 items-center gap-2 rounded-md pl-2 pr-1",
-            selected ? "bg-selected text-foreground" : "text-foreground/85 hover:bg-selected/50",
+            // Edge to edge: the row reaches past the list's 8px gutter, and its content keeps to it.
+            "relative -mx-2 flex h-9 items-center gap-2 pl-[calc(1rem+var(--indent,0px))] pr-3",
+            selected ? "bg-selected text-foreground" : "text-foreground/90 hover:bg-selected/50",
             picked && "bg-info/12 ring-1 ring-inset ring-info/45",
           )}
           title={location ?? (branchName ? `${branchName} · ${title}` : title)}
@@ -1087,7 +1107,6 @@ function ConversationRow({
                 <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchName ?? "No branch"}</span>
                 {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                 {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                {mark}
                 {/* The row's state sits where the time does, at the end, so the row's own icon keeps its place; while working, the sign stands in for the time. */}
                 <StatusMark status={status} />
                 {status !== "in_progress" && <RowTime at={conversationTime(session)} />}
@@ -1096,14 +1115,13 @@ function ConversationRow({
               <>
                 <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
                 {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                {mark}
                 <StatusMark status={status} />
               </>
             )}
-            {named === "branch" || status === "in_progress" ? null : branch ? (
+            {named === "branch" || status === "in_progress" ? null : locationLabel || branch ? (
               <span className={cn("flex max-w-[45%] shrink-0 items-center gap-1 font-mono text-[10px] text-faint", yieldsToRowActions)}>
-                <GitBranch className="size-3 shrink-0" />
-                <span className="truncate">{branch}</span>
+                {branch ? <GitBranch className="size-3 shrink-0" /> : <Folder className="size-3 shrink-0" />}
+                <span className="truncate">{locationLabel ?? branch}</span>
               </span>
             ) : (
               <RowTime at={conversationTime(session)} />
@@ -1122,7 +1140,7 @@ function ConversationRow({
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </ContextMenu>
-        <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuContent align="end" className="w-56" onCloseAutoFocus={keepFocusForNameField}>
           <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </DropdownMenuContent>
       </DropdownMenu>

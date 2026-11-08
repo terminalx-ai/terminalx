@@ -337,3 +337,14 @@ describe("a settled turn's header and footer", () => {
     expect(bubble.querySelector(":scope > time")?.getAttribute("dateTime")).toBe("2026-10-03T00:00:00.000Z");
   });
 });
+
+it("resets only a completed successful turn using its completion sequence", () => {
+  const onReset = vi.fn();
+  const value = turn([]);
+  value.completed = { seq: 19, status: "ok", ts: "2026-11-07T00:00:00Z" };
+  const view = render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} onReset={onReset} />);
+  fireEvent.click(screen.getByRole("button", { name: "Reset to here" }));
+  expect(onReset).toHaveBeenCalledWith(19);
+  view.rerender(<TurnBlock turn={{ ...value, completed: { ...value.completed, status: "aborted" } }} sessionId="s" stream={[]} working={false} onReset={onReset} />);
+  expect(screen.queryByRole("button", { name: "Reset to here" })).toBeNull();
+});

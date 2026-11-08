@@ -119,11 +119,15 @@ impl Stance {
     }
 }
 
-/// Whether a tab in a shared session may be in `mode`. Bypass is the mode a
-/// share refuses; a Codex stance with no sandbox is refused with it, whatever
-/// it is called and whatever its approval policy.
-pub fn allowed_while_shared(mode: &str) -> bool {
-    mode != BYPASS_MODE && !mode.ends_with(super::codex::NO_SANDBOX)
+/// Whether a tab in a shared session may be in `mode`: every mode may. Whether
+/// to share a session where nothing asks (Bypass, or a Codex stance with no
+/// sandbox), letting a guest who drives have the agent do anything on this
+/// computer, is the host's choice, made with that warning in front of them in
+/// the share dialog. This is the one place the policy is set: every check of a
+/// shared session's mode (creating a link, adding or switching a tab, a mode
+/// the agent reports, delivering a guest's prompt) asks it.
+pub fn allowed_while_shared(_mode: &str) -> bool {
+    true
 }
 
 /// A mode by the name the pickers give it, for a line in the chat. One the
@@ -603,12 +607,12 @@ mod tests {
     }
 
     #[test]
-    fn a_share_refuses_bypass_and_any_stance_with_no_sandbox() {
-        for mode in ["plan", "manual", "auto", "acceptEdits", "dontAsk", "never, workspace-write", "something-newer"] {
+    /// Sharing takes every mode: a session where nothing asks is shared at the
+    /// host's choice, with the share dialog's warning in front of them.
+    fn a_share_takes_every_mode_the_host_chooses() {
+        for mode in ["plan", "manual", "auto", "acceptEdits", "dontAsk", "never, workspace-write", "something-newer", BYPASS_MODE, "on-request, danger-full-access"] {
             assert!(allowed_while_shared(mode), "{mode}");
         }
-        assert!(!allowed_while_shared(BYPASS_MODE));
-        assert!(!allowed_while_shared("on-request, danger-full-access"));
     }
 
     #[test]

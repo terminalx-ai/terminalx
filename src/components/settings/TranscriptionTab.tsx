@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useSettingsFile } from "@/lib/settingsFile";
+import { RegisteredSetting } from "./settingsRegistry";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Download, ExternalLink, Trash2, X } from "@/icons";
 import { Button } from "@/components/ui/button";
-import { SettingRow, Switch } from "@/components/ui/controls";
+import { Switch } from "@/components/ui/controls";
 import { TranscriptionInputPicker } from "@/components/chat/TranscriptionInputPicker";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
@@ -37,21 +39,25 @@ function Score({ label, value }: { label: string; value: number }) {
  * reads it without a round trip through the webview.
  */
 export function TranscriptionTab() {
+  const { revision } = useSettingsFile();
   const [models, setModels] = useState<TranscriptionModel[]>([]);
   const [settings, setSettings] = useState<TranscriptionPreferences | null>(null);
   const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
   const [error, setError] = useState<string | null>(null);
+  const request = useRef(0);
 
   const reload = useCallback(async () => {
+    const current = ++request.current;
     try {
       const [m, s] = await Promise.all([transcription.models(), transcription.preferences()]);
+      if (current !== request.current) return;
       setModels(m);
       setSettings(s);
       const p: Record<string, DownloadProgress> = {};
       for (const row of m) if (row.progress && !row.progress.done) p[row.id] = row.progress;
       setProgress(p);
     } catch (e) {
-      setError(errorMessage(e));
+      if (current === request.current) setError(errorMessage(e));
     }
   }, []);
 
@@ -77,9 +83,10 @@ export function TranscriptionTab() {
       .catch(() => {});
     return () => {
       live = false;
+      request.current++;
       unlisten?.();
     };
-  }, [reload]);
+  }, [reload, revision]);
 
   const choose = async (id: string) => {
     setError(null);
@@ -123,7 +130,7 @@ export function TranscriptionTab() {
         {error && <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
       </div>
 
-      <div className="flex flex-col gap-2">
+      <RegisteredSetting setting="transcription.model"><div className="flex flex-col gap-2">
         <ModelCard
           selected={selected === APPLE}
           name="Built in"
@@ -199,17 +206,14 @@ export function TranscriptionTab() {
             />
           );
         })}
-      </div>
+      </div></RegisteredSetting>
 
       <div>
         <div className="mb-1 text-sm font-medium">Input</div>
-        <SettingRow
-          label="Microphone"
+        <RegisteredSetting setting="transcription.microphone"
           control={<TranscriptionInputPicker />}
         />
-        <SettingRow
-          label="Mute while recording"
-          description="Keeps whatever is playing out of the transcript. Unmuted automatically when recording stops."
+        <RegisteredSetting setting="transcription.mute"
           control={
             <Switch
               checked={settings?.muteWhileRecording ?? false}
