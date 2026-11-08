@@ -641,6 +641,7 @@ pub fn run() {
             commands::prepare_continuation,
             commands::send_message,
             commands::report_send_shown,
+            commands::report_terminal_view,
             commands::report_recovery_ui,
             commands::resend_unsent,
             commands::resend_message,
