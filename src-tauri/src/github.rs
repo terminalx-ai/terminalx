@@ -1403,7 +1403,7 @@ mod tests {
         let marker = root.join("started");
         let command = || {
             let mut command = Command::new("/bin/sh");
-            command.args(["-c", "printf '%s' $$ > \"$1\"; exec sleep 30", "privacy"]).arg(&marker);
+            command.args(["-c", "printf '%s' $$ > \"$1.tmp\"; /bin/mv \"$1.tmp\" \"$1\"; exec sleep 30", "privacy"]).arg(&marker);
             command
         };
         crate::store::write_json(&preference, &serde_json::json!({"enabled":std::env::var_os("TERMINALX_TEST_MANAGED_PRIVACY").is_none()})).unwrap();

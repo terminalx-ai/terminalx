@@ -120,7 +120,8 @@ elif [ -f {hold} ]; then
  trap '' TERM
  /bin/sleep 15 &
  child=$!
- printf '%s %s\n' "$$" "$child" > {held}
+ printf '%s %s\n' "$$" "$child" > {held}.tmp
+ /bin/mv {held}.tmp {held}
  wait "$child"
  exit 94
 fi

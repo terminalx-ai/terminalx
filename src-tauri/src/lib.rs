@@ -93,7 +93,12 @@ mod github_process;
 
 /// Internal stdio transport entry, handled before starting a desktop/runtime.
 /// Its parent owns admission and the process group, including all probes.
-pub fn run_git_transport_cli() -> Option<i32> { git::ssh::run_cli() }
+pub fn run_git_transport_cli() -> Option<i32> {
+    #[cfg(unix)]
+    { git::ssh::run_cli() }
+    #[cfg(not(unix))]
+    { None }
+}
 mod unfinished_merge;
 mod pr_associations;
 mod github_identity;

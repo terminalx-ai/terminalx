@@ -140,7 +140,10 @@ fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>
     let Execution { git, stop, progress } = execution;
     let _privacy = ticket.enter()?;
     if stop() { return Err(Stopped.into()); }
+    #[cfg(unix)]
     let _transport = if git { Some(crate::git::ssh::prepare(&mut command)?) } else { None };
+    #[cfg(not(unix))]
+    let _ = git;
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -185,6 +188,19 @@ fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>
     let written = stdin.map(|writer| writer.join());
     let stdout = stdout.join();
     let stderr = stderr.join();
+    #[cfg(unix)]
+    {
+        // Reaping the leader and draining its pipes is not yet proof that
+        // descendants (including recursive Git transports) have disappeared.
+        // Keep admission until this exact group is gone. Never signal again
+        // after reaping the leader: its numeric id could later be reused.
+        let group = -(child.id() as i32);
+        while unsafe { libc::kill(group, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
     anyhow::ensure!(ticket.valid(), crate::data_privacy::MESSAGE);
     let status = status?;
     if let Some(written) = written {

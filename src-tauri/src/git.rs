@@ -10,6 +10,7 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
 #[path = "git_ssh.rs"]
 pub(crate) mod ssh;
 
