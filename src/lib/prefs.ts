@@ -16,6 +16,8 @@ export interface Prefs {
   /** The reader used Settings or remembered a browser choice, rather than inheriting a default. */
   linkBrowserChosen: boolean;
   linkActions: boolean;
+  /** Has made a share link: Share opens on its settings, with How sharing works for the introduction. */
+  shareOnboarded: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
   panelOpen: boolean;
@@ -139,6 +141,7 @@ const DEFAULTS: Prefs = {
   linkBrowser: "ask",
   linkBrowserChosen: false,
   linkActions: true,
+  shareOnboarded: false,
   sidebarOpen: true,
   sidebarWidth: 268,
   panelOpen: false,

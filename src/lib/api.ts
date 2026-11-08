@@ -346,6 +346,7 @@ export const api = {
    */
   accountRefreshRoles: (force: boolean) => invoke<{ status: AccountStatus; fresh: boolean }>("account_refresh_roles", { force }),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
+  accountPasteCallback: (link: string) => invoke<void>("account_paste_callback", { link }),
   /** Opens the organization's page in the web console, in the system browser. */
   organizationConsoleOpen: (organizationId: string) => invoke<void>("organization_console_open", { organizationId }),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
@@ -732,6 +733,8 @@ export interface AccountIdentity {
   organization: string | null;
   /** The active (default) organization's id. */
   organizationId?: string | null;
+  /** The person's picture from the sign-in service, an https: URL; absent when it sends none. */
+  picture?: string | null;
 }
 
 export interface AccountStatus {

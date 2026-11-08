@@ -53,6 +53,19 @@ pub async fn account_sign_in(
     tauri::async_runtime::spawn_blocking(move || account.begin_sign_in(&app)).await.map_err(err)?.map_err(err)
 }
 
+/// A sign-in link pasted in place of the browser's button opening the app
+/// (a development build has no URL scheme for it to open): checked as a
+/// delivered link is, then exchanged.
+#[tauri::command]
+pub async fn account_paste_callback(
+    app: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+    link: String,
+) -> CmdResult<()> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.paste_callback(&app, &link)).await.map_err(err)?.map_err(err)
+}
+
 /// Opens an organization's page in the web console in the system browser
 /// (PRO-40: API keys and webhooks are managed there).
 #[tauri::command]
