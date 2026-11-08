@@ -241,8 +241,9 @@ export function RightPanel({
         </WithTooltip>
       </div>
       {isGit && onBranch && (
-        // Branch's two views, drawn like the Browser's and Computer's second row and level with the chat's tabs.
-        <div role="tablist" aria-label="Branch" className="flex h-9 shrink-0 items-stretch gap-1 border-b border-hairline px-2 text-xs" data-testid="branch-views">
+        // Branch's two views, drawn like the Browser's and Computer's second row and level with the chat's tabs: those
+        // are 36px tall with a 1px rule under them, so this row is 37px with its rule inside.
+        <div role="tablist" aria-label="Branch" className="flex h-[37px] shrink-0 items-stretch gap-1 border-b border-hairline px-2 text-xs" data-testid="branch-views">
           {BRANCH_VIEWS.map((view) => (
             <WithTooltip key={view.id} label={view.label} shortcut={view.shortcut}>
               <button

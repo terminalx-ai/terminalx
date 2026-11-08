@@ -1371,6 +1371,17 @@ pub fn remote_url(cwd: &Path) -> Option<String> {
     run(cwd, &["remote", "get-url", "origin"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// The URL `branch` is pushed to, as `git push` picks the remote: the branch's
+/// `pushRemote`, else `remote.pushDefault`, else the branch's `remote`. Often
+/// a fork when the work goes to someone else's repository by pull request.
+pub fn push_remote_url(cwd: &Path, branch: &str) -> Option<String> {
+    let config = |key: String| run(cwd, &["config", "--get", &key]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let remote = config(format!("branch.{branch}.pushRemote"))
+        .or_else(|| config("remote.pushDefault".into()))
+        .or_else(|| config(format!("branch.{branch}.remote")))?;
+    run(cwd, &["remote", "get-url", &remote]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
