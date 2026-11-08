@@ -313,7 +313,7 @@ fn to_terminal_fixture(manager: &SessionManager) {
     assert!(manager.codex_stdio_to_terminal("stdio-owner", "tab").is_err());
     assert_eq!(index::get("stdio-owner").unwrap().tab("tab").unwrap().transport, AgentTransport::ExperimentalCodexStdio);
     rt.lock().unwrap().stop_in_flight = false;
-    manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::Timeout);
+    manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::Timeout, crate::recovery_log::Source::Watcher);
     let child = rt.lock().unwrap().child.clone().expect("a running connection");
     manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
     assert!(child.terminal_receipt().is_some(), "the connection exits before the tab changes engine");
