@@ -67,11 +67,14 @@ exec /bin/sh -c "$4"
 printf 'parent %s\n' "$$" >> "$TERMINALX_HOME/submodule-launches"
 [ "$1" = --identity ] && [ "$2" = parent-only-key ] || exit 92
 shift 2
-if [ "$1" = -G ]; then exit 0; fi
+if [ "$1" = -G ]; then
+  printf 'hostname parent.invalid\nuser parent-user\nport 22\nproxycommand none\nproxyjump none\nforkafterauthentication no\npermitlocalcommand no\n'
+  exit 0
+fi
 while [ "$#" -gt 2 ]; do
   case "$1" in
     -S) [ "$2" = none ] || exit 93; shift 2 ;;
-    -o) [ "$2" = SendEnv=GIT_PROTOCOL ] || exit 94; shift 2 ;;
+    -o) case "$2" in SendEnv=GIT_PROTOCOL|ProxyCommand=none|ForkAfterAuthentication=no|PermitLocalCommand=no) ;; *) exit 94 ;; esac; shift 2 ;;
     *) exit 95 ;;
   esac
 done
@@ -106,7 +109,10 @@ impl Repositories {
     fn fetch(&self) -> bool {
         let (base, why, fresh) = crate::landed::base_for(&self.project, crate::landed::Fetch::Fresh);
         assert_eq!(base.as_deref(), Some("origin/main"));
-        if !fresh { assert!(why.unwrap().contains(data_privacy::MESSAGE)); }
+        if !fresh {
+            let why = why.unwrap();
+            assert!(why.contains(data_privacy::MESSAGE), "{why}");
+        }
         fresh
     }
 
