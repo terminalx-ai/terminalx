@@ -58,6 +58,7 @@ fn scan(client: &Arc<Client>, fixture: &FetchFixture) -> Value {
     Sessions::new(client.clone()).workspace("scan", json!({"projectPaths":[fixture.project]})).unwrap()
 }
 
+#[track_caller]
 fn scanned(value: &Value, fixture: &FetchFixture, verified: bool) {
     let candidate = value.as_array().unwrap().iter().flat_map(|project| project["candidates"].as_array().unwrap())
         .find(|candidate| candidate["path"] == fixture.worktree.to_str().unwrap()).unwrap();
@@ -80,6 +81,9 @@ fn forwarding(root: &Path, fixture: &FetchFixture, managed: bool) {
     let owner = service(root, &endpoint);
     let (_, mut bridge) = hooks::serve(endpoint.clone(), |_| hooks::HookReply::default(), move |request| owner.handle(request)).unwrap();
     let mut client = Client::connect(root).unwrap();
+    let connected = control(&endpoint, &endpoint.token, "status", json!({}));
+    assert!(connected.ok);
+    assert_eq!(connected.result.unwrap()["localRuntime"]["epoch"], client.epoch(), "handover must freeze the owner this client actually discovered");
     assert_eq!(control(&endpoint, "wrong-token", "runtime.session.workspace", json!({})).error.unwrap().code, "unauthorized");
     let before = launches(root);
     scanned(&scan(&client, fixture), fixture, true);

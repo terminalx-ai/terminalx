@@ -11,13 +11,29 @@ const OPERATIONS: &[&str] = &["ssh", "https", "list", "legacy-read", "legacy-wri
 #[test]
 fn privacy_covers_identity_and_issue_entry_points() {
     for managed in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "github_process::tests::privacy_entry_points_child", "--nocapture"])
-            .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
-            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
-        assert!(output.status.success(), "policy={managed}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        for child in ["privacy_entry_points_child", "privacy_transport_entry_points_child"] {
+            let root = tempfile::tempdir().unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &format!("github_process::tests::{child}"), "--nocapture"])
+                .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
+                .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+            assert!(output.status.success(), "policy={managed}/{child}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+        }
     }
+}
+
+#[test]
+fn privacy_transport_entry_points_child() {
+    let Ok(kind) = std::env::var("TERMINALX_TEST_GITHUB_ENTRIES") else { return };
+    let managed = kind == "managed";
+    let root = store::root().unwrap();
+    fixture(&root);
+    policy(false, managed);
+    let fetch = fresh_fixture(&root);
+    // The bridge being frozen must also own discovery. Earlier entrypoint
+    // fixtures retain listeners, so give this handover its own process/home.
+    transport::run(&root, &fetch, managed);
 }
 
 fn policy(enabled: bool, managed: bool) {
@@ -278,7 +294,6 @@ fn privacy_entry_points_child() {
     forwarded_cleanup_keeps_denial(&root, &fetch, managed);
     #[cfg(feature = "desktop")]
     queued_commands(&root, &ssh, &fetch, managed);
-    transport::run(&root, &fetch, managed);
     let observed = std::fs::read_to_string(root.join("launches")).unwrap();
     assert!(observed.contains("ControlMaster=no -o ControlPath=none -o ControlPersist=no"));
 }

@@ -26,6 +26,8 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   const catalog = { version: 1, createMemory: {}, orgs: { [ORG]: { workspaces: [ws("w1", "parity-test"), ws("w2", "demo workspace")], repositories: [], quota: { used: 2, limit: 3 }, fetchedAt: now,
     sessions: { w1: { sessions: Array.from({ length: 12 }, (_, i) => session(`s${i}`, i === 11 ? "Last session" : `Session ${i}`)), capabilities: ["session/2"], at: now }, w2: { sessions: [session("s3", "Demo session")], capabilities: null, at: now } } } } };
   const answers = {
+    // Native privacy readiness precedes app startup and account/cloud work.
+    data_privacy_status: { enabled: false, managed: false },
     settings_file_status: () => structuredClone(settings.file),
     update_user_preferences: ({ patch, migrate }) => {
       if (migrate && (settings.migrated || (!settings.file.exists && !Object.keys(patch).length))) return structuredClone(settings.file);
