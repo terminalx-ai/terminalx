@@ -85,7 +85,18 @@ struct Rig {
 
 #[test]
 fn a_shared_session_may_switch_to_bypass_at_the_hosts_choice() {
-    let rig = Rig::new();
+    let mut rig = Rig::new();
+    // An idle mode change really restarts the CLI. Keep that path under
+    // test without depending on (or launching) an installed agent.
+    rig.pane = SessionManager::pane_id(TAB);
+    let program = rig._dir.path().join("claude-fixture");
+    let ran = rig._dir.path().join("claude-fixture.ran");
+    std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.ran\"\n").unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _program = claude::pty::claude_program_for_tests(program);
     let entry: index::SessionEntry = serde_json::from_value(json!({
         "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
         "title": "shared", "created": index::now(), "modified": index::now(),
@@ -94,7 +105,13 @@ fn a_shared_session_may_switch_to_bypass_at_the_hosts_choice() {
     index::save(&[entry]).unwrap();
     rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
         crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
-    assert!(rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").is_ok());
+    rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").unwrap();
+    assert_eq!(rig.mode(), now_in("bypassPermissions"));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !std::fs::read_to_string(&ran).is_ok_and(|args| args.lines().any(|arg| arg == "--dangerously-skip-permissions")) {
+        assert!(Instant::now() < deadline, "the restarted fixture never received the host's requested mode");
+        std::thread::sleep(MOMENT);
+    }
 }
 
 #[test]

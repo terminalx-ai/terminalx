@@ -83,6 +83,7 @@ export class FakeAgentRuntime implements WorkspaceTransport {
    */
   slow: string[] = [];
   private held: unknown[] | null = null;
+  toTerminalWaiting = false;
   /** How `session.toTerminal` (#644) is refused, in the runtime's own words; null moves the tab. */
   toTerminalRefusal: { code: string; message: string } | null = null;
 
@@ -232,6 +233,7 @@ export class FakeAgentRuntime implements WorkspaceTransport {
         return ok({ interrupted: this.tabs.some((tab) => tab.tabId === params.tabId && (tab.status === "in_progress" || tab.status === "waiting")) });
       // A native Codex tab moves to its terminal for good (#644), unless the runtime refuses it.
       case "session.toTerminal":
+        if (this.toTerminalWaiting) return ok({ sessionId: params.sessionId, tabId: params.tabId, waitingForTurn: true });
         if (this.toTerminalRefusal) return { id: frame.id, ok: false, error: this.toTerminalRefusal };
         this.tabs = this.tabs.map((tab) => (tab.tabId === params.tabId ? { ...tab, transport: undefined } : tab));
         return ok({ sessionId: params.sessionId, tabId: params.tabId });
