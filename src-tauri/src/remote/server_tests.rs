@@ -3580,3 +3580,118 @@ async fn an_interrupt_needs_no_member_list_and_a_runtime_without_agents_says_so(
     assert_eq!(call(&f.rpc, &manager, "session.interrupt", params).await.unwrap()["interrupted"], true);
     assert_eq!(ops.interrupts.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn privacy_raw_pty_queues_and_partial_writes_retain_authority() {
+    for kind in ["personal", "managed"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "remote::server::tests::privacy_raw_pty_child", "--nocapture"])
+            .env("TERMINALX_TEST_RAW_PTY_PRIVACY", kind).output().unwrap();
+        assert!(output.status.success(), "{kind}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[test]
+fn privacy_raw_pty_child() {
+    let Ok(kind) = std::env::var("TERMINALX_TEST_RAW_PTY_PRIVACY") else { return };
+    let _home = crate::store::temp_home();
+    let managed = kind == "managed";
+    let policy = move |enabled| {
+        if managed && enabled { std::env::set_var("TERMINALX_TEST_MANAGED_PRIVACY", "1"); }
+        else { std::env::remove_var("TERMINALX_TEST_MANAGED_PRIVACY"); }
+        crate::store::write_json(&crate::store::root().unwrap().join("data-privacy.json"), &json!({"enabled":enabled && !managed})).unwrap();
+        assert_eq!(crate::data_privacy::refresh().enabled, enabled);
+    };
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        let end = Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(Instant::now() < end, "{what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    struct Partial {
+        inner: Box<dyn std::io::Write + Send>,
+        pause: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    }
+    impl std::io::Write for Partial {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some((entered, release)) = self.pause.take() {
+                let n = self.inner.write(&bytes[..1])?;
+                assert_eq!(n, 1);
+                entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(30)).unwrap();
+                Ok(n)
+            } else { self.inner.write(bytes) }
+        }
+        fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).max_blocking_threads(2).enable_all().build().unwrap();
+    let _entered = runtime.enter();
+    for agent in [false, true] {
+        policy(false);
+        let f = fixture();
+        with_tab(&f);
+        let (peer, _events) = runtime.block_on(agent_person(&f.rpc, "raw-privacy", Authority::Manage, "admin"));
+        let id = if agent {
+            start_agent_cli(&f); AGENT_TERMINAL.to_string()
+        } else {
+            runtime.block_on(call(&f.rpc, &peer, "pty.create", json!({"cols":80,"rows":24,"clientRequestId":"raw-privacy-create"}))).unwrap()["ptyId"].as_str().unwrap().to_string()
+        };
+        runtime.block_on(call(&f.rpc, &peer, "pty.attach", json!({"ptyId":id}))).unwrap();
+        let input = f.root.join("raw-input");
+        let ready = f.root.join("ready");
+        f.terminals.write(&id, format!("stty raw -echo; touch '{}'; exec cat > '{}'\n", ready.display(), input.display()).as_bytes()).unwrap();
+        wait("real PTY reader ready", &|| ready.exists() && input.exists());
+        let mut seq = 0;
+        let mut send = |text: &str| {
+            seq += 1;
+            runtime.block_on(call(&f.rpc, &peer, "pty.write", json!({"ptyId":id,"data":text,"seq":seq,"writerId":"raw"}))).unwrap()
+        };
+        let drained = || f.rpc.ptys.lock().unwrap().get(&id).unwrap().input_pending.load(Ordering::SeqCst) == 0;
+        let mut expected = Vec::new();
+        for cycle in [false, true] {
+            let (entered, arrived) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let terminals = f.terminals.clone(); let pane = id.clone();
+            let blocker = std::thread::spawn(move || terminals.with_input_lock_for_test(&pane, || {
+                entered.send(()).unwrap(); released.recv_timeout(Duration::from_secs(30)).unwrap();
+            }));
+            arrived.recv_timeout(Duration::from_secs(30)).unwrap();
+            assert_eq!(send("stale-first")["applied"], true);
+            assert_eq!(send("stale-second")["applied"], true);
+            // Neither a writer waiting for its physical lock nor its backlog
+            // owns admission. Acknowledgement is possible before release.
+            policy(true);
+            if cycle { policy(false); }
+            release.send(()).unwrap(); blocker.join().unwrap();
+            wait("stale raw queue drained", &drained);
+            assert_eq!(std::fs::read(&input).unwrap(), expected, "agent={agent}, cycle={cycle}");
+            // Desktop input stays useful while privacy is enabled.
+            f.terminals.write(&id, b"local").unwrap(); expected.extend(b"local");
+            wait("local terminal input", &|| std::fs::read(&input).unwrap() == expected);
+            policy(false);
+            send("fresh"); expected.extend(b"fresh");
+            wait("fresh raw request restored", &|| std::fs::read(&input).unwrap() == expected);
+        }
+        let (entered, arrived) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        f.terminals.wrap_input_for_test(&id, |inner| Box::new(Partial { inner, pause: Some((entered, released)) }));
+        send("active");
+        arrived.recv_timeout(Duration::from_secs(30)).unwrap();
+        let mut first = expected.clone(); first.push(b'a');
+        wait("first physical byte reached the reader", &|| std::fs::read(&input).unwrap() == first);
+        send("stale-behind-active");
+        let (done, ack) = std::sync::mpsc::channel();
+        let activation = std::thread::spawn(move || { policy(true); done.send(()).unwrap(); });
+        wait("authority invalidated during partial write", &crate::data_privacy::enabled);
+        assert!(ack.recv_timeout(Duration::from_millis(100)).is_err(), "acknowledged a partial raw write, agent={agent}");
+        release.send(()).unwrap();
+        ack.recv_timeout(Duration::from_secs(30)).unwrap(); activation.join().unwrap();
+        wait("active and expired raw writes drained", &drained);
+        expected.extend(b"active");
+        wait("active delivery finished before acknowledgement", &|| std::fs::read(&input).unwrap() == expected);
+        policy(false); send("restored"); expected.extend(b"restored");
+        wait("fresh input after partial delivery", &|| std::fs::read(&input).unwrap() == expected);
+        assert_eq!(runtime.block_on(call(&f.rpc, &peer, "pty.write", json!({"ptyId":id,"data":"restored","seq":seq,"writerId":"raw"}))).unwrap()["applied"], false);
+    }
+}

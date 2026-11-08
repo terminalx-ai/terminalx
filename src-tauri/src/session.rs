@@ -3010,6 +3010,7 @@ impl SessionManager {
                 self.apply_actions(&mut rt, actions);
             }
             Engine::OpenCode(o) => {
+                o.set_prompt_seq(events[0].seq);
                 let actions = if o.ready {
                     o.prompt(prompt.agent.clone(), wire_images)
                 } else {
@@ -3284,26 +3285,40 @@ impl SessionManager {
                         _ => {}
                     }
                 }
-                Action::Http { tag, method, url, body } => {
+                Action::Http { generation, tag, method, url, body } => {
                     let manager = self.clone();
                     let me = rt.me.clone();
                     let privacy = crate::data_privacy::remote_ticket();
                     let child = rt.child.clone();
                     std::thread::spawn(move || {
-                        let Ok(_privacy) = privacy.as_ref().map(|ticket| ticket.scope()).transpose() else {
-                            if let Some(runtime) = me.upgrade() {
-                                let mut rt = runtime.lock().unwrap();
-                                if child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live)) {
-                                    let actions = if let Engine::OpenCode(o) = &mut rt.engine { o.withdraw_prompt(&tag) } else { Vec::new() };
-                                    manager.apply_actions(&mut rt, actions);
-                                }
-                            }
-                            return;
-                        };
-                        let line = opencode::perform(&tag, &method, &url, body);
-                        if let Some(r) = me.upgrade() {
-                            manager.on_line(&r, &line);
+                        #[cfg(test)] {
+                            let hook = BEFORE_OPENCODE_HTTP.lock().unwrap().take();
+                            if let Some(hook) = hook { hook(); }
                         }
+                        let admitted = crate::data_privacy::delivery_scope(privacy.as_ref());
+                        let Some(runtime) = me.upgrade() else { return };
+                        let current = |rt: &TabRuntime| !rt.stopping
+                            && child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
+                            && matches!(&rt.engine, Engine::OpenCode(o) if o.generation() == generation);
+                        {
+                            let mut rt = runtime.lock().unwrap();
+                            if !current(&rt) { return; }
+                            if admitted.is_err() {
+                                let actions = if let Engine::OpenCode(o) = &mut rt.engine { o.withdraw_prompt(&tag) } else { Vec::new() };
+                                manager.apply_actions(&mut rt, actions);
+                                return;
+                            }
+                        }
+                        // The original ticket and turn generation survive the whole
+                        // request, fallback opening, and subsequent physical prompt.
+                        let line = opencode::perform(&tag, &method, &url, body);
+                        let mut rt = runtime.lock().unwrap();
+                        if !current(&rt) { return; }
+                        let actions = if let Engine::OpenCode(o) = &mut rt.engine { o.handle(&line) } else { Vec::new() };
+                        rt.last_activity = Instant::now();
+                        rt.incidents.progress("agent_output");
+                        manager.stall_disproved(&mut rt);
+                        manager.apply_actions(&mut rt, actions);
                     });
                 }
                 Action::Write(line) => {
@@ -6914,7 +6929,10 @@ impl SessionManager {
                         Some(delivery) => a.prompt_with_delivery(q.text.clone(), q.images.clone(), Some(delivery)),
                         None => a.prompt(q.text.clone(), q.images.clone()),
                     },
-                    Engine::OpenCode(o) => o.prompt(q.text.clone(), q.images.clone()),
+                    Engine::OpenCode(o) => {
+                        o.set_prompt_seq(pending.seq);
+                        o.prompt(q.text.clone(), q.images.clone())
+                    },
                     // A PTY tab never queues here: the CLI holds typed input
                     // itself, so the message went in when it was written.
                     Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => Vec::new(),
@@ -7291,3 +7309,6 @@ mod tests {
         assert_eq!(pty_first("opencode"), None);
     }
 }
+
+#[cfg(test)]
+static BEFORE_OPENCODE_HTTP: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);

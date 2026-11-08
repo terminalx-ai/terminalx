@@ -654,3 +654,6 @@ mod acp_lifecycle;
 
 #[path = "session_relay_privacy_tests.rs"]
 mod relay;
+
+#[path = "session_opencode_privacy_tests.rs"]
+mod opencode_privacy;

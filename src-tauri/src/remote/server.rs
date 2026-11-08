@@ -237,6 +237,12 @@ impl Peer {
     }
 }
 
+/// Authority belongs to the keystroke, not the later writer thread.
+struct PtyInput {
+    data: Vec<u8>,
+    privacy: crate::data_privacy::Ticket,
+}
+
 /// One remote terminal. Its bytes live only in `ring`: nothing here writes
 /// terminal output into a session transcript.
 struct PtyState {
@@ -272,7 +278,7 @@ struct PtyState {
     applied_seq: HashMap<(String, String), (u64, Instant)>,
     /// Accepted input, written by the terminal's own writer thread so a
     /// program that stops reading never stalls the connection.
-    input: std::sync::mpsc::Sender<Vec<u8>>,
+    input: std::sync::mpsc::Sender<PtyInput>,
     input_pending: Arc<AtomicUsize>,
     subscribers: HashMap<String, Arc<Peer>>,
     /// Set for an agent tab's own terminal (`agent-pty/1`): the pane the
@@ -1364,7 +1370,7 @@ impl WorkspaceRpc {
             if self.removed_agent_tabs.lock().unwrap().iter().any(|removed| removed == tab_id) {
                 return Err(RpcError::not_found("the terminal closed with its tab"));
             }
-            let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
+            let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
             let input_pending = Arc::new(AtomicUsize::new(0));
             let terminals = self.terminals.clone();
             let pending = input_pending.clone();
@@ -1375,8 +1381,8 @@ impl WorkspaceRpc {
                     // Ends when the entry (the sender) is dropped with its tab.
                     for data in queue {
                         // Between two CLIs there is nothing to type into.
-                        let _ = terminals.write(&pane, &data);
-                        pending.fetch_sub(data.len(), Ordering::SeqCst);
+                        let _ = terminals.write_remote(&pane, &data.data, &data.privacy);
+                        pending.fetch_sub(data.data.len(), Ordering::SeqCst);
                     }
                 })
                 .map_err(RpcError::internal)?;
@@ -1576,7 +1582,7 @@ impl WorkspaceRpc {
             return Err(RpcError::invalid("cwd is not a directory"));
         }
         let pty_id = format!("{PTY_PREFIX}{}", uuid::Uuid::new_v4().simple());
-        let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
         let input_pending = Arc::new(AtomicUsize::new(0));
         {
             let mut ptys = self.ptys.lock().unwrap();
@@ -1625,8 +1631,8 @@ impl WorkspaceRpc {
             // Ends when the terminal's entry (the sender) is dropped, or the
             // program is gone; its exit is reported through `pty.exit`.
             for data in queue {
-                let written = terminals.write(&writer_id, &data);
-                input_pending.fetch_sub(data.len(), Ordering::SeqCst);
+                let written = terminals.write_remote(&writer_id, &data.data, &data.privacy);
+                input_pending.fetch_sub(data.data.len(), Ordering::SeqCst);
                 // A program that stopped reading loses this input, not every
                 // later keystroke: it may read again.
                 if written.is_err_and(|error| !error.is::<crate::pty::InputStalled>()) {
@@ -1780,7 +1786,7 @@ impl WorkspaceRpc {
             return Err(RpcError::new("backpressure", "the program is not reading its input yet; retry"));
         }
         pty.input_pending.fetch_add(data.len(), Ordering::SeqCst);
-        if pty.input.send(data.as_bytes().to_vec()).is_err() {
+        if pty.input.send(PtyInput { data: data.as_bytes().to_vec(), privacy: crate::data_privacy::remote_ticket().unwrap_or_else(crate::data_privacy::Ticket::denied) }).is_err() {
             pty.input_pending.fetch_sub(data.len(), Ordering::SeqCst);
             return Err(RpcError::new("unavailable", "the terminal has exited"));
         }

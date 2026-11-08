@@ -70,6 +70,8 @@ pub struct OpenCode {
     pub base: String,
     pub session_id: Option<String>,
     pub ready: bool,
+    generation: u64,
+    prompt_seq: Option<u64>,
     stashed: Option<(String, Vec<(String, String)>)>,
     pub model: Option<String>,
     pub mode: String,
@@ -108,11 +110,12 @@ impl OpenCode {
     }
 
     fn http(&self, tag: &str, method: &str, path: &str, body: Option<Value>) -> Action {
-        Action::Http { tag: tag.into(), method: method.into(), url: format!("{}{}", self.base, path), body }
+        Action::Http { generation: self.generation, tag: tag.into(), method: method.into(), url: format!("{}{}", self.base, path), body }
     }
 
     /// The first prompt waits for a session; resume asks for the old one first.
     pub fn start(&mut self, text: String, images: Vec<(String, String)>) -> Vec<Action> {
+        self.generation += 1;
         self.stashed = Some((text, images));
         vec![self.open_session()]
     }
@@ -125,6 +128,7 @@ impl OpenCode {
     }
 
     fn begin_turn(&mut self, text: &str, images: &[(String, String)]) -> Vec<Action> {
+        self.generation += 1;
         let sid = self.session_id.clone().unwrap_or_default();
         let mut parts = vec![json!({"type": "text", "text": text})];
         for (i, (media, data)) in images.iter().enumerate() {
@@ -142,7 +146,7 @@ impl OpenCode {
         self.seen.clear();
         self.committed.clear();
         vec![
-            Action::Emit(Payload::TurnStarted { model: self.model.clone(), provider_session_id: self.session_id.clone(), prompt_seq: None, started_by: None, initiating_prompt: None }),
+            Action::Emit(Payload::TurnStarted { model: self.model.clone(), provider_session_id: self.session_id.clone(), prompt_seq: self.prompt_seq, started_by: None, initiating_prompt: None }),
             Action::Emit(Payload::ModelRequestStarted),
             self.http("prompt", "POST", &format!("/session/{sid}/message"), Some(body)),
         ]
@@ -150,19 +154,27 @@ impl OpenCode {
 
     pub fn prompt(&mut self, text: String, images: Vec<(String, String)>) -> Vec<Action> {
         if !self.ready {
-            self.stashed = Some((text, images));
-            return Vec::new();
+            // A cancelled request will never reply. Start another opening for
+            // this turn; the owner leaves later follow-ups in its queue.
+            return self.start(text, images);
         }
         self.begin_turn(&text, &images)
     }
+
+    pub fn generation(&self) -> u64 { self.generation }
+
+    pub fn set_prompt_seq(&mut self, seq: u64) { self.prompt_seq = Some(seq); }
 
     /// A remote HTTP action lost admission before it could write. Forget the
     /// startup stash as well, so neither a late opening reply nor restart can
     /// revive it. The owner verifies this is still the same child.
     pub fn withdraw_prompt(&mut self, tag: &str) -> Vec<Action> {
         if !matches!(tag, "session_get" | "session_new" | "prompt") { return Vec::new(); }
+        self.generation += 1; // old opening/prompt callbacks cannot settle its successor
         if self.stashed.take().is_some() { self.turn_open = true; }
-        self.end_turn(TurnStatus::Aborted, None, false)
+        let mut actions = self.prompt_seq.take().map(|prompt_seq| Action::Emit(Payload::PromptWithdrawn { prompt_seq })).into_iter().collect::<Vec<_>>();
+        actions.extend(self.end_turn(TurnStatus::Aborted, None, false));
+        actions
     }
 
     /// Abort the open turn; the server keeps running. The turn ends when the
@@ -287,6 +299,7 @@ impl OpenCode {
             }
             "session_new" | "session_get" => {
                 if !ok {
+                    self.stashed = None;
                     self.turn_open = true;
                     return self.end_turn(TurnStatus::Error, Some(message), status == 401 || status == 403);
                 }
@@ -599,16 +612,16 @@ mod tests {
     }
 
     #[test]
-    fn withdrawn_remote_opening_cannot_replay_on_a_late_reply() {
+    fn withdrawn_remote_opening_restarts_without_a_reply() {
         for tag in ["session_new", "session_get"] {
             let mut o = OpenCode::new(4321, "/tmp/x", None, None, "default");
             o.start("expired remote".into(), vec![]);
             let withdrawn = o.withdraw_prompt(tag);
             assert!(emits(&withdrawn).iter().any(|payload| matches!(payload, Payload::TurnCompleted { status: TurnStatus::Aborted, .. })));
-            let reply = o.on_http(tag, 200, &json!({"id":"late-session"}));
-            assert!(https(&reply).is_empty(), "a late opening reply must not revive the prompt");
             let fresh = o.prompt("fresh local".into(), vec![]);
-            assert_eq!(https(&fresh)[0].2.as_ref().unwrap()["parts"][0]["text"], "fresh local");
+            assert_eq!(https(&fresh)[0].0, "session_new", "no refused HTTP request will reply");
+            let ready = o.on_http("session_new", 200, &json!({"id":"local-session"}));
+            assert_eq!(https(&ready)[0].2.as_ref().unwrap()["parts"][0]["text"], "fresh local");
         }
     }
 

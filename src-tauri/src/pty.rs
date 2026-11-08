@@ -1123,6 +1123,31 @@ impl Terminals {
         input.write(data)
     }
 
+    /// A remote queue may wait behind local input. Acquire its original
+    /// authority only after that wait, and keep the lease through every partial
+    /// write/flush. Activation can then acknowledge either no write or its end.
+    pub(crate) fn write_remote(&self, id: &str, data: &[u8], ticket: &crate::data_privacy::Ticket) -> Result<bool> {
+        let input = self.panes.lock().unwrap().get(id).context("no such terminal")?.input.clone();
+        let mut input = input.lock().unwrap();
+        let Ok(_privacy) = ticket.enter() else { return Ok(false) };
+        input.write(data).map(|()| true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_input_lock_for_test(&self, id: &str, f: impl FnOnce()) {
+        let input = self.panes.lock().unwrap().get(id).unwrap().input.clone();
+        let _input = input.lock().unwrap();
+        f();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wrap_input_for_test(&self, id: &str, wrap: impl FnOnce(Box<dyn Write + Send>) -> Box<dyn Write + Send>) {
+        let input = self.panes.lock().unwrap().get(id).unwrap().input.clone();
+        let mut input = input.lock().unwrap();
+        let writer = std::mem::replace(&mut input.writer, Box::new(std::io::sink()));
+        input.writer = wrap(writer);
+    }
+
     /// Capture the writer only if it is still the process the caller admitted.
     /// Keeping that writer Arc cannot redirect bytes to a replacement pane.
     pub(crate) fn write_for_process(&self, id: &str, pid: u32, data: &[u8]) -> Result<()> {

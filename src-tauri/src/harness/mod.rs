@@ -43,7 +43,7 @@ pub enum Action {
     ThreadReady(String),
     /// An HTTP request for a server-backed harness; the reply comes back
     /// to the engine as a line tagged `raccoon_http`.
-    Http { tag: String, method: String, url: String, body: Option<Value> },
+    Http { generation: u64, tag: String, method: String, url: String, body: Option<Value> },
 }
 
 /// Which CLI a PTY-first tab is running. The two differ in their launch line,
