@@ -27,8 +27,9 @@ it("shows files without mounting Git panels or resolving branch labels for folde
 it("preserves Git panels when switching back from a folder", () => {
   const view = render(<RightPanel cwd="/tmp/folder" isGit={false} />);
   view.rerender(<RightPanel cwd="/repo" isGit branch="main" />);
-  // Branch holds the pull request, and Changes the commit box and history: no Repo or PR of their own.
-  expect(screen.getAllByRole("button").map((b) => b.textContent).filter(Boolean)).toEqual(["Branch", "Changes", "Files"]);
+  // Branch holds the pull request (Overview) and the commit box and history (Changes): no Repo or PR of their own.
+  expect(screen.getAllByRole("button").map((b) => b.textContent).filter(Boolean)).toEqual(["Branch", "Files"]);
+  expect(screen.getAllByRole("tab").map((b) => b.textContent)).toEqual(["Overview", "Changes"]);
   expect(gitPanelMounted).toHaveBeenCalledTimes(2);
   expect(screen.getByText("Branch overview")).toBeTruthy();
 });

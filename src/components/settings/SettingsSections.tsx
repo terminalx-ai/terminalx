@@ -1,3 +1,5 @@
+import { SettingsFileRow } from "./SettingsFile";
+import { useSettingsFile } from "@/lib/settingsFile";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "@/icons";
@@ -53,6 +55,7 @@ export function GeneralTab() {
   };
   return (
     <div className="flex flex-col">
+      <SettingsFileRow />
       <RegisteredSetting setting="general.websiteLinks" control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v, linkBrowserChosen: true })} options={[{ value: "ask", label: "Ask every time" }, { value: "system", label: "System Browser" }, { value: "terminalx", label: "TerminalX Browser" }]} />} />
       <RegisteredSetting setting="general.linkActions" control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
       {/* PRO-40: unless the app ships the in-window confirmation alone. */}
@@ -429,15 +432,18 @@ export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
 
 /** Trackers the issues view can read. Keys live in the app's own settings file. */
 export function IntegrationsTab() {
+  const { revision } = useSettingsFile();
   const [linear, setLinear] = useState<LinearStatus | null>(null);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ghOk, setGhOk] = useState<boolean | null>(null);
   useEffect(() => {
-    issues.linearStatus().then(setLinear).catch(() => setLinear({ connected: false }));
-    gh.available().then(setGhOk).catch(() => setGhOk(false));
-  }, []);
+    let live = true;
+    issues.linearStatus().then((value) => live && setLinear(value)).catch(() => live && setLinear({ connected: false }));
+    gh.available().then((value) => live && setGhOk(value)).catch(() => live && setGhOk(false));
+    return () => { live = false; };
+  }, [revision]);
   const save = async (value: string) => {
     setBusy(true);
     setError(null);
@@ -574,10 +580,35 @@ export function AboutTab() {
 
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">What's new</div>
-        <RegisteredSetting setting="about.changelog"><div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
-          <Markdown text={changelog.replace(/^# TerminalX changelog\s*/m, "")} />
-        </div></RegisteredSetting>
+        <RegisteredSetting setting="about.changelog"><Changelog /></RegisteredSetting>
       </div>
+    </div>
+  );
+}
+
+/** The changelog, split at its releases (`## 0.2.25`), newest first. */
+const RELEASES = changelog.replace(/^# TerminalX changelog\s*/m, "").split(/\n(?=## )/).filter((part) => part.trim());
+/** Unreleased (when there is one) and the newest release open the page; the rest wait to be asked for. */
+const FIRST_SHOWN = RELEASES[0]?.startsWith("## Unreleased") ? 2 : 1;
+
+/**
+ * What's new: the latest notes, then the earlier releases on request. The
+ * whole file is 28 releases of Markdown, which took About two thirds of a
+ * second to draw every time it opened.
+ */
+function Changelog() {
+  const [all, setAll] = useState(false);
+  const earlier = RELEASES.length - FIRST_SHOWN;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
+        <Markdown text={(all ? RELEASES : RELEASES.slice(0, FIRST_SHOWN)).join("\n")} />
+      </div>
+      {!all && earlier > 0 && (
+        <Button variant="ghost" size="sm" className="self-start" onClick={() => setAll(true)}>
+          Show earlier releases ({earlier})
+        </Button>
+      )}
     </div>
   );
 }

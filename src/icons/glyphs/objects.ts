@@ -102,5 +102,7 @@ export const GLYPHS: Record<string, Glyph> = {
   FoldDashed: [["path", { d: "M2.5 8h11", strokeDasharray: "2 1.6" }], ["path", { d: "M8 2.5V6M6 4l2 2 2-2M8 13.5V10M6 12l2-2 2 2" }]],
   UnfoldDashed: [["path", { d: "M2.5 8h11", strokeDasharray: "2 1.6" }], ["path", { d: "M8 6V2.5M6 4.5l2-2 2 2M8 10v3.5M6 11.5l2 2 2-2" }]],
   SearchStop: [["circle", { cx: 7, cy: 7, r: 4.5 }], ["path", { d: "M10.4 10.4 13.5 13.5" }], ["rect", { x: 5.5, y: 5.5, width: 3, height: 3, rx: 0.4, fill: "currentColor", stroke: "none" }]],
-  Share: [["path", { d: "M8 9.5V2.5M5 5.5 8 2.5l3 3M3.5 8.5v4a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-4" }]],
+  // An arrow leaving an open box, the box drawn like the header's other frames.
+  // Centred on the grid's middle (1.75 to 14.25), so it sits level with a label beside it.
+  Share: [["path", { d: "M5.5 6.75h-1A1.5 1.5 0 0 0 3 8.25v4.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5v-4.5a1.5 1.5 0 0 0-1.5-1.5h-1M8 9.75V1.75M5.75 4 8 1.75 10.25 4" }]],
 };

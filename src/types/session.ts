@@ -22,6 +22,8 @@ export interface TabEntry {
   /** A mode asked for that waits for the restart that applies it. Drawn as pending, never as current. */
   requestedPermissionMode?: string | null;
   providerSessionId?: string | null;
+  resetLogId?: string;
+  resetBackupId?: string;
   /**
    * How the app reaches the agent. Absent is its CLI in the tab's terminal.
    * An experimental Codex connection has no terminal: opening the terminal
@@ -145,6 +147,11 @@ export interface SessionEntry {
   link?: { path: string; branch?: string | null } | null;
 }
 
+export interface RepositoryScripts {
+  setup: string;
+  archive: string;
+}
+
 export interface Project {
   /** Older project stores contain Git projects without an explicit kind. */
   kind?: "git" | "folder";
@@ -162,9 +169,11 @@ export interface Project {
   agentIssueUpdates?: boolean;
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;
+  scripts?: RepositoryScripts | null;
 }
 
 export interface ProjectPatch {
+  scripts?: RepositoryScripts;
   name?: string;
   color?: string | null;
   mascot?: string | null;

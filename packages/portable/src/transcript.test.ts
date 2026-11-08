@@ -272,3 +272,23 @@ describe("what a compaction's row says, on the desktop and the phone (#644)", ()
     expect(compactionStatus(row({ state: "stopped", stoppedBy: "failed" }))).toBe("Compaction stopped: turn failed");
   });
 });
+
+it("keeps the runtime checkpoint identity when a queued prompt becomes a new turn", () => {
+  const payloads: Payload[] = [
+    { type: "user_message", text: "First", queued: false },
+    { type: "user_message", text: "Next", queued: true },
+    { type: "turn_checkpoint", seq: 1, base: "a", head: "b" },
+    { type: "turn_completed", status: "ok", authFailed: false },
+    { type: "turn_started", promptSeq: 2 },
+    { type: "turn_checkpoint", seq: 5, base: "b", head: "c" },
+    { type: "turn_completed", status: "ok", authFailed: false },
+    { type: "turn_started", startedBy: "Scheduled task" },
+    { type: "turn_checkpoint", seq: 8, base: "c", head: "d" },
+    { type: "turn_completed", status: "ok", authFailed: false },
+  ];
+  const events: AgentEvent[] = payloads.map((payload, i) => ({ id: `cp${i}`, sessionId: "s", tabId: "t", harness: "claude", seq: i + 1, ts: "2026-11-07T00:00:00Z", payload }));
+  const turns = buildTranscript(events, false).turns;
+  expect(turns.map((turn) => turn.checkpointSeq)).toEqual([1, 5, 8]);
+  expect(turns[1].prompt?.seq).toBe(2);
+  expect(turns[2].prompt).toBeUndefined();
+});

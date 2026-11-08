@@ -1,26 +1,34 @@
 import { useEffect, useState } from "react";
-import { Copy, Plus, QrCode, Share2 } from "@/icons";
+import { ChevronDown, Copy, Eye, Link2, ShieldAlert, ShieldCheck, Plus, QrCode, Terminal, UserPlus, X } from "@/icons";
+import { Switch } from "@/components/ui/controls";
+import { Fold } from "@/components/ui/Fold";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/cn";
+import { agent } from "@/lib/api";
+import { modeIsUnguarded, modeLabel, PERMISSION_MODES } from "@/lib/models";
+import { useSessionStore } from "@/lib/sessions";
+import { setPrefs, usePrefs } from "@/lib/prefs";
+import { CollaborationScene } from "./CollaborationScene";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import {
-  changeShare,
-  closeSessionShare,
-  createShare,
-  defaultShareSettings,
-  isWaitingGuest,
-  openSessionShare,
-  refreshShare,
-  useLocalShare,
-  useShareDialog,
-  type ShareLink,
-  type ShareRole,
-  type ShareSettings,
-} from "@/lib/localSharing";
+import { changeShare, closeSessionShare, createShare, defaultShareSettings, isWaitingGuest, longestShareExpiry, MAX_SHARE_PEOPLE, openSessionShare, refreshShare, type ShareLink, type ShareRole, type ShareSettings, useLocalShare, useShareDialog } from "@/lib/localSharing";
 import { errorMessage } from "@/lib/api";
 import { usePairing } from "@/lib/pairing";
 import { useAccount, signIn } from "@/lib/account";
 
-const field = "rounded-md border border-hairline bg-background px-2 py-1.5 text-sm";
+const field = "h-7 rounded-md border border-hairline bg-background px-2 text-[12px]";
+
+/** One setting of the sheet: what it is (and a line on it) on the left, its control on the right. */
+function Row({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-11 items-center gap-4 px-3.5 py-2.5">
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] text-foreground">{label}</div>
+        {hint && <div className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{hint}</div>}
+      </div>
+      <div className="flex shrink-0 items-center">{children}</div>
+    </div>
+  );
+}
 function RolePicker({
   value,
   onChange,
@@ -42,110 +50,112 @@ function RolePicker({
     </select>
   );
 }
-function SettingsForm({ value, set }: { value: ShareSettings; set: (value: ShareSettings) => void }) {
+/**
+ * The link's settings as sheets of rows, the way Settings lays out its own.
+ * What is chosen every time (who, how, for how long) is out, untitled; what
+ * is chosen now and then waits folded under More settings, with `extra` rows
+ * (local network only) at its end.
+ */
+/** The session's tabs in different permission modes, as the picker shows it. */
+const MIXED = "__mixed__";
+
+function SettingsForm({ value, set, extra }: { value: ShareSettings; set: (value: ShareSettings) => void; extra?: React.ReactNode }) {
   const patch = (update: Partial<ShareSettings>) => set({ ...value, ...update });
+  const minutes = Math.max(1, Math.round((value.expiresAt - Date.now()) / 60_000));
+  // Off, a link lasts as long as the host allows: until TerminalX restarts, 24 hours at most. On, it ends sooner.
+  const [customExpiry, setCustomExpiry] = useState(false);
+  // Off, as many people as the host takes; on, fewer.
+  const [limitPeople, setLimitPeople] = useState(value.maximumPeople < MAX_SHARE_PEOPLE);
+  const sheet = "flex flex-col divide-y divide-hairline rounded-xl bg-well hairline";
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap gap-3">
-        <label className="flex flex-col gap-1 text-xs">
-          Who can join
-          <select
-            className={field}
-            value={value.audience}
-            onChange={(event) => patch({ audience: event.target.value as ShareSettings["audience"] })}
-          >
-            <option value="anyone">Anyone with the link, signed in</option>
-            <option value="people">Only specific people</option>
-            <option value="organization">Members of my organization</option>
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          Default access
-          <RolePicker value={value.role} onChange={(role) => patch({ role })} label="Default access" />
-        </label>
-      </div>
+    <div className="flex flex-col gap-3">
+    <div className={sheet} data-testid="share-settings">
+      <Row label="Who can join">
+        <select aria-label="Who can join" className={field} value={value.audience} onChange={(event) => patch({ audience: event.target.value as ShareSettings["audience"] })}>
+          <option value="anyone">Anyone with the link, signed in</option>
+          <option value="people">Only specific people</option>
+          <option value="organization">Members of my organization</option>
+        </select>
+      </Row>
       {value.audience === "people" && (
-        <div className="space-y-2">
-          <p className="text-xs text-muted-foreground">
-            Only verified account emails are admitted. Choose access for each person.
-          </p>
+        <div className="flex flex-col gap-2 px-3.5 py-2.5">
+          <p className="text-[11px] text-muted-foreground">Only verified account emails are admitted. Choose access for each person.</p>
           {value.people.map((person, i) => (
-            <div key={i} className="flex gap-2">
+            <div key={i} className="flex items-center gap-2">
               <input
                 type="email"
                 aria-label={`Account email ${i + 1}`}
+                placeholder="name@example.com"
                 className={`${field} min-w-0 flex-1`}
                 value={person.email}
-                onChange={(event) =>
-                  patch({ people: value.people.map((p, at) => (at === i ? { ...p, email: event.target.value } : p)) })
-                }
+                onChange={(event) => patch({ people: value.people.map((p, at) => (at === i ? { ...p, email: event.target.value } : p)) })}
               />
-              <RolePicker
-                label={`Access for account ${i + 1}`}
-                value={person.role}
-                onChange={(role) => patch({ people: value.people.map((p, at) => (at === i ? { ...p, role } : p)) })}
-              />
-              <Button
-                variant="ghost"
-                aria-label={`Remove account ${i + 1}`}
-                onClick={() => patch({ people: value.people.filter((_, at) => at !== i) })}
-              >
-                Remove
+              <RolePicker label={`Access for account ${i + 1}`} value={person.role} onChange={(role) => patch({ people: value.people.map((p, at) => (at === i ? { ...p, role } : p)) })} />
+              <Button variant="ghost" size="icon-sm" aria-label={`Remove account ${i + 1}`} onClick={() => patch({ people: value.people.filter((_, at) => at !== i) })}>
+                <X />
               </Button>
             </div>
           ))}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => patch({ people: [...value.people, { email: "", role: value.role }] })}
-          >
+          <Button size="sm" variant="ghost" className="self-start" onClick={() => patch({ people: [...value.people, { email: "", role: value.role }] })}>
             <Plus /> Add account
           </Button>
         </div>
       )}
-      <div className="flex flex-wrap gap-3">
-        <label className="flex flex-col gap-1 text-xs">
-          Expires in
-          <select
-            className={field}
-            aria-label="Expiry"
-            value={Math.max(1, Math.round((value.expiresAt - Date.now()) / 60_000))}
-            onChange={(event) => patch({ expiresAt: Date.now() + Number(event.target.value) * 60_000 })}
-          >
-            <option value={Math.max(1, Math.round((value.expiresAt - Date.now()) / 60_000))}>
-              Current · {new Date(value.expiresAt).toLocaleTimeString()}
-            </option>
-            <option value="15">15 minutes</option>
-            <option value="60">1 hour</option>
-            <option value="240">4 hours</option>
-            <option value="1440">24 hours</option>
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          Maximum people
-          <input
-            aria-label="Maximum people"
-            type="number"
-            min={1}
-            max={32}
-            className={`${field} w-24`}
-            value={value.maximumPeople}
-            onChange={(event) => patch({ maximumPeople: Number(event.target.value) })}
+      <Row label="Default access" hint="Read only watches; Can drive can send the agent prompts.">
+        <RolePicker value={value.role} onChange={(role) => patch({ role })} label="Default access" />
+      </Row>
+    </div>
+    <Fold label="More settings" testId="share-more-settings">
+      <div className={cn(sheet, "mt-2")}>
+      <Row label="Custom expiry" hint={customExpiry ? undefined : "Off: until TerminalX restarts, 24 hours at most."}>
+        <div className="flex items-center gap-2">
+          {customExpiry && (
+            <select className={field} aria-label="Expiry" value={minutes} onChange={(event) => patch({ expiresAt: Date.now() + Number(event.target.value) * 60_000 })}>
+              {![15, 60, 240].includes(minutes) && <option value={minutes}>At {new Date(value.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</option>}
+              <option value="15">In 15 minutes</option>
+              <option value="60">In 1 hour</option>
+              <option value="240">In 4 hours</option>
+            </select>
+          )}
+          <Switch
+            aria-label="Custom expiry"
+            checked={customExpiry}
+            onCheckedChange={(on) => {
+              setCustomExpiry(on);
+              // On, it starts at an hour; off, back to as long as allowed.
+              patch({ expiresAt: on ? Date.now() + 3_600_000 : longestShareExpiry() });
+            }}
           />
-        </label>
+        </div>
+      </Row>
+      <Row label="Limit people" hint={limitPeople ? undefined : `Off: as many as a session takes, ${MAX_SHARE_PEOPLE}.`}>
+        <div className="flex items-center gap-2">
+          {limitPeople && (
+            <input aria-label="Maximum people" type="number" min={1} max={MAX_SHARE_PEOPLE} className={`${field} w-16 text-right tabular-nums`} value={value.maximumPeople} onChange={(event) => patch({ maximumPeople: Math.min(MAX_SHARE_PEOPLE, Math.max(1, Number(event.target.value) || 1)) })} />
+          )}
+          <Switch
+            aria-label="Limit people"
+            checked={limitPeople}
+            onCheckedChange={(on) => {
+              setLimitPeople(on);
+              // On, it starts at a handful; off, back to as many as allowed.
+              patch({ maximumPeople: on ? 8 : MAX_SHARE_PEOPLE });
+            }}
+          />
+        </div>
+      </Row>
+      <Row label="Approve each person" hint="Each one waits until you admit them.">
+        <Switch aria-label="Approve each person" checked={value.approveEachPerson} onCheckedChange={(approveEachPerson) => patch({ approveEachPerson })} />
+      </Row>
+      <Row label="Guests may approve permissions" hint="Let a driver answer the agent's permission prompts.">
+        <Switch aria-label="Guests may approve permissions" checked={value.canApprove} onCheckedChange={(canApprove) => patch({ canApprove })} />
+      </Row>
+      <Row label="Single use" hint="The link works for one person, then stops.">
+        <Switch aria-label="Single use" checked={value.singleUse} onCheckedChange={(singleUse) => patch({ singleUse })} />
+      </Row>
+      {extra}
       </div>
-      {(
-        [
-          ["approveEachPerson", "Approve each person"],
-          ["canApprove", "Guests may approve permissions"],
-          ["singleUse", "Single use"],
-        ] as const
-      ).map(([key, label]) => (
-        <label key={key} className="flex items-center gap-2 text-sm">
-          <input type="checkbox" checked={value[key]} onChange={(event) => patch({ [key]: event.target.checked })} />
-          {label}
-        </label>
-      ))}
+    </Fold>
     </div>
   );
 }
@@ -227,6 +237,21 @@ function SecretLink({ link, edit, revoke }: { link: ShareLink; edit: () => void;
     </div>
   );
 }
+/** One thing sharing allows: its icon, a short heading, and a line on what it means. */
+function ShareTerm({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
+  return (
+    <li className="flex items-start gap-3 px-3.5 py-3">
+      <span className="flex h-5 w-4 shrink-0 items-center justify-center text-muted-foreground [&_svg]:size-4" aria-hidden>
+        {icon}
+      </span>
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-[13px] text-foreground">{title}</span>
+        <span className="text-[12px] leading-snug text-muted-foreground">{children}</span>
+      </span>
+    </li>
+  );
+}
+
 export function ShareSessionDialogHost() {
   const session = useShareDialog();
   return session ? <ShareSessionDialog key={session} sessionId={session} /> : null;
@@ -234,6 +259,20 @@ export function ShareSessionDialogHost() {
 function ShareSessionDialog({ sessionId }: { sessionId: string }) {
   const share = useLocalShare(sessionId);
   const { status } = useAccount();
+  const signedIn = status.state === "signed-in";
+  // Until the first link is made, signed in opens on the introduction; How sharing works opens it again.
+  const onboarded = usePrefs().shareOnboarded;
+  const [intro, setIntro] = useState(!onboarded);
+  const showIntro = !signedIn || intro;
+  // The session's agent tabs and their permission mode, as the share is about to expose them.
+  const session = useSessionStore().sessions.find((candidate) => candidate.id === sessionId);
+  const agentTabs = (session?.tabs ?? []).filter((tab) => !!tab.permissionMode);
+  const unguarded = agentTabs.some((tab) => modeIsUnguarded(tab.permissionMode) || (!!tab.requestedPermissionMode && modeIsUnguarded(tab.requestedPermissionMode)));
+  const modes = [...new Set(agentTabs.map((tab) => tab.requestedPermissionMode || tab.permissionMode))];
+  const sessionMode = modes.length === 1 ? modes[0] : MIXED;
+  // Sharing where nothing asks takes a second, deliberate click: the first turns Create into Share in Bypass anyway.
+  const [bypassConfirmed, setBypassConfirmed] = useState(false);
+
   const relay = usePairing().status.relay.phase === "connected";
   const [settings, setSettings] = useState(defaultShareSettings);
   const [editing, setEditing] = useState<string | null>(null);
@@ -262,51 +301,107 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
         if (!open) closeSessionShare();
       }}
     >
-      <DialogContent width="max-w-[42rem]" className="max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Share session</DialogTitle>
-          <DialogDescription>Invite people to this session. Sharing ends when TerminalX restarts.</DialogDescription>
-        </DialogHeader>
-        <p className="mb-4 rounded-md bg-veil-raised p-3 text-sm">
-          Guests can see the existing transcript and terminal content. A driver can ask the agent to change files and
-          run commands on this machine. Anyone signed in who receives a forwarded link can ask to join; while Approve
-          each person is on, each one waits until you admit them.
-        </p>
-        {status.state !== "signed-in" ? (
-          <Button onClick={() => void signIn()}>Sign in to share</Button>
+      {/* Two views. The introduction (the picture of a shared session, what guests can do) greets anyone signed out,
+          and anyone signed in until their first link; How sharing works brings it back. After that, Share opens
+          straight on the link's settings, plainly. */}
+      <DialogContent width={showIntro ? "max-w-[26rem]" : "max-w-[30rem]"} className="max-h-[90vh] overflow-y-auto p-6">
+        {showIntro ? (
+          <div data-testid="share-intro">
+            <CollaborationScene className="mb-5 mt-6" />
+            <DialogHeader className="mb-5 items-center gap-0 text-center">
+              <span className="flex min-w-0 flex-col gap-1">
+                <DialogTitle className="text-[15px] font-medium text-foreground">{signedIn && onboarded ? "How sharing works" : "Share this session"}</DialogTitle>
+                <DialogDescription className="text-[13px] leading-relaxed text-muted-foreground">
+                  Invite people into this conversation. Sharing ends when TerminalX restarts.
+                </DialogDescription>
+              </span>
+            </DialogHeader>
+            <ul className="mb-5 flex flex-col divide-y divide-hairline rounded-xl bg-well hairline" data-testid="share-terms">
+              <ShareTerm icon={<Eye />} title="Guests can watch">They see the transcript and terminal so far.</ShareTerm>
+              <ShareTerm icon={<Terminal />} title="A driver can act">They can have the agent change files and run commands on this computer.</ShareTerm>
+              <ShareTerm icon={<Link2 />} title="The link is the key">Anyone signed in with it can ask to join. While Approve each person is on, each waits until you admit them.</ShareTerm>
+            </ul>
+            {!signedIn ? (
+              <div className="flex flex-col items-stretch gap-2" data-testid="share-sign-in">
+                <Button onClick={() => void signIn()}>Sign in to share</Button>
+                <p className="text-center text-[11px] text-faint">Share links are made with your TerminalX account.</p>
+              </div>
+            ) : (
+              <Button className="w-full" onClick={() => setIntro(false)}>{onboarded ? "Back to sharing" : "Continue"}</Button>
+            )}
+          </div>
         ) : (
-          <fieldset disabled={busy} className="space-y-4">
-            <SettingsForm value={settings} set={setSettings} />
-            {!editing && (
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={directOnly} onChange={(event) => setDirectOnly(event.target.checked)} />
-                Local network only
-              </label>
-            )}
-            {!directOnly && !relay && (
-              <p className="text-xs text-muted-foreground">
-                Relay needs the host's Relay entitlement and an active connection. Choose local network only to share
-                with people who can reach this computer directly.
-              </p>
-            )}
-            {directOnly && (
-              <p className="text-xs text-muted-foreground">
-                Guests must reach this computer on this Wi-Fi or Tailscale. Allow local network access and incoming
-                connections when prompted.
-              </p>
-            )}
-            <div className="flex gap-2">
+          <>
+            <DialogHeader className="mb-4 gap-0.5 pr-8">
+              <DialogTitle className="text-[15px] font-medium text-foreground">Share this session</DialogTitle>
+              <DialogDescription className="text-[12px] text-muted-foreground">
+                Sharing ends when TerminalX restarts.{" "}
+                <button type="button" className="text-foreground/80 underline decoration-hairline-strong underline-offset-2 hover:text-foreground" onClick={() => setIntro(true)}>
+                  How sharing works
+                </button>
+              </DialogDescription>
+            </DialogHeader>
+        {signedIn && (
+          <fieldset disabled={busy} className="flex flex-col gap-4">
+            <SettingsForm
+              value={settings}
+              set={setSettings}
+              extra={!editing && (
+                <Row
+                  label="Local network only"
+                  hint={directOnly ? "Guests must reach this computer on this Wi-Fi or Tailscale." : relay ? "Off: guests anywhere join through Relay." : "Relay is not connected here, so only people on your network can join."}
+                >
+                  <Switch aria-label="Local network only" checked={directOnly} onCheckedChange={setDirectOnly} />
+                </Row>
+              )}
+            />
+            {/* The session's permissions, beside the link that shares it: a tab where nothing asks (Bypass, or Codex
+                with no sandbox) would let a guest have the agent do anything here, so the host settles it now. */}
+            <div className="flex items-center gap-2">
+              {!editing && agentTabs.length > 0 && (
+                // One box: the shield, its name and the mode, the height of the button beside it.
+                <label className={cn("relative flex h-8 min-w-0 items-center gap-1.5 rounded-md border border-hairline bg-background pl-2.5 text-[12px] focus-within:ring-2 focus-within:ring-ring/40", unguarded && "border-warning/50")}>
+                  {unguarded ? <ShieldAlert className="size-3.5 shrink-0 text-warning" aria-hidden /> : <ShieldCheck className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
+                  <span className="shrink-0 text-muted-foreground">Permissions</span>
+                  <select
+                    aria-label="Session permissions"
+                    className="h-full min-w-0 cursor-pointer appearance-none bg-transparent pr-5 text-[12px] text-foreground outline-none"
+                    value={sessionMode}
+                    onChange={(event) => void run(async () => {
+                      const mode = event.target.value;
+                      setBypassConfirmed(false);
+                      for (const tab of agentTabs) await agent.setPermissionMode(sessionId, tab.id, mode);
+                    })}
+                  >
+                    {sessionMode === MIXED && <option value={MIXED} disabled>Mixed</option>}
+                    {/* A mode the picker has no entry for (a Codex stance, say) is shown as it is. */}
+                    {sessionMode !== MIXED && !PERMISSION_MODES.some((mode) => mode.id === sessionMode) && <option value={sessionMode} disabled>{modeLabel(sessionMode)}</option>}
+                    {PERMISSION_MODES.map((mode) => (
+                      <option key={mode.id} value={mode.id}>{mode.label}</option>
+                    ))}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-2 size-3 text-faint" aria-hidden />
+                </label>
+              )}
+              <div className="ml-auto flex flex-row-reverse gap-2">
               <Button
-                onClick={() =>
+                className={cn(unguarded && !editing && bypassConfirmed && "bg-warning text-black hover:bg-warning/90")}
+                onClick={() => {
+                  if (unguarded && !editing && !bypassConfirmed) { setBypassConfirmed(true); return; }
                   void run(async () => {
                     if (editing) await changeShare(sessionId, "edit", { linkId: editing, settings });
-                    else await createShare(sessionId, settings, directOnly);
+                    else {
+                      await createShare(sessionId, settings, directOnly);
+                      // The first link made: from now on Share opens on its settings.
+                      if (!onboarded) setPrefs({ shareOnboarded: true });
+                    }
                     setEditing(null);
                     setSettings(defaultShareSettings());
-                  })
-                }
+                    setBypassConfirmed(false);
+                  });
+                }}
               >
-                {busy ? "Saving…" : editing ? "Save settings" : "Create share link"}
+                {busy ? "Saving…" : editing ? "Save settings" : unguarded && bypassConfirmed ? "Share in Bypass anyway" : "Create share link"}
               </Button>
               {editing && (
                 <Button
@@ -319,16 +414,24 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
                   Cancel edit
                 </Button>
               )}
+              </div>
             </div>
+            {unguarded && !editing && (
+              <p role="status" className="rounded-lg bg-warning/10 px-3 py-2 text-[12px] leading-snug text-warning" data-testid="share-unguarded">
+                Bypass is on: a guest who can drive could have the agent do anything on this computer, with nothing
+                asking you first. Share only with people you trust, or choose another mode.
+              </p>
+            )}
           </fieldset>
         )}
-        {error && (
+        {error && signedIn && (
           <p role="alert" className="mt-3 text-sm text-destructive">
             {error}
           </p>
         )}
-        <div className="mt-5 space-y-3">
-          {share.links?.map((link) => (
+        {/* Only when there are links: empty, its top margin left a gap under the dialog's last line. */}
+        {!!share.links?.length && <div className="mt-5 space-y-3">
+          {share.links.map((link) => (
             <SecretLink
               key={link.id}
               link={link}
@@ -339,7 +442,7 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
               revoke={() => void run(() => changeShare(sessionId, "revoke", { linkId: link.id, removeGuests: true }))}
             />
           ))}
-        </div>
+        </div>}
         {share.people.length > 0 && (
           <div className="mt-5 space-y-2">
             <h3 className="text-sm font-medium">People</h3>
@@ -451,6 +554,8 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
             )}
           </div>
         )}
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -474,12 +579,14 @@ export function LocalShareButton({ sessionId }: { sessionId: string }) {
     <Button
       variant="ghost"
       size="sm"
+      // A 20px icon like the header's others, and a label sized to stand beside it.
+      className="gap-1.5 px-3 text-[13px] [&>svg]:size-5"
       aria-label="Share session…"
       aria-describedby={waiting.length ? waitingId : undefined}
       title={detail || "Share session"}
       onClick={() => openSessionShare(sessionId)}
     >
-      <Share2 />
+      <UserPlus />
       <span>{share.active ? `${people.length} guests` : "Share"}</span>
       {waiting.length > 0 && (
         <span className="text-warning" data-testid="share-waiting">

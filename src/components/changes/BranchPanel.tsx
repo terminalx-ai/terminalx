@@ -1,5 +1,5 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
-import { GitBranch, Loader2, Sparkles } from "@/icons";
+import { ChevronRight, GitBranch, Loader2, Sparkles } from "@/icons";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { api, errorMessage, git, type BranchOverview, type PullRequest } from "@/lib/api";
 import { localGitSource } from "@/lib/gitSource";
@@ -125,7 +125,7 @@ export function BranchPanel({
   if (error && !overview) return <p className="p-4 text-xs text-destructive">{error}</p>;
   if (!overview) {
     return (
-      <p role="status" className="flex items-center gap-1.5 p-4 text-xs text-faint">
+      <p role="status" className="animate-panel-content flex items-center gap-1.5 p-4 text-xs text-faint">
         <Loader2 className="size-3 animate-spin" aria-hidden /> Reading the branch…
       </p>
     );
@@ -162,7 +162,7 @@ export function BranchPanel({
       type="button"
       onClick={() => run(what)}
       disabled={!!working}
-      className="flex shrink-0 items-center gap-1 rounded-md bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent hover:bg-accent/25 disabled:opacity-60"
+      className="flex shrink-0 items-center gap-1 h-6 rounded-md bg-accent/15 px-2.5 text-[11px] font-medium text-accent hover:bg-accent/25 disabled:opacity-60"
     >
       {working === what && <Loader2 className="size-3 animate-spin" aria-hidden />}
       {label}
@@ -179,7 +179,7 @@ export function BranchPanel({
       askButton("conflicts", `Merge the latest ${overview.base ?? baseName} into ${here}, and resolve the conflicts.`, "Resolve")
     ) : step?.kind === "commit" ? (
       <>
-        <button type="button" onClick={() => showPanelTab("changes")} className="flex shrink-0 items-center gap-1 rounded-md bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent hover:bg-accent/25">
+        <button type="button" onClick={() => showPanelTab("changes")} className="flex shrink-0 items-center gap-1 h-6 rounded-md bg-accent/15 px-2.5 text-[11px] font-medium text-accent hover:bg-accent/25">
           Review &amp; commit
         </button>
         {askButton("commit", "Commit the changes in this worktree with a clear message.")}
@@ -197,22 +197,25 @@ export function BranchPanel({
   const landed = overview.ahead === 0 && !overview.onBase && !!started && !!overview.forkPoint && !overview.forkPoint.sha.startsWith(started) && !started.startsWith(overview.forkPoint.sha);
 
   return (
-    <div className={inline ? undefined : "h-full overflow-y-auto scrollbar-thin"} data-testid="branch-panel">
-      <div className="flex flex-col gap-3 p-3">
-        <header className="flex min-w-0 items-center gap-1.5 px-1">
-          <GitBranch className="size-4 shrink-0 text-accent" aria-hidden />
+    <div className={cn("animate-panel-content", !inline && "h-full overflow-y-auto scrollbar-thin")} data-testid="branch-panel">
+      {/* One left edge for the tab, 24px from the panel: the branch icon, each box's own edge, the graph's dots and every row
+          start on it. Only what is inside a box is indented. */}
+      <div className="flex flex-col gap-3 px-6 py-4">
+        <header className="flex min-h-6 min-w-0 items-center gap-2">
+          {/* The glyph's drawing starts 3px into its box: pulled left by that, its ink lines up with the text and dots below. */}
+          <GitBranch className="-ml-[3px] size-4 shrink-0 text-accent" aria-hidden />
           <h3 className="truncate font-mono text-[13px] text-foreground" title={branch ?? "Detached HEAD"} data-testid="branch-name">
             {branch ?? "Detached HEAD"}
           </h3>
           {!overview.hasRemote && (
-            <span className="ml-auto shrink-0 rounded-full bg-veil-raised px-2 py-0.5 text-[10.5px] text-muted-foreground" title="This repository has no remote: nothing is pushed or shared from it" data-testid="branch-local-only">
+            <span className="ml-auto shrink-0 rounded-full bg-veil-raised px-2.5 py-0.5 text-[10.5px] text-muted-foreground" title="This repository has no remote: nothing is pushed or shared from it" data-testid="branch-local-only">
               This computer only
             </span>
           )}
         </header>
 
         {done && !step && (
-          <p role="status" className="px-1 text-xs text-success">
+          <p role="status" className="text-xs text-success">
             {done}
           </p>
         )}
@@ -243,7 +246,7 @@ export function BranchPanel({
 
         {/* The base moving on blocks nothing until it conflicts, which is the step above. */}
         {!overview.onBase && overview.behind > 0 && step?.kind !== "conflicts" && (
-          <div className="flex items-center gap-1.5 px-1" data-testid="branch-behind">
+          <div className="flex items-center gap-1.5" data-testid="branch-behind">
             <span className="min-w-0 flex-1 text-xs text-faint">
               {baseName} is {count(overview.behind)} ahead
             </span>
@@ -261,14 +264,17 @@ function since(iso: string): string {
   return r === "now" ? "just now" : /^\d/.test(r) ? `${r} ago` : `on ${r}`;
 }
 
-const AGENT_BUTTON = "flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-veil-raised hover:text-foreground";
+const AGENT_BUTTON = "flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] text-muted-foreground hover:bg-veil-raised hover:text-foreground";
 
 /** Commits of the base drawn on its line; older ones are counted above them. */
 const BASE_SHOWN = 12;
 const ROW = 30;
-/** The base's line, then the branch's, from the panel's left edge. */
-const BASE_X = 9;
-const BRANCH_X = 33;
+/**
+ * The base's line, then the branch's, from where the tab's content starts. The base's dots are 10px wide, so
+ * at 5 their left edge is that start: in line with the branch icon above and every row's text.
+ */
+const BASE_X = 5;
+const BRANCH_X = 29;
 
 function count(n: number): string {
   return `${n} ${n === 1 ? "commit" : "commits"}`;
@@ -282,15 +288,17 @@ type GraphRow =
 
 /**
  * Oldest first, as the line is read down: where the branch left the base,
- * the branch itself, what others pushed to it since, then what the base
- * gained since. On the base itself: the base, then what is not pulled yet.
+ * the branch itself (its own commits too, when `mine` opens them), what
+ * others pushed to it since, then what the base gained since. On the base
+ * itself: the base, then what is not pulled yet.
  */
-export function graphRows(overview: BranchOverview, baseName: string): GraphRow[] {
+export function graphRows(overview: BranchOverview, baseName: string, mine = false): GraphRow[] {
   const oldestFirst = (commits: CommitInfo[]) => [...commits].reverse();
   if (overview.onBase || !overview.base) {
     return [{ kind: "base" }, ...oldestFirst(overview.incoming ?? []).map((commit): GraphRow => ({ kind: "commit", lane: "base", commit, incoming: true }))];
   }
   const rows: GraphRow[] = [{ kind: "base" }, { kind: "you" }];
+  if (mine) rows.push(...oldestFirst(overview.commits).map((commit): GraphRow => ({ kind: "commit", lane: "branch", commit })));
   rows.push(...oldestFirst(overview.incoming ?? []).map((commit): GraphRow => ({ kind: "commit", lane: "branch", commit, incoming: true })));
   const shown = overview.baseCommits.slice(0, BASE_SHOWN);
   const earlier = overview.behind - shown.length;
@@ -304,7 +312,10 @@ export function graphRows(overview: BranchOverview, baseName: string): GraphRow[
  * its line, with its author's face at the end of the row, named on hover.
  */
 function BranchGraph({ overview, baseName, branch, who, github, landed }: { overview: BranchOverview; baseName: string; branch: string | null; who: (c: CommitInfo) => string; github: boolean; landed: boolean }) {
-  const rows = graphRows(overview, baseName);
+  // "You · 5 commits" opens the branch's own commits onto its line, and folds them away again.
+  const [mine, setMine] = useState(false);
+  const canOpen = overview.commits.length > 0 && !overview.onBase && !!overview.base;
+  const rows = graphRows(overview, baseName, mine && canOpen);
   const y = (i: number) => i * ROW + ROW / 2;
   const you = rows.findIndex((r) => r.kind === "you");
   const lastBase = rows.reduce((last, r, i) => (r.kind === "base" || r.kind === "more" || (r.kind === "commit" && r.lane === "base") ? i : last), 0);
@@ -315,7 +326,7 @@ function BranchGraph({ overview, baseName, branch, who, github, landed }: { over
   const forkY = y(0) + ROW * 0.55;
   const fade = `branch-fade-${useId().replace(/:/g, "")}`;
   return (
-    <section aria-label="Commits" data-testid="branch-graph" className="px-1">
+    <section aria-label="Commits" data-testid="branch-graph">
       <div className="relative" style={{ height }}>
         <svg className="pointer-events-none absolute inset-0 overflow-visible" width={BRANCH_X + 8} height={height} aria-hidden>
           {lastBase > 0 && <line x1={BASE_X} x2={BASE_X} y1={y(0)} y2={y(lastBase)} className="stroke-muted-foreground/60" strokeWidth={1.5} />}
@@ -344,7 +355,8 @@ function BranchGraph({ overview, baseName, branch, who, github, landed }: { over
             return (
               <li
                 key={row.kind === "commit" ? row.commit.sha : row.kind}
-                className="flex items-center gap-2"
+                // Your own commits, opened from the You row, fade in rather than appear at once.
+                className={cn("flex items-center gap-2", row.kind === "commit" && row.lane === "branch" && !row.incoming && "animate-panel-content")}
                 style={{ height: ROW, paddingLeft: x + 12 }}
                 data-testid={testId}
                 data-lane={row.kind === "commit" ? row.lane : undefined}
@@ -370,13 +382,30 @@ function BranchGraph({ overview, baseName, branch, who, github, landed }: { over
                     )}
                   </span>
                 ) : row.kind === "you" ? (
-                  <span className="min-w-0 truncate text-xs text-foreground">
-                    You
-                    <span className="text-faint">
-                      {" "}
-                      · {overview.ahead ? count(overview.ahead) : landed ? `all in ${baseName}` : "no commits yet"}
+                  canOpen ? (
+                    <button
+                      type="button"
+                      aria-expanded={mine}
+                      onClick={() => setMine(!mine)}
+                      title={mine ? "Hide your commits" : "Show your commits"}
+                      className="group/you flex min-w-0 items-center gap-1 rounded-sm text-left text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                      data-testid="branch-you-toggle"
+                    >
+                      <span className="min-w-0 truncate">
+                        You
+                        <span className="text-faint group-hover/you:text-muted-foreground"> · {count(overview.ahead || overview.commits.length)}</span>
+                      </span>
+                      <ChevronRight className={cn("size-3 shrink-0 text-faint transition-transform duration-200 group-hover/you:text-muted-foreground", mine && "rotate-90")} aria-hidden />
+                    </button>
+                  ) : (
+                    <span className="min-w-0 truncate text-xs text-foreground">
+                      You
+                      <span className="text-faint">
+                        {" "}
+                        · {overview.ahead ? count(overview.ahead) : landed ? `all in ${baseName}` : "no commits yet"}
+                      </span>
                     </span>
-                  </span>
+                  )
                 ) : row.kind === "more" ? (
                   <span className="text-[11px] text-faint">{row.label}</span>
                 ) : (
