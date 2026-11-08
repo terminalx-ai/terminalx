@@ -6903,14 +6903,17 @@ impl SessionManager {
             // hard stop has emptied the queue before it closes the turn.
             while !rt.stopping && rt.recovery.is_none() && !rt.queued.is_empty() {
                 let pending = rt.queued.remove(0);
-                let Ok(_privacy) = pending.privacy.as_ref().map(|ticket| ticket.scope()).transpose() else {
+                let Ok(_privacy) = crate::data_privacy::delivery_scope(pending.privacy.as_ref()) else {
                     self.publish(rt, Payload::PromptWithdrawn { prompt_seq: pending.seq }, None);
                     continue;
                 };
                 let q = pending.message;
                 let delivery = pending.privacy.map(|privacy| acp::Delivery { seq: pending.seq, privacy: Some(privacy), mobile: None, shared: None });
                 let actions = match &mut rt.engine {
-                    Engine::Acp(a) => a.prompt_with_delivery(q.text.clone(), q.images.clone(), delivery),
+                    Engine::Acp(a) => match delivery {
+                        Some(delivery) => a.prompt_with_delivery(q.text.clone(), q.images.clone(), Some(delivery)),
+                        None => a.prompt(q.text.clone(), q.images.clone()),
+                    },
                     Engine::OpenCode(o) => o.prompt(q.text.clone(), q.images.clone()),
                     // A PTY tab never queues here: the CLI holds typed input
                     // itself, so the message went in when it was written.

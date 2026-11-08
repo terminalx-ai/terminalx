@@ -184,17 +184,23 @@ thread_local! {
 pub fn remote_ticket() -> Option<Ticket> { REMOTE.with(|ticket| ticket.borrow().clone()) }
 
 pub struct RemoteScope {
-    _write: RemoteWrite,
+    _write: Option<RemoteWrite>,
     previous: Option<Ticket>,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 impl Ticket {
     pub fn scope(&self) -> anyhow::Result<RemoteScope> {
-        let write = self.enter()?;
-        let previous = REMOTE.with(|ticket| ticket.replace(Some(self.clone())));
-        Ok(RemoteScope { _write: write, previous, _thread: Default::default() })
+        delivery_scope(Some(self))
     }
 }
+/// Re-enter a queued message's recorded origin. An explicitly local message
+/// must not inherit the remote origin of the callback that drained its queue.
+pub(crate) fn delivery_scope(origin: Option<&Ticket>) -> anyhow::Result<RemoteScope> {
+    let write = origin.map(Ticket::enter).transpose()?;
+    let previous = REMOTE.with(|ticket| ticket.replace(origin.cloned()));
+    Ok(RemoteScope { _write: write, previous, _thread: Default::default() })
+}
+
 impl Drop for RemoteScope {
     fn drop(&mut self) { REMOTE.with(|ticket| ticket.replace(self.previous.take())); }
 }
