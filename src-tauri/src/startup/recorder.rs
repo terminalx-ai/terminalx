@@ -82,7 +82,7 @@ pub(super) fn supervise(directory: &Path, mode: &str, args: &[OsString]) -> Resu
     })?;
     let mut command = Command::new(std::env::current_exe()?);
     command.arg(mode).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|error| { spawn_failed(directory, &error); error })?;
+    let mut child = command.spawn().inspect_err(|error| spawn_failed(directory, error))?;
     let owner = RecorderIdentity { pid: child.id(), birth: super::process_identity(Some(child.id())) };
     if let Err(error) = crate::store::write_json(&directory.join("owner.json"), &owner) {
         // The prior reservation still holds. An identity write failure must

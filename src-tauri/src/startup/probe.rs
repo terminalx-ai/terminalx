@@ -166,7 +166,7 @@ pub(super) fn start(directory: &Path) -> Result<()> {
         use std::os::unix::process::CommandExt;
         recorder.process_group(0);
     }
-    let child = recorder.spawn().map_err(|error| { recorder::spawn_failed(&path, &error); error })
+    let child = recorder.spawn().inspect_err(|error| recorder::spawn_failed(&path, error))
         .context("Could not start health recorder; its spawn failure is retained")?;
     recorder::reap_supervisor(child);
     Ok(())
