@@ -11,7 +11,7 @@ afterEach(cleanup);
 it.each([false, true])("withdraws service and fallback pictures under privacy (managed=%s), then restores them", async (managed) => {
   mocks.invoke.mockResolvedValue({ enabled: false, managed: false });
   await refreshDataPrivacy();
-  render(<AccountAvatar identity={{ name: "Ada", email: "ada@example.test", picture: "https://img.example/ada.png" }} />);
+  render(<AccountAvatar identity={{ name: "Ada", email: "ada@example.test", organization: null, picture: "https://img.example/ada.png" }} />);
   expect(screen.getByTestId("account-picture").getAttribute("src")).toBe("https://img.example/ada.png");
   mocks.invoke.mockResolvedValue({ enabled: true, managed });
   await act(() => refreshDataPrivacy());
