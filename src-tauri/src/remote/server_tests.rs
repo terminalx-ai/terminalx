@@ -3638,6 +3638,7 @@ fn privacy_raw_pty_child() {
             runtime.block_on(call(&f.rpc, &peer, "pty.create", json!({"cols":80,"rows":24,"clientRequestId":"raw-privacy-create"}))).unwrap()["ptyId"].as_str().unwrap().to_string()
         };
         runtime.block_on(call(&f.rpc, &peer, "pty.attach", json!({"ptyId":id}))).unwrap();
+        runtime.block_on(call(&f.rpc, &peer, "pty.control", json!({"ptyId":id}))).unwrap();
         let input = f.root.join("raw-input");
         let ready = f.root.join("ready");
         f.terminals.write(&id, format!("stty raw -echo; touch '{}'; exec cat > '{}'\n", ready.display(), input.display()).as_bytes()).unwrap();
