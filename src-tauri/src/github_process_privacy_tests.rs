@@ -498,11 +498,25 @@ fn workspace_rpc(root: &Path, cwd: &Path, managed: bool) {
     let (arrived, release) = after_output_barrier();
     let pending = runtime.spawn(rpc.handle_owned(peer.clone(), request("git.prReady")));
     arrived.recv_timeout(Duration::from_secs(10)).unwrap();
-    policy(true, managed);
-    policy(false, managed);
+    // The subprocess has drained, but the enclosing remote mutation still
+    // owns admission. Activation withdraws its ticket immediately and must
+    // await that mutation before acknowledging, including reconciliation.
+    let (acknowledged, ack) = std::sync::mpsc::channel();
+    let activation = std::thread::spawn(move || { policy(true, managed); acknowledged.send(()).unwrap(); });
+    let until = Instant::now() + Duration::from_secs(5);
+    while !data_privacy::enabled() {
+        assert!(Instant::now() < until, "activation did not withdraw the RPC ticket");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(ack.recv_timeout(Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        "activation acknowledged while the admitted RPC mutation was paused");
     release.send(()).unwrap();
     assert_eq!(runtime.block_on(pending).unwrap()["ok"], false);
+    ack.recv_timeout(Duration::from_secs(5)).unwrap();
+    activation.join().unwrap();
     assert_eq!(launches(root), before + 1, "reconciliation must retain original authority");
+    policy(false, managed);
+    assert_eq!(launches(root), before + 1, "restoration must not replay reconciliation");
     assert_eq!(runtime.block_on(rpc.handle_owned(peer.clone(), request("git.prReady")))["ok"], true);
     assert_eq!(launches(root), before + 3, "a fresh ready request performs its reconciliation");
 
