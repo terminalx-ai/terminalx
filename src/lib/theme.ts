@@ -164,6 +164,11 @@ if (typeof window !== "undefined") {
   });
 }
 
+/** The current palette for terminal instances created before a view mounts. */
+export function getTheme(): ThemeState {
+  return state;
+}
+
 export function useTheme(): ThemeState {
   return useSyncExternalStore(
     (cb) => {

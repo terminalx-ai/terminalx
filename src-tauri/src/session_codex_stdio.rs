@@ -161,29 +161,86 @@ impl SessionManager {
     /// exits (#727). The PTY engine copies the thread's rollout into its home
     /// and reads it from the end, so what the chat already shows is not drawn
     /// again.
-    pub fn codex_stdio_to_terminal(&self, session_id: &str, tab_id: &str) -> Result<()> {
-        use crate::issue_pipeline::admission::{fence, Kind, Scope};
-        // One switch at a time, as when admission was held for it: a second
-        // finds the first one's tab already moved.
+    /// `false` means the current turn still owns the connection. The view
+    /// waits and asks again, leaving progress, approvals and Interrupt usable.
+    pub fn codex_stdio_to_terminal(&self, session_id: &str, tab_id: &str) -> Result<bool> {
+        self.codex_stdio_to_terminal_reported(session_id, tab_id, None)
+    }
+
+    pub fn codex_stdio_to_terminal_reported(&self, session_id: &str, tab_id: &str, transition_id: Option<uuid::Uuid>) -> Result<bool> {
+        use crate::issue_pipeline::admission::{fence, lock, Kind, Scope};
+        use super::view_transition::{record, ErrorCategory, Stage, Surface};
         static SWITCHING: Mutex<()> = Mutex::new(());
         let _one = SWITCHING.lock().unwrap_or_else(|error| error.into_inner());
-        let _switching = fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]);
-        self.accepting_work()?;
-        let rt_arc = self.runtime(session_id, tab_id)?;
-        let experimental = index::get(session_id)?.tab(tab_id).is_some_and(selected);
-        let running = {
-            // Decided under the runtime lock as well as by the index: a live
-            // connection is never left behind a tab that reads as moved.
-            let rt = rt_arc.lock().unwrap();
-            let running = matches!(rt.engine, Engine::CodexStdio(_));
-            if !experimental && !running { return Ok(()); }
-            anyhow::ensure!(!rt.turn_open, "Wait for Codex to finish this turn, or interrupt it, before opening its terminal.");
-            running
+        let started = Instant::now();
+        let transition_id = transition_id.unwrap_or_else(uuid::Uuid::now_v7);
+        let sequence = std::cell::Cell::new(0);
+        let report = |stage, error_category| {
+            sequence.set(sequence.get() + 1);
+            TerminalViewReport { transition_id, sequence: sequence.get(), elapsed_ms: started.elapsed().as_millis() as u64, stage, surface: Surface::Runtime, error_category }
         };
-        if running { self.stop_codex_stdio(&rt_arc, false)?; }
-        index::update_tab(session_id, tab_id, |tab| { tab.transport = AgentTransport::Pty; Ok(()) })?;
-        if let Ok(session) = index::get(session_id) { self.sink.emit("session_updated", &session); }
-        Ok(())
+        let note = |stage, category| { let _ = self.note_terminal_view(session_id, tab_id, &report(stage, category)); };
+        note(Stage::Requested, None);
+        let mut category = ErrorCategory::Handoff;
+        let result = (|| {
+            self.accepting_work()?;
+            let rt_arc = self.runtime(session_id, tab_id)?;
+            let (running, resume, _switching) = {
+                // Inspect before fencing, under the same admission as sends and
+                // protocol writes. Fencing an active connection can reject its
+                // next approval/interrupt/start frame and falsely fail its turn.
+                let _admission = lock();
+                let entry = index::get(session_id)?;
+                let tab = entry.tab(tab_id).context("tab not found")?;
+                let rt = rt_arc.lock().unwrap();
+                let running = matches!(rt.engine, Engine::CodexStdio(_));
+                if !selected(tab) && !running { return Ok(true); }
+                if rt.turn_open {
+                    category = ErrorCategory::ConnectionEnded;
+                    anyhow::ensure!(matches!(&rt.engine, Engine::CodexStdio(engine) if !engine.failed() && !engine.exited),
+                        "Codex's connection ended before the turn finished. Stop the session before opening its terminal; the conversation is saved.");
+                    record(&rt, tab.transport, &report(Stage::WaitingForTurn, None));
+                    return Ok(false);
+                }
+                (running, tab.provider_session_id.clone(), fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]))
+            };
+            #[cfg(test)]
+            tests::handoff_fenced();
+            // The general PTY launcher can restart a missing conversation.
+            // A view switch must never take that fallback. Check before
+            // stopping, then copy after exit so the final writes are included.
+            category = ErrorCategory::ConversationUnavailable;
+            let saved = if let Some(id) = resume {
+                let managed = codex::home::managed_root()?;
+                let source = [codex::home::native_root_if_made(), codex::home::user_root()]
+                    .into_iter().flatten().find(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()))
+                    .context("Codex's saved conversation is not available for Terminal view. Keep using Chat and try again once Codex has saved it.")?;
+                Some((id, managed, source))
+            } else { None };
+            if running {
+                category = ErrorCategory::OwnerCleanup;
+                note(Stage::StoppingOwner, None);
+                self.stop_codex_stdio(&rt_arc, false)?;
+            }
+            category = ErrorCategory::ConversationUnavailable;
+            if let Some((id, managed, source)) = saved {
+                if source != managed {
+                    anyhow::ensure!(codex::home::copy_rollout(&managed, &source, &id)
+                        .context("Codex's saved conversation could not be copied for Terminal view. Chat is still available; retry after resolving the file access problem.")?,
+                        "Codex's saved conversation is no longer available for Terminal view. Chat is still available.");
+                }
+            }
+            category = ErrorCategory::Persistence;
+            index::update_tab(session_id, tab_id, |tab| { tab.transport = AgentTransport::Pty; Ok(()) })?;
+            if let Ok(session) = index::get(session_id) { self.sink.emit("session_updated", &session); }
+            Ok(true)
+        })();
+        match &result {
+            Ok(true) => note(Stage::TransportChanged, None),
+            Err(_) => note(Stage::Failed, Some(category)),
+            Ok(false) => {},
+        }
+        result
     }
 
     /// A permission mode is an approval policy and a sandbox, which Codex
@@ -408,7 +465,6 @@ impl SessionManager {
                 let rt_arc = runtime.upgrade().context("Codex runtime was removed")?;
                 let mut rt = rt_arc.lock().unwrap();
                 self.accepting_work()?;
-                crate::issue_pipeline::admission::check(&rt.session_id, &rt.tab_id)?;
                 anyhow::ensure!(same_launch(&rt, launch) && !rt.stopping, "Codex launch was cancelled; input will not be replayed");
                 anyhow::ensure!(matches!(&rt.engine, Engine::CodexStdio(e) if !e.exited && !e.blocked), "Codex connection is no longer writable");
                 let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
@@ -418,6 +474,12 @@ impl SessionManager {
                     engine.retire_write(&frame, false);
                     return Ok(());
                 }
+                // Completion can retire an interrupt while it waits for this
+                // writer. Discard it before a handoff's hold fence is checked:
+                // it has no bytes to admit and must not fail a usable owner if
+                // the handoff later refuses (for example, a missing rollout).
+                crate::issue_pipeline::admission::check(&rt.session_id, &rt.tab_id)?;
+                let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
                 let (_mobile, _owner) = match (admitted, owner) {
                     (Ok(mobile), Ok(owner)) => (mobile, owner),
                     (Err(error), _) | (_, Err(error)) => {

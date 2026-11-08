@@ -27,6 +27,9 @@ use anyhow::{anyhow, bail, Context, Result};
 mod compaction;
 #[path = "session_codex_stdio.rs"]
 mod codex_stdio;
+#[path = "session_view_transition.rs"]
+mod view_transition;
+pub use view_transition::TerminalViewReport;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

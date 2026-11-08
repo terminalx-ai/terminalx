@@ -208,6 +208,10 @@ impl Sessions {
             "pressedAt":timings.pressed_at,"drawnAt":timings.drawn_at,"answeredAt":timings.answered_at,"shownAt":timings.shown_at}}))
     }
 
+    pub fn note_terminal_view(&self, session: &str, tab: &str, report: &crate::session::TerminalViewReport) -> Result<()> {
+        self.quick_tab("terminalViewReport", session, tab, json!({"report":report}))
+    }
+
     /// A window's report of a tab's warning (`SessionManager::note_incident_ui`).
     pub fn note_incident_ui(&self, session: &str, tab: &str, report: &crate::recovery_log::UiReport) -> Result<()> {
         self.quick_tab("incidentUi", session, tab, json!({"report": report}))
@@ -286,8 +290,10 @@ impl Sessions {
         self.tab("handoff", session, tab, json!({}))
     }
 
-    pub fn to_terminal(&self, session: &str, tab: &str) -> Result<()> {
-        self.tab("toTerminal", session, tab, json!({}))
+    pub fn to_terminal(&self, session: &str, tab: &str, transition_id: Option<uuid::Uuid>) -> Result<bool> {
+        // Older local runtimes returned null for a completed handoff.
+        let ready: Option<bool> = self.tab("toTerminal", session, tab, json!({"transitionId":transition_id,"deferUntilIdle":true}))?;
+        Ok(ready.unwrap_or(true))
     }
 }
 

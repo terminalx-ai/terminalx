@@ -2574,6 +2574,13 @@ pub async fn report_send_shown(state: State<'_, AppState>, session_id: String, t
     tauri::async_runtime::spawn_blocking(move || m.note_shown(&session_id, &tab_id, seq, &timings).map_err(err)).await.map_err(err)?
 }
 
+/// Content-free view transition evidence, kept beside the tab's diagnostics.
+#[tauri::command]
+pub async fn report_terminal_view(state: State<'_, AppState>, session_id: String, tab_id: String, report: crate::session::TerminalViewReport) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.note_terminal_view(&session_id, &tab_id, &report).map_err(err)).await.map_err(err)?
+}
+
 /// What the window showed of a tab's warning, or what was done in it (#815).
 /// The report is labels and numbers only (`recovery_log::UiReport` refuses
 /// anything else); the app's own build is put on it here. Recording is best
@@ -2627,9 +2634,9 @@ pub async fn tab_handoff(state: State<'_, AppState>, session_id: String, tab_id:
 /// its own terminal interface on the same thread, and the tab stays there.
 /// It waits for admission and a confirmed exit, so never on the main thread.
 #[tauri::command]
-pub async fn tab_to_terminal(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+pub async fn tab_to_terminal(state: State<'_, AppState>, session_id: String, tab_id: String, transition_id: Option<uuid::Uuid>) -> CmdResult<bool> {
     let m = state.sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || m.to_terminal(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || m.to_terminal(&session_id, &tab_id, transition_id).map_err(err)).await.map_err(err)?
 }
 
 /// The terminal pane a tab's CLI is running in, or nothing if it is not.

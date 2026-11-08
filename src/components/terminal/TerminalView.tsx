@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { EnvironmentNotice } from "./EnvironmentNotice";
 import { pty } from "@/lib/api";
-import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
+import { disposeInstance, getInstance, isAgentPane, peekInstance, registerTerminalFactory, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
 import { terminalInput } from "@/lib/terminalInput";
 import { deferredTerminalFit, fitTerminal } from "@/lib/terminalFit";
@@ -116,17 +116,31 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
   // (this one disposed, the next one created), or this one attached again
   // over a new connection, has another, and neither can detach or answer for
   // the other, in whatever order their calls land.
-  const attach = () => {
+  const attach = (reset = false) => {
     const token = crypto.randomUUID();
-    const view = { token, retired: false, feed: feedLocalPane(id, token, term, { paced: !isAgentPane(id), retire: () => disposeInstance(id) }) };
-    void subscribeTerminals()
-      .then(() => (view.retired ? undefined : pty.attachSized(id, token, view.feed.data)))
-      // Retired while the attach was on its way: it must not be left attached to nothing.
+    const view = { token, retired: false, failed: false, ready: Promise.resolve(), feed: feedLocalPane(id, token, term, { paced: !isAgentPane(id), retire: () => disposeInstance(id) }) };
+    // Finish already queued parser writes before replaying a new attachment.
+    const drained = reset ? new Promise<void>((resolve) => term.write("", () => {
+      if (!view.retired) term.reset();
+      resolve();
+    })) : Promise.resolve();
+    view.ready = drained.then(() => subscribeTerminals())
       .then(() => {
-        if (view.retired) return pty.detach(id, token);
+        if (view.retired) throw new Error("The terminal attachment was cancelled. Try opening Terminal view again.");
+        return pty.attachSized(id, token, view.feed.data);
+      })
+      // Retired while the attach was on its way: it must not be left attached to nothing.
+      .then(async () => {
+        if (view.retired) {
+          await pty.detach(id, token);
+          throw new Error("The terminal attachment was replaced. Try opening Terminal view again.");
+        }
         reassertTerminalResize(term);
       })
-      .catch(() => {});
+      .catch((error: unknown) => { view.failed = true; throw error; });
+    // Hidden views attach in the background. Explicit switches observe this
+    // same promise through ensureAttached and retain Chat on rejection.
+    void view.ready.catch(() => {});
     return view;
   };
   const retire = (view: ReturnType<typeof attach>) => {
@@ -136,7 +150,6 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
   };
   let view = attach();
   let released = false;
-  let reattaching = 0;
   const input = terminalInput(id);
   term.onData(input.write);
   term.onBinary(input.write);
@@ -148,17 +161,17 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
     fit,
     restorable: true,
     attachedAs: (token) => !released && view.token === token,
+    ensureAttached: async () => {
+      if (released) throw new Error("The terminal view was closed. Try opening it again.");
+      if (view.failed) { retire(view); view = attach(true); }
+      const requested = view;
+      await requested.ready;
+      if (released || view !== requested) throw new Error("The terminal connection changed while opening. Try again.");
+    },
     reattach: () => {
       if (released) return;
       retire(view);
-      const request = ++reattaching;
-      // What the old connection delivered is parsed first; then the screen is
-      // drawn again from the pane's scrollback, which the attach replays.
-      term.write("", () => {
-        if (released || request !== reattaching) return;
-        term.reset();
-        view = attach();
-      });
+      view = attach(true);
     },
     release: () => {
       released = true;
@@ -214,6 +227,9 @@ export function TerminalView({
   const pageShown = useSyncExternalStore(subscribeVisibility, pageVisible, () => true);
   const shown = visible && pageShown;
   const make = () => (create ? create(resolvedMode) : createInstance(id, resolvedMode));
+  const factory = useRef(make);
+  factory.current = make;
+  useEffect(() => registerTerminalFactory(id, () => factory.current()), [id]);
   const fitting = useRef(fit);
   fitting.current = fit;
 

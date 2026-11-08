@@ -456,7 +456,14 @@ pub fn diagnose_stall(path: &std::path::Path, opener: Option<(&'static str, &'st
     append_diagnostic(path, &line.to_string());
 }
 
-fn append_diagnostic(path: &std::path::Path, line: &str) {
+pub(crate) fn append_diagnostic(path: &std::path::Path, line: &str) {
+    // Two bounded private files. Diagnostic failures never affect work.
+    const LIMIT: u64 = 1024 * 1024;
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _writing = WRITING.lock().unwrap_or_else(|error| error.into_inner());
+    if line.len() as u64 >= LIMIT { return; }
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() + line.len() as u64 + 1 > LIMIT)
+        && std::fs::rename(path, path.with_extension("jsonl.1")).is_err() { return; }
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
@@ -501,6 +508,19 @@ pub fn sanitize(payload: &mut Payload) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagnostics_rotate_and_failed_writes_do_not_block_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tab.diagnostics.jsonl");
+        std::fs::write(&path, vec![b'x'; 1024 * 1024]).unwrap();
+        append_diagnostic(&path, "{\"v\":1}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"v\":1}\n");
+        assert_eq!(std::fs::metadata(path.with_extension("jsonl.1")).unwrap().len(), 1024 * 1024);
+        append_diagnostic(dir.path(), "a directory is not a log");
+        append_diagnostic(&path, &"x".repeat(1024 * 1024));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"v\":1}\n");
+    }
+
     #[test]
     fn codex_sign_in_screen_is_a_signed_out_recovery_after_persistence_and_rereading() {
         let mut payload = Payload::Error { message: crate::harness::codex::pty::SIGN_IN_REQUIRED.into(), fatal: false, detail: None };

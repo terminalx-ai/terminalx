@@ -703,7 +703,7 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         let tab = string("tabId")?;
         let permit = manager.mobile.permit(&actor, string("connection")?, session, tab)?;
         drop(permit.enter()?);
-        manager.codex_stdio_to_terminal(session, tab)?;
+        anyhow::ensure!(manager.codex_stdio_to_terminal(session, tab)?, "Wait for Codex to finish this turn, or interrupt it, before opening its terminal.");
         manager.ensure_started(session, tab)?;
         return Ok(serde_json::json!({"opened":true}));
     }
