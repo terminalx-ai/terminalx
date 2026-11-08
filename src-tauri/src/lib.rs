@@ -102,6 +102,7 @@ pub fn run_git_transport_cli() -> Option<i32> {
 mod unfinished_merge;
 mod pr_associations;
 mod github_identity;
+mod ssh_containment;
 mod harness;
 pub mod hooks;
 mod idle_agents;

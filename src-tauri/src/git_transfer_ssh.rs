@@ -112,25 +112,6 @@ fn transport(effective: &OsStr, shell: bool) -> Command {
     command
 }
 
-fn direct_configuration(bytes: &[u8]) -> Result<()> {
-    let text = std::str::from_utf8(bytes).context("SSH did not report readable effective configuration")?;
-    let values: Vec<_> = text.lines().filter_map(|line| line.split_once(char::is_whitespace))
-        .map(|(key, value)| (key.to_ascii_lowercase(), value.trim())).collect();
-    for required in ["hostname", "user", "port"] {
-        anyhow::ensure!(values.iter().any(|(key, value)| key == required && !value.is_empty()),
-            "Cannot verify the configured SSH transport: missing {required} in ssh -G output");
-    }
-    for (key, value) in values {
-        match key.as_str() {
-            "proxyjump" | "proxycommand" if !value.eq_ignore_ascii_case("none") =>
-                bail!("App Git transfers cannot safely contain this SSH {key} route. Run Git in your terminal or agent, or configure a direct SSH connection; the app has not changed the route or started a transfer."),
-            "forkafterauthentication" | "permitlocalcommand" if value != "no" =>
-                bail!("App Git transfers cannot safely contain SSH {key}. Run Git in your terminal or agent, or disable that option for the app's SSH command."),
-            _ => {}
-        }
-    }
-    Ok(())
-}
 
 fn execute(settings: Settings, args: Vec<OsString>) -> Result<()> {
     anyhow::ensure!(args.len() >= 2, "missing Git SSH destination");
@@ -147,24 +128,11 @@ fn execute(settings: Settings, args: Vec<OsString>) -> Result<()> {
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status()?;
         selected = if status.success() { Variant::Ssh } else { Variant::Simple };
     }
-    let mut command = transport(&effective, shell);
-    if selected == Variant::Ssh {
-        // Probe the actual command too (Match command can select routing).
-        // This runs inside the parent's original admitted/cancellable group.
-        // A nested proxy can detach or reuse a master outside that group: do
-        // not silently reroute it to a direct connection or kill its master.
-        let configuration = transport(&effective, shell).arg("-G").args(&args)
-            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output()?;
-        anyhow::ensure!(configuration.status.success(), "Cannot verify configured SSH transport: {}", String::from_utf8_lossy(&configuration.stderr));
-        direct_configuration(&configuration.stdout)?;
-        // Last -S wins even when configured arguments supplied -S or -o
-        // ControlPath earlier. No socket means neither reuse nor persistence;
-        // direct keys/ports remain effective. Pin the verified absence of a
-        // proxy/fork/local command before config is read again at execution.
-        command.args(["-S", "none", "-o", "ProxyCommand=none", "-o", "ForkAfterAuthentication=no", "-o", "PermitLocalCommand=no"]).args(&args);
+    // Argument grammar and transport capabilities are independent: even
+    // explicit `simple` can name OpenSSH (directly or through a wrapper).
+    let arguments = if selected == Variant::Ssh {
+        args
     } else {
-        // The outer Git uses ssh grammar solely for this adapter. Reconstruct
-        // the selected transport's grammar, including simple's refusals.
         let mut converted = Vec::new();
         let mut i = 0;
         let mut port = None;
@@ -184,10 +152,36 @@ fn execute(settings: Settings, args: Vec<OsString>) -> Result<()> {
         }
         if selected == Variant::Tortoise { converted.push("-batch".into()); }
         if let Some(port) = port { converted.extend(["-P".into(), port]); }
-        command.args(converted).args(&args[args.len() - 2..]);
+        converted.extend_from_slice(&args[args.len() - 2..]);
+        converted
+    };
+    // Probe the actual command/grammar inside the parent's original admitted
+    // process group. A simple wrapper may reject -G; an OpenSSH wrapper that
+    // accepts it must pass the same route checks, regardless of ssh.variant.
+    let mut probe = transport(&effective, shell);
+    if selected != Variant::Ssh {
+        if let Some(value) = settings.env("GIT_PROTOCOL") { probe.env("GIT_PROTOCOL", value); }
+        else { probe.env_remove("GIT_PROTOCOL"); }
+    }
+    let configuration = probe.arg("-G").args(&arguments)
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output()?;
+    let openssh = configuration.status.success();
+    let named_ssh = variant(None, word.as_deref()) == Variant::Ssh;
+    anyhow::ensure!(openssh || (selected != Variant::Ssh && !named_ssh),
+        "Cannot verify configured SSH transport: {}", String::from_utf8_lossy(&configuration.stderr));
+    let mut command = transport(&effective, shell);
+    if openssh {
+        crate::ssh_containment::direct_configuration(&configuration.stdout)?;
+        // Last -S wins, preserving identity/port but never sharing a master.
+        // Pin the verified direct route before configuration is read again.
+        command.args(crate::ssh_containment::OPTIONS);
+    }
+    command.args(arguments);
+    if selected != Variant::Ssh {
         if let Some(value) = settings.env("GIT_PROTOCOL") { command.env("GIT_PROTOCOL", value); }
         else { command.env_remove("GIT_PROTOCOL"); }
     }
+
     Err(command.exec().into())
 }
 

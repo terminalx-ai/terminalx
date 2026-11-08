@@ -651,3 +651,6 @@ while IFS= read -r line; do printf '%s\n' "$line" >> "$0.requests"; done
 
 #[path = "session_acp_privacy_tests.rs"]
 mod acp_lifecycle;
+
+#[path = "session_relay_privacy_tests.rs"]
+mod relay;

@@ -88,7 +88,7 @@ if [ "$phase" = probe ]; then
     : > "$TERMINALX_HOME/held-$$"
     exec /bin/sleep 30
   fi
-  case "$mode" in simple) exit 1 ;; ssh) printf 'hostname fixture.invalid\nuser configured-user\nport 22\nproxycommand none\nproxyjump none\nforkafterauthentication no\npermitlocalcommand no\n'; exit 0 ;; *) exit 99 ;; esac
+  case "$mode" in simple|plink|tortoiseplink) exit 1 ;; ssh) printf 'hostname fixture.invalid\nuser configured-user\nport 22\nproxycommand none\nproxyjump none\nforkafterauthentication no\npermitlocalcommand no\n'; exit 0 ;; *) exit 99 ;; esac
 fi
 case "$mode" in
  simple)
@@ -120,18 +120,18 @@ exec /bin/sh -c "$remote"
     let remote = root.join("fetch-origin.git");
     // (name, env variant, config variant, command source, basename, grammar, probes)
     for (name, env, config, source, basename, grammar, probes) in [
-        ("simple-unset-path", None, None, "path", "strict wrapper", "simple", 1),
-        ("simple-auto-path", Some("auto"), Some("ssh"), "path", "strict wrapper", "simple", 1),
-        ("simple-auto-core", None, Some("auto"), "core", "strict wrapper", "simple", 1),
-        ("simple-unset-command", None, None, "command", "strict wrapper", "simple", 1),
-        ("simple-explicit", Some("simple"), None, "command", "strict wrapper", "simple", 0),
+        ("simple-unset-path", None, None, "path", "strict wrapper", "simple", 2),
+        ("simple-auto-path", Some("auto"), Some("ssh"), "path", "strict wrapper", "simple", 2),
+        ("simple-auto-core", None, Some("auto"), "core", "strict wrapper", "simple", 2),
+        ("simple-unset-command", None, None, "command", "strict wrapper", "simple", 2),
+        ("simple-explicit", Some("simple"), None, "command", "strict wrapper", "simple", 1),
         ("ssh-auto", Some("auto"), None, "command", "strict wrapper", "ssh", 2),
         ("ssh-unknown-env", Some("future-variant"), Some("simple"), "command", "strict wrapper", "ssh", 1),
         ("ssh-unknown-config", None, Some("future-variant"), "core", "strict wrapper", "ssh", 1),
         ("ssh-basename", None, None, "path", "ssh", "ssh", 1),
-        ("plink-basename", None, None, "path", "plink", "plink", 0),
-        ("tortoiseplink-basename", Some("auto"), None, "core", "TortoisePlink.exe", "tortoiseplink", 0),
-        ("putty-explicit", Some("putty"), None, "command", "putty", "plink", 0),
+        ("plink-basename", None, None, "path", "plink", "plink", 1),
+        ("tortoiseplink-basename", Some("auto"), None, "core", "TortoisePlink.exe", "tortoiseplink", 1),
+        ("putty-explicit", Some("putty"), None, "command", "putty", "plink", 1),
     ] {
         println!("privacy SSH variant: managed={managed}/{name}");
         for (key, _) in &saved { std::env::remove_var(key); }

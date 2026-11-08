@@ -852,7 +852,9 @@ impl WorkspaceRpc {
     }
 
     async fn dispatch(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        if !ticket.valid() { return Err(RpcError::forbidden(crate::data_privacy::MESSAGE)); }
         if method == "rpc.hello" {
+            let _privacy = ticket.scope().map_err(|error| RpcError::forbidden(error.to_string()))?;
             let granted = protocol::negotiate(&params)?;
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
             peer.phone.store(params["client"]["app"].as_str() == Some(MOBILE_APP), Ordering::SeqCst);
@@ -993,25 +995,37 @@ impl WorkspaceRpc {
     /// Answer `ports.open` in order with the connection's notifications, and
     /// only then let the stream's data flow: an application that speaks
     /// first can never be heard before the client knows the stream's id.
-    pub async fn answer_port_open(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value) {
-        let response = self.handle(peer, request).await;
-        let stream_id = response.pointer("/result/streamId").and_then(Value::as_str).map(str::to_string);
-        peer.deliver(response);
-        if let Some(stream_id) = stream_id {
-            self.ports.start(peer, &stream_id);
+    pub fn answer_port_open<'a>(self: &'a Arc<Self>, peer: &'a Arc<Peer>, request: &'a Value) -> impl std::future::Future<Output = ()> + Send + 'a {
+        let response = self.handle(peer, request);
+        async move {
+            let response = response.await;
+            let stream_id = response.pointer("/result/streamId").and_then(Value::as_str).map(str::to_string);
+            peer.deliver(response);
+            if let Some(stream_id) = stream_id { self.ports.start(peer, &stream_id); }
         }
     }
 
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
-            return self.ports.handle(peer, method, params, &|| self.may_use_ports(peer)).await;
+            return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket).await;
         }
         let rpc = self.clone();
         let peer = peer.clone();
         let method = method.to_string();
         // File, Git and process work blocks; keep it off the socket's task.
-        tokio::task::spawn_blocking(move || crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params)))
+        tokio::task::spawn_blocking(move || {
+            // Remote mutations, including deferred SessionManager deliveries,
+            // need more than a thread-local GitHub ticket. Acquire before any
+            // state change; retain the lease until all synchronous work ends.
+            let _privacy = ticket.scope().map_err(|error| RpcError::forbidden(error.to_string()))?;
+            #[cfg(test)]
+            {
+                let hook = BEFORE_REMOTE_WORK.lock().unwrap().take();
+                if let Some(hook) = hook { hook(); }
+            }
+            crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params))
+        })
             .await
             .map_err(RpcError::internal)?
     }
@@ -3488,3 +3502,6 @@ mod pipeline_tests;
 #[cfg(test)]
 #[path = "pipeline_reviewer_tests.rs"]
 mod pipeline_reviewer_tests;
+
+#[cfg(test)]
+pub(crate) static BEFORE_REMOTE_WORK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);

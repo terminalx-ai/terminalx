@@ -325,3 +325,8 @@ pub(super) fn ipc_queues(root: &Path, managed: bool, runtime: &tokio::runtime::R
 mod transfers;
 #[path = "git_openssh_privacy_tests.rs"]
 mod openssh;
+
+pub(super) fn native_review_ssh(root: &Path, managed: bool) {
+    openssh::identity(root, managed);
+    openssh::run(root, managed, None);
+}

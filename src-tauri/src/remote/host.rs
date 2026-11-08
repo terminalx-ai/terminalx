@@ -916,7 +916,11 @@ impl RelayHost {
                                     Some("ports.open") => {
                                         let rpc = self.rpc.clone();
                                         let peer = peer.clone();
-                                        tokio::spawn(async move { rpc.answer_port_open(&peer, &request).await });
+                                        let ticket = crate::github_process::ticket();
+                                        tokio::spawn(async move {
+                                            let response = crate::github_process::with_ticket(ticket, || rpc.answer_port_open(&peer, &request));
+                                            response.await;
+                                        });
                                         continue;
                                     }
                                     Some(method) if SLOW_METHODS.contains(&method) => {

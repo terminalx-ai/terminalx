@@ -144,12 +144,24 @@ pub fn active_login_in_status(text: &str) -> Option<String> {
 
 fn ssh_greeting(cwd: &Path, host: &str) -> Option<String> {
     let ssh = crate::binpath::resolve("ssh").unwrap_or_else(|| PathBuf::from("ssh"));
-    let mut command = Command::new(ssh);
-    command.current_dir(cwd)
-        .env("PATH", crate::binpath::login_path())
-        // Own the physical connection; never reuse or leave a background SSH master.
-        .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no", &format!("git@{host}")]);
+    let _request = crate::github_process::scope();
+    let destination = format!("git@{host}");
+    let command = || {
+        let mut command = Command::new(&ssh);
+        command.current_dir(cwd).env("PATH", crate::binpath::login_path())
+            .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no"]);
+        command
+    };
+    // Destination control options do not constrain a nested ProxyJump client.
+    // Verify the effective route under the same request, before any connection.
+    let mut probe = command();
+    probe.args(["-G", &destination]);
+    let configuration = crate::github_process::output(probe, SSH_PATIENCE, None).ok()?;
+    if !configuration.status.success() { return None; }
+    crate::ssh_containment::direct_configuration(&configuration.stdout).ok()?;
+    let mut command = command();
+    command.args(crate::ssh_containment::OPTIONS).arg(destination);
     // GitHub closes the greeting with exit 1; it is not a success check.
     let out = crate::github_process::output(command, SSH_PATIENCE, None).ok()?;
     let mut text = String::from_utf8_lossy(&out.stderr).into_owned();

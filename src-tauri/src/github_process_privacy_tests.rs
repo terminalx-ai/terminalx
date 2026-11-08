@@ -115,7 +115,9 @@ case "$hold:$*" in
    exec /bin/sleep 30 ;;
 esac
 case "${0##*/}" in
- ssh) printf "Hi privacy-reader! You've successfully authenticated.\n" >&2; exit 1 ;;
+ ssh)
+   case " $* " in *' -G '*) printf 'hostname github.com\nuser git\nport 22\nproxycommand none\nproxyjump none\n'; exit 0 ;; esac
+   printf "Hi privacy-reader! You've successfully authenticated.\n" >&2; exit 1 ;;
 esac
 case "$*" in
  *'query=query($owner:'*) printf '{"data":{"repository":{"pullRequest":{"url":"https://github.com/privacy/fixture/pull/7","headRefOid":"head","baseRefOid":"base","reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}\n'; exit 0 ;;
@@ -421,9 +423,9 @@ fn workspace_rpc(root: &Path, cwd: &Path, managed: bool) {
         assert_eq!(error.code, "forbidden");
         refused(&runtime.block_on(rpc.handle(&peer, &input)));
         assert_eq!(launches(root), before, "enabled runtime started {method}");
-        let local = runtime.block_on(rpc.handle(&peer, &request("git.branches")));
-        assert_eq!(local["ok"], true);
-        assert_eq!(local["result"]["current"], "main");
+        refused(&runtime.block_on(rpc.handle(&peer, &request("git.branches"))));
+        let local = workspace.handle("git.branches", &request("git.branches")["params"]).unwrap().unwrap();
+        assert_eq!(local["current"], "main", "local inspection remains available without a remote request");
         assert_eq!(launches(root), before, "local metadata must not contact GitHub");
 
         policy(false, managed);
@@ -623,9 +625,17 @@ fn fresh_runtime(root: &Path, fixture: &FetchFixture, managed: bool) {
     let (peer, _events) = Peer::new("privacy-fetch-client".into(), Authority::Manage);
     assert_eq!(runtime.block_on(rpc.handle(&peer, &json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["workspace/1"]}})))["ok"], true);
     let request = || json!({"id":"fetch","method":"workspace.disposition","params":{"sessionId":fixture.session,"fetch":true}});
-    let check = |answer: serde_json::Value, fresh| {
-        assert_eq!(answer["ok"], true, "local disposition still answers: {answer}");
-        fixture.disposition(&answer["result"]["disposition"], fresh);
+    let check = |answer: serde_json::Value, fresh: bool| {
+        if answer["ok"] == false {
+            assert!(!fresh, "fresh remote disposition was refused: {answer}");
+            assert_eq!(answer["error"]["code"], "forbidden");
+            assert_eq!(answer["error"]["message"], data_privacy::MESSAGE);
+            // Local inspection still produces useful, explicitly unverified facts.
+            let local = crate::session_ops::workspace_disposition(&fixture.project, &fixture.worktree, false).unwrap();
+            fixture.disposition(&serde_json::to_value(local).unwrap(), false);
+        } else {
+            fixture.disposition(&answer["result"]["disposition"], fresh);
+        }
     };
     policy(true, managed);
     let before = launches(root);
@@ -703,7 +713,7 @@ fn fresh_ipcs(root: &Path, fixture: &FetchFixture, managed: bool, runtime: &toki
     use std::task::{Context, Waker};
     for operation in ["disposition", "pr_landed"] {
         println!("privacy non-main IPC fetch: managed={managed}/{operation}");
-        let check = |answer: serde_json::Value, fresh| {
+        let check = |answer: serde_json::Value, fresh: bool| {
             if operation == "disposition" { fixture.disposition(&answer, fresh); }
             else { assert_landed(&answer, fresh); }
         };
@@ -814,3 +824,24 @@ mod media;
 
 #[path = "git_pull_privacy_tests.rs"]
 mod pull;
+
+#[test]
+fn privacy_contains_identity_and_simple_openssh() {
+    for managed in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "github_process::tests::privacy_native_ssh_child", "--nocapture"])
+            .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
+            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+        assert!(output.status.success(), "policy={managed}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+}
+
+#[test]
+fn privacy_native_ssh_child() {
+    let Ok(kind) = std::env::var("TERMINALX_TEST_GITHUB_ENTRIES") else { return };
+    let root = store::root().unwrap();
+    fixture(&root);
+    pull::native_review_ssh(&root, kind == "managed");
+}

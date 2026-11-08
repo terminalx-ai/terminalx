@@ -3710,7 +3710,7 @@ pub async fn issue_pipeline_merge_cloud(
     repository: String,
     settings: Option<crate::store::projects::IssuePipelineSettings>,
 ) -> CmdResult<crate::issue_pipeline::cloud_merge::CloudMerge> {
-    tauri::async_runtime::spawn_blocking(move || {
+    github_work(move || {
         let settings = settings.unwrap_or_default();
         crate::issue_pipeline::cloud_merge::merge(&crate::issue_pipeline::cloud_merge::ReadersGh, &pipeline, &repository, &settings).map_err(err)
     })

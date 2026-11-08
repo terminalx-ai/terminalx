@@ -156,6 +156,16 @@ impl Ticket {
         let state = self.policy.state.read().unwrap();
         self.owner == self.policy.id && !state.status.enabled && self.epoch == Some(state.epoch)
     }
+    /// Wake deferred remote I/O on this generation's revocation, even if the
+    /// setting was turned off again before the future was first polled.
+    pub async fn cancelled(&self) {
+        let cancel = {
+            let state = self.policy.state.read().unwrap();
+            if self.owner != self.policy.id || state.status.enabled || self.epoch != Some(state.epoch) { return; }
+            state.cancel.clone()
+        };
+        cancel.cancelled().await;
+    }
     pub fn enter(&self) -> anyhow::Result<RemoteWrite> {
         let state = self.policy.state.read().unwrap();
         anyhow::ensure!(self.owner == self.policy.id && !state.status.enabled && self.epoch == Some(state.epoch), MESSAGE);

@@ -162,12 +162,28 @@ impl Drop for Ssh {
 
 pub(super) fn run(root: &Path, managed: bool, runtime: Option<&tokio::runtime::Runtime>) {
     proxy_refusal(root, managed, runtime);
-    for master in [false, true] {
-        println!("privacy real OpenSSH: managed={managed}/existing-master={master}/desktop={}", runtime.is_some());
+    for (variant, master) in [("auto", false), ("auto", true), ("simple", false), ("simple", true)] {
+        println!("privacy real OpenSSH: managed={managed}/variant={variant}/existing-master={master}/desktop={}", runtime.is_some());
         let _environment = Environment::new(root);
         policy(false, managed);
-        let f = Fixture::new(root, &format!("openssh-{master}-{}", runtime.is_some()));
+        let f = Fixture::new(root, &format!("openssh-{variant}-{master}-{}", runtime.is_some()));
         let mut ssh = Ssh::new(&f);
+        git(&f.cwd, &["config", "ssh.variant", variant]);
+        if variant == "simple" && master {
+            git(&f.cwd, &["config", "core.sshCommand", &format!("/usr/bin/ssh -F {}", quote(&ssh.config))]);
+        }
+        if variant == "simple" && !master {
+            // A real OpenSSH wrapper in simple grammar can detach a master.
+            // Ordinary Git is the positive control; the app must contain it.
+            checked(Command::new("/usr/bin/git").current_dir(&f.cwd).args(["ls-remote", "origin"]));
+            assert!(ssh.socket.exists(), "simple/OpenSSH positive control did not persist");
+            checked(Command::new("/usr/bin/ssh").arg("-F").arg(&ssh.config).args(["-O", "exit", ssh.master_host]));
+            let until = Instant::now() + Duration::from_secs(5);
+            while ssh.socket.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
+            // ls-remote used the first server request; reset only that fixture
+            // marker so the partial-clone demand-fetch assertions stay exact.
+            std::fs::remove_file(f.cwd.parent().unwrap().join("ssh-first")).unwrap();
+        }
         if master { ssh.master(); }
         let pull = || {
             #[cfg(feature = "desktop")]
@@ -265,4 +281,86 @@ fn proxy_refusal(root: &Path, managed: bool, runtime: Option<&tokio::runtime::Ru
             ssh.clients_dead();
         }
     }
+}
+
+pub(super) fn identity(root: &Path, managed: bool) {
+    let _environment = Environment::new(root);
+    policy(false, managed);
+    let f = Fixture::new(root, "identity-route");
+    let mut ssh = Ssh::new(&f);
+    ssh.master_host = "privacy-jump";
+    let direct = std::fs::read_to_string(&ssh.config).unwrap();
+    let proxy = format!("Host github-privacy\n ProxyJump privacy-jump\n ControlPath none\n{direct}");
+    std::fs::write(&ssh.config, &proxy).unwrap();
+    // The isolated sshd authenticates the test's OS account. Keep the actual
+    // OpenSSH route/options, translating only GitHub's fixed `git` username.
+    let user = Command::new("/usr/bin/id").arg("-un").output().unwrap();
+    let user = String::from_utf8(user.stdout).unwrap();
+    let wrapper = root.join("bin/ssh");
+    let saved = std::fs::read(&wrapper).unwrap();
+    std::fs::write(&wrapper, format!(r#"#!/bin/sh
+for arg do
+ shift
+ case "$arg" in git@*) arg='{user}@'"${{arg#git@}}" ;; esac
+ set -- "$@" "$arg"
+done
+printf '%s\n' "$$" >> {clients}
+exec /usr/bin/ssh -F {config} "$@"
+"#,user=user.trim(),clients=quote(&ssh.clients),config=quote(&ssh.config))).unwrap();
+    // A greeting-only server exercises identity's physical authentication.
+    let serve = f.cwd.parent().unwrap().join("serve-git");
+    std::fs::write(&serve, format!(r#"#!/bin/sh
+if [ -f {hold} ]; then printf '%s\n' "$$" > {entered}; exec /bin/sleep 30; fi
+printf "Hi privacy-reader! You've successfully authenticated.\n"
+exit 1
+"#,hold=quote(&ssh.hold),entered=quote(&ssh.entered))).unwrap();
+    git(&f.cwd, &["remote", "set-url", "origin", "git@github-privacy:privacy/fixture.git"]);
+    git(&f.cwd, &["config", "user.email", "local@example.test"]);
+    for master in [false, true] {
+        std::fs::write(&ssh.config, &proxy).unwrap();
+        if master { ssh.master(); }
+        else {
+            // Exactly the old identity invocation: destination options alone
+            // still allow the nested jump to create its own persistent master.
+            let out = Command::new(&wrapper).args(["-T", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no", "git@github-privacy"]).output().unwrap();
+            assert!(String::from_utf8_lossy(&out.stdout).contains("Hi privacy-reader!"));
+            assert!(ssh.socket.exists(), "identity positive control must persist its jump master");
+            checked(Command::new("/usr/bin/ssh").arg("-F").arg(&ssh.config).args(["-O", "exit", "privacy-jump"]));
+            let until = Instant::now() + Duration::from_secs(5);
+            while ssh.socket.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
+        }
+        let before = ssh.connections();
+        let lookup = || crate::github_identity::identity(&f.cwd, true);
+        policy(true, managed);
+        assert!(lookup().login.is_none());
+        policy(false, managed);
+        let stale = crate::github_process::queued(lookup);
+        policy(true, managed); policy(false, managed);
+        assert!(stale().login.is_none());
+        let answer = lookup();
+        assert_eq!(answer.source.as_deref(), Some("gh"), "unsafe SSH route must use the admitted gh fallback");
+        assert_eq!(answer.email.as_deref(), Some("local@example.test"));
+        assert_eq!(ssh.connections(), before, "identity must refuse before creating/reusing any jump connection");
+        ssh.clients_dead();
+        std::fs::write(&ssh.config, &direct).unwrap();
+        assert_eq!(lookup().source.as_deref(), Some("ssh"));
+        ssh.clients_dead();
+        // Hold real SSH authentication/session work and cancel it. The owning
+        // policy acknowledgement waits until the observed client is gone.
+        std::fs::write(&ssh.hold, "").unwrap();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(crate::github_process::queued(lookup));
+            let until = Instant::now() + Duration::from_secs(10);
+            while !ssh.entered.exists() { assert!(Instant::now() < until && !worker.is_finished()); std::thread::sleep(Duration::from_millis(5)); }
+            policy(true, managed);
+            ssh.clients_dead();
+            assert!(worker.join().unwrap().login.is_none());
+        });
+        std::fs::remove_file(&ssh.hold).unwrap();
+        std::fs::remove_file(&ssh.entered).unwrap();
+        policy(false, managed);
+        assert_eq!(lookup().source.as_deref(), Some("ssh"));
+        ssh.clients_dead();
+    }
+    std::fs::write(wrapper, saved).unwrap();
 }
