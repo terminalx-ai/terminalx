@@ -406,6 +406,12 @@ fn receive(read: &mut BufReader<UnixStream>, silence: Duration) -> Result<Value>
 }
 
 #[cfg(test)]
+pub(crate) static BEFORE_WORKSPACE_SEND: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) static AFTER_WORKSPACE_WRITE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::control::ControlError;
@@ -531,9 +537,3 @@ mod tests {
         dir
     }
 }
-
-#[cfg(test)]
-pub(crate) static BEFORE_WORKSPACE_SEND: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
-
-#[cfg(test)]
-pub(crate) static AFTER_WORKSPACE_WRITE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
