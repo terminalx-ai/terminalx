@@ -647,9 +647,10 @@ fn fresh_runtime(root: &Path, fixture: &FetchFixture, managed: bool) {
         assert_eq!(answer["ok"], false, "{answer}");
         assert_eq!(answer["error"]["code"], "forbidden");
         assert_eq!(answer["error"]["message"], data_privacy::MESSAGE);
-        // Local inspection remains useful without authorizing a replacement request.
+        // A local verification request remains useful under explicit denial:
+        // it returns unverified facts without authorizing a replacement fetch.
         let local = super::with_ticket(data_privacy::Ticket::denied(), ||
-            crate::session_ops::workspace_disposition(&fixture.project, &fixture.worktree, false)).unwrap();
+            crate::session_ops::workspace_disposition(&fixture.project, &fixture.worktree, true)).unwrap();
         fixture.disposition(&serde_json::to_value(local).unwrap(), false);
     };
     policy(true, managed);
