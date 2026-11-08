@@ -53,7 +53,7 @@ pub(crate) fn prepare(command: &mut Command) -> Result<tempfile::TempDir> {
     let mut proxy = OsString::from("exec ");
     proxy.push(quote(std::env::current_exe()?.as_os_str()));
     #[cfg(test)]
-    proxy.push(" --exact git::ssh::transfer::tests::privacy_transport_child -- ");
+    proxy.push(" --exact git::ssh::transfer::tests::privacy_transport_child --nocapture -- ");
     proxy.push(" "); proxy.push(ENTRY); proxy.push(" "); proxy.push(quote(path.as_os_str()));
     // libtest's startup text must not enter Git's protocol. The child restores
     // stdout before exec; production binaries enter directly in main().
