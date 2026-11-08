@@ -294,7 +294,7 @@ fn to_terminal_fixture(manager: &SessionManager) {
     let (writer, runtime) = (manager.clone(), Arc::downgrade(&rt));
     HANDOFF_FENCED.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
         assert!(crate::issue_pipeline::admission::held("stdio-owner", "tab"));
-        writer.write_codex_frame(&runtime, &launch, interrupt, None).expect("a completed turn's queued interrupt must retire without failing its owner");
+        writer.write_codex_frame(&runtime, &launch, interrupt, None, None).expect("a completed turn's queued interrupt must retire without failing its owner");
     })));
     let refused = manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap_err();
     assert!(refused.to_string().contains("saved conversation is not available"), "{refused:#}");
