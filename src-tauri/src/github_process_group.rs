@@ -25,16 +25,18 @@ impl Child {
     }
 
     pub(super) fn finish(mut self, git_cancelled: bool) -> io::Result<ExitStatus> {
-        let mut signal_error = None;
         if git_cancelled {
             // Git owns its lockfiles. Keep its bounded SIGTERM cleanup window;
             // never remove repository locks or shared SSH sockets ourselves.
-            signal_error = self.signal(libc::SIGTERM).err();
+            let _ = self.signal(libc::SIGTERM);
             std::thread::sleep(Duration::from_millis(250));
         }
         loop {
             self.exited()?;
-            if let Err(error) = self.signal(libc::SIGKILL) { signal_error.get_or_insert(error); }
+            // An exited-only group can reject a signal (EPERM on macOS).
+            // Neither success nor failure proves drainage; only the ownership,
+            // exit and membership checks below allow us to finish cleanup.
+            let _ = self.signal(libc::SIGKILL);
             #[cfg(test)]
             observe(self.0.id(), Event::Scan);
             // The zombie leader still reserves the ID, so a delayed scan cannot
@@ -48,8 +50,7 @@ impl Child {
         #[cfg(test)]
         observe(self.0.id(), Event::Reaped);
         // No signal, group existence probe or membership scan after this wait.
-        let status = status?;
-        match signal_error { Some(error) => Err(error), None => Ok(status) }
+        status
     }
 }
 
