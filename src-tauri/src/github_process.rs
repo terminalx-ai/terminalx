@@ -136,6 +136,10 @@ fn read_progress(pipe: impl Read + Send + 'static, progress: Progress) -> std::t
 
 struct Execution<'a> { git: bool, stop: &'a dyn Fn() -> bool, progress: Option<Progress> }
 
+#[cfg(unix)]
+#[path = "github_process_group.rs"]
+mod group;
+
 fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket, execution: Execution<'_>) -> Result<Output> {
     let Execution { git, stop, progress } = execution;
     let _privacy = ticket.enter()?;
@@ -160,49 +164,35 @@ fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>
         let mut pipe = child.stdin.take().expect("piped stdin");
         std::thread::spawn(move || pipe.write_all(&bytes))
     });
+    #[cfg(unix)]
+    let child = group::Child::new(child);
     let deadline = Instant::now() + timeout;
     let status = loop {
         if !ticket.valid() { break Err(anyhow::anyhow!(crate::data_privacy::MESSAGE)); }
         if stop() { break Err(Stopped.into()); }
         if Instant::now() >= deadline { break Err(TimedOut(timeout).into()); }
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+        #[cfg(unix)]
+        let exited = child.exited();
+        #[cfg(not(unix))]
+        let exited = child.try_wait().map(|status| status.is_some());
+        match exited {
+            Ok(true) => break Ok(()),
+            Ok(false) => std::thread::sleep(Duration::from_millis(25)),
             Err(error) => break Err(error.into()),
         }
     };
+    // On Unix the unreaped leader anchors the group through every signal and
+    // descendant check. Reaping is the final group operation, even on success.
     #[cfg(unix)]
-    if git && status.is_err() {
-        // Git owns its index/ref lockfiles and cleans them on SIGTERM. Give
-        // every member of this exact group a bounded cleanup opportunity;
-        // never delete a repository lock ourselves. Admission stays held.
-        unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM); }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    // All exits, including wait errors and successful parents with surviving
-    // descendants, follow the same cleanup. Never release admission first.
-    #[cfg(unix)]
-    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
-    let _ = child.kill();
-    let _ = child.wait();
+    let reaped = child.finish(git && status.is_err());
+    #[cfg(not(unix))]
+    let reaped = { let _ = child.kill(); child.wait() };
     let written = stdin.map(|writer| writer.join());
     let stdout = stdout.join();
     let stderr = stderr.join();
-    #[cfg(unix)]
-    {
-        // Reaping the leader and draining its pipes is not yet proof that
-        // descendants (including recursive Git transports) have disappeared.
-        // Keep admission until this exact group is gone. Never signal again
-        // after reaping the leader: its numeric id could later be reused.
-        let group = -(child.id() as i32);
-        while unsafe { libc::kill(group, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-        {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
     anyhow::ensure!(ticket.valid(), crate::data_privacy::MESSAGE);
-    let status = status?;
+    status?;
+    let status = reaped?;
     if let Some(written) = written {
         written.map_err(|_| anyhow::anyhow!("GitHub input writer failed"))??;
     }
