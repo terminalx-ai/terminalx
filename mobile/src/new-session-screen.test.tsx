@@ -70,6 +70,7 @@ beforeEach(() => {
       onFeaturesChanged: () => () => {},
       newSessionOptions: vi.fn(async () => options),
       createSession: vi.fn(async () => ({ created: true, sessionId: "s-1", tabId: "t-1", title: "Fix the login redirect", native: false, queued: false })),
+      onSettingsChanged: vi.fn((_listener: () => void) => () => {}),
       macSettings: vi.fn(async () => ({ nativeCodex: false })),
       setNativeCodex: vi.fn(async (on: boolean) => ({ nativeCodex: on })),
     },
@@ -157,6 +158,13 @@ describe("starting a session from the phone", () => {
 });
 
 describe("this Mac's settings on the phone", () => {
+  it("reloads the open switch when the Mac's settings file changes", async () => {
+    await render(<SettingsScreen />);
+    mocks.app.api.macSettings.mockResolvedValue({ nativeCodex: true });
+    await act(async () => mocks.app.api.onSettingsChanged.mock.calls[0][0]());
+    expect((container.querySelector("input[aria-label='Native Codex']") as HTMLInputElement).checked).toBe(true);
+  });
+
   it("turns Native Codex on for the Mac's next Codex sessions", async () => {
     await render(<SettingsScreen />);
     expect(container.textContent).toContain("This Mac · Studio");

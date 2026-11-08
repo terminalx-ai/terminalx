@@ -1192,6 +1192,15 @@ struct PromptText {
     display: String,
 }
 
+impl PromptText {
+    fn append_agent_context(&mut self, context: &str) {
+        if !context.is_empty() {
+            self.agent.push_str("\n\n");
+            self.agent.push_str(context);
+        }
+    }
+}
+
 /// The checkout's tree for a prompt's `baseline`, read before it was admitted.
 struct PreparedBaseline {
     cwd: String,
@@ -1851,6 +1860,13 @@ impl SessionManager {
             || matches!(&payload, Payload::ToolCallCompleted { result, .. } if result.is_error) {
             recovery::diagnose(&rt.diagnostics_path(), &payload);
             recovery::sanitize(&mut payload);
+        }
+        if subagent.is_none() {
+            match crate::checkpoints::observe(&rt.session_id, &rt.tab_id, rt.seq + 1, &mut payload) {
+                Ok(Some(checkpoint)) => { self.publish(rt, Payload::TurnCheckpoint { seq: checkpoint.seq, base: checkpoint.base, head: checkpoint.head }, None); }
+                Err(error) => log::warn!("capture turn checkpoint: {error:#}"),
+                _ => {}
+            }
         }
         rt.seq += 1;
         let mut ts = rt.source_timestamp.clone().unwrap_or_else(index::now);
@@ -2808,14 +2824,24 @@ impl SessionManager {
     /// answer is waiting for (#725).
     #[allow(clippy::too_many_arguments)]
     fn send_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, prompt: PromptText,
+        session_id: &str, tab_id: &str, mut prompt: PromptText,
         images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
+        // Serialize note delivery with other sends; failed admission leaves the note pending.
+        let revert_send = crate::checkpoints::send_lock(session_id, tab_id);
+        let _revert_send = revert_send.lock().unwrap();
+        let notes = if tui::is_slash_command(&prompt.agent) { Vec::new() } else { crate::checkpoints::pending(session_id, tab_id)? };
+        prompt.append_agent_context(&crate::checkpoints::context(&notes));
         // What the send found, before it changed anything.
         let found = self.runtime(session_id, tab_id).ok().map(|rt| { let rt = rt.lock().unwrap(); (rt.turn_open, rt.pending.len()) });
         let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt);
         self.note_send(session_id, tab_id, origin, found, &outcome);
         let outcome = outcome?;
+        if let Some(event) = outcome.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. })) {
+            if let Err(error) = crate::checkpoints::acknowledge_sent(session_id, tab_id, event.seq, &notes) {
+                log::warn!("acknowledge revert context: {error:#}");
+            }
+        }
         self.observer.answered(session_id, tab_id);
         Ok(outcome)
     }
@@ -6024,6 +6050,27 @@ impl SessionManager {
                     self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                     self.set_status(&mut rt, TabStatus::InProgress);
                 }
+                if frame.event == "UserPromptSubmit" {
+                    // Prompts typed directly into a CLI bypass send_admitted. Its blocking
+                    // hook can deliver pending revert context before the model sees them.
+                    // A composer send already carries the note and owns this lock until admitted.
+                    let send_lock = crate::checkpoints::send_lock(&frame.session, &frame.tab);
+                    if let Ok(_sending) = send_lock.try_lock() {
+                        match crate::checkpoints::pending(&frame.session, &frame.tab) {
+                            Ok(notes) if !notes.is_empty() => {
+                                reply.output = Some(serde_json::json!({ "hookSpecificOutput": {
+                                    "hookEventName": "UserPromptSubmit",
+                                    "additionalContext": crate::checkpoints::context(&notes),
+                                }}));
+                                if let Err(error) = crate::checkpoints::acknowledge(&frame.session, &frame.tab, &notes) {
+                                    log::warn!("acknowledge CLI revert context: {error:#}");
+                                }
+                            }
+                            Err(error) => log::warn!("read CLI revert context: {error:#}"),
+                            _ => {}
+                        }
+                    };
+                }
                 if frame.event == "PreToolUse" {
                     // This authenticated, still-current launch only reported a
                     // tool. Explicitly acknowledge it: the local-owner bridge
@@ -6487,7 +6534,7 @@ impl SessionManager {
         }
         let payload = match payload {
             Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, detail, .. } => {
-                let head = index::get(&rt.session_id).ok().and_then(|e| git::snapshot_tree(Path::new(&e.cwd)).ok());
+                let head = None; // The publication path captures and pins the completed tree.
                 if let Some(u) = &usage {
                     let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
                     let (cu, cm) = (u.context_used, u.context_max);
@@ -6711,6 +6758,16 @@ mod tests {
 
         assert_eq!(projected.len(), 2, "one projected record per real submission");
         assert!(projected.iter().all(|p| matches!(p, Payload::UserMessage { text, images, .. } if text == "describe this" && images.as_slice() == std::slice::from_ref(&image))));
+    }
+
+    #[test]
+    fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
+        let mut prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        prompt.append_agent_context("The user reverted a.txt from turn 1.");
+        let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
+        assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));
+        assert!(matches!(message, Payload::UserMessage { text, .. } if text == "Continue"));
+        assert!(echo.matches(&prompt.agent), "the provider echo of the augmented prompt must be deduplicated");
     }
 
     #[test]

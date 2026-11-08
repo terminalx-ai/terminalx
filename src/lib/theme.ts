@@ -21,6 +21,25 @@ export const DEFAULT_THEME: ThemeId = "den";
 
 const THEME_KEY = "raccoon.theme";
 const MODE_KEY = "raccoon.mode";
+let fileWriter: ((patch: Record<string, unknown>) => void) | null = null;
+
+export function legacyThemePreferences(): Record<string, unknown> {
+  const theme = readStorage(THEME_KEY);
+  const mode = readStorage(MODE_KEY);
+  return { ...(theme ? { theme: coerceTheme(theme) } : {}), ...(mode ? { mode: coerceMode(mode) } : {}) };
+}
+
+export function connectThemeFile(writer: (patch: Record<string, unknown>) => void) { fileWriter = writer; }
+
+export function applyFileTheme(values: Record<string, unknown>, clearLegacy = true) {
+  const theme = coerceTheme(values.theme);
+  const mode = coerceMode(values.mode);
+  state = { theme, mode, resolvedMode: resolveMode(theme, mode) };
+  if (clearLegacy) {
+    try { localStorage.removeItem(THEME_KEY); localStorage.removeItem(MODE_KEY); } catch { /* storage unavailable */ }
+  }
+  emit();
+}
 
 export function coerceTheme(value: unknown): ThemeId {
   return THEMES.some((t) => t.id === value) ? (value as ThemeId) : DEFAULT_THEME;
@@ -113,13 +132,13 @@ function emit() {
 
 export function setTheme(theme: ThemeId) {
   state = { ...state, theme, resolvedMode: resolveMode(theme, state.mode) };
-  writeStorage(THEME_KEY, theme);
+  if (fileWriter) fileWriter({ theme }); else writeStorage(THEME_KEY, theme);
   emit();
 }
 
 export function setMode(mode: Mode) {
   state = { ...state, mode, resolvedMode: resolveMode(state.theme, mode) };
-  writeStorage(MODE_KEY, mode);
+  if (fileWriter) fileWriter({ mode }); else writeStorage(MODE_KEY, mode);
   emit();
 }
 
@@ -135,6 +154,7 @@ if (typeof document !== "undefined") apply();
 // so the floating window never sits in one palette beside the main one in another.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
+    if (fileWriter) return;
     if ((e.key !== THEME_KEY && e.key !== MODE_KEY) || e.storageArea !== localStorage) return;
     const theme = coerceTheme(readStorage(THEME_KEY));
     const mode = coerceMode(readStorage(MODE_KEY));

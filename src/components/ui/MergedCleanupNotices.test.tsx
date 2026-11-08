@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useDialogs, closeWorkspaceRemove } from "@/lib/dialogs";
 import type { MergedRemoval, MergedStatus } from "@terminalx/portable/workspace";
 
 // #432: a workspace about to be removed after its pull request merged is
@@ -10,6 +11,11 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 
 const { MergedCleanupNotices } = await import("./MergedCleanupNotices");
 const { bootMergedCleanup, getMergedCleanup, requestMergedSweep, resetMergedCleanupForTest } = await import("@/lib/mergedCleanup");
+
+function RemovalRequest() {
+  const { workspaceRemove } = useDialogs();
+  return <output data-testid="removal-request">{JSON.stringify(workspaceRemove)}</output>;
+}
 
 const path = "/repos/app/.raccoon/worktrees/quiet-amber-fox";
 const record: MergedRemoval = {
@@ -64,6 +70,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   cleanup();
+  closeWorkspaceRemove();
   resetMergedCleanupForTest();
 });
 
@@ -90,6 +97,17 @@ describe("merged workspace notices", () => {
     expect(notice.textContent).toContain("Kept workspace quiet-amber-fox");
     expect(notice.textContent).toContain("Its pull request #62 was merged, but it was not deleted: ignored local files: .env. 1 ignored file or folder may be local data: .env.");
     fireEvent.click(within(notice).getByRole("button", { name: "Review in clean-up" }));
+    expect(screen.queryByTestId("merged-notice")).toBeNull();
+  });
+
+  it("announces a later archive failure once and opens manual removal", async () => {
+    render(<><MergedCleanupNotices /><RemovalRequest /></>);
+    const failed = status({ phase: "kept", archiveBlocked: true, reason: "automatic archive cleanup is paused", detail: "Archive script failed (exit 17). Automatic retries are paused." });
+    await pass([failed]);
+    expect(screen.getByTestId("merged-notice").textContent).toContain("Automatic retries are paused");
+    fireEvent.click(screen.getByRole("button", { name: "Review removal" }));
+    expect(JSON.parse(screen.getByTestId("removal-request").textContent!)).toMatchObject({ projectPath: failed.projectPath, path, mode: "settle", archiveNotice: failed.detail });
+    await pass([failed]);
     expect(screen.queryByTestId("merged-notice")).toBeNull();
   });
 

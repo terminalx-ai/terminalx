@@ -58,6 +58,7 @@ export type WorkItem =
 export interface Turn {
   key: string;
   seq: number;
+  checkpointSeq?: number;
   /** Time of the event that opened this turn, even without a prompt or completion. */
   ts: string;
   prompt?: { author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; messageTs?: string; seq: number } & Delivery;
@@ -533,6 +534,10 @@ export class TranscriptReducer {
           this.current.editedFiles += new Set(payload.edits.map((edit) => edit.path)).size;
           this.touch(this.current);
         }
+        break;
+      }
+      case "turn_checkpoint": {
+        if (!event.subagent) this.ensureTurn(event).checkpointSeq = payload.seq;
         break;
       }
       case "turn_completed": {

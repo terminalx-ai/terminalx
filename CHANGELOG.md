@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- User settings reload when `settings.json` changes. General shows its location
+  and offers to create it. Existing webview preferences migrate into that file;
+  downgrading to a build without this support uses its preference defaults,
+  because the localStorage copies are removed. The migrated choices remain in
+  `settings.json`. Unknown keys and `$schema` survive saves, and an invalid
+  field no longer resets valid credentials, permission choices, or other
+  settings when the app starts. (Part of PRO-140)
 ## 0.2.27
 
 ### Sessions and sidebar

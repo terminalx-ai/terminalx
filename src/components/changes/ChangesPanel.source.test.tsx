@@ -307,6 +307,26 @@ it("shows no merge for a source that cannot tell, and a merge that cannot be rea
   expect(screen.getByText("All changes · 5 files")).toBeTruthy();
 });
 
+
+it("opens discard from the list and diff header and confirms against the displayed base", async () => {
+  const source = fakeSource("local:discard");
+  source.cloud = false;
+  source.canWrite = true;
+  source.discard = vi.fn().mockResolvedValue(undefined);
+  render(<ChangesPanel source={source} events={events} version={2} active live={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Discard changes to src/turn.ts" }));
+  expect(source.discard).not.toHaveBeenCalled();
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: /Modified.*turn.ts/ }));
+  await screen.findByTestId("diff");
+  const discardButtons = screen.getAllByRole("button", { name: "Discard changes to src/turn.ts" });
+  expect(discardButtons).toHaveLength(2);
+  fireEvent.click(discardButtons[1]);
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(source.discard).toHaveBeenCalledWith("src/turn.ts", "merge-base", undefined));
+  expect(document.querySelector("button button")).toBeNull();
+});
+
 it("refetches file statistics with the whitespace choice in every scope", async () => {
   const { setPrefs } = await import("@/lib/prefs");
   setPrefs({ diffHideWhitespace: false });

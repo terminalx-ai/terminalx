@@ -49,6 +49,20 @@ describe("the phone's new-session form", () => {
 describe("the Mac's side of a new session", () => {
   const api = (request: ReturnType<typeof vi.fn>) => new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
 
+  it("notifies an open settings view when the Mac's file changes and removes listeners on close", () => {
+    let event!: (value: { method: string }) => void;
+    const host = new HostApi({ onEvent: (listener: typeof event) => { event = listener; return () => {}; } } as unknown as HostConnection);
+    const changed = vi.fn();
+    const stop = host.onSettingsChanged(changed);
+    event({ method: "settings.changed" });
+    expect(changed).toHaveBeenCalledTimes(1);
+    event({ method: "sessions.changed" });
+    expect(changed).toHaveBeenCalledTimes(1);
+    stop();
+    event({ method: "settings.changed" });
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
   it("asks only a Mac that says it can start sessions for a phone", async () => {
     const old = vi.fn(async (method: string) => method === "sync.capabilities" ? { ok: true, value: { sendIds: 1 } } : { ok: false, refusal: { message: "unknown method" } });
     const host = api(old);
