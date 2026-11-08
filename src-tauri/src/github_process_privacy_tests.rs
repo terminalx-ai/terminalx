@@ -15,7 +15,7 @@ fn privacy_covers_identity_and_issue_entry_points() {
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "github_process::tests::privacy_entry_points_child", "--nocapture"])
             .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
-            .env("TERMINALX_HOME", root.path()).output().unwrap();
+            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
         assert!(output.status.success(), "policy={managed}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }
 }

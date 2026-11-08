@@ -66,7 +66,7 @@ impl Sessions {
             "remove" => 120 + 360 * params["items"].as_array().map_or(1, |items| items.len() as u64),
             "removeLeftovers" => 120 + 360 * params["ids"].as_array().map_or(1, |items| items.len() as u64),
             "mergedSweep" => 3600 + 360 * crate::merged_cleanup::ARCHIVES_PER_PASS as u64,
-            _ => 120,
+            _ => return self.0.workspace(operation, params, origin),
         };
         self.0.workspace_within(operation, params, origin, std::time::Duration::from_secs(seconds))
     }
