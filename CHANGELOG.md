@@ -5,7 +5,8 @@
 - Keep sidebar New chat conversations in Chats with ordinary retention and
   project linking, while using the shared composer and saved agent settings.
   Branch drafts retain their requested project and advertised source branch.
-  Chat Git panels follow the working folder's actual repository status.
+  Chat Git panels follow the working folder's actual repository status;
+  linked chats keep their repository account indicator and refresh control.
   (PRO-173 follow-up)
 
 ## 0.2.28
