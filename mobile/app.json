@@ -7,7 +7,6 @@
     "icon": "./assets/icon.png",
     "scheme": "terminalx",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.terminalx.next.mobile",
@@ -28,8 +27,7 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow TerminalX to attach the photos you choose to a message for your agent.",
-          "cameraPermission": false
+          "photosPermission": "Allow TerminalX to attach the photos you choose to a message for your agent."
         }
       ],
       [
@@ -51,7 +49,9 @@
           "cameraPermission": "Allow TerminalX to scan a pairing code shown on your Mac."
         }
       ],
-      "expo-notifications"
+      "expo-notifications",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
