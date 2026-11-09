@@ -1055,3 +1055,66 @@ fn a_handover_carries_each_tabs_state_so_work_under_way_is_counted_once_and_whol
     assert_eq!(transition("s/asking", TabStatus::InProgress, Source::Live), Some(3));
     exit_runtime();
 }
+
+#[test]
+fn repeated_handovers_count_the_time_between_capture_and_adoption() {
+    let clock = Instant::now();
+    let at = |ms| clock + Duration::from_millis(ms);
+    let mut tabs = Tabs::default();
+    assert_eq!(tabs.step("s/working", TabStatus::InProgress, Source::Live, T, clock).unwrap().kind, START);
+
+    // The same agent keeps working while the old runtime serializes its
+    // record and the replacement starts, twice. Move both clocks instead
+    // of sleeping so the exact missing intervals are independent of load.
+    for (capture, adopt) in [(100, 5000), (5100, 9000)] {
+        let record = serde_json::to_vec(&tabs.carried(at(capture), Some(capture))).unwrap();
+        tabs = Tabs::default();
+        tabs.carry_on(serde_json::from_slice(&record).unwrap(), at(adopt), Some(adopt));
+        assert!(tabs.step("s/working", TabStatus::InProgress, Source::Live, T + adopt as i64, at(adopt)).is_none(),
+            "an adopted turn is not another start");
+    }
+
+    let ended = tabs.step("s/working", TabStatus::Idle, Source::Live, T + 10_000, at(10_000)).unwrap();
+    assert_eq!(ended.kind, STOP);
+    assert_eq!(ended.duration_ms, 10_000, "work during both handovers must count too");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_handover_counts_the_delay_before_the_replacement_claims_activity() {
+    let _home = crate::store::temp_home();
+    let _runtime = writer_for_test();
+    claim();
+    assert_eq!(transition("s/working", TabStatus::InProgress, Source::Live), Some(1));
+    let record = carried();
+    assert!(record[0].captured_monotonic_ms.is_some(), "capture uses the OS monotonic clock");
+    let record = serde_json::to_vec(&record).unwrap();
+
+    // The agent keeps working while no runtime owns activity history.
+    OWNER.lock().unwrap().take();
+    let during = Duration::from_millis(160);
+    std::thread::sleep(during);
+    claim();
+    carry_on(serde_json::from_slice(&record).unwrap());
+    assert_eq!(transition("s/working", TabStatus::InProgress, Source::Live), None);
+    transition("s/working", TabStatus::Idle, Source::Live);
+    let counted = summary().unwrap();
+    assert_eq!(counted.agents_spawned, 1);
+    assert!(counted.agent_time_ms >= during.as_millis() as u64,
+        "work during the handover counts: {} ms", counted.agent_time_ms);
+    exit_runtime();
+}
+
+#[test]
+fn an_older_activity_record_keeps_the_elapsed_work_it_carried() {
+    let record: Vec<CarriedTab> = serde_json::from_value(json!([
+        { "key": "s/working", "state": TabStatus::InProgress, "opened": [T, 120] }
+    ])).unwrap();
+    assert!(record[0].captured_monotonic_ms.is_none());
+    let clock = Instant::now() + Duration::from_secs(1);
+    let mut tabs = Tabs::default();
+    tabs.carry_on(record, clock, Some(1000));
+    assert!(tabs.step("s/working", TabStatus::InProgress, Source::Live, T + 1000, clock).is_none());
+    let ended = tabs.step("s/working", TabStatus::Idle, Source::Live, T + 1080, clock + Duration::from_millis(80)).unwrap();
+    assert_eq!(ended.duration_ms, 200, "the old record's elapsed work and the work after adoption count");
+}

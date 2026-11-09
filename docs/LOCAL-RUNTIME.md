@@ -348,7 +348,10 @@ number; absent before 0.2.24).
   over claims it again before it adopts anything. What the exec would lose
   is each tab's last counted state, which the record carries: a turn under
   way is not counted as a new agent start when it is seen again, and when it
-  ends it counts the time it ran before the handover too.
+  ends it counts the time it ran before the handover too. The record also
+  carries the machine's monotonic capture time, so work during serialization,
+  exec and replacement startup counts without depending on the wall clock.
+  Older records without this timestamp retain the elapsed work they supplied.
 - **What it cannot carry** in format 1 is an agent driven over its standard
   input and output (experimental Codex stdio, ACP agents, OpenCode) while its
   process runs. `runtime.handover.plan` names it; the handover refuses

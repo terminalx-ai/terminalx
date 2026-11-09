@@ -190,6 +190,38 @@ pub struct CarriedTab {
     /// epoch, and how many milliseconds before the handover that was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened: Option<(i64, u64)>,
+    /// This machine's monotonic clock when `opened` was captured. Its
+    /// origin survives exec, so adoption can include the intervening work.
+    /// Absent in older records, which carry only their elapsed duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_monotonic_ms: Option<u64>,
+}
+
+/// The same OS clock used by `Instant`, expressed relative to its system-wide
+/// origin rather than an opaque Rust value. Wall-clock adjustments must not
+/// add or remove work while the runtime is being replaced.
+/// <https://doc.rust-lang.org/std/time/struct.Instant.html#underlying-system-calls>
+#[cfg(unix)]
+fn handover_clock_ms() -> Option<u64> {
+    #[cfg(target_vendor = "apple")]
+    let clock = libc::CLOCK_UPTIME_RAW;
+    #[cfg(not(target_vendor = "apple"))]
+    let clock = libc::CLOCK_MONOTONIC;
+    let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: this clock is supported by the platform and `time` is a valid
+    // writable timespec. No descriptor or process ownership is involved.
+    if unsafe { libc::clock_gettime(clock, &mut time) } != 0 {
+        log::error!("read the activity handover clock: {}", std::io::Error::last_os_error());
+        return None;
+    }
+    u64::try_from(time.tv_sec).ok()?.checked_mul(1000)?
+        .checked_add(u64::try_from(time.tv_nsec).ok()? / 1_000_000)
+}
+
+// Exec handovers are Unix-only; keep the activity store portable.
+#[cfg(not(unix))]
+fn handover_clock_ms() -> Option<u64> {
+    None
 }
 
 impl Tabs {
@@ -229,20 +261,25 @@ impl Tabs {
     }
 
     /// Each tab's state, as a handover carries it.
-    fn carried(&self, clock: Instant) -> Vec<CarriedTab> {
+    fn carried(&self, clock: Instant, captured_monotonic_ms: Option<u64>) -> Vec<CarriedTab> {
         let ago = |started: Instant| u64::try_from(clock.saturating_duration_since(started).as_millis()).unwrap_or(u64::MAX);
         self.0.iter().map(|(key, mirror)| CarriedTab {
             key: key.clone(),
             state: mirror.state,
             opened: mirror.opened.map(|(at, started)| (at, ago(started))),
+            captured_monotonic_ms,
         }).collect()
     }
 
     /// Go on from the states a handover carried, as if this process had
     /// counted them itself.
-    fn carry_on(&mut self, tabs: Vec<CarriedTab>, clock: Instant) {
+    fn carry_on(&mut self, tabs: Vec<CarriedTab>, clock: Instant, monotonic_ms: Option<u64>) {
         for tab in tabs {
-            let opened = tab.opened.map(|(at, ago)| (at, clock.checked_sub(Duration::from_millis(ago)).unwrap_or(clock)));
+            let during = tab.captured_monotonic_ms.zip(monotonic_ms)
+                .map_or(0, |(captured, now)| now.saturating_sub(captured));
+            let opened = tab.opened.map(|(at, ago)| {
+                (at, clock.checked_sub(Duration::from_millis(ago.saturating_add(during))).unwrap_or(clock))
+            });
             self.0.insert(tab.key, Mirror { state: tab.state, opened });
         }
     }
@@ -834,7 +871,10 @@ pub fn carried() -> Vec<CarriedTab> {
     if !writer() {
         return Vec::new();
     }
-    with_owner(|owner| Ok(owner.tabs().carried(Instant::now()))).unwrap_or_else(|error| {
+    with_owner(|owner| {
+        let clock = Instant::now();
+        Ok(owner.tabs().carried(clock, handover_clock_ms()))
+    }).unwrap_or_else(|error| {
         log::error!("read agent activity for the handover: {error:#}");
         Vec::new()
     })
@@ -849,7 +889,7 @@ pub fn carry_on(tabs: Vec<CarriedTab>) {
         return;
     }
     if let Err(error) = with_owner(|owner| {
-        owner.tabs().carry_on(tabs, Instant::now());
+        owner.tabs().carry_on(tabs, Instant::now(), handover_clock_ms());
         Ok(())
     }) {
         log::error!("take over agent activity: {error:#}");
