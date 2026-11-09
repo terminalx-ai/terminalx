@@ -474,7 +474,7 @@ it("keeps the current discard dialog and Viewed controls together in All changes
   expect(source.discard).not.toHaveBeenCalled();
   const dialog = await screen.findByRole("dialog");
   source.changesBetween.mockResolvedValue([]);
-  fireEvent.click(within(dialog).getByRole("button", { name: "Discard", exact: true }));
+  fireEvent.click(within(dialog).getByRole("button", { name: /^Discard$/ }));
   await waitFor(() => expect(source.discard).toHaveBeenCalledWith("edited.ts", "merge-base", undefined));
   await screen.findByText("All changes · 0 files");
 });
