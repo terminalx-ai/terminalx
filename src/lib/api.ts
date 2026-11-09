@@ -2164,10 +2164,15 @@ export interface PrAssociation {
   scope: PrScope;
 }
 
+/** Owner-issued privacy provenance for one Actions click, reused unchanged
+ * across its IPC continuations. It holds no native lease or credentials. */
+export type CheckAuthority = Readonly<{ owner: string; epoch: number | null }>;
+
 export const gh = {
+  checkAuthority: () => invoke<CheckAuthority>("pr_check_authority"),
   checkLog: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<CheckLog>("pr_check_log", { cwd, prUrl, checkUrl, failed }),
-  rerunCheck: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<void>("pr_check_rerun", { cwd, prUrl, checkUrl, failed }),
-  fixAttachment: (sessionId: string, tabId: string, prUrl: string) => invoke<{ path: string; truncated: boolean }>("pr_check_fix_attachment", { sessionId, tabId, prUrl }),
+  rerunCheck: (cwd: string, prUrl: string, checkUrl: string, failed: boolean, authority: CheckAuthority) => invoke<void>("pr_check_rerun", { cwd, prUrl, checkUrl, failed, authority }),
+  fixAttachment: (sessionId: string, tabId: string, prUrl: string, authority: CheckAuthority) => invoke<{ path: string; truncated: boolean }>("pr_check_fix_attachment", { sessionId, tabId, prUrl, authority }),
   reviewFiles: (url: string, head: string, base: string) => invoke<import("./reviewThreads").ReviewFile[]>("pr_review_files", { url, head, base }),
   reviewThreads: (url: string) => invoke<import("./reviewThreads").ReviewThreads>("pr_review_threads", { url }),
   resolveReview: (url: string, threadId: string, resolved: boolean) => invoke<void>("pr_review_resolve", { url, threadId, resolved }),
@@ -2176,8 +2181,8 @@ export const gh = {
   available: () => invoke<boolean>("gh_available"),
   associationsBatch: (sessionIds: string[]) => invoke<Record<string, PrAssociation[]>>("pr_associations_batch", { sessionKeys: sessionIds }),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
-  list: (cwd: string, branch: string) => invoke<PullRequest[]>("pr_list", { cwd, branch }),
-  details: (cwd: string, number: number, url?: string) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}) }),
+  list: (cwd: string, branch: string, authority?: CheckAuthority) => invoke<PullRequest[]>("pr_list", { cwd, branch, ...(authority ? { authority } : {}) }),
+  details: (cwd: string, number: number, url?: string, authority?: CheckAuthority) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}), ...(authority ? { authority } : {}) }),
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
     invoke<string>("pr_create", { cwd, title, body, base, draft, ...(sessionId ? { sessionId } : {}) }),
   merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase" | "queue", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),

@@ -2,7 +2,7 @@ import { reviewFileReader } from "./reviewThreads";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
-import { api, errorMessage, gh, git, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
+import { api, errorMessage, gh, git, type CheckAuthority, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
 import type { BranchInfo, ChangedFile, CommitInfo, UnfinishedMerge, WorkStatus } from "@/types/session";
 
 /** A workspace's Git status, with what is left in progress in it. */
@@ -51,7 +51,8 @@ export interface GitSource {
   ghAvailable(): Promise<boolean>;
   /** Actions operations are optional for runtimes that cannot yet serve logs. */
   checkLog?(prUrl: string, checkUrl: string, failed: boolean): Promise<CheckLog>;
-  rerunCheck?(prUrl: string, checkUrl: string, failed: boolean): Promise<void>;
+  checkAuthority?(): Promise<CheckAuthority>;
+  rerunCheck?(prUrl: string, checkUrl: string, failed: boolean, authority: CheckAuthority): Promise<void>;
   prs(branch: string): Promise<PullRequest[]>;
   /** Review threads through this source's GitHub credentials, when supported. */
   reviewThreads?(url: string): import("./reviewThreads").ReviewThreadAccess;
@@ -71,8 +72,9 @@ export interface GitSource {
 const locals = new Map<string, GitSource>();
 
 /** The local checkout at `cwd`, through the existing Tauri commands. */
-export function localGitSource(cwd: string): GitSource {
-  const known = locals.get(cwd);
+export function localGitSource(cwd: string, authority?: CheckAuthority): GitSource {
+  // Action-scoped readers must not enter the ordinary source cache.
+  const known = authority ? undefined : locals.get(cwd);
   if (known) return known;
   const source: GitSource = {
     key: `local:${cwd}`,
@@ -96,8 +98,9 @@ export function localGitSource(cwd: string): GitSource {
     abortMerge: (merge) => git.abortMerge(cwd, merge.head, merge.mergeHead),
     ghAvailable: () => gh.available(),
     checkLog: (prUrl, checkUrl, failed) => gh.checkLog(cwd, prUrl, checkUrl, failed),
-    rerunCheck: (prUrl, checkUrl, failed) => gh.rerunCheck(cwd, prUrl, checkUrl, failed),
-    prs: (branch) => gh.list(cwd, branch),
+    checkAuthority: () => gh.checkAuthority(),
+    rerunCheck: (prUrl, checkUrl, failed, original) => gh.rerunCheck(cwd, prUrl, checkUrl, failed, original),
+    prs: (branch) => gh.list(cwd, branch, authority),
     reviewThreads: (url) => ({
       read: () => gh.reviewThreads(url),
       file: reviewFileReader((snapshot) => gh.reviewFiles(url, snapshot.headOid, snapshot.baseOid)),
@@ -108,7 +111,7 @@ export function localGitSource(cwd: string): GitSource {
     prAccess: (association) => {
       if (association.scope.kind !== "local") throw new Error("Reconnect this PR's cloud workspace to refresh it.");
       return {
-        read: () => gh.details(cwd, association.number, association.url),
+        read: () => gh.details(cwd, association.number, association.url, authority),
         ready: () => gh.ready(cwd, association.number, association.url),
         merge: (method) => gh.merge(cwd, association.number, method, association.url),
       };
@@ -119,7 +122,7 @@ export function localGitSource(cwd: string): GitSource {
     errorMessage,
   };
   if (locals.size > 64) locals.clear();
-  locals.set(cwd, source);
+  if (!authority) locals.set(cwd, source);
   return source;
 }
 

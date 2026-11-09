@@ -22,6 +22,7 @@ function setup() {
     branch_overview: { branch: "feature", base: "origin/main", onBase: false, ahead: 1, behind: 0, commits: [], baseCommits: [], contributors: [], baseContributors: [], upstream: "origin/feature", unpushed: 0, unpulled: 0, incoming: [], dirty: false, changed: 0, hasRemote: true, merge: { state: "clean", conflicted: [] } },
     git_identity: { name: "Developer", email: "dev@example.test" },
     pr_check_log: (args) => { window.__checks.logs.push(args); return { text: "test\tRun tests\t^[[31;1mFAIL^[[0m expected 2, received 1\n" + "diagnostic output ".repeat(25), truncated: true }; },
+    pr_check_authority: { owner: "webkit-policy", epoch: 0 },
     pr_check_rerun: (args) => { window.__checks.reruns.push(args); return null; },
     pr_check_fix_attachment: { path: "/attachments/local-s1/check-failures.log", truncated: true },
     send_message: (args) => { window.__checks.prompts.push(args); return { events: [], queued: false }; },

@@ -2994,8 +2994,8 @@ pub async fn pr_associations_batch(session_keys: Vec<String>) -> CmdResult<std::
 }
 
 #[tauri::command]
-pub async fn pr_list(cwd: String, branch: String) -> CmdResult<Vec<crate::github::PullRequest>> {
-    github_work(move || crate::github::panel_prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
+pub async fn pr_list(cwd: String, branch: String, authority: Option<crate::data_privacy::Ticket>) -> CmdResult<Vec<crate::github::PullRequest>> {
+    github_action_work(authority, move || crate::github::panel_prs_for_branch(Path::new(&cwd), &branch).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -3004,8 +3004,18 @@ pub async fn pr_landed(cwd: String) -> CmdResult<crate::landed::Landed> {
 }
 
 #[tauri::command]
-pub async fn pr_details(cwd: String, number: u64, url: Option<String>) -> CmdResult<crate::github::PullRequest> {
-    github_work(move || crate::github::panel_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+pub async fn pr_details(cwd: String, number: u64, url: Option<String>, authority: Option<crate::data_privacy::Ticket>) -> CmdResult<crate::github::PullRequest> {
+    github_action_work(authority, move || crate::github::panel_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+/// Capture once at the start of a desktop Actions click/shortcut. The owner
+/// incarnation and epoch survive delayed IPC replies; serialization transfers
+/// no live lease. Every physical request still re-admits this original ticket.
+#[tauri::command]
+pub fn pr_check_authority() -> CmdResult<crate::data_privacy::Ticket> {
+    let ticket = crate::github_process::ticket();
+    ticket.enter().map_err(err)?;
+    Ok(ticket)
 }
 
 #[tauri::command]
@@ -3014,13 +3024,13 @@ pub async fn pr_check_log(cwd: String, pr_url: String, check_url: String, failed
 }
 
 #[tauri::command]
-pub async fn pr_check_rerun(cwd: String, pr_url: String, check_url: String, failed: bool) -> CmdResult<()> {
-    github_work(move || crate::github::checks::rerun(Path::new(&cwd), &pr_url, &check_url, failed).map_err(err)).await.map_err(err)?
+pub async fn pr_check_rerun(cwd: String, pr_url: String, check_url: String, failed: bool, authority: crate::data_privacy::Ticket) -> CmdResult<()> {
+    github_action_work(Some(authority), move || crate::github::checks::rerun(Path::new(&cwd), &pr_url, &check_url, failed).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub async fn pr_check_fix_attachment(session_id: String, tab_id: String, pr_url: String) -> CmdResult<crate::github::checks::FixAttachment> {
-    github_work(move || crate::github::checks::prepare_fix(&session_id, &tab_id, &pr_url).map_err(err)).await.map_err(err)?
+pub async fn pr_check_fix_attachment(session_id: String, tab_id: String, pr_url: String, authority: crate::data_privacy::Ticket) -> CmdResult<crate::github::checks::FixAttachment> {
+    github_action_work(Some(authority), move || crate::github::checks::prepare_fix(&session_id, &tab_id, &pr_url).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -3486,6 +3496,14 @@ pub fn transcription_set_mute(state: State<'_, AppState>, mute: bool) -> CmdResu
 fn github_work<F, R>(work: F) -> tauri::async_runtime::JoinHandle<R>
 where F: FnOnce() -> R + Send + 'static, R: Send + 'static {
     tauri::async_runtime::spawn_blocking(crate::github_process::queued(work))
+}
+
+// An explicit Actions authority must never fall back to the current epoch,
+// even when it has expired. Ordinary single-request reads capture before queueing.
+fn github_action_work<F, R>(authority: Option<crate::data_privacy::Ticket>, work: F) -> tauri::async_runtime::JoinHandle<R>
+where F: FnOnce() -> R + Send + 'static, R: Send + 'static {
+    let ticket = authority.unwrap_or_else(crate::github_process::ticket);
+    tauri::async_runtime::spawn_blocking(move || crate::github_process::with_ticket(ticket, work))
 }
 
 // ------------------------------------------------------------------ issues

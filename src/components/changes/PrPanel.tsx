@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { api, type PullRequest } from "@/lib/api";
 import { sessionPrs, type SessionPr } from "@/lib/sessionPrs";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
@@ -235,8 +236,9 @@ export function PrPanel({
       actionError.current = source.errorMessage(e);
       setError(actionError.current);
       setErrorFrom("action");
-      // A refusal may still have changed something (a lost answer): read GitHub again.
-      setTick((t) => t + 1);
+      // Reconcile a lost answer, but a revoked action cannot start a fresh
+      // generation of reads. Normal refresh/new actions remain available.
+      if (!actionError.current.includes(PRIVACY_MESSAGE)) setTick((t) => t + 1);
       return false;
     } finally {
       if (actionLock.current === generation) actionLock.current = null;
@@ -245,12 +247,13 @@ export function PrPanel({
   };
 
   const rerun = (pr: PullRequest, failedOnly: boolean) => void act("rerun", async () => {
-    if (!source.canWrite || !source.rerunCheck) throw new Error("Re-running checks is unavailable here.");
+    if (!source.canWrite || !source.rerunCheck || !source.checkAuthority) throw new Error("Re-running checks is unavailable here.");
     const checks = actionsRuns(pr, failedOnly);
+    const authority = await source.checkAuthority();
     for (const check of checks) {
       // A navigation during a batch cancels the remaining outward actions.
       if (!mounted.current || selected.current.generation !== generation) return;
-      await source.rerunCheck(pr.url, check.url!, failedOnly);
+      await source.rerunCheck(pr.url, check.url!, failedOnly, authority);
       if (!mounted.current || selected.current.generation !== generation) return;
       const runId = check.actions!.runId;
       setPendingRuns((old) => [...old.filter((p) => p.until > Date.now() && !(p.prUrl === pr.url && p.runId === runId)), {

@@ -31,12 +31,17 @@ fn install(root: &Path, cwd: &Path) {
         "number":7,"url":PR,"state":"OPEN","headRefOid":"head",
         "statusCheckRollup":[{"name":"build","conclusion":"FAILURE","detailsUrl":RUN}]
     })).unwrap();
+    let pr: serde_json::Value = store::read_json(&root.join("actions-pr")).unwrap().unwrap();
+    store::write_json(&root.join("actions-list"), &json!([pr])).unwrap();
+    let panel: serde_json::Value = serde_json::from_str(include_str!("fixtures/github_pr_panel.json")).unwrap();
+    store::write_json(&root.join("actions-queue"), &panel["queue"]).unwrap();
     let entry: store::index::SessionEntry = serde_json::from_value(json!({
         "id":SESSION,"projectPath":cwd,"cwd":cwd,"title":"Actions privacy",
         "created":"2026-11-09T00:00:00Z","modified":"2026-11-09T00:00:00Z",
         "tabs":[{"id":TAB,"harness":"claude","created":"2026-11-09T00:00:00Z"}]
     })).unwrap();
     store::index::update(|entries| { entries.push(entry); Ok(()) }).unwrap();
+    crate::pr_associations::record_local(SESSION, cwd, PR, "main").unwrap();
     // fixture() already made this executable and installed its bin directory.
     std::fs::write(root.join("bin/gh"), r#"#!/bin/sh
 printf 'gh %s\n' "$*" >> "$TERMINALX_HOME/launches"
@@ -52,9 +57,13 @@ esac
 case "$*" in
  'run view --job '*) printf '{"databaseId":42}\n' ;;
  'run view 42 '*--json*) printf '{"databaseId":42,"headSha":"head"}\n' ;;
+ 'run view 43 '*--json*) printf '{"databaseId":43,"headSha":"head"}\n' ;;
  'run view 42 '*--log*) exec /bin/cat "$TERMINALX_HOME/actions-log" ;;
+ 'pr list '*) exec /bin/cat "$TERMINALX_HOME/actions-list" ;;
+ 'pr checks '*) printf '[]\n' ;;
+ 'api graphql '*) exec /bin/cat "$TERMINALX_HOME/actions-queue" ;;
  'pr view '*) exec /bin/cat "$TERMINALX_HOME/actions-pr" ;;
- 'run rerun 42 '*) : > "$TERMINALX_HOME/reran" ;;
+ 'run rerun 42 '*|'run rerun 43 '*) printf '%s\n' "$3" >> "$TERMINALX_HOME/reran" ;;
  *) printf 'Unexpected gh call: %s\n' "$*" >&2; exit 9 ;;
 esac
 "#).unwrap();
@@ -176,9 +185,9 @@ fn ipc_queues(root: &Path, cwd: &Path, managed: bool) {
     async fn invoke(operation: &str, cwd: &Path) -> Result<(), String> {
         match operation {
             "log" => assert_log(crate::commands::pr_check_log(cwd.to_string_lossy().into_owned(), PR.into(), RUN.into(), true).await?),
-            "rerun" => crate::commands::pr_check_rerun(cwd.to_string_lossy().into_owned(), PR.into(), RUN.into(), true).await?,
+            "rerun" => crate::commands::pr_check_rerun(cwd.to_string_lossy().into_owned(), PR.into(), RUN.into(), true, data_privacy::Ticket::default()).await?,
             "fix" => {
-                let result = crate::commands::pr_check_fix_attachment(SESSION.into(), TAB.into(), PR.into()).await?;
+                let result = crate::commands::pr_check_fix_attachment(SESSION.into(), TAB.into(), PR.into(), data_privacy::Ticket::default()).await?;
                 assert_log(CheckLog { text: std::fs::read_to_string(result.path).unwrap(), truncated: result.truncated });
             }
             _ => unreachable!(),
@@ -187,6 +196,7 @@ fn ipc_queues(root: &Path, cwd: &Path, managed: bool) {
     }
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).max_blocking_threads(1).enable_all().build().unwrap();
     tauri::async_runtime::set(runtime.handle().clone());
+    ipc_continuations(root, cwd, managed, &runtime);
     for operation in ["log", "rerun", "fix"] {
         policy(true, managed);
         let before = launches(root);
@@ -205,5 +215,83 @@ fn ipc_queues(root: &Path, cwd: &Path, managed: bool) {
         assert_eq!(launches(root), before, "{operation} IPC captured after dispatch");
         runtime.block_on(invoke(operation, cwd)).unwrap();
         assert!(launches(root) >= before + 2);
+    }
+}
+
+/// The prior per-process pauses cannot expose renewal AFTER an IPC has fully
+/// completed. These calls use serialized owner tickets across that exact gap.
+#[cfg(feature = "desktop")]
+fn ipc_continuations(root: &Path, cwd: &Path, managed: bool, runtime: &tokio::runtime::Runtime) {
+    use crate::commands;
+    let path = cwd.to_string_lossy().into_owned();
+    let wire = |ticket: data_privacy::Ticket| -> data_privacy::Ticket {
+        serde_json::from_value(serde_json::to_value(ticket).unwrap()).unwrap()
+    };
+    let runs = || std::fs::read_to_string(root.join("reran")).unwrap_or_default();
+    let attachments = || std::fs::read_dir(store::attachments_dir(SESSION).unwrap()).unwrap().count();
+    policy(true, managed);
+    assert!(commands::pr_check_authority().unwrap_err().contains(data_privacy::MESSAGE));
+    policy(false, managed);
+    let mut old_owner = serde_json::to_value(commands::pr_check_authority().unwrap()).unwrap();
+    old_owner["owner"] = "previous-runtime-incarnation".into();
+    let before = launches(root);
+    assert!(runtime.block_on(commands::pr_check_rerun(path.clone(), PR.into(), RUN.into(), false, serde_json::from_value(old_owner).unwrap())).unwrap_err().contains(data_privacy::MESSAGE));
+    assert_eq!(launches(root), before, "a foreign/old owner must not become current authority");
+    for cycle in [false, true] {
+        println!("Actions completed IPC continuation: managed={managed}, off/on={cycle}");
+        let _ = std::fs::remove_file(root.join("reran"));
+        let ticket = wire(commands::pr_check_authority().unwrap());
+        runtime.block_on(commands::pr_check_rerun(path.clone(), PR.into(), RUN.into(), false, wire(ticket.clone()))).unwrap();
+        assert_eq!(runs(), "42\n", "first completed mutation must be retained");
+        let before = launches(root);
+        // There is no active worker or lease here: model an unread completed
+        // reply/paused JavaScript continuation, then acknowledge the setting.
+        policy(true, managed);
+        if cycle { policy(false, managed); }
+        let second = "https://github.com/privacy/fixture/actions/runs/43";
+        let error = runtime.block_on(commands::pr_check_rerun(path.clone(), PR.into(), second.into(), false, wire(ticket))).unwrap_err();
+        assert!(error.contains(data_privacy::MESSAGE), "{error}");
+        assert_eq!(launches(root), before, "old click started the next workflow");
+        assert_eq!(runs(), "42\n");
+        policy(false, managed);
+        assert_eq!(launches(root), before, "restoration cannot replay the old click");
+        runtime.block_on(commands::pr_check_rerun(path.clone(), PR.into(), second.into(), false, wire(commands::pr_check_authority().unwrap()))).unwrap();
+        assert_eq!(runs(), "42\n43\n");
+
+        // Both discovery and associated-PR reads occur outside attachment
+        // collection. Exercise each completed IPC, plus a held capture reply.
+        for completed in ["capture", "discovery", "associated"] {
+            let ticket = wire(commands::pr_check_authority().unwrap());
+            if completed != "capture" {
+                let prs = runtime.block_on(commands::pr_list(path.clone(), "main".into(), Some(wire(ticket.clone())))).unwrap();
+                assert_eq!(prs.len(), 1); assert_eq!(prs[0].url, PR);
+                let owned = runtime.block_on(commands::pr_associations(SESSION.into(), vec![])).unwrap();
+                assert_eq!(owned.len(), 1); assert_eq!(owned[0].url, PR);
+            }
+            if completed == "associated" {
+                let pr = runtime.block_on(commands::pr_details(path.clone(), 7, Some(PR.into()), Some(wire(ticket.clone())))).unwrap();
+                assert_eq!(pr.url, PR);
+            }
+            let before = launches(root);
+            let files = attachments();
+            policy(true, managed);
+            if cycle { policy(false, managed); }
+            // Every later network-capable step must refuse the same ticket,
+            // including an association fallback and the final log collection.
+            assert!(runtime.block_on(commands::pr_list(path.clone(), "main".into(), Some(wire(ticket.clone())))).unwrap_err().contains(data_privacy::MESSAGE));
+            assert!(runtime.block_on(commands::pr_details(path.clone(), 7, Some(PR.into()), Some(wire(ticket.clone())))).unwrap_err().contains(data_privacy::MESSAGE));
+            assert!(runtime.block_on(commands::pr_check_fix_attachment(SESSION.into(), TAB.into(), PR.into(), wire(ticket))).unwrap_err().contains(data_privacy::MESSAGE));
+            assert_eq!(launches(root), before, "{completed} renewed discovery authority");
+            assert_eq!(attachments(), files, "refused collection wrote an attachment");
+            assert_eq!(runtime.block_on(commands::pr_associations(SESSION.into(), vec![])).unwrap().len(), 1, "local ownership survives");
+            policy(false, managed);
+            assert_eq!(launches(root), before);
+            let fresh = wire(commands::pr_check_authority().unwrap());
+            assert_eq!(runtime.block_on(commands::pr_list(path.clone(), "main".into(), Some(wire(fresh.clone())))).unwrap().len(), 1);
+            assert_eq!(runtime.block_on(commands::pr_details(path.clone(), 7, Some(PR.into()), Some(wire(fresh.clone())))).unwrap().url, PR);
+            let restored = runtime.block_on(commands::pr_check_fix_attachment(SESSION.into(), TAB.into(), PR.into(), fresh)).unwrap();
+            assert_log(CheckLog { text: std::fs::read_to_string(restored.path).unwrap(), truncated: restored.truncated });
+            assert_eq!(attachments(), files + 1);
+        }
     }
 }

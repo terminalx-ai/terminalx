@@ -127,8 +127,8 @@ pub(super) fn ipc_queues(root: &Path, cwd: &Path, managed: bool, runtime: &tokio
     async fn invoke(operation: &str, cwd: &Path) -> bool {
         let path = cwd.to_string_lossy().into_owned();
         match operation {
-            "list" => crate::commands::pr_list(path, "main".into()).await.is_ok_and(panel_ok),
-            "details" => crate::commands::pr_details(path, 7, None).await.is_ok_and(|pr| panel_ok(vec![pr])),
+            "list" => crate::commands::pr_list(path, "main".into(), None).await.is_ok_and(panel_ok),
+            "details" => crate::commands::pr_details(path, 7, None, None).await.is_ok_and(|pr| panel_ok(vec![pr])),
             "queue" => crate::commands::pr_merge(path, 7, "queue".into(), None).await.is_ok(),
             _ => unreachable!(),
         }

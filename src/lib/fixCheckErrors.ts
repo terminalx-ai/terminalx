@@ -33,9 +33,11 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled }: {
     locked.current = generation;
     setState({ key, busy: true });
     try {
+      const authority = await gh.checkAuthority();
+      if (!isCurrent()) return;
       let pr = given;
       if (!pr) {
-        const source = localGitSource(cwd);
+        const source = localGitSource(cwd, authority);
         const status = await source.workStatus();
         const result = await sessionPrs(source, sessionId, status.branch === status.defaultBranch ? null : status.branch ?? branch ?? null, isCurrent);
         if (result.error) throw new Error(result.error);
@@ -45,7 +47,7 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled }: {
       }
       if (!isCurrent()) return;
       if (!pr) throw new Error("No failing GitHub Actions checks were found for this session.");
-      const attachment = await gh.fixAttachment(sessionId, tabId, pr.url);
+      const attachment = await gh.fixAttachment(sessionId, tabId, pr.url, authority);
       // Log downloads can take time. Never send after the reader changes tabs,
       // sessions, or closes this view, and never retry a send automatically.
       if (!isCurrent()) return;

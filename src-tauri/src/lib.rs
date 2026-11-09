@@ -726,6 +726,7 @@ pub fn run() {
             commands::pr_create,
             commands::pr_merge,
             commands::pr_ready,
+            commands::pr_check_authority,
             commands::pr_check_log,
             commands::pr_check_rerun,
             commands::pr_check_fix_attachment,
