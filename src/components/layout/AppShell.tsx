@@ -1,3 +1,5 @@
+import { bootSelfUi } from "@/lib/selfUi";
+import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
 import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
@@ -120,6 +122,7 @@ export function AppShell() {
     startIdleArchive();
     void bootAutomations();
     void bootIssuePipelines();
+    void bootSelfUi();
     void loadModels();
     startNotifications();
     void bootStatus();
@@ -228,6 +231,7 @@ export function AppShell() {
 
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
+      <SelfUiAccess />
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <MergedCleanupNotices />
         <CloseUndoNotices />

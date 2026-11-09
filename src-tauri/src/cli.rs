@@ -104,6 +104,8 @@ Usage:
   terminalx issues create --project PROJECT [--provider github|linear] --title TEXT
       [--body TEXT|--body-file PATH] [--team TEAM] [--assignee USER...] [--label LABEL...]
       [--state STATE] [--priority none|urgent|high|medium|low] [--json]
+  terminalx pipelines start SESSION-OR-TAB [--adopt-pr] [--auto-merge|--no-auto-merge]
+      [--resolve-conflicts|--no-resolve-conflicts] [--json]
   terminalx pipelines list [--project PROJECT] [--json]
   terminalx pipelines show PIPELINE [--project PROJECT] [--json]
   terminalx pipelines auto-merge PIPELINE on|off [--project PROJECT] [--json]
@@ -964,7 +966,7 @@ const ISSUE_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Where an issue command runs from. The app finds the project from it and
 /// names the session in its question; it decides nothing, since any process
 /// can say anything here. Confirmation policy does not trust these claims.
-fn issue_caller() -> Value {
+pub(crate) fn issue_caller() -> Value {
     let present = |name: &str| std::env::var(name).ok().filter(|value| !value.trim().is_empty());
     json!({
         "session": present("RACCOON_SESSION_ID"),
@@ -1010,6 +1012,17 @@ fn list_values(value: &str) -> Vec<String> {
 fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
     let command = tokens.required_front("pipelines command")?;
     match command.as_str() {
+        "start" | "attach" => {
+            let adopt_pr = tokens.flag("--adopt-pr")?;
+            let auto_merge = match (tokens.flag("--auto-merge")?, tokens.flag("--no-auto-merge")?) {
+                (true, true) => return Err(invalid("--auto-merge and --no-auto-merge are mutually exclusive.")),
+                (true, false) => Some(true), (false, true) => Some(false), (false, false) => None,
+            };
+            let resolve_conflicts = conflict_switch(tokens)?;
+            let target = tokens.required_front("existing session or author tab")?;
+            tokens.finish()?;
+            Ok(Action::Rpc { command: "pipelines.start".into(), params: json!({"target": target, "adoptPr": adopt_pr, "autoMerge": auto_merge, "resolveConflicts": resolve_conflicts, "caller": issue_caller()}), timeout: PIPELINE_TIMEOUT })
+        }
         "list" => {
             let project = tokens.option("--project")?;
             rpc("pipelines.list", json!({"project": project}), tokens)
@@ -1543,6 +1556,17 @@ mod tests {
                 assert!(text.contains(command), "missing {command}");
             }
         }
+    }
+
+    #[test]
+    fn existing_session_autopilot_needs_no_new_author_and_keeps_choices() {
+        let (command, params, _) = issue_rpc(&["pipelines", "start", "author-tab", "--adopt-pr", "--no-auto-merge", "--resolve-conflicts"]);
+        assert_eq!(command, "pipelines.start");
+        assert_eq!(params, json!({"target":"author-tab","adoptPr":true,"autoMerge":false,"resolveConflicts":true}));
+        assert_eq!(rpc_of(&["pipelines", "attach", "session"]).0, "pipelines.start");
+        assert!(parse(&args(&["pipelines", "start"])).is_err());
+        assert!(parse(&args(&["pipelines", "start", "s", "--auto-merge", "--no-auto-merge"])).is_err());
+        assert!(parse(&args(&["pipelines", "start", "s", "--force"])).is_err());
     }
 
     #[test]

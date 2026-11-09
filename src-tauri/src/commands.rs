@@ -3669,6 +3669,12 @@ pub async fn issue_pipeline_start(app: AppHandle, session_id: String, tab_id: St
 }
 
 #[tauri::command]
+pub async fn issue_pipeline_attach(app: AppHandle, session_id: String, tab_id: String, auto_merge: bool, resolve_conflicts: bool) -> CmdResult<StartedIssuePipeline> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("attach", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"autoMerge":auto_merge,"resolveConflicts":resolve_conflicts})).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn issue_pipeline_continue(app: AppHandle, session_id: String, tab_id: String, options: crate::issue_pipeline::LaunchOptions) -> CmdResult<Option<StartedIssuePipeline>> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.pipeline("continue", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"options":options})).map_err(err)).await.map_err(err)?

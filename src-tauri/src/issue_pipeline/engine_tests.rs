@@ -125,6 +125,7 @@ struct World {
     abort_error: Option<String>,
     reviewer_tabs: bool,
     announced: u32,
+    during_changed: Option<Hook>,
     issue_body: Option<String>,
     push_error: Option<String>,
     send_error: Option<String>,
@@ -208,6 +209,7 @@ impl FakeHost {
             abort_error: None,
             reviewer_tabs: false,
             announced: 0,
+            during_changed: None,
             issue_body: Some("Sessions stop at code.".into()),
             push_error: None,
             send_error: None,
@@ -539,7 +541,8 @@ impl Host for FakeHost {
     }
 
     fn changed(&self, _pipeline: &Pipeline) {
-        self.world().announced += 1;
+        let hook = { let mut world = self.world(); world.announced += 1; world.during_changed.take() };
+        if let Some(hook) = hook { hook(); }
     }
 }
 
@@ -3639,4 +3642,123 @@ fn carrying_on_from_an_aborted_resolution_resolves_a_conflict_only_github_finds(
     assert_eq!(carried.resolution.as_ref().map(|resolution| resolution.head.as_str()), Some(C1));
     assert_eq!(run.host.prompts_to("resolver").len(), 2);
     assert_eq!(run.host.world().pushes, [C1]);
+}
+
+// #871: start/attach uses the original conversation and exact existing PR.
+fn existing_pr_host() -> FakeHost {
+    let host = FakeHost::new(&github_issue());
+    host.push(Path::new("/repo")).unwrap();
+    host.create_pull_request(Path::new("/repo"), "Already reviewed", "Keep this body").unwrap();
+    host.world().pushes.clear();
+    host.world().created.clear();
+    host.world().reviewer_tabs = true;
+    host
+}
+fn cli_actor() -> super::SwitchActor {
+    super::SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t1".into()) }
+}
+#[test]
+fn existing_session_start_is_idempotent_and_sends_the_brief_once() {
+    let _home = crate::store::temp_home();
+    let host = FakeHost::new(&github_issue());
+    let p = engine::start_existing(&host, "author", "t1", Some(false), Some(false), false, cli_actor()).unwrap();
+    assert_eq!(p.author, SessionRef { session_id: "author".into(), tab_id: "t1".into() });
+    assert_eq!(host.world().sessions.len(), 1);
+    assert_eq!(host.prompts_to("author").len(), 1);
+    assert_eq!(p.events.last().unwrap().actor, Some(cli_actor()));
+    let repeated = engine::start_existing(&host, "author", "t1", Some(true), Some(true), false, cli_actor()).unwrap();
+    assert_eq!(repeated.id, p.id);
+    assert!(!repeated.auto_merge && !repeated.resolve_conflicts);
+    assert_eq!(host.prompts_to("author").len(), 1);
+    assert_eq!(store::list().unwrap().len(), 1);
+}
+#[test]
+fn adoption_waits_for_idle_and_reviews_the_same_pr_without_push_or_history_changes() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+    let actor = super::SwitchActor::SelfUi { session_id: Some("author".into()), tab_id: Some("t1".into()) };
+    let p = engine::start_existing(&host, "author", "t1", Some(false), Some(false), true, actor.clone()).unwrap();
+    assert_eq!(p.pr.as_ref().unwrap().number, 7);
+    assert_eq!(p.stage, Stage::Merge);
+    assert_eq!(p.events.last().unwrap().actor, Some(actor));
+    poll(&host);
+    assert_eq!(host.world().reviewers, 0);
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::Idle;
+    poll(&host);
+    let reviewing = store::get(&p.id).unwrap();
+    assert_eq!(reviewing.stage, Stage::Review);
+    assert_eq!(reviewing.review_commit.as_deref(), Some(C1));
+    let reviewer = reviewing.reviewer.as_ref().unwrap();
+    assert_eq!(reviewer.session_id, "author");
+    assert_ne!(reviewer.tab_id, "t1");
+    let repeated = engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).unwrap();
+    assert_eq!(repeated.id, p.id);
+    let world = host.world();
+    assert_eq!(world.sessions.len(), 1);
+    assert_eq!(world.reviewers, 1);
+    assert!(world.pushes.is_empty() && world.created.is_empty() && world.edited.is_empty());
+    assert_eq!(world.pr.as_ref().unwrap().body, "Keep this body");
+}
+#[test]
+fn adoption_refuses_unmatched_or_dirty_work_without_creating_a_pipeline() {
+    let _home = crate::store::temp_home();
+    for condition in ["dirty", "head", "branch", "missing", "merging", "stdio"] {
+        let host = existing_pr_host();
+        {
+            let mut world = host.world();
+            match condition {
+                "dirty" => world.workspace.dirty.push("uncommitted.ts".into()),
+                "head" => world.workspace.head = C2.into(),
+                "branch" => world.pr.as_mut().unwrap().head = "another-branch".into(),
+                "missing" => world.pr = None,
+                "merging" => world.workspace.merging.push(BASE.into()),
+                "stdio" => world.sessions.get_mut("author").unwrap().tabs[0].transport = crate::store::index::AgentTransport::ExperimentalCodexStdio,
+                _ => unreachable!(),
+            }
+        }
+        assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err(), "{condition}");
+        assert!(store::list().unwrap().is_empty());
+        assert!(host.world().sent.is_empty());
+    }
+}
+#[test]
+fn adoption_preserves_person_only_merge_and_existing_author_ownership() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    host.world().settings.require_person = true;
+    // An existing issue pipeline at Work can adopt, too.
+    let original = start(&host, "author", "t1", Some(true), None).unwrap();
+    let p = engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).unwrap();
+    assert_eq!(p.id, original.id);
+    poll(&host);
+    let p = store::get(&p.id).unwrap();
+    let reviewer = p.reviewer.as_ref().unwrap();
+    assert!(engine::start_existing(&host, &reviewer.session_id, &reviewer.tab_id, None, None, true, cli_actor()).is_err());
+    turn_completed(&host, &reviewer.session_id, &reviewer.tab_id, Some(&reviewed(C1, "merge", "[]")));
+    assert!(host.world().merges.is_empty());
+    let p = store::get(&p.id).unwrap();
+    assert!(matches!(p.reason, Some(StopReason::PersonRequired)));
+    assert_eq!(p.author.tab_id, "t1");
+}
+
+#[test]
+fn adoption_does_not_overwrite_a_pipeline_that_advanced_or_stopped_during_creation() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    host.world().during_changed = Some(Box::new(|| {
+        let mut p = store::for_session("author").unwrap().unwrap();
+        p.stage = Stage::Review;
+        store::commit(&mut p).unwrap();
+    }));
+    assert!(engine::start_existing(&host, "author", "t1", Some(false), Some(false), true, cli_actor()).is_err());
+    let mut p = store::for_session("author").unwrap().unwrap();
+    assert_eq!(p.stage, Stage::Review);
+    assert!(p.pr.is_none());
+    assert!(!p.events.iter().any(|event| event.kind == "adopted"));
+    p.stage = Stage::Work;
+    store::commit(&mut p).unwrap();
+    engine::act_from_agent(&host, &p.id, Action::Stop).unwrap();
+    assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err());
+    assert!(store::get(&p.id).unwrap().stopped);
 }

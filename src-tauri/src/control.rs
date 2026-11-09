@@ -327,6 +327,9 @@ impl WindowControl {
                 action => pairing.change_share(session, action, params.clone()),
             }.map_err(ControlError::internal);
         }
+        if let Some(method) = command.strip_prefix("computer.selfUi.") {
+            return crate::self_ui::call(self.sink.as_ref(), self.questions.as_ref(), method, params);
+        }
         if let Some(method) = command.strip_prefix("computer.") {
             return self.computer.call(method, params, request_id).map_err(computer_error);
         }
@@ -492,6 +495,9 @@ impl ControlService {
                     action => pairing.change_share(session, action, params.clone()),
                 };
                 return result.map_err(ControlError::internal);
+            }
+            if let Some(method) = command.strip_prefix("computer.selfUi.") {
+                return crate::self_ui::call(self.sink.as_ref(), self.questions.as_ref(), method, params);
             }
             if let Some(method) = command.strip_prefix("computer.") {
                 // Computer-use errors keep their own codes: the skill guide
@@ -700,7 +706,7 @@ impl ControlService {
                 format!("{command} needs the TerminalX desktop app; terminalx-serve lists issues only."),
                 None::<String>,
             )),
-            "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
+            "pipelines.start" | "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -955,6 +961,17 @@ impl ControlService {
 
     fn pipelines(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::issue_pipeline::{engine, store};
+        if command == "pipelines.start" {
+            let target = resolve_target(&required_string(&params, "target")?)?;
+            self.manager.accepting_work().map_err(ControlError::internal)?;
+            let pipeline = engine::start_existing(&self.pipeline_host(), &target.session.id, &target.tab.id,
+                params["autoMerge"].as_bool(), params["resolveConflicts"].as_bool(), params["adoptPr"].as_bool().unwrap_or(false),
+                crate::issue_pipeline::SwitchActor::Cli {
+                    session_id: params["caller"]["session"].as_str().map(str::to_owned),
+                    tab_id: params["caller"]["tab"].as_str().map(str::to_owned),
+                }).map_err(ControlError::internal)?;
+            return Ok(json!({"pipeline": pipeline, "authorBrief": crate::issue_pipeline::prompts::author_brief()}));
+        }
         if command == "pipelines.list" {
             let mut pipelines = store::list().map_err(ControlError::internal)?;
             if let Some(selector) = optional_string(&params, "project") {

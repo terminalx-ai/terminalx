@@ -469,12 +469,42 @@ The response carries `pipeline` (or `null`, with the reason in `pipelineNote`, w
 has the pipeline turned off or the session is not on a branch of its own).
 
 ```text
+terminalx pipelines start <existing-session-or-author-tab> [--adopt-pr] \
+  [--auto-merge|--no-auto-merge] [--resolve-conflicts|--no-resolve-conflicts] --json
+terminalx pipelines attach <existing-session-or-author-tab> [--adopt-pr] --json
 terminalx pipelines list [--project <project>] --json
 terminalx pipelines show <pipeline> [--project <project>] --json
 terminalx pipelines auto-merge <pipeline> on|off [--project <project>] --json
 terminalx pipelines resolve-conflicts <pipeline> on|off [--project <project>] --json
 terminalx pipelines stop|resume|advance|review|merge|refresh <pipeline> [--project <project>] --json
 ```
+
+`start` (`attach` is an alias) activates Autopilot in an existing local session. A session
+selector uses its active author tab; use the exact tab id to avoid ambiguity. It preserves the
+session, conversation, checkout and branch. No new author is created. The project must allow
+pipelines and the checkout must be on a non-base branch; experimental stdio tabs are refused.
+With no existing pipeline, launch switches take the project's issue/session defaults unless
+specified. Repeating the command returns the same pipeline and does not resend the author brief
+or change its switches. Use the switch commands below to change an existing pipeline.
+
+Use `--adopt-pr` when the branch already has an open PR. TerminalX verifies the clean checkout
+matches that PR's branch and exact head before attaching it. It never pushes, rewrites history,
+edits the PR body or creates a replacement PR during adoption. The original author yields its
+turn; TerminalX then independently reviews the same PR, with the existing review, security,
+local-check and CI gates. Prior reviews are not imported as a fabricated TerminalX verdict.
+An existing pipeline at Work with no PR can adopt too; one already attached to a PR is returned
+unchanged. Reviewer/resolver tabs cannot take over as author. A stopped pipeline needs `resume`.
+
+Without `--adopt-pr`, a new pipeline sends its handoff brief to the original author once (queued
+when busy). The response includes `pipeline` and `authorBrief`; inspect its state/note if delivery
+fails. An existing open PR is reused later when the author reports completion. After attaching
+from the author tab, finish the turn so review can proceed. These commands need no UI grant and
+never authorize human-only confirmations, review extensions or security overrides.
+
+For explicitly authorized operation of the visible session controls, use
+`terminalx computer self-ui` as documented in `terminalx skills get computer-use`. Its expiring
+grant names one session, tab, main window and control allowlist. Raw self-app screenshots,
+accessibility trees and coordinate/keyboard actions remain protected.
 
 `<pipeline>` is a pipeline id or its unique prefix, the issue (`433`, `ENG-42`; the newest
 pipeline when an issue has several), or the author session's id. When more than one project
@@ -555,7 +585,8 @@ open, `terminalx computer` actions answer `confirmation_pending`: only the perso
 Do not try to work around any of this, and do not answer it for them: ask the person.
 
 What the confirmation is and is not: it stops mistakes, and an agent that only uses this app.
-TerminalX's computer use never operates TerminalX's own windows (`own_app_protected`), and on
+TerminalX's raw computer use protects its own windows (`own_app_protected`). The scoped
+`computer self-ui` route exposes approved session controls only, never confirmations. On
 macOS this version's helper serves only the app itself: an agent that talks to it directly, or
 starts its own copy of it, is refused. It does not stop a hostile program that drives the
 screen by other means: a computer-use helper from an older TerminalX (0.2.8 or earlier), which
@@ -640,7 +671,8 @@ request an explicit complete guide; the embedded guide is complete either way.
 
 The built-in browser is TerminalX's own Chromium, opened as a headed window the reader can see
 and take over, with tabs scoped to TerminalX workspaces. It is not the reader's Chrome or
-Safari and not TerminalX's own app chrome; for those use a desktop-control tool, not these
+Safari or TerminalX's own app chrome. Use desktop computer use for Safari, and scoped
+`computer self-ui` for approved TerminalX session controls, rather than these
 commands. Tabs and cookies persist in a browser profile under `$TERMINALX_HOME/browser`, so a
 login survives across commands and sessions.
 

@@ -1524,6 +1524,15 @@ impl Step<'_> {
     }
 
     fn evaluate_snapshot(&mut self, pr: PrSnapshot, merger: Merger) -> Result<()> {
+        // Adoption waits for the original author to yield the checkout. It
+        // does not trust an agent's assertion that an earlier review passed.
+        if pr.state == "OPEN" && self.p.round == 0 && self.p.events.iter().any(|event| event.kind == "adopted") {
+            if !self.ready_for_review(&pr.head_sha)? || !self.host.workspace_idle(&self.p, &self.cwd)? {
+                self.settle(State::Waiting, None, "Waiting for the original author to be idle on the adopted pull request's clean head.");
+                return Ok(());
+            }
+            return self.request_review(false);
+        }
         if merger == Merger::Pipeline && pr.state == "OPEN" && self.p.stage != Stage::Resolve && self.watch_conflicts()? { return Ok(()); }
         if pr.state == "OPEN" && self.local_checks_failed(&pr.head_sha) {
             self.needs_you(StopReason::LocalChecksFailed);
@@ -1831,6 +1840,12 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
 
 /// Explicit launch choices override defaults independently.
 pub fn start_with_switches(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
+    let lock = step_lock(&format!("start:{session_id}"));
+    let _start = lock.lock().unwrap_or_else(|error| error.into_inner());
+    start_locked(host, session_id, tab_id, auto_merge, resolve_conflicts, issue_body)
+}
+
+fn start_locked(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
     let session = host.session(session_id)?;
     let issue = session.issue.clone();
     if session.tab(tab_id).is_none() {
@@ -1944,6 +1959,61 @@ pub fn start_with_switches(host: &dyn Host, session_id: &str, tab_id: &str, auto
     store::insert(&pipeline)?;
     host.changed(&pipeline);
     Ok(pipeline)
+}
+
+/// Attach automation to the existing author, without a handoff or a new PR.
+/// Repeating a successful request returns the existing pipeline unchanged.
+/// Agent authority never imports a review verdict or extends its round budget.
+pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, adopt_pr: bool, actor: super::SwitchActor) -> Result<Pipeline> {
+    let lock = step_lock(&format!("start:{session_id}"));
+    let _start = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let existing = store::for_session(session_id)?;
+    if let Some(existing) = &existing {
+        if existing.author.session_id != session_id || existing.author.tab_id != tab_id {
+            bail!("This session already participates in a pipeline. Use its original author tab.");
+        }
+        if !adopt_pr || existing.pr.is_some() { return Ok(existing.clone()); }
+        if existing.stopped || existing.stage != Stage::Work {
+            bail!("Only an active author pipeline still at Work can adopt a pull request.");
+        }
+    }
+    let session = host.session(session_id)?;
+    let tab = session.tab(tab_id).context("The author tab is no longer in this session.")?;
+    if tab.transport == crate::store::index::AgentTransport::ExperimentalCodexStdio {
+        bail!("Autopilot requires a PTY author conversation.");
+    }
+    let pr = if adopt_pr {
+        let workspace = host.workspace(Path::new(&session.cwd))?;
+        let branch = workspace.branch.as_deref().context("The author needs a branch.")?;
+        let pr = host.open_pull_request(Path::new(&session.cwd), branch)?.context("No open pull request exists for this branch. Nothing was started.")?;
+        if pr.state != "OPEN" || pr.head != branch || !same_commit(&pr.head_sha, &workspace.head) || !workspace.dirty.is_empty() || !workspace.merging.is_empty() {
+            bail!("Adoption needs a clean checkout on the open pull request's exact branch and head. Commit and push the intended work first.");
+        }
+        Some(pr)
+    } else { None };
+    let p = match existing { Some(existing) => existing, None => start_locked(host, session_id, tab_id, auto_merge, resolve_conflicts, None)? };
+    run(host, &p.id, false, if adopt_pr { OnError::Report } else { OnError::NeedsYou }, |step| {
+        // The author or poller may have advanced while the attachment waited
+        // for this lock. Never overwrite a review, resolution or handoff.
+        if adopt_pr && (step.p.author != p.author || step.p.stage != Stage::Work || step.p.pr.is_some() || step.p.resolution.is_some()) {
+            bail!("The pipeline advanced while adoption was being prepared. Inspect its current state before retrying.");
+        }
+        let by = match &actor { super::SwitchActor::Person => "the person", super::SwitchActor::SelfUi { .. } => "an agent through scoped self-UI", _ => "an agent through the CLI" };
+        step.record("attached", format!("Autopilot attached to the existing author conversation by {by}.")).actor = Some(actor.clone());
+        if let Some(pr) = pr {
+            step.host.associate_pull_request(session_id, &step.cwd, &pr)?;
+            step.p.pr = Some(PrLink { number: pr.number, url: pr.url.clone(), base: pr.base });
+            step.p.stage = Stage::Merge;
+            step.settle(State::Waiting, None, "Existing pull request adopted. Independent review starts when the author is idle.");
+            let event = step.record("adopted", format!("Adopted existing pull request #{} without pushing or opening another pull request.", pr.number));
+            event.url = Some(pr.url);
+            event.actor = Some(actor);
+        } else {
+            step.save()?;
+            step.host.send(&step.p.author, &prompts::author_brief())?;
+        }
+        Ok(())
+    })
 }
 
 /// A turn ended in some session. Nothing happens unless that tab is the
@@ -2086,6 +2156,8 @@ fn record_switch(host: &dyn Host, pipeline: &mut Pipeline, kind: &str, label: &s
     let who = match &actor {
         super::SwitchActor::Person => "the person in the app".into(),
         super::SwitchActor::System => "TerminalX".into(),
+        super::SwitchActor::SelfUi { session_id: Some(session_id), .. } => format!("agent in session {session_id} through authorized self-UI"),
+        super::SwitchActor::SelfUi { session_id: None, .. } => "an agent through authorized self-UI".into(),
         super::SwitchActor::Cli { session_id: Some(id), .. } if *id == pipeline.author.session_id => format!("author session {id} through the CLI"),
         super::SwitchActor::Cli { session_id: Some(id), .. } => format!("session {id} through the CLI"),
         super::SwitchActor::Cli { session_id: None, .. } => "the CLI (outside a session)".into(),

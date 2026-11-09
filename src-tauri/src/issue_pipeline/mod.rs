@@ -127,6 +127,7 @@ pub struct MergeRecord {
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SwitchActor {
     Person,
+    SelfUi { session_id: Option<String>, tab_id: Option<String> },
     Cli { session_id: Option<String>, tab_id: Option<String> },
     System,
 }

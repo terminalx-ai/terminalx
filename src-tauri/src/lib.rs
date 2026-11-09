@@ -96,6 +96,8 @@ mod idle_agents;
 mod issue_control;
 #[cfg(feature = "desktop")]
 mod issue_confirmation;
+#[cfg(feature = "desktop")]
+mod self_ui;
 mod issue_pipeline;
 mod issue_ops;
 mod issues;
@@ -727,6 +729,12 @@ pub fn run() {
             commands::pty_kill,
             commands::terminal_perf_reply,
             commands::cloud_control_reply,
+            self_ui::self_ui_claim,
+            self_ui::self_ui_validate,
+            self_ui::self_ui_reply,
+            self_ui::self_ui_start,
+            self_ui::self_ui_grants,
+            self_ui::self_ui_revoke,
             issue_confirmation::issue_confirmation_pending,
             issue_confirmation::issue_confirmation_reply,
             commands::cloud_control_setting,
@@ -806,6 +814,7 @@ pub fn run() {
             commands::issues_list,
             commands::issue_pipelines_list,
             commands::issue_pipeline_start,
+            commands::issue_pipeline_attach,
             commands::issue_pipeline_continue,
             commands::issue_pipeline_set_auto_merge,
             commands::issue_pipeline_set_resolve_conflicts,

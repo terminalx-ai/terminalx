@@ -17,7 +17,8 @@ const MAX_CALLS: usize = 16;
 
 pub(crate) fn supported(command: &str) -> bool {
     matches!(command,
-        "computer.permissions" | "computer.permissionsStatus" | "computer.permissionsReset" | "computer.capabilities"
+        "computer.selfUi.authorize" | "computer.selfUi.snapshot" | "computer.selfUi.click" | "computer.selfUi.revoke"
+         | "computer.permissions" | "computer.permissionsStatus" | "computer.permissionsReset" | "computer.capabilities"
          | "computer.listApps" | "computer.listWindows" | "computer.getAppState" | "computer.click"
          | "computer.performSecondaryAction" | "computer.scroll" | "computer.drag" | "computer.typeText"
          | "computer.pressKey" | "computer.hotkey" | "computer.pasteText" | "computer.setValue"
