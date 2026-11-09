@@ -184,7 +184,8 @@ fn resume_fixture(case: &str) {
     let until = Instant::now() + WAIT;
     let settled = |events: &[AgentEvent]| events.iter().any(|event| matches!(&event.payload, Payload::TurnCompleted { .. } | Payload::Error { .. }));
     while !settled(&events()) {
-        assert!(Instant::now() < until, "{case}: no outcome: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+        assert!(Instant::now() < until, "{case}: no outcome: {:?}; provider received: {:?}",
+            events().iter().map(|event| &event.payload).collect::<Vec<_>>(), std::fs::read_to_string(bin.join("received")));
         std::thread::sleep(Duration::from_millis(20));
     }
     let received: Vec<serde_json::Value> = std::fs::read_to_string(bin.join("received")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();

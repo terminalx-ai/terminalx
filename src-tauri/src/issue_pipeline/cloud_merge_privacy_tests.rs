@@ -75,7 +75,11 @@ case "$*" in
  'api '*'/status?'*) printf '[{"total_count":0,"statuses":[]}]\n' ;;
  'pr merge '*)
    case "$*" in *'--match-head-commit 1111111111111111111111111111111111111111'*) ;; *) exit 91 ;; esac
-   if [ -f "$TERMINALX_HOME/hold" ]; then printf '%s\n' "$$" > "$TERMINALX_HOME/held"; exec /bin/sleep 30; fi
+   if [ -f "$TERMINALX_HOME/hold" ]; then
+     printf '%s\n' "$$" > "$TERMINALX_HOME/held.tmp"
+     /bin/mv "$TERMINALX_HOME/held.tmp" "$TERMINALX_HOME/held"
+     exec /bin/sleep 30
+   fi
    : > "$TERMINALX_HOME/merged" ;;
  'refuse merge') exit 1 ;;
  *) exit 92 ;;
