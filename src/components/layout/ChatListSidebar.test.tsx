@@ -338,6 +338,10 @@ describe("status grouping and view controls (PRO-164)", () => {
     expect(document.activeElement).toBe(search);
     fireEvent.change(search, { target: { value: "web" } });
     expect(screen.queryByRole("menuitemradio", { name: "other" })).toBeNull();
+    // Moving from the formerly hovered row fires leave before the next move.
+    // Radix otherwise focuses the menu content and interrupts the typed query.
+    fireEvent.pointerLeave(all, { pointerType: "mouse" });
+    expect(document.activeElement).toBe(search);
     fireEvent.pointerMove(screen.getByRole("menuitemradio", { name: "web" }), { pointerType: "mouse" });
     expect(document.activeElement).toBe(search);
     fireEvent.keyDown(search, { key: "ArrowDown" });

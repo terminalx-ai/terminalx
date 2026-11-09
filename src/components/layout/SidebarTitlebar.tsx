@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type PointerEvent } from "react";
 import { useCloudProjectChoices } from "@/components/session/CloudNewSession";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { canonicalProject, sidebarProjectOf } from "@/lib/sidebarView";
@@ -179,16 +179,18 @@ function ProjectFilterMenu() {
   }
   if (sidebarProject && !choices.has(sidebarProject)) choices.set(sidebarProject, sidebarProject.split("/").pop() || sidebarProject);
   const matching = [...choices].filter(([path, name]) => `${name} ${path}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())).sort((a, b) => a[1].localeCompare(b[1]));
+  const keepSearchFocus = (event: PointerEvent) => {
+    // A pointer leaving a formerly hovered result also moves Radix focus.
+    // Protect both leave and move while typing; clicking a result still selects it.
+    if (query && document.activeElement === search.current) event.preventDefault();
+  };
   return <DropdownMenuSub onOpenChange={(open) => {
     setQuery("");
     // Radix's submenu autofocus runs during mount; focus the editable field afterwards.
     if (open) window.setTimeout(() => search.current?.focus(), 0);
   }}>
     <DropdownMenuSubTrigger><Search /> Filter by project{sidebarProject && <Check className="ml-auto" />}</DropdownMenuSubTrigger>
-    <DropdownMenuSubContent ref={content} className="w-64" onPointerMoveCapture={(event) => {
-      // Keep a typed query focused; an empty search still allows normal mouse highlighting.
-      if (query && document.activeElement === search.current) event.preventDefault();
-    }} onKeyDown={(event) => {
+    <DropdownMenuSubContent ref={content} className="w-64" onPointerMoveCapture={keepSearchFocus} onKeyDown={(event) => {
       if (event.key === "ArrowUp" && event.target === content.current?.querySelector('[role="menuitemradio"]')) {
         event.preventDefault(); search.current?.focus();
       }
@@ -202,11 +204,11 @@ function ProjectFilterMenu() {
           items?.[event.shiftKey ? items.length - 1 : 0]?.focus();
         }
       }} className="mb-1 w-full rounded-md bg-well px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-ring" />
-      <DropdownMenuItem role="menuitemradio" aria-checked={!sidebarProject} onSelect={() => setPrefs({ sidebarProject: null })}>
+      <DropdownMenuItem role="menuitemradio" aria-checked={!sidebarProject} onPointerLeave={keepSearchFocus} onSelect={() => setPrefs({ sidebarProject: null })}>
         {!sidebarProject ? <Check /> : <span className="size-4" />}All projects
       </DropdownMenuItem>
       <div className="max-h-64 overflow-y-auto">
-        {matching.map(([path, name]) => <DropdownMenuItem key={path} role="menuitemradio" aria-checked={sidebarProject === path} onSelect={() => setPrefs({ sidebarProject: path })} title={path}>
+        {matching.map(([path, name]) => <DropdownMenuItem key={path} role="menuitemradio" aria-checked={sidebarProject === path} onPointerLeave={keepSearchFocus} onSelect={() => setPrefs({ sidebarProject: path })} title={path}>
           {sidebarProject === path ? <Check /> : <span className="size-4" />}<span className="truncate">{name}</span>
         </DropdownMenuItem>)}
         {!matching.length && <p className="px-2 py-2 text-xs text-muted-foreground">No matching projects.</p>}
