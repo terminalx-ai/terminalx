@@ -356,6 +356,11 @@ pub fn from_history(events: &[crate::events::AgentEvent]) -> Option<RecoveryKind
             // Older logs raised one for every failed tool, mid-turn (#400).
             Payload::Recovery { kind } => recovery = kind.filter(|kind| *kind != RecoveryKind::Tool),
             Payload::UserMessage { queued: false, .. } => { open = true; recovery = None; }
+            Payload::TurnStarted { .. } => { open = true; recovery = None; }
+            // Native submission is acknowledged before turn/started. That
+            // interval is already an accepted turn, even after a crash.
+            Payload::PromptAbsorbed { .. } if !open => { open = true; recovery = None; }
+            Payload::PromptWithdrawn { unconfirmed: true, .. } if !open && recovery.is_none() => recovery = Some(RecoveryKind::Unsent),
             Payload::TurnCompleted { .. } => open = false,
             Payload::Status { text } if text == SESSION_CLOSED_MESSAGE => { open = false; recovery = None; }
             // Another conversation took the tab's terminal (#437): whatever

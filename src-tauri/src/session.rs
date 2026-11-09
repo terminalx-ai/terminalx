@@ -1851,6 +1851,9 @@ impl SessionManager {
                 me: std::sync::Weak::new(),
             }));
             rt.lock().unwrap().me = Arc::downgrade(&rt);
+            if codex_stdio::selected(tab) {
+                self.reconcile_codex_followups(&mut rt.lock().unwrap())?;
+            }
             Ok(rt)
         })
     }

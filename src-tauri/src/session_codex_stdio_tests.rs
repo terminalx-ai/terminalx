@@ -10,12 +10,172 @@ const WAIT: Duration = Duration::from_secs(3);
 thread_local! {
     static FULL_PIPE: std::cell::RefCell<Option<mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
     static HANDOFF_FENCED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static EMPTY_WRITE: std::cell::Cell<Option<std::io::ErrorKind>> = const { std::cell::Cell::new(None) };
+    static AFTER_EMPTY_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static WRITTEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+pub(super) fn try_write_stdin(child: &crate::harness::host::LiveChild, bytes: &[u8]) -> std::io::Result<usize> {
+    if let Some(kind) = EMPTY_WRITE.with(|hook| hook.take()) { return Err(kind.into()); }
+    let result = child.try_write_stdin(bytes);
+    if let Ok(count) = result { WRITTEN.with(|written| written.set(written.get() + count)); }
+    result
+}
+pub(super) fn after_empty_write() {
+    let hook = AFTER_EMPTY_WRITE.with(|hook| hook.borrow_mut().take());
+    if let Some(run) = hook { run(); }
 }
 pub(super) fn handoff_fenced() {
     HANDOFF_FENCED.with(|hook| { if let Some(run) = hook.borrow_mut().take() { run(); } });
 }
 pub(super) fn observed_full_pipe() {
     FULL_PIPE.with(|hook| { if let Some(tx) = hook.borrow_mut().take() { tx.send(()).unwrap(); } });
+}
+
+#[test]
+fn empty_write_retries_revalidate_mobile_and_shared_authority() {
+    for mobile in [true, false] {
+        for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::Interrupted] {
+            let _home = store::temp_home();
+            let root = store::root().unwrap();
+            let session: index::SessionEntry = serde_json::from_value(json!({
+                "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+                "created":index::now(), "modified":index::now(),
+                "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+            })).unwrap();
+            index::save(&[session]).unwrap();
+            let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+                Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+                Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+            let rt_arc = manager.runtime("stdio-owner", "tab").unwrap();
+            let mut engine = Stdio::new(root.to_string_lossy().into_owned(), String::new(), None, "auto".into(), None);
+            engine.thread = Some("thread".into());
+            engine.ready = true;
+            let frame = engine.prompt("revocable prompt".into(), vec![]).unwrap().into_iter().find_map(|action| match action {
+                StdioAction::Write(frame) => Some(frame), _ => None,
+            }).unwrap();
+            let launch = engine.launch.clone();
+            let mut rt = rt_arc.lock().unwrap();
+            rt.engine = Engine::CodexStdio(engine);
+            let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, text: "revocable prompt".into(), images: vec![], baseline: None, queued: true, cwd: None }, None).seq;
+            rt.stdio_followups.active = Some((seq, false));
+            rt.open_turn();
+            let sink = Arc::new(StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
+            let args = vec!["-c".into(), "cat > received".into()];
+            let child = manager.host.spawn(&rt.key(), SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: &root, env: &[], unset: &[] }, sink).unwrap();
+            rt.child_pid = Some(child.pid);
+            rt.child = Some(child.clone());
+            drop(rt);
+
+            let mut authority = Authority { session: "stdio-owner".into(), tab: "tab".into(), seq: Some(seq), mobile: None, shared: None };
+            let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
+            let revoking = manager.clone();
+            if mobile {
+                store::write_json(&root.join("devices.json"), &json!({"devices":[{
+                    "id":"driver","label":"Fixture","platform":"test","token":"fixture-hash",
+                    "scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":index::now()
+                }]})).unwrap();
+                let lease = lifetime.command("runtime.attach", json!({"protocol":1})).unwrap();
+                let actor: crate::local_runtime::mobile::Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+                manager.mobile.register(&lifetime, actor.clone(), "connection", "driver").unwrap();
+                authority.mobile = Some(manager.mobile.permit(&actor, "connection", "stdio-owner", "tab").unwrap());
+                AFTER_EMPTY_WRITE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { revoking.mobile.revoke_device(&actor, "driver").unwrap(); })));
+            } else {
+                let now = chrono::Utc::now().timestamp_millis();
+                let mut share = crate::local_sharing::tests::fixture();
+                let link = share.links.get_mut("link").unwrap();
+                link.settings.expires_at = now + 3_600_000;
+                link.credential_expires_at = now + 3_600_000;
+                let mut guest = crate::local_sharing::tests::guest("guest-connection", "alice");
+                guest.verified_until = now + 3_600_000;
+                share.join(guest, now).unwrap();
+                authority.shared = Some(share.write_permit("guest-connection", "tab").unwrap());
+                manager.sharing.lock().unwrap().sessions.insert("stdio-owner".into(), share);
+                AFTER_EMPTY_WRITE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { revoking.sharing.lock().unwrap().sessions.remove("stdio-owner"); })));
+            }
+            EMPTY_WRITE.with(|hook| hook.set(Some(kind)));
+            WRITTEN.with(|written| written.set(0));
+            manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, Some(authority)).unwrap();
+            let written = WRITTEN.with(|written| written.get());
+            let events: Vec<AgentEvent> = store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+            let usable = matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(engine) if !engine.blocked && !engine.exited);
+            manager.stop("stdio-owner", "tab").unwrap();
+            assert_eq!(written, 0, "mobile={mobile}, error={kind:?}: revoked prompt reached stdin");
+            assert!(usable);
+            assert!(events.iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if prompt_seq == seq)));
+        }
+    }
+}
+
+#[test]
+fn recreated_runtime_reconciles_pending_prompts_and_acknowledged_turns() {
+    for state in ["pending", "acknowledged", "started", "active-with-pending", "completed", "completed-with-pending", "withdrawn", "other-conversation", "live"] {
+        let _home = store::temp_home();
+        let root = store::root().unwrap();
+        let session: index::SessionEntry = serde_json::from_value(json!({
+            "id":"stdio-recovery", "projectPath":root, "cwd":root, "title":"fixture",
+            "created":index::now(), "modified":index::now(),
+            "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+        })).unwrap();
+        index::save(&[session]).unwrap();
+        let make_manager = || SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+            Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+            Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+        let manager = make_manager();
+        let rt_arc = manager.runtime("stdio-recovery", "tab").unwrap();
+        let mut rt = rt_arc.lock().unwrap();
+        let user = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: vec![], baseline: None, queued: true, cwd: None };
+        let first = manager.publish(&mut rt, user("first"), None).seq;
+        if matches!(state, "acknowledged" | "started" | "active-with-pending" | "completed" | "completed-with-pending") {
+            manager.publish(&mut rt, Payload::PromptAbsorbed { prompt_seq: first }, None);
+        }
+        if matches!(state, "started" | "active-with-pending" | "completed" | "completed-with-pending") {
+            manager.publish(&mut rt, Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: Some(first), started_by: None, initiating_prompt: None }, None);
+        }
+        let pending = if matches!(state, "active-with-pending" | "completed-with-pending") {
+            manager.publish(&mut rt, user("follow-up"), None).seq
+        } else { first };
+        if matches!(state, "completed" | "completed-with-pending") {
+            manager.publish(&mut rt, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
+        }
+        if state == "withdrawn" { manager.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: first, unconfirmed: false }, None); }
+        if state == "other-conversation" {
+            manager.publish(&mut rt, Payload::Conversation { id: Some("new".into()), harness: "codex".into(), resumed: false }, None);
+        }
+        if state == "live" {
+            rt.open_turn();
+            rt.status = TabStatus::InProgress;
+            rt.queued.push(QueuedMessage { id: first.to_string(), text: "first".into(), images: vec![] });
+        }
+        drop(rt);
+        // The new manager has neither the previous writer nor its queue.
+        let reopened = if state == "live" { manager.clone() } else { make_manager() };
+        let events = reopened.load_events("stdio-recovery", "tab").unwrap();
+        let withdrawn: Vec<_> = events.iter().filter_map(|event| match event.payload {
+            Payload::PromptWithdrawn { prompt_seq, unconfirmed } => Some((prompt_seq, unconfirmed)), _ => None,
+        }).collect();
+        let expected = match state {
+            "pending" | "active-with-pending" | "completed-with-pending" => vec![(pending, true)],
+            "withdrawn" => vec![(first, false)],
+            _ => vec![],
+        };
+        assert_eq!(withdrawn, expected, "{state}");
+        let rt = reopened.runtime("stdio-recovery", "tab").unwrap();
+        let expected_recovery = match state {
+            "acknowledged" | "started" | "active-with-pending" => Some(RecoveryKind::Disconnected),
+            "pending" | "completed-with-pending" => Some(RecoveryKind::Unsent),
+            _ => None,
+        };
+        assert_eq!(rt.lock().unwrap().recovery, expected_recovery, "{state}");
+        assert!(events.iter().any(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text == "first")));
+        assert_eq!(rt.lock().unwrap().queued.len(), usize::from(state == "live"));
+        let again = reopened.load_events("stdio-recovery", "tab").unwrap();
+        assert_eq!(again.iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { .. })).count(), expected.len(), "repeated load: {state}");
+        if state != "live" {
+            let restarted = make_manager();
+            let again = restarted.load_events("stdio-recovery", "tab").unwrap();
+            assert_eq!(again.iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { .. })).count(), expected.len(), "second restart: {state}");
+        }
+    }
 }
 
 #[test]

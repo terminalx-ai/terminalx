@@ -148,8 +148,8 @@ function pullQueued(turns: Turn[], seq: number): { item: Extract<WorkItem, { kin
  * A queued message is a note in the turn it was queued behind: the agent held
  * it until that turn was over and then took it as its next prompt, or it was
  * typed again as one when the reader sent it now. One the agent took mid-turn
- * has a `prompt_absorbed` instead (#551), and stays in its turn as a message;
- * in a log from before that event it stays as it was sent.
+ * has a `prompt_absorbed` instead (#551), and stays in its turn as a message
+ * unless a later `turn_started` explicitly names it as that turn's prompt.
  *
  * A message drawn as a turn's prompt can be taken too (#540). It was sent
  * while the agent was busy on a turn of its own that the app had not heard
@@ -163,9 +163,12 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
     turn.prompt = undefined;
     return { prompt, from: turn };
   }
-  const found = pullQueued(turns, seq);
+  const found = findMessage(turns, seq);
   if (!found) return undefined;
-  const { item, turn } = found;
+  const { turn, at } = found;
+  if (at == null) return undefined;
+  const [item] = turn.work.splice(at, 1);
+  if (item.kind !== "queued" && item.kind !== "message") return undefined;
   const { inputOccupied, replaced, withdrawn, unconfirmed, sent } = item;
   return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, unconfirmed, sent }, from: turn };
 }

@@ -133,6 +133,27 @@ fn codex_supported() -> bool {
 }
 
 impl SessionManager {
+    /// A recreated runtime has no writer or queue. Preserve pending text but
+    /// retire its queued claim; a crash cannot tell us whether bytes arrived.
+    pub(super) fn reconcile_codex_followups(&self, rt: &mut TabRuntime) -> Result<()> {
+        let events: Vec<AgentEvent> = store::read_lines(&rt.log_path)?;
+        let mut pending = Vec::new();
+        for event in events.iter().filter(|event| event.subagent.is_none()) {
+            match &event.payload {
+                Payload::Conversation { .. } => pending.clear(),
+                Payload::UserMessage { queued: true, .. } => pending.push(event.seq),
+                Payload::PromptAbsorbed { prompt_seq }
+                | Payload::TurnStarted { prompt_seq: Some(prompt_seq), .. }
+                | Payload::PromptWithdrawn { prompt_seq, .. } => pending.retain(|seq| seq != prompt_seq),
+                _ => {}
+            }
+        }
+        for prompt_seq in pending {
+            self.publish(rt, Payload::PromptWithdrawn { prompt_seq, unconfirmed: true }, None);
+        }
+        Ok(())
+    }
+
     /// Native Codex is tried, not required (#644): a tab that has not started
     /// its thread runs on the terminal engine instead when this Codex is older
     /// than the app server's minimum, or missing. Decided at its first launch,
@@ -500,17 +521,18 @@ impl SessionManager {
         bytes.push(b'\n');
         let mut offset = 0;
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut sender = sender;
         while offset < bytes.len() {
             anyhow::ensure!(Instant::now() < deadline, "Codex input pipe timed out; delivery is uncertain and will not be replayed");
             {
                 let _admission = crate::issue_pipeline::admission::lock();
                 // Delivery that has begun under a current permit is finished:
                 // a stream takes no half frame back.
-                let sender = if offset == 0 { sender.take() } else { None };
+                // An empty attempt consumed no authority: revalidate it on
+                // every retry until the first byte is actually written.
+                let sender = if offset == 0 { sender.as_ref() } else { None };
                 let mut sharing = sender.is_some().then(|| self.sharing.lock().unwrap());
                 let mut owner_attachment = None;
-                let admitted = match &sender {
+                let admitted = match sender {
                     None => Ok(None),
                     Some(sender) => admit_codex_prompt(sender, sharing.as_deref_mut(), &mut owner_attachment)
                         .and_then(|()| sender.mobile.as_ref().map(|permit| permit.enter()).transpose()),
@@ -552,7 +574,11 @@ impl SessionManager {
                 // authority locks. Reader/Stop can run between attempts, even
                 // when the child never reads or produces a full stdout pipe.
                 anyhow::ensure!(Instant::now() < deadline, "Codex input pipe timed out; delivery is uncertain and will not be replayed");
-                match child.try_write_stdin(&bytes[offset..]) {
+                #[cfg(test)]
+                let written = tests::try_write_stdin(child, &bytes[offset..]);
+                #[cfg(not(test))]
+                let written = child.try_write_stdin(&bytes[offset..]);
+                match written {
                     Ok(0) => bail!("Codex input pipe closed; delivery is uncertain and will not be replayed"),
                     Ok(written) => offset += written,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -566,6 +592,8 @@ impl SessionManager {
                     if let Engine::CodexStdio(engine) = &mut rt.engine { engine.retire_write(&frame, true); }
                 }
             }
+            #[cfg(test)]
+            if offset == 0 { tests::after_empty_write(); }
             if offset < bytes.len() { std::thread::sleep(Duration::from_millis(5)); }
         }
         Ok(())
@@ -851,6 +879,19 @@ impl SessionManager {
 /// and is offered back rather than called a lost connection.
 pub(super) fn recovery_on_open(tab: &TabEntry, log: &Path, kind: RecoveryKind) -> RecoveryKind {
     if kind != RecoveryKind::Disconnected { return kind; }
+    // A later pending follow-up must not hide an acknowledged turn that
+    // crashed. Legacy native logs without acknowledgement still use the
+    // unsent-prompt check below.
+    let events: Vec<AgentEvent> = store::read_lines(log).unwrap_or_default();
+    for event in events.iter().rev().filter(|event| event.subagent.is_none()) {
+        match &event.payload {
+            Payload::PromptAbsorbed { .. } | Payload::TurnStarted { .. } => return kind,
+            Payload::TurnCompleted { .. } | Payload::Conversation { .. }
+            | Payload::UserMessage { queued: false, .. } => break,
+            Payload::Status { text } if text == recovery::SESSION_CLOSED_MESSAGE => break,
+            _ => {}
+        }
+    }
     if unsent::said_in(log, tab.follow.conversation.as_deref()).since.is_empty() { kind } else { RecoveryKind::Unsent }
 }
 
