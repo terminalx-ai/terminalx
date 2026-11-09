@@ -2072,6 +2072,12 @@ export interface PrCheck {
   name: string;
   state: string;
   url?: string | null;
+  actions?: { runId: number; jobId: number | null } | null;
+}
+
+export interface CheckLog {
+  text: string;
+  truncated: boolean;
 }
 
 export interface BranchContributor {
@@ -2158,6 +2164,9 @@ export interface PrAssociation {
 }
 
 export const gh = {
+  checkLog: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<CheckLog>("pr_check_log", { cwd, prUrl, checkUrl, failed }),
+  rerunCheck: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<void>("pr_check_rerun", { cwd, prUrl, checkUrl, failed }),
+  fixAttachment: (sessionId: string, tabId: string, prUrl: string) => invoke<{ path: string; truncated: boolean }>("pr_check_fix_attachment", { sessionId, tabId, prUrl }),
   reviewFiles: (url: string, head: string, base: string) => invoke<import("./reviewThreads").ReviewFile[]>("pr_review_files", { url, head, base }),
   reviewThreads: (url: string) => invoke<import("./reviewThreads").ReviewThreads>("pr_review_threads", { url }),
   resolveReview: (url: string, threadId: string, resolved: boolean) => invoke<void>("pr_review_resolve", { url, threadId, resolved }),

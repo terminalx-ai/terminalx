@@ -52,6 +52,8 @@ export interface Prefs {
   turnChanges: boolean;
   /** A mark per prompt down the transcript's right edge: hover to read one, click to go to it. */
   promptMap: boolean;
+  /** Appended to the prompt that sends failed CI logs to an agent. */
+  fixErrorsInstructions: string;
   /**
    * The system's spelling correction, smart quotes and dashes, and text
    * replacements in the fields where the reader writes to an agent, and in the
@@ -167,6 +169,7 @@ const DEFAULTS: Prefs = {
   foldToolCalls: true,
   turnChanges: true,
   promptMap: true,
+  fixErrorsInstructions: "",
   autocorrect: false,
   lastProject: null,
   lastAgent: "claude",
@@ -287,6 +290,8 @@ function load(legacyOnly = false): Prefs {
     prefs.cloudIssuePipelines = pipelines && typeof pipelines === "object" && !Array.isArray(pipelines) ? Object.fromEntries(Object.entries(pipelines).filter(([, value]) => !!value && typeof value === "object" && !Array.isArray(value))) : {};
     // Each entry is checked as it is read (`issueFilterFor`); only the map itself is checked here.
     if (!prefs.issueFilters || typeof prefs.issueFilters !== "object" || Array.isArray(prefs.issueFilters)) prefs.issueFilters = {};
+    if (typeof prefs.fixErrorsInstructions !== "string") prefs.fixErrorsInstructions = "";
+    prefs.fixErrorsInstructions = prefs.fixErrorsInstructions.slice(0, 8000);
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;
