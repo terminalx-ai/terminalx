@@ -73,7 +73,9 @@ export function revealSearchRange(range: Range, chat: HTMLElement, footerHeight:
     let element = range.startContainer.parentElement;
     while (element && chat.contains(element)) {
       const { overflowY, overflowX } = getComputedStyle(element);
-      if (element === chat || /auto|scroll/.test(overflowY + overflowX)) {
+      // Hidden overflow still scrolls programmatically (unlike clip). Skipping
+      // it can place a result inside the chat while an inner wrapper hides it.
+      if (element === chat || /auto|scroll|hidden/.test(overflowY + overflowX)) {
         const rect = range.getBoundingClientRect();
         const box = element.getBoundingClientRect();
         const bottom = box.bottom - (element === chat ? footerHeight : 0);

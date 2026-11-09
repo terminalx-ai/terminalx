@@ -63,7 +63,7 @@ const session = (id: string, title: string, status: string, fields: Record<strin
 });
 
 beforeEach(async () => {
-  prefs.setPrefs({ sidebarLayout: "simple", sidebarSections: {}, hiddenOrganizations: [], organizationDisplay: "all", selectedOrganization: null, cloudPinned: {}, cloudProjects: {}, cloudBlankProjects: {} });
+  prefs.setPrefs({ sidebarLayout: "simple", sidebarProject: null, sidebarFilters: {}, sidebarSections: {}, hiddenOrganizations: [], organizationDisplay: "all", selectedOrganization: null, cloudPinned: {}, cloudProjects: {}, cloudBlankProjects: {} });
   mocks.status = {
     state: "signed-in",
     identity: { name: "A", email: "a@example.com", organization: "Acme", organizationId: ORG },
@@ -92,6 +92,7 @@ beforeEach(async () => {
     await store.bootSessions();
     await store.refreshEverything();
     store.selectSession(null);
+    store.setShowArchived(false);
     // Acme: two workspaces of one repository and a blank project; Beta: one workspace.
     await catalog.ingestCloudList({ workspaces: [item("ws-1", ORG), item("ws-2", ORG), item("image-only", ORG, { repositories: [] })], quota: { used: 3, limit: 5 } }, ORG);
     await catalog.ingestCloudList({ workspaces: [item("ws-b", OTHER, { repositories: [betaSite] })], quota: { used: 1, limit: 5 } }, OTHER);
@@ -110,6 +111,53 @@ const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpe
 const orgSection = (orgId: string) => screen.getAllByTestId("cloud-org-list").find((section) => section.getAttribute("data-org") === orgId)!;
 
 describe("cloud organizations in the sidebar", () => {
+  it.each([false, true])("retains a selected session outside the project filter without including its workspace peers (archived: %s)", async (archived) => {
+    await act(async () => {
+      catalog.cacheCloudSessions(ORG, "ws-1", [session("s1", "Fix login redirect", "idle", { archived })] as never, ["session/2"]);
+      store.selectCloudSession(`cloud:${ORG}:ws-1:s1`);
+      prefs.setPrefs({ sidebarProject: `cloud:${OTHER}:github.com/beta/site` });
+    });
+    mount();
+    expect(await screen.findByRole("button", { name: /^Fix login redirect/ })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /^Landing page copy/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Add tests/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "main, Talk here" })).toBeNull();
+  });
+
+  it.each([false, true])("shows matching archived cloud sessions with a project filter (active session selected: %s)", async (selected) => {
+    await act(async () => {
+      catalog.cacheCloudSessions(ORG, "ws-1", [
+        ...(selected ? [session("s1", "Fix login redirect", "idle")] : []),
+        session("archived", "Archived review", "idle", { archived: true }),
+      ] as never, ["session/2"]);
+      catalog.cacheCloudSessions(ORG, "ws-2", [], ["session/2"]);
+      if (selected) store.selectCloudSession(`cloud:${ORG}:ws-1:s1`);
+      prefs.setPrefs({ sidebarProject: `cloud:${ORG}:github.com/acme/api` });
+      store.setShowArchived(true);
+    });
+    mount();
+    expect(await screen.findByRole("button", { name: /^Archived review/ })).toBeTruthy();
+    if (selected) expect(screen.getByRole("button", { name: /^Fix login redirect/ })).toBeTruthy();
+    expect(screen.queryByTestId("sidebar-filter-empty")).toBeNull();
+  });
+
+  it("filters archived workspaces by project while keeping them hidden for Needs you", async () => {
+    await act(async () => {
+      await catalog.ingestCloudList({ workspaces: [
+        item("archive-api", ORG, { state: "archived", archivedAt: 1 }),
+        item("archive-site", ORG, { state: "archived", archivedAt: 1, repositories: [betaSite] }),
+      ], quota: { used: 2, limit: 5 } }, ORG);
+      prefs.setPrefs({ sidebarProject: `cloud:${ORG}:github.com/acme/api` });
+    });
+    mount();
+    const archive = await screen.findByTestId("cloud-node-archived");
+    await act(async () => { fireEvent.click(within(archive).getByRole("button", { name: "Archived workspaces (1)" })); });
+    expect(within(archive).getByText("archive-api")).toBeTruthy();
+    expect(within(archive).queryByText("archive-site")).toBeNull();
+    await act(async () => { prefs.setPrefs({ sidebarFilters: { "a@example.com": "needs" } }); });
+    expect(screen.queryByTestId("cloud-node-archived")).toBeNull();
+  });
+
   it("lists each organization after Local, its cloud projects folding to their sessions, in both layouts", async () => {
     mount();
     const list = screen.getByTestId("conversation-list");
@@ -122,11 +170,10 @@ describe("cloud organizations in the sidebar", () => {
     expect(within(acme).getAllByRole("group").map((group) => group.getAttribute("aria-label"))).toEqual(["acme/api", "image-only"]);
     const api = within(acme).getByRole("group", { name: "acme/api" });
     expect(within(api).getAllByTestId("cloud-workspace-group").map((row) => row.getAttribute("data-workspace"))).toEqual(["ws-1", "ws-2"]);
-    const fix = within(api).getByRole("button", { name: /^Fix login redirect/ });
+    const fix = within(api).getByRole("button", { name: /^Fix login redirect/, description: "Status: Backlog" });
     // A row ends in its branch; a working one shows the working sign there instead.
     expect(fix.textContent).toContain("terminalx/fix-login");
-    const adding = within(api).getByRole("button", { name: /^Add tests/ });
-    expect(adding.querySelector('[data-testid="status-working"], [aria-label="Working"]') || adding.textContent === "Add tests").toBeTruthy();
+    expect(within(api).getByRole("button", { name: /^Add tests/, description: "Status: Backlog" })).toBeTruthy();
     // Beta's one workspace lists its sessions directly under the project.
     const beta = orgSection(OTHER);
     expect(within(beta).queryAllByTestId("cloud-workspace-group")).toHaveLength(0);

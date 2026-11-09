@@ -2119,6 +2119,12 @@ pub fn set_session_pinned(app: AppHandle, session_id: String, pinned: bool) -> C
 }
 
 #[tauri::command]
+pub async fn set_session_status(state: State<'_, crate::AppState>, session_id: String, status: index::ManualStatus) -> CmdResult<()> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.set_manual_status(&session_id, status).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub fn set_active_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<()> {
     let session = index::update_session(&session_id, |s| {
         if s.tab(&tab_id).is_some() {
@@ -2369,6 +2375,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: vec![new_tab.clone()],
             active_tab: Some(new_tab.id.clone()),
             link: None,
@@ -4341,6 +4348,7 @@ mod command_tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: Vec::new(),
             link: None,
             active_tab: None,

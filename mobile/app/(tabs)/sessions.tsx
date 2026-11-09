@@ -1,3 +1,4 @@
+import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { useMemo, useState } from "react";
 import { Platform, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
@@ -110,10 +111,12 @@ function ProjectChat({ row, onOpen }: { row: ChatRow; onOpen(tabId: string): voi
   const chats = branchChats(row.session);
   const many = chats.length > 1;
   const state = row.state === "needs" ? "needs you" : row.state === "working" ? "working" : "";
+  const manualStatus = manualStatusLabel(row.session.manualStatus);
   return <View>
-    <Pressable accessibilityRole="button" accessibilityState={many ? { expanded: open } : undefined} accessibilityLabel={[row.name, many ? `${chats.length} chats` : "", state, row.preview].filter(Boolean).join(", ")} onPress={() => many ? setOpen(!open) : onOpen(row.tabId)} style={({ pressed }) => [styles.channel, row.branched ? styles.branchRow : styles.titleRow, pressed && { backgroundColor: palette.raised }]}>
+    <Pressable accessibilityRole="button" accessibilityState={many ? { expanded: open } : undefined} accessibilityLabel={[row.name, many ? `${chats.length} chats` : "", manualStatus, state, row.preview].filter(Boolean).join(", ")} onPress={() => many ? setOpen(!open) : onOpen(row.tabId)} style={({ pressed }) => [styles.channel, row.branched ? styles.branchRow : styles.titleRow, pressed && { backgroundColor: palette.raised }]}>
       {row.branched ? <MacIcon name="GitBranch" size={16} color={palette.muted} strokeWidth={1.35} /> : null}
       <Text numberOfLines={1} style={[row.branched ? styles.branchName : styles.chatTitle, { color: palette.ink }]}>{row.name}</Text>
+      <Text style={[styles.time, { color: palette.muted }]}>{manualStatus}</Text>
       {row.state !== "done" ? <StateMark state={row.state} info={palette.info} warning={palette.warning} /> : many ? null : <Text style={[styles.time, { color: palette.faint }]}>{shortTime(row.time)}</Text>}
       {many ? <View style={[styles.count, { backgroundColor: palette.raised }]}>
         <Text style={[styles.countText, { color: palette.muted }]}>{chats.length}</Text>

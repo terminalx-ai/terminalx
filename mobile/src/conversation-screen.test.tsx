@@ -543,6 +543,25 @@ describe("mobile conversation navigation", () => {
     expect(mocks.push).toHaveBeenLastCalledWith(expect.objectContaining({ params: expect.objectContaining({ tabId: "codex" }) }));
   });
 
+  it("keeps manual status visible and updated in both the Chats and Projects lists", async () => {
+    mocks.app.sessions = [{ ...mocks.app.sessions[0], manualStatus: "in_review" }];
+    await render(true);
+    const row = () => [...container.querySelectorAll("button")].find((item) => item.getAttribute("aria-label")?.startsWith("issue-132"))!;
+    expect(row().textContent).toContain("In review");
+    expect(row().getAttribute("aria-label")).toContain("In review");
+    await click("Group by project");
+    expect(row().textContent).toContain("In review");
+    expect(row().getAttribute("aria-label")).toContain("In review");
+    mocks.app.sessions = [{ ...mocks.app.sessions[0], manualStatus: "done" }];
+    await render(true);
+    expect(row().textContent).toContain("Done");
+    expect(row().textContent).not.toContain("In review");
+    await click("Show all chats");
+    expect(row().textContent).toContain("Done");
+    expect(row().getAttribute("aria-label")).toContain("Done");
+    expect(row().textContent).not.toContain("In review");
+  });
+
   it("switches agents, keeps drafts and transcripts separate, and sends to the selected tab", async () => {
     await render();
     expect(container.querySelector('[data-testid="screen-title"]')?.textContent).toBe("Claude Code");
