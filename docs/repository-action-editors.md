@@ -18,7 +18,7 @@ The components are deliberately not mounted in Settings yet: showing a working S
 
 ## Remaining wiring
 
-Once PRO-131 lands, mount these editors under Settings → Repositories → project → Actions / Preview URLs and connect them to its native store. Reset additionally needs the repository-file configuration layer.
+The Settings page now uses PRO-123's `settingsRegistry.tsx` and `sectionRenderers.tsx`. Fields inside the action editor are saved with the action and stay out of Settings search. Once PRO-131 lands, add the Actions / Preview URLs section registrations and mount their adapters through `sectionRenderers`, under Settings → Repositories → project, connected to that native store. Do not introduce another Settings row or navigation list. Reset additionally needs the repository-file configuration layer.
 
 Once PRO-243 lands, use `visibleActions` in both the Run menu and action palette entries, preserving array order. Command-R's default is the first entry of that filtered list, or none when all are hidden. Pass the action's command, concurrent and run-after-setup choices to that ticket's runner.
 

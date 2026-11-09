@@ -42,6 +42,7 @@ export interface CloudSessionTab {
 }
 
 export interface CloudSessionRow {
+  manualStatus?: import("@/types/session").ManualStatus;
   automation?: { id: string } | null;
   key: CloudKey;
   orgId: string;
@@ -289,6 +290,7 @@ export function buildCloudSessions(input: {
       lastMessageAt: newestMessageTime(session.lastMessageAt, ...session.tabs.flatMap((tab) => [agentTabs.get(tab.id)?.info.lastMessageAt, agentTabs.get(tab.id)?.info.sessionLastMessageAt])),
       hasMessages: session.hasMessages || session.tabs.some((tab) => tab.hasMessages || agentTabs.get(tab.id)?.info.hasMessages || agentTabs.get(tab.id)?.info.sessionHasMessages),
       pinned: session.pinned,
+      manualStatus: session.manualStatus,
       archived: session.archived,
       automation: session.automation,
       tabs: session.tabs.map((tab, index) => tabOf(tab.id, { harness: tab.harness, title: tab.title, status: tab.status }, { title: session.title, first: index === 0 })),

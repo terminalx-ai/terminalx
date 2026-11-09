@@ -632,6 +632,15 @@ impl ControlService {
                 self.sink.emit("session_updated", &session);
                 Ok(json!({"sessionId": session.id, "session": session}))
             }
+            "sessions.status" => {
+                let status = serde_json::from_value::<index::ManualStatus>(params.get("status").cloned().unwrap_or(Value::Null))
+                    .map_err(|_| ControlError::invalid("Status must be backlog, in_progress, in_review, done or canceled."))?;
+                let session = resolve_session(&required_string(&params, "session")?)?;
+                let patch = crate::session_ops::SessionPatch { manual_status: Some(status), ..Default::default() };
+                let session = crate::session_ops::update_session_meta(&session.id, &patch).map_err(ControlError::internal)?;
+                self.sink.emit("session_updated", &session);
+                Ok(json!({"sessionId": session.id, "session": session}))
+            }
             // The app's own archive (#718): the windows hear of it at once.
             "sessions.archive" | "sessions.unarchive" => {
                 let selectors: Vec<String> = match params.get("sessions") {
@@ -2071,6 +2080,19 @@ mod tests {
         assert_eq!(index::get(&second.id).unwrap().title, second.title);
         assert_eq!(&*events.try_recv().unwrap().event, "session_updated");
 
+        for status in ["backlog", "in_progress", "in_review", "done", "canceled"] {
+            let result = service.execute("sessions.status", json!({"session": &first.id[..first.id.len() - 2], "status": status}), "status").unwrap();
+            assert_eq!(result["session"]["manualStatus"], status);
+            let event = events.try_recv().unwrap();
+            assert_eq!(&*event.event, "session_updated");
+            assert_eq!(serde_json::from_str::<Value>(&event.payload).unwrap()["manualStatus"], status);
+            assert_eq!(index::get(&second.id).unwrap().manual_status, None);
+        }
+        for status in [Value::Null, json!("working"), json!(42)] {
+            assert_eq!(service.execute("sessions.status", json!({"session": first.id, "status": status}), "invalid").unwrap_err().code, "invalid_arguments");
+            assert!(events.try_recv().is_err());
+        }
+
         let result = service.execute("worktrees.rename", json!({"worktree": "old", "name": "Fix 203", "project": project.path}), "r2").unwrap();
         assert_eq!(result["name"], "fix-203");
         assert_eq!(result["branch"], "raccoon/fix-203");
@@ -2125,6 +2147,7 @@ mod tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: Vec::new(),
             active_tab: None,
             link: None,

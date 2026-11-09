@@ -195,6 +195,7 @@ impl Fixture {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             active_tab: None,
             tabs: vec![tab],
             unknown: BTreeMap::new(),

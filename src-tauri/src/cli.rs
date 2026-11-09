@@ -68,6 +68,7 @@ Usage:
   terminalx share revoke SESSION LINK [--keep-guests] [--json]
   terminalx share stop SESSION [--json]
   terminalx sessions rename SESSION --title TEXT [--json]
+  terminalx sessions status SESSION --status backlog|in_progress|in_review|done|canceled [--json]
   terminalx tabs list SESSION [--json]
   terminalx send SESSION_OR_TAB TEXT [--json]
   terminalx read SESSION_OR_TAB [--since SEQ] [--tail COUNT] [--json]
@@ -592,6 +593,13 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let title = tokens.required_option("--title")?;
             let session = tokens.required_front("session")?;
             rpc("sessions.rename", json!({"session": session, "title": title}), tokens)
+        }
+        "status" => {
+            let status = tokens.required_option("--status")?;
+            serde_json::from_value::<crate::store::index::ManualStatus>(json!(status))
+                .map_err(|_| invalid("Status must be backlog, in_progress, in_review, done or canceled."))?;
+            let session = tokens.required_front("session")?;
+            rpc("sessions.status", json!({"session": session, "status": status}), tokens)
         }
         // A quick chat: no project, a scratch directory of its own.
         "create" if tokens.peek_flag("--quick") => {
@@ -1238,6 +1246,18 @@ mod tests {
         assert_eq!(rpc_of(&["sessions", "list", "--project", "api"]).1, json!({"project": "api", "quick": false, "archived": false, "worktree": null}));
         assert!(parse(&args(&["sessions", "list", "--quick", "--project", "api"])).is_err());
         assert!(parse(&args(&["sessions", "list", "--quick", "--cloud"])).is_err());
+    }
+
+    #[test]
+    fn manual_session_status_accepts_only_the_five_workflow_values() {
+        for status in ["backlog", "in_progress", "in_review", "done", "canceled"] {
+            let (command, params, _) = rpc_of(&["sessions", "status", "s1", "--status", status, "--json"]);
+            assert_eq!(command, "sessions.status");
+            assert_eq!(params, json!({"session":"s1","status":status}));
+        }
+        for invalid in [&["sessions", "status", "s1"][..], &["sessions", "status", "s1", "--status", "working"], &["sessions", "status", "--status", "done"], &["sessions", "status", "s1", "--status", "done", "--all"]] {
+            assert_eq!(parse(&args(invalid)).unwrap_err().code, "invalid_arguments");
+        }
     }
 
     #[test]

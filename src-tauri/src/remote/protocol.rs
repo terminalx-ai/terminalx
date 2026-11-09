@@ -65,8 +65,9 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   `pipeline.noteTracker`. It also lets `session.create` take an issue, which
 ///   an older runtime would ignore: a client sends one only once this is granted.
 /// - `pipeline/2`: paginated persistent reviewer identities, independent of pipeline history.
-pub const CAPABILITIES: [&str; 23] = [
-    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
+/// - `session-status/1`: `session.update.manualStatus`, separate from agent activity.
+pub const CAPABILITIES: [&str; 24] = [
+    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
     "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2",
 ];
 

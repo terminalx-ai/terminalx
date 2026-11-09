@@ -633,6 +633,7 @@ export const api = {
    * doing (#718). `keep`: what this window shows. Resolves to the ids archived; the windows hear of each as usual.
    */
   archiveIdleSessions: (keep: string[]) => invoke<string[]>("archive_idle_sessions", { keep }),
+  setSessionStatus: (sessionId: string, status: import("@/types/session").ManualStatus) => invoke<void>("set_session_status", { sessionId, status }),
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
   /** Delete one session; its workspace and every other session stay. */

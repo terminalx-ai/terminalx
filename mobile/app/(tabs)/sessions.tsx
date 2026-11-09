@@ -1,3 +1,4 @@
+import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { useMemo, useState } from "react";
 import { Pressable, RefreshControl, SectionList, StyleSheet, Text, TextInput, View } from "react-native";
 import { useRouter } from "expo-router";
@@ -40,7 +41,7 @@ function SessionRow({ session: row, onPress }: { session: ConversationRow; onPre
   const { palette } = useTheme();
   const status = row.column;
   const color = status === "needs" ? palette.warning : status === "working" ? palette.accent : palette.success;
-  return <Card style={styles.sessionCard}><Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.sessionRow, pressed && { backgroundColor: palette.raised }]}><View style={[styles.statusBar, { backgroundColor: color }]} /><View style={styles.flex}><View style={styles.titleLine}><Text numberOfLines={1} style={[styles.sessionTitle, { color: palette.ink }]}>{session.title}</Text>{session.issueRef ? <Text style={[styles.issue, { color: palette.accent }]}>{session.issueRef}</Text> : null}</View><Text numberOfLines={1} style={[styles.meta, { color: palette.muted }]}>{session.project} · {session.worktree}</Text><Text style={[styles.prompt, { color: palette.ink }]}>{label}</Text><Text style={[styles.reply, { color }]}>{statusLabel(tab.status)}</Text></View><ChevronRight size={18} color={palette.faint} /></Pressable></Card>;
+  return <Card style={styles.sessionCard}><Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.sessionRow, pressed && { backgroundColor: palette.raised }]}><View style={[styles.statusBar, { backgroundColor: color }]} /><View style={styles.flex}><View style={styles.titleLine}><Text numberOfLines={1} style={[styles.sessionTitle, { color: palette.ink }]}>{session.title}</Text>{session.issueRef ? <Text style={[styles.issue, { color: palette.accent }]}>{session.issueRef}</Text> : null}</View><Text numberOfLines={1} style={[styles.meta, { color: palette.muted }]}>{session.project} · {session.worktree}</Text><Text style={[styles.prompt, { color: palette.ink }]}>{label}</Text><Text style={[styles.reply, { color }]}>{manualStatusLabel(session.manualStatus)} · {statusLabel(tab.status)}</Text></View><ChevronRight size={18} color={palette.faint} /></Pressable></Card>;
 }
 
 function connectionCopy(stage: string, attempt: number): { title: string; hint?: string } {
