@@ -13,9 +13,7 @@ vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("@mobile/ui/PairingScanner", () => ({ PairingScanner: () => null }));
 vi.mock("expo-router", () => ({ useRouter: () => ({ navigate: mocks.navigate, dismissTo: mocks.dismissTo, push: vi.fn() }) }));
 vi.mock("expo-camera", () => ({ useCameraPermissions: () => [{ granted: true }, vi.fn()], CameraView: () => null }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboard", "QrCode", "X", "Search", "MoreVertical", "Plus"].map((name) => [name, () => null])));
 vi.mock("@terminalx/portable/dashboard", () => ({}));
-vi.mock("@mobile/data/conversations", () => ({ conversationRows: () => [], statusLabel: () => "" }));
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {

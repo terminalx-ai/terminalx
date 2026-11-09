@@ -15,8 +15,6 @@ vi.mock("expo-crypto", () => ({ randomUUID: () => `draft-${++mocks.uuids}` }));
 vi.mock("@mobile/notifications/local", () => ({ localNotificationsEnabled: async () => false, enableLocalNotifications: vi.fn(), disableLocalNotifications: vi.fn() }));
 vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => true }));
 vi.mock("@terminalx/portable/dashboard", () => ({}));
-vi.mock("@mobile/data/conversations", () => ({ conversationRows: () => [], statusLabel: () => "" }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["Check", "ChevronDown", "ChevronUp", "ChevronRight", "Plus", "Search", "Trash2", "MoreVertical", "Keyboard", "QrCode", "X"].map((name) => [name, () => null])));
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
@@ -145,13 +143,7 @@ describe("starting a session from the phone", () => {
     expect(container.textContent).toContain("Update TerminalX on this Mac");
   });
 
-  it("is offered on the sessions screen by a Mac that can start sessions", async () => {
-    await render(<SessionsScreen />);
-    await click("New session");
-    expect(mocks.push).toHaveBeenCalledWith("/session/new");
-    mocks.app.api.features.mockResolvedValue({});
-    await render(<SessionsScreen />);
-    mocks.app = { ...mocks.app, activeHost: { ...mocks.app.activeHost, id: "mac-2" } };
+  it("no longer puts New session on the sessions screen: it is the tab bar's", async () => {
     await render(<SessionsScreen />);
     expect(button("New session")).toBeUndefined();
   });

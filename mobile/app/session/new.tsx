@@ -9,10 +9,20 @@ import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 
-/** Start a session on the Mac, with the choices its new-session view offers. */
+export interface StartedSession { sessionId: string; tabId: string; hostId: string; title: string }
+
+/** Start a session on the Mac, opened over the page that asked for it. */
 export default function NewSessionScreen() {
-  const app = useApp();
   const router = useRouter();
+  return <NewSessionForm onStarted={(params) => router.replace({ pathname: "/session/[sessionId]", params: { ...params } })} />;
+}
+
+/**
+ * Start a session on the Mac, with the choices its new-session view offers.
+ * `title` is a tab's own large title; `onStarted` opens the session.
+ */
+export function NewSessionForm({ title, onStarted }: { title?: string; onStarted(session: StartedSession): void }) {
+  const app = useApp();
   const { palette } = useTheme();
   const [options, setOptions] = useState<NewSessionOptions | null | undefined>(undefined);
   const [choices, setChoices] = useState<NewSessionChoices | null>(null);
@@ -32,9 +42,9 @@ export default function NewSessionScreen() {
     return () => { current = false; };
   }, [app.api, app.connectionStage]);
 
-  if (app.connectionStage !== "connected") return <Screen><EmptyState title="Connect to your Mac" detail="New sessions start on the Mac, over the encrypted connection." /></Screen>;
-  if (options === undefined) return <Screen><EmptyState title="Loading" detail="Reading projects and agents from your Mac." busy /></Screen>;
-  if (options === null || !choices) return <Screen><EmptyState title="Not available on this Mac" detail={error ?? "Update TerminalX on this Mac to start sessions from your phone."} /></Screen>;
+  if (app.connectionStage !== "connected") return <Screen title={title}><EmptyState title="Connect to your Mac" detail="New sessions start on the Mac, over the encrypted connection." /></Screen>;
+  if (options === undefined) return <Screen title={title}><EmptyState title="Loading" detail="Reading projects and agents from your Mac." busy /></Screen>;
+  if (options === null || !choices) return <Screen title={title}><EmptyState title="Not available on this Mac" detail={error ?? "Update TerminalX on this Mac to start sessions from your phone."} /></Screen>;
 
   const agent = options.agents.find((candidate) => candidate.id === choices.agent) ?? null;
   const model = agent?.models.find((candidate) => candidate.id === choices.model) ?? null;
@@ -54,7 +64,7 @@ export default function NewSessionScreen() {
       if (!result.created) { setError(result.message); return; }
       draftId.current = null;
       void app.refreshSessions();
-      router.replace({ pathname: "/session/[sessionId]", params: { sessionId: result.sessionId, tabId: result.tabId, hostId: app.activeHost?.id ?? "", title: result.title } });
+      onStarted({ sessionId: result.sessionId, tabId: result.tabId, hostId: app.activeHost?.id ?? "", title: result.title });
       if (result.sendError) setError(result.sendError);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -65,7 +75,7 @@ export default function NewSessionScreen() {
 
   const choice = (key: string, label: string, selected: boolean, onPress: () => void, detail?: string, disabled?: boolean) => <Pressable key={key} accessibilityRole="button" accessibilityLabel={label} accessibilityHint={detail} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={onPress} style={[styles.choice, { backgroundColor: selected ? palette.selected : palette.raised, opacity: disabled ? 0.5 : 1 }]}><View style={styles.flex}><Text style={[styles.choiceLabel, { color: palette.ink }]}>{label}</Text>{detail ? <Text style={[styles.detail, { color: palette.muted }]}>{detail}</Text> : null}</View>{selected ? <Check size={17} color={palette.accent} /> : null}</Pressable>;
 
-  return <Screen>
+  return <Screen title={title}>
     <SectionTitle>Where</SectionTitle>
     <Card style={styles.group}>
       {options.projects.map((candidate) => choice(candidate.id, candidate.name, project?.id === candidate.id, () => change({ where: { projectId: candidate.id, useWorktree: candidate.git } }), candidate.git ? undefined : "Folder"))}
