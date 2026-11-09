@@ -24,7 +24,7 @@ export const DialogDescription = DialogPrimitive.Description;
  * dialog Radix closed itself has already animated out and is left alone.
  * Not in a document without animations (tests), nor under reduced motion.
  */
-function leaveGracefully(node: HTMLElement | null) {
+export function leaveGracefully(node: HTMLElement | null) {
   if (!node || node.getAttribute("data-state") !== "open") return;
   if (typeof document.documentElement.getAnimations !== "function") return;
   if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
@@ -48,6 +48,13 @@ function leaveGracefully(node: HTMLElement | null) {
   const dialog = ghosts.at(-1);
   dialog?.addEventListener("animationend", (event) => { if (event.target === dialog) done(); });
   window.setTimeout(done, 400);
+}
+
+/** A ref for a dialog's content that plays its exit even when the dialog is removed at once (`leaveGracefully`). */
+export function useGracefulLeave<T extends HTMLElement>() {
+  const node = React.useRef<T | null>(null);
+  React.useLayoutEffect(() => () => leaveGracefully(node.current), []);
+  return node;
 }
 
 export const DialogContent = React.forwardRef<
