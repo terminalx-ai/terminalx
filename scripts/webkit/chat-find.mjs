@@ -12,6 +12,8 @@ try {
     const extra = `(() => {
       ${fallback ? 'window.Highlight = undefined;' : ''}
       localStorage.setItem("raccoon.prefs", JSON.stringify({ foldToolCalls: true }));
+      // Folded on purpose here: the one-time unfold of an old default must leave this choice alone.
+      localStorage.setItem("raccoon.migrated.foldToolCallsOff", "1");
       window.__PW_STUB__.answers.load_tab_events = ({ tabId }) => {
         const events = [];
         const push = (payload) => events.push({ id: 'find-' + events.length, seq: events.length + 1, sessionId: 'local-s1', tabId, harness: 'gemini', ts: '2026-11-07T00:00:00Z', payload });
