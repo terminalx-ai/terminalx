@@ -332,6 +332,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "agent-browser runtime and browser installation" },
   }),
   defineSetting({
+    id: "general.startupDiagnostics", section: "general", title: "Local startup diagnostics",
+    description: "Inspect suspected child-process startup stalls, adjust thresholds, run one health probe and preview a redacted local report.",
+    searchTerms: ["startup", "stall", "diagnostics", "incident", "macos", "health", "report"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/startup/incidents.json" },
+  }),
+  defineSetting({
     id: "general.floatingOnTop", section: "general", title: "Keep the floating window on top",
     description: "The floating chat window stays above other apps’ windows. Off lets it go behind them like any other window; the pin in the window does the same.",
     searchTerms: ["general", "keep", "the", "floating", "window", "on", "top"], scope: "user",
