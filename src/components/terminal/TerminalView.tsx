@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
+import { cn } from "@/lib/cn";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -209,6 +210,8 @@ export function TerminalView({
   fit = true,
   dropRefusal,
   redraw = true,
+  actions,
+  pinned = false,
 }: {
   id: string;
   visible: boolean;
@@ -217,6 +220,10 @@ export function TerminalView({
   dropRefusal?: TerminalDropRefusal;
   /** The "Redraw terminal" control above it; a compact view leaves it out. */
   redraw?: boolean;
+  /** More controls for the same corner toolbar, beside Redraw. */
+  actions?: ReactNode;
+  /** Keep the toolbar on screen; otherwise it shows only while the pointer or focus is on the terminal. */
+  pinned?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLDivElement>(null);
@@ -331,19 +338,31 @@ export function TerminalView({
   }, [id, shown, fit]);
 
   return (
-    <div ref={frame} className="relative flex h-full w-full flex-col" data-testid="terminal-drop-target" {...drop.zoneProps}>
+    <div ref={frame} className="group/terminal relative flex h-full w-full flex-col" data-testid="terminal-drop-target" {...drop.zoneProps}>
       <EnvironmentNotice id={id} active={visible && !create} />
-      {redraw && <div className="flex h-6 shrink-0 justify-end px-3">
-        <button
-          type="button"
-          className="rounded px-2 text-xs text-muted-foreground hover:text-foreground"
-          onClick={recover}
-          title="Redraw the terminal without restarting its process"
-          tabIndex={visible ? 0 : -1}
+      {(redraw || actions) && (
+        // Floats over the terminal's corner rather than taking a row: nothing is drawn until it is wanted.
+        <div
+          className={cn(
+            "absolute top-1.5 right-3 z-10 flex items-center gap-1 rounded-md border border-hairline bg-chat/90 p-0.5 shadow-sm backdrop-blur transition-opacity duration-150",
+            pinned ? "opacity-100" : "pointer-events-none opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100",
+          )}
+          data-testid="terminal-toolbar"
         >
-          Redraw terminal
-        </button>
-      </div>}
+          {actions}
+          {redraw && (
+            <button
+              type="button"
+              className="h-6 rounded px-2 text-xs text-muted-foreground hover:bg-veil-raised hover:text-foreground"
+              onClick={recover}
+              title="Redraw the terminal without restarting its process"
+              tabIndex={visible ? 0 : -1}
+            >
+              Redraw terminal
+            </button>
+          )}
+        </div>
+      )}
       <div ref={host} className="terminal-host min-h-0 w-full flex-1 px-2 pt-1" />
       <TerminalDropHint drop={drop} />
     </div>

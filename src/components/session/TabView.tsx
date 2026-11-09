@@ -759,35 +759,12 @@ export function TabView({
     </RecoveryReports.Provider>
   );
 
-  const info = views.info[tab.id];
   const terminal = (
     <div className="flex h-full min-h-0 flex-1 flex-col">
-      <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
-        <span className="shrink-0 text-foreground" data-testid="terminal-view-title">{terminalTab ? "Terminal" : `Terminal view · ${TAB_STATUS_LABEL[tab.status]}`}</span>
-        {live && !recovery && <Button size="xs" variant="outline" disabled={recovering} onClick={(e) => { actions.pressedWith(inputOf(e)); stop("chat"); }}>Stop session</Button>}
-        {!terminalTab && (
-          <span className="min-w-0 truncate font-mono text-[11px] text-faint" title={info?.command}>
-            {info?.command}
-          </span>
-        )}
-        <span className="ml-auto min-w-0 text-faint">
-          {terminalTab
-            ? "No agent is running in this tab. Start one here and the tab becomes its tab."
-            : byHand
-              ? `${agentLabel} was started in this terminal. The chat is the same conversation.`
-              : ptyFirst
-                ? "The chat is the same conversation."
-                : "The chat resumes when you switch back."}
-          {tab.harness === "claude" && !terminalTab && (
-            <> Claude Code may show its own diff sidebar. Type <code>/diff</code> in the terminal to hide or show it.</>
-          )}
-        </span>
-        {terminalTab && held && !pane?.exited && (
-          <Button size="xs" variant="outline" disabled={resuming} onClick={() => resume(held)} data-testid="terminal-resume">
-            <Play /> Resume {agentLabel}
-          </Button>
-        )}
-      </div>
+      {/* No bar over a terminal that is working: what it would say (its state, its command line, how the chat
+          relates to it) the tab already shows or nobody needs. Its few controls sit in the terminal's corner
+          toolbar, shown on hover; only a problem below, such as an exit or an error, takes a row. */}
+      <span className="sr-only" data-testid="terminal-view-title">{terminalTab ? "Terminal" : `Terminal view · ${TAB_STATUS_LABEL[tab.status]}`}</span>
       {terminalTab && error && (
         <div role="alert" className="shrink-0 bg-warning/10 px-3 py-1.5 text-xs text-foreground">{error}</div>
       )}
@@ -806,7 +783,21 @@ export function TabView({
         </div>
       )}
       <div className="relative min-h-0 flex-1">
-        <TerminalView id={paneId} visible={active && terminalMode} />
+        <TerminalView
+          id={paneId}
+          visible={active && terminalMode}
+          pinned={terminalTab && !!held && !pane?.exited}
+          actions={
+            <>
+              {terminalTab && held && !pane?.exited && (
+                <Button size="xs" variant="ghost" disabled={resuming} onClick={() => resume(held)} data-testid="terminal-resume">
+                  <Play /> Resume {agentLabel}
+                </Button>
+              )}
+              {live && !recovery && <Button size="xs" variant="ghost" disabled={recovering} onClick={(e) => { actions.pressedWith(inputOf(e)); stop("chat"); }}>Stop session</Button>}
+            </>
+          }
+        />
       </div>
     </div>
   );
@@ -814,11 +805,11 @@ export function TabView({
   // The same header as a local tab's terminal view; what it attaches to is on the VM.
   const cloudTerminal = remoteTerminal && (
     <div className="flex h-full min-h-0 flex-1 flex-col">
-      <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
+      {/* Like the local view: a row only when there is something wrong to say. */}
+      <div className={remoteTerminal.client ? "sr-only" : "flex min-h-8 shrink-0 items-center border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground"}>
         <span className="shrink-0 text-foreground" data-testid="cloud-terminal-view-title">
           Terminal view · {remoteTerminal.client ? TAB_STATUS_LABEL[tab.status] : remoteTerminal.asleep ? "Stopped" : "Not connected"}
         </span>
-        <span className="ml-auto min-w-0 text-faint">The chat is the same conversation.</span>
       </div>
       <CloudAgentTerminal
         target={remoteTerminal}
