@@ -129,6 +129,13 @@ describe("chat scroll follow", () => {
     const banner = screen.getByRole("region", { name: "Codex goal" });
     expect(banner.textContent).toContain("Finish the migration");
     expect(view.container.querySelector("[data-chat-scroller]")?.contains(banner)).toBe(false);
+    // The banner shares main's focusable chat root; it must not replace search.
+    fireEvent.pointerDown(banner);
+    const region = view.container.querySelector('[data-find-scope="chat"]');
+    expect(document.activeElement).toBe(region);
+    fireEvent.keyDown(document.activeElement!, { key: "f", ctrlKey: true });
+    expect(screen.getByRole("textbox", { name: "Find in chat" })).toBeDefined();
+    expect(screen.getByRole("region", { name: "Codex goal" })).toBe(banner);
     view.rerender(<Chat {...props} transcript={buildTranscript([event, { ...event, id: "clear", seq: 2, payload: { type: "goal_cleared" } }], false)} />);
     expect(screen.queryByRole("region", { name: "Codex goal" })).toBeNull();
   });
