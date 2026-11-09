@@ -877,6 +877,7 @@ impl Sink for StdioSink {
         if !self.current(&rt) || !rt.child.as_ref().is_some_and(|c| c.pid == receipt.pid && c.epoch == receipt.epoch) { return; }
         rt.stdio_writer = None;
         self.manager.codex_stdio_loss(&mut rt, CompactionLoss::Exited);
+        rt.compaction.stdio_drained(&self.launch, receipt.epoch);
         let manual = matches!(&rt.engine, Engine::CodexStdio(e) if e.is_manual_compact());
         let starting = matches!(&rt.engine, Engine::CodexStdio(e) if !e.ready);
         rt.stdio_compaction = None;

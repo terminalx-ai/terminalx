@@ -963,7 +963,7 @@ const ISSUE_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Where an issue command runs from. The app finds the project from it and
 /// names the session in its question; it decides nothing, since any process
-/// can say anything here. Every write is asked.
+/// can say anything here. Confirmation policy does not trust these claims.
 fn issue_caller() -> Value {
     let present = |name: &str| std::env::var(name).ok().filter(|value| !value.trim().is_empty());
     json!({

@@ -93,7 +93,6 @@ mod github_identity;
 mod harness;
 pub mod hooks;
 mod idle_agents;
-#[cfg(feature = "desktop")]
 mod issue_control;
 #[cfg(feature = "desktop")]
 mod issue_confirmation;
