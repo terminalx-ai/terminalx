@@ -57,22 +57,41 @@ export function chatOwnsFocus(root: HTMLElement | null, target: Element | null):
 
 /** Reveal through nested output/code scrollers, stopping at the chat so the app shell cannot move. */
 export function revealSearchRange(range: Range, chat: HTMLElement, footerHeight: number): void {
-  let element = range.startContainer.parentElement;
-  while (element && chat.contains(element)) {
-    const { overflowY, overflowX } = getComputedStyle(element);
-    // Hidden overflow still scrolls programmatically (unlike clip). Skipping
-    // it can place a result inside the chat while an inner wrapper hides it.
-    if (element === chat || /auto|scroll|hidden/.test(overflowY + overflowX)) {
-      const rect = range.getBoundingClientRect();
-      const box = element.getBoundingClientRect();
-      const bottom = box.bottom - (element === chat ? footerHeight : 0);
-      if (rect.top < box.top + 8) element.scrollTop += rect.top - box.top - 8;
-      else if (rect.bottom > bottom - 8) element.scrollTop += Math.min(rect.bottom - bottom + 8, rect.top - box.top - 8);
-      if (rect.left < box.left) element.scrollLeft += rect.left - box.left;
-      else if (rect.right > box.right) element.scrollLeft += rect.right - box.right;
+  // Offscreen Markdown code blocks defer layout with content-visibility: auto.
+  // WebKit can then return a Range rectangle but ignore the nested scrollTop
+  // write. Measure the selected path with layout enabled, then restore its
+  // original rendering policy once both the inner scrollers and chat are set.
+  const deferred: { element: HTMLElement; value: string; priority: string }[] = [];
+  for (let element = range.startContainer.parentElement; element && chat.contains(element); element = element.parentElement) {
+    if (getComputedStyle(element).contentVisibility === "auto") {
+      deferred.push({ element, value: element.style.getPropertyValue("content-visibility"), priority: element.style.getPropertyPriority("content-visibility") });
     }
     if (element === chat) break;
-    element = element.parentElement;
+  }
+  try {
+    for (const { element } of deferred) element.style.setProperty("content-visibility", "visible");
+    let element = range.startContainer.parentElement;
+    while (element && chat.contains(element)) {
+      const { overflowY, overflowX } = getComputedStyle(element);
+      // Hidden overflow still scrolls programmatically (unlike clip). Skipping
+      // it can place a result inside the chat while an inner wrapper hides it.
+      if (element === chat || /auto|scroll|hidden/.test(overflowY + overflowX)) {
+        const rect = range.getBoundingClientRect();
+        const box = element.getBoundingClientRect();
+        const bottom = box.bottom - (element === chat ? footerHeight : 0);
+        if (rect.top < box.top + 8) element.scrollTop += rect.top - box.top - 8;
+        else if (rect.bottom > bottom - 8) element.scrollTop += Math.min(rect.bottom - bottom + 8, rect.top - box.top - 8);
+        if (rect.left < box.left) element.scrollLeft += rect.left - box.left;
+        else if (rect.right > box.right) element.scrollLeft += rect.right - box.right;
+      }
+      if (element === chat) break;
+      element = element.parentElement;
+    }
+  } finally {
+    for (const { element, value, priority } of deferred) {
+      if (value) element.style.setProperty("content-visibility", value, priority);
+      else element.style.removeProperty("content-visibility");
+    }
   }
 }
 

@@ -565,7 +565,7 @@ const permissionMenuItem = (page) =>
     const icon = item.querySelector('[data-testid="permission-mode-icon"]');
     const rect = item.getBoundingClientRect();
     const shield = icon?.getBoundingClientRect();
-    const iconInside = !!shield && shield.width > 0 && shield.left >= rect.left && shield.right <= rect.right && shield.top >= rect.top && shield.bottom <= rect.bottom;
+    const iconInside = !!shield && shield.width > 0 && shield.height > 0 && shield.left >= rect.left && shield.right <= rect.right && shield.top >= rect.top && shield.bottom <= rect.bottom;
     const tint = !icon ? null : icon.classList.contains("text-destructive") ? "danger" : icon.classList.contains("text-info") ? "plan" : "plain";
     return { name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1, tint, iconInside };
   });
