@@ -36,7 +36,7 @@ export interface RailProps {
 /** The sidebar in the shape the reader chose: the projects with their conversations, or one flat list of chats. */
 export function ProjectRail(props: RailProps) {
   const { sidebarLayout } = usePrefs();
-  return sidebarLayout === "list" ? <ChatListSidebar {...props} /> : <SessionSidebar {...props} />;
+  return sidebarLayout !== "simple" ? <ChatListSidebar {...props} /> : <SessionSidebar {...props} />;
 }
 
 /**

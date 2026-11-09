@@ -93,7 +93,7 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_line
         "preferences.updateChannel" => &["stable", "beta"],
         "preferences.fontScale" => &["sm", "md", "lg"],
         "preferences.transcriptLayout" => &["wide", "chat"],
-        "preferences.sidebarLayout" => &["simple", "list"],
+        "preferences.sidebarLayout" => &["simple", "list", "status"],
         "preferences.organizationDisplay" => &["all", "one"],
         "preferences.theme" => &["den", "slate", "moss", "ember"],
         "preferences.mode" => &["system", "light", "dark"],
@@ -444,6 +444,13 @@ mod tests {
         assert!(settings.floating.shortcut.is_none());
         assert!(settings.merged_cleanup.enabled_for("/repo"));
         assert_eq!(settings.preferences["mode"], "dark");
+    }
+
+    #[test]
+    fn status_grouping_is_a_valid_default_sidebar_layout() {
+        let settings = parse(r#"{"preferences":{"sidebarLayout":"status"}}"#).unwrap();
+        assert_eq!(settings.preferences["sidebarLayout"], "status");
+        assert!(parse(r#"{"preferences":{"sidebarLayout":"unknown"}}"#).is_err());
     }
 
     #[test]
