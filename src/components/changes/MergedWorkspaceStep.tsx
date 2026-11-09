@@ -4,7 +4,7 @@ import { GitMerge } from "@/icons";
 import { api, errorMessage } from "@/lib/api";
 import { bytesText } from "@/lib/cloudResources";
 import { cn } from "@/lib/cn";
-import { openWorkspaceDelete } from "@/lib/dialogs";
+import { openWorkspaceDelete, openWorkspaceRemove } from "@/lib/dialogs";
 import { holdMergedWorkspace, LOCAL_HOST, mergedDue, useMergedStatus } from "@/lib/mergedCleanup";
 
 /**
@@ -25,6 +25,7 @@ export function MergedWorkspaceStep({ cwd }: { cwd: string }) {
   const [size, setSize] = useState<number | null>(null);
   const measured = status && status.phase !== "removed" ? `${status.projectPath}\n${status.path}` : null;
   useEffect(() => {
+    setSize(null);
     if (!measured || !status) return;
     let live = true;
     api.workspaceSize(status.projectPath, status.path).then((bytes) => { if (live) setSize(bytes); }).catch(() => {});
@@ -45,7 +46,15 @@ export function MergedWorkspaceStep({ cwd }: { cwd: string }) {
     </Button>
   );
   const remove = (
-    <Button size="sm" variant="ghost" disabled={busy} onClick={() => openWorkspaceDelete(status.projectPath, status.path, status.name)}>
+    <Button
+      size="sm"
+      variant="ghost"
+      disabled={busy}
+      // A workspace whose conversations could not be filed away first: the remove dialog that settles that.
+      onClick={() => status.archiveBlocked && status.hostId === LOCAL_HOST
+        ? openWorkspaceRemove({ projectPath: status.projectPath, path: status.path, name: status.name, mode: "settle", archiveNotice: status.detail ?? undefined })
+        : openWorkspaceDelete(status.projectPath, status.path, status.name)}
+    >
       Delete workspace…
     </Button>
   );

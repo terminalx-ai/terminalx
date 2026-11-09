@@ -1,9 +1,8 @@
 import { useState } from "react";
-import { GitMerge, Loader2, ShieldCheck, Trash2, Undo2, X } from "@/icons";
+import { GitMerge, Loader2, Trash2, Undo2, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
-import { openWorkspaceRemove, openWorktreeCleanup } from "@/lib/dialogs";
 import { branchOutcome, dismissMergedNotice, holdMergedWorkspace, mergedDue, restoreMergedRemoval, useMergedCleanup, type MergedNotice } from "@/lib/mergedCleanup";
 
 /** How many notices are shown at once; the rest are in Settings → Storage. */
@@ -21,7 +20,6 @@ function NoticeCard({ notice }: { notice: MergedNotice }) {
   const [notes, setNotes] = useState<string[] | null>(null);
   const { status } = notice;
   const removed = notice.kind === "removed";
-  const kept = notice.kind === "kept";
   const act = (work: () => Promise<string[] | void>) => {
     setBusy(true);
     setError(null);
@@ -31,22 +29,20 @@ function NoticeCard({ notice }: { notice: MergedNotice }) {
       .finally(() => setBusy(false));
   };
   const [details, setDetails] = useState(false);
-  const Icon = removed ? Trash2 : kept ? ShieldCheck : GitMerge;
-  // A kept workspace's reason can list many files: the card says it in two lines, and the rest is a click away.
+  const Icon = removed ? Trash2 : GitMerge;
+  // What became of the branches can run long: the card says it in two lines, and the rest is a click away.
   const body = notes
     ? notes.join(" ")
     : removed
       ? `Its pull request #${status.pr.number} was merged. ${status.record ? branchOutcome(status.record) : ""}`
-      : kept
-        ? `Its pull request #${status.pr.number} was merged, but it was not deleted: ${status.reason ?? "it could not be checked"}. ${status.detail ?? ""}`.trim()
-        : `The workspace ${status.name} and its branch will be deleted ${mergedDue(status)}.`;
+      : `The workspace ${status.name} and its branch will be deleted ${mergedDue(status)}.`;
   const long = body.length > 140;
   return (
     <aside role="status" aria-busy={busy} data-testid="merged-notice" className={NOTICE}>
       <div className="flex items-start gap-2.5">
-        <Icon aria-hidden className={kept ? "mt-0.5 size-4 shrink-0 text-warning" : "mt-0.5 size-4 shrink-0 text-merged"} />
+        <Icon aria-hidden className="mt-0.5 size-4 shrink-0 text-merged" />
         <div className="min-w-0 flex-1">
-          <div className="truncate font-medium">{notes ? `Brought back ${status.name}` : removed ? `Deleted workspace ${status.name}` : kept ? `Kept workspace ${status.name}` : `Pull request #${status.pr.number} merged`}</div>
+          <div className="truncate font-medium">{notes ? `Brought back ${status.name}` : removed ? `Deleted workspace ${status.name}` : `Pull request #${status.pr.number} merged`}</div>
           <div className={cn("text-xs leading-relaxed break-words text-muted-foreground", long && !details && "line-clamp-2")}>{body}</div>
           {error ? (
             <div role="alert" className="mt-1 text-xs text-destructive">
@@ -55,19 +51,7 @@ function NoticeCard({ notice }: { notice: MergedNotice }) {
           ) : null}
           {notes ? null : (
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              {kept ? (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => {
-                    dismissMergedNotice(notice.id);
-                    if (status.archiveBlocked && notice.hostId === "local") openWorkspaceRemove({ projectPath: status.projectPath, path: status.path, name: status.name, mode: "settle", archiveNotice: status.detail ?? undefined });
-                    else openWorktreeCleanup();
-                  }}
-                >
-                  {status.archiveBlocked && notice.hostId === "local" ? "Review removal" : "Review in clean-up"}
-                </Button>
-              ) : removed ? (
+              {removed ? (
                 <Button size="sm" variant="secondary" disabled={busy} onClick={() => act(() => restoreMergedRemoval(notice.hostId, notice.id).then((restored) => restored.notes))}>
                   {busy ? <Loader2 aria-hidden className="animate-spin" /> : <Undo2 aria-hidden />} Undo
                 </Button>
@@ -93,15 +77,12 @@ function NoticeCard({ notice }: { notice: MergedNotice }) {
 }
 
 /**
- * Notices of the removal that follows a merged pull request, bottom right:
- * one when a workspace is about to go (Keep workspace), one when it has gone
- * (Undo), and one when a newly merged one stays, with why. Mounted once by
- * AppShell.
+ * Notices of the removal that follows a merged pull request, top right under the tabs: one when a workspace is about
+ * to go (Keep workspace), one when it has gone (Undo). Only these pop up, as they have a short window to answer; a
+ * workspace clean-up kept is said in its Branch tab instead (docs/CLEANUP-PLACEMENT.md). Mounted once by AppShell.
  */
 export function MergedCleanupNotices() {
-  // A kept workspace is not urgent: it is said in its session's Branch tab, marked on its sidebar row, and counted
-  // under the projects. Only what has a short window to answer pops up: a deletion coming (Keep), or done (Undo).
-  const notices = useMergedCleanup().notices.filter((notice) => notice.kind !== "kept");
+  const { notices } = useMergedCleanup();
   if (!notices.length) return null;
   const shown = notices.slice(-SHOWN);
   const more = notices.length - shown.length;
