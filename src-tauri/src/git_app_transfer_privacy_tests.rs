@@ -235,8 +235,8 @@ fn merge_inputs(root: &Path, managed: bool) {
         policy(true, managed);
         let fetched = f.transfers();
         let object = Command::new("/usr/bin/git").current_dir(&f.cwd).args(["cat-file", "blob", &f.blob])
-            .env_remove("GIT_NO_LAZY_FETCH").output().unwrap();
-        assert!(object.status.success()); assert_eq!(object.stdout, NEW); assert!(f.transfers() > fetched);
+            .env_remove("GIT_NO_LAZY_FETCH").env("TERMINALX_TEST_ORDINARY_GIT", "1").output().unwrap();
+        assert!(object.status.success(), "agent-owned positive control: {}", String::from_utf8_lossy(&object.stderr)); assert_eq!(object.stdout, NEW); assert!(f.transfers() > fetched);
         policy(false, managed);
         let resolution = compare().unwrap().expect("cached binary conflicts remain real conflicts");
         assert_eq!(resolution.head, local); assert_eq!(resolution.base_commit, f.after);

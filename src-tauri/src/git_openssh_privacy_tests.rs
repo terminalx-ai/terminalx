@@ -377,7 +377,7 @@ pub(super) fn strict_wrapper(root: &Path, managed: bool) {
         let hold = f.cwd.parent().unwrap().join("hold-probe");
         std::fs::write(&wrapper, format!(r#"#!/bin/sh
 if [ "$#" != 2 ]; then
- if [ -f {hold} ]; then printf '%s\n' "$$" > {held}; exec /bin/sleep 30; fi
+ if [ -f {hold} ]; then printf '%s\n' "$$" > {held}.tmp; /bin/mv {held}.tmp {held}; exec /bin/sleep 30; fi
  exit 91
 fi
 exec /usr/bin/ssh -F {config} "$@"

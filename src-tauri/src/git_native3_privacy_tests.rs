@@ -42,7 +42,7 @@ pub(super) fn run(root: &Path, managed: bool) {
     let f = Fixture::new(root, "native3-reference-lock");
     let hook = f.cwd.join(".git/hooks/reference-transaction");
     let entered = f.cwd.parent().unwrap().join("prepared");
-    std::fs::write(&hook, format!("#!/bin/sh\n[ \"$1\" = prepared ] || exit 0\nprintf '%s\\n' \"$$\" > {}\nexec /bin/sleep 30\n", quote(&entered))).unwrap();
+    std::fs::write(&hook, format!("#!/bin/sh\n[ \"$1\" = prepared ] || exit 0\nprintf '%s\\n' \"$$\" > {ready}.tmp\n/bin/mv {ready}.tmp {ready}\nexec /bin/sleep 30\n", ready=quote(&entered))).unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     let lock = f.cwd.join(".git/refs/remotes/origin/main.lock");
     std::thread::scope(|scope| {
