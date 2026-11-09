@@ -361,6 +361,8 @@ export type ChangeStatus = "added" | "modified" | "deleted" | "renamed";
 export interface ChangedFile {
   path: string;
   oldPath?: string;
+  /** Head blob ID, or deleted:<removed blob ID>. Absent on older runtimes. */
+  blobHash?: string;
   status: ChangeStatus;
   additions: number;
   deletions: number;

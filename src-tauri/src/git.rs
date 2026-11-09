@@ -516,6 +516,10 @@ pub struct ChangedFile {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
+    /// Content identity at the reviewed head. Deletions retain the removed blob's
+    /// identity with a prefix; live diffs without a snapshot have no identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_hash: Option<String>,
     pub status: ChangeStatus,
     pub additions: u32,
     pub deletions: u32,
@@ -540,14 +544,15 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
             bail!("bad head tree id");
         }
     }
-    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", "--name-status", "-z", base];
+    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", "--raw", "--no-abbrev", "-z", base];
     if let Some(h) = head {
         args.push(h);
     }
     args.push("--");
-    // --numstat and --name-status can't be combined in one call; run both.
+    // Read raw statuses separately from line counts, keeping identities independent
+    // of the whitespace display option. -z preserves tabs/newlines in file names.
     let status_out = run(cwd, &args.iter().filter(|a| **a != "--numstat").cloned().collect::<Vec<_>>())?;
-    let mut num_args = args.iter().filter(|a| **a != "--name-status").copied().collect::<Vec<_>>();
+    let mut num_args = args.iter().filter(|a| **a != "--raw").copied().collect::<Vec<_>>();
     if hide_whitespace { num_args.insert(1, "-w"); }
     let num_out = run(cwd, &num_args)?;
 
@@ -577,13 +582,18 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
             i += 1;
             continue;
         }
-        let code = st.chars().next().unwrap_or('M');
+        let raw: Vec<&str> = st.split_whitespace().collect();
+        if raw.len() != 5 || !st.starts_with(':') {
+            bail!("Malformed git diff raw record");
+        }
+        let code = raw[4].chars().next().unwrap_or('M');
+        let blob_hash = head.map(|_| if code == 'D' { format!("deleted:{}", raw[2]) } else { raw[3].to_string() });
         match code {
             'R' | 'C' => {
                 let old = fields.get(i + 1).copied().unwrap_or("").to_string();
                 let new = fields.get(i + 2).copied().unwrap_or("").to_string();
                 let (a, d) = counts.get(&new).copied().unwrap_or((0, 0));
-                out.push(ChangedFile { path: new, old_path: Some(old), status: ChangeStatus::Renamed, additions: a, deletions: d });
+                out.push(ChangedFile { path: new, old_path: Some(old), blob_hash, status: ChangeStatus::Renamed, additions: a, deletions: d });
                 i += 3;
             }
             _ => {
@@ -594,7 +604,7 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
                     'D' => ChangeStatus::Deleted,
                     _ => ChangeStatus::Modified,
                 };
-                out.push(ChangedFile { path: p, old_path: None, status, additions: a, deletions: d });
+                out.push(ChangedFile { path: p, old_path: None, blob_hash, status, additions: a, deletions: d });
                 i += 2;
             }
         }
@@ -1517,6 +1527,70 @@ mod tests {
         let ws = work_status(p);
         assert!(ws.is_repo && ws.dirty);
         assert_eq!(ws.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn review_blob_identities_cover_renames_deletions_binary_and_live_changes() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        std::fs::write(p.join("old name"), "a unique file to rename\n").unwrap();
+        std::fs::write(p.join("gone"), "removed\n").unwrap();
+        commit_all(p, "fixtures", None).unwrap();
+        let base = head_tree(p).unwrap();
+        let renamed = "new\tname\n.txt";
+        std::fs::rename(p.join("old name"), p.join(renamed)).unwrap();
+        std::fs::remove_file(p.join("gone")).unwrap();
+        std::fs::write(p.join("binary"), [0, 1, 255, 2]).unwrap();
+        std::fs::write(p.join("a.txt"), "hello\nmodified\n").unwrap();
+        let head = snapshot_tree(p).unwrap();
+        let files = changes_between(p, &base, Some(&head)).unwrap();
+        assert_eq!(files.len(), 4);
+        for file in &files {
+            let expected = if file.status == ChangeStatus::Deleted {
+                format!("deleted:{}", run(p, &["rev-parse", &format!("{base}:{}", file.path)]).unwrap().trim())
+            } else {
+                run(p, &["rev-parse", &format!("{head}:{}", file.path)]).unwrap().trim().to_string()
+            };
+            assert_eq!(file.blob_hash.as_deref(), Some(expected.as_str()));
+        }
+        let rename = files.iter().find(|file| file.path == renamed).unwrap();
+        assert_eq!(rename.old_path.as_deref(), Some("old name"));
+        assert_eq!(rename.status, ChangeStatus::Renamed);
+        std::fs::write(p.join("binary"), [0, 3, 255, 2]).unwrap();
+        let next = snapshot_tree(p).unwrap();
+        let updated = changes_between_options(p, &base, Some(&next), true).unwrap();
+        for file in &files {
+            let changed = updated.iter().find(|other| other.path == file.path).unwrap();
+            assert_eq!(file.blob_hash == changed.blob_hash, file.path != "binary");
+        }
+        assert!(changes_between(p, &base, None).unwrap().iter().all(|file| file.blob_hash.is_none()));
+    }
+
+    #[test]
+    fn commit_scope_counts_match_git_show_for_root_regular_and_merge_commits() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let mut commits = log_commits(p, None, 1).unwrap();
+        std::fs::write(p.join("a.txt"), "hello\nmore\n").unwrap();
+        commit_all(p, "regular", None).unwrap();
+        commits.extend(log_commits(p, None, 1).unwrap());
+        run(p, &["checkout", "-b", "other"]).unwrap();
+        std::fs::write(p.join("other.txt"), "other branch\n").unwrap();
+        commit_all(p, "other", None).unwrap();
+        run(p, &["checkout", "main"]).unwrap();
+        std::fs::write(p.join("main.txt"), "main branch\n").unwrap();
+        commit_all(p, "main", None).unwrap();
+        run(p, &["merge", "--no-ff", "other", "-m", "merge"]).unwrap();
+        commits.extend(log_commits(p, None, 1).unwrap());
+        for commit in commits {
+            let base = commit.parent.as_deref().map(|sha| log_commits(p, Some(sha), 1).unwrap()[0].tree.clone()).unwrap_or_else(|| EMPTY_TREE.into());
+            let files = changes_between(p, &base, Some(&commit.tree)).unwrap();
+            let expected = run(p, &["show", "--format=", "--numstat", &commit.sha, "--"]).unwrap();
+            let actual = files.iter().map(|file| format!("{}\t{}\t{}\n", file.additions, file.deletions, file.path)).collect::<String>();
+            assert_eq!(actual.trim(), expected.trim(), "commit {}", commit.sha);
+        }
     }
 
     #[test]
