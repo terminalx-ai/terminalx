@@ -691,14 +691,14 @@ describe("a quick chat in the floating window's compact chrome", () => {
       expect(guard.calls.filter((call) => call.command === "work_status").map((call) => call.args)).toContainEqual({ cwd });
       expect(guard.calls.filter((call) => call.command === "github_identity")).toEqual([]);
       expect(screen.queryByTestId("session-github-account")).toBeNull();
-      expect(screen.getByRole("button", { name: "Files", exact: true })).toBeTruthy();
-      expect(screen.queryByRole("button", { name: "Branch", exact: true })).toBeNull();
+      expect(screen.getByRole("button", { name: "Files" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Branch" })).toBeNull();
 
       // Agent activity links the repository without moving the chat's working folder.
       act(() => upsertSession({ ...session, link: { path: linkedPath, branch: "feature" } }));
       const chip = await screen.findByRole("button", { name: "Connected to GitHub as linked-account" });
       expect(getSessionStore().sessions.find((entry) => entry.id === session.id)?.cwd).toBe(cwd);
-      expect(screen.queryByRole("button", { name: "Branch", exact: true })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Branch" })).toBeNull();
       expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: linkedPath, refresh: false }]);
 
       fireEvent.click(chip);
@@ -711,7 +711,7 @@ describe("a quick chat in the floating window's compact chrome", () => {
       act(() => upsertSession({ ...session, link: null }));
       await settle();
       expect(screen.queryByTestId("session-github-account")).toBeNull();
-      expect(screen.queryByRole("button", { name: "Branch", exact: true })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Branch" })).toBeNull();
       expect(guard.calls.filter((call) => call.command === "github_identity")).toHaveLength(2);
     } finally {
       view.unmount();
