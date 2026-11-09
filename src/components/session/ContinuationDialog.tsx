@@ -231,7 +231,18 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
             <span className="flex items-center gap-1"><GitBranch className="size-3.5" />{worktree ? "On a new branch (worktree)" : "In its main checkout, shared with its other conversations"}</span>
           </label>
         ) : <p className="mt-4 text-xs text-muted-foreground">In the folder · no Git</p>)}
-        {loading ? <p role="status" className="mt-5 flex h-8 items-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin" />Preparing context…</p> : <>
+        {/* While it reads the context, the same rows with placeholders where the pills will be: the dialog opens at
+            its final height and nothing moves when they arrive. */}
+        {loading ? <div className="mt-5 flex flex-col gap-2" data-testid="continuation-loading">
+          <span className="flex items-center gap-2 text-xs font-medium text-foreground">Agent<span role="status" className="flex items-center gap-1.5 font-normal text-faint"><LoaderCircle className="size-3 animate-spin" />Preparing context…</span></span>
+          <div className="flex gap-1.5" aria-hidden>
+            {["w-32", "w-24", "w-16", "w-40"].map((w) => <span key={w} className={cn("h-8 flex-auto animate-pulse-soft rounded-md bg-secondary", w)} />)}
+          </div>
+          <span className="mt-4 mb-2 text-xs font-medium text-foreground">Context</span>
+          <div className="h-8 animate-pulse-soft rounded-md bg-veil-raised" aria-hidden />
+          <p className="text-xs text-faint" aria-hidden>&nbsp;</p>
+          <span className="mt-3 h-0" aria-hidden />
+        </div> : <>
           {/* Two rows of the same make: a label, then controls across the full width at one height, so the
               pills and the context switch line up edge to edge. */}
           <div role="group" aria-label="New session settings" className="mt-5 flex flex-col gap-2">
