@@ -1,10 +1,10 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AgentEvent } from "@/types/events";
+import { setPrefs } from "@/lib/prefs";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@/lib/prefs", () => ({ usePrefs: () => ({ panelWidth: 360, diffMode: "unified", diffHideWhitespace: false, diffWrap: true, diffWrapFiles: {} }), setPrefs: vi.fn() }));
 vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), keycaps: () => [], useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/dialogs", () => ({ openSettle: vi.fn(), openWorkspaceDelete: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
@@ -22,6 +22,7 @@ const events: AgentEvent[] = [
 ];
 
 beforeEach(() => {
+  setPrefs({ panelWidth: 360, diffMode: "unified", diffHideWhitespace: false, diffWrap: true, diffWrapFiles: {} });
   invoke.mockImplementation(async (command: string) => {
     const files = [
       { path: "src/modified.ts", status: "modified", additions: 2, deletions: 1 },

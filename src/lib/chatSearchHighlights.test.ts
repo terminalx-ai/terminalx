@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { chatOwnsFocus, searchRanges } from "./chatSearchHighlights";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { chatOwnsFocus, revealSearchRange, searchRangeRects, searchRanges } from "./chatSearchHighlights";
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("chat search highlights", () => {
   it("spans emphasis, links and code tokens without changing the DOM", () => {
@@ -15,6 +17,58 @@ describe("chat search highlights", () => {
     root.innerHTML = '<div data-streamdown="code-block-header">needle</div><button>needle</button><pre>needle\n\n  here</pre><p>Needle here</p>';
     expect(searchRanges(root, "needle here", false).map((range) => range.toString())).toEqual(["needle\n\n  here", "Needle here"]);
     expect(searchRanges(root, "needle here", true)).toHaveLength(1);
+  });
+});
+
+describe("revealing clipped search results", () => {
+  it("reveals through a hidden overflow wrapper as well as its nested code scroller", () => {
+    const shell = document.createElement("div");
+    const chat = document.createElement("div");
+    const wrapper = document.createElement("div");
+    const body = document.createElement("div");
+    shell.append(chat);
+    chat.append(wrapper);
+    wrapper.append(body);
+    body.textContent = "codeNeedle";
+    shell.scrollTop = 345;
+    chat.style.overflowY = body.style.overflowY = "auto";
+    wrapper.style.overflowY = "hidden";
+
+    // Replay the failed WebKit geometry: the wrapper still has a 202px
+    // intrinsic box around a 384px code scroller. Scroll writes must clamp
+    // like the browser; moving only the chat and code leaves the match clipped.
+    const scrollport = (element: HTMLElement, initial: number, client: number, extent: number) => {
+      let top = initial;
+      Object.defineProperties(element, {
+        clientHeight: { value: client },
+        scrollHeight: { value: extent },
+        scrollTop: { get: () => top, set: (value: number) => { top = Math.max(0, Math.min(extent - client, Math.floor(value))); } },
+      });
+    };
+    scrollport(chat, 4686, 658, 480814);
+    scrollport(wrapper, 0, 200, 412);
+    scrollport(body, 787, 384, 2022);
+    const wrapperTop = () => 3595 - chat.scrollTop;
+    const bodyTop = () => wrapperTop() + 29 - wrapper.scrollTop;
+    vi.spyOn(chat, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, 120, 500, 658));
+    vi.spyOn(wrapper, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, wrapperTop(), 500, 202));
+    vi.spyOn(body, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, bodyTop(), 500, 384));
+    const [range] = searchRanges(chat, "codeNeedle", false);
+    vi.spyOn(range, "getBoundingClientRect").mockImplementation(() => new DOMRect(10, bodyTop() + 1978 - body.scrollTop, 75, 16));
+    vi.spyOn(range, "getClientRects").mockImplementation(() => {
+      const rect = range.getBoundingClientRect();
+      return Object.assign([rect], { item: (index: number) => index === 0 ? rect : null });
+    });
+    expect(range.getBoundingClientRect().top).toBe(129);
+    expect(searchRangeRects(range, chat, 218)).toEqual([]);
+
+    revealSearchRange(range, chat, 218);
+
+    const rect = range.getBoundingClientRect();
+    expect(searchRangeRects(range, chat, 218)).toEqual([{ top: rect.top, left: rect.left, width: rect.width, height: rect.height }]);
+    expect(rect.top).toBeGreaterThanOrEqual(120);
+    expect(rect.bottom).toBeLessThanOrEqual(778 - 218);
+    expect(shell.scrollTop).toBe(345);
   });
 });
 

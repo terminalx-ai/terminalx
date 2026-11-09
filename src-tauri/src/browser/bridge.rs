@@ -448,35 +448,81 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn three_timeouts_close_the_session_and_reset_the_lane() {
+        timeout_cleanup_fixture(false, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn three_timeouts_before_command_handling_reset_the_lane() {
+        timeout_cleanup_fixture(true, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn three_timeouts_reset_a_previously_launched_lane() {
+        timeout_cleanup_fixture(false, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn three_timeouts_before_command_handling_reset_a_previously_launched_lane() {
+        timeout_cleanup_fixture(true, true);
+    }
+
+    #[cfg(unix)]
+    fn timeout_cleanup_fixture(stall_before_log: bool, previously_launched: bool) {
         let tmp = tempfile::tempdir().unwrap();
         let fake = tmp.path().join("agent-browser");
-        // Snapshot hangs; setup and close succeed. Exec leaves no sleeping
-        // grandchild holding the output pipes after the client is killed.
-        std::fs::write(&fake, "#!/bin/sh\necho \"$@\" >> \"$AB_LOG\"\ncase \"$*\" in *snapshot*) exec sleep 30;; *) echo '{\"success\":true,\"data\":{}}';; esac\n").unwrap();
+        // Setup and close succeed; snapshots can stall before command handling.
+        // Exec keeps a sleeping grandchild from retaining the output pipes.
+        std::fs::write(&fake, r#"#!/bin/sh
+case "$*" in
+  *close*) echo "$@" >> "$AB_LOG"; echo '{"success":true,"data":{"closed":true}}' ;;
+  *snapshot*)
+    if [ "$AB_STALL_BEFORE_LOG" = 1 ]; then exec sleep 5; fi
+    echo "$@" >> "$AB_LOG"
+    exec sleep 5 ;;
+  *) echo "$@" >> "$AB_LOG"; echo '{"success":true,"data":{}}' ;;
+esac
+"#).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let log_path = tmp.path().join("log");
         let mut env = ProcessEnvironment { vars: Vec::new(), socket_dir: None, owns_socket_directory: false };
         env.vars.push(("AB_LOG".into(), log_path.to_string_lossy().into_owned()));
+        env.vars.push(("AB_STALL_BEFORE_LOG".into(), u8::from(stall_before_log).to_string()));
         let bridge = Bridge::with_binary(env, fake);
         let session = bridge.session("default", tmp.path().join("profile"), tmp.path().join("downloads"));
-        bridge.with_session(&session, |ctx| ctx.ensure_tab("t0")).unwrap();
+        if previously_launched {
+            bridge.with_session(&session, |ctx| {
+                ctx.ensure_tab("t1").unwrap();
+                ctx.lane.capture_active = true;
+            });
+        }
+        assert_eq!(bridge.live_session_names(), if previously_launched { vec![session.name.clone()] } else { Vec::new() });
         for attempt in 1..=CONSECUTIVE_TIMEOUT_LIMIT {
             let err = bridge
                 .with_session(&session, |ctx| ctx.run(&["snapshot"], ExecOptions { timeout: Duration::from_millis(1200), stdin: None }))
                 .unwrap_err();
             assert_eq!(err.code, "browser_timeout");
-            // A child can time out before it executes its logging statement.
-            // Count observed timeouts, not how many children got CPU time.
+            // Count the bridge's timeout results, not child log writes: a
+            // timed-out client need not have reached its command handler.
+            let reset = attempt == CONSECUTIVE_TIMEOUT_LIMIT;
+            let still_live = previously_launched && !reset;
             bridge.with_session(&session, |ctx| {
-                let restarted = attempt == CONSECUTIVE_TIMEOUT_LIMIT;
-                assert_eq!(ctx.lane.consecutive_timeouts, if restarted { 0 } else { attempt });
-                assert_eq!(ctx.lane.launched, !restarted);
-                assert_eq!(ctx.lane.active_tab.as_deref(), if restarted { None } else { Some("t0") });
+                assert_eq!(ctx.lane.consecutive_timeouts, if reset { 0 } else { attempt });
+                assert_eq!(ctx.lane.launched, still_live);
+                assert_eq!(ctx.lane.active_tab.as_deref(), if still_live { Some("t1") } else { None });
+                assert_eq!(ctx.lane.capture_active, still_live);
             });
+            assert_eq!(bridge.live_session_names(), if still_live { vec![session.name.clone()] } else { Vec::new() });
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            assert_eq!(log.matches("close").count(), usize::from(reset), "{log}");
         }
         let log = std::fs::read_to_string(&log_path).unwrap();
-        assert_eq!(log.lines().filter(|line| line.ends_with(" close")).count(), 1, "{log}");
+        if stall_before_log {
+            assert!(!log.contains("snapshot"), "the client must stall before handling snapshots: {log}");
+        }
         assert!(log.lines().last().unwrap().contains("close"), "{log}");
         bridge.with_session(&session, |ctx| {
             assert_eq!(ctx.lane.consecutive_timeouts, 0);
