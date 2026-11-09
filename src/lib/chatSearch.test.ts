@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createChatSearchIndex, markdownSearchText, MAX_CHAT_MATCHES, searchTranscript } from "./chatSearch";
+import { createChatSearchIndex, markdownSearchText, MAX_CHAT_MATCHES, searchText, searchTranscript } from "./chatSearch";
 import { buildTranscript, type Transcript, type Turn } from "./transcript";
 
 const turn = (key: string): Turn => ({ key, seq: 1, ts: "", work: [], toolCount: 0, editedFiles: 0, live: false });
@@ -47,6 +47,19 @@ describe("transcript search", () => {
     expect(searchTranscript(index, "σ", options).map((m) => [m.from, m.to])).toEqual([[2, 3], [4, 5], [6, 7]]);
     expect(searchTranscript(index, "😀", options)[0]).toMatchObject({ from: 8, to: 10 });
     expect(searchTranscript(index, "[file]", options)).toHaveLength(1);
+  });
+
+  it("preserves boundary spaces and Unicode offsets when collapsing mixed whitespace", () => {
+    const text = "\tİ\r\nΣ  \u00a0😀\u2028a.*b\uFEFF";
+    expect(searchText(text)).toBe(" İ Σ 😀 a.*b ");
+    expect(searchText("")).toBe("");
+    expect(searchText("\t\r\n\u00a0")).toBe(" ");
+    expect(searchText("already normalized\u200b")).toBe("already normalized\u200b");
+    const t = { ...turn("t"), prompt: { seq: 1, ts: "", text } };
+    const index = createChatSearchIndex()(transcript([t]));
+    expect(searchTranscript(index, "σ", options)[0]).toMatchObject({ from: 3, to: 4 });
+    expect(searchTranscript(index, "😀", options)[0]).toMatchObject({ from: 5, to: 7 });
+    expect(searchTranscript(index, "\r\n a.*b\t", options)[0]).toMatchObject({ from: 7, to: 13 });
   });
 
   it("indexes error summaries and the agent's details separately", () => {
