@@ -9,7 +9,7 @@
   checks and login target the repository's host after resolving SSH aliases and
   excluding unrelated remotes. Connection failures offer retry,
   failed login output stays available, and repository creation works from linked
-  worktrees. PR check logs, reruns and Fix errors remain available after
+  worktrees. PR conversations, check logs, reruns and Fix errors remain available after
   connecting; failed reruns keep their output behind **Show details**. (PRO-166)
 
 - Keep native resend regression fixtures within their existing deadlines by

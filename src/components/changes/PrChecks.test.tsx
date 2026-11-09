@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { copyText } from "@/lib/clipboard";
 import { type PullRequest } from "@/lib/api";
+import type { PrConversation, PrConversationAction } from "@terminalx/portable/workspaceGit";
 import { localGitSource } from "@/lib/gitSource";
 import { runSignature, withPendingChecks } from "@/lib/checks";
 import { mergeReadiness, PrPanel } from "./PrPanel";
@@ -28,6 +29,7 @@ beforeEach(() => {
     if (command === "git_has_remote") return true;
     if (command === "work_status") return { branch: "feature", defaultBranch: "main", aheadOfBase: 1 };
     if (command === "pr_list") return [current];
+    if (command === "pr_conversation") return { url: current.url, title: current.title, body: current.body, author: current.author, viewer: "reviewer", state: current.state, canEdit: true, reviewers: [], unresolvedThreads: 0, activity: [] } satisfies PrConversation;
     if (command === "pr_check_log") return { text: "^[[31merror: assertion failed^[[0m", truncated: true };
     if (command === "pr_check_rerun") return;
     throw new Error(`Unexpected command: ${command}`);
@@ -35,6 +37,42 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 const show = (inline = true) => render(<PrPanel cwd="/repo" branch="feature" active busy={false} inline={inline} />);
+
+it.each([true, false])("keeps queued checks and deployments when the conversation edits the PR (inline=%s)", async (inline) => {
+  current.deployments = [{ name: "Preview", state: "success", url: "https://preview.example.test/" }];
+  const conversation: PrConversation = { url: pr.url, title: pr.title, body: "Original description", author: pr.author, viewer: "reviewer", state: "OPEN", canEdit: true, reviewers: [], unresolvedThreads: 0, activity: [] };
+  const backend = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, ...args: unknown[]) => {
+    if (command === "pr_conversation") return structuredClone(conversation);
+    if (command === "pr_conversation_action") {
+      const { action } = args[0] as { action: PrConversationAction };
+      if (action.kind === "edit") {
+        conversation.title = action.title;
+        conversation.body = action.body;
+      }
+      return;
+    }
+    return backend(command, ...args);
+  });
+  show(inline);
+  const rerun = await screen.findByRole("button", { name: "Re-run failed" });
+  await waitFor(() => expect((rerun as HTMLButtonElement).disabled).toBe(false));
+  await act(async () => { fireEvent.click(rerun); });
+  await screen.findByLabelText("test: queued");
+  expect((screen.getByRole("button", { name: "Re-run all" }) as HTMLButtonElement).disabled).toBe(true);
+  const discoveryReads = mocks.invoke.mock.calls.filter(([command]) => command === "pr_list").length;
+  fireEvent.click(screen.getByRole("button", { name: "Edit title and description" }));
+  fireEvent.change(screen.getByLabelText("Pull request title"), { target: { value: "Updated title" } });
+  fireEvent.change(screen.getByLabelText("Pull request description"), { target: { value: "Updated description" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("Updated description");
+  expect(screen.getByRole("button", { name: /Updated title/ })).toBeTruthy();
+  expect(screen.getAllByLabelText("test: queued")).toHaveLength(1);
+  expect(screen.getAllByLabelText("lint: queued")).toHaveLength(1);
+  expect(screen.getByRole("region", { name: "Deployments" })).toBeTruthy();
+  expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_list")).toHaveLength(discoveryReads);
+  expect(mocks.invoke).toHaveBeenCalledWith("pr_conversation_action", { url: pr.url, action: { kind: "edit", title: "Updated title", body: "Updated description", expectedTitle: pr.title, expectedBody: "Original description" } });
+});
 
 it.each([true, false])("keeps one checks list with summaries, requirements, queue details and log actions (inline=%s)", async (inline) => {
   current.requiredChecks = ["test", "lint"];

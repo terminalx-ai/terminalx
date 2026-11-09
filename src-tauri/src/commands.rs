@@ -3039,6 +3039,21 @@ pub async fn pr_details(cwd: String, number: u64, url: Option<String>) -> CmdRes
 }
 
 #[tauri::command]
+pub async fn pr_conversation(url: String) -> CmdResult<crate::github::conversation::Conversation> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::pr_conversation(&url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_conversation_action(url: String, action: crate::github::conversation::Action) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::pr_conversation_action(&url, action).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_reviewer_search(url: String, query: String) -> CmdResult<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::pr_reviewer_search(&url, &query).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn pr_check_log(cwd: String, pr_url: String, check_url: String, failed: bool) -> CmdResult<crate::github::checks::CheckLog> {
     tauri::async_runtime::spawn_blocking(move || crate::github::checks::log(Path::new(&cwd), &pr_url, &check_url, failed).map_err(err)).await.map_err(err)?
 }
