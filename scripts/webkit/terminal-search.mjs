@@ -23,10 +23,13 @@ function setup() {
       if (id !== shell.id) return;
       checks.attached++;
       const text = ["needle first", ...Array.from({ length: 180 }, (_, i) => `scrollback line ${i}`), "NEEDLE upper", "needle last", "select this output"].join("\r\n");
-      const bytes = new TextEncoder().encode(text);
-      const frame = new Uint8Array(bytes.length + 4);
-      frame.set(bytes, 4);
-      channel.onmessage(frame.buffer);
+      window.__TERMINAL_OUTPUT__ = (text) => {
+        const bytes = new TextEncoder().encode(text);
+        const frame = new Uint8Array(bytes.length + 4);
+        frame.set(bytes, 4);
+        channel.onmessage(frame.buffer);
+      };
+      window.__TERMINAL_OUTPUT__(text);
     },
   });
 }
@@ -39,6 +42,25 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   await openConversation(page, "claude tab");
   const dock = page.getByTestId("panel-terminal");
+  await dock.locator(".xterm-screen").waitFor();
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => document.activeElement?.blur());
+  const idleSearch = await dock.evaluate((dock) => {
+    const button = dock.querySelector('[aria-label="Search terminal"]');
+    const b = button.getBoundingClientRect(), s = dock.querySelector(".xterm-screen").getBoundingClientRect();
+    const x = Math.max(b.left, s.left), y = Math.max(b.top, s.top);
+    const width = Math.min(b.right, s.right) - x, height = Math.min(b.bottom, s.bottom) - y;
+    const hit = width > 0 && height > 0 ? document.elementFromPoint(x + width / 2, y + height / 2) : null;
+    return { overlap: width > 0 && height > 0, hitIsSearch: !!hit && button.contains(hit), opacity: getComputedStyle(button).opacity };
+  });
+  assert.equal(idleSearch.overlap && idleSearch.hitIsSearch, false, "idle Search must not obscure or intercept terminal text");
+  assert.equal(idleSearch.opacity, "0", "Search is hidden while the terminal is idle");
+  await dock.getByRole("button", { name: "Search terminal", exact: true }).focus();
+  await page.waitForFunction(() => {
+    const button = document.querySelector('[data-testid="panel-terminal"] [aria-label="Search terminal"]');
+    return document.activeElement === button && getComputedStyle(button).opacity === "1";
+  });
+  assert.equal(await dock.getByRole("button", { name: "Search terminal", exact: true }).evaluate((button) => getComputedStyle(button).pointerEvents), "auto", "keyboard focus reveals an operable Search control");
   await dock.locator(".xterm-helper-textarea").focus();
   await page.keyboard.press("Meta+f");
   const search = page.getByRole("search", { name: "Find in terminal" });
@@ -60,6 +82,31 @@ try {
   assert.notEqual(await search.getByRole("status").textContent(), first, "Shift+Enter goes backwards");
   await search.getByRole("button", { name: "Match case" }).click();
   await page.waitForFunction(() => document.querySelector('[role="search"] [role="status"]')?.textContent?.endsWith("of 2"));
+
+  // There is one match, so its rendered rectangles identify it without an
+  // active-decoration class (which this addon version does not add).
+  await input.fill("needle last");
+  await page.waitForFunction(() => document.querySelector('[role="search"] [role="status"]')?.textContent === "1 of 1");
+  await page.waitForTimeout(300);
+  const matchInView = () => dock.locator(".xterm-screen").evaluate((screen) => {
+    const box = screen.getBoundingClientRect();
+    return [...screen.closest(".xterm").querySelectorAll(".xterm-find-result-decoration")].some((el) => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.bottom > box.top && r.top < box.bottom;
+    });
+  });
+  assert.equal(await matchInView(), true, "explicit search shows its unique match");
+  await dock.locator(".xterm-screen").hover();
+  await page.mouse.wheel(0, -10000);
+  await page.waitForTimeout(300);
+  assert.equal(await matchInView(), false, "the user can scroll away from the selected match");
+  await page.evaluate(() => window.__TERMINAL_OUTPUT__("\r\nunrelated live output\r\n"));
+  // addon-search recomputes 200 ms after parsed output. Observe its settled viewport.
+  await page.waitForTimeout(500);
+  assert.equal(await matchInView(), false, "unrelated output preserves the user's viewport");
+  await search.getByRole("button", { name: "Next match", exact: true }).click();
+  assert.equal(await matchInView(), true, "explicit navigation can return to the selected match");
+
   await input.fill("absent match");
   await page.waitForFunction(() => document.querySelector('[role="search"] [role="status"]')?.textContent === "No matches");
   assert.equal(await search.getByRole("status").textContent(), "No matches");

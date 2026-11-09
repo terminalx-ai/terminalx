@@ -60,15 +60,9 @@ export function TerminalTools({ id, shown, frame }: { id: string; shown: boolean
     const addon = new SearchAddon();
     inst.term.loadAddon(addon);
     search.current = addon;
-    const change = addon.onDidChangeResults((results) => {
-      setResults(results);
-      // A resize or incoming output makes the addon recompute with noScroll.
-      // Keep its selected match visible after the terminal's grid changes.
-      const start = inst.term.getSelectionPosition()?.start;
-      if (start && (start.y < inst.term.buffer.active.viewportY || start.y >= inst.term.buffer.active.viewportY + inst.term.rows)) {
-        inst.term.scrollToLine(Math.max(0, start.y - Math.floor(inst.term.rows / 2)));
-      }
-    });
+    // Writes and resizes recompute with noScroll. Only explicit searches and
+    // navigation should move the viewport; background results just update the bar.
+    const change = addon.onDidChangeResults(setResults);
     input.current?.focus();
     input.current?.select();
     return () => {
@@ -139,7 +133,7 @@ export function TerminalTools({ id, shown, frame }: { id: string; shown: boolean
       <button type="button" aria-label="Next match" disabled={!query} onClick={() => find(false)} className="rounded p-1 hover:bg-veil-raised disabled:opacity-40"><ChevronDown className="size-3.5" /></button>
       <button type="button" aria-label="Close terminal search" onClick={close} className="rounded p-1 hover:bg-veil-raised"><X className="size-3.5" /></button>
     </div>}
-    {!open && <button type="button" aria-label="Search terminal" onClick={show} className="absolute top-1 left-3 z-10 rounded bg-background px-1 py-0.5 text-xs text-muted-foreground hover:text-foreground"><Search className="size-3" /></button>}
+    {!open && <button type="button" aria-label="Search terminal" onClick={show} className="pointer-events-none absolute top-1 left-3 z-10 rounded bg-terminal px-1 py-0.5 text-xs text-muted-foreground opacity-0 transition-opacity duration-150 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 focus:pointer-events-auto focus:opacity-100 hover:text-foreground"><Search className="size-3" /></button>}
     {!open && (selection.trim() || notice || error) && <div className="absolute right-4 bottom-3 z-20 max-w-[90%] rounded-md border border-hairline bg-popover px-2 py-1 text-xs shadow-md">
       {selection.trim() && <button type="button" disabled={pending} onMouseDown={(event) => event.preventDefault()} onClick={() => void add()} className="rounded px-1 py-1 hover:bg-veil-raised disabled:opacity-50">{pending ? "Adding…" : "Add to chat"}</button>}
       {notice && <span role="status">{notice}</span>}
