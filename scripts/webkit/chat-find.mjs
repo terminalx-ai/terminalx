@@ -8,7 +8,7 @@ const server = await serve();
 let browser;
 try {
   browser = await launch();
-  for (const fallback of [false, true]) {
+  for (const [fallback, delayedCode] of [[false, false], [true, false], [false, true], [true, true], [false, "scrolled"], [true, "scrolled"]]) {
     const extra = `(() => {
       ${fallback ? 'window.Highlight = undefined;' : ''}
       localStorage.setItem("raccoon.prefs", JSON.stringify({ foldToolCalls: true }));
@@ -30,6 +30,18 @@ try {
       };
     })();`;
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width: 1100, height: 800 }, { extra });
+    // Hold the real lazy renderer until find has revealed the plain-code fallback.
+    // Its replacement must retain the active result's nested scroll position.
+    let releaseCode;
+    let codeRequested = false;
+    if (delayedCode) {
+      const ready = new Promise((resolve) => { releaseCode = resolve; });
+      await page.route("**/highlighted-body-*.js", async (route) => {
+        codeRequested = true;
+        await ready;
+        await route.continue();
+      });
+    }
     await openConversation(page, "claude tab");
     await tab(page, "gemini tab").click();
     const chat = page.locator('[data-find-scope="chat"]:visible');
@@ -72,6 +84,27 @@ try {
     await chat.getByRole("status").filter({ hasText: "1 of 2" }).waitFor();
     await input.fill("codeNeedle");
     await visibleHighlight("codeNeedle");
+    if (delayedCode) {
+      assert.equal(codeRequested, true);
+      const codeBody = scroller.locator('[data-streamdown="code-block-body"]');
+      if (delayedCode === "scrolled") {
+        await codeBody.hover();
+        await page.mouse.wheel(0, -2000);
+        await page.waitForFunction(() => document.querySelector('[data-streamdown="code-block-body"]').scrollTop === 0);
+      }
+      const topBeforeReplacement = await scroller.evaluate((el) => el.scrollTop);
+      releaseCode();
+      await page.waitForFunction(() => [...document.querySelectorAll('[data-streamdown="code-block"] span')].some((el) => {
+        const color = el.style.getPropertyValue("--sdm-c");
+        return color && color !== "inherit";
+      }));
+      if (delayedCode === "scrolled") {
+        assert.equal(await codeBody.evaluate((el) => el.scrollTop), 0, "keep the reader's scroll after replacing code");
+        assert.equal(await scroller.evaluate((el) => el.scrollTop), topBeforeReplacement);
+      } else {
+        await visibleHighlight("codeNeedle");
+      }
+    }
     await input.fill("buried-output");
     await chat.getByRole("status").filter({ hasText: "1 of 1" }).waitFor();
     await visibleHighlight("buried-output");
@@ -87,7 +120,7 @@ try {
     await input.waitFor({ state: "hidden" });
     assert.equal(await scroller.getByText("A hidden thought", { exact: true }).count(), 0);
     assert.equal(await page.locator('[data-chat-search-highlight]').count(), 0);
-    console.log(`ok  ${fallback ? 'fallback overlays' : 'native highlights'}: 2,000 virtual turns, Markdown, code, folded output, navigation and options`);
+    console.log(`ok  ${fallback ? 'fallback overlays' : 'native highlights'}${delayedCode ? ', delayed code renderer' : ''}${delayedCode === 'scrolled' ? ', reader scrolled away' : ''}: 2,000 virtual turns, Markdown, code, folded output, navigation and options`);
     await page.close();
   }
 } finally {
