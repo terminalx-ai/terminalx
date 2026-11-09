@@ -91,7 +91,7 @@ export default function SessionScreen() {
       if (!result.done) return Alert.alert("Could not close the chat", result.message);
       if (next) select(next.id);
       await app.refreshSessions();
-    }) }]);
+    }).catch((cause: unknown) => Alert.alert("Could not close the chat", cause instanceof Error ? cause.message : String(cause))) }]);
   };
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: label, headerShown: false }} />
@@ -250,7 +250,8 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
   const send = async () => {
     const text = draft.trim();
     if ((!text && !attachments.length) || !connected || sending) return;
-    if (dictation.listening) dictation.stop();
+    // What was heard is in the draft already: a result still on its way would come after the send.
+    if (dictation.listening) dictation.cancel();
     draftEdited.current = true;
     setSending(true);
     setSendFeedback(null);
@@ -621,9 +622,10 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
     let parsed = Promise.resolve();
     // A program that redraws its screen in place (Claude Code) leaves the terminal no history: the phone keeps it.
     let history = new ScreenHistory();
-    const draw = () => { if (!frame) frame = setTimeout(() => { frame = null; const current = screen.current; if (active && current) setRows(current.hasHistory() ? current.lines() : [...history.rows, ...current.viewport()]); }, 50); };
+    const draw = () => { if (!frame) frame = setTimeout(() => { frame = null; const current = screen.current; if (active && current) setRows([...history.rows, ...(current.hasHistory() ? current.lines() : current.viewport())]); }, 50); };
     /** Output parsed, then the screen looked at, so what moved off its top is kept. */
-    const feed = (text: string) => apply(async (current) => { await current.write(text); history.observe(current.viewport()); });
+    // Only a normal screen with no history of its own: a terminal's own scrollback, or a full-screen program's moves, are not kept twice.
+    const feed = (text: string) => apply(async (current) => { await current.write(text); if (!current.hasHistory() && !current.modes().alternate) history.observe(current.viewport()); });
     const apply = (step: (current: TerminalScreen) => void | Promise<void>) => {
       parsed = parsed.then(async () => { if (active && screen.current) await step(screen.current); }).then(draw, draw);
     };

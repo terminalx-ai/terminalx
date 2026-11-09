@@ -8,8 +8,14 @@ type Loaded = { uri: string } | { error: string };
 export interface PromptImageSource { scope: string; load(url: string): Promise<Loaded> }
 export const PromptImageContext = createContext<PromptImageSource | null>(null);
 
-// An image is asked for once a conversation, however often its row is drawn.
+// An image is asked for once a conversation, however often its row is drawn; only the latest few are held.
+const HELD = 24;
 const loaded = new Map<string, Promise<Loaded>>();
+const hold = (key: string, pending: Promise<Loaded>) => {
+  loaded.delete(key);
+  loaded.set(key, pending);
+  while (loaded.size > HELD) loaded.delete(loaded.keys().next().value!);
+};
 const direct = (url: string) => /^(data:|https?:)/.test(url);
 
 /** The images sent with a message, as thumbnails in its bubble; one opens to fill the screen. */
@@ -35,9 +41,11 @@ function Thumbnail({ image, size, onOpen }: { image: { url: string; name?: strin
     let active = true;
     const key = `${source.scope}\n${image.url}`;
     let pending = loaded.get(key);
+    // Looked at again, an image is among the latest held.
+    if (pending) hold(key, pending);
     if (!pending) {
       pending = source.load(image.url).catch((cause: unknown) => ({ error: cause instanceof Error ? cause.message : String(cause) }));
-      loaded.set(key, pending);
+      hold(key, pending);
       // A refusal is not kept: the next look asks again.
       void pending.then((result) => { if ("error" in result) loaded.delete(key); });
     }

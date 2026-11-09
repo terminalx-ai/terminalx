@@ -70,3 +70,28 @@ describe("dictating into the composer", () => {
     expect(probe.current!.error).toBe("The network is down.");
   });
 });
+
+describe("a long dictation", () => {
+  it("keeps each sentence iOS settles on its own, and the one being said after them", async () => {
+    await act(async () => probe.current!.start());
+    await emit("result", { isFinal: true, results: [{ transcript: "Fix the login." }] });
+    // iOS 18 starts the next sentence afresh.
+    await emit("result", { isFinal: false, results: [{ transcript: "Then the" }] });
+    await emit("result", { isFinal: true, results: [{ transcript: "Then the tests." }] });
+    expect(said.at(-1)).toBe("Fix the login. Then the tests.");
+    // A recognizer that hands back everything at once is not doubled.
+    await emit("result", { isFinal: false, results: [{ transcript: "Fix the login. Then the tests. And" }] });
+    expect(said.at(-1)).toBe("Fix the login. Then the tests. And");
+  });
+
+  it("hears nothing more once cancelled or sent, and starts afresh", async () => {
+    await act(async () => probe.current!.start());
+    await emit("result", { isFinal: true, results: [{ transcript: "One." }] });
+    await act(async () => probe.current!.cancel());
+    await emit("result", { isFinal: true, results: [{ transcript: "One. Two." }] });
+    expect(said.at(-1)).toBe("One.");
+    await act(async () => probe.current!.start());
+    await emit("result", { isFinal: false, results: [{ transcript: "Fresh" }] });
+    expect(said.at(-1)).toBe("Fresh");
+  });
+});
