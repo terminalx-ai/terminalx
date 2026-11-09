@@ -1,6 +1,56 @@
 import { describe, expect, it } from "vitest";
-import type { AgentEvent, Payload } from "./events";
+import type { AgentEvent, Goal, Payload } from "./events";
 import { buildTranscript, compactionStatus, ConversationView, conversationEvents, TranscriptReducer } from "./transcript";
+
+describe("Codex goals", () => {
+  const goal: Goal = { objective: "Reduce latency", status: "active", tokenBudget: 1000, tokensUsed: 0 };
+  const event = (seq: number, payload: Payload, extra: Partial<AgentEvent> = {}): AgentEvent => ({
+    id: `goal-${seq}`, seq, sessionId: "s", tabId: "t", harness: "codex", ts: "2026-11-07T10:48:53Z", payload, ...extra,
+  });
+
+  it("shows a goal before any turn, replaces accounting snapshots and restores them on replay", () => {
+    const reducer = new TranscriptReducer();
+    const events = [event(1, { type: "goal_updated", goal })];
+    reducer.push(events[0]);
+    const before = reducer.snapshot(true);
+    expect(before.goal).toEqual(goal);
+    expect(before.turns).toEqual([]);
+    events.push(event(2, { type: "goal_updated", goal: { ...goal, tokensUsed: 700, status: "paused" } }));
+    reducer.push(events[1]);
+    expect(before.goal?.tokensUsed).toBe(0);
+    expect(reducer.snapshot(false).goal).toEqual({ ...goal, tokensUsed: 700, status: "paused" });
+    expect(buildTranscript(events, false)).toEqual(reducer.snapshot(false));
+    // A new goal replaces old usage, including an explicitly absent budget.
+    reducer.push(event(3, { type: "goal_updated", goal: { ...goal, objective: "Next task", tokenBudget: null } }));
+    expect(reducer.snapshot(false).goal).toEqual({ ...goal, objective: "Next task", tokenBudget: null });
+  });
+
+  it("does not let context usage, errors, turn completion, or subagents change the goal", () => {
+    const transcript = buildTranscript([
+      event(1, { type: "goal_updated", goal }),
+      event(2, { type: "usage_update", contextUsed: 95000, contextMax: 200000 }),
+      event(3, { type: "error", message: "Retry needed", fatal: false }),
+      event(4, { type: "turn_completed", status: "error", authFailed: false }),
+      event(5, { type: "goal_updated", goal: { ...goal, status: "complete" } }, { subagent: { id: "child" } }),
+      event(6, { type: "goal_cleared" }, { subagent: { id: "child" } }),
+      event(7, { type: "goal_cleared" }, { harness: "claude" }),
+    ], false);
+    expect(transcript.goal).toEqual(goal);
+    expect(transcript.contextUsed).toBe(95000);
+  });
+
+  it("clears only on reported clearance and isolates conversations", () => {
+    const events = [event(1, { type: "goal_updated", goal }),
+      event(2, { type: "conversation", id: "second", harness: "codex" }),
+      event(3, { type: "goal_updated", goal: { ...goal, objective: "Another thread" } })];
+    expect(new ConversationView(null, true).update(events).transcript(false).goal).toEqual(goal);
+    expect(new ConversationView("second", true).update(events).transcript(false).goal?.objective).toBe("Another thread");
+    events.push(event(4, { type: "goal_cleared" }));
+    expect(new ConversationView("second", true).update(events).transcript(false).goal).toBeUndefined();
+    expect(new ConversationView(null, true).update(events).transcript(false).goal).toEqual(goal);
+    expect(buildTranscript([], false).goal).toBeUndefined();
+  });
+});
 
 /**
  * The incremental transcript (#727) against the whole-log build it replaces:

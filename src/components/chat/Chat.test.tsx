@@ -121,6 +121,18 @@ function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
 }
 
 describe("chat scroll follow", () => {
+  it("shows a reported goal above the scroller before the first turn and hides a cleared goal", () => {
+    const event: AgentEvent = { id: "goal", seq: 1, sessionId: "s", tabId: "t", harness: "codex", ts: "",
+      payload: { type: "goal_updated", goal: { objective: "Finish the migration", status: "active", tokenBudget: 1000, tokensUsed: 0 } } };
+    const props = { sessionId: "s", live: false, progressing: false, answering: false, stream: [], onAnswerPermission: () => {}, onAnswerQuestions: () => {}, footer: null };
+    const view = render(<Chat {...props} transcript={buildTranscript([event], false)} />);
+    const banner = screen.getByRole("region", { name: "Codex goal" });
+    expect(banner.textContent).toContain("Finish the migration");
+    expect(view.container.querySelector("[data-chat-scroller]")?.contains(banner)).toBe(false);
+    view.rerender(<Chat {...props} transcript={buildTranscript([event, { ...event, id: "clear", seq: 2, payload: { type: "goal_cleared" } }], false)} />);
+    expect(screen.queryByRole("region", { name: "Codex goal" })).toBeNull();
+  });
+
   it("shows confirmed compaction while ordinary work is idle", () => {
     const scope = { sessionId: "s", tabId: "t", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
     const events: AgentEvent[] = [
