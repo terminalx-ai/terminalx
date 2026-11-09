@@ -58,13 +58,19 @@ try {
       const box = chat.getBoundingClientRect();
       if (fallback) return [...document.querySelectorAll('[data-chat-search-highlight]')].some((el) => {
         const r = el.getBoundingClientRect();
-        return r.width > 0 && r.top >= box.top && r.bottom <= box.bottom;
+        return !!el.style.outline && r.width > 0 && r.height > 0 && r.top >= box.top && r.bottom <= box.bottom;
       });
       const active = [...CSS.highlights.entries()].find(([name]) => name.endsWith('-active'))?.[1];
       if (!active) return false;
       return [...active].some((range) => {
         const r = range.getBoundingClientRect();
-        return range.toString() === text && r.width > 0 && r.top >= box.top && r.bottom <= box.bottom - 120;
+        let top = box.top, bottom = box.bottom - 120, left = box.left, right = box.right;
+        for (let el = range.startContainer.parentElement; el && el !== chat; el = el.parentElement) {
+          const style = getComputedStyle(el), clip = el.getBoundingClientRect();
+          if (/auto|scroll|hidden|clip/.test(style.overflowY)) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
+          if (/auto|scroll|hidden|clip/.test(style.overflowX)) { left = Math.max(left, clip.left); right = Math.min(right, clip.right); }
+        }
+        return range.toString() === text && r.width > 0 && r.top >= top && r.bottom <= bottom && r.left >= left && r.right <= right;
       });
     }, { text, fallback });
     await visibleHighlight("hidden needle");
@@ -82,7 +88,9 @@ try {
       assert.equal(codeRequested, true);
       const codeBody = scroller.locator('[data-streamdown="code-block-body"]');
       if (delayedCode === "scrolled") {
-        await codeBody.evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event("scroll")); });
+        await codeBody.hover();
+        await page.mouse.wheel(0, -2000);
+        await page.waitForFunction(() => document.querySelector('[data-streamdown="code-block-body"]').scrollTop === 0);
       }
       const topBeforeReplacement = await scroller.evaluate((el) => el.scrollTop);
       releaseCode();

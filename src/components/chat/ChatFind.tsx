@@ -79,8 +79,13 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
     if (!open || !chat) return;
     const native = typeof Highlight !== "undefined" && typeof CSS !== "undefined" && !!CSS.highlights;
     let pending = true;
-    let chosenNode: Node | undefined;
-    let chosenVisible = false;
+    let revealedNodes: [Node, Node] | undefined;
+    // Syntax rendering can replace a scrolled code container. Keep this
+    // selection visible across that replacement, until the reader takes over.
+    const stopFollowing = () => { pending = false; revealedNodes = undefined; };
+    const readerKey = (event: KeyboardEvent) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stopFollowing();
+    };
     const paint = () => {
       const all: Range[] = [];
       let chosen: Range | undefined;
@@ -96,29 +101,34 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
         highlight.priority = 1;
         CSS.highlights.set(`${name}-active`, highlight);
       }
-      // A lazy code renderer can replace both the matched text and its scroller.
-      // Follow that replacement only while the reader still has the match in view.
-      if (chosen && (pending || (chosenVisible && chosenNode && !chosenNode.isConnected))) {
+      if (chosen && (pending || revealedNodes?.some((node) => !chat.contains(node)))) {
         pending = false;
+        revealedNodes = [chosen.startContainer, chosen.endContainer];
         chat.dispatchEvent(new Event(READER_SCROLL_EVENT));
         revealSearchRange(chosen, chat, footerHeight);
       }
-      chosenNode = chosen?.startContainer;
-      chosenVisible = !!chosen && searchRangeRects(chosen, chat, footerHeight).length > 0;
       if (!native) setRects(all.flatMap((range) => searchRangeRects(range, chat, footerHeight).map((rect) => ({ ...rect, active: range === chosen }))));
     };
     paint();
     // Markdown syntax highlighting and virtual rows can finish after the find bar's commit.
     const observer = new MutationObserver(paint);
     observer.observe(chat, { childList: true, characterData: true, subtree: true });
+    chat.addEventListener("wheel", stopFollowing, { passive: true });
+    chat.addEventListener("touchstart", stopFollowing, { passive: true });
+    chat.addEventListener("pointerdown", stopFollowing);
+    chat.addEventListener("keydown", readerKey);
     const resize = new ResizeObserver(paint);
     if (!native) {
       resize.observe(chat);
+      chat.addEventListener("scroll", paint, true);
       window.addEventListener("resize", paint);
     }
-    chat.addEventListener("scroll", paint, true);
     return () => {
       observer.disconnect();
+      chat.removeEventListener("wheel", stopFollowing);
+      chat.removeEventListener("touchstart", stopFollowing);
+      chat.removeEventListener("pointerdown", stopFollowing);
+      chat.removeEventListener("keydown", readerKey);
       resize.disconnect();
       chat.removeEventListener("scroll", paint, true);
       window.removeEventListener("resize", paint);
