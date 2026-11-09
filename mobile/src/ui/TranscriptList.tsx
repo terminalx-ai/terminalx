@@ -1,4 +1,4 @@
-import { createElement, isValidElement, useMemo, useRef, useState } from "react";
+import { createElement, isValidElement, useMemo, useRef, useState, type ComponentType, type ReactElement } from "react";
 import { FlatList, StyleSheet, View, type FlatListProps } from "react-native";
 import { ArrowDown } from "lucide-react-native";
 import { GlassIconButton } from "./glass";
@@ -8,8 +8,8 @@ const LATEST_THRESHOLD = 80;
 const MAINTAIN_POSITION = { minIndexForVisible: 0 };
 
 type Props<Item> = Pick<FlatListProps<Item>, "data" | "renderItem" | "keyExtractor" | "ListEmptyComponent" | "onScroll" | "contentContainerStyle"> & {
-  earlier?: FlatListProps<Item>["ListFooterComponent"];
-  latest?: FlatListProps<Item>["ListHeaderComponent"];
+  earlier?: ReactElement | null;
+  latest?: ReactElement | null;
   /** Room kept at the latest edge for a composer floating over the list, which the latest rows scroll clear of. */
   inset?: number;
 };
@@ -26,7 +26,7 @@ export function TranscriptList<Item>({ data, earlier, latest, onScroll, contentC
   const newestFirst = useMemo(() => Array.from(data ?? []).reverse(), [data]);
   // An inverted list counter-flips its empty state through a `style` prop on the
   // element. Host it on a View so components that ignore `style` stay upright.
-  const empty = ListEmptyComponent ? <View>{isValidElement(ListEmptyComponent) ? ListEmptyComponent : createElement(ListEmptyComponent)}</View> : null;
+  const empty = ListEmptyComponent ? <View>{isValidElement(ListEmptyComponent) ? ListEmptyComponent : createElement(ListEmptyComponent as ComponentType)}</View> : undefined;
   const keepLatest = () => {
     if (following.current && !dragging.current) list.current?.scrollToOffset({ offset: 0, animated: false });
   };
@@ -67,8 +67,8 @@ export function TranscriptList<Item>({ data, earlier, latest, onScroll, contentC
       onContentSizeChange={keepLatest}
       onLayout={keepLatest}
       ListEmptyComponent={empty}
-      ListHeaderComponent={latest}
-      ListFooterComponent={earlier}
+      ListHeaderComponent={latest ?? undefined}
+      ListFooterComponent={earlier ?? undefined}
     />
     {awayFromLatest ? <View style={[styles.jump, { bottom: 12 + inset }]}><GlassIconButton
       label="Jump to latest"

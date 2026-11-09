@@ -1,0 +1,84 @@
+import { act, cleanup, renderHook } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { agent, gh, type PullRequest } from "./api";
+import { setPrefs } from "./prefs";
+import { fixErrorsPrompt, useFixCheckErrors } from "./fixCheckErrors";
+
+const mocks = vi.hoisted(() => ({ shortcut: vi.fn(), merge: vi.fn(), workStatus: vi.fn(), sessionPrs: vi.fn() }));
+vi.mock("./api", () => ({ agent: { send: vi.fn() }, gh: { fixAttachment: vi.fn() }, errorMessage: (e: unknown) => String(e) }));
+vi.mock("./agentEvents", () => ({ mergeTabEvents: mocks.merge }));
+vi.mock("./hotkeys", () => ({ useShortcut: mocks.shortcut }));
+vi.mock("./gitSource", () => ({ localGitSource: () => ({ workStatus: mocks.workStatus }) }));
+vi.mock("./sessionPrs", () => ({ sessionPrs: mocks.sessionPrs }));
+
+const pr = { url: "https://github.com/owner/repo/pull/1", state: "OPEN", checks: [{ name: "test", state: "failure", url: "https://github.com/owner/repo/actions/runs/12/job/34", actions: { runId: 12, jobId: 34 } }] } as PullRequest;
+const input = { sessionId: "s", tabId: "active-agent", cwd: "/repo", branch: "feature", enabled: true };
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(gh.fixAttachment).mockResolvedValue({ path: "/attachments/s/check-failures.log", truncated: true });
+  vi.mocked(agent.send).mockResolvedValue({ events: [], queued: true });
+  mocks.workStatus.mockResolvedValue({ branch: "feature", defaultBranch: "main" });
+  mocks.sessionPrs.mockResolvedValue({ rows: [{ pr }] });
+  setPrefs({ fixErrorsInstructions: "Run the affected tests." });
+});
+afterEach(cleanup);
+
+it("collects one attachment and sends exactly one prompt to the selected tab, with extra instructions", async () => {
+  const hook = renderHook(() => useFixCheckErrors(input));
+  await act(async () => { await Promise.all([hook.result.current.fix(pr), hook.result.current.fix(pr)]); });
+  expect(gh.fixAttachment).toHaveBeenCalledExactlyOnceWith("s", "active-agent", pr.url);
+  expect(agent.send).toHaveBeenCalledExactlyOnceWith("s", "active-agent", expect.stringContaining("@/attachments/s/check-failures.log"));
+  expect(vi.mocked(agent.send).mock.calls[0][2]).toContain("Additional instructions:\nRun the affected tests.");
+  expect(mocks.merge).toHaveBeenCalledExactlyOnceWith("s", "active-agent", []);
+  expect(hook.result.current.notice).toContain("Queued");
+  expect(hook.result.current.notice).toContain("trimmed to 256 KiB");
+});
+
+it("cancels delivery when the selected tab changes during log collection", async () => {
+  let resolve!: (value: { path: string; truncated: boolean }) => void;
+  vi.mocked(gh.fixAttachment).mockImplementation(() => new Promise((done) => { resolve = done; }));
+  const hook = renderHook((props) => useFixCheckErrors(props), { initialProps: input });
+  let pending!: Promise<void>;
+  act(() => { pending = hook.result.current.fix(pr); });
+  hook.rerender({ ...input, tabId: "another-agent" });
+  vi.mocked(gh.fixAttachment).mockResolvedValueOnce({ path: "/new.log", truncated: false });
+  await act(async () => { await hook.result.current.fix(pr); });
+  expect(agent.send).toHaveBeenCalledExactlyOnceWith("s", "another-agent", expect.stringContaining("@/new.log"));
+  await act(async () => { resolve({ path: "/old.log", truncated: false }); await pending; });
+  expect(agent.send).toHaveBeenCalledOnce();
+});
+
+it("cancels on unmount and reports collection failures without sending a partial prompt", async () => {
+  vi.mocked(gh.fixAttachment).mockRejectedValueOnce(new Error("Logs expired"));
+  const hook = renderHook(() => useFixCheckErrors(input));
+  await act(async () => { await expect(hook.result.current.fix(pr)).rejects.toThrow("Logs expired"); });
+  expect(hook.result.current.error).toContain("Logs expired");
+  expect(agent.send).not.toHaveBeenCalled();
+  let resolve!: (value: { path: string; truncated: boolean }) => void;
+  vi.mocked(gh.fixAttachment).mockImplementation(() => new Promise((done) => { resolve = done; }));
+  let pending!: Promise<void>;
+  act(() => { pending = hook.result.current.fix(pr); });
+  hook.unmount();
+  resolve({ path: "/gone.log", truncated: false });
+  await pending;
+  expect(agent.send).not.toHaveBeenCalled();
+});
+
+it("registers the session shortcut, discovers a failing PR, and refuses ambiguous targets", async () => {
+  const hook = renderHook(() => useFixCheckErrors(input));
+  expect(mocks.shortcut).toHaveBeenLastCalledWith("session.fixErrors", expect.any(Function), { enabled: true });
+  await act(async () => { await hook.result.current.fix(); });
+  expect(agent.send).toHaveBeenCalledOnce();
+  mocks.sessionPrs.mockResolvedValue({ rows: [{ pr }, { pr: { ...pr, url: pr.url + "2" } }] });
+  await act(async () => { await expect(hook.result.current.fix()).rejects.toThrow("Several pull requests"); });
+  expect(agent.send).toHaveBeenCalledOnce();
+});
+
+it("does not send when disabled and quotes attachment paths containing spaces", async () => {
+  const hook = renderHook(() => useFixCheckErrors({ ...input, enabled: false }));
+  await act(async () => { await hook.result.current.fix(pr); });
+  expect(agent.send).not.toHaveBeenCalled();
+  expect(fixErrorsPrompt(pr.url, "/My Files/failure.log", " ")).toContain('@"/My Files/failure.log"');
+  expect(fixErrorsPrompt(pr.url, "/log", " ")).not.toContain("Additional instructions");
+});

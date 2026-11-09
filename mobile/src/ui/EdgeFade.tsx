@@ -1,8 +1,12 @@
+import type { ComponentType, ReactElement, ReactNode } from "react";
 import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import { BlurView } from "expo-blur";
 import { LinearGradient } from "expo-linear-gradient";
-import MaskedView from "@react-native-masked-view/masked-view";
+import MaskedViewClass from "@react-native-masked-view/masked-view";
 import { useTheme } from "./theme";
+
+// The mask's class predates React 19.3's component types; drawn as the component it is.
+const MaskedView = MaskedViewClass as unknown as ComponentType<{ style?: StyleProp<ViewStyle>; maskElement: ReactElement; children?: ReactNode }>;
 
 /**
  * Content passing under a bar fades out rather than being cut off: a blur that
