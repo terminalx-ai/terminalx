@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ScrollViewInstance } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChevronLeft, MessageSquare, Plus, SquareTerminal, X } from "lucide-react-native";
 import { providerName } from "@mobile/data/conversations";
@@ -46,7 +46,7 @@ export function SessionHeader({ title, subtitle, onBack, view, onView }: {
 export function ChatTabs({ session, selectedTabId, onSelect, onAdd, onClose }: { session: SessionSummary; selectedTabId: string; onSelect(tabId: string): void; onAdd?(): void; onClose?(tabId: string): void }) {
   const { palette } = useTheme();
   const chats = branchChats(session);
-  const scroll = useRef<ScrollView>(null);
+  const scroll = useRef<ScrollViewInstance>(null);
   const offsets = useRef<Record<string, number>>({});
   useEffect(() => { scroll.current?.scrollTo({ x: Math.max(0, (offsets.current[selectedTabId] ?? 0) - 16), animated: true }); }, [selectedTabId]);
   return <View style={[styles.strip, { borderBottomColor: palette.border }]}>
