@@ -2,7 +2,7 @@ import { reviewFileReader } from "./reviewThreads";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
-import { api, errorMessage, gh, git, type GitHubConnectionStatus, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
+import { api, errorMessage, gh, git, type GitHubConnectionStatus, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
 import type { BranchInfo, ChangedFile, CommitInfo, UnfinishedMerge, WorkStatus } from "@/types/session";
 
 /** A workspace's Git status, with what is left in progress in it. */
@@ -54,6 +54,9 @@ export interface GitSource {
   hasRemote?(): Promise<boolean>;
   addRemote?(url: string): Promise<void>;
   createRepository?(name: string, privateRepo: boolean): Promise<void>;
+  /** Actions operations are optional for runtimes that cannot yet serve logs. */
+  checkLog?(prUrl: string, checkUrl: string, failed: boolean): Promise<CheckLog>;
+  rerunCheck?(prUrl: string, checkUrl: string, failed: boolean): Promise<void>;
   prs(branch: string): Promise<PullRequest[]>;
   /** Review threads through this source's GitHub credentials, when supported. */
   reviewThreads?(url: string): import("./reviewThreads").ReviewThreadAccess;
@@ -101,6 +104,8 @@ export function localGitSource(cwd: string): GitSource {
     hasRemote: () => git.hasRemote(cwd),
     addRemote: (url) => git.addRemote(cwd, url),
     createRepository: (name, privateRepo) => gh.createRepository(cwd, name, privateRepo),
+    checkLog: (prUrl, checkUrl, failed) => gh.checkLog(cwd, prUrl, checkUrl, failed),
+    rerunCheck: (prUrl, checkUrl, failed) => gh.rerunCheck(cwd, prUrl, checkUrl, failed),
     prs: (branch) => gh.list(cwd, branch),
     reviewThreads: (url) => ({
       read: () => gh.reviewThreads(url),
