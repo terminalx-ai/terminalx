@@ -101,6 +101,46 @@ export interface RemotePullRequest {
   author: string;
 }
 
+/** PR conversation returned by one paginated GraphQL query. */
+export interface PrReviewer {
+  login: string;
+  kind: "user" | "team" | "bot";
+  state: string;
+  requested: boolean;
+}
+export interface PrActivity {
+  id: string;
+  kind: "comment" | "review" | "commit" | "force_push";
+  author: string;
+  body: string;
+  at: string;
+  url: string | null;
+  state: string | null;
+  before: string | null;
+  after: string | null;
+}
+export interface PrConversation {
+  url: string;
+  title: string;
+  body: string;
+  state: string;
+  author: string;
+  viewer: string;
+  canEdit: boolean;
+  reviewers: PrReviewer[];
+  unresolvedThreads: number;
+  activity: PrActivity[];
+}
+export type PrConversationAction =
+  | { kind: "edit"; title: string; body: string; expectedTitle: string; expectedBody: string }
+  | { kind: "request" | "remove"; login: string; team: boolean }
+  | { kind: "approve"; viewer: string };
+export interface PrConversationAccess {
+  read(): Promise<PrConversation>;
+  act(action: PrConversationAction): Promise<void>;
+  search(query: string): Promise<string[]>;
+}
+
 export interface RemotePushResult {
   repo: string;
   branch: string;
@@ -232,6 +272,14 @@ export class RemoteGit {
    * Older runtimes use `branch`; callers still verify the returned identity. */
   prs(branch?: string, number?: number): Promise<{ branch: string; prs: RemotePullRequest[] }> {
     return this.read("git.prs", { ...(branch ? { branch } : {}), ...(number ? { number } : {}) });
+  }
+
+  prConversation(url: string): PrConversationAccess {
+    return {
+      read: () => this.read("git.prConversation", { url }),
+      act: (action) => this.write("git.prConversationAction", { url, action }),
+      search: (query) => this.read("git.prReviewerSearch", { url, query }),
+    };
   }
 
   prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null }[] }> {
