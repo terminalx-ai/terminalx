@@ -33,6 +33,8 @@
   --background: var(--surface-page);
   /* Behind a tab's chat and terminal: the page itself, a shade darker in dark mode. */
   --surface-chat: var(--surface-page);
+  /* A terminal's ground, edge to edge: its canvas and the space around it are one colour, never a box. */
+  --surface-terminal: var(--surface-page);
   --foreground: var(--ink-strong);
   --card: var(--surface-card);
   --card-foreground: var(--ink-strong);
@@ -85,6 +87,8 @@
   --border: oklch(1 0 0 / 10%);
   --surface-well: oklch(0 0 0 / 28%);
   --surface-chat: color-mix(in oklab, var(--surface-page) 88%, black);
+  /* Near black in the dark: a terminal reads as a terminal at a glance, apart from the chat. */
+  --surface-terminal: oklch(0.13 0 0);
   --surface-thumb: color-mix(in oklab, var(--surface-card) 70%, white 30%);
   --shadow-surface: none;
   --shadow-card: none;
