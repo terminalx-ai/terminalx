@@ -362,6 +362,7 @@ describe("chat scroll follow", () => {
   // #727: a turn scrolled far from the view is not drawn. What the reader
   // opened in it is the chat's to keep, so it comes back as they left it.
   it("keeps a turn's tool calls unfolded after it was scrolled out of the drawn band and back", () => {
+    setPrefs({ foldToolCalls: true });
     const { transcript } = setup(200);
     const key = transcript.turns.at(-2)!.key;
     const fold = () => content.querySelector<HTMLElement>(`[data-turn="${key}"]`)?.querySelector<HTMLElement>("button[aria-expanded]") ?? null;

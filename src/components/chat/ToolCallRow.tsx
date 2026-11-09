@@ -93,7 +93,7 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
       <div
         onClick={() => { if (hasBody && !isWholeRead) setOpen((o) => !o); }}
         className={cn(
-          "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[13px]",
+          "flex w-full items-center gap-2.5 rounded-md px-1.5 py-1.5 text-left text-[13.5px]",
           hasBody && !isWholeRead && "hover:bg-veil-raised",
         )}
       >
@@ -103,14 +103,20 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
         ) : failed ? (
           <CircleAlert className="size-3.5 shrink-0 text-destructive" />
         ) : (
-          <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+          <Icon className="size-4 shrink-0 text-muted-foreground" />
         )}
-        <span className={cn("shrink-0", pending ? "text-shimmer" : failed ? "text-destructive" : "text-muted-foreground")}>
+        <span className={cn("shrink-0", pending ? "text-shimmer" : failed ? "text-destructive" : "text-foreground/90")}>
           {call.abandoned && !call.result ? "Interrupted" : toolVerb(call.name, done)}
         </span>
         </button>
-        <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-foreground/90" title={target}>
-          <LinkedText text={target} context={linkContext} />
+        {/* Three kinds of text, each its own look: the step (plain), what it acted on (code, in a quiet chip beside
+            it, not pushed to the far edge), and the reply's prose around it. */}
+        <span className="flex min-w-0 flex-1">
+          {target && (
+            <span className="min-w-0 max-w-[36rem] truncate rounded-md bg-veil-raised px-1.5 py-0.5 font-mono text-[12px] text-muted-foreground" title={target}>
+              <LinkedText text={target} context={linkContext} />
+            </span>
+          )}
         </span>
         {safetyCheck && (
           <span className="flex min-w-0 max-w-[45%] items-center gap-1 text-[11px] text-warning" title={safetyCheck} data-testid="tool-safety-check">
@@ -191,7 +197,7 @@ export function ToolGroupRow({ name, calls, cwd, linkContext }: { name: string; 
     <div>
       <div
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-veil-raised"
+        className="flex w-full items-center gap-2.5 rounded-md px-1.5 py-1.5 text-left text-[13.5px] hover:bg-veil-raised"
       >
         <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={`${open ? "Collapse" : "Expand"} ${label}`} className="rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
         {!done ? (
@@ -199,15 +205,17 @@ export function ToolGroupRow({ name, calls, cwd, linkContext }: { name: string; 
         ) : endedFailed ? (
           <CircleAlert className="size-3.5 shrink-0 text-destructive" />
         ) : (
-          <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+          <Icon className="size-4 shrink-0 text-muted-foreground" />
         )}
         </button>
-        <span className={cn("min-w-0 flex-1 truncate", !done ? "text-shimmer" : "text-muted-foreground")}><LinkedText text={label} context={linkContext} /></span>
-        {targets.length > 1 && names.length > 0 && (
-          <span className="hidden max-w-[40%] truncate font-mono text-[11px] text-faint sm:inline">
-            {names.slice(0, 4).join(", ")}
-          </span>
-        )}
+        <span className={cn("shrink-0 truncate", !done ? "text-shimmer" : "text-foreground/90")}><LinkedText text={label} context={linkContext} /></span>
+        <span className="flex min-w-0 flex-1">
+          {targets.length > 1 && names.length > 0 && (
+            <span className="min-w-0 max-w-[36rem] truncate rounded-md bg-veil-raised px-1.5 py-0.5 font-mono text-[12px] text-muted-foreground">
+              {names.slice(0, 4).join(", ")}
+            </span>
+          )}
+        </span>
         <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse tool group" : "Expand tool group"} className="rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/40"><ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} /></button>
       </div>
       {open && (

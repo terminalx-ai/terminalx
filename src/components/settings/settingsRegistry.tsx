@@ -291,7 +291,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "general.foldToolCalls", section: "general", title: "Fold tool calls",
-    description: "Once an agent starts answering, the tool calls it made collapse under one line. Off keeps every call expanded.",
+    description: "Once an agent starts answering, the tool calls it made collapse under one line. Off (the default) keeps every step in view.",
     searchTerms: ["general", "fold", "tool", "calls"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.foldToolCalls" },
   }),
