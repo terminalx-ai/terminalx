@@ -39,9 +39,9 @@ function enqueue(work: () => Promise<void>) {
   return queue;
 }
 
-function save(patch: Record<string, unknown>) {
+function save(patch: Record<string, unknown>): Promise<void> {
   pending.push(patch);
-  void enqueue(async () => {
+  return enqueue(async () => {
     try {
       const file = await invoke<SettingsFileStatus>("update_user_preferences", { patch, migrate: false });
       pending.splice(pending.indexOf(patch), 1);
@@ -85,11 +85,13 @@ function unfoldToolCallsOnce(file: SettingsFileStatus) {
   if (!connected || file.error) return;
   try {
     if (localStorage.getItem(UNFOLDED)) return;
-    localStorage.setItem(UNFOLDED, "1");
   } catch {
     return;
   }
-  if (file.preferences?.foldToolCalls === true) save({ foldToolCalls: false });
+  const done = () => { try { localStorage.setItem(UNFOLDED, "1"); } catch { /* storage unavailable */ } };
+  if (file.preferences?.foldToolCalls !== true) return done();
+  // Marked done only once the file says so: a save that failed is tried again at the next start.
+  void save({ foldToolCalls: false }).then(() => { if (state.file?.preferences?.foldToolCalls === false) done(); });
 }
 
 /** Subscribe before reading so edits during startup cannot be missed. */
