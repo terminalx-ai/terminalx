@@ -879,3 +879,6 @@ fn privacy_native3_git_child() {
     let root = store::root().unwrap(); fixture(&root);
     pull::native3_regressions(&root, kind == "managed");
 }
+
+#[path = "github_checks_privacy_tests.rs"]
+mod checks;

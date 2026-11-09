@@ -70,12 +70,44 @@ where F: FnOnce() -> R + Send {
     }
 }
 
-fn read_all(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+struct CapturedBytes { bytes: Vec<u8>, truncated: bool }
+
+/// The bounded log path uses the same admission and owned-process lifecycle as
+/// other GitHub work. Its readers retain only tails while draining every byte.
+pub(crate) struct CapturedOutput {
+    pub output: Output,
+    pub truncated: [bool; 2],
+}
+
+fn read_all(pipe: impl Read + Send + 'static, limit: Option<usize>) -> std::thread::JoinHandle<std::io::Result<CapturedBytes>> {
     std::thread::spawn(move || {
         let mut pipe = pipe;
-        let mut bytes = Vec::new();
-        pipe.read_to_end(&mut bytes)?;
-        Ok(bytes)
+        let Some(limit) = limit else {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes)?;
+            return Ok(CapturedBytes { bytes, truncated: false });
+        };
+        let mut tail = std::collections::VecDeque::with_capacity(limit);
+        let mut truncated = false;
+        let mut chunk = [0; 8192];
+        loop {
+            let n = match pipe.read(&mut chunk) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            if n == 0 { break; }
+            let excess = (tail.len() + n).saturating_sub(limit);
+            truncated |= excess > 0;
+            tail.drain(..excess.min(tail.len()));
+            tail.extend(&chunk[n.saturating_sub(limit)..n]);
+        }
+        Ok(CapturedBytes { bytes: tail.into(), truncated })
+    })
+}
+
+pub(crate) fn output_bounded(command: Command, timeout: Duration, stdout_limit: usize, stderr_limit: usize) -> Result<CapturedOutput> {
+    output_process(command, timeout, None, ticket(), Execution {
+        git: false, stop: &|| false, progress: None, tail_limits: Some([stdout_limit, stderr_limit]),
     })
 }
 
@@ -84,7 +116,7 @@ pub(crate) fn output(command: Command, timeout: Duration, input: Option<Vec<u8>>
 }
 
 pub(crate) fn output_admitted(command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket) -> Result<Output> {
-    output_process(command, timeout, input, ticket, Execution { git: false, stop: &|| false, progress: None })
+    output_process(command, timeout, input, ticket, Execution { git: false, stop: &|| false, progress: None, tail_limits: None }).map(|captured| captured.output)
 }
 
 /// Only explicitly requested Git transfers may acquire promised objects. The
@@ -98,7 +130,7 @@ pub(crate) fn git_output_admitted(command: Command, timeout: Duration, ticket: T
 /// Verification fetches use Git's graceful lock cleanup without permitting
 /// implicit object acquisition by any inspection performed along the way.
 pub(crate) fn git_verification_output(command: Command, timeout: Duration) -> Result<Output> {
-    output_process(command, timeout, None, ticket(), Execution { git: true, stop: &|| false, progress: None })
+    output_process(command, timeout, None, ticket(), Execution { git: true, stop: &|| false, progress: None, tail_limits: None }).map(|captured| captured.output)
 }
 
 type Progress = Box<dyn Fn(&str) + Send>;
@@ -106,10 +138,10 @@ type Progress = Box<dyn Fn(&str) + Send>;
 pub(crate) fn git_output_reporting(mut command: Command, timeout: Duration, ticket: Ticket, stop: &dyn Fn() -> bool, progress: Option<Progress>) -> Result<Output> {
     if let Some(value) = std::env::var_os("GIT_NO_LAZY_FETCH") { command.env("GIT_NO_LAZY_FETCH", value); }
     else { command.env_remove("GIT_NO_LAZY_FETCH"); }
-    output_process(command, timeout, None, ticket, Execution { git: true, stop, progress })
+    output_process(command, timeout, None, ticket, Execution { git: true, stop, progress, tail_limits: None }).map(|captured| captured.output)
 }
 
-fn read_progress(pipe: impl Read + Send + 'static, progress: Progress) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+fn read_progress(pipe: impl Read + Send + 'static, progress: Progress) -> std::thread::JoinHandle<std::io::Result<CapturedBytes>> {
     std::thread::spawn(move || {
         let mut pipe = pipe;
         let mut result = Vec::new();
@@ -136,18 +168,18 @@ fn read_progress(pipe: impl Read + Send + 'static, progress: Progress) -> std::t
             }
         }
         emit(&mut pending, false);
-        Ok(result)
+        Ok(CapturedBytes { bytes: result, truncated: false })
     })
 }
 
-struct Execution<'a> { git: bool, stop: &'a dyn Fn() -> bool, progress: Option<Progress> }
+struct Execution<'a> { git: bool, stop: &'a dyn Fn() -> bool, progress: Option<Progress>, tail_limits: Option<[usize; 2]> }
 
 #[cfg(unix)]
 #[path = "github_process_group.rs"]
 mod group;
 
-fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket, execution: Execution<'_>) -> Result<Output> {
-    let Execution { git, stop, progress } = execution;
+fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket, execution: Execution<'_>) -> Result<CapturedOutput> {
+    let Execution { git, stop, progress, tail_limits } = execution;
     let _privacy = ticket.enter()?;
     if stop() { return Err(Stopped.into()); }
     #[cfg(unix)]
@@ -161,9 +193,9 @@ fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>
     }
     let mut child = command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let stdout = read_all(child.stdout.take().expect("piped stdout"));
+    let stdout = read_all(child.stdout.take().expect("piped stdout"), tail_limits.map(|limits| limits[0]));
     let pipe = child.stderr.take().expect("piped stderr");
-    let stderr = match progress { Some(progress) => read_progress(pipe, progress), None => read_all(pipe) };
+    let stderr = match progress { Some(progress) => read_progress(pipe, progress), None => read_all(pipe, tail_limits.map(|limits| limits[1])) };
     // A provider that stops reading its request body must not prevent privacy
     // activation. Poll cancellation independently of every pipe operation.
     let stdin = input.map(|bytes| {
@@ -182,8 +214,11 @@ fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>
         #[cfg(not(unix))]
         let exited = child.try_wait().map(|status| status.is_some());
         match exited {
-            Ok(true) => break Ok(()),
-            Ok(false) => std::thread::sleep(Duration::from_millis(25)),
+            // Logs are complete only after EOF, not just leader exit. Retain
+            // the unreaped ownership anchor while descendants hold the pipes,
+            // with the same cancellation/deadline and bounded reader memory.
+            Ok(true) if tail_limits.is_none() || (stdout.is_finished() && stderr.is_finished()) => break Ok(()),
+            Ok(_) => std::thread::sleep(Duration::from_millis(25)),
             Err(error) => break Err(error.into()),
         }
     };
@@ -203,7 +238,14 @@ fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>
         written.map_err(|_| anyhow::anyhow!("GitHub input writer failed"))??;
     }
     let output = match (stdout, stderr) {
-        (Ok(stdout), Ok(stderr)) => Ok(Output { status, stdout: stdout?, stderr: stderr? }),
+        (Ok(stdout), Ok(stderr)) => {
+            let stdout = stdout?;
+            let stderr = stderr?;
+            Ok(CapturedOutput {
+                truncated: [stdout.truncated, stderr.truncated],
+                output: Output { status, stdout: stdout.bytes, stderr: stderr.bytes },
+            })
+        },
         _ => bail!("GitHub output reader failed"),
     };
     // A completed process no longer holds activation open between the reads of

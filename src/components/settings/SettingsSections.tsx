@@ -114,6 +114,12 @@ export function GeneralTab() {
       <RegisteredSetting setting="general.promptMap"
         control={<Switch aria-label="Prompt map" checked={prefs.promptMap} onCheckedChange={(v) => setPrefs({ promptMap: v })} />}
       />
+      <RegisteredSetting setting="general.fixErrorsInstructions" stacked
+        control={<textarea aria-label="Fix errors instructions" value={prefs.fixErrorsInstructions} maxLength={8000} rows={3}
+          onChange={(event) => setPrefs({ fixErrorsInstructions: event.target.value })}
+          placeholder="For example: run the affected tests before committing."
+          className="w-full resize-y rounded-md border border-border bg-well px-2 py-1.5 text-xs outline-none focus:border-ring" />}
+      />
       <RegisteredSetting setting="general.autocorrect"
         control={<Switch aria-label="Autocorrect" checked={prefs.autocorrect} onCheckedChange={(v) => setPrefs({ autocorrect: v })} />}
       />
