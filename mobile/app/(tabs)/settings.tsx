@@ -67,7 +67,7 @@ export default function SettingsScreen() {
     setNotifications(await enableLocalNotifications(app.connection, app.activeHost.id));
   };
 
-  return <Screen>
+  return <Screen title="Settings">
     <SectionTitle>Account</SectionTitle>
     <Card style={styles.block}>{app.session ? <><Text style={[styles.title, { color: palette.ink }]}>{app.session.user.displayName ?? "TerminalX account"}</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.session.user.email}</Text><Button label="Sign out" kind="secondary" onPress={() => void app.signOut()} /></> : <><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to discover Macs bound to your account.</Text><Button label="Sign in" onPress={() => void app.signIn()} /></>}</Card>
 

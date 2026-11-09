@@ -10,6 +10,19 @@ const WAIT: Duration = Duration::from_secs(3);
 thread_local! {
     static FULL_PIPE: std::cell::RefCell<Option<mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
     static HANDOFF_FENCED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static EMPTY_WRITE: std::cell::Cell<Option<std::io::ErrorKind>> = const { std::cell::Cell::new(None) };
+    static AFTER_EMPTY_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static WRITTEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+pub(super) fn try_write_stdin(child: &crate::harness::host::LiveChild, bytes: &[u8]) -> std::io::Result<usize> {
+    if let Some(kind) = EMPTY_WRITE.with(|hook| hook.take()) { return Err(kind.into()); }
+    let result = child.try_write_stdin(bytes);
+    if let Ok(count) = result { WRITTEN.with(|written| written.set(written.get() + count)); }
+    result
+}
+pub(super) fn after_empty_write() {
+    let hook = AFTER_EMPTY_WRITE.with(|hook| hook.borrow_mut().take());
+    if let Some(run) = hook { run(); }
 }
 pub(super) fn handoff_fenced() {
     HANDOFF_FENCED.with(|hook| { if let Some(run) = hook.borrow_mut().take() { run(); } });
@@ -19,12 +32,165 @@ pub(super) fn observed_full_pipe() {
 }
 
 #[test]
+fn empty_write_retries_revalidate_mobile_and_shared_authority() {
+    for mobile in [true, false] {
+        for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::Interrupted] {
+            let _home = store::temp_home();
+            let root = store::root().unwrap();
+            let session: index::SessionEntry = serde_json::from_value(json!({
+                "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+                "created":index::now(), "modified":index::now(),
+                "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+            })).unwrap();
+            index::save(&[session]).unwrap();
+            let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+                Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+                Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+            let rt_arc = manager.runtime("stdio-owner", "tab").unwrap();
+            let mut engine = Stdio::new(root.to_string_lossy().into_owned(), String::new(), None, "auto".into(), None);
+            engine.thread = Some("thread".into());
+            engine.ready = true;
+            let frame = engine.prompt("revocable prompt".into(), vec![]).unwrap().into_iter().find_map(|action| match action {
+                StdioAction::Write(frame) => Some(frame), _ => None,
+            }).unwrap();
+            let launch = engine.launch.clone();
+            let mut rt = rt_arc.lock().unwrap();
+            rt.engine = Engine::CodexStdio(engine);
+            let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, text: "revocable prompt".into(), images: vec![], baseline: None, queued: true, cwd: None }, None).seq;
+            rt.stdio_followups.active = Some((seq, false));
+            rt.open_turn();
+            let sink = Arc::new(StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
+            let args = vec!["-c".into(), "cat > received".into()];
+            let child = manager.host.spawn(&rt.key(), SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: &root, env: &[], unset: &[] }, sink).unwrap();
+            rt.child_pid = Some(child.pid);
+            rt.child = Some(child.clone());
+            drop(rt);
+
+            let mut authority = Authority { session: "stdio-owner".into(), tab: "tab".into(), seq: Some(seq), mobile: None, shared: None };
+            let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
+            let revoking = manager.clone();
+            if mobile {
+                store::write_json(&root.join("devices.json"), &json!({"devices":[{
+                    "id":"driver","label":"Fixture","platform":"test","token":"fixture-hash",
+                    "scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":index::now()
+                }]})).unwrap();
+                let lease = lifetime.command("runtime.attach", json!({"protocol":1})).unwrap();
+                let actor: crate::local_runtime::mobile::Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+                manager.mobile.register(&lifetime, actor.clone(), "connection", "driver").unwrap();
+                authority.mobile = Some(manager.mobile.permit(&actor, "connection", "stdio-owner", "tab").unwrap());
+                AFTER_EMPTY_WRITE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { revoking.mobile.revoke_device(&actor, "driver").unwrap(); })));
+            } else {
+                let now = chrono::Utc::now().timestamp_millis();
+                let mut share = crate::local_sharing::tests::fixture();
+                let link = share.links.get_mut("link").unwrap();
+                link.settings.expires_at = now + 3_600_000;
+                link.credential_expires_at = now + 3_600_000;
+                let mut guest = crate::local_sharing::tests::guest("guest-connection", "alice");
+                guest.verified_until = now + 3_600_000;
+                share.join(guest, now).unwrap();
+                authority.shared = Some(share.write_permit("guest-connection", "tab").unwrap());
+                manager.sharing.lock().unwrap().sessions.insert("stdio-owner".into(), share);
+                AFTER_EMPTY_WRITE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { revoking.sharing.lock().unwrap().sessions.remove("stdio-owner"); })));
+            }
+            EMPTY_WRITE.with(|hook| hook.set(Some(kind)));
+            WRITTEN.with(|written| written.set(0));
+            manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, Some(authority)).unwrap();
+            let written = WRITTEN.with(|written| written.get());
+            let events: Vec<AgentEvent> = store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+            let usable = matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(engine) if !engine.blocked && !engine.exited);
+            manager.stop("stdio-owner", "tab").unwrap();
+            assert_eq!(written, 0, "mobile={mobile}, error={kind:?}: revoked prompt reached stdin");
+            assert!(usable);
+            assert!(events.iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if prompt_seq == seq)));
+        }
+    }
+}
+
+#[test]
+fn recreated_runtime_reconciles_pending_prompts_and_acknowledged_turns() {
+    for state in ["pending", "acknowledged", "started", "active-with-pending", "completed", "completed-with-pending", "withdrawn", "other-conversation", "live"] {
+        let _home = store::temp_home();
+        let root = store::root().unwrap();
+        let session: index::SessionEntry = serde_json::from_value(json!({
+            "id":"stdio-recovery", "projectPath":root, "cwd":root, "title":"fixture",
+            "created":index::now(), "modified":index::now(),
+            "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+        })).unwrap();
+        index::save(&[session]).unwrap();
+        let make_manager = || SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+            Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+            Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+        let manager = make_manager();
+        let rt_arc = manager.runtime("stdio-recovery", "tab").unwrap();
+        let mut rt = rt_arc.lock().unwrap();
+        let user = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: vec![], baseline: None, queued: true, cwd: None };
+        let first = manager.publish(&mut rt, user("first"), None).seq;
+        if matches!(state, "acknowledged" | "started" | "active-with-pending" | "completed" | "completed-with-pending") {
+            manager.publish(&mut rt, Payload::PromptAbsorbed { prompt_seq: first }, None);
+        }
+        if matches!(state, "started" | "active-with-pending" | "completed" | "completed-with-pending") {
+            manager.publish(&mut rt, Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: Some(first), started_by: None, initiating_prompt: None }, None);
+        }
+        let pending = if matches!(state, "active-with-pending" | "completed-with-pending") {
+            manager.publish(&mut rt, user("follow-up"), None).seq
+        } else { first };
+        if matches!(state, "completed" | "completed-with-pending") {
+            manager.publish(&mut rt, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
+        }
+        if state == "withdrawn" { manager.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: first, unconfirmed: false }, None); }
+        if state == "other-conversation" {
+            manager.publish(&mut rt, Payload::Conversation { id: Some("new".into()), harness: "codex".into(), resumed: false }, None);
+        }
+        if state == "live" {
+            rt.open_turn();
+            rt.status = TabStatus::InProgress;
+            rt.queued.push(QueuedMessage { id: first.to_string(), text: "first".into(), images: vec![] });
+        }
+        drop(rt);
+        // The new manager has neither the previous writer nor its queue.
+        let reopened = if state == "live" { manager.clone() } else { make_manager() };
+        let events = reopened.load_events("stdio-recovery", "tab").unwrap();
+        let withdrawn: Vec<_> = events.iter().filter_map(|event| match event.payload {
+            Payload::PromptWithdrawn { prompt_seq, unconfirmed } => Some((prompt_seq, unconfirmed)), _ => None,
+        }).collect();
+        let expected = match state {
+            "pending" | "active-with-pending" | "completed-with-pending" => vec![(pending, true)],
+            "withdrawn" => vec![(first, false)],
+            _ => vec![],
+        };
+        assert_eq!(withdrawn, expected, "{state}");
+        let rt = reopened.runtime("stdio-recovery", "tab").unwrap();
+        let expected_recovery = match state {
+            "acknowledged" | "started" | "active-with-pending" => Some(RecoveryKind::Disconnected),
+            "pending" | "completed-with-pending" => Some(RecoveryKind::DeliveryUnconfirmed),
+            _ => None,
+        };
+        assert_eq!(rt.lock().unwrap().recovery, expected_recovery, "{state}");
+        if matches!(state, "pending" | "completed-with-pending") {
+            let saved = unsent::said_in(&store::log_path("stdio-recovery", "tab").unwrap(), None);
+            assert_eq!(saved.since.last().unwrap().seq, pending, "{state}: restore by prompt identity");
+            assert!(saved.since.last().unwrap().unconfirmed);
+            assert!(reopened.resend_unsent("stdio-recovery", "tab").unwrap_err().to_string().contains("unconfirmed"));
+        }
+        assert!(events.iter().any(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text == "first")));
+        assert_eq!(rt.lock().unwrap().queued.len(), usize::from(state == "live"));
+        let again = reopened.load_events("stdio-recovery", "tab").unwrap();
+        assert_eq!(again.iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { .. })).count(), expected.len(), "repeated load: {state}");
+        if state != "live" {
+            let restarted = make_manager();
+            let again = restarted.load_events("stdio-recovery", "tab").unwrap();
+            assert_eq!(again.iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { .. })).count(), expected.len(), "second restart: {state}");
+        }
+    }
+}
+
+#[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
     for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
         "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
-        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working", "handover-stop", "handover-exit", "handover-descendant"] {
+        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -455,9 +621,9 @@ fn continuation_fixture(case: &str) {
                 manager.send_confirmed("stdio-owner", "tab", "the brief".into()).unwrap_err()
             };
             let said = format!("{refused:#}");
-            assert!(said.contains(if case == "continuation-stopped" { "stopped before Codex received" } else { "did not receive" }), "{said}");
+            assert!(said.contains("delivery is unconfirmed"), "{said}");
             assert!(starts().is_empty(), "Codex never took the brief");
-            assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::Unsent));
+            assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::DeliveryUnconfirmed));
             assert!(!rt.lock().unwrap().turn_open);
             let ended: Vec<_> = events().iter().filter_map(|event| match &event.payload { Payload::TurnCompleted { status, .. } => Some(*status), _ => None }).collect();
             assert_eq!(ended, [TurnStatus::Aborted]);
@@ -469,13 +635,14 @@ fn continuation_fixture(case: &str) {
                 std::thread::sleep(Duration::from_millis(20));
             }
             std::fs::write(bin.join("mode"), "").unwrap();
-            manager.resend_unsent("stdio-owner", "tab").unwrap();
+            assert!(manager.resend_unsent("stdio-owner", "tab").unwrap_err().to_string().contains("unconfirmed"));
+            manager.send("stdio-owner", "tab", "the brief".into(), vec![]).unwrap();
             settled(1);
             assert_eq!(starts(), ["the brief"], "the brief goes once, when the reader resends it");
         }
         "resend-after-restart" => {
             manager.load_events("stdio-owner", "tab").unwrap();
-            assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::Unsent), "never taken, so not a lost connection");
+            assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::DeliveryUnconfirmed), "missing acknowledgement cannot prove non-delivery");
             manager.resend_unsent("stdio-owner", "tab").unwrap();
             settled(1);
             let methods: Vec<_> = frames().iter().map(|frame| frame["method"].as_str().unwrap().to_owned()).collect();
@@ -1212,12 +1379,18 @@ while read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
-    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
+    *'"method":"thread/start"'*|*'"method":"thread/resume"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
     *'"method":"turn/start"'*)
+      printf '%s\n' "$line" >> "$here/requests"
+      held hold-accept none
+      if [ -f "$here/fail-start" ]; then
+        printf '{"id":%s,"error":{"message":"delivery refused"}}\n' "$id"
+        continue
+      fi
       printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
       printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
-      ( held hold-progress "turn-$id"
-        printf '{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"commandExecution","id":"c%s"}}}\n' "$id" "$id"
+      ( printf '{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"commandExecution","id":"c%s"}}}\n' "$id" "$id"
+        held hold-progress "turn-$id"
         printf '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"commandExecution","id":"c%s","status":"completed","exitCode":0,"aggregatedOutput":""}}}\n' "$id" "$id"
         held hold-finish "turn-$id"
         printf '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"agentMessage","id":"m%s","text":"done"}}}\n' "$id" "$id"
@@ -1233,8 +1406,8 @@ done
 "#;
 
 /// #815: native Codex at work for longer than the watcher's stall limit is
-/// not stalled, and a message sent while it works (or right after an
-/// interrupt, before Codex has ended the turn) is refused as a request: no
+/// not stalled, and a compact command sent while it works (or right after
+/// an interrupt, before Codex has ended the turn) is refused as a request: no
 /// error, no warning, no Needs attention, and the running turn goes on. The
 /// watcher still calls real silence, and progress takes that warning back.
 /// What happened is in the incident log, with no message text in it.
@@ -1271,7 +1444,7 @@ fn busy_fixture() {
     let warned = |events: &[AgentEvent]| count(events, &|payload| matches!(payload, Payload::Error { .. } | Payload::Recovery { kind: Some(_) }));
     let busy = |what: &str| {
         let before = warned(&events());
-        let error = manager.send("stdio-owner", "tab", format!("again: {what}"), Vec::new()).expect_err(what);
+        let error = manager.send("stdio-owner", "tab", "/compact".into(), Vec::new()).expect_err(what);
         assert!(error.to_string().starts_with(BUSY_WORDS), "{what}: {error:#}");
         let rt = rt_arc.lock().unwrap();
         assert!(rt.turn_open && rt.status == TabStatus::InProgress && rt.recovery.is_none(), "{what}: the running turn is left as it was");
@@ -1283,8 +1456,162 @@ fn busy_fixture() {
 
     hold("hold-progress");
     hold("hold-finish");
-    manager.send("stdio-owner", "tab", "first".into(), Vec::new()).unwrap();
+    hold("hold-accept");
+    let first = manager.send("stdio-owner", "tab", "first".into(), Vec::new()).unwrap();
+    assert!(matches!(first.events[0].payload, Payload::UserMessage { queued: true, .. }), "even an idle send awaits acknowledgement");
+    assert_eq!(count(&events(), &|p| matches!(p, Payload::PromptAbsorbed { .. })), 0);
+    release("hold-accept");
     wait("the first turn starts", &|events| count(events, &|payload| matches!(payload, Payload::TurnStarted { .. })) == 1);
+    if std::env::var(CASE).unwrap() == "queued-overflow" {
+        wait("a tool is waiting", &|events| count(events, &|p| matches!(p, Payload::ToolCallStarted { .. })) == 1);
+        let mut accepted = Vec::new();
+        for n in 0..32 {
+            let outcome = manager.send("stdio-owner", "tab", format!("follow-up-{n}"), vec![]).unwrap();
+            assert!(outcome.queued);
+            accepted.push(outcome.events[0].seq);
+        }
+        let error = manager.send("stdio-owner", "tab", "overflow".into(), vec![]).unwrap_err();
+        assert!(error.is::<QueueFull>());
+        assert_eq!(manager.queued("stdio-owner", "tab").len(), 32);
+        assert_eq!(warned(&events()), 0);
+        assert_eq!(rt_arc.lock().unwrap().recovery, None);
+        assert_eq!(rt_arc.lock().unwrap().status, TabStatus::InProgress);
+        // No further tool or assistant output can clear a mistaken recovery
+        // before interruption. It must dispatch the already accepted queue.
+        manager.send_queued_now("stdio-owner", "tab", accepted[0]).unwrap();
+        wait("first accepted follow-up starts", &|events| count(events, &|p| matches!(p, Payload::TurnStarted { prompt_seq: Some(seq), .. } if *seq == accepted[0])) == 1);
+        assert_eq!(manager.queued("stdio-owner", "tab").len(), 31);
+        release("hold-progress");
+        release("hold-finish");
+        wait("all accepted follow-ups finish", &|events| count(events, &|p| matches!(p, Payload::TurnCompleted { .. })) == 33);
+        for seq in accepted {
+            assert_eq!(count(&events(), &|p| matches!(p, Payload::TurnStarted { prompt_seq: Some(s), .. } if *s == seq)), 1);
+        }
+        assert!(!events().iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { .. })));
+        assert_eq!(std::fs::read_to_string(bin.join("requests")).unwrap().lines().count(), 33);
+        manager.stop("stdio-owner", "tab").unwrap();
+        return;
+    }
+    if std::env::var(CASE).unwrap() == "queued-share-ended" {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut share = crate::local_sharing::tests::fixture();
+        let link = share.links.get_mut("link").unwrap();
+        link.settings.expires_at = now + 3_600_000;
+        link.credential_expires_at = now + 3_600_000;
+        let mut guest = crate::local_sharing::tests::guest("guest-connection", "alice");
+        guest.verified_until = now + 3_600_000;
+        let person = guest.person.clone();
+        share.join(guest, now).unwrap();
+        let permit = share.write_permit("guest-connection", "tab").unwrap();
+        manager.sharing.lock().unwrap().sessions.insert("stdio-owner".into(), share);
+        let queued = manager.send_shared("stdio-owner", "tab", "a queued guest message".into(), person, permit).unwrap();
+        assert!(queued.queued);
+        manager.sharing.lock().unwrap().sessions.remove("stdio-owner");
+        release("hold-progress");
+        release("hold-finish");
+        wait("revoked queued authority is withdrawn", &|events| events.iter().any(|e| matches!(e.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if prompt_seq == queued.events[0].seq)));
+        assert_eq!(std::fs::read_to_string(bin.join("requests")).unwrap().lines().count(), 1, "a queued prompt keeps its authority until the writer");
+        manager.stop("stdio-owner", "tab").unwrap();
+        return;
+    }
+    if matches!(std::env::var(CASE).unwrap().as_str(), "queued-stop" | "queued-interrupt") {
+        let message = manager.send("stdio-owner", "tab", "a follow-up that survives".into(), Vec::new()).unwrap();
+        assert!(message.queued);
+        let seq = message.events[0].seq;
+        if std::env::var(CASE).unwrap() == "queued-stop" {
+            manager.stop("stdio-owner", "tab").unwrap();
+            assert!(events().iter().any(|e| matches!(e.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if prompt_seq == seq)));
+            assert!(manager.queued("stdio-owner", "tab").is_empty());
+        } else {
+            hold("hold-interrupt");
+            manager.send_queued_now("stdio-owner", "tab", seq).unwrap();
+            let after = manager.send("stdio-owner", "tab", "right after interrupt".into(), Vec::new()).unwrap();
+            assert!(after.queued);
+            release("hold-progress");
+            release("hold-finish");
+            release("hold-interrupt");
+            wait("both follow-ups finish", &|events| count(events, &|p| matches!(p, Payload::TurnStarted { prompt_seq: Some(_), .. })) == 3
+                && count(events, &|p| matches!(p, Payload::TurnCompleted { .. })) == 3);
+            assert_eq!(count(&events(), &|p| matches!(p, Payload::TurnStarted { prompt_seq: Some(s), .. } if *s == seq)), 1);
+            manager.stop("stdio-owner", "tab").unwrap();
+        }
+        return;
+    }
+    if std::env::var(CASE).unwrap() == "queued-while-working" {
+        let send = |text: &str| manager.send("stdio-owner", "tab", text.into(), Vec::new()).expect("a follow-up during a tool wait must be accepted");
+        let starts = |events: &[AgentEvent], seq| count(events, &|p| matches!(p, Payload::TurnStarted { prompt_seq: Some(s), .. } if *s == seq));
+        let absorbed = |events: &[AgentEvent], seq| count(events, &|p| matches!(p, Payload::PromptAbsorbed { prompt_seq } if *prompt_seq == seq));
+        let requests = || std::fs::read_to_string(bin.join("requests")).unwrap().lines().map(str::to_owned).collect::<Vec<_>>();
+        wait("a command is waiting", &|events| count(events, &|p| matches!(p, Payload::ToolCallStarted { .. })) == 1);
+        let next = send("Please also check the remaining tasks");
+        let later = send("Then run the checks");
+        assert!(next.queued && later.queued, "follow-ups visibly wait for delivery");
+        let seq = next.events[0].seq;
+        assert!(matches!(next.events[0].payload, Payload::UserMessage { queued: true, .. }));
+        assert_eq!(starts(&events(), seq) + absorbed(&events(), seq), 0);
+        assert_eq!(requests().len(), 1, "nothing is written during the tool wait");
+
+        hold("hold-accept");
+        release("hold-progress");
+        release("hold-finish");
+        wait("the next prompt reaches the child", &|_| requests().len() == 2);
+        assert_eq!(starts(&events(), seq) + absorbed(&events(), seq), 0, "writing is not acknowledgement");
+        // A third send meets the next turn's request before its acknowledgement.
+        let racing = send("Check the completion race too");
+        assert!(racing.queued);
+        manager.send_queued_now("stdio-owner", "tab", racing.events[0].seq).unwrap();
+        release("hold-accept");
+        wait("all four turns end", &|events| count(events, &|p| matches!(p, Payload::TurnCompleted { .. })) == 4);
+        for message in [&next, &later, &racing] {
+            assert_eq!(starts(&events(), message.events[0].seq), 1, "each queued identity starts exactly one turn");
+        }
+        assert_eq!(requests().len(), 4);
+        assert!(manager.queued("stdio-owner", "tab").is_empty());
+
+        // Race sends with completion from both sides of the runtime lock.
+        hold("hold-finish");
+        send("before the boundary");
+        let joins: Vec<_> = (0..8).map(|n| {
+            let manager = manager.clone();
+            std::thread::spawn(move || manager.send("stdio-owner", "tab", format!("boundary-{n}"), Vec::new()).unwrap())
+        }).collect();
+        release("hold-finish");
+        for join in joins { join.join().unwrap(); }
+        wait("boundary sends all finish", &|events| count(events, &|p| matches!(p, Payload::TurnCompleted { .. })) == 13);
+        for n in 0..8 {
+            assert_eq!(requests().iter().filter(|request| request.contains(&format!("boundary-{n}"))).count(), 1);
+        }
+
+        // Refusal of the next request retains it, and withdraws unsent successors.
+        hold("hold-finish");
+        hold("hold-accept");
+        let idle = send("before delivery failure");
+        assert!(matches!(idle.events[0].payload, Payload::UserMessage { queued: true, .. }));
+        assert_eq!(starts(&events(), idle.events[0].seq) + absorbed(&events(), idle.events[0].seq), 0);
+        release("hold-accept");
+        wait("the idle-side request is accepted", &|events| starts(events, idle.events[0].seq) == 1);
+        let failed = send("retain this failed message");
+        let unsent = send("retain this unsent successor");
+        hold("fail-start");
+        release("hold-finish");
+        wait("both messages are recoverable", &|events| [failed.events[0].seq, unsent.events[0].seq].iter().all(|seq| events.iter().any(|e| matches!(e.payload, Payload::PromptWithdrawn { prompt_seq, .. } if prompt_seq == *seq))));
+        for message in [&failed, &unsent] {
+            assert_eq!(starts(&events(), message.events[0].seq) + absorbed(&events(), message.events[0].seq), 0);
+        }
+        assert_eq!(requests().len(), 15, "neither a refusal nor a completion is replayed");
+        assert!(manager.queued("stdio-owner", "tab").is_empty());
+        manager.stop("stdio-owner", "tab").unwrap();
+        // The queued successor was never written. Earlier-turn output must
+        // not erase it from the actual resend path.
+        assert_eq!(manager.unsent_prompt("stdio-owner", "tab").unwrap().0, "retain this unsent successor");
+        release("fail-start");
+        let resent = manager.resend_unsent("stdio-owner", "tab").unwrap();
+        wait("the retained successor is resent", &|events| starts(events, resent.events[0].seq) == 1
+            && events.iter().any(|event| matches!(event.payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. }) && event.seq > resent.events[0].seq));
+        assert_eq!(requests().iter().filter(|request| request.contains("retain this unsent successor")).count(), 1);
+        manager.stop("stdio-owner", "tab").unwrap();
+        return;
+    }
     let opened = rt_arc.lock().unwrap().turn_started_at.unwrap();
     std::thread::sleep(Duration::from_millis(300));
     release("hold-progress");
@@ -1367,7 +1694,7 @@ fn child_fixture() {
     if case == "cloud-launch" { return cloud_launch_fixture(); }
     if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }
-    if case == "busy-while-working" { return busy_fixture(); }
+    if matches!(case.as_str(), "busy-while-working" | "queued-while-working" | "queued-stop" | "queued-interrupt" | "queued-share-ended" | "queued-overflow") { return busy_fixture(); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({

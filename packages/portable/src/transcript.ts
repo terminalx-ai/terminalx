@@ -33,6 +33,8 @@ export interface Delivery {
   replaced?: boolean;
   /** Stopped while it waited on the agent's input box: never typed. */
   withdrawn?: boolean;
+  /** Delivery may have happened, but the connection lost its acknowledgement. */
+  unconfirmed?: boolean;
   /** What was sent, when the agent received something else; `text` is then what it received. */
   sent?: string;
 }
@@ -147,8 +149,8 @@ function pullQueued(turns: Turn[], seq: number): { item: Extract<WorkItem, { kin
  * A queued message is a note in the turn it was queued behind: the agent held
  * it until that turn was over and then took it as its next prompt, or it was
  * typed again as one when the reader sent it now. One the agent took mid-turn
- * has a `prompt_absorbed` instead (#551), and stays in its turn as a message;
- * in a log from before that event it stays as it was sent.
+ * has a `prompt_absorbed` instead (#551), and stays in its turn as a message
+ * unless a later `turn_started` explicitly names it as that turn's prompt.
  *
  * A message drawn as a turn's prompt can be taken too (#540). It was sent
  * while the agent was busy on a turn of its own that the app had not heard
@@ -162,11 +164,14 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
     turn.prompt = undefined;
     return { prompt, from: turn };
   }
-  const found = pullQueued(turns, seq);
+  const found = findMessage(turns, seq);
   if (!found) return undefined;
-  const { item, turn } = found;
-  const { inputOccupied, replaced, withdrawn, sent } = item;
-  return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, sent }, from: turn };
+  const { turn, at } = found;
+  if (at == null) return undefined;
+  const [item] = turn.work.splice(at, 1);
+  if (item.kind !== "queued" && item.kind !== "message") return undefined;
+  const { inputOccupied, replaced, withdrawn, unconfirmed, sent } = item;
+  return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, unconfirmed, sent }, from: turn };
 }
 
 /** Where the reader's message published under `seq` is drawn now: a turn's prompt (no `at`), or a note at `at` in a turn's work. */
@@ -461,7 +466,7 @@ export class TranscriptReducer {
         break;
       }
       case "prompt_withdrawn": {
-        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, inputOccupied: undefined }));
+        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, unconfirmed: payload.unconfirmed, inputOccupied: undefined }));
         break;
       }
       case "prompt_joined": {

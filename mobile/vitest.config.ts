@@ -7,5 +7,5 @@ export default defineConfig({
     dedupe: ["react", "react-dom"],
   },
   esbuild: { jsx: "automatic" },
-  test: { include: ["src/**/*.test.{ts,tsx}"] },
+  test: { include: ["src/**/*.test.{ts,tsx}"], setupFiles: ["./vitest.setup.ts"] },
 });
