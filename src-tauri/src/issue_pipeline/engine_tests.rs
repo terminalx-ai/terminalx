@@ -107,6 +107,7 @@ struct World {
     pushes: Vec<String>,
     created: Vec<(String, String)>,
     associations: Vec<(String, String)>,
+    association_error: bool,
     edited: Vec<String>,
     comments: Vec<String>,
     merges: Vec<(String, String)>,
@@ -193,6 +194,7 @@ impl FakeHost {
             pushes: Vec::new(),
             created: Vec::new(),
             associations: Vec::new(),
+            association_error: false,
             edited: Vec::new(),
             comments: Vec::new(),
             merges: Vec::new(),
@@ -473,7 +475,9 @@ impl Host for FakeHost {
     }
 
     fn associate_pull_request(&self, session_id: &str, _cwd: &Path, pr: &PrSnapshot) -> Result<()> {
-        self.world().associations.push((session_id.into(), pr.url.clone()));
+        let mut world = self.world();
+        if world.association_error { bail!("Could not associate the pull request."); }
+        world.associations.push((session_id.into(), pr.url.clone()));
         Ok(())
     }
 
@@ -3743,21 +3747,53 @@ fn adoption_preserves_person_only_merge_and_existing_author_ownership() {
 }
 
 #[test]
-fn adoption_does_not_overwrite_a_pipeline_that_advanced_or_stopped_during_creation() {
+fn adoption_is_initialized_before_completion_events_and_polling_can_see_it() {
+    let _home = crate::store::temp_home();
+    let host = std::sync::Arc::new(existing_pr_host());
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+    let callback_host = host.clone();
+    host.world().during_changed = Some(Box::new(move || {
+        let p = store::for_session("author").unwrap().unwrap();
+        assert_eq!((p.stage, p.state), (Stage::Merge, State::Waiting));
+        assert_eq!(p.pr.as_ref().unwrap().number, 7);
+        assert_eq!(p.events.iter().find(|event| event.kind == "adopted").unwrap().actor, Some(cli_actor()));
+        // These are the real entry points that could previously push and edit
+        // the PR between publishing Work and acquiring the adoption step lock.
+        turn_completed(callback_host.as_ref(), "author", "t1", Some(&done("Ready for review")));
+        poll(callback_host.as_ref());
+    }));
+    let p = engine::start_existing(host.as_ref(), "author", "t1", Some(false), Some(false), true, cli_actor()).unwrap();
+    assert_eq!(store::get(&p.id).unwrap().stage, Stage::Merge);
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::Idle;
+    poll(host.as_ref());
+    let reviewing = store::get(&p.id).unwrap();
+    assert_eq!(reviewing.stage, Stage::Review);
+    assert_eq!(reviewing.pr.as_ref().unwrap().number, 7);
+    assert_eq!(reviewing.author, p.author);
+    let world = host.world();
+    assert!(world.pushes.is_empty() && world.created.is_empty() && world.edited.is_empty());
+    assert_eq!(world.pr.as_ref().unwrap().body, "Keep this body");
+    assert_eq!(world.sessions.len(), 1);
+    assert_eq!(world.reviewers, 1);
+}
+
+#[test]
+fn adoption_association_failure_does_not_publish_a_work_pipeline() {
     let _home = crate::store::temp_home();
     let host = existing_pr_host();
-    host.world().during_changed = Some(Box::new(|| {
-        let mut p = store::for_session("author").unwrap().unwrap();
-        p.stage = Stage::Review;
-        store::commit(&mut p).unwrap();
-    }));
-    assert!(engine::start_existing(&host, "author", "t1", Some(false), Some(false), true, cli_actor()).is_err());
-    let mut p = store::for_session("author").unwrap().unwrap();
-    assert_eq!(p.stage, Stage::Review);
-    assert!(p.pr.is_none());
-    assert!(!p.events.iter().any(|event| event.kind == "adopted"));
-    p.stage = Stage::Work;
-    store::commit(&mut p).unwrap();
+    host.world().association_error = true;
+    assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err());
+    assert!(store::list().unwrap().is_empty());
+    assert_eq!(host.world().announced, 0);
+    turn_completed(&host, "author", "t1", Some(&done("Ready for review")));
+    assert!(host.world().pushes.is_empty());
+}
+
+#[test]
+fn adoption_does_not_overwrite_a_stopped_pipeline() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    let p = start(&host, "author", "t1", Some(false), None).unwrap();
     engine::act_from_agent(&host, &p.id, Action::Stop).unwrap();
     assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err());
     assert!(store::get(&p.id).unwrap().stopped);

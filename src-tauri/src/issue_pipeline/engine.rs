@@ -1847,7 +1847,6 @@ pub fn start_with_switches(host: &dyn Host, session_id: &str, tab_id: &str, auto
 
 fn start_locked(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
     let session = host.session(session_id)?;
-    let issue = session.issue.clone();
     if session.tab(tab_id).is_none() {
         bail!("tab {tab_id} not found in session {session_id}");
     }
@@ -1881,6 +1880,16 @@ fn start_locked(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Opt
             Ok(())
         });
     }
+    let pipeline = new_pipeline(host, &session, tab_id, auto_merge, resolve_conflicts, issue_body)?;
+    store::insert(&pipeline)?;
+    host.changed(&pipeline);
+    Ok(pipeline)
+}
+
+/// Construct privately: callers must finish initialization before publishing.
+fn new_pipeline(host: &dyn Host, session: &SessionEntry, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
+    let session_id = &session.id;
+    let issue = session.issue.clone();
     let settings = host.settings(&session.project_path).context("The project's issue pipeline settings could not be read.")?;
     if !settings.enabled {
         bail!("The issue pipeline is turned off for this project.");
@@ -1956,8 +1965,6 @@ fn start_locked(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Opt
     if cloud {
         pipeline.record(&now, "note", "In a cloud workspace the pipeline stops at Ready to merge. The merge is yours, from the issue page in TerminalX or on GitHub.");
     }
-    store::insert(&pipeline)?;
-    host.changed(&pipeline);
     Ok(pipeline)
 }
 
@@ -1991,6 +1998,19 @@ pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merg
         }
         Some(pr)
     } else { None };
+    if existing.is_none() {
+        if let Some(pr) = &pr {
+            let mut pipeline = new_pipeline(host, &session, tab_id, auto_merge, resolve_conflicts, None)?;
+            host.associate_pull_request(session_id, Path::new(&session.cwd), pr)?;
+            // Completion events and polling may run as soon as insert returns.
+            // They must see the adopted PR, never a Work pipeline that can push.
+            record_attachment(&mut pipeline, &stamp(host.now()), &actor);
+            initialize_adoption(&mut pipeline, &stamp(host.now()), pr, &actor);
+            store::insert(&pipeline)?;
+            host.changed(&pipeline);
+            return Ok(pipeline);
+        }
+    }
     let p = match existing { Some(existing) => existing, None => start_locked(host, session_id, tab_id, auto_merge, resolve_conflicts, None)? };
     run(host, &p.id, false, if adopt_pr { OnError::Report } else { OnError::NeedsYou }, |step| {
         // The author or poller may have advanced while the attachment waited
@@ -1998,22 +2018,37 @@ pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merg
         if adopt_pr && (step.p.author != p.author || step.p.stage != Stage::Work || step.p.pr.is_some() || step.p.resolution.is_some()) {
             bail!("The pipeline advanced while adoption was being prepared. Inspect its current state before retrying.");
         }
-        let by = match &actor { super::SwitchActor::Person => "the person", super::SwitchActor::SelfUi { .. } => "an agent through scoped self-UI", _ => "an agent through the CLI" };
-        step.record("attached", format!("Autopilot attached to the existing author conversation by {by}.")).actor = Some(actor.clone());
+        record_attachment(&mut step.p, &stamp(host.now()), &actor);
         if let Some(pr) = pr {
             step.host.associate_pull_request(session_id, &step.cwd, &pr)?;
-            step.p.pr = Some(PrLink { number: pr.number, url: pr.url.clone(), base: pr.base });
-            step.p.stage = Stage::Merge;
-            step.settle(State::Waiting, None, "Existing pull request adopted. Independent review starts when the author is idle.");
-            let event = step.record("adopted", format!("Adopted existing pull request #{} without pushing or opening another pull request.", pr.number));
-            event.url = Some(pr.url);
-            event.actor = Some(actor);
+            initialize_adoption(&mut step.p, &stamp(host.now()), &pr, &actor);
         } else {
             step.save()?;
             step.host.send(&step.p.author, &prompts::author_brief())?;
         }
         Ok(())
     })
+}
+
+fn record_attachment(pipeline: &mut Pipeline, now: &str, actor: &super::SwitchActor) {
+    let by = match actor { super::SwitchActor::Person => "the person", super::SwitchActor::SelfUi { .. } => "an agent through scoped self-UI", _ => "an agent through the CLI" };
+    pipeline.record(now, "attached", format!("Autopilot attached to the existing author conversation by {by}.")).actor = Some(actor.clone());
+}
+
+fn initialize_adoption(pipeline: &mut Pipeline, now: &str, pr: &PrSnapshot, actor: &super::SwitchActor) {
+    let note = "Existing pull request adopted. Independent review starts when the author is idle.";
+    pipeline.pr = Some(PrLink { number: pr.number, url: pr.url.clone(), base: pr.base.clone() });
+    pipeline.stage = Stage::Merge;
+    if pipeline.state != State::Waiting || pipeline.reason.is_some() {
+        pipeline.record(now, "waiting", note);
+    }
+    pipeline.state = State::Waiting;
+    pipeline.reason = None;
+    pipeline.note = Some(note.into());
+    pipeline.answered = None;
+    let event = pipeline.record(now, "adopted", format!("Adopted existing pull request #{} without pushing or opening another pull request.", pr.number));
+    event.url = Some(pr.url.clone());
+    event.actor = Some(actor.clone());
 }
 
 /// A turn ended in some session. Nothing happens unless that tab is the
