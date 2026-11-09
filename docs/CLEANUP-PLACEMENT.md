@@ -3,10 +3,11 @@
 **Decision (Nov 2026):** when clean-up keeps a merged workspace instead of
 deleting it, that is said in three quiet places, and never as a pop-up:
 
-1. **The session's Branch tab**, first thing under the branch name: "Merged,
-   kept: 2 unpushed commits", the reason in full, and the buttons for it
-   (Keep, Delete…). The branch's own next step sits under it, so the fix for
-   the reason (Push, Commit) is one click away.
+1. **The session's Branch tab**, first thing under the branch name: "Pull
+   request #870 merged", then "Not deleted: 2 unpushed commits", the reason in
+   plain words, what deleting it would free, and buttons that say what they do
+   (Keep workspace, Delete workspace…). The branch's own next step sits under
+   it, so the fix for the reason (Push, Commit) is one click away.
 2. **Its sidebar row**: the merged tick on the branch icon turns amber, and the
    tooltip says why.
 3. **One line under the projects**: "Clean up 3 merged workspaces", shown only

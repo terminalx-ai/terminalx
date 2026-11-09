@@ -858,7 +858,8 @@ function BranchRow({
 function BranchGlyph({ merged, cleanup }: { merged: boolean; cleanup?: HostedStatus }) {
   const waiting = cleanup && cleanup.phase !== "removed";
   if (!merged && !waiting) return <GitBranch className="size-4 shrink-0 text-muted-foreground" />;
-  const title = waiting ? `Merged · ${mergedNote(cleanup)}` : "Merged: its commits are in the default branch";
+  const note = waiting ? mergedNote(cleanup) : "";
+  const title = waiting ? `${note.charAt(0).toUpperCase()}${note.slice(1)}` : "Merged: its commits are in the default branch";
   return (
     <span className="flex shrink-0" title={title} data-testid={waiting ? "branch-cleanup-marker" : undefined}>
       <GitBranch className="size-4 text-muted-foreground">

@@ -8,7 +8,7 @@ import type { Leftover } from "@/types/session";
 /** Why what is offered is safe to remove: each one a check the backend makes before it deletes (`cleanup.rs`). */
 const SAFE = [
   "No session uses them anymore",
-  "Everything in them is already in main",
+  "Everything in them is already merged",
   "Nothing uncommitted, unpushed or stashed",
 ];
 
@@ -27,8 +27,8 @@ function summary(items: Leftover[]): string {
 
 /**
  * On a project's page: what earlier sessions left behind in this project (workspace folders no session uses, old
- * agent conversation data for workspaces that are gone, stray branches), and a way to remove it. Build output is
- * not counted here; that is the Files tab's.
+ * agent conversation data for workspaces that are gone, stray branches), and a way to remove it. Build output in a
+ * workspace still in use is not counted: deleting it only buys a slow rebuild.
  *
  * Only what the leftovers scan calls removable is offered: unused, and everything in it merged into the default
  * branch, verified against the remote. Removing scans again and deletes only what is still removable. Deletes are
@@ -94,7 +94,7 @@ export function ProjectLeftovers({ path }: { path: string }) {
           </ul>
           <p className="text-[11px] text-faint">
             {summary(items)}
-            {kept ? `. ${count(kept, "more is", "more are")} kept because it has work not in main.` : ""}
+            {kept ? `. ${count(kept, "more is", "more are")} kept because ${kept === 1 ? "it has" : "they have"} work that is not merged.` : ""}
           </p>
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             <Button size="sm" variant="secondary" onClick={() => setStep("confirm")}>{bytes ? `Clean up ${bytesText(bytes)}` : "Clean up"}</Button>
