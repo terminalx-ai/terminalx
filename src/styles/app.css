@@ -10,6 +10,7 @@
 @theme inline {
   --color-background: var(--background);
   --color-chat: var(--surface-chat);
+  --color-terminal: var(--surface-terminal);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);

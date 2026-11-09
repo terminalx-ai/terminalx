@@ -760,7 +760,7 @@ export function TabView({
   );
 
   const terminal = (
-    <div className="flex h-full min-h-0 flex-1 flex-col">
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-terminal">
       {/* No bar over a terminal that is working: what it would say (its state, its command line, how the chat
           relates to it) the tab already shows or nobody needs. Its few controls sit in the terminal's corner
           toolbar, shown on hover; only a problem below, such as an exit or an error, takes a row. */}
@@ -804,7 +804,7 @@ export function TabView({
 
   // The same header as a local tab's terminal view; what it attaches to is on the VM.
   const cloudTerminal = remoteTerminal && (
-    <div className="flex h-full min-h-0 flex-1 flex-col">
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-terminal">
       {/* Like the local view: a row only when there is something wrong to say. */}
       <div className={remoteTerminal.client ? "sr-only" : "flex min-h-8 shrink-0 items-center border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground"}>
         <span className="shrink-0 text-foreground" data-testid="cloud-terminal-view-title">

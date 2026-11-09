@@ -30,9 +30,10 @@ function cssVar(name: string): string {
 /** The terminal's palette follows the app's mode; ANSI colours are tuned per mode. */
 export function themeFor(mode: "dark" | "light") {
   const fg = terminalColorHex(cssVar("--foreground"), mode === "dark" ? "#e6e6e6" : "#222222");
-  // The page surface, opaque: programs that query the background (OSC 11)
-  // then learn the real mode instead of a transparent black.
-  const bg = terminalColorHex(cssVar("--surface-page"), mode === "dark" ? "#1c1c1f" : "#f7f7f5");
+  // The terminal's own surface, opaque: programs that query the background (OSC 11)
+  // then learn the real mode instead of a transparent black. The view around the
+  // canvas is drawn in the same colour (`bg-terminal`), so there is no box.
+  const bg = terminalColorHex(cssVar("--surface-terminal"), mode === "dark" ? "#0b0b0b" : "#f7f7f5");
   return mode === "dark"
     ? {
         background: bg,
@@ -338,13 +339,13 @@ export function TerminalView({
   }, [id, shown, fit]);
 
   return (
-    <div ref={frame} className="group/terminal relative flex h-full w-full flex-col" data-testid="terminal-drop-target" {...drop.zoneProps}>
+    <div ref={frame} className="group/terminal relative flex h-full w-full flex-col bg-terminal" data-testid="terminal-drop-target" {...drop.zoneProps}>
       <EnvironmentNotice id={id} active={visible && !create} />
       {(redraw || actions) && (
         // Floats over the terminal's corner rather than taking a row: nothing is drawn until it is wanted.
         <div
           className={cn(
-            "absolute top-1.5 right-3 z-10 flex items-center gap-1 rounded-md border border-hairline bg-chat/90 p-0.5 shadow-sm backdrop-blur transition-opacity duration-150",
+            "absolute top-1.5 right-3 z-10 flex items-center gap-1 rounded-md border border-hairline bg-terminal/90 p-0.5 shadow-sm backdrop-blur transition-opacity duration-150",
             pinned ? "opacity-100" : "pointer-events-none opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100",
           )}
           data-testid="terminal-toolbar"
