@@ -424,18 +424,24 @@ it, or a file, for a comment with quotes, backticks or several lines. `--to`, `-
   `"comments"` added under `--comments`; `comment` answers `{"comment": …}`; every other write
   answers `{"issue": …}`, re-read from GitHub or Linear after the change.
 
-Reading needs no confirmation. **Every write is an outward action**: it changes the issue where
-other people see it and may notify them, so TerminalX shows a pending request in the main
-window, whoever runs the command. The person chooses Review to see the reported session,
+Reading and creating issues need no confirmation. When the person asks to file an issue,
+`issues create --provider github|linear` validates and submits it using the configured provider
+credentials, then returns the created issue, including its identifier and URL. Creation needs
+no app dialog or desktop window, and does not wait for confirmation or its timeout. Provider
+failures are reported without automatically retrying creation; check the provider before
+retrying an uncertain result to avoid duplicates.
+
+Other issue writes show a pending request in the main window, whoever runs the command.
+The person chooses Review to see the reported session,
 project, target, action and complete text in a bounded, scrollable dialog. Background requests
 do not open the dialog or switch conversations. Only the explicit action button approves;
 Cancel request refuses, while Escape leaves it pending. Unanswered requests expire after
 40 seconds. Computer-use actions remain paused while a request is pending. A refusal answers
 `declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
-what you wanted to do instead. A comment, title or description longer than 4000 characters or 40
-lines is refused before anyone is asked; link to the details instead. A project can let comments and
+what you wanted to do instead. The existing limit of 4000 characters or 40 lines for a comment,
+new issue title or description still applies; link to the details instead. A project can let comments and
 status moves on its own GitHub repository's issues go ahead without asking (Issue pipeline… in
-the project menu); assigning, labels, new issues and Linear issues always ask.
+the project menu); assigning, labels and edits to existing Linear issues always ask.
 
 When to use them: read the issue you were started on (`view --comments`) before working on it,
 and when you are done, comment the pull-request link or a short summary on the issue. Move its
@@ -784,9 +790,9 @@ JSON failures have this shape:
 - `cloud_control_disabled`: the person has not allowed cloud commands from the command line. Tell
   them the setting named in `recovery`; do not retry.
 - `declined`: the person refused the request in the app window. Do not retry.
-- `expired`, `busy`, `backoff`: an issue write was not answered in time, another question was
+- `expired`, `busy`, `backoff`: an edit to an existing issue was not answered in time, another question was
   already on screen, or the person refused one a moment ago. Nothing was changed.
-- `confirmation_unavailable`: an issue write needs the person's answer and this runtime has no
+- `confirmation_unavailable`: an edit to an existing issue needs the person's answer and this runtime has no
   window to ask in. Nothing was changed; ask the person.
 - `account_signed_out`: sign in to TerminalX in the app.
 - `cloud_unavailable`: the app's window did not answer. Check the session with `read` before
