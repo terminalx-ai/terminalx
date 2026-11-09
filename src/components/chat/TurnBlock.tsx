@@ -293,6 +293,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
         <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
           <div className="flex items-center gap-2">
             <Clock className="size-3.5 shrink-0" />
+            {!item.withdrawn && <span className="text-xs">Queued</span>}
             {item.author && <span data-user-id={item.author.userId}>{item.author.displayName}:</span>}
             <div className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={item.text} context={linkContext} /></span><MessageTime ts={item.messageTs} /></div>
             {onSendQueuedNow && !item.inputOccupied && !item.withdrawn && (
@@ -304,7 +305,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
             )}
           </div>
           {item.inputOccupied && <InputOccupiedNote />}
-          {item.withdrawn && <WithdrawnNote seq={item.seq} onSendAgain={onSendAgain} />}
+          {item.withdrawn && <WithdrawnNote unconfirmed={item.unconfirmed} seq={item.seq} onSendAgain={onSendAgain} />}
         </div>
       );
     case "status":
@@ -387,11 +388,11 @@ function InputOccupiedNote() {
 }
 
 /** A message stopped before the agent took it (#722, #746): not sent, and offered again. */
-function WithdrawnNote({ seq, onSendAgain }: { seq?: number; onSendAgain?: (seq: number) => void }) {
+function WithdrawnNote({ seq, unconfirmed, onSendAgain }: { seq?: number; unconfirmed?: boolean; onSendAgain?: (seq: number) => void }) {
   return (
     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-warning" data-testid="prompt-withdrawn">
       <CircleAlert className="size-3.5 shrink-0" />
-      <span className="min-w-0 flex-1">Not sent: the agent was stopped before it took this message.</span>
+      <span className="min-w-0 flex-1">{unconfirmed ? "Delivery was not confirmed. Check the conversation before sending again." : "Not sent: the agent was stopped before it took this message."}</span>
       {onSendAgain && seq !== undefined && (
         <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendAgain(seq)}>
           <Send /> Send again
@@ -474,7 +475,7 @@ function ReaderMessage({
           </details>
         )}
         {message.inputOccupied && <InputOccupiedNote />}
-        {message.withdrawn && <WithdrawnNote seq={message.seq} onSendAgain={onSendAgain} />}
+        {message.withdrawn && <WithdrawnNote unconfirmed={message.unconfirmed} seq={message.seq} onSendAgain={onSendAgain} />}
         {message.replaced && (
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-warning" data-testid="prompt-replaced">
             <CircleAlert className="size-3.5 shrink-0" />

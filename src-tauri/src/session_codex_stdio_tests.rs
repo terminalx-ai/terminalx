@@ -24,7 +24,7 @@ fn owned_stdio_lifecycle_is_process_bounded() {
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
         "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
-        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working", "handover-stop", "handover-exit", "handover-descendant"] {
+        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "handover-stop", "handover-exit", "handover-descendant"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1214,10 +1214,16 @@ while read -r line; do
     *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
     *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
     *'"method":"turn/start"'*)
+      printf '%s\n' "$line" >> "$here/requests"
+      held hold-accept none
+      if [ -f "$here/fail-start" ]; then
+        printf '{"id":%s,"error":{"message":"delivery refused"}}\n' "$id"
+        continue
+      fi
       printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
       printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
-      ( held hold-progress "turn-$id"
-        printf '{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"commandExecution","id":"c%s"}}}\n' "$id" "$id"
+      ( printf '{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"commandExecution","id":"c%s"}}}\n' "$id" "$id"
+        held hold-progress "turn-$id"
         printf '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"commandExecution","id":"c%s","status":"completed","exitCode":0,"aggregatedOutput":""}}}\n' "$id" "$id"
         held hold-finish "turn-$id"
         printf '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"agentMessage","id":"m%s","text":"done"}}}\n' "$id" "$id"
@@ -1233,8 +1239,8 @@ done
 "#;
 
 /// #815: native Codex at work for longer than the watcher's stall limit is
-/// not stalled, and a message sent while it works (or right after an
-/// interrupt, before Codex has ended the turn) is refused as a request: no
+/// not stalled, and a compact command sent while it works (or right after
+/// an interrupt, before Codex has ended the turn) is refused as a request: no
 /// error, no warning, no Needs attention, and the running turn goes on. The
 /// watcher still calls real silence, and progress takes that warning back.
 /// What happened is in the incident log, with no message text in it.
@@ -1271,7 +1277,7 @@ fn busy_fixture() {
     let warned = |events: &[AgentEvent]| count(events, &|payload| matches!(payload, Payload::Error { .. } | Payload::Recovery { kind: Some(_) }));
     let busy = |what: &str| {
         let before = warned(&events());
-        let error = manager.send("stdio-owner", "tab", format!("again: {what}"), Vec::new()).expect_err(what);
+        let error = manager.send("stdio-owner", "tab", "/compact".into(), Vec::new()).expect_err(what);
         assert!(error.to_string().starts_with(BUSY_WORDS), "{what}: {error:#}");
         let rt = rt_arc.lock().unwrap();
         assert!(rt.turn_open && rt.status == TabStatus::InProgress && rt.recovery.is_none(), "{what}: the running turn is left as it was");
@@ -1283,8 +1289,123 @@ fn busy_fixture() {
 
     hold("hold-progress");
     hold("hold-finish");
-    manager.send("stdio-owner", "tab", "first".into(), Vec::new()).unwrap();
+    hold("hold-accept");
+    let first = manager.send("stdio-owner", "tab", "first".into(), Vec::new()).unwrap();
+    assert!(matches!(first.events[0].payload, Payload::UserMessage { queued: true, .. }), "even an idle send awaits acknowledgement");
+    assert_eq!(count(&events(), &|p| matches!(p, Payload::PromptAbsorbed { .. })), 0);
+    release("hold-accept");
     wait("the first turn starts", &|events| count(events, &|payload| matches!(payload, Payload::TurnStarted { .. })) == 1);
+    if std::env::var(CASE).unwrap() == "queued-share-ended" {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut share = crate::local_sharing::tests::fixture();
+        let link = share.links.get_mut("link").unwrap();
+        link.settings.expires_at = now + 3_600_000;
+        link.credential_expires_at = now + 3_600_000;
+        let mut guest = crate::local_sharing::tests::guest("guest-connection", "alice");
+        guest.verified_until = now + 3_600_000;
+        let person = guest.person.clone();
+        share.join(guest, now).unwrap();
+        let permit = share.write_permit("guest-connection", "tab").unwrap();
+        manager.sharing.lock().unwrap().sessions.insert("stdio-owner".into(), share);
+        let queued = manager.send_shared("stdio-owner", "tab", "a queued guest message".into(), person, permit).unwrap();
+        assert!(queued.queued);
+        manager.sharing.lock().unwrap().sessions.remove("stdio-owner");
+        release("hold-progress");
+        release("hold-finish");
+        wait("revoked queued authority is withdrawn", &|events| events.iter().any(|e| matches!(e.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if prompt_seq == queued.events[0].seq)));
+        assert_eq!(std::fs::read_to_string(bin.join("requests")).unwrap().lines().count(), 1, "a queued prompt keeps its authority until the writer");
+        manager.stop("stdio-owner", "tab").unwrap();
+        return;
+    }
+    if matches!(std::env::var(CASE).unwrap().as_str(), "queued-stop" | "queued-interrupt") {
+        let message = manager.send("stdio-owner", "tab", "a follow-up that survives".into(), Vec::new()).unwrap();
+        assert!(message.queued);
+        let seq = message.events[0].seq;
+        if std::env::var(CASE).unwrap() == "queued-stop" {
+            manager.stop("stdio-owner", "tab").unwrap();
+            assert!(events().iter().any(|e| matches!(e.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if prompt_seq == seq)));
+            assert!(manager.queued("stdio-owner", "tab").is_empty());
+        } else {
+            hold("hold-interrupt");
+            manager.send_queued_now("stdio-owner", "tab", seq).unwrap();
+            let after = manager.send("stdio-owner", "tab", "right after interrupt".into(), Vec::new()).unwrap();
+            assert!(after.queued);
+            release("hold-progress");
+            release("hold-finish");
+            release("hold-interrupt");
+            wait("both follow-ups finish", &|events| count(events, &|p| matches!(p, Payload::TurnStarted { prompt_seq: Some(_), .. })) == 3
+                && count(events, &|p| matches!(p, Payload::TurnCompleted { .. })) == 3);
+            assert_eq!(count(&events(), &|p| matches!(p, Payload::TurnStarted { prompt_seq: Some(s), .. } if *s == seq)), 1);
+            manager.stop("stdio-owner", "tab").unwrap();
+        }
+        return;
+    }
+    if std::env::var(CASE).unwrap() == "queued-while-working" {
+        let send = |text: &str| manager.send("stdio-owner", "tab", text.into(), Vec::new()).expect("a follow-up during a tool wait must be accepted");
+        let starts = |events: &[AgentEvent], seq| count(events, &|p| matches!(p, Payload::TurnStarted { prompt_seq: Some(s), .. } if *s == seq));
+        let absorbed = |events: &[AgentEvent], seq| count(events, &|p| matches!(p, Payload::PromptAbsorbed { prompt_seq } if *prompt_seq == seq));
+        let requests = || std::fs::read_to_string(bin.join("requests")).unwrap().lines().map(str::to_owned).collect::<Vec<_>>();
+        wait("a command is waiting", &|events| count(events, &|p| matches!(p, Payload::ToolCallStarted { .. })) == 1);
+        let next = send("Please also check the remaining tasks");
+        let later = send("Then run the checks");
+        assert!(next.queued && later.queued, "follow-ups visibly wait for delivery");
+        let seq = next.events[0].seq;
+        assert!(matches!(next.events[0].payload, Payload::UserMessage { queued: true, .. }));
+        assert_eq!(starts(&events(), seq) + absorbed(&events(), seq), 0);
+        assert_eq!(requests().len(), 1, "nothing is written during the tool wait");
+
+        hold("hold-accept");
+        release("hold-progress");
+        release("hold-finish");
+        wait("the next prompt reaches the child", &|_| requests().len() == 2);
+        assert_eq!(starts(&events(), seq) + absorbed(&events(), seq), 0, "writing is not acknowledgement");
+        // A third send meets the next turn's request before its acknowledgement.
+        let racing = send("Check the completion race too");
+        assert!(racing.queued);
+        manager.send_queued_now("stdio-owner", "tab", racing.events[0].seq).unwrap();
+        release("hold-accept");
+        wait("all four turns end", &|events| count(events, &|p| matches!(p, Payload::TurnCompleted { .. })) == 4);
+        for message in [&next, &later, &racing] {
+            assert_eq!(starts(&events(), message.events[0].seq), 1, "each queued identity starts exactly one turn");
+        }
+        assert_eq!(requests().len(), 4);
+        assert!(manager.queued("stdio-owner", "tab").is_empty());
+
+        // Race sends with completion from both sides of the runtime lock.
+        hold("hold-finish");
+        send("before the boundary");
+        let joins: Vec<_> = (0..8).map(|n| {
+            let manager = manager.clone();
+            std::thread::spawn(move || manager.send("stdio-owner", "tab", format!("boundary-{n}"), Vec::new()).unwrap())
+        }).collect();
+        release("hold-finish");
+        for join in joins { join.join().unwrap(); }
+        wait("boundary sends all finish", &|events| count(events, &|p| matches!(p, Payload::TurnCompleted { .. })) == 13);
+        for n in 0..8 {
+            assert_eq!(requests().iter().filter(|request| request.contains(&format!("boundary-{n}"))).count(), 1);
+        }
+
+        // Refusal of the next request retains it, and withdraws unsent successors.
+        hold("hold-finish");
+        hold("hold-accept");
+        let idle = send("before delivery failure");
+        assert!(matches!(idle.events[0].payload, Payload::UserMessage { queued: true, .. }));
+        assert_eq!(starts(&events(), idle.events[0].seq) + absorbed(&events(), idle.events[0].seq), 0);
+        release("hold-accept");
+        wait("the idle-side request is accepted", &|events| starts(events, idle.events[0].seq) == 1);
+        let failed = send("retain this failed message");
+        let unsent = send("retain this unsent successor");
+        hold("fail-start");
+        release("hold-finish");
+        wait("both messages are recoverable", &|events| [failed.events[0].seq, unsent.events[0].seq].iter().all(|seq| events.iter().any(|e| matches!(e.payload, Payload::PromptWithdrawn { prompt_seq, .. } if prompt_seq == *seq))));
+        for message in [&failed, &unsent] {
+            assert_eq!(starts(&events(), message.events[0].seq) + absorbed(&events(), message.events[0].seq), 0);
+        }
+        assert_eq!(requests().len(), 15, "neither a refusal nor a completion is replayed");
+        assert!(manager.queued("stdio-owner", "tab").is_empty());
+        manager.stop("stdio-owner", "tab").unwrap();
+        return;
+    }
     let opened = rt_arc.lock().unwrap().turn_started_at.unwrap();
     std::thread::sleep(Duration::from_millis(300));
     release("hold-progress");
@@ -1367,7 +1488,7 @@ fn child_fixture() {
     if case == "cloud-launch" { return cloud_launch_fixture(); }
     if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }
-    if case == "busy-while-working" { return busy_fixture(); }
+    if matches!(case.as_str(), "busy-while-working" | "queued-while-working" | "queued-stop" | "queued-interrupt" | "queued-share-ended") { return busy_fixture(); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({

@@ -111,6 +111,7 @@ describe("what became of a message on its way to the agent (#722)", () => {
     expect(deliveryNote({ inputOccupied: true, sent: "x" })).toMatch(/input box already has text in it/);
     expect(deliveryNote({ replaced: true, inputOccupied: true })).toMatch(/^Not answered/);
     expect(deliveryNote({ withdrawn: true })).toMatch(/^Not sent/);
+    expect(deliveryNote({ withdrawn: true, unconfirmed: true })).toMatch(/^Delivery was not confirmed/);
   });
 
   it("gives a running compaction no row (the conversation's running line stands for it), and every other one its row (#644)", () => {

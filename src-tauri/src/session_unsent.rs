@@ -53,7 +53,7 @@ pub(super) enum Restart {
 /// ever had the conversation; anything else there came from its agent.
 fn the_apps_own(payload: &Value) -> bool {
     match payload["type"].as_str() {
-        Some("status" | "recovery" | "error" | "settings_changed") => true,
+        Some("status" | "recovery" | "error" | "settings_changed" | "prompt_withdrawn") => true,
         // A CLI that exits with a turn open has the turn closed for it.
         Some("turn_completed") => payload["status"].as_str() != Some("ok"),
         _ => false,
@@ -285,6 +285,17 @@ mod tests {
         assert_eq!(restart_of(None), Some(Restart::Unsent(sent(35, "continue"))));
         // A continuation that is not among them was taken long ago.
         assert_eq!(restart_of(Some(99)), Some(Restart::Unsent(sent(35, "continue"))));
+    }
+
+    #[test]
+    fn a_delivery_failure_does_not_count_as_an_agent_answer() {
+        for unconfirmed in [false, true] {
+            let (_dir, path) = log(&[
+                line(1, serde_json::json!({ "type": "user_message", "text": "keep me", "queued": true })),
+                line(2, serde_json::json!({ "type": "prompt_withdrawn", "promptSeq": 1, "unconfirmed": unconfirmed })),
+            ]);
+            assert_eq!(restart(said_in(&path, None), None, true), Some(Restart::Unsent(sent(1, "keep me"))));
+        }
     }
 
     #[test]
