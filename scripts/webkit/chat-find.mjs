@@ -71,8 +71,10 @@ try {
       return [...active].some((range) => {
         const r = range.getBoundingClientRect();
         let top = box.top, bottom = box.bottom - 120, left = box.left, right = box.right;
-        for (let el = range.startContainer.parentElement; el && el !== chat; el = el.parentElement) {
-          const style = getComputedStyle(el), clip = el.getBoundingClientRect();
+        // A Range may sit inside the chat while its code/output scrollport
+        // clips it entirely. Verify the text is visible through every ancestor.
+        for (let node = range.startContainer.parentElement; node && node !== chat; node = node.parentElement) {
+          const style = getComputedStyle(node), clip = node.getBoundingClientRect();
           if (/auto|scroll|hidden|clip/.test(style.overflowY)) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
           if (/auto|scroll|hidden|clip/.test(style.overflowX)) { left = Math.max(left, clip.left); right = Math.min(right, clip.right); }
         }
