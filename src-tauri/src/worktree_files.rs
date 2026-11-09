@@ -88,12 +88,12 @@ impl PreviewCache {
     }
 }
 
-fn ignored_snapshot(project: &Path, token: Option<&str>) -> Result<Arc<IgnoredFiles>> {
-    let Some(token) = token else { return ignored_files(project).map(Arc::new) };
+fn ignored_snapshot(project: &Path, root: &safe_open::Directory, token: Option<&str>) -> Result<Arc<IgnoredFiles>> {
+    let Some(token) = token else { return ignored_files(project, root).map(Arc::new) };
     anyhow::ensure!(!token.is_empty() && token.len() <= 64, "Invalid preview snapshot");
     static CACHE: OnceLock<Mutex<PreviewCache>> = OnceLock::new();
     CACHE.get_or_init(Default::default).lock().unwrap_or_else(|error| error.into_inner())
-        .get(project, token, || ignored_files(project))
+        .get(project, token, || ignored_files(project, root))
 }
 
 pub fn has_include_file(project: &Path) -> Result<bool> {
@@ -104,10 +104,10 @@ pub fn has_include_file(project: &Path) -> Result<bool> {
     }
 }
 
-fn effective_patterns(project: &Path, draft: Option<&[String]>) -> Result<(bool, Vec<String>)> {
-    if has_include_file(project)? {
+fn effective_patterns(project: &Path, root: &safe_open::Directory, draft: Option<&[String]>) -> Result<(bool, Vec<String>)> {
+    if root.entry_exists(".worktreeinclude")? {
         // Do not follow a repository-supplied link to a file elsewhere on the Mac.
-        let mut file = safe_open::read(project, Path::new(".worktreeinclude")).context("Could not read .worktreeinclude")?;
+        let mut file = safe_open::read(root, Path::new(".worktreeinclude")).context("Could not read .worktreeinclude")?;
         let mut text = String::new();
         (&mut file).take(MAX_INCLUDE_BYTES + 1).read_to_string(&mut text)?;
         anyhow::ensure!(text.len() as u64 <= MAX_INCLUDE_BYTES, ".worktreeinclude is too large (maximum 64 KiB)");
@@ -142,39 +142,40 @@ fn safe_relative(path: &Path) -> bool {
     })
 }
 
-fn ignored_files(project: &Path) -> Result<IgnoredFiles> {
+fn ignored_files(project: &Path, root: &safe_open::Directory) -> Result<IgnoredFiles> {
     let workspaces = git::worktree_root(project);
     let mut args = vec!["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", "."];
     // Exclude managed worktrees before Git walks them: a broad glob must not
     // recursively copy old workspaces (or the workspace just being created).
     let excluded = workspaces.strip_prefix(project).ok().map(|path| format!(":(exclude,literal){}", path.display()));
     if let Some(excluded) = &excluded { args.push(excluded); }
-    let (files, limited) = git::file_names_bounded(project, &args, MAX_SCAN_FILES, MAX_SCAN_BYTES)?;
+    let (files, limited) = git::file_names_bounded(root.command()?, &args, MAX_SCAN_FILES, MAX_SCAN_BYTES)?;
     let files = files.into_iter().filter(|file| {
         let path = Path::new(file);
         safe_relative(path) && !project.join(path).starts_with(&workspaces)
-            && !fs::symlink_metadata(project.join(path)).is_ok_and(|metadata| metadata.is_dir())
+            && !root.is_directory(path).unwrap_or(false)
     }).collect::<BTreeSet<_>>().into_iter().collect();
     Ok(IgnoredFiles { files, limited })
 }
 
 pub fn preview(project: &Path, draft: Option<&[String]>, snapshot: Option<&str>) -> Result<Preview> {
     let project = fs::canonicalize(project)?;
-    anyhow::ensure!(git::is_own_worktree(&project), "Choose the root of a Git repository");
+    let root = safe_open::Directory::open_resolved(&project)?;
+    validate_repository_root(&root)?;
     let mut preview = Preview {
         root_path: project.to_string_lossy().into_owned(),
         workspaces_path: git::worktree_root(&project).to_string_lossy().into_owned(),
-        from_include_file: has_include_file(&project)?,
+        from_include_file: root.entry_exists(".worktreeinclude")?,
         patterns: Vec::new(), error: None, warning: None,
     };
     // Path rows and the repository-file lock remain available even when the
     // file is unreadable or its list exceeds the limit.
     let result = (|| -> Result<()> {
-        let (from_include_file, patterns) = effective_patterns(&project, draft)?;
+        let (from_include_file, patterns) = effective_patterns(&project, &root, draft)?;
         preview.from_include_file = from_include_file;
         anyhow::ensure!(patterns.len() <= MAX_PATTERNS, "Use at most {MAX_PATTERNS} patterns");
         // An empty pattern list needs only the paths, with no filesystem scan.
-        let ignored = if patterns.is_empty() { Arc::new(IgnoredFiles::default()) } else { ignored_snapshot(&project, snapshot)? };
+        let ignored = if patterns.is_empty() { Arc::new(IgnoredFiles::default()) } else { ignored_snapshot(&project, &root, snapshot)? };
         if ignored.limited { preview.warning = Some(SCAN_WARNING.into()); }
         preview.patterns = patterns.into_iter().map(|pattern| {
             match matcher(&pattern) {
@@ -207,78 +208,119 @@ fn copy_files(project: &Path, destination: &Path) -> Result<CopyReport> {
 }
 
 fn copy_files_with_limits(project: &Path, destination: &Path, max_files: usize, max_bytes: u64) -> Result<CopyReport> {
-    let project = fs::canonicalize(project)?;
-    // Resolve configured parent aliases once; keep the checkout's final
-    // component unresolved so safe_open still refuses a replaced root symlink.
-    let destination = fs::canonicalize(destination.parent().context("Missing workspace parent")?)?
-        .join(destination.file_name().context("Missing workspace name")?);
-    anyhow::ensure!(git::is_own_worktree(&project), "Choose the root of a Git repository");
-    let (_, patterns) = effective_patterns(&project, None)?;
-    anyhow::ensure!(patterns.len() <= MAX_PATTERNS, "Use at most {MAX_PATTERNS} patterns");
-    let mut report = CopyReport::default();
-    if patterns.is_empty() { return Ok(report); }
-    // Creation always scans afresh; preview snapshots can never authorize a copy.
-    let ignored = ignored_files(&project)?;
-    if ignored.limited { report.error = Some(SCAN_WARNING.into()); }
-    let mut files = BTreeSet::new();
-    for pattern in patterns {
-        match matcher(&pattern) {
-            Ok(glob) => files.extend(ignored.files.iter().filter(|file| glob.is_match(file)).cloned()),
-            Err(error) => report.skip(pattern, format!("Invalid pattern: {error}")),
-        }
-    }
-    let files: Vec<_> = files.into_iter().collect();
-    let eligible = if files.is_empty() { BTreeSet::new() } else {
-        git::ignored_untracked_paths(&destination, &files[..files.len().min(max_files)])?
-    };
-    if !eligible.is_empty() { validate_staging_directory(&destination)?; }
-    for (index, path) in files.into_iter().enumerate() {
-        if index >= max_files {
-            report.skip(path, format!("Copy limit: at most {max_files} matching files per workspace"));
-            continue;
-        }
-        if !eligible.contains(&path) {
-            report.skip(path, "Tracked or not ignored in the new workspace");
-            continue;
-        }
-        match copy_one(&project, &destination, Path::new(&path), max_bytes - report.copied_bytes) {
-            Ok((bytes, warning)) => {
-                report.copied_count += 1;
-                report.copied_bytes += bytes;
-                if let Some(reason) = warning {
-                    if report.warnings.len() < MAX_REPORT_DETAILS { report.warnings.push(SkippedFile { path, reason }); }
-                }
+    CopyPlan::prepare(project, destination, max_files, max_bytes)?.execute()
+}
+
+/// Eligibility is a Git snapshot, not a lock on concurrent index/ignore edits.
+/// Hold the checked directory identities through the entire copy batch.
+struct CopyPlan {
+    project: safe_open::Directory,
+    destination: CopyDestination,
+    files: Vec<String>,
+    eligible: BTreeSet<String>,
+    report: CopyReport,
+    max_files: usize,
+    max_bytes: u64,
+}
+
+impl CopyPlan {
+    fn prepare(project: &Path, destination: &Path, max_files: usize, max_bytes: u64) -> Result<Self> {
+        let project = fs::canonicalize(project)?;
+        let root = safe_open::Directory::open_resolved(&project)?;
+        let destination = CopyDestination::open(destination)?;
+        validate_repository_root(&root)?;
+        let (_, patterns) = effective_patterns(&project, &root, None)?;
+        anyhow::ensure!(patterns.len() <= MAX_PATTERNS, "Use at most {MAX_PATTERNS} patterns");
+        let mut report = CopyReport::default();
+        // Creation always scans afresh; preview snapshots can never authorize a copy.
+        let ignored = if patterns.is_empty() { IgnoredFiles::default() } else { ignored_files(&project, &root)? };
+        if ignored.limited { report.error = Some(SCAN_WARNING.into()); }
+        let mut files = BTreeSet::new();
+        for pattern in patterns {
+            match matcher(&pattern) {
+                Ok(glob) => files.extend(ignored.files.iter().filter(|file| glob.is_match(file)).cloned()),
+                Err(error) => report.skip(pattern, format!("Invalid pattern: {error}")),
             }
-            Err(error) => report.skip(path, format!("{error:#}")),
         }
+        let files: Vec<_> = files.into_iter().collect();
+        let eligible = if files.is_empty() { BTreeSet::new() } else {
+            validate_repository_root(&destination.root)?;
+            git::ignored_untracked_paths(destination.root.command()?, &files[..files.len().min(max_files)])?
+        };
+        if !eligible.is_empty() { validate_staging_directory(&destination.staging)?; }
+        Ok(Self { project: root, destination, files, eligible, report, max_files, max_bytes })
     }
-    Ok(report)
+
+    fn execute(self) -> Result<CopyReport> {
+        let Self { project, destination, files, eligible, mut report, max_files, max_bytes } = self;
+        for (index, path) in files.into_iter().enumerate() {
+            if index >= max_files {
+                report.skip(path, format!("Copy limit: at most {max_files} matching files per workspace"));
+                continue;
+            }
+            if !eligible.contains(&path) {
+                report.skip(path, "Tracked or not ignored in the new workspace");
+                continue;
+            }
+            match copy_one(&project, &destination, Path::new(&path), max_bytes - report.copied_bytes) {
+                Ok((bytes, warning)) => {
+                    report.copied_count += 1;
+                    report.copied_bytes += bytes;
+                    if let Some(reason) = warning {
+                        if report.warnings.len() < MAX_REPORT_DETAILS { report.warnings.push(SkippedFile { path, reason }); }
+                    }
+                }
+                Err(error) => report.skip(path, format!("{error:#}")),
+            }
+        }
+        Ok(report)
+    }
 }
 
 /// Staging is outside the new checkout. If its parent is inside another
 /// checkout (normally the source repository), the entire directory must be
 /// ignored there too. Check once per batch, before writing any temporary data.
-fn validate_staging_directory(destination: &Path) -> Result<()> {
-    let destination = fs::canonicalize(destination)?;
-    let staging = destination.parent().context("Missing workspace parent")?;
-    for ancestor in staging.ancestors() {
-        match fs::symlink_metadata(ancestor.join(".git")) {
-            Ok(_) => {},
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+fn validate_staging_directory(staging: &safe_open::Directory) -> Result<()> {
+    let mut ancestor = staging.try_clone()?;
+    loop {
+        if ancestor.entry_exists(".git")? {
+            // Run from the held staging directory, so Git checks that identity,
+            // not a path that may now resolve to a replacement checkout.
+            let relative = String::from(".");
+            anyhow::ensure!(git::ignored_untracked_paths(staging.command()?, std::slice::from_ref(&relative))?.contains(&relative),
+                "Workspace parent must be ignored before staging file copies");
+            break;
         }
-        // Once a checkout marker exists, a failed Git query must fail closed.
-        let root = fs::canonicalize(git::run(staging, &["rev-parse", "--show-toplevel"])?.trim())?;
-        let relative = staging.strip_prefix(&root)?.to_str().context("Workspace parent is not valid UTF-8")?.to_owned();
-        anyhow::ensure!(!relative.is_empty()
-            && git::ignored_untracked_paths(&root, std::slice::from_ref(&relative))?.contains(&relative),
-            "Workspace parent must be ignored before staging file copies");
-        break;
+        let Some(parent) = ancestor.parent()? else { break };
+        ancestor = parent;
     }
     Ok(())
 }
 
-fn copy_one(project: &Path, destination: &Path, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
+fn validate_repository_root(root: &safe_open::Directory) -> Result<()> {
+    anyhow::ensure!(root.entry_exists(".git")?
+        && git::run_command(&mut root.command()?, &["rev-parse", "--is-inside-work-tree"])?.trim() == "true"
+        && git::run_command(&mut root.command()?, &["rev-parse", "--show-prefix"])?.trim().is_empty(),
+        "Choose the root of a Git repository");
+    Ok(())
+}
+
+/// Resolve configured aliases before binding, then derive the workspace from
+/// its held parent. Both handles live through eligibility and publication.
+struct CopyDestination {
+    root: safe_open::Directory,
+    staging: safe_open::Directory,
+}
+
+impl CopyDestination {
+    fn open(path: &Path) -> Result<Self> {
+        let staging = safe_open::Directory::open_resolved(&fs::canonicalize(path.parent().context("Missing workspace parent")?)?)?;
+        let root = staging.child(path.file_name().context("Missing workspace name")?)?;
+        Ok(Self { root, staging })
+    }
+}
+
+fn copy_one(project: &safe_open::Directory, destination: &CopyDestination, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
     anyhow::ensure!(safe_relative(relative), "Unsafe relative path");
     // A copied nested ignore file could unignore secrets that were eligible
     // under the new checkout's original rules. Preserve those rules throughout.
@@ -316,10 +358,80 @@ mod safe_open {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
 
-    fn parent(root: &Path, relative: &Path, create: bool) -> Result<(File, CString)> {
+    /// Opening a canonical path still traverses every component with NOFOLLOW.
+    /// Afterwards no operation reopens that path: commands fchdir to this fd,
+    /// and reads, temporary writes and publication all use relative *at calls.
+    pub(super) struct Directory(File);
+
+    impl Directory {
+        pub(super) fn open_resolved(path: &Path) -> Result<Self> {
+            anyhow::ensure!(path.is_absolute(), "Expected a resolved absolute directory");
+            let mut directory = Self(fs::OpenOptions::new().read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open("/")?);
+            for part in path.components() {
+                match part {
+                    Component::RootDir => {},
+                    Component::Normal(name) => directory = directory.child(name)?,
+                    _ => anyhow::bail!("Expected a resolved directory without traversal"),
+                }
+            }
+            Ok(directory)
+        }
+
+        pub(super) fn child(&self, name: &std::ffi::OsStr) -> Result<Self> {
+            anyhow::ensure!(Path::new(name).components().count() == 1 && matches!(Path::new(name).components().next(), Some(Component::Normal(_))), "Expected one directory name");
+            Ok(Self(open_at(&self.0, &CString::new(name.as_bytes())?, libc::O_RDONLY | libc::O_DIRECTORY)?))
+        }
+
+        pub(super) fn try_clone(&self) -> Result<Self> { Ok(Self(self.0.try_clone()?)) }
+
+        pub(super) fn parent(&self) -> Result<Option<Self>> {
+            use std::os::unix::fs::MetadataExt;
+            let parent = Self(open_at(&self.0, &CString::new("..")?, libc::O_RDONLY | libc::O_DIRECTORY)?);
+            let here = self.0.metadata()?;
+            let above = parent.0.metadata()?;
+            Ok(((here.dev(), here.ino()) != (above.dev(), above.ino())).then_some(parent))
+        }
+
+        pub(super) fn entry_exists(&self, name: &str) -> Result<bool> {
+            Ok(mode_at(&self.0, &CString::new(name)?)?.is_some())
+        }
+
+        pub(super) fn is_directory(&self, relative: &Path) -> Result<bool> {
+            let (directory, name) = parent(self, relative, false)?;
+            Ok(mode_at(&directory, &name)?.is_some_and(|mode| mode & libc::S_IFMT == libc::S_IFDIR))
+        }
+
+        pub(super) fn command(&self) -> Result<std::process::Command> {
+            use std::os::unix::process::CommandExt;
+            let directory = self.0.try_clone()?;
+            let mut command = git::git();
+            // SAFETY: the closure retains a live directory fd until spawn.
+            // fchdir and last_os_error are async-signal-safe; no allocation or
+            // parent-process cwd mutation occurs between fork and exec.
+            unsafe { command.pre_exec(move || {
+                if libc::fchdir(directory.as_raw_fd()) < 0 { return Err(std::io::Error::last_os_error()); }
+                Ok(())
+            }); }
+            Ok(command)
+        }
+    }
+
+    fn mode_at(directory: &File, name: &CString) -> Result<Option<libc::mode_t>> {
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: fd/name remain valid and fstatat initializes metadata on success.
+        if unsafe { libc::fstatat(directory.as_raw_fd(), name.as_ptr(), metadata.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound { return Ok(None); }
+            return Err(error.into());
+        }
+        // SAFETY: fstatat succeeded.
+        Ok(Some(unsafe { metadata.assume_init() }.st_mode))
+    }
+
+    fn parent(root: &Directory, relative: &Path, create: bool) -> Result<(File, CString)> {
         anyhow::ensure!(safe_relative(relative), "Unsafe relative path");
-        let mut directory = fs::OpenOptions::new().read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(root)?;
+        let mut directory = root.0.try_clone()?;
         let parts: Vec<_> = relative.components().collect();
         for part in &parts[..parts.len() - 1] {
             let name = CString::new(part.as_os_str().as_bytes())?;
@@ -343,14 +455,14 @@ mod safe_open {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    pub(super) fn read(root: &Path, relative: &Path) -> Result<File> {
+    pub(super) fn read(root: &Directory, relative: &Path) -> Result<File> {
         let (directory, name) = parent(root, relative, false)?;
         let file = open_at(&directory, &name, libc::O_RDONLY | libc::O_NONBLOCK)?;
         anyhow::ensure!(file.metadata()?.is_file(), "Only regular files can be copied");
         Ok(file)
     }
 
-    pub(super) fn copy(source: &mut File, root: &Path, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
+    pub(super) fn copy(source: &mut File, root: &CopyDestination, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
         use std::os::unix::fs::PermissionsExt;
         let mut bytes = 0;
         let warning = write_atomic(root, relative, |target| {
@@ -362,16 +474,14 @@ mod safe_open {
         Ok((bytes, warning))
     }
 
-    pub(super) fn write_atomic(root: &Path, relative: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<Option<String>> {
-        let (directory, name) = parent(root, relative, true)?;
+    pub(super) fn write_atomic(root: &CopyDestination, relative: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<Option<String>> {
+        let (directory, name) = parent(&root.root, relative, true)?;
         // A temporary sibling of the final file may itself be unignored. Keep
         // temporary contents outside the checkout, including on cleanup failure.
         // Managed workspaces and their parent share a filesystem for linkat.
-        let staging = fs::OpenOptions::new().read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(root.parent().context("Missing workspace parent")?)?;
+        let staging = &root.staging.0;
         let temporary = CString::new(format!(".terminalx-copy-{}", uuid::Uuid::new_v4()))?;
-        let mut target = open_at(&staging, &temporary, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
+        let mut target = open_at(staging, &temporary, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
         let result = write(&mut target).and_then(|()| {
             // Publish only the complete file. linkat fails if anything already
             // occupies the destination, including a dangling symbolic link.
@@ -394,6 +504,31 @@ mod safe_open {
     // every component, but path-based opens cannot prevent replacements
     // between this check and use. Unlike the Unix fd traversal, this is not
     // a boundary against concurrent filesystem changes by another process.
+    pub(super) struct Directory(PathBuf);
+    impl Directory {
+        pub(super) fn open_resolved(path: &Path) -> Result<Self> {
+            anyhow::ensure!(fs::symlink_metadata(path)?.is_dir(), "Expected a directory");
+            Ok(Self(path.to_path_buf()))
+        }
+        pub(super) fn child(&self, name: &std::ffi::OsStr) -> Result<Self> {
+            Self::open_resolved(&checked(&self.0, Path::new(name), false)?)
+        }
+        pub(super) fn try_clone(&self) -> Result<Self> { Ok(Self(self.0.clone())) }
+        pub(super) fn parent(&self) -> Result<Option<Self>> { self.0.parent().map(Self::open_resolved).transpose() }
+        pub(super) fn entry_exists(&self, name: &str) -> Result<bool> {
+            match fs::symlink_metadata(self.0.join(name)) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error.into()),
+            }
+        }
+        pub(super) fn is_directory(&self, relative: &Path) -> Result<bool> { Ok(fs::symlink_metadata(checked(&self.0, relative, false)?)?.is_dir()) }
+        pub(super) fn command(&self) -> Result<std::process::Command> {
+            let mut command = git::git();
+            command.current_dir(&self.0);
+            Ok(command)
+        }
+    }
     fn checked(root: &Path, relative: &Path, create: bool) -> Result<std::path::PathBuf> {
         anyhow::ensure!(safe_relative(relative), "Unsafe relative path");
         let mut path = fs::canonicalize(root)?;
@@ -412,15 +547,14 @@ mod safe_open {
         }
         Ok(path)
     }
-    pub(super) fn read(root: &Path, relative: &Path) -> Result<File> {
-        let file = File::open(checked(root, relative, false)?)?;
+    pub(super) fn read(root: &Directory, relative: &Path) -> Result<File> {
+        let file = File::open(checked(&root.0, relative, false)?)?;
         anyhow::ensure!(file.metadata()?.is_file(), "Only regular files can be copied");
         Ok(file)
     }
-    pub(super) fn copy(source: &mut File, root: &Path, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
-        let destination = checked(root, relative, true)?;
-        let temporary = fs::canonicalize(root)?.parent().context("Missing workspace parent")?
-            .join(format!(".terminalx-copy-{}", uuid::Uuid::new_v4()));
+    pub(super) fn copy(source: &mut File, root: &CopyDestination, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
+        let destination = checked(&root.root.0, relative, true)?;
+        let temporary = root.staging.0.join(format!(".terminalx-copy-{}", uuid::Uuid::new_v4()));
         let mut target = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
         let mut bytes = 0;
         let result = copy_bounded(source, &mut target, remaining_bytes).and_then(|copied| {

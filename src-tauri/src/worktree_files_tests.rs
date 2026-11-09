@@ -2,19 +2,24 @@ use super::*;
 
 fn repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    git::run(dir.path(), &["init", "-q", "-b", "main"]).unwrap();
-    git::run(dir.path(), &["config", "user.name", "Test"]).unwrap();
-    git::run(dir.path(), &["config", "user.email", "test@example.com"]).unwrap();
+    init_repo(dir.path());
+    dir
+}
+
+fn init_repo(path: &Path) {
+    fs::create_dir_all(path).unwrap();
+    git::run(path, &["init", "-q", "-b", "main"]).unwrap();
+    git::run(path, &["config", "user.name", "Test"]).unwrap();
+    git::run(path, &["config", "user.email", "test@example.com"]).unwrap();
     // The different-base regression must depend only on this fixture's rules,
     // even when the developer globally ignores .env files.
-    let excludes = dir.path().join(".git/test-global-ignore");
+    let excludes = path.join(".git/test-global-ignore");
     fs::write(&excludes, "").unwrap();
-    git::run(dir.path(), &["config", "core.excludesFile", excludes.to_str().unwrap()]).unwrap();
-    write(dir.path(), ".gitignore", ".env*\nconfig/local/\ncache/\n");
-    write(dir.path(), "tracked.txt", "tracked");
-    git::run(dir.path(), &["add", "."]).unwrap();
-    git::run(dir.path(), &["commit", "-qm", "initial"]).unwrap();
-    dir
+    git::run(path, &["config", "core.excludesFile", excludes.to_str().unwrap()]).unwrap();
+    write(path, ".gitignore", ".env*\nconfig/local/\ncache/\n");
+    write(path, "tracked.txt", "tracked");
+    git::run(path, &["add", "."]).unwrap();
+    git::run(path, &["commit", "-qm", "initial"]).unwrap();
 }
 
 fn write(root: &Path, path: &str, value: &str) {
@@ -184,11 +189,11 @@ fn symbolic_links_and_special_files_cannot_escape_or_hang_copying() {
     write(repo.path(), ".worktreeinclude", ".env*\nconfig/local/**\n");
     let dest = tempfile::tempdir().unwrap();
     symlink(outside.path(), dest.path().join("config")).unwrap();
-    assert!(copy_one(repo.path(), dest.path(), Path::new(".env.link"), MAX_COPY_BYTES).is_err());
-    assert!(copy_one(repo.path(), dest.path(), Path::new("config/local/app"), MAX_COPY_BYTES).is_err());
+    assert!(copy_path(repo.path(), dest.path(), Path::new(".env.link"), MAX_COPY_BYTES).is_err());
+    assert!(copy_path(repo.path(), dest.path(), Path::new("config/local/app"), MAX_COPY_BYTES).is_err());
     assert!(!outside.path().join("local").exists());
     symlink(outside.path(), repo.path().join("cache")).unwrap();
-    assert!(copy_one(repo.path(), dest.path(), Path::new("cache/secret"), MAX_COPY_BYTES).is_err());
+    assert!(copy_path(repo.path(), dest.path(), Path::new("cache/secret"), MAX_COPY_BYTES).is_err());
     fs::remove_file(repo.path().join(".worktreeinclude")).unwrap();
     symlink(outside.path().join("secret"), repo.path().join(".worktreeinclude")).unwrap();
     let preview = preview(repo.path(), None, None).unwrap();
@@ -201,7 +206,7 @@ fn symbolic_links_and_special_files_cannot_escape_or_hang_copying() {
     let fifo = std::ffi::CString::new(repo.path().join(".env.fifo").to_str().unwrap()).unwrap();
     // SAFETY: the path is a valid C string in this test's private temp directory.
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-    assert!(copy_one(repo.path(), dest.path(), Path::new(".env.fifo"), MAX_COPY_BYTES).is_err());
+    assert!(copy_path(repo.path(), dest.path(), Path::new(".env.fifo"), MAX_COPY_BYTES).is_err());
 }
 
 #[test]
@@ -264,7 +269,7 @@ fn copied_ignore_rules_cannot_make_a_secret_visible_to_git() {
         git::run(destination, &["add", "-A"]).unwrap();
         assert!(git::run(destination, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
         // Case-insensitive filesystems must not accept an alternate spelling.
-        assert!(copy_one(repo.path(), destination, Path::new("secrets/.GITIGNORE"), MAX_COPY_BYTES)
+        assert!(copy_path(repo.path(), destination, Path::new("secrets/.GITIGNORE"), MAX_COPY_BYTES)
             .unwrap_err().to_string().contains("ignore rules"));
     }
 }
@@ -289,7 +294,7 @@ fn staging_cannot_expose_copies_in_the_surrounding_repository() {
     let destination = broken.path().join("workspace");
     fs::create_dir(&destination).unwrap();
     write(broken.path(), ".git", "gitdir: missing\n");
-    assert!(validate_staging_directory(&destination).is_err());
+    assert!(validate_staging_directory(&CopyDestination::open(&destination).unwrap().staging).is_err());
 }
 
 #[cfg(unix)]
@@ -314,14 +319,14 @@ fn scan_limits_discard_partial_names_without_corrupting_utf8() {
     write(repo.path(), ".env.a", "a");
     write(repo.path(), ".env.é", "b");
     let args = ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"];
-    let (names, limited) = git::file_names_bounded(repo.path(), &args, 1, 100).unwrap();
+    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&fs::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 1, 100).unwrap();
     assert_eq!(names, patterns(&[".env.a"]));
     assert!(limited);
     // Seven bytes for the first name + NUL, then stop inside the second é.
-    let (names, limited) = git::file_names_bounded(repo.path(), &args, 10, 13).unwrap();
+    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&fs::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 10, 13).unwrap();
     assert_eq!(names, patterns(&[".env.a"]));
     assert!(limited);
-    let (names, limited) = git::file_names_bounded(repo.path(), &args, 10, 100).unwrap();
+    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&fs::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 10, 100).unwrap();
     assert_eq!(names, patterns(&[".env.a", ".env.é"]));
     assert!(!limited);
 }
@@ -395,7 +400,7 @@ fn cleanup_failure_does_not_misreport_a_published_file_as_skipped() {
 fn growing_source_cannot_publish_a_file_beyond_the_byte_budget() {
     let root = tempfile::tempdir().unwrap();
     let mut source = std::io::Cursor::new(b"larger than the metadata indicated");
-    let error = safe_open::write_atomic(root.path(), Path::new(".env"), |target| {
+    let error = safe_open::write_atomic(&CopyDestination::open(root.path()).unwrap(), Path::new(".env"), |target| {
         copy_bounded(&mut source, target, 5).map(|_| ())
     }).unwrap_err();
     assert!(error.to_string().contains("byte limit"));
@@ -411,7 +416,7 @@ fn failed_writes_leave_no_partial_file_and_successful_copies_preserve_owner_exec
     let staging = tempfile::tempdir().unwrap();
     let root = staging.path().join("workspace");
     fs::create_dir(&root).unwrap();
-    let error = safe_open::write_atomic(&root, Path::new(".env"), |file| {
+    let error = safe_open::write_atomic(&CopyDestination::open(&root).unwrap(), Path::new(".env"), |file| {
         // Even while writing, no unignored temporary secret exists in the checkout.
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 2);
@@ -424,7 +429,110 @@ fn failed_writes_leave_no_partial_file_and_successful_copies_preserve_owner_exec
     let source = tempfile::tempdir().unwrap();
     write(source.path(), "setup", "#!/bin/sh\n");
     fs::set_permissions(source.path().join("setup"), fs::Permissions::from_mode(0o755)).unwrap();
-    copy_one(source.path(), &root, Path::new("setup"), MAX_COPY_BYTES).unwrap();
+    copy_path(source.path(), &root, Path::new("setup"), MAX_COPY_BYTES).unwrap();
     assert_eq!(fs::metadata(root.join("setup")).unwrap().permissions().mode() & 0o777, 0o700);
     assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_batch_keeps_validated_destination_and_staging_after_ancestor_swap() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    let created = git::create_worktree(repo.path(), "bound", Some("main")).unwrap();
+    write(repo.path(), ".env", "validated secret");
+    write(repo.path(), ".worktreeinclude", ".env\n");
+    let destination = Path::new(&created.path);
+    let plan = CopyPlan::prepare(repo.path(), destination, MAX_COPY_FILES, MAX_COPY_BYTES).unwrap();
+    let outside = self::repo();
+    write(outside.path(), ".gitignore", "");
+    let replacement = outside.path().join("worktrees/bound");
+    fs::create_dir_all(&replacement).unwrap();
+    let ancestor = repo.path().join(".raccoon");
+    let held = repo.path().join(".raccoon-held");
+    fs::rename(&ancestor, &held).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &ancestor).unwrap();
+    let report = plan.execute().unwrap();
+    assert!(!replacement.join(".env").exists(), "secret published in unvalidated checkout");
+    assert_eq!(fs::read_dir(outside.path().join("worktrees")).unwrap().count(), 1, "temporary secret escaped staging");
+    assert_eq!(report.copied_count, 1);
+    assert_eq!(fs::read_to_string(held.join("worktrees/bound/.env")).unwrap(), "validated secret");
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_batch_keeps_validated_source_after_ancestor_swap() {
+    let _home = crate::store::temp_home();
+    let container = tempfile::tempdir().unwrap();
+    let source_parent = container.path().join("source");
+    let source = source_parent.join("repo");
+    init_repo(&source);
+    let destination = repo();
+    write(&source, ".env", "validated secret");
+    write(&source, ".worktreeinclude", ".env\n");
+    let plan = CopyPlan::prepare(&source, destination.path(), MAX_COPY_FILES, MAX_COPY_BYTES).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write(outside.path(), "repo/.env", "unvalidated secret");
+    fs::rename(&source_parent, container.path().join("held")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &source_parent).unwrap();
+    let report = plan.execute().unwrap();
+    assert_eq!(report.copied_count, 1);
+    assert_eq!(fs::read_to_string(destination.path().join(".env")).unwrap(), "validated secret");
+}
+
+fn copy_path(project: &Path, destination: &Path, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
+    copy_one(&safe_open::Directory::open_resolved(&fs::canonicalize(project)?)?, &CopyDestination::open(destination)?, relative, remaining_bytes)
+}
+
+#[cfg(unix)]
+#[test]
+fn staging_and_cleanup_keep_the_bound_parent_during_an_ancestor_swap() {
+    use std::io::Write;
+    let container = tempfile::tempdir().unwrap();
+    let parent = container.path().join("parent");
+    let root = parent.join("staging/workspace");
+    fs::create_dir_all(&root).unwrap();
+    let destination = CopyDestination::open(&root).unwrap();
+    let outside = repo();
+    write(outside.path(), ".gitignore", "");
+    fs::create_dir_all(outside.path().join("staging/workspace")).unwrap();
+    let held = container.path().join("held");
+    fs::rename(&parent, &held).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
+    safe_open::write_atomic(&destination, Path::new(".env"), |file| {
+        file.write_all(b"private")?;
+        // Check while the temporary file contains the secret, before cleanup
+        // could hide a transient write into the replacement checkout.
+        assert_eq!(fs::read_dir(outside.path().join("staging"))?.count(), 1);
+        assert_eq!(fs::read_dir(held.join("staging"))?.count(), 2);
+        Ok(())
+    }).unwrap();
+    assert!(!outside.path().join("staging/workspace/.env").exists());
+    assert_eq!(fs::read_dir(held.join("staging")).unwrap().count(), 1);
+    assert_eq!(fs::read_to_string(held.join("staging/workspace/.env")).unwrap(), "private");
+}
+
+#[cfg(unix)]
+#[test]
+fn git_eligibility_uses_the_bound_source_after_an_ancestor_swap() {
+    let _home = crate::store::temp_home();
+    let container = tempfile::tempdir().unwrap();
+    let parent = container.path().join("source");
+    let source = parent.join("repo");
+    init_repo(&source);
+    write(&source, ".env.original", "private");
+    let resolved = fs::canonicalize(&source).unwrap();
+    let root = safe_open::Directory::open_resolved(&resolved).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    init_repo(&outside.path().join("repo"));
+    write(outside.path(), "repo/.env.replacement", "different");
+    fs::rename(&parent, container.path().join("held")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
+    validate_repository_root(&root).unwrap();
+    assert_eq!(ignored_files(&resolved, &root).unwrap().files, patterns(&[".env.original"]));
+    assert_eq!(git::ignored_untracked_paths(root.command().unwrap(), &patterns(&[".env.original", "tracked.txt"])).unwrap(),
+        BTreeSet::from([String::from(".env.original")]));
+    // Resolving aliases is allowed before binding. Once resolved, binding must
+    // refuse a newly substituted symlink in any component, not just the leaf.
+    assert!(safe_open::Directory::open_resolved(&resolved).is_err());
 }

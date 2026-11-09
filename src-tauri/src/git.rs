@@ -15,7 +15,7 @@ pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 #[path = "git_checkpoints.rs"]
 pub mod checkpoints;
 
-fn git() -> Command {
+pub(crate) fn git() -> Command {
     let mut c = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     c.env("PATH", crate::binpath::login_path());
     c.env("GIT_TERMINAL_PROMPT", "0");
@@ -24,7 +24,11 @@ fn git() -> Command {
 }
 
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = git().current_dir(cwd).args(args).output().with_context(|| format!("git {}", args.join(" ")))?;
+    run_command(git().current_dir(cwd), args)
+}
+
+pub(crate) fn run_command(command: &mut Command, args: &[&str]) -> Result<String> {
+    let out = command.args(args).output().with_context(|| format!("git {}", args.join(" ")))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
@@ -34,10 +38,10 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
 
 /// A bounded ignored-file scan. Stop Git when its output reaches the byte
 /// limit; never decode a partial NUL-delimited name at that boundary.
-pub(crate) fn file_names_bounded(cwd: &Path, args: &[&str], max_files: usize, max_bytes: usize) -> Result<(Vec<String>, bool)> {
+pub(crate) fn file_names_bounded(mut command: Command, args: &[&str], max_files: usize, max_bytes: usize) -> Result<(Vec<String>, bool)> {
     use std::io::Read;
     use std::process::Stdio;
-    let mut child = git().current_dir(cwd).args(args).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let mut child = command.args(args).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
     let mut bytes = Vec::new();
     let read = child.stdout.take().context("Missing Git output")?.take(max_bytes as u64 + 1).read_to_end(&mut bytes);
     let byte_limit = bytes.len() > max_bytes;
@@ -58,10 +62,10 @@ pub(crate) fn file_names_bounded(cwd: &Path, args: &[&str], max_files: usize, ma
 /// Unlike --no-index, check-ignore's default also rejects tracked paths,
 /// including tracked files absent from disk. Both conditions must hold before
 /// copying secrets into a checkout whose ignore rules may differ from the source.
-pub(crate) fn ignored_untracked_paths(cwd: &Path, paths: &[String]) -> Result<std::collections::BTreeSet<String>> {
+pub(crate) fn ignored_untracked_paths(mut command: Command, paths: &[String]) -> Result<std::collections::BTreeSet<String>> {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = git().current_dir(cwd).args(["check-ignore", "-z", "--stdin"])
+    let mut child = command.args(["check-ignore", "-z", "--stdin"])
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let mut stdin = child.stdin.take().context("Missing Git input")?;
     let input = paths.join("\0") + "\0";
