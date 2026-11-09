@@ -52,7 +52,15 @@ try {
       if (!active) return false;
       return [...active].some((range) => {
         const r = range.getBoundingClientRect();
-        return range.toString() === text && r.width > 0 && r.top >= box.top && r.bottom <= box.bottom - 120;
+        let top = box.top, bottom = box.bottom - 120, left = box.left, right = box.right;
+        // A Range may sit inside the chat while its code/output scrollport
+        // clips it entirely. Verify the text is visible through every ancestor.
+        for (let node = range.startContainer.parentElement; node && node !== chat; node = node.parentElement) {
+          const style = getComputedStyle(node), clip = node.getBoundingClientRect();
+          if (/auto|scroll|hidden|clip/.test(style.overflowY)) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
+          if (/auto|scroll|hidden|clip/.test(style.overflowX)) { left = Math.max(left, clip.left); right = Math.min(right, clip.right); }
+        }
+        return range.toString() === text && r.width > 0 && r.top >= top && r.bottom <= bottom && r.left >= left && r.right <= right;
       });
     }, { text, fallback });
     await visibleHighlight("hidden needle");
