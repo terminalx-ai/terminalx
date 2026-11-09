@@ -875,6 +875,7 @@ pub struct TabRuntime {
     /// A continuation sent to experimental Codex, answered once Codex takes
     /// its turn or the connection ends before it does.
     stdio_receipt: Option<(u64, DeliveryReceipt)>,
+    stdio_followups: codex_stdio::Followups,
     /// The native Codex launch being let go after a turn refused for its
     /// sign-in (`retire_codex_stdio`): until it is gone the tab is busy to
     /// the cloud mailbox, and it keeps showing the refusal.
@@ -1828,7 +1829,7 @@ impl SessionManager {
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None,
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(),
                 stdio_retiring: None,
                 turn_started_at: None,
                 turn_by_command: false,
@@ -1850,6 +1851,9 @@ impl SessionManager {
                 me: std::sync::Weak::new(),
             }));
             rt.lock().unwrap().me = Arc::downgrade(&rt);
+            if codex_stdio::selected(tab) {
+                self.reconcile_codex_followups(&mut rt.lock().unwrap())?;
+            }
             Ok(rt)
         })
     }
@@ -2123,7 +2127,7 @@ impl SessionManager {
         for event in events.iter().filter(|event| event.subagent.is_none()) {
             match &event.payload {
                 Payload::InputOccupied { prompt_seq, occupied: true } if !open.contains(prompt_seq) => open.push(*prompt_seq),
-                Payload::InputOccupied { prompt_seq, occupied: false } | Payload::PromptWithdrawn { prompt_seq } => open.retain(|seq| seq != prompt_seq),
+                Payload::InputOccupied { prompt_seq, occupied: false } | Payload::PromptWithdrawn { prompt_seq, .. } => open.retain(|seq| seq != prompt_seq),
                 _ => {}
             }
         }
@@ -2770,7 +2774,7 @@ impl SessionManager {
         // Native Codex still on its turn refused the request, not the turn
         // (#815): the turn goes on, nothing is raised in the tab, and the
         // sender is told why in words of its own.
-        if outcome.as_ref().is_err_and(|error| error.is::<codex_stdio::Busy>()) {
+        if outcome.as_ref().is_err_and(|error| error.is::<codex_stdio::Busy>() || error.is::<codex_stdio::QueueFull>()) {
             return outcome;
         }
         if let Err(error) = &outcome {
@@ -3221,6 +3225,19 @@ impl SessionManager {
     /// held prompt is pasted again. Acceptance, not the interrupt, removes it.
     pub fn send_queued_now(&self, session_id: &str, tab_id: &str, seq: u64) -> Result<()> {
         let rt_arc = self.runtime(session_id, tab_id)?;
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            if matches!(rt.engine, Engine::CodexStdio(_)) {
+                if !rt.turn_open || !rt.queued.iter().any(|q| q.id == seq.to_string()) { return Ok(()); }
+                if !matches!(&rt.engine, Engine::CodexStdio(engine) if engine.can_interrupt()) { return Ok(()); }
+                self.cancel_asks(&mut rt);
+                let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
+                let actions = engine.interrupt()?;
+                self.apply_codex_actions(&mut rt, actions)?;
+                self.observer.interrupted(&rt.key());
+                return Ok(());
+            }
+        }
         let tail = match &rt_arc.lock().unwrap().engine {
             Engine::Cli(p) => p.tail.clone(),
             _ => bail!("Only a Claude Code or Codex tab holds messages this way."),
@@ -3253,7 +3270,14 @@ impl SessionManager {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         let pos = rt.queued.iter().position(|q| q.id == message_id);
-        Ok(pos.map(|p| rt.queued.remove(p)))
+        let removed = pos.map(|p| rt.queued.remove(p));
+        if matches!(rt.engine, Engine::CodexStdio(_)) {
+            if let Some(seq) = removed.as_ref().and_then(|q| q.id.parse().ok()) {
+                rt.stdio_followups.authorities.remove(&seq);
+                self.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: seq, unconfirmed: false }, None);
+            }
+        }
+        Ok(removed)
     }
 
     /// Kill the agent but keep resume state, so the next prompt resumes.
@@ -4120,6 +4144,7 @@ impl SessionManager {
             let mut runtime = runtime.lock().unwrap();
             runtime.stopping = true;
             runtime.restart_claim = None;
+            if matches!(runtime.engine, Engine::CodexStdio(_)) { self.withdraw_codex_followups(&mut runtime); }
             runtime.queued.clear();
             if let Engine::Cli(cli) = &mut runtime.engine {
                 for echo in &mut cli.echoed {
@@ -5811,7 +5836,7 @@ impl SessionManager {
         if let Engine::Cli(p) = &mut rt.engine {
             forget_taken(p);
         }
-        self.publish(rt, Payload::PromptWithdrawn { prompt_seq: seq }, None);
+        self.publish(rt, Payload::PromptWithdrawn { prompt_seq: seq, unconfirmed: false }, None);
         if let Some(receipt) = receipt {
             let _ = receipt.send(Err("The new session opened, but the handoff was stopped before its agent took it. The prepared prompt is retained.".into()));
         }
@@ -6614,7 +6639,7 @@ impl SessionManager {
             // An interrupted turn hands over to the next queued message like
             // one that finished (#427): Escape stops a turn, not the queue. A
             // hard stop has emptied the queue before it closes the turn.
-            if !rt.stopping && rt.recovery.is_none() && !rt.queued.is_empty() {
+            if !matches!(rt.engine, Engine::CodexStdio(_)) && !rt.stopping && rt.recovery.is_none() && !rt.queued.is_empty() {
                 let q = rt.queued.remove(0);
                 let actions = match &mut rt.engine {
                     Engine::Acp(a) => a.prompt(q.text.clone(), q.images.clone()),
