@@ -39,6 +39,7 @@ try {
       await page.getByText("/repos/p0/.raccoon/worktrees", { exact: true }).waitFor();
       if (shots && width === 1100) await page.getByRole("main", { name: "Settings", exact: true }).screenshot({ path: join(shots, `general-${mode}.png`) });
       const paths = await page.getByRole("button", { name: /^(Copy|Reveal) (root|workspaces) path$/ }).count();
+      await page.getByLabel("Archive script", { exact: true }).fill("echo preserve draft");
       await page.getByRole("button", { name: "Files to copy", exact: true }).click();
       await page.getByText(".env.local", { exact: true }).waitFor();
       await page.getByRole("textbox", { name: "Glob patterns (one per line)" }).fill(".env*\nconfig/local/**");
@@ -57,15 +58,23 @@ try {
         const bounds = section.getBoundingClientRect();
         const outside = [...section.querySelectorAll("button,textarea")].filter(node => {
           const box = node.getBoundingClientRect();
-          return box.left < bounds.left - 1 || box.right > bounds.right + 1;
+          // General stays mounted to retain script drafts. Hidden controls have
+          // zero rectangles at the origin, outside this column but not laid out.
+          return box.width > 0 && (box.left < bounds.left - 1 || box.right > bounds.right + 1);
         }).map(node => node.textContent);
-        return { outside, overflow: main.scrollWidth > main.clientWidth + 1, readOnly: textarea.readOnly, value: textarea.value, saves: window.__SAVES__ };
+        const generalRows = [...section.querySelectorAll('[data-setting-id="repositories.mergedCleanup"], [data-setting-id="repositories.scripts"]')];
+        return { outside, generalHidden: generalRows.length === 2 && generalRows.every(node => node.getClientRects().length === 0),
+          editorVisible: textarea.getBoundingClientRect().width > 0,
+          overflow: main.scrollWidth > main.clientWidth + 1, readOnly: textarea.readOnly, value: textarea.value, saves: window.__SAVES__ };
       });
+      await page.getByRole("navigation", { name: "Repository settings", exact: true }).getByRole("button", { name: "General", exact: true }).click();
+      const scriptDraft = await page.getByLabel("Archive script", { exact: true }).inputValue();
       failed += report(`${width}px ${mode}`, {
         "both paths have Reveal and Copy": paths === 4,
         "editor saves both patterns": JSON.stringify(measured.saves) === JSON.stringify([{ repositorySettings: { filesToCopy: [".env*", "config/local/**"] } }]),
         "repository file overrides the editor": measured.readOnly && measured.value === "config/local/**",
-        "controls and long paths fit": !measured.overflow && measured.outside.length === 0,
+        "controls and long paths fit": measured.editorVisible && !measured.overflow && measured.outside.length === 0,
+        "General controls stay hidden while editing files and retain script drafts": measured.generalHidden && scriptDraft === "echo preserve draft",
       }, measured);
       await page.close();
     }
