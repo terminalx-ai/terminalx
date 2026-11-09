@@ -291,11 +291,11 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
     case "queued":
       return (
         <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Clock className="size-3.5 shrink-0" />
             {!item.withdrawn && <span className="text-xs">Queued</span>}
             {item.author && <span data-user-id={item.author.userId}>{item.author.displayName}:</span>}
-            <div className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={item.text} context={linkContext} /></span><MessageTime ts={item.messageTs} /></div>
+            <div className="min-w-0 flex-1 basis-40 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={item.text} context={linkContext} /></span><MessageTime ts={item.messageTs} /></div>
             {onSendQueuedNow && !item.inputOccupied && !item.withdrawn && (
               <WithTooltip label="Interrupt the agent and send this now">
                 <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
