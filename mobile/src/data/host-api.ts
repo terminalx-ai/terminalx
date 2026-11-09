@@ -7,6 +7,7 @@ import type { HostConnection } from "../transport/connection";
 
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
 export interface SessionSummary {
+  manualStatus?: import("@terminalx/portable/manualStatus").ManualStatus | null;
   id: string;
   /** `quick`: a quick chat, filed under "Quick chats" rather than a project. */
   kind?: "quick" | "project";

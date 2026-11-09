@@ -1,9 +1,9 @@
 import { configure } from "@testing-library/dom";
 
-// Shared development hosts may need more time to schedule mocked async work.
 // Keep Testing Library's default unless a run explicitly opts into a budget.
-const asyncUtilTimeout = Number(process.env.VITEST_ASYNC_TIMEOUT_MS);
-if (Number.isFinite(asyncUtilTimeout) && asyncUtilTimeout > 0) configure({ asyncUtilTimeout });
+// Retain the older _MS alias; the main branch's name takes precedence.
+const asyncTimeout = Number(process.env.VITEST_ASYNC_TIMEOUT ?? process.env.VITEST_ASYNC_TIMEOUT_MS);
+if (Number.isFinite(asyncTimeout) && asyncTimeout > 0) configure({ asyncUtilTimeout: asyncTimeout });
 
 // jsdom lays nothing out and ships no ResizeObserver. Components observe
 // their own boxes for re-fitting, so give them an observer that never fires;
