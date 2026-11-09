@@ -88,13 +88,15 @@ try {
   await input.fill("needle last");
   await page.waitForFunction(() => document.querySelector('[role="search"] [role="status"]')?.textContent === "1 of 1");
   await page.waitForTimeout(300);
-  const matchInView = () => dock.locator(".xterm-screen").evaluate((screen) => {
+  const renderedMatchInView = (screen) => {
     const box = screen.getBoundingClientRect();
     return [...screen.closest(".xterm").querySelectorAll(".xterm-find-result-decoration")].some((el) => {
       const r = el.getBoundingClientRect();
       return r.width > 0 && r.height > 0 && r.bottom > box.top && r.top < box.bottom;
     });
-  });
+  };
+  const screen = await dock.locator(".xterm-screen").elementHandle();
+  const matchInView = () => screen.evaluate(renderedMatchInView);
   assert.equal(await matchInView(), true, "explicit search shows its unique match");
   await dock.locator(".xterm-screen").hover();
   await page.mouse.wheel(0, -10000);
@@ -105,6 +107,8 @@ try {
   await page.waitForTimeout(500);
   assert.equal(await matchInView(), false, "unrelated output preserves the user's viewport");
   await search.getByRole("button", { name: "Next match", exact: true }).click();
+  // xterm renders decorations on an animation frame after scrolling.
+  await page.waitForFunction(renderedMatchInView, screen);
   assert.equal(await matchInView(), true, "explicit navigation can return to the selected match");
 
   await input.fill("absent match");
