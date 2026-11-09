@@ -63,7 +63,8 @@ class Provider(http.server.BaseHTTPRequestHandler):
             for status in ['busy', 'idle']:
                 news.put({'type':'session.status','properties':{'sessionID':'local-session','status':{'type':status}}})
 server = http.server.ThreadingHTTPServer(('127.0.0.1',0), Provider)
-(root/'port').write_text(str(server.server_address[1]))
+(root/'port.tmp').write_text(str(server.server_address[1]))
+(root/'port.tmp').replace(root/'port')
 server.serve_forever()
 "#).unwrap();
     let python = crate::binpath::resolve("python3").expect("python3 fixture provider");
