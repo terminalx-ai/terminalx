@@ -1,6 +1,7 @@
 //! Pull requests through the `gh` CLI, which already holds auth and host
 //! configuration. Absent `gh` is one readable line, not a broken panel.
 
+pub mod conversation;
 pub mod reviews;
 
 use std::path::{Path, PathBuf};
@@ -10,6 +11,8 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+pub mod checks;
 
 fn gh() -> Result<Command> {
     let p = crate::binpath::resolve("gh").ok_or_else(|| anyhow!("GitHub CLI (gh) is not installed or not on PATH."))?;
@@ -75,6 +78,8 @@ pub struct PrCheck {
     pub state: String,
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<checks::ActionsCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,7 +141,9 @@ pub(crate) fn parse_pr(v: &Value) -> PullRequest {
                         _ => c["conclusion"].as_str().filter(|s| !s.is_empty()).or_else(|| c["state"].as_str()).unwrap_or("pending"),
                     }
                     .to_ascii_lowercase();
-                    PrCheck { name, state, url: c["detailsUrl"].as_str().or_else(|| c["targetUrl"].as_str()).map(String::from) }
+                    let url = c["detailsUrl"].as_str().or_else(|| c["targetUrl"].as_str()).map(String::from);
+                    let actions = url.as_deref().and_then(|url| checks::map_check(v["url"].as_str()?, url));
+                    PrCheck { name, state, url, actions }
                 })
                 .collect()
         })
@@ -357,6 +364,19 @@ pub fn recover_workspace_prs() -> Result<()> {
     }
     if !errors.is_empty() { bail!("{}", errors.join("; ")); }
     Ok(())
+}
+
+/// Read/write a conversation by full PR identity using the local gh account.
+pub fn pr_conversation(url: &str) -> Result<conversation::Conversation> {
+    conversation::read_with(&conversation::Target::new(url)?, |args| run(&outside_checkouts(), args))
+}
+
+pub fn pr_conversation_action(url: &str, action: conversation::Action) -> Result<()> {
+    conversation::act_with(&conversation::Target::new(url)?, action, |args| run(&outside_checkouts(), args))
+}
+
+pub fn pr_reviewer_search(url: &str, query: &str) -> Result<Vec<String>> {
+    conversation::search_with(&conversation::Target::new(url)?, query, |args| run(&outside_checkouts(), args))
 }
 
 /// One pull request by number, for command-palette task URLs.
@@ -673,20 +693,20 @@ fn validation_with(cwd: &Path, pr: &PrSnapshot, run: &mut impl FnMut(&Path, &[&s
     if !attempt_consistent || workflows != workflows_after || suite_records != suites_after || children != children_after || statuses != statuses_after {
         // A normal race is pending, not a successful validation or a terminal
         // error. The pipeline's next poll collects a fresh complete snapshot.
-        return Ok((vec![PrCheck { name: "validation changed during collection; waiting for a consistent attempt".into(), state: "pending".into(), url: None }], Vec::new()));
+        return Ok((vec![PrCheck { name: "validation changed during collection; waiting for a consistent attempt".into(), state: "pending".into(), url: None, actions: None }], Vec::new()));
     }
     let mut checks = Vec::new();
     for child in &children {
         if child["head_sha"].as_str() != Some(&pr.head_sha) { bail!("GitHub returned a check for a different commit"); }
         checks.push(PrCheck {
             name: child["name"].as_str().context("GitHub omitted a check name")?.into(),
-            state: validation_state(child)?.into(), url: None,
+            state: validation_state(child)?.into(), url: None, actions: None,
         });
     }
     for status in statuses {
         checks.push(PrCheck {
             name: status["context"].as_str().context("GitHub omitted a status context")?.into(),
-            state: status["state"].as_str().context("GitHub omitted a status state")?.into(), url: None,
+            state: status["state"].as_str().context("GitHub omitted a status state")?.into(), url: None, actions: None,
         });
     }
     let mut validation = Vec::new();
@@ -715,14 +735,14 @@ fn validation_with(cwd: &Path, pr: &PrSnapshot, run: &mut impl FnMut(&Path, &[&s
                 state = "success";
             }
             let name = item["name"].as_str().or_else(|| item["app"]["slug"].as_str()).unwrap_or(key);
-            validation.push(PrCheck { name: format!("{name} ({key} #{id})"), state: state.into(), url: None });
+            validation.push(PrCheck { name: format!("{name} ({key} #{id})"), state: state.into(), url: None, actions: None });
         }
     }
     // Missing suites are incomplete evidence even when another producer has
     // already published successful checks.
     for suite in workflow_suites.into_iter().chain(children.iter().map(|child| child["check_suite"]["id"].as_u64().unwrap_or(0))) {
         if !suites.contains(&suite) {
-            validation.push(PrCheck { name: format!("check suite #{suite}"), state: "pending".into(), url: None });
+            validation.push(PrCheck { name: format!("check suite #{suite}"), state: "pending".into(), url: None, actions: None });
         }
     }
     Ok((validation, checks))

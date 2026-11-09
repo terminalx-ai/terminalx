@@ -80,7 +80,22 @@ function mockBackend(disposition: WorkspaceDisposition, shouldFailDisposition: (
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   mocks.invoke.mockReset();
+});
+
+it.each([false, true])("renders one description and does not reload a terminal conversation on discovery ticks (inline=%s)", async (inline) => {
+  vi.useFakeTimers();
+  mockBackend(cleanMerged);
+  const backend = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, ...args: unknown[]) => command === "pr_conversation" ? {
+    ...mergedPr, body: "The only PR description.", viewer: "reviewer", canEdit: true, reviewers: [], unresolvedThreads: 0, activity: [],
+  } : backend(command, ...args));
+  await act(async () => { render(<PrPanel cwd={cwd} branch={mergedPr.head} active busy={false} inline={inline} />); });
+  expect(screen.getAllByText("The only PR description.")).toHaveLength(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(180_000); });
+  expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_conversation")).toHaveLength(1);
+  expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_list").length).toBeGreaterThan(1);
 });
 
 describe("merged workspace action", () => {
@@ -386,7 +401,8 @@ it.each([false, true])("loads review threads for the selected PR URL (inline=%s)
   expect(mocks.invoke).toHaveBeenCalledWith("pr_review_threads", { url: pr.url });
 });
 
-const { mergeReadiness, checkCounts, checkSummary } = await import("./PrPanel");
+const { mergeReadiness } = await import("./PrPanel");
+const { checkCounts, checkSummary } = await import("@/lib/checks");
 const openPr: PullRequest = { ...followup, mergeState: "CLEAN", checks: [], requiredChecks: [] };
 
 function panelBackend(read: () => PullRequest) {
