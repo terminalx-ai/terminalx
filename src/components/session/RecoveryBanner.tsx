@@ -69,7 +69,7 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   if (!kind && asks.length) {
     const stop = <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={pressed(onStop)}>Stop session</Button>;
     return <section aria-label="Session recovery" role="status" className={placement === "composer"
-      ? "mx-auto mb-2 flex max-h-[60vh] w-full max-w-3xl shrink-0 flex-col gap-2 overflow-auto px-6"
+      ? "mx-auto mb-2 flex max-h-[60vh] w-[calc(100%-2rem)] max-w-3xl shrink-0 flex-col gap-2 overflow-auto"
       : "flex max-h-[50vh] shrink-0 flex-col gap-2 overflow-auto border-b border-hairline p-3"}>
       {asks.map((ask, i) => {
         const aside = i === asks.length - 1 ? stop : null;
@@ -105,5 +105,6 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
     </div>
   </section>
   );
-  return placement === "composer" ? <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-6">{card}</div> : card;
+  // The space under it is the wrapper's, on the chat's colour: a margin there was a gap the transcript showed through.
+  return placement === "composer" ? <div className="mx-auto w-full max-w-3xl shrink-0 bg-chat px-6 pb-2">{card}</div> : card;
 }
