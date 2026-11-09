@@ -44,6 +44,7 @@ mod commands;
 mod cloud_agent_client;
 #[cfg(feature = "desktop")]
 mod cloud_diagnostics;
+pub mod startup;
 #[cfg(feature = "desktop")]
 mod cloud_ports;
 #[cfg(feature = "desktop")]
@@ -106,7 +107,6 @@ mod ssh_containment;
 mod harness;
 pub mod hooks;
 mod idle_agents;
-#[cfg(feature = "desktop")]
 mod issue_control;
 #[cfg(feature = "desktop")]
 mod issue_confirmation;
@@ -551,6 +551,11 @@ pub fn run() {
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,
+            startup::commands::startup_diagnostics_status,
+            startup::commands::startup_diagnostics_policy,
+            startup::commands::startup_diagnostics_probe,
+            startup::commands::startup_diagnostics_preview,
+            startup::commands::startup_diagnostics_export,
             cloud_agent_client::cloud_agent_enqueue,
             cloud_agent_client::cloud_agent_outbox,
             cloud_agent_client::cloud_agent_outbox_sync,

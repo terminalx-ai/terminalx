@@ -15,8 +15,8 @@ pub(super) struct Delivery {
     privacy: Option<crate::data_privacy::Ticket>,
 }
 
-/// A send refused because Codex is still on a turn, or a card waits on the
-/// reader (#815). The request is refused, not the turn: nothing is published
+/// A command or continuation refused because Codex is still on a turn.
+/// Ordinary follow-ups are queued instead (#866). The request is refused, not the turn: nothing is published
 /// and the tab goes on as it was. The sender keeps its message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Busy;
@@ -28,6 +28,25 @@ impl std::fmt::Display for Busy {
 }
 
 impl std::error::Error for Busy {}
+
+/// Refuse only the extra request; accepted queue entries and the turn survive.
+#[derive(Debug)]
+pub(super) struct QueueFull;
+
+impl std::fmt::Display for QueueFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Codex's follow-up queue is full. Wait for a message to be delivered before sending again.")
+    }
+}
+impl std::error::Error for QueueFull {}
+
+/// Follow-ups use the shared visible queue. Their message sequence is the
+/// queue id, and their writer authority survives until actual delivery.
+#[derive(Default)]
+pub(super) struct Followups {
+    pub(super) authorities: HashMap<u64, Authority>,
+    active: Option<(u64, bool)>, // message sequence, acknowledged by Codex
+}
 
 pub(super) fn selected(tab: &TabEntry) -> bool {
     tab.transport == AgentTransport::ExperimentalCodexStdio
@@ -131,6 +150,27 @@ fn codex_supported() -> bool {
 }
 
 impl SessionManager {
+    /// A recreated runtime has no writer or queue. Preserve pending text but
+    /// retire its queued claim; a crash cannot tell us whether bytes arrived.
+    pub(super) fn reconcile_codex_followups(&self, rt: &mut TabRuntime) -> Result<()> {
+        let events: Vec<AgentEvent> = store::read_lines(&rt.log_path)?;
+        let mut pending = Vec::new();
+        for event in events.iter().filter(|event| event.subagent.is_none()) {
+            match &event.payload {
+                Payload::Conversation { .. } => pending.clear(),
+                Payload::UserMessage { queued: true, .. } => pending.push(event.seq),
+                Payload::PromptAbsorbed { prompt_seq }
+                | Payload::TurnStarted { prompt_seq: Some(prompt_seq), .. }
+                | Payload::PromptWithdrawn { prompt_seq, .. } => pending.retain(|seq| seq != prompt_seq),
+                _ => {}
+            }
+        }
+        for prompt_seq in pending {
+            self.publish(rt, Payload::PromptWithdrawn { prompt_seq, unconfirmed: true }, None);
+        }
+        Ok(())
+    }
+
     /// Native Codex is tried, not required (#644): a tab that has not started
     /// its thread runs on the terminal engine instead when this Codex is older
     /// than the app server's minimum, or missing. Decided at its first launch,
@@ -267,7 +307,27 @@ impl SessionManager {
         anyhow::ensure!(!manual || images.is_empty(), "Compaction does not accept images");
         anyhow::ensure!(!manual || receipt.is_none(), "A continuation cannot be a compaction");
         anyhow::ensure!(tab.harness == "codex", "Experimental stdio requires Codex");
-        if rt.turn_open || !rt.pending.is_empty() { return Err(Busy.into()); }
+        if rt.turn_open || !rt.pending.is_empty() {
+            if manual || receipt.is_some() { return Err(Busy.into()); }
+            anyhow::ensure!(matches!(&rt.engine, Engine::CodexStdio(engine) if !engine.failed() && !engine.exited && !engine.blocked),
+                "Codex's connection ended. Stop the session before sending again; this message was not queued.");
+            if rt.queued.len() >= 32 { return Err(QueueFull.into()); }
+            let event = self.publish(rt, Payload::UserMessage {
+                author: prompt.author, text: prompt.display, images, baseline: None, queued: true, cwd: Some(entry.cwd.clone()),
+            }, None);
+            let privacy = crate::data_privacy::remote_ticket();
+            if privacy.is_some() || prompt.mobile.is_some() || prompt.shared_connection.is_some() {
+                rt.stdio_followups.authorities.insert(event.seq, Authority {
+                    session: rt.session_id.clone(), tab: rt.tab_id.clone(), seq: Some(event.seq),
+                    mobile: prompt.mobile, shared: prompt.shared_connection, privacy: privacy.clone(),
+                });
+            }
+            rt.queued.push(PendingMessage {
+                message: QueuedMessage { id: event.seq.to_string(), text: prompt.agent, images: wire_images },
+                privacy, seq: event.seq,
+            });
+            return Ok(SendOutcome { queued: true, events: vec![event], in_input: false });
+        }
         Stdio::validate_mode(&tab.permission_mode)?;
         self.reclaim_ended_codex_stdio(rt);
         if !matches!(rt.engine, Engine::CodexStdio(_)) {
@@ -282,9 +342,13 @@ impl SessionManager {
         let events = if manual { Vec::new() } else {
             let baseline = rt.baseline_for(&entry.cwd);
             vec![self.publish(rt, Payload::UserMessage {
-                author: prompt.author, text: prompt.display, images, baseline, queued: false, cwd: Some(entry.cwd.clone()),
+                author: prompt.author, text: prompt.display, images, baseline, queued: true, cwd: Some(entry.cwd.clone()),
             }, None)]
         };
+        // Even a send just after completion is pending until Codex's RPC
+        // response or turn/started acknowledges it. The send outcome below
+        // describes immediate submission, not provider delivery.
+        rt.stdio_followups.active = events.first().map(|event| (event.seq, false));
         // Every prompt replaces what the last one left: a desktop prompt is
         // held to nothing, a phone's or a share's to its permits.
         let privacy = crate::data_privacy::remote_ticket();
@@ -309,6 +373,43 @@ impl SessionManager {
             return Err(error);
         }
         Ok(SendOutcome { queued: false, events, in_input: false })
+    }
+
+    /// The same runtime lock orders sends and turn completion. Claim exactly
+    /// one queue entry before writing it; subsequent sends queue behind it.
+    fn deliver_codex_followup(&self, rt: &mut TabRuntime) -> Result<()> {
+        if rt.turn_open || !rt.pending.is_empty() || rt.stopping || rt.queued.is_empty() { return Ok(()); }
+        if rt.recovery.is_some() {
+            self.withdraw_codex_followups(rt);
+            return Ok(());
+        }
+        self.accepting_work()?;
+        let pending = rt.queued.remove(0);
+        let seq = pending.seq;
+        let q = pending.message;
+        // The physical writer uses the queued sender's original authority.
+        // A local follow-up must not inherit the completion callback's origin.
+        let _origin = crate::data_privacy::delivery_scope(None)?;
+        rt.stdio_followups.active = Some((seq, false));
+        rt.stdio_authority = rt.stdio_followups.authorities.remove(&seq);
+        let Engine::CodexStdio(engine) = &mut rt.engine else { bail!("Codex owner was replaced") };
+        let actions = engine.prompt(q.text, q.images)?;
+        rt.open_turn();
+        rt.turn_started_at = Some(Instant::now());
+        self.set_status(rt, TabStatus::InProgress);
+        self.apply_codex_actions(rt, actions)
+    }
+
+    /// Retain all text in the event log with a retry action. A request whose
+    /// acknowledgement was lost is never automatically replayed.
+    pub(super) fn withdraw_codex_followups(&self, rt: &mut TabRuntime) {
+        if let Some((seq, false)) = rt.stdio_followups.active.take() {
+            self.publish(rt, Payload::PromptWithdrawn { prompt_seq: seq, unconfirmed: true }, None);
+        }
+        for pending in std::mem::take(&mut rt.queued) {
+            self.publish(rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
+        }
+        rt.stdio_followups.authorities.clear();
     }
 
     fn start_codex_stdio(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<()> {
@@ -430,6 +531,10 @@ impl SessionManager {
     /// one: the turn it opened ends as stopped and the tab is idle again. A
     /// manual compaction opened no user turn, so it only closes.
     fn withdraw_codex_prompt(&self, rt: &mut TabRuntime, seq: Option<u64>) {
+        if rt.stdio_followups.active.take().is_some() {
+            if let Some(seq) = seq { self.publish(rt, Payload::PromptWithdrawn { prompt_seq: seq, unconfirmed: false }, None); }
+        }
+        self.withdraw_codex_followups(rt);
         if seq.is_some() { self.end_open_turn(rt, TurnStatus::Aborted, None); } else { rt.turn_open = false; }
         self.set_status(rt, TabStatus::Idle);
     }
@@ -449,7 +554,6 @@ impl SessionManager {
         // Keep the remote barrier through every partial write of this frame.
         let privacy = control.as_ref().or_else(|| sender.as_ref().and_then(|sender| sender.privacy.as_ref().or_else(|| sender.shared.as_ref().map(|permit| &permit.privacy))
             .or_else(|| sender.mobile.as_ref().map(|permit| &permit.grant.privacy)))).map(|ticket| ticket.enter()).transpose();
-        let mut sender = sender;
         let mut answered = None;
         while offset < bytes.len() {
             anyhow::ensure!(Instant::now() < deadline, "Codex input pipe timed out; delivery is uncertain and will not be replayed");
@@ -457,10 +561,12 @@ impl SessionManager {
                 let _admission = crate::issue_pipeline::admission::lock();
                 // Delivery that has begun under a current permit is finished:
                 // a stream takes no half frame back.
-                let sender = if offset == 0 { sender.take() } else { None };
+                // An empty attempt consumed no authority: revalidate it on
+                // every retry until the first byte is actually written.
+                let sender = if offset == 0 { sender.as_ref() } else { None };
                 let mut sharing = sender.is_some().then(|| self.sharing.lock().unwrap());
                 let mut owner_attachment = None;
-                let admitted = privacy.as_ref().map_err(|error| anyhow::anyhow!("{error}")).and_then(|_| match &sender {
+                let admitted = privacy.as_ref().map_err(|error| anyhow::anyhow!("{error}")).and_then(|_| match sender {
                     None => Ok(None),
                     Some(sender) => admit_codex_prompt(sender, sharing.as_deref_mut(), &mut owner_attachment)
                         .and_then(|()| sender.mobile.as_ref().map(|permit| permit.enter()).transpose()),
@@ -502,7 +608,11 @@ impl SessionManager {
                 // authority locks. Reader/Stop can run between attempts, even
                 // when the child never reads or produces a full stdout pipe.
                 anyhow::ensure!(Instant::now() < deadline, "Codex input pipe timed out; delivery is uncertain and will not be replayed");
-                match child.try_write_stdin(&bytes[offset..]) {
+                #[cfg(test)]
+                let written = tests::try_write_stdin(child, &bytes[offset..]);
+                #[cfg(not(test))]
+                let written = child.try_write_stdin(&bytes[offset..]);
+                match written {
                     Ok(0) => bail!("Codex input pipe closed; delivery is uncertain and will not be replayed"),
                     Ok(written) => offset += written,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -520,6 +630,8 @@ impl SessionManager {
                     }
                 }
             }
+            #[cfg(test)]
+            if offset == 0 { tests::after_empty_write(); }
             if offset < bytes.len() { std::thread::sleep(Duration::from_millis(5)); }
         }
         if let Some((session, tab)) = answered { self.observer.answered(&session, &tab); }
@@ -527,6 +639,10 @@ impl SessionManager {
     }
 
     pub(super) fn apply_codex_actions(&self, rt: &mut TabRuntime, actions: Vec<StdioAction>) -> Result<()> {
+        // Approval cancellation can apply nested actions while a completion
+        // is still settling. Only the outer boundary may start the next turn.
+        let boundary = actions.iter().any(|action| matches!(action,
+            StdioAction::Emit(Payload::TurnCompleted { .. }) | StdioAction::CompactEnded));
         for action in actions {
             match action {
                 StdioAction::Write(line) => {
@@ -571,12 +687,21 @@ impl SessionManager {
                     let confirmed = matches!(evidence, CompactionObservation::ItemStarted { .. });
                     anyhow::ensure!(matches!(self.publish_compaction_locked(rt, &token, evidence, confirmed)?, compaction::Publication::Committed(_)), "Compaction publication uncertain");
                 }
-                StdioAction::Emit(payload) => {
+                StdioAction::Emit(mut payload) => {
+                    if let Payload::TurnStarted { prompt_seq, .. } = &mut payload {
+                        *prompt_seq = rt.stdio_followups.active.take().map(|(seq, _)| seq);
+                    }
                     let turn_end = matches!(payload, Payload::TurnCompleted { .. });
                     self.apply(rt, payload, None);
                     if turn_end && !rt.turn_open && rt.recovery == Some(RecoveryKind::SignedOut) { self.retire_codex_stdio_later(rt); }
                 }
                 StdioAction::Accepted => {
+                    if let Some((seq, acknowledged)) = rt.stdio_followups.active.as_mut() {
+                        let seq = *seq;
+                        if !std::mem::replace(acknowledged, true) {
+                            self.publish(rt, Payload::PromptAbsorbed { prompt_seq: seq }, None);
+                        }
+                    }
                     if let Some((_, receipt)) = rt.stdio_receipt.take() { let _ = receipt.send(Ok(())); }
                 }
                 StdioAction::CompactEnded => {
@@ -586,6 +711,7 @@ impl SessionManager {
                 }
             }
         }
+        if boundary { self.deliver_codex_followup(rt)?; }
         Ok(())
     }
 
@@ -604,6 +730,7 @@ impl SessionManager {
         // the stderr read at the close can say more: a refused sign-in.
         if matches!(&rt.engine, Engine::CodexStdio(engine) if engine.failed()) && !exit.as_ref().is_some_and(|exit| exit.sign_in_refused) { return; }
         let unaccepted = matches!(&rt.engine, Engine::CodexStdio(engine) if engine.unaccepted());
+        self.withdraw_codex_followups(rt);
         rt.stdio_writer = None;
         rt.stdio_authority = None;
         if let Engine::CodexStdio(engine) = &mut rt.engine { engine.fail(); }
@@ -611,7 +738,7 @@ impl SessionManager {
         self.cancel_asks(rt);
         self.codex_stdio_loss(rt, CompactionLoss::Disconnected);
         if let Some((_, receipt)) = rt.stdio_receipt.take() {
-            let _ = receipt.send(Err(format!("The new session opened, but Codex did not receive its continuation prompt: {}. The prepared prompt is retained.", said.trim_end_matches('.'))));
+            let _ = receipt.send(Err(format!("The new session opened, but Codex did not acknowledge its continuation prompt; delivery is unconfirmed: {}. The prepared prompt is retained.", said.trim_end_matches('.'))));
         }
         match exit {
             Some(exit) if exit.sign_in_refused && rt.turn_open => self.fail_open_turn(rt, &exit),
@@ -620,13 +747,13 @@ impl SessionManager {
                 self.sign_in_refused(rt);
                 self.needs_recovery(rt, RecoveryKind::SignedOut, crate::recovery_log::Source::SignIn);
             }
-            // Codex never took the prompt: it is the reader's to send again
-            // ("Resend last prompt"), and its turn never ran.
+            // No acknowledgement arrived. Keep the prompt available, but
+            // do not infer non-delivery from a lost response or replay it.
             exit if unaccepted && rt.turn_open => {
                 let detail = exit.and_then(|exit| exit.detail).or_else(|| recovery::detail(&said));
-                self.apply(rt, Payload::Error { message: format!("Codex did not receive this prompt: {}", said.trim_end_matches('.')), fatal: false, detail }, None);
+                self.apply(rt, Payload::Error { message: format!("Codex did not acknowledge this prompt; delivery is unconfirmed: {}", said.trim_end_matches('.')), fatal: false, detail }, None);
                 self.close_open_turn(rt, TurnStatus::Aborted, None);
-                self.needs_recovery(rt, RecoveryKind::Unsent, crate::recovery_log::Source::Unsent);
+                self.needs_recovery(rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery);
             }
             exit => {
                 let message = format!("Experimental Codex connection failed: {said}. Stop this session, then send again to resume it; input will not be replayed.");
@@ -721,21 +848,22 @@ impl SessionManager {
     /// `retire`: the connection of a refused turn, let go with the tab left
     /// as it is, still showing the refusal.
     fn end_codex_stdio(&self, rt_arc: &Arc<Mutex<TabRuntime>>, keep_unread: bool, retire: bool) -> Result<()> {
-        let (launch, unsent) = {
+        let (launch, unconfirmed) = {
             let mut rt = rt_arc.lock().unwrap();
             anyhow::ensure!(!rt.stop_in_flight, "Stop is already in progress");
-            // Stopped before Codex took the prompt: never received, so offered
-            // back like any prompt a CLI never took. Decided now: the reader's
+            // Stopped before acknowledgement: delivery is uncertain, not
+            // proof the prompt was never received. Decided now: the reader's
             // drain closes the turn before the exit below is confirmed.
             let turn_open = rt.turn_open;
             let Engine::CodexStdio(engine) = &mut rt.engine else { bail!("Codex owner changed") };
-            let unsent = turn_open && !engine.is_manual_compact() && engine.unaccepted();
+            let unconfirmed = turn_open && !engine.is_manual_compact() && engine.unaccepted();
             engine.exited = true;
             let launch = engine.launch.clone();
             rt.stop_in_flight = true; rt.stopping = true;
+            self.withdraw_codex_followups(&mut rt);
             rt.stdio_writer = None;
             self.codex_stdio_loss(&mut rt, CompactionLoss::Exited);
-            (launch, unsent)
+            (launch, unconfirmed)
         };
         let deadline = Instant::now() + RESTART_WAIT;
         let mut signalled = None;
@@ -766,7 +894,7 @@ impl SessionManager {
         self.cancel_asks(&mut rt);
         let manual = matches!(&rt.engine, Engine::CodexStdio(e) if e.is_manual_compact());
         if let Some((_, receipt)) = rt.stdio_receipt.take() {
-            let _ = receipt.send(Err("The new session was stopped before Codex received its continuation prompt. The prepared prompt is retained.".into()));
+            let _ = receipt.send(Err("The new session was stopped before Codex acknowledged its continuation prompt; delivery is unconfirmed. The prepared prompt is retained.".into()));
         }
         if manual { rt.turn_open = false; }
         else { self.close_open_turn(&mut rt, TurnStatus::Aborted, None); }
@@ -775,7 +903,7 @@ impl SessionManager {
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
         if retiring(&rt, &launch) { rt.stdio_retiring = None; }
-        if unsent { self.needs_recovery(&mut rt, RecoveryKind::Unsent, crate::recovery_log::Source::Unsent); }
+        if unconfirmed { self.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery); }
         else if !retire && !(keep_unread && rt.status == TabStatus::Completed) { self.set_status(&mut rt, TabStatus::Idle); }
         Ok(())
     }
@@ -795,12 +923,24 @@ impl SessionManager {
 }
 
 /// What an experimental tab's history means when it is opened with no
-/// connection: a prompt whose turn Codex never started (its `turn_started` is
-/// what `unsent::said_in` counts as the agent answering) was never received,
-/// and is offered back rather than called a lost connection.
+/// connection: missing acknowledgement is uncertain delivery, including
+/// legacy native logs that predate the explicit queued/withdrawn events.
 pub(super) fn recovery_on_open(tab: &TabEntry, log: &Path, kind: RecoveryKind) -> RecoveryKind {
     if kind != RecoveryKind::Disconnected { return kind; }
-    if unsent::said_in(log, tab.follow.conversation.as_deref()).since.is_empty() { kind } else { RecoveryKind::Unsent }
+    // A later pending follow-up must not hide an acknowledged turn that
+    // crashed. Legacy native logs without acknowledgement still use the
+    // unsent-prompt check below.
+    let events: Vec<AgentEvent> = store::read_lines(log).unwrap_or_default();
+    for event in events.iter().rev().filter(|event| event.subagent.is_none()) {
+        match &event.payload {
+            Payload::PromptAbsorbed { .. } | Payload::TurnStarted { .. } => return kind,
+            Payload::TurnCompleted { .. } | Payload::Conversation { .. }
+            | Payload::UserMessage { queued: false, .. } => break,
+            Payload::Status { text } if text == recovery::SESSION_CLOSED_MESSAGE => break,
+            _ => {}
+        }
+    }
+    if unsent::said_in(log, tab.follow.conversation.as_deref()).since.is_empty() { kind } else { RecoveryKind::DeliveryUnconfirmed }
 }
 
 /// A phone's or a share's prompt, as `type_prompt` holds a PTY one: what the
@@ -910,6 +1050,7 @@ impl Sink for StdioSink {
         if !self.current(&rt) || !rt.child.as_ref().is_some_and(|c| c.pid == receipt.pid && c.epoch == receipt.epoch) { return; }
         rt.stdio_writer = None;
         self.manager.codex_stdio_loss(&mut rt, CompactionLoss::Exited);
+        rt.compaction.stdio_drained(&self.launch, receipt.epoch);
         let manual = matches!(&rt.engine, Engine::CodexStdio(e) if e.is_manual_compact());
         let starting = matches!(&rt.engine, Engine::CodexStdio(e) if !e.ready);
         rt.stdio_compaction = None;

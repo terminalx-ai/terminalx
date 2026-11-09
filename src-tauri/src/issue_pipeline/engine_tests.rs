@@ -115,6 +115,8 @@ struct World {
     conflict: bool,
     local_runs: Vec<(String, String)>,
     local_error: bool,
+    startup_blocker: Option<String>,
+    validation_pending: bool,
     during_local: Option<Hook>,
     resolution_error: Option<String>,
     /// Merges TerminalX aborted: `(head, merge_head)`.
@@ -198,6 +200,8 @@ impl FakeHost {
             conflict: false,
             local_runs: Vec::new(),
             local_error: false,
+            startup_blocker: None,
+            validation_pending: false,
             during_local: None,
             resolution_error: None,
             aborts: Vec::new(),
@@ -353,7 +357,11 @@ impl Host for FakeHost {
         Ok(SessionRef { session_id: id, tab_id: "t1".into() })
     }
 
-    fn run_local_check(&self, _cwd: &Path, command: &str) -> Result<()> {
+    fn startup_blocker(&self, _pipeline: &Pipeline, _new_validation: bool) -> Result<Option<String>> { Ok(self.world().startup_blocker.clone()) }
+
+    fn validation_pending(&self, _pipeline: &Pipeline) -> Result<bool> { Ok(self.world().validation_pending) }
+
+    fn run_local_check(&self, _pipeline: &Pipeline, _cwd: &Path, command: &str) -> Result<()> {
         let hook = {
             let mut world = self.world();
             let head = world.workspace.head.clone();
@@ -2450,6 +2458,39 @@ fn failed_local_command_does_not_merge_even_with_successful_hosted_checks() {
     assert_eq!(run.to_gate().state, State::NeedsYou);
     assert!(!run.pipeline().checking_locally);
     assert!(run.pipeline().local_check.is_none());
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn host_startup_blockers_escalate_author_work_without_a_pr_or_changed_tab_metadata() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().startup_blocker = Some("Incident a is unresolved; recorder pending".into());
+    run.poll();
+    let blocked = run.pipeline();
+    assert_eq!(blocked.state, State::NeedsYou);
+    assert!(blocked.pr.is_none());
+    assert!(blocked.note.as_ref().is_some_and(|note| note.contains("Incident a")));
+    let events = blocked.events.len();
+    run.poll();
+    assert_eq!(run.pipeline().events.len(), events, "unchanged incident does not repeat alerts");
+    run.host.world().startup_blocker = Some("Incident a needs attention; recorder still pending".into());
+    run.poll();
+    assert!(run.pipeline().note.as_ref().is_some_and(|note| note.contains("needs attention")));
+    assert!(run.host.world().local_runs.is_empty());
+    assert!(run.host.world().sent.is_empty());
+}
+
+#[test]
+fn host_incident_admits_no_new_local_check_even_with_successful_ci() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.to_review();
+    run.host.world().startup_blocker = Some("Incident a: demonstrate health before validation".into());
+    let blocked = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(blocked.state, State::NeedsYou);
+    assert!(blocked.local_check.is_none());
+    assert!(blocked.failed_local_checks.is_empty(), "host-blocked is not an application test failure");
+    assert!(run.host.world().local_runs.is_empty());
     assert!(run.merges().is_empty());
 }
 

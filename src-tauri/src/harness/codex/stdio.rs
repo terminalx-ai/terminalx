@@ -172,6 +172,8 @@ impl Stdio {
         Ok(vec![self.request("turn/start", json!({"threadId": thread, "input": input, "model": model, "effort": self.effort}), Request::Turn)?])
     }
 
+    pub(crate) fn can_interrupt(&self) -> bool { self.turn.is_some() && !self.exited && !self.blocked }
+
     pub(crate) fn interrupt(&mut self) -> Result<Vec<Action>> {
         // Before thread/turn acceptance there is no safe interrupt target. Fence
         // the deferred input instead of letting a late handshake send it.

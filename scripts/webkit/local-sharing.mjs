@@ -11,15 +11,21 @@ try {
   const host = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSharing: "host" }, { width: 1280, height: 760 });
   await openConversation(host, "claude tab");
   await host.getByRole("button", { name: "Share session…" }).click();
+  // A first-time host sees the introduction before the link settings (#852).
+  await host.getByTestId("share-intro").waitFor();
+  failed += report("sharing introduction", {
+    "the risk notice is visible": await host.getByTestId("share-terms").getByText("A driver can act", { exact: true }).isVisible()
+      && await host.getByTestId("share-terms").getByText(/can have the agent change files and run commands on this computer/).isVisible(),
+  });
+  await host.getByRole("button", { name: "Continue", exact: true }).click();
+  await host.getByRole("button", { name: "More settings", exact: true }).click();
+  failed += report("host sharing settings", {
+    "approval is an explicit unchecked grant": await host.getByRole("switch", { name: "Guests may approve permissions" }).getAttribute("aria-checked") === "false",
+  });
   await host.getByRole("button", { name: "Create share link" }).click();
   await host.getByLabel("Secret share link").waitFor();
   failed += report("host sharing", {
     "the link stays concealed": await host.getByLabel("Secret share link").getAttribute("type") === "password",
-    "approval is an explicit unchecked grant": !(await host.getByLabel("Guests may approve permissions").isChecked()),
-    // Since #838 the risk is one of the dialog's terms: "A driver can act", "They can have
-    // the agent change files and run commands on this computer."
-    "the risk notice is visible": await host.getByTestId("share-terms").getByText("A driver can act", { exact: true }).isVisible()
-      && await host.getByTestId("share-terms").getByText(/can have the agent change files and run commands on this computer/).isVisible(),
   });
   await host.screenshot({ path: "/tmp/terminalx-sharing-host.png" });
   await host.close();

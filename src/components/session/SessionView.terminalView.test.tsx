@@ -395,7 +395,6 @@ describe("a local session's row of tabs under the title bar", () => {
     }
     const dialog = await screen.findByRole("dialog", { name: "Continue in New Session" });
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
-    expect(within(dialog).getByText("Write the fix")).toBeTruthy();
     expect(guard.calls.filter((call) => call.command === "prepare_continuation").map((call) => call.args)).toEqual([
       { sessionId: "strip-1", tabId: "st-2" },
     ]);

@@ -166,7 +166,7 @@ fn blocked_pipe_child() {
         rig.manager.stop(SESSION, TAB).unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
     }
-    wait_for("blocked or cancelled input is withdrawn", || rig.events().iter().any(|e| matches!(&e.payload, Payload::PromptWithdrawn { prompt_seq } if *prompt_seq == seq)));
+    wait_for("blocked or cancelled input is withdrawn", || rig.events().iter().any(|e| matches!(&e.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if *prompt_seq == seq)));
     wait_for("the failed delivery settles its turn", || !rig.rt.lock().unwrap().turn_open);
     assert!(!rig.events().iter().any(|e| matches!(&e.payload, Payload::TurnStarted { prompt_seq: Some(prompt_seq), .. } if *prompt_seq == seq)));
     rig.manager.stop(SESSION, TAB).unwrap();
@@ -287,7 +287,7 @@ fn startup_child() {
                 "text":"remote startup","prompt":"remote startup"})).unwrap();
         sent["events"][0]["seq"].as_u64().expect("phone send returns the logged user message")
     };
-    let withdrawn = || rig.events().iter().any(|e| matches!(&e.payload, Payload::PromptWithdrawn { prompt_seq } if *prompt_seq == seq));
+    let withdrawn = || rig.events().iter().any(|e| matches!(&e.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if *prompt_seq == seq));
     if case == "phone-init-error" { wait_for("initialization failure withdraws the stash", withdrawn); }
     else { wait_for("real provider paused before opening reply", || rig._dir.path().join("opening").exists()); }
     let remote_seq = if relay {
@@ -343,7 +343,7 @@ fn startup_child() {
         let texts = prompts().iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
         assert!(texts.contains("local startup") && texts.contains("queued local"));
         assert_eq!(texts.contains("queued remote"), expected == 3);
-        assert_eq!(rig.events().iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq } if Some(prompt_seq) == remote_seq)).count(), usize::from(expected == 2));
+        assert_eq!(rig.events().iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if Some(prompt_seq) == remote_seq)).count(), usize::from(expected == 2));
         store::write_json(&store::root().unwrap().join("data-privacy.json"), &json!({"enabled":false})).unwrap();
         assert!(!crate::data_privacy::refresh().enabled);
         relay_send("fresh restored relay");
@@ -395,7 +395,7 @@ fn startup_child() {
         wait_for("expired startup prompt withdrawn", withdrawn);
         wait_for("withdrawn startup turn closed", || !rig.rt.lock().unwrap().turn_open);
         assert!(prompts().is_empty(), "no remote prompt after acknowledgement: {:?}", prompts());
-        assert_eq!(rig.events().iter().filter(|e| matches!(&e.payload, Payload::PromptWithdrawn { prompt_seq } if *prompt_seq == seq)).count(), 1);
+        assert_eq!(rig.events().iter().filter(|e| matches!(&e.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if *prompt_seq == seq)).count(), 1);
         // Recovery never revives remote input. A new local prompt is usable
         // even while privacy remains on, after interrupt, failure or Stop.
         if matches!(&rig.rt.lock().unwrap().engine, Engine::None) { launch(); }

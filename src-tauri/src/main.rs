@@ -3,6 +3,7 @@
 
 fn main() {
     if let Some(code) = raccoon_lib::run_git_transport_cli() { std::process::exit(code); }
+    if raccoon_lib::startup::probe_cli() { return; }
     #[cfg(windows)]
     attach_cli_console();
     // `raccoon hook <Event>` is how the agent CLIs' hooks reach a running app.

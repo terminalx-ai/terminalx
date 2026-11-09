@@ -212,7 +212,7 @@ impl Acp {
     pub fn withdraw_input(&mut self) -> Vec<Action> {
         let mut seqs: Vec<_> = self.stashed.take().and_then(|s| s.delivery).map(|d| d.seq).into_iter().collect();
         for (id, seq) in self.undelivered.drain() { self.pending.remove(&id); seqs.push(seq); }
-        seqs.into_iter().map(|prompt_seq| Action::Emit(Payload::PromptWithdrawn { prompt_seq })).collect()
+        seqs.into_iter().map(|prompt_seq| Action::Emit(Payload::PromptWithdrawn { prompt_seq, unconfirmed: false })).collect()
     }
 
     pub fn interrupt(&mut self) -> Vec<Action> {

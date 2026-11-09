@@ -85,32 +85,60 @@ struct Rig {
 
 #[test]
 fn a_shared_session_may_switch_to_bypass_at_the_hosts_choice() {
-    let mut rig = Rig::new();
-    // An idle mode change really restarts the CLI. Keep that path under
-    // test without depending on (or launching) an installed agent.
-    rig.pane = SessionManager::pane_id(TAB);
-    let program = rig._dir.path().join("claude-fixture");
-    let ran = rig._dir.path().join("claude-fixture.ran");
-    std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.ran\"\n").unwrap();
-    #[cfg(unix)] {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    struct StopBeforeGuards<'a>(&'a SessionManager);
+    impl Drop for StopBeforeGuards<'_> {
+        fn drop(&mut self) {
+            // Stop invalidates the CLI under its runtime lock, fencing late
+            // transcript callbacks, and confirms process exit before either
+            // the program override or the process-wide test home is released.
+            self.0.closing();
+            self.0.stop(SESSION, TAB).unwrap();
+        }
     }
-    let _program = claude::pty::claude_program_for_tests(program);
-    let entry: index::SessionEntry = serde_json::from_value(json!({
-        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
-        "title": "shared", "created": index::now(), "modified": index::now(),
-        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
-    })).unwrap();
-    index::save(&[entry]).unwrap();
-    rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
-        crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
-    rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").unwrap();
-    assert_eq!(rig.mode(), now_in("bypassPermissions"));
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !std::fs::read_to_string(&ran).is_ok_and(|args| args.lines().any(|arg| arg == "--dangerously-skip-permissions")) {
-        assert!(Instant::now() < deadline, "the restarted fixture never received the host's requested mode");
-        std::thread::sleep(MOMENT);
+    struct TeardownUnwind;
+
+    for unwinding in [false, true] {
+        let mut rig = Rig::new();
+        // An idle mode change really restarts the CLI. Keep that path under
+        // test without depending on (or launching) an installed agent.
+        rig.pane = SessionManager::pane_id(TAB);
+        let program = rig._dir.path().join("claude-fixture");
+        let ran = rig._dir.path().join("claude-fixture.ran");
+        // Stay alive after the marker so teardown must stop a real process;
+        // a lucky watcher tick cannot make the cleanup assertions pass.
+        std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.ran\"\nIFS= read -r line\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _program = claude::pty::claude_program_for_tests(program);
+        let entry: index::SessionEntry = serde_json::from_value(json!({
+            "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+            "title": "shared", "created": index::now(), "modified": index::now(),
+            "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
+        })).unwrap();
+        index::save(&[entry]).unwrap();
+        rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
+            crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
+        let pid = Cell::new(None);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _stop = StopBeforeGuards(&rig.manager);
+            rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").unwrap();
+            assert_eq!(rig.mode(), now_in("bypassPermissions"));
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !std::fs::read_to_string(&ran).is_ok_and(|args| args.lines().any(|arg| arg == "--dangerously-skip-permissions")) {
+                assert!(Instant::now() < deadline, "the restarted fixture never received the host's requested mode");
+                std::thread::sleep(MOMENT);
+            }
+            pid.set(rig.manager.terminals.pid(&rig.pane));
+            assert!(rig.manager.terminals.is_running(&rig.pane));
+            if unwinding { std::panic::panic_any(TeardownUnwind); }
+        }));
+        assert_eq!(outcome.is_err(), unwinding);
+        if let Err(payload) = outcome { assert!(payload.is::<TeardownUnwind>()); }
+        assert!(rig.released(), "late watcher callbacks must no longer own a CLI");
+        assert!(!crate::harness::host::group_or_process_alive(pid.get().unwrap()), "the fixture must exit before releasing the test home");
+        assert_eq!(rig.mode(), now_in("bypassPermissions"));
     }
 }
 
@@ -218,7 +246,7 @@ impl Rig {
             seq: 0,
             source_timestamp: None,
             message_times: HashMap::new(),
-            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_retiring: None,
+            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(), stdio_retiring: None,
             status: TabStatus::Idle,
             child: None,
             child_pid: None,

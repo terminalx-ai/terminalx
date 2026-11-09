@@ -26,6 +26,7 @@ import { AgentIdleSettings } from "./AgentIdleSettings";
 import { CommandApprovalSettings } from "./CommandApprovalSettings";
 import { ArchiveIdleSettings } from "./ArchiveIdleSettings";
 import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
+import { openStartupDiagnostics } from "@/lib/startupDiagnostics";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 
 export function GeneralTab() {
@@ -121,6 +122,7 @@ export function GeneralTab() {
       />
       <QuickChatSettings />
       <LocalRuntimeSettings />
+      <RegisteredSetting setting="general.startupDiagnostics" control={<Button variant="outline" size="sm" onClick={openStartupDiagnostics}>Inspect startup</Button>} />
     </div>
   );
 }

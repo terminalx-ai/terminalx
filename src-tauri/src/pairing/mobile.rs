@@ -400,6 +400,7 @@ pub(super) fn dispatch(
         "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries()?, params.version)),
         "session.sync" => parse_params(params).and_then(|params| session_sync(connection, request_id(request), params)),
         "session.tail" => parse_params(params).and_then(|params| session_tail(connection, request_id(request), params)),
+        "session.image" => parse_params(params).and_then(|params: PromptImageParams| prompt_image(&params)),
         "session.subscribe" => sink
             .as_ref()
             .context("app is unavailable")
@@ -418,7 +419,7 @@ pub(super) fn dispatch(
         "session.tab" => parse_params(params).and_then(|params: TabControlParams| connection.call("tab", params.into_call())),
         "models.list" => parse_params(params).and_then(|params: ModelsParams| connection.call("models", json!({"refresh": params.refresh}))),
         "session.prepareContinuation" => parse_params(params).and_then(|params: TabControlParams| connection.call("prepareContinuation", params.into_call())),
-        "session.stop" | "session.interrupt" | "session.resendUnsent" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: TabControlParams| {
+        "session.stop" | "session.interrupt" | "session.resendUnsent" | "session.closeTab" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: TabControlParams| {
             connection.call(method.trim_start_matches("session."), params.into_call())
         })),
         "session.setModel" | "session.setEffort" | "session.setMode" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: TabSettingParams| {
@@ -467,8 +468,8 @@ pub(super) fn dispatch(
 /// refused (#730), so those are named only as far as the runtime serves them
 /// (`local_runtime::mobile::features`).
 fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
-    // `transcript` and `conditionalLists` are this app's own.
-    let mut named = json!({ "transcript": 1, "conditionalLists": 1 });
+    // `transcript`, `conditionalLists` and `promptImages` (`session.image`) are this app's own.
+    let mut named = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1 });
     // `sendIds`: `session.send` and `chat.post` take a `clientMessageId` (#675).
     // `sessionControls`: stop, interrupt, recovery, settings and continuing in
     // a new tab, as the desktop offers them.
@@ -476,7 +477,8 @@ fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
     // as the desktop does. `macSettings`: `mac.settings` and `mac.setSettings`.
     // `terminal`: `terminal.open`, and terminal observations that carry the
     // pane's size, so the phone can emulate the screen and drive it.
-    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1)] {
+    // `closeTab`: `session.closeTab` closes a tab as the desktop's tab strip does.
+    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1)] {
         if runtime.mobile.get(feature).and_then(Value::as_u64).is_some_and(|served| served >= level) {
             named[feature] = json!(level);
         }
@@ -497,6 +499,43 @@ fn outdated(error: anyhow::Error) -> anyhow::Error {
 }
 
 /// One tab, for a control that takes nothing else.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PromptImageParams {
+    session_id: String,
+    tab_id: String,
+    /// The image's place on the Mac, as the transcript names it.
+    path: String,
+}
+
+/// The largest prompt image a phone is sent: under the fragmented message limit once encoded.
+const MAX_PROMPT_IMAGE_BYTES: usize = 7 * 1024 * 1024;
+
+/// An image a prompt in this session carried, for the phone to draw where the
+/// desktop draws it. Only the session's own attachments are read: any other
+/// path, a link out of that folder among them, is refused.
+fn prompt_image(params: &PromptImageParams) -> Result<Value> {
+    validate_session_tab(&params.session_id, &params.tab_id)?;
+    let folder = store::attachments_dir(&params.session_id)?.canonicalize()?;
+    let path = Path::new(&params.path).canonicalize().map_err(|_| anyhow!("The image is no longer on the Mac."))?;
+    if !path.starts_with(&folder) {
+        bail!("That image is not one of this session's attachments.");
+    }
+    let media_type = match path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("heic") => "image/heic",
+        _ => bail!("That attachment is not an image."),
+    };
+    let size = std::fs::metadata(&path)?.len() as usize;
+    if size > MAX_PROMPT_IMAGE_BYTES {
+        bail!("The image is {}, too large to show on the phone. Open it on your Mac.", megabytes(size));
+    }
+    Ok(json!({ "mediaType": media_type, "data": general_purpose::STANDARD.encode(std::fs::read(&path)?) }))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TabControlParams {
@@ -590,6 +629,19 @@ fn require_driver(device: &DeviceEntry) -> Result<()> {
     }
 }
 
+/// What the Mac's project list calls a session's row: its branch, by the
+/// label the reader gave it, or `None` when the branch is only a drawn
+/// worktree name (`dc/calm-ember-panda`), which the list leaves for the
+/// conversation's title.
+fn row_branch(session: &SessionEntry, labels: Option<&std::collections::BTreeMap<String, String>>) -> Option<String> {
+    let branch = session.branch.as_deref().filter(|branch| !branch.is_empty())?;
+    if let Some(label) = labels.and_then(|labels| labels.get(branch)) {
+        return Some(label.clone());
+    }
+    let name = branch.rsplit('/').next().unwrap_or(branch);
+    (!crate::names::is_worktree_name(name)).then(|| branch.to_string())
+}
+
 /// The group a paired phone files quick chats under.
 const QUICK_CHATS_PROJECT: &str = "Quick chats";
 
@@ -598,6 +650,9 @@ fn session_summaries() -> Result<Value> {
         .into_iter()
         .map(|summary| (summary.session_id.clone(), summary))
         .collect();
+    // The names the reader gave branches, by project, as the Mac's project list shows them.
+    let labels: HashMap<String, std::collections::BTreeMap<String, String>> =
+        store::projects::list()?.0.into_iter().map(|project| (project.path, project.branch_labels)).collect();
     let mut sessions = Vec::new();
     for session in store::conversation_titles::backfill()?.into_iter().filter(|session| !session.archived) {
         let summary = snippets.get(&session.id);
@@ -614,9 +669,11 @@ fn session_summaries() -> Result<Value> {
                 .or_else(|| session.branch.clone())
                 .unwrap_or_else(|| file_name(&session.cwd))
         };
+        let branch = if quick { None } else { row_branch(&session, labels.get(&session.project_path)) };
         sessions.push(json!({
             "id": session.id,
             "kind": if quick { "quick" } else { "project" },
+            "branch": branch,
             "title": session.title,
             "project": project,
             "worktree": worktree,
@@ -1696,6 +1753,61 @@ mod tests {
     use super::*;
     use crate::events::TurnStatus;
 
+    #[test]
+    fn a_prompt_image_is_read_only_from_its_session_attachments() {
+        let _home = store::temp_home();
+        let session: SessionEntry = serde_json::from_value(json!({
+            "id": "s", "projectPath": "/p", "cwd": "/p", "title": "t", "created": "x", "modified": "y",
+            "tabs": [{ "id": "t", "harness": "claude", "created": "x" }],
+        }))
+        .unwrap();
+        index::save(&[session]).unwrap();
+        let attachments = store::attachments_dir("s").unwrap();
+        std::fs::write(attachments.join("shot.png"), b"png-bytes").unwrap();
+        let read = |session: &str, path: &Path| prompt_image(&PromptImageParams { session_id: session.into(), tab_id: "t".into(), path: path.to_string_lossy().into_owned() });
+
+        let image = read("s", &attachments.join("shot.png")).unwrap();
+        assert_eq!(image["mediaType"], "image/png");
+        assert_eq!(general_purpose::STANDARD.decode(image["data"].as_str().unwrap()).unwrap(), b"png-bytes");
+        // Outside the session's attachments, by path or by a way out of the folder: refused.
+        let elsewhere = store::root().unwrap().join("secret.png");
+        std::fs::write(&elsewhere, b"secret").unwrap();
+        assert!(read("s", &elsewhere).is_err());
+        assert!(read("s", &attachments.join("../../secret.png")).is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&elsewhere, attachments.join("link.png")).unwrap();
+            assert!(read("s", &attachments.join("link.png")).is_err(), "a link out of the folder is refused");
+        }
+        // Not an image, an unknown session, a missing file: refused.
+        std::fs::write(attachments.join("notes.txt"), b"text").unwrap();
+        assert!(read("s", &attachments.join("notes.txt")).is_err());
+        assert!(read("../s", &attachments.join("shot.png")).is_err());
+        assert!(read("s", &attachments.join("gone.png")).is_err());
+        // A phone may read one, not only a driver.
+        assert!(super::super::allowed_method(DeviceScope::Viewer, "session.image"));
+    }
+
+    #[test]
+    fn a_row_is_named_by_its_branch_as_the_project_list_names_it() {
+        let session = |branch: Option<&str>| -> SessionEntry {
+            serde_json::from_value(json!({
+                "id": "s", "projectPath": "/p", "cwd": "/p", "title": "Fix the login", "created": "x", "modified": "y", "tabs": [],
+                "branch": branch,
+            }))
+            .unwrap()
+        };
+        let labels: std::collections::BTreeMap<String, String> = [("dc/calm-ember-panda".to_string(), "Login fix".to_string())].into();
+        assert_eq!(row_branch(&session(Some("dc/design-tweaks")), None).as_deref(), Some("dc/design-tweaks"));
+        // A drawn worktree name is no name: the row takes the conversation's title.
+        assert_eq!(row_branch(&session(Some("dc/calm-ember-panda")), None), None);
+        assert_eq!(row_branch(&session(Some("calm-ember-panda")), None), None);
+        // Unless the reader named the branch.
+        assert_eq!(row_branch(&session(Some("dc/calm-ember-panda")), Some(&labels)).as_deref(), Some("Login fix"));
+        assert_eq!(row_branch(&session(None), None), None);
+        assert_eq!(row_branch(&session(Some("")), None), None);
+    }
+
     fn device(provenance: DeviceProvenance, bound_user_id: Option<&str>) -> DeviceEntry {
         DeviceEntry {
             id: "device-1".into(),
@@ -2322,16 +2434,18 @@ mod tests {
     /// serve, not what this app could serve through a runtime of its own build.
     #[test]
     fn a_phone_is_offered_only_what_the_attached_runtime_serves() {
-        let every = json!({ "transcript": 1, "conditionalLists": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
+        let released = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
+        let mut every = released.clone();
+        every["closeTab"] = json!(1);
         assert_eq!(capabilities(&current_runtime()), every);
-        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), every, "0.2.22 serves them all, without naming them");
-        let app_only = json!({ "transcript": 1, "conditionalLists": 1 });
+        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab came later");
+        let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1 });
         assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,
             "no terminal, session controls, new sessions, Mac settings or send ids from a 0.2.21 runtime");
         assert_eq!(capabilities(&runtime_of(None, None)), app_only, "nor from one that would not say its version");
         // A runtime that names features is taken at its word, at the level this app knows.
         let named = capabilities(&runtime_of(Some("9.0.0"), Some(json!({ "terminal": 2, "sendIds": 0, "sessionCreate": "1", "futureThing": 1 }))));
-        assert_eq!(named, json!({ "transcript": 1, "conditionalLists": 1, "terminal": 1 }));
+        assert_eq!(named, json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "terminal": 1 }));
     }
 
     /// #730: an operation the runtime does not know reads as what to do about it.

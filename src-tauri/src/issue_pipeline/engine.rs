@@ -127,7 +127,10 @@ pub trait Host: Send + Sync {
     /// progress is of `merge_head` alone.
     fn abort_merge(&self, _cwd: &Path, _head: &str, _merge_head: &str) -> Result<()> { bail!("Aborting a merge is not available on this host") }
     fn defer_local_check(&self, _pipeline_id: &str) -> bool { false }
-    fn run_local_check(&self, _cwd: &Path, _command: &str) -> Result<()> { bail!("Local check execution is unavailable on this host") }
+    /// Independent host evidence, even when the tab/PR metadata is unchanged.
+    fn startup_blocker(&self, _pipeline: &Pipeline, _new_validation: bool) -> Result<Option<String>> { Ok(None) }
+    fn validation_pending(&self, _pipeline: &Pipeline) -> Result<bool> { Ok(false) }
+    fn run_local_check(&self, _pipeline: &Pipeline, _cwd: &Path, _command: &str) -> Result<()> { bail!("Local check execution is unavailable on this host") }
     fn workspace(&self, cwd: &Path) -> Result<Workspace>;
     /// What this checkout calls the branch a pull request merges into.
     fn base_ref(&self, cwd: &Path, base_branch: &str) -> String;
@@ -1472,6 +1475,14 @@ impl Step<'_> {
     fn check_locally(&mut self, head: &str) -> Result<bool> {
         let Some(command) = self.settings.local_check_command.clone().filter(|command| !command.trim().is_empty()) else { return Ok(true) };
         if self.p.local_check.as_ref().is_some_and(|checked| checked.command == command && same_commit(&checked.head, head)) { return Ok(true); }
+        if let Some(message) = self.host.startup_blocker(&self.p, true)? {
+            self.needs_you(StopReason::Failed { step: "Local child startup".into(), message });
+            return Ok(false);
+        }
+        if self.host.validation_pending(&self.p)? {
+            self.needs_you(StopReason::Failed { step: "Local validation recorder".into(), message: "The previous validation recorder is still pending. No duplicate check was started, and its result has not been accepted.".into() });
+            return Ok(false);
+        }
         if self.background && self.host.defer_local_check(&self.p.id) {
             self.p.stage = Stage::Merge;
             self.settle(State::Waiting, None, "Waiting for local checks.");
@@ -1495,11 +1506,11 @@ impl Step<'_> {
             self.save()?;
         }
         self.doing = "Running local checks";
-        let result = self.host.run_local_check(&self.cwd, &command);
-        self.p.checking_locally = false;
+        let result = self.host.run_local_check(&self.p, &self.cwd, &command);
+        self.p.checking_locally = self.host.validation_pending(&self.p)?;
         self.save()?;
         if let Err(error) = result {
-            if !self.p.failed_local_checks.iter().any(|failed| same_commit(failed, head)) { self.p.failed_local_checks.push(head.into()); }
+            if error.downcast_ref::<crate::startup::ValidationHeld>().is_none() && !self.p.failed_local_checks.iter().any(|failed| same_commit(failed, head)) { self.p.failed_local_checks.push(head.into()); }
             self.needs_you(StopReason::Failed { step: self.doing.into(), message: format!("{error:#}") });
             return Ok(false);
         }
@@ -2282,7 +2293,28 @@ pub fn poll(host: &dyn Host) {
     };
     let now = host.now();
     let mut parked = 0;
+    // This pass also visits author work with no PR and takes no dependency on
+    // a metadata change or a pending recorder finishing. Deduplicated by the
+    // persisted reason; no new reviewer, retry, or check is launched here.
+    for pipeline in &pipelines {
+        if pipeline.checking_locally && host.validation_pending(pipeline).is_ok_and(|pending| !pending) {
+            let _ = run(host, &pipeline.id, true, OnError::Background, |step| {
+                // A final recorder result releases checkout ownership. It does
+                // not certify a head after the original observer gave up.
+                if step.p.checking_locally && !step.host.validation_pending(&step.p)? { step.p.checking_locally = false; }
+                Ok(())
+            });
+        }
+        if pipeline.stopped || matches!(pipeline.state, State::Merged | State::Stopped) { continue; }
+        if let Ok(Some(message)) = host.startup_blocker(pipeline, false) {
+            let reason = StopReason::Failed { step: "Local child startup".into(), message };
+            if pipeline.reason.as_ref() != Some(&reason) {
+                let _ = run(host, &pipeline.id, false, OnError::Background, |step| { step.needs_you(reason); Ok(()) });
+            }
+        }
+    }
     for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && (pipeline.pr.is_some() || pipeline.resolve_conflicts)) {
+        if host.startup_blocker(&pipeline, false).ok().flatten().is_some() { continue; }
         let at_gate = pipeline.stage == Stage::Merge;
         let due = match pipeline.state {
             // A resolver at work is watched for its pull request merging or
@@ -2349,7 +2381,7 @@ fn recover_reservations(host: &dyn Host, pipelines: &[Pipeline]) {
     for pipeline in pipelines.iter().filter(|pipeline| pipeline.resolution.is_some() || pipeline.checking_locally) {
         let _ = run(host, &pipeline.id, true, OnError::NeedsYou, |step| {
             step.p.resolution = None;
-            step.p.checking_locally = false;
+            step.p.checking_locally = step.p.checking_locally && step.host.validation_pending(&step.p)?;
             step.needs_you(StopReason::Failed { step: "Recovering checkout automation".into(), message: "TerminalX restarted during resolution or local checks. Inspect the checkout and any remaining processes before continuing; no result was accepted.".into() });
             Ok(())
         });

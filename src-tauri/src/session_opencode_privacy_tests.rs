@@ -198,7 +198,7 @@ server.serve_forever()
     assert_eq!(rows[2]["body"]["parts"][0]["text"], "local second");
     assert!(rig.rt.lock().unwrap().queued.is_empty());
     let remote_seq = rig.events().iter().find_map(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text == "expired remote").then_some(event.seq)).unwrap();
-    assert_eq!(rig.events().iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq } if prompt_seq == remote_seq)).count(), 1);
+    assert_eq!(rig.events().iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if prompt_seq == remote_seq)).count(), 1);
     for text in ["local first", "local second"] {
         assert_eq!(rig.events().iter().filter(|event| matches!(&event.payload, Payload::UserMessage { text: sent, .. } if sent == text)).count(), 1);
     }

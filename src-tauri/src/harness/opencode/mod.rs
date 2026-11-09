@@ -177,7 +177,7 @@ impl OpenCode {
         if !matches!(tag, "session_get" | "session_new" | "prompt") { return Vec::new(); }
         self.generation += 1; // old opening/prompt callbacks cannot settle its successor
         if self.stashed.take().is_some() { self.turn_open = true; }
-        let mut actions = self.prompt_seq.take().map(|prompt_seq| Action::Emit(Payload::PromptWithdrawn { prompt_seq })).into_iter().collect::<Vec<_>>();
+        let mut actions = self.prompt_seq.take().map(|prompt_seq| Action::Emit(Payload::PromptWithdrawn { prompt_seq, unconfirmed: false })).into_iter().collect::<Vec<_>>();
         actions.extend(self.end_turn(TurnStatus::Aborted, None, false));
         actions
     }
