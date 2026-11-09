@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronDown, ChevronRight, CircleAlert, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
+import { ChevronDown, ChevronRight, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, type PrCheck, type PullRequest } from "@/lib/api";
+import { api, type PullRequest } from "@/lib/api";
 import { sessionPrs, type SessionPr } from "@/lib/sessionPrs";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
+import { Deployments, PrChecks } from "./PrChecks";
+import { actionsRuns, checkCounts, checkSummary, isFailingCheck, runSignature, withPendingChecks, type PendingCheckRun } from "@/lib/checks";
 import { NextLine } from "./NextStep";
 import { PrConversation, useDocumentVisible } from "./PrConversation";
 import { ReviewThreads } from "./ReviewThreads";
@@ -70,8 +72,12 @@ export function PrPanel({
   workspace,
   inline = false,
   held = false,
+  onFixErrors,
+  fixBusy = false,
 }: {
   cwd?: string;
+  onFixErrors?: (pr: PullRequest) => Promise<unknown>;
+  fixBusy?: boolean;
   sessionId?: string;
   /** A cloud repository (PRO-27); without it, the local checkout at `cwd`. */
   source?: GitSource;
@@ -95,13 +101,16 @@ export function PrPanel({
   active = active && documentVisible;
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const [available, setAvailable] = useState<boolean | null>(null);
+  const [pendingRuns, setPendingRuns] = useState<PendingCheckRun[]>([]);
   const [rows, setRows] = useState<SessionPr[]>([]);
   const selection = `${sessionId ?? ""}\0${source.key}\0${branch ?? ""}`;
   const selected = useRef({ key: selection, generation: 0 });
   if (selected.current.key !== selection) selected.current = { key: selection, generation: selected.current.generation + 1 };
   const generation = selected.current.generation;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [loadedSelection, setLoadedSelection] = useState<string | null>(null);
-  const visibleRows = loadedSelection === selection ? rows : [];
+  const visibleRows = loadedSelection === selection ? rows.map((row) => row.pr ? { ...row, pr: withPendingChecks(row.pr, pendingRuns) } : row) : [];
   const prs = visibleRows.flatMap((row) => row.pr ? [row.pr] : []);
   const [landed, setLanded] = useState<Pick<Landed, "safe" | "head" | "branch"> | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
@@ -111,6 +120,7 @@ export function PrPanel({
   const [error, setError] = useState<string | null>(null);
   /** A failed read is said quietly inline; a failed click, plainly. */
   const [errorFrom, setErrorFrom] = useState<"load" | "action">("load");
+  const actionError = useRef<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -156,8 +166,8 @@ export function PrPanel({
         setStatus(workStatus);
         setLanded(landedWork);
         setCheckedWorkspace(workspaceCheck);
-        setError(pullRequests.error ?? null);
-        setErrorFrom("load");
+        setError(pullRequests.error ?? actionError.current);
+        setErrorFrom(pullRequests.error || !actionError.current ? "load" : "action");
       })
       .catch((e) => {
         if (cancelled) return;
@@ -172,6 +182,8 @@ export function PrPanel({
   }, [source, sessionId, selection, branch, active, available, tick, busy, workspaceKey]);
 
   useEffect(() => {
+    setPendingRuns([]);
+    actionError.current = null;
     setStatus(null);
     setLanded(null);
     setError(null);
@@ -205,31 +217,53 @@ export function PrPanel({
   // Also discover externally created follow-ups when all known PRs are closed.
   useEffect(() => {
     if (!active || loading || working) return;
-    const id = window.setTimeout(() => setTick((t) => t + 1), 30_000);
+    const id = window.setTimeout(() => setTick((t) => t + 1), pendingRuns.some((p) => p.until > Date.now()) ? 5_000 : 30_000);
     return () => window.clearTimeout(id);
-  }, [active, loading, working, tick]);
+  }, [active, loading, working, tick, pendingRuns]);
 
+  const actionLock = useRef<number | null>(null);
   const act = async (label: string, fn: () => Promise<string | null | void>) => {
+    if (actionLock.current === generation) return false;
+    actionLock.current = generation;
+    actionError.current = null;
     setWorking(label);
     setError(null);
     setNotice(null);
     try {
       const said = await fn();
-      if (selected.current.generation !== generation) return false;
+      if (!mounted.current || selected.current.generation !== generation) return false;
       if (said) setNotice(said);
       setTick((t) => t + 1);
       return true;
     } catch (e) {
-      if (selected.current.generation !== generation) return false;
-      setError(source.errorMessage(e));
+      if (!mounted.current || selected.current.generation !== generation) return false;
+      actionError.current = source.errorMessage(e);
+      setError(actionError.current);
       setErrorFrom("action");
       // A refusal may still have changed something (a lost answer): read GitHub again.
       setTick((t) => t + 1);
       return false;
     } finally {
-      if (selected.current.generation === generation) setWorking(null);
+      if (actionLock.current === generation) actionLock.current = null;
+      if (mounted.current && selected.current.generation === generation) setWorking(null);
     }
   };
+
+  const rerun = (pr: PullRequest, failedOnly: boolean) => void act("rerun", async () => {
+    if (!source.canWrite || !source.rerunCheck) throw new Error("Re-running checks is unavailable here.");
+    const checks = actionsRuns(pr, failedOnly);
+    for (const check of checks) {
+      // A navigation during a batch cancels the remaining outward actions.
+      if (!mounted.current || selected.current.generation !== generation) return;
+      await source.rerunCheck(pr.url, check.url!, failedOnly);
+      if (!mounted.current || selected.current.generation !== generation) return;
+      const runId = check.actions!.runId;
+      setPendingRuns((old) => [...old.filter((p) => p.until > Date.now() && !(p.prUrl === pr.url && p.runId === runId)), {
+        prUrl: pr.url, runId, failedOnly, signature: runSignature(pr, runId), until: Date.now() + 60_000,
+      }]);
+    }
+    return `Re-run requested for ${checks.length} Actions ${checks.length === 1 ? "run" : "runs"}.`;
+  });
 
   /** Merged from here: where workspaces are removed once merged, this one is looked at now rather than at the next pass. */
   const merge = (row: SessionPr, method: "merge" | "squash" | "rebase" | "queue") =>
@@ -248,7 +282,7 @@ export function PrPanel({
 
   const open = prs.filter((p) => p.state === "OPEN");
   const currentBranch = status?.branch ?? branch;
-  const fresh = loadedSelection === selection && !loading && !error && !visibleRows.some((row) => row.error);
+  const fresh = loadedSelection === selection && !loading && (!error || errorFrom === "action") && !visibleRows.some((row) => row.error);
   const currentOpen = visibleRows.some((row) => row.current && row.pr?.state === "OPEN");
   const workLanded = status?.aheadOfBase === 0 || !!(landed?.safe && landed.head === status?.head && landed.branch === currentBranch);
   const needsLandedProof = visibleRows.some((row) => row.current && row.pr?.state === "MERGED");
@@ -304,7 +338,10 @@ export function PrPanel({
         }} />;
         const ready = mergeReadiness(pr);
         const reviews = <ReviewThreads source={source} url={pr.url} sessionId={sessionId} active={active} prState={pr.state} />;
-        if (inline) return <div key={row.identity}><InlinePr reviews={reviews} pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
+        const checks = <PrChecks pr={pr} source={source} showSummary={!inline} disabled={!!working || loading || !fresh} fixBusy={fixBusy}
+          onRerun={(failedOnly) => rerun(pr, failedOnly)}
+          onFix={onFixErrors && pr.state === "OPEN" ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
+        if (inline) return <div key={row.identity}><InlinePr reviews={reviews} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
           <>
             {pr.isDraft && (
               <Button size="xs" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
@@ -340,7 +377,7 @@ export function PrPanel({
               </div>
             </div>
             {pr.state === "OPEN" && pr.mergeQueueEntry && <p className="mt-2 text-[11px] text-faint">Queue position {pr.mergeQueueEntry.position}</p>}
-            <PrChecks pr={pr} />
+            {pr.checks.length > 0 && <div className="mt-2">{checks}</div>}
             <Deployments pr={pr} />
             {pr.detailsError && <p role="alert" className="mt-2 text-xs text-destructive">Could not refresh merge details: {pr.detailsError}</p>}
             {pr.state === "OPEN" && (
@@ -470,81 +507,6 @@ export function PrPanel({
   );
 }
 
-const FAILING = ["failure", "error", "cancelled", "timed_out", "action_required", "startup_failure", "stale"];
-const RUNNING = ["pending", "in_progress", "queued", "expected", "waiting", "requested"];
-
-function checkBucket(state: string): "passed" | "failed" | "running" | "skipped" | "unknown" {
-  if (FAILING.includes(state)) return "failed";
-  if (RUNNING.includes(state)) return "running";
-  if (state === "success") return "passed";
-  if (state === "neutral" || state === "skipped") return "skipped";
-  return "unknown";
-}
-
-export function checkCounts(checks: PrCheck[]) {
-  const counts = { total: checks.length, passed: 0, failed: 0, running: 0, skipped: 0, unknown: 0 };
-  for (const check of checks) counts[checkBucket(check.state)]++;
-  return counts;
-}
-
-export function checkSummary(checks: PrCheck[]): string {
-  const c = checkCounts(checks);
-  const result = c.failed ? `${c.failed} of ${c.total} failed` : `${c.passed} of ${c.total} passed`;
-  return [result, c.running && `${c.running} running`, c.skipped && `${c.skipped} skipped`, c.unknown && `${c.unknown} unknown`].filter(Boolean).join(" · ");
-}
-
-function CheckIcon({ state }: { state: string }) {
-  const bucket = checkBucket(state);
-  if (bucket === "running") return <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />;
-  if (bucket === "passed") return <Check className="size-3.5 shrink-0 text-add" />;
-  if (bucket === "skipped") return <CircleDot className="size-3.5 shrink-0 text-faint" />;
-  return <CircleAlert className={cn("size-3.5 shrink-0", bucket === "failed" ? "text-destructive" : "text-faint")} />;
-}
-
-/** Provider URLs are untrusted data; only web links may leave the app. */
-function webUrl(value?: string | null): string | null {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? url.href : null;
-  } catch { return null; }
-}
-
-function CheckRows({ pr }: { pr: PullRequest }) {
-  return <>{pr.checks.map((check, index) => {
-    const requirement = pr.requiredChecks == null ? "Requirement unknown" : pr.requiredChecks.includes(check.name) ? "Required" : "Optional";
-    const url = webUrl(check.url);
-    return <div key={`${check.name}:${index}`} aria-label={`${check.name}: ${check.state}`} className="flex items-center gap-2 text-xs">
-      <CheckIcon state={check.state} />
-      {url ? <button type="button" onClick={() => void openUrl(url)} className="truncate text-left text-muted-foreground hover:underline">{check.name}</button> : <span className="truncate text-muted-foreground">{check.name}</span>}
-      <span className="ml-auto shrink-0 text-[10px] text-faint">{requirement}</span>
-    </div>;
-  })}</>;
-}
-
-function PrChecks({ pr }: { pr: PullRequest }) {
-  if (!pr.checks.length) return null;
-  return <div className="mt-2 flex flex-col gap-0.5">
-    <p className="mb-1 text-[11px] text-muted-foreground">{checkSummary(pr.checks)}</p>
-    <CheckRows pr={pr} />
-  </div>;
-}
-
-function Deployments({ pr }: { pr: PullRequest }) {
-  if (!pr.deployments?.length) return null;
-  return <section aria-label="Deployments" className="mt-2 flex flex-col gap-1">
-    <h4 className="text-[11px] font-medium text-muted-foreground">Deployments</h4>
-    {pr.deployments.map((deployment, index) => {
-      const url = webUrl(deployment.url);
-      return <div key={`${deployment.name}:${index}`} className="flex min-w-0 items-center gap-2 text-xs">
-        <CheckIcon state={deployment.state} />
-        <span className="truncate text-muted-foreground">{deployment.name}</span>
-        {url && <button type="button" onClick={() => void openUrl(url)} title={url} className="min-w-0 truncate text-faint hover:underline">{url}</button>}
-      </div>;
-    })}
-  </section>;
-}
-
 function reviewLabel(decision: string): string {
   return decision === "APPROVED" ? "approved" : decision === "CHANGES_REQUESTED" ? "changes requested" : decision === "REVIEW_REQUIRED" ? "review required" : decision.toLowerCase();
 }
@@ -554,8 +516,8 @@ function reviewLabel(decision: string): string {
  * number and state, its checks folded into a count (unfolded when one fails),
  * then, unless the branch has a step first, what to do with it now.
  */
-function InlinePr({ pr, ready, held, actions, reviews }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; reviews: ReactNode }) {
-  const failing = pr.checks.filter((c) => FAILING.includes(c.state)).length;
+function InlinePr({ pr, ready, held, actions, checks, reviews }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; checks: ReactNode; reviews: ReactNode }) {
+  const failing = pr.checks.filter(isFailingCheck).length;
   const [checksOpen, setChecksOpen] = useState(failing > 0);
   useEffect(() => {
     if (failing > 0) setChecksOpen(true);
@@ -588,7 +550,7 @@ function InlinePr({ pr, ready, held, actions, reviews }: { pr: PullRequest; read
             {checksOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
             {checkSummary(pr.checks)}
           </button>
-          {checksOpen && <div className="mt-0.5 flex flex-col gap-0.5"><CheckRows pr={pr} /></div>}
+          {checksOpen && <div className="mt-0.5">{checks}</div>}
         </div>
       )}
       {reviews}

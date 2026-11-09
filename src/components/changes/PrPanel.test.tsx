@@ -401,7 +401,8 @@ it.each([false, true])("loads review threads for the selected PR URL (inline=%s)
   expect(mocks.invoke).toHaveBeenCalledWith("pr_review_threads", { url: pr.url });
 });
 
-const { mergeReadiness, checkCounts, checkSummary } = await import("./PrPanel");
+const { mergeReadiness } = await import("./PrPanel");
+const { checkCounts, checkSummary } = await import("@/lib/checks");
 const openPr: PullRequest = { ...followup, mergeState: "CLEAN", checks: [], requiredChecks: [] };
 
 function panelBackend(read: () => PullRequest) {

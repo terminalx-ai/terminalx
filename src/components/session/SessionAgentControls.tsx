@@ -14,7 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { EFFORT_LABEL, PERMISSION_MODES, modelGroups, modelNote, modelOptionText } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, modelGroups, modelNote, runningModelName } from "@/lib/models";
 import type { useSessionAgent } from "@/lib/useSessionAgent";
 
 /**
@@ -24,13 +24,18 @@ import type { useSessionAgent } from "@/lib/useSessionAgent";
  * to a project); the parent supplies a wrapping row. `disabled` holds the
  * choices once a launch has begun.
  */
-export function SessionAgentControls({ selection, pipeline, disabled = false }: { pipeline?: ReturnType<typeof usePipelineLaunch>; selection: ReturnType<typeof useSessionAgent>; disabled?: boolean }) {
+export function SessionAgentControls({ selection, pipeline, disabled = false, fill = false }: {
+  pipeline?: ReturnType<typeof usePipelineLaunch>; selection: ReturnType<typeof useSessionAgent>; disabled?: boolean;
+  /** Stretch the pills across their row, each name left and its chevron right, so the row is as wide as what is under it. */
+  fill?: boolean;
+}) {
   const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort } = selection;
   const agentMenu = useRowMenu();
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const effortMenu = useRowMenu();
   const modeMenu = useRowMenu();
-  const pill = "min-w-0 max-w-full gap-1.5";
+  // The model's own name on its pill (`Opus 5.5`), not what the menu says about it: the menu is where "latest" is explained.
+  const pill = fill ? "h-8 min-w-0 flex-auto justify-between gap-1.5" : "min-w-0 max-w-full shrink gap-1.5";
 
   return (
     <>
@@ -58,7 +63,7 @@ export function SessionAgentControls({ selection, pipeline, disabled = false }: 
         <DropdownMenu {...modelMenu.root}>
           <DropdownMenuTrigger asChild {...modelMenu.trigger}>
             <Button variant="secondary" size="sm" className={pill} title="Model" disabled={disabled}>
-              <span className="truncate">{unavailableModel ? `Unavailable: ${unavailableModel}` : model ? modelOptionText(model, models) : "Agent default"}</span>
+              <span className="truncate">{unavailableModel ? `Unavailable: ${unavailableModel}` : model ? runningModelName(model) : "Agent default"}</span>
               <ChevronDown className="text-faint" />
             </Button>
           </DropdownMenuTrigger>

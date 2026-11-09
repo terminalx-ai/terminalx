@@ -19,8 +19,9 @@ vi.mock("@/lib/tabViews", () => ({
 }));
 // The agent's own screen: an xterm with the textarea it reads keys from.
 vi.mock("@/components/terminal/TerminalView", () => ({
-  TerminalView: () => (
+  TerminalView: ({ actions }: { actions?: React.ReactNode }) => (
     <div className="terminal-host">
+      {actions}
       <div className="xterm">
         <textarea aria-label="Terminal input" />
       </div>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { BYPASS_MODE, PERMISSION_MODES, bypassEffect, effortChoices, EFFORT_LABEL, modelForTab, type ModelInfo } from "@terminalx/portable/agentSettings";
 import type { ContextMode } from "@terminalx/portable/continuation";
@@ -13,11 +13,29 @@ import { useTheme } from "./theme";
 interface Choice { key: string; label: string; hint?: string; current?: boolean; pending?: boolean; onSelect(): void }
 
 /**
+ * The controls in pieces, for a composer that places them itself: `chips` in
+ * its bar, `panel` (recovery, notes, sheets) above it, and Interrupt on its
+ * send button while the agent works.
+ */
+export interface SessionControlParts {
+  chips: ReactNode;
+  /** The pickers one by one, for a composer that draws them its own way: what each shows, and how it opens. */
+  /** `bypass`: whether the mode in force lets the agent act without asking. */
+  settings: { model: Setting; effort: Setting | null; mode: Setting & { bypass: boolean } };
+  panel: ReactNode;
+  busy: boolean;
+  working: boolean;
+  interrupt(): void;
+  stop(): void;
+}
+export interface Setting { label: string; disabled: boolean; open(): void }
+
+/**
  * Stop, Interrupt, the recovery banner's actions, the model, effort and mode
  * pickers, and Continue in new session: what the desktop offers for a tab,
  * for a Mac that takes them (`sessionControls`).
  */
-export function SessionControls({ sessionId, tabId, events, asks, connected, onOpenTab }: {
+export function SessionControls({ sessionId, tabId, events, asks, connected, onOpenTab, children }: {
   sessionId: string;
   tabId: string;
   events: AgentEvent[];
@@ -25,6 +43,8 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
   asks: number;
   connected: boolean;
   onOpenTab(tabId: string): void;
+  /** Given, it lays the controls out; `null` when the Mac offers none. Without it they are drawn stacked. */
+  children?: (parts: SessionControlParts | null) => ReactNode;
 }) {
   const app = useApp();
   const { palette } = useTheme();
@@ -50,7 +70,7 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
     return () => { active = false; };
   }, [app.api, supported]);
 
-  if (!supported || !tab || !connected) return null;
+  if (!supported || !tab || !connected) return children ? <>{children(null)}</> : null;
   const view = settingsView(tab, models);
   const { kind, offer } = recoveryState(events, asks, tab);
   const busy = tab.status === "in_progress";
@@ -84,16 +104,19 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
     Alert.alert("Bypass permissions?", `${effect}\n\n${flag}`, [{ text: "Cancel", style: "cancel" }, { text: "Bypass", style: "destructive", onPress: apply }]);
   };
 
-  return <View style={styles.wrap}>
-    {busy ? <View style={styles.row}>
-      <Button label="Interrupt" kind="secondary" disabled={working} onPress={() => void act(async () => done(await app.api.interrupt(sessionId, tabId)))} style={styles.flex} />
-      <Button label="Stop" kind="danger" disabled={working} onPress={() => void act(async () => done(await app.api.stop(sessionId, tabId)))} style={styles.flex} />
-    </View> : null}
-    <View style={styles.row}>
-      <Chip label={view.modelName} disabled={working} onPress={() => { freshModels(); setPicker({ title: "Model", choices: modelChoices((model) => void act(async () => done(await app.api.setModel(sessionId, tabId, model.id)))) }); }} />
-      {view.efforts.length ? <Chip label={view.effortName ?? "Effort"} disabled={working} onPress={() => setPicker({ title: "Effort", choices: view.efforts.map((effort) => ({ key: effort.id, label: effort.label, current: effort.id === tab.effort, pending: effort.pending, onSelect: () => void act(async () => done(await app.api.setEffort(sessionId, tabId, effort.id))) })) })} /> : null}
-      <Chip label={view.modeName} disabled={working} onPress={() => setPicker({ title: "Permission mode", choices: view.modes.map((mode) => ({ key: mode.id, label: mode.label, hint: mode.hint, current: mode.current, pending: mode.pending, onSelect: () => chooseMode(mode.id) })) })} />
-    </View>
+  const interrupt = () => void act(async () => done(await app.api.interrupt(sessionId, tabId)));
+  const stop = () => void act(async () => done(await app.api.stop(sessionId, tabId)));
+  const settings = {
+    model: { label: view.modelName, disabled: working, open: () => { freshModels(); setPicker({ title: "Model", choices: modelChoices((model) => void act(async () => done(await app.api.setModel(sessionId, tabId, model.id)))) }); } },
+    effort: view.efforts.length ? { label: view.effortName ?? "Effort", disabled: working, open: () => setPicker({ title: "Effort", choices: view.efforts.map((effort) => ({ key: effort.id, label: effort.label, current: effort.id === tab.effort, pending: effort.pending, onSelect: () => void act(async () => done(await app.api.setEffort(sessionId, tabId, effort.id))) })) }) } : null,
+    mode: { label: view.modeName, bypass: (tab.requestedPermissionMode ?? tab.permissionMode) === BYPASS_MODE, disabled: working, open: () => setPicker({ title: "Permission mode", choices: view.modes.map((mode) => ({ key: mode.id, label: mode.label, hint: mode.hint, current: mode.current, pending: mode.pending, onSelect: () => chooseMode(mode.id) })) }) },
+  };
+  const chips = <>
+    <Chip label={settings.model.label} disabled={working} onPress={settings.model.open} />
+    {settings.effort ? <Chip label={settings.effort.label} disabled={working} onPress={settings.effort.open} /> : null}
+    <Chip label={settings.mode.label} disabled={working} onPress={settings.mode.open} />
+  </>;
+  const panel = <>
     {view.note ? <Text accessibilityLiveRegion="polite" style={[styles.note, { color: palette.muted }]}>{view.note}</Text> : null}
     {kind ? <Card style={[styles.recovery, { borderColor: palette.warning }]}>
       <Text style={[styles.title, { color: palette.ink }]}>{offer.title}</Text>
@@ -103,7 +126,7 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
         {offer.retry ? <Button label={offer.retry} kind={kind === "signed_out" ? "secondary" : "primary"} disabled={working} onPress={() => void act(async () => sent(await retrySafely(app.api, sessionId, tabId)))} /> : null}
         {offer.sendContinue ? <Button label="Continue here" kind="secondary" disabled={working} onPress={() => void act(async () => sent(await continueHere(app.api, tabId)))} /> : null}
         {offer.chooseModel ? <Button label="Choose another model" kind="secondary" disabled={working} onPress={() => { freshModels(); setPicker({ title: "Retry on another model", choices: modelChoices((model) => void act(async () => sent(await retrySafely(app.api, sessionId, tabId, model.id)))) }); }} /> : null}
-        <Button label="Stop session" kind="secondary" disabled={working} onPress={() => void act(async () => done(await app.api.stop(sessionId, tabId)))} />
+        <Button label="Stop session" kind="secondary" disabled={working} onPress={stop} />
         {offer.continueInNewSession ? <Button label="Continue in new session" kind="secondary" disabled={working} onPress={() => setContinuing(true)} /> : null}
       </View>
     </Card> : null}
@@ -121,13 +144,23 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
           : `The new conversation opened, but the handoff could not be confirmed. ${result.message ?? ""}`.trim();
       }, "Continued in a new conversation.");
     }} /> : null}
+  </>;
+
+  if (children) return <>{children({ chips, settings, panel, busy, working, interrupt, stop })}</>;
+  return <View style={styles.wrap}>
+    {busy ? <View style={styles.row}>
+      <Button label="Interrupt" kind="secondary" disabled={working} onPress={interrupt} style={styles.flex} />
+      <Button label="Stop" kind="danger" disabled={working} onPress={stop} style={styles.flex} />
+    </View> : null}
+    <View style={styles.row}>{chips}</View>
+    {panel}
   </View>;
 }
 
 function Chip({ label, disabled, onPress }: { label: string; disabled?: boolean; onPress(): void }) {
   const { palette } = useTheme();
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress} style={[styles.chip, { borderColor: palette.border, backgroundColor: palette.raised }, disabled && styles.disabled]}>
-    <Text numberOfLines={1} style={{ color: palette.ink, fontSize: 12 }}>{label}</Text>
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress} hitSlop={4} style={({ pressed }) => [styles.chip, { backgroundColor: pressed ? palette.selected : "transparent" }, disabled && styles.disabled]}>
+    <Text numberOfLines={1} style={{ color: palette.muted, fontSize: 13, fontWeight: "500" }}>{label}</Text>
   </Pressable>;
 }
 
@@ -158,7 +191,7 @@ function ContinueSheet({ tab, models, onClose, onStart }: { tab: TabControls; mo
   const efforts = effortChoices(model, settings.effort);
   const row = (label: string, options: { key: string; label: string; selected: boolean; onPress(): void }[]) => <View style={styles.field}>
     <Text style={[styles.message, { color: palette.muted }]}>{label}</Text>
-    <View style={styles.actions}>{options.map((option) => <Pressable key={option.key} accessibilityRole="button" accessibilityState={{ selected: option.selected }} onPress={option.onPress} style={[styles.chip, { borderColor: palette.border }, option.selected && { backgroundColor: palette.selected }]}>
+    <View style={styles.actions}>{options.map((option) => <Pressable key={option.key} accessibilityRole="button" accessibilityState={{ selected: option.selected }} onPress={option.onPress} style={[styles.chip, styles.outlined, { borderColor: palette.border }, option.selected && { backgroundColor: palette.selected }]}>
       <Text style={{ color: palette.ink, fontSize: 12 }}>{option.label}</Text>
     </Pressable>)}</View>
   </View>;
@@ -182,7 +215,8 @@ const styles = StyleSheet.create({
   wrap: { paddingHorizontal: 12, paddingTop: 6, gap: 6 },
   row: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   flex: { flex: 1 },
-  chip: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5, maxWidth: 180 },
+  chip: { borderRadius: 14, paddingHorizontal: 9, paddingVertical: 6, maxWidth: 180 },
+  outlined: { borderWidth: StyleSheet.hairlineWidth },
   disabled: { opacity: 0.4 },
   note: { fontSize: 12, lineHeight: 16 },
   recovery: { borderWidth: StyleSheet.hairlineWidth, padding: 12, gap: 6 },

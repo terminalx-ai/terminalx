@@ -173,6 +173,41 @@ function log(seed: number, length: number): AgentEvent[] {
 const json = (value: unknown) => JSON.parse(JSON.stringify(value));
 
 describe("TranscriptReducer", () => {
+  it("joins acknowledged native prompts to their turns and carries later queued messages forward", () => {
+    const reducer = new TranscriptReducer();
+    const events: AgentEvent[] = [];
+    const push = (payload: Payload) => {
+      const seq = events.length + 1;
+      const event: AgentEvent = { id: `e${seq}`, sessionId: "s", tabId: "t", harness: "codex", seq, ts: "2026-01-01T00:00:00Z", payload };
+      events.push(event);
+      reducer.push(event);
+      expect(json(reducer.snapshot(true))).toEqual(json(buildTranscript(events, true)));
+      return seq;
+    };
+    const first = push({ type: "user_message", text: "first", queued: true });
+    push({ type: "prompt_absorbed", promptSeq: first });
+    push({ type: "turn_started", promptSeq: first });
+    push({ type: "assistant_text", text: "first answer" });
+    const second = push({ type: "user_message", text: "second", queued: true });
+    const third = push({ type: "user_message", text: "third", queued: true });
+    push({ type: "turn_completed", status: "ok" });
+    push({ type: "prompt_absorbed", promptSeq: second });
+    push({ type: "turn_started", promptSeq: second });
+    push({ type: "assistant_text", text: "second answer" });
+    const turns = reducer.snapshot(true).turns;
+    expect(turns.map((turn) => turn.prompt?.text)).toEqual(["first", "second"]);
+    expect(turns.map((turn) => turn.work.filter((item) => item.kind === "text").map((item) => item.text))).toEqual([["first answer"], ["second answer"]]);
+    expect(turns[0].work).not.toEqual(expect.arrayContaining([expect.objectContaining({ seq: second })]));
+    expect(turns[1].work).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "queued", seq: third })]));
+    push({ type: "turn_completed", status: "ok" });
+    push({ type: "prompt_absorbed", promptSeq: third });
+    push({ type: "turn_started", promptSeq: third });
+    push({ type: "assistant_text", text: "third answer" });
+    expect(reducer.snapshot(true).turns.map((turn) => turn.prompt?.text)).toEqual(["first", "second", "third"]);
+    expect(reducer.snapshot(true).turns.map((turn) => turn.work.filter((item) => item.kind === "text").map((item) => item.text))).toEqual([["first answer"], ["second answer"], ["third answer"]]);
+    expect(reducer.snapshot(true).turns.flatMap((turn) => turn.work).filter((item) => item.kind === "queued" || item.kind === "message")).toEqual([]);
+  });
+
   it("gives, event by event, the transcript the whole log builds, live or not", () => {
     for (let seed = 1; seed <= 24; seed++) {
       const events = log(seed, 120);
