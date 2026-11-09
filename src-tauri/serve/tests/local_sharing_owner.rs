@@ -190,13 +190,19 @@ fn revocation_cancels_a_queued_followup_before_the_turn_can_finish() {
         )["queued"],
         true
     );
-    assert_eq!(
-        fixture.serve.try_control(
-            "runtime.session.mode",
-            json!({"sessionId":fixture.session,"tabId":fixture.tab,"mode":"bypassPermissions"})
-        )["ok"],
-        false
+    // Sharing in Bypass is the host's choice, not a guest capability.
+    // Revoking a guest must still discard its queued input after that choice.
+    for method in ["session.mode", "runtime.session.mode"] {
+        fixture.refused(
+            "guest",
+            fixture.guest(method, json!({"mode":"bypassPermissions"})),
+        );
+    }
+    fixture.serve.control(
+        "runtime.session.mode",
+        json!({"sessionId":fixture.session,"tabId":fixture.tab,"mode":"bypassPermissions"}),
     );
+    assert_eq!(fixture.call("status", json!({}))["queue"].as_array().unwrap().len(), 1);
     fixture.call("revoke", json!({"linkId":"link","removeGuests":true}));
     let pending = fixture.serve.control("permissions.list", json!({}));
     fixture.serve.control(
