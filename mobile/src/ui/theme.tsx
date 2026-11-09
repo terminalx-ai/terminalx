@@ -15,16 +15,20 @@ export interface Palette {
   accentInk: string;
   success: string;
   warning: string;
+  /** The Mac's blue, for an agent at work. */
+  info: string;
   danger: string;
   border: string;
   terminal: string;
 }
 
+// Near-black pages with clear steps of elevation above them, text in the
+// system's greys, and hairlines of light rather than lines of colour.
 const dark: Record<ThemeName, Palette> = {
-  Den: palette("#29292c", "#343437", "#2e2e31", "#414145", "#eceae6", "#9f9da1", "#747277", "#e3b45e", "#34230b"),
-  Slate: palette("#25282c", "#2e3238", "#292d32", "#3a4048", "#eef1f5", "#9da6b2", "#717a86", "#6fa7ed", "#10223c"),
-  Moss: palette("#222a26", "#2b3530", "#26302b", "#37433d", "#edf1e9", "#9ba89e", "#6f7d72", "#67c48a", "#102b1a"),
-  Ember: palette("#2c232a", "#362a33", "#31262e", "#453540", "#f2e9ec", "#aa989f", "#796a70", "#e7806d", "#35120d"),
+  Den: palette("#111113", "#1a1a1d", "#212124", "#2c2c30", "#f2f2f3", "#a0a0a6", "#6b6b72", "#e3b45e", "#1a1204", "#ffffff1a", "#050506"),
+  Slate: palette("#080a0d", "#11151a", "#181d23", "#252c35", "#eef2f7", "#9aa5b3", "#66707d", "#6fa7ed", "#0b1830", "#ffffff1a", "#040608"),
+  Moss: palette("#080b09", "#111613", "#18201b", "#243029", "#edf2ec", "#98a89c", "#67776b", "#67c48a", "#0c2415", "#ffffff1a", "#040605"),
+  Ember: palette("#0c0809", "#171113", "#20181b", "#2f2327", "#f4ecee", "#ab9aa0", "#7a6a70", "#e7806d", "#2a0d08", "#ffffff1a", "#070405"),
 };
 
 const light: Record<ThemeName, Palette> = {
@@ -52,6 +56,6 @@ export function useTheme() {
   return value;
 }
 
-function palette(page: string, card: string, raised: string, selected: string, ink: string, muted: string, faint: string, accent: string, accentInk: string): Palette {
-  return { page, card, raised, selected, ink, muted, faint, accent, accentInk, success: "#55b979", warning: "#d6a744", danger: "#db695f", border: `${muted}35`, terminal: "#171719" };
+function palette(page: string, card: string, raised: string, selected: string, ink: string, muted: string, faint: string, accent: string, accentInk: string, border = `${muted}35`, terminal = "#171719"): Palette {
+  return { page, card, raised, selected, ink, muted, faint, accent, accentInk, success: "#55b979", warning: "#d6a744", info: "#5b8def", danger: "#db695f", border, terminal };
 }

@@ -4,7 +4,8 @@ import { markdownBlocks, textChunks } from "./markdown-blocks";
 
 export type TurnRow = { key: string; startsTurn: boolean; ts?: string } & (
   /** `note`: under the last of a message's rows, what became of it on its way to the agent (#722). */
-  | { kind: "prompt"; text: string; note?: string }
+  /** `images`: under the first of a message's rows, the images sent with it. */
+  | { kind: "prompt"; text: string; note?: string; images?: { url: string; name?: string }[] }
   | { kind: "markdown"; token: Token }
   | { kind: "work"; item: WorkItem }
 );
@@ -34,7 +35,7 @@ export function turnRows(turn: Turn): TurnRow[] {
   };
   if (turn.prompt) {
     const chunks = turn.prompt.text ? textChunks(turn.prompt.text) : [""];
-    for (const [index, text] of chunks.entries()) rows.push({ key: `prompt:${turn.prompt.seq}:${index}`, kind: "prompt", text, startsTurn: false, ts: index === 0 ? turn.prompt.messageTs : undefined });
+    for (const [index, text] of chunks.entries()) rows.push({ key: `prompt:${turn.prompt.seq}:${index}`, kind: "prompt", text, startsTurn: false, ts: index === 0 ? turn.prompt.messageTs : undefined, ...(index === 0 && turn.prompt.images?.length ? { images: turn.prompt.images } : {}) });
     note(rows, turn.prompt);
   }
   for (const item of turn.work) {
@@ -43,7 +44,7 @@ export function turnRows(turn: Turn): TurnRow[] {
     if (item.kind === "text") addMarkdown(item.key, item.text, item.messageTs);
     // A message the agent took mid-turn is the reader's, drawn like the prompt.
     else if (item.kind === "message") {
-      for (const [index, text] of (item.text ? textChunks(item.text) : [""]).entries()) rows.push({ key: `${item.key}:${index}`, kind: "prompt", text, startsTurn: false, ts: index === 0 ? item.messageTs : undefined });
+      for (const [index, text] of (item.text ? textChunks(item.text) : [""]).entries()) rows.push({ key: `${item.key}:${index}`, kind: "prompt", text, startsTurn: false, ts: index === 0 ? item.messageTs : undefined, ...(index === 0 && item.images?.length ? { images: item.images } : {}) });
       note(rows, item);
     } else if ("text" in item) {
       for (const [index, text] of textChunks(item.text).entries()) rows.push({ key: `${item.key}:${index}`, kind: "work", item: { ...item, text, ...((item.kind === "queued") ? { messageTs: index === 0 ? item.messageTs : undefined } : {}) }, startsTurn: false });
