@@ -9,6 +9,10 @@ const WAIT: Duration = Duration::from_secs(3);
 
 thread_local! {
     static FULL_PIPE: std::cell::RefCell<Option<mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+    static HANDOFF_FENCED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn handoff_fenced() {
+    HANDOFF_FENCED.with(|hook| { if let Some(run) = hook.borrow_mut().take() { run(); } });
 }
 pub(super) fn observed_full_pipe() {
     FULL_PIPE.with(|hook| { if let Some(tx) = hook.borrow_mut().take() { tx.send(()).unwrap(); } });
@@ -28,7 +32,7 @@ fn owned_stdio_lifecycle_is_process_bounded() {
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-slow-start", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
         "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
-        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working"] {
+        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working", "handover-stop", "handover-exit", "handover-descendant"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -203,6 +207,52 @@ fn resume_fixture(case: &str) {
     if case == "to-terminal" {
         return to_terminal_fixture(&manager);
     }
+    if matches!(case, "handover-stop" | "handover-exit") {
+        assert!(rt_bound(&manager), "the native connection owns compaction observations");
+        let held = manager.hold_tabs(WAIT, |held| held).unwrap();
+        assert_eq!(held.unadoptable.len(), 1, "a live native connection needs approval to stop");
+        let rt = manager.runtime("stdio-owner", "tab").unwrap();
+        let (child, launch, token) = {
+            let rt = rt.lock().unwrap();
+            let Engine::CodexStdio(engine) = &rt.engine else { panic!("native owner missing") };
+            (rt.child.clone().unwrap(), engine.launch.clone(), rt.stdio_compaction.clone().unwrap())
+        };
+        if case == "handover-exit" {
+            crate::harness::host::terminate(child.pid);
+            let until = Instant::now() + WAIT;
+            while child.terminal_receipt().is_none() {
+                assert!(Instant::now() < until, "native readers never drained");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(rt.lock().unwrap().compaction.is_idle(), "spontaneous drain retires its observation owner too");
+        }
+        manager.stop("stdio-owner", "tab").unwrap();
+        {
+            let rt = rt.lock().unwrap();
+            assert_eq!(rt.status, TabStatus::Idle);
+            assert!(!rt.stopping && !rt.stop_in_flight && !rt.stdio_starting && rt.restart_claim.is_none());
+            assert!(rt.compaction.is_idle(), "no drained compaction binding can hold handover off");
+        }
+        assert!(manager.publish_compaction(&token, CompactionObservation::ContinuityLost {
+            generation: token.generation(), reason: CompactionLoss::Exited,
+        }, false).is_err(), "a drained token no longer owns even a loss observation");
+        for _ in 0..2 {
+            let held = manager.hold_tabs(WAIT, |held| held).expect("a stopped native tab must not keep handover busy");
+            assert!(held.unadoptable.is_empty());
+        }
+        manager.send("stdio-owner", "tab", "resume after stop".into(), Vec::new()).unwrap();
+        let until = Instant::now() + WAIT;
+        while !rt_bound(&manager) {
+            assert!(Instant::now() < until, "new native owner never bound");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let stale = StdioSink { manager: manager.clone(), rt: rt.clone(), launch, startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };
+        stale.drained(&child.terminal_receipt().unwrap());
+        assert!(!rt.lock().unwrap().compaction.is_idle(), "an old drain cannot release the replacement's binding");
+        manager.stop("stdio-owner", "tab").unwrap();
+        assert!(manager.hold_tabs(WAIT, |held| held.unadoptable.is_empty()).unwrap());
+        return;
+    }
     if case == "resume-thread" {
         assert_eq!(methods, ["initialize", "initialized", "thread/resume", "turn/start"]);
         assert_eq!(received[3]["params"]["input"][0]["text"], "carry on");
@@ -264,30 +314,80 @@ fn settings_fixture(manager: &SessionManager, bin: &Path, first: &[serde_json::V
 }
 
 /// Opening the terminal view hands the thread to Codex's own terminal: never
-/// mid-turn, only once the connection has exited, and for good.
+/// mid-turn: the request waits without fencing its writer. Once idle it moves
+/// only after the connection has exited, and for good.
 fn to_terminal_fixture(manager: &SessionManager) {
     let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    let local_move = |defer| {
+        let mut params = json!({"sessionId":"stdio-owner", "tabId":"tab"});
+        if defer { params["deferUntilIdle"] = json!(true); }
+        crate::local_runtime::calls::execute(manager, &manager.sink, "runtime.session.toTerminal", params)
+    };
     let chat = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().into_iter()
-        .filter(|event| !matches!(event.payload, Payload::ContextCompactionLifecycle { .. })).count();
+        .filter(|event| !matches!(event.payload, Payload::ContextCompactionLifecycle { .. } | Payload::Recovery { .. })).count();
     let before = chat();
     rt.lock().unwrap().turn_open = true;
-    let refused = manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap_err();
-    assert!(refused.to_string().contains("finish this turn"), "{refused:#}");
+    crate::issue_pipeline::admission::observe_next_lock(Some(Box::new(|| {
+        assert!(!crate::issue_pipeline::admission::held("stdio-owner", "tab"), "checking an active turn must not fence its writer");
+    })), None);
+    assert!(!manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap(), "an active turn defers the switch without an error");
+    assert!(local_move(false).unwrap_err().to_string().contains("still working"), "a protocol 1 caller cannot interpret a deferred success");
+    assert!(!serde_json::from_value::<bool>(local_move(true).unwrap()).unwrap());
     assert!(matches!(rt.lock().unwrap().engine, Engine::CodexStdio(_)));
     rt.lock().unwrap().turn_open = false;
+    // Interrupt was queued just before natural completion. Release its writer
+    // inside the real handoff's fence, before missing history refuses the move.
+    let (launch, interrupt) = {
+        let mut rt = rt.lock().unwrap();
+        let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
+        engine.handle(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"finishing"}}}"#).unwrap();
+        let StdioAction::Write(frame) = engine.interrupt().unwrap().remove(0) else { panic!("missing interrupt") };
+        engine.handle(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"finishing","status":"completed"}}}"#).unwrap();
+        (engine.launch.clone(), frame)
+    };
+    let (writer, runtime) = (manager.clone(), Arc::downgrade(&rt));
+    HANDOFF_FENCED.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        assert!(crate::issue_pipeline::admission::held("stdio-owner", "tab"));
+        writer.write_codex_frame(&runtime, &launch, interrupt, None).expect("a completed turn's queued interrupt must retire without failing its owner");
+    })));
+    let refused = manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap_err();
+    assert!(refused.to_string().contains("saved conversation is not available"), "{refused:#}");
+    assert!(matches!(&rt.lock().unwrap().engine, Engine::CodexStdio(engine) if !engine.failed()), "a missing rollout keeps the native owner usable");
+    assert_eq!(rt.lock().unwrap().recovery, None);
+    let relative = "sessions/2026/11/01/rollout-2026-11-01T00-00-00-thread-1.jsonl";
+    let source = codex::home::native_root().unwrap().join(relative);
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, "{}\n").unwrap();
+    // A previous refused handoff's copy must not hide later native work.
+    let managed = codex::home::managed_root().unwrap().join(relative);
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    std::fs::write(&managed, "").unwrap();
     // An exit Stop cannot confirm leaves the tab where it was, to retry.
     rt.lock().unwrap().stop_in_flight = true;
     assert!(manager.codex_stdio_to_terminal("stdio-owner", "tab").is_err());
     assert_eq!(index::get("stdio-owner").unwrap().tab("tab").unwrap().transport, AgentTransport::ExperimentalCodexStdio);
     rt.lock().unwrap().stop_in_flight = false;
+    manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::Timeout, crate::recovery_log::Source::Watcher);
     let child = rt.lock().unwrap().child.clone().expect("a running connection");
     manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
     assert!(child.terminal_receipt().is_some(), "the connection exits before the tab changes engine");
     assert!(matches!(rt.lock().unwrap().engine, Engine::None) && rt.lock().unwrap().child.is_none());
     let tab = index::get("stdio-owner").unwrap().tab("tab").unwrap().clone();
     assert_eq!((tab.transport, tab.provider_session_id.as_deref()), (AgentTransport::Pty, Some("thread-1")));
+    assert_eq!(std::fs::read(&managed).unwrap(), std::fs::read(&source).unwrap(), "the terminal takes the latest saved conversation");
     manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
-    assert_eq!(chat(), before, "the move adds nothing to the chat");
+    assert_eq!(chat(), before, "the move adds no prompts, turns or errors to the chat");
+    serde_json::from_value::<()>(local_move(false).unwrap()).expect("an older desktop must still decode a completed handoff as null");
+    assert!(serde_json::from_value::<bool>(local_move(true).unwrap()).unwrap());
+    assert_eq!(rt.lock().unwrap().recovery, None, "the successful handoff clears the previous connection's warning");
+    let path = rt.lock().unwrap().diagnostics_path();
+    let trace: Vec<serde_json::Value> = store::read_lines::<serde_json::Value>(&path).unwrap().into_iter()
+        .filter(|line| line["type"] == "terminal_view_transition").collect();
+    assert!(trace.iter().any(|line| line["report"]["stage"] == "waiting_for_turn" && line["turn_open"] == true && line["transport"] == "experimentalCodexStdio"));
+    assert!(trace.iter().any(|line| line["report"]["errorCategory"] == "owner_cleanup"));
+    assert!(trace.iter().any(|line| line["report"]["errorCategory"] == "conversation_unavailable" && line["transport"] == "experimentalCodexStdio"));
+    assert!(trace.iter().any(|line| line["report"]["stage"] == "transport_changed" && line["transport"] == "pty"));
+    assert!(!serde_json::to_string(&trace).unwrap().contains("carry on"), "no conversation content in diagnostics");
 }
 
 /// Continue in New Session into an experimental tab: confirmed once Codex
@@ -1273,7 +1373,10 @@ fn a_busy_refusal_says_the_words_the_window_knows_it_by() {
 #[test]
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
-    if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings" | "to-terminal") { return resume_fixture(&case); }
+    // Binary discovery reads the login shell. Keep process fixtures independent
+    // of the developer's dotfiles and their unbounded startup work.
+    std::env::set_var("SHELL", "/bin/sh");
+    if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings" | "to-terminal" | "handover-stop" | "handover-exit") { return resume_fixture(&case); }
     if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-slow-start" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
     if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart") { return continuation_fixture(&case); }
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
@@ -1396,6 +1499,8 @@ fn child_fixture() {
     // exits naturally, so even a failed assertion leaves no long-lived child.
     let script = if matches!(case.as_str(), "full-input-pipe" | "expired-input-pipe") {
         r#"printf '%s\n' '{"method":"thread/status/changed","params":{"threadId":"unbound"}}'; exec sleep 10"#
+    } else if case == "handover-descendant" {
+        r#"sleep 10 </dev/null >/dev/null 2>&1 & printf '%s\n' '{"method":"thread/status/changed","params":{"threadId":"unbound"}}'"#
     } else {
         r#"printf '%s\n' '{"method":"thread/status/changed","params":{"threadId":"unbound"}}'"#
     };
@@ -1457,6 +1562,13 @@ fn child_fixture() {
         assert!(rt.child.as_ref().is_some_and(|retained| Arc::ptr_eq(retained, &child)), "drain must retain the exact cleanup witness");
         assert_eq!(rt.child_pid, Some(child.pid));
         drop(rt);
+        if case == "handover-descendant" {
+            assert!(!crate::harness::host::is_alive(child.pid), "the native leader has exited");
+            let held = manager.hold_tabs(WAIT, |held| held).unwrap();
+            // Clean the group even if the handover assertion fails below.
+            manager.stop("stdio-owner", "tab").unwrap();
+            assert_eq!(held.unadoptable.len(), 1, "a live native descendant still requires approval to stop");
+        }
         manager.stop("stdio-owner", "tab").unwrap();
         assert!(rt_arc.lock().unwrap().child.is_none());
     }

@@ -41,6 +41,7 @@ class FakeRuntime implements WorkspaceTransport {
   agentEvents: { seq: number; id: string }[] = [];
   sessions: RuntimeSession[] = [session("s1", "Fix login")];
   updates = 0;
+  terminalWaiting = false;
   private cache = new Map<string, unknown>();
   private applied = new Map<string, number>();
   private subscription = 0;
@@ -153,6 +154,8 @@ class FakeRuntime implements WorkspaceTransport {
       }
       case "session.interrupt":
         return ok({ interrupted: true });
+      case "session.toTerminal":
+        return ok({ sessionId: params.sessionId, tabId: params.tabId, ...(this.terminalWaiting ? { waitingForTurn: true } : {}) });
       case "session.nudge":
         return ok({});
       case "session.list":
@@ -875,6 +878,20 @@ describe("workspace RPC client", () => {
       await expect(before.removeCleanup([{ projectPath: "/w", path: "/w/a", token: "t" }])).rejects.toMatchObject({ code: "capability_not_granted" });
       expect(old.sent.some((frame) => frame.method.startsWith("cleanup."))).toBe(false);
       before.close();
+    });
+
+    it("opts into deferred terminal switching and also accepts an older runtime's completed response", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      expect(await client.moveAgentTabToTerminal("s1", "t1")).toEqual({ sessionId: "s1", tabId: "t1" });
+      runtime.terminalWaiting = true;
+      expect(await client.moveAgentTabToTerminal("s1", "t1", { deferUntilIdle: true })).toMatchObject({ waitingForTurn: true });
+      const requests = runtime.sent.filter((frame) => frame.method === "session.toTerminal");
+      expect(requests).toHaveLength(2);
+      expect(requests[0].params.deferUntilIdle).toBeUndefined();
+      expect(requests[1].params.deferUntilIdle).toBe(true);
+      client.close();
     });
 
     it("session/3: an interrupt is one live call, never resent after a drop, and an older runtime is never asked", async () => {

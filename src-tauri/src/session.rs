@@ -27,6 +27,9 @@ use anyhow::{anyhow, bail, Context, Result};
 mod compaction;
 #[path = "session_codex_stdio.rs"]
 mod codex_stdio;
+#[path = "session_view_transition.rs"]
+mod view_transition;
+pub use view_transition::TerminalViewReport;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -2421,6 +2424,18 @@ impl SessionManager {
         }
         out.sort_by(|a, b| a.request_id.cmp(&b.request_id));
         out
+    }
+
+    /// The startup observer must never wait behind a child launch holding a
+    /// tab lock. This is observational only; it cannot answer any prompt.
+    pub(crate) fn startup_prompt_panes(&self) -> Option<Vec<String>> {
+        let tabs = self.tabs.try_lock().ok()?;
+        let mut panes = Vec::new();
+        for runtime in tabs.values() {
+            let runtime = runtime.try_lock().ok()?;
+            if !runtime.pending.is_empty() { panes.push(Self::pane_id(&runtime.tab_id)); }
+        }
+        Some(panes)
     }
 
     pub fn queued(&self, session_id: &str, tab_id: &str) -> Vec<QueuedMessage> {

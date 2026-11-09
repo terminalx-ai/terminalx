@@ -11,6 +11,8 @@
   failed login output stays available, and repository creation works from linked
   worktrees. (PRO-166)
 
+## 0.2.28
+
 - User settings reload when `settings.json` changes. General shows its location
   and offers to create it. Existing webview preferences migrate into that file;
   downgrading to a build without this support uses its preference defaults,
@@ -18,6 +20,23 @@
   `settings.json`. Unknown keys and `$schema` survive saves, and an invalid
   field no longer resets valid credentials, permission choices, or other
   settings when the app starts. (Part of PRO-140)
+
+- Keep a checkpoint for each chat turn and reset a conversation to an earlier
+  turn, with an Undo option. Reset changes the conversation only; files stay
+  as they are. (#843, #858)
+- Find text across the chat with Command-F, including messages outside the
+  visible portion of long conversations. (#857)
+- Manage repository scripts from Settings, including setup and archive scripts
+  and their run history. (#808)
+- Native Codex can move from chat to its terminal interface while preserving
+  the conversation. The transition handles process startup and readiness, and
+  reports interrupted transitions without silently replaying prompts. (#819)
+- Attention notices wait while the foreground conversation has an approval
+  needing a response, keeping approval controls and live terminals usable.
+  (#862)
+- Settings and sharing get a design update, with settings search, a simpler
+  account menu and a pasted sign-in-link fallback. Sharing explains permission
+  choices before a link is created. (#852)
 
 ## 0.2.27
 
