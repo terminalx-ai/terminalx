@@ -448,17 +448,29 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn three_timeouts_close_the_session_and_reset_the_lane() {
-        timeout_cleanup_fixture(false);
+        timeout_cleanup_fixture(false, false);
     }
 
     #[cfg(unix)]
     #[test]
     fn three_timeouts_before_command_handling_reset_the_lane() {
-        timeout_cleanup_fixture(true);
+        timeout_cleanup_fixture(true, false);
     }
 
     #[cfg(unix)]
-    fn timeout_cleanup_fixture(stall_before_log: bool) {
+    #[test]
+    fn three_timeouts_reset_a_previously_launched_lane() {
+        timeout_cleanup_fixture(false, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn three_timeouts_before_command_handling_reset_a_previously_launched_lane() {
+        timeout_cleanup_fixture(true, true);
+    }
+
+    #[cfg(unix)]
+    fn timeout_cleanup_fixture(stall_before_log: bool, previously_launched: bool) {
         let tmp = tempfile::tempdir().unwrap();
         let fake = tmp.path().join("agent-browser");
         // A timeout may happen before the client handles or records a command.
@@ -479,12 +491,14 @@ esac
         env.vars.push(("AB_STALL_BEFORE_LOG".into(), u8::from(stall_before_log).to_string()));
         let bridge = Bridge::with_binary(env, fake);
         let session = bridge.session("default", tmp.path().join("profile"), tmp.path().join("downloads"));
-        bridge.with_session(&session, |ctx| {
-            ctx.lane.launched = true;
-            ctx.lane.active_tab = Some("t1".into());
-            ctx.lane.capture_active = true;
-        });
-        assert_eq!(bridge.live_session_names(), vec![session.name.clone()]);
+        if previously_launched {
+            bridge.with_session(&session, |ctx| {
+                ctx.lane.launched = true;
+                ctx.lane.active_tab = Some("t1".into());
+                ctx.lane.capture_active = true;
+            });
+        }
+        assert_eq!(bridge.live_session_names(), if previously_launched { vec![session.name.clone()] } else { Vec::new() });
         for attempt in 1..=CONSECUTIVE_TIMEOUT_LIMIT {
             let err = bridge
                 .with_session(&session, |ctx| ctx.run(&["snapshot"], ExecOptions { timeout: Duration::from_millis(1200), stdin: None }))
@@ -493,17 +507,14 @@ esac
             // Count the bridge's timeout results, not child log writes: a
             // timed-out client need not have reached its command handler.
             let reset = attempt == CONSECUTIVE_TIMEOUT_LIMIT;
+            let still_live = previously_launched && !reset;
             bridge.with_session(&session, |ctx| {
                 assert_eq!(ctx.lane.consecutive_timeouts, if reset { 0 } else { attempt });
-                assert_eq!(ctx.lane.launched, !reset);
-                assert_eq!(ctx.lane.active_tab.as_deref(), if reset { None } else { Some("t1") });
-                assert_eq!(ctx.lane.capture_active, !reset);
+                assert_eq!(ctx.lane.launched, still_live);
+                assert_eq!(ctx.lane.active_tab.as_deref(), if still_live { Some("t1") } else { None });
+                assert_eq!(ctx.lane.capture_active, still_live);
             });
-            if reset {
-                assert!(bridge.live_session_names().is_empty());
-            } else {
-                assert_eq!(bridge.live_session_names(), vec![session.name.clone()]);
-            }
+            assert_eq!(bridge.live_session_names(), if still_live { vec![session.name.clone()] } else { Vec::new() });
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.matches("close").count(), usize::from(reset), "{log}");
         }
