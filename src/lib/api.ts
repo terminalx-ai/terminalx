@@ -569,10 +569,6 @@ export const api = {
   /** Say what quitting now would cut short, so the app asks first; null when it is over. */
   setQuitWarning: (warning: string | null) => invoke<void>("set_quit_warning", { warning }),
   workspaceSize: (projectPath: string, path: string) => invoke<number>("workspace_size", { projectPath, path }),
-  /** Ignored build folders the workspace can free (`node_modules`, `dist`…); never new work or local settings. */
-  workspaceRebuildable: (projectPath: string, path: string) => invoke<RebuildableScan>("workspace_rebuildable", { projectPath, path }),
-  /** Move those folders to the Trash: only the ones a fresh scan still offers. */
-  workspaceFreeRebuildable: (projectPath: string, path: string, folders: string[]) => invoke<FreedRebuildable>("workspace_free_rebuildable", { projectPath, path, folders }),
   /**
    * What a workspace holds. With `fetch`, the default branch is fetched and
    * the clean-and-merged check is made too (`landed`); that is for the
@@ -721,18 +717,6 @@ export const api = {
   logCommits: (cwd: string, range?: string | null, limit?: number) =>
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
-
-export interface RebuildableScan {
-  folders: { path: string; bytes: number; files: number }[];
-  bytes: number;
-  files: number;
-}
-
-export interface FreedRebuildable {
-  bytes: number;
-  moved: string[];
-  skipped: string[];
-}
 
 export interface OrganizationSummary {
   id: string;
