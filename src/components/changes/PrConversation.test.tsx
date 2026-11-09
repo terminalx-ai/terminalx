@@ -145,7 +145,7 @@ describe("visibility and late responses", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     let finishRead!: (value: Conversation) => void;
     const replacement: PrConversationAccess = {
-      read: vi.fn(() => new Promise((resolve) => { finishRead = resolve; })), act: vi.fn(), search: vi.fn(),
+      read: vi.fn(() => new Promise<Conversation>((resolve) => { finishRead = resolve; })), act: vi.fn(), search: vi.fn(),
     };
     source = { ...source, conversation: () => replacement };
     rendered.rerender(view());
