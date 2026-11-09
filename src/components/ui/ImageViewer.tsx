@@ -55,6 +55,8 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
   const [note, setNote] = useState<string | null>(null);
   const viewRef = useRef(view);
   viewRef.current = view;
+  const fittedRef = useRef(fitted);
+  fittedRef.current = fitted;
 
   /** The scale at which the whole image, as turned, fits the stage with a margin; never above its own size. */
   const fitScale = useCallback((turns = viewRef.current.turns) => {
@@ -63,7 +65,7 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
     const sideways = turns % 2 === 1;
     const w = sideways ? natural.h : natural.w;
     const h = sideways ? natural.w : natural.h;
-    return Math.min(1, (box.width - 96) / w, (box.height - 96) / h);
+    return Math.max(MIN, Math.min(1, (box.width - 96) / w, (box.height - 96) / h));
   }, [natural]);
 
   const fit = useCallback((turns = viewRef.current.turns) => {
@@ -75,7 +77,8 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
   useLayoutEffect(() => {
     if (!natural) return;
     fit();
-    const onResize = () => { if (fitted) fit(); };
+    // Read through the ref: the closure is the first render's, and a zoom since then must not be undone.
+    const onResize = () => { if (fittedRef.current) fit(); };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [natural]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -144,25 +147,30 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
   const rotate = useCallback(() => fit((viewRef.current.turns + 1) % 4), [fit]);
   const actual = (cx?: number, cy?: number) => zoomAt(1, cx, cy);
 
-  // Keys: + − zoom, 0 fit, 1 actual size, R rotate, ← → step. Escape is the dialog's.
+  // Keys: + − zoom, 0 fit, 1 actual size, R rotate, ← → step, ⌘C (Ctrl+C off a Mac) copies. Escape is the dialog's.
+  // Registered once; what changes is read through refs. The dialog is modal, so nothing else wants these keys.
+  const keys = useRef({ zoomAt, fit, rotate, actual: () => actual(), copy: () => void copy(), many: images.length > 1 });
+  keys.current = { zoomAt, fit, rotate, actual: () => actual(), copy: () => void copy(), many: images.length > 1 };
   useEffect(() => {
+    const mac = navigator.platform.toLowerCase().includes("mac");
     const onKey = (event: KeyboardEvent) => {
-      if (event.metaKey && event.key.toLowerCase() === "c") { void copy(); event.preventDefault(); return; }
+      const k = keys.current;
+      if ((mac ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === "c") { k.copy(); event.preventDefault(); return; }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      const k = event.key;
-      if (k === "+" || k === "=") zoomAt(viewRef.current.scale * STEP);
-      else if (k === "-" || k === "_") zoomAt(viewRef.current.scale / STEP);
-      else if (k === "0") fit();
-      else if (k === "1") actual();
-      else if (k.toLowerCase() === "r") rotate();
-      else if (k === "ArrowRight" && images.length > 1) stepImageViewer(1);
-      else if (k === "ArrowLeft" && images.length > 1) stepImageViewer(-1);
+      const key = event.key;
+      if (key === "+" || key === "=") k.zoomAt(viewRef.current.scale * STEP);
+      else if (key === "-" || key === "_") k.zoomAt(viewRef.current.scale / STEP);
+      else if (key === "0") k.fit();
+      else if (key === "1") k.actual();
+      else if (key.toLowerCase() === "r") k.rotate();
+      else if (key === "ArrowRight" && k.many) stepImageViewer(1);
+      else if (key === "ArrowLeft" && k.many) stepImageViewer(-1);
       else return;
       event.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   const say = (text: string) => {
     setNote(text);
@@ -245,7 +253,7 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
           <button type="button" onClick={() => actual()} title="Actual size (1)" className={cn("h-8 rounded-full px-2.5 text-xs hover:bg-white/10", !fitted && Math.abs(view.scale - 1) < 0.001 && "bg-white/15")}>1:1</button>
           <Tool label="Rotate (R)" onClick={rotate}><RotateCw /></Tool>
           <span aria-hidden className="mx-1 h-4 w-px bg-white/15" />
-          <Tool label="Copy image (⌘C)" onClick={() => void copy()}><Copy /></Tool>
+          <Tool label="Copy image" onClick={() => void copy()}><Copy /></Tool>
           {openOutside && <Tool label="Open in default app" onClick={openOutside}><ExternalLink /></Tool>}
         </div>
         {note && <span role="status" className="absolute bottom-16 rounded-full bg-neutral-900/90 px-3 py-1 text-xs text-white/90 ring-1 ring-white/10">{note}</span>}
@@ -269,6 +277,7 @@ function StepButton({ side, onClick }: { side: "left" | "right"; onClick: () => 
       type="button"
       aria-label={side === "left" ? "Previous image (←)" : "Next image (→)"}
       onPointerDown={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
       onClick={onClick}
       className={cn("absolute top-1/2 flex size-10 -translate-y-1/2 items-center justify-center rounded-full bg-neutral-900/80 text-white/85 ring-1 ring-white/10 hover:bg-neutral-800 hover:text-white", side === "left" ? "left-4" : "right-4")}
     >
