@@ -332,7 +332,12 @@ function load(legacyOnly = false): Prefs {
     }
     if (migrated) {
       try {
-        localStorage.setItem(KEY, JSON.stringify({ ...prefs, ...windowChoices({ ...DEFAULTS, ...legacy }) }));
+        localStorage.setItem(KEY, JSON.stringify({
+          ...prefs, ...windowChoices({ ...DEFAULTS, ...legacy }),
+          // An unrelated migration must not turn the default into a sort choice
+          // or publish this window's override. Undefined stays absent in JSON.
+          sidebarSort: legacy.sidebarSort,
+        }));
       } catch {
         // Still use the migrated preferences when storage is unavailable.
       }
