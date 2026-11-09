@@ -17,10 +17,10 @@ export function NewSessionDialog({ onClose, onCreated }: { onClose: () => void; 
           aria-describedby={undefined}
           data-testid="new-session-dialog"
           ref={content}
-          // Its top edge is pinned where the full form sits when centred, not centred itself: what it reads after
-          // opening (projects, models, branches) makes it taller, and a centred form would jump up as it grew.
-          // Growing downward from a fixed top, it opens once, in place, with the same rise as every dialog.
-          className="fixed left-1/2 top-[max(1rem,calc(50dvh-17rem))] z-(--z-dialog) max-h-[calc(100dvh-max(1rem,calc(50dvh-17rem))-1rem)] w-[calc(100%-2rem)] max-w-3xl -translate-x-1/2 overflow-y-auto outline-none data-[state=open]:animate-dialog-in data-[state=closed]:animate-dialog-out"
+          // Its top edge is pinned at a share of the window's height, not centred: what it reads after opening
+          // (projects, models, branches) makes it taller, and a centred form would jump up as it grew. Growing
+          // downward from a fixed top, it opens once, in place, with the same rise as every dialog.
+          className="fixed left-1/2 top-[max(1rem,12dvh)] z-(--z-dialog) max-h-[calc(100dvh-max(1rem,12dvh)-1rem)] w-[calc(100%-2rem)] max-w-3xl -translate-x-1/2 overflow-y-auto outline-none data-[state=open]:animate-dialog-in data-[state=closed]:animate-dialog-out"
         >
           <DialogPrimitive.Title className="sr-only">New session</DialogPrimitive.Title>
           <NewSessionView modal onCreated={onCreated} />

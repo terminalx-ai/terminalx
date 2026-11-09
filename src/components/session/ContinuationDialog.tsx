@@ -236,7 +236,8 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
         {loading ? <div className="mt-5 flex flex-col gap-2" data-testid="continuation-loading">
           <span className="flex items-center gap-2 text-xs font-medium text-foreground">Agent<span role="status" className="flex items-center gap-1.5 font-normal text-faint"><LoaderCircle className="size-3 animate-spin" />Preparing context…</span></span>
           <div className="flex gap-1.5" aria-hidden>
-            {["w-32", "w-24", "w-16", "w-40"].map((w) => <span key={w} className={cn("h-8 flex-auto animate-pulse-soft rounded-md bg-secondary", w)} />)}
+            {/* In proportion to the pills they stand for (agent, model, effort, permissions), not fixed widths. */}
+            {[8, 6, 4, 10].map((grow) => <span key={grow} className="h-8 basis-0 animate-pulse-soft rounded-md bg-secondary" style={{ flexGrow: grow }} />)}
           </div>
           <span className="mt-4 mb-2 text-xs font-medium text-foreground">Context</span>
           <div className="h-8 animate-pulse-soft rounded-md bg-veil-raised" aria-hidden />
@@ -293,7 +294,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
 /** One side of a two-way choice drawn as a segmented control; a real radio underneath. */
 function Choice({ name, checked, disabled, onChange, label }: { name: string; checked: boolean; disabled?: boolean; onChange: () => void; label: string }) {
   return (
-    <label className={cn("flex cursor-pointer items-center justify-center rounded-[5px] text-muted-foreground transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring/40", checked && "bg-card text-foreground shadow-sm", disabled && "cursor-not-allowed opacity-50")}>
+    <label className={cn("flex cursor-pointer items-center justify-center rounded-sm text-muted-foreground transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring/40", checked && "bg-card text-foreground shadow-sm", disabled && "cursor-not-allowed opacity-50")}>
       <input type="radio" name={name} checked={checked} disabled={disabled} onChange={onChange} aria-describedby="full-context-help" className="sr-only" />
       {label}
     </label>

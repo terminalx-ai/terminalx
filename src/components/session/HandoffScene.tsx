@@ -6,11 +6,12 @@ import { cn } from "@/lib/cn";
  * source as a small stack of lines, glides along the path between them, and
  * the new conversation's lines fill in as it lands; the source stays as it
  * was, since it stays open. One loop is five seconds (app.css, `.hs-*`);
- * under reduced motion it holds the finished handoff.
+ * under reduced motion it holds the finished handoff. It is sized from the
+ * dialog's width (a share of it, at a fixed aspect), so it scales with it.
  */
 export function HandoffScene({ className }: { className?: string }) {
   return (
-    <div aria-hidden className={cn("relative mx-auto h-20 w-full max-w-[20rem]", className)} data-testid="handoff-scene">
+    <div aria-hidden className={cn("relative mx-auto aspect-[4/1] w-[68%]", className)} data-testid="handoff-scene">
       <Window className="left-0" label="This session">
         <Line width="78%" />
         <Line width="54%" />
@@ -22,7 +23,7 @@ export function HandoffScene({ className }: { className?: string }) {
           (translate(-50%, -50%)) rather than a class as well, which would lift it twice. */}
       <span className="absolute inset-y-0 left-[38%] right-[38%]">
         <span className="absolute inset-x-1 top-1/2 border-t border-dashed border-foreground/15" />
-        <span className="hs-packet absolute top-1/2 flex w-7 flex-col gap-0.5 rounded-md bg-accent/90 p-1 shadow-sm">
+        <span className="hs-packet absolute top-1/2 flex w-[30%] flex-col gap-0.5 rounded-md bg-accent/90 p-1 shadow-sm">
           <span className="h-0.5 w-full rounded-full bg-accent-foreground/70" />
           <span className="h-0.5 w-3/4 rounded-full bg-accent-foreground/70" />
           <span className="h-0.5 w-1/2 rounded-full bg-accent-foreground/70" />
