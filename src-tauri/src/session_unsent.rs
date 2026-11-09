@@ -27,6 +27,7 @@ pub(super) struct Sent {
     pub seq: u64,
     pub text: String,
     pub images: Vec<ImageRef>,
+    pub unconfirmed: bool,
 }
 
 /// What a tab's log says of one of its conversations.
@@ -34,7 +35,8 @@ pub(super) struct Sent {
 pub(super) struct Said {
     /// Whether its agent ever said anything in it.
     pub answered: bool,
-    /// The prompts sent since its agent last said anything, oldest first.
+    /// Unanswered prompts, including queued messages not yet acknowledged by
+    /// their identity. Earlier-turn output cannot answer a later queued prompt.
     pub since: Vec<Sent>,
 }
 
@@ -47,13 +49,15 @@ pub(super) enum Restart {
     Resend(Sent),
     /// The CLI never took the reader's prompts. The last is offered again.
     Unsent(Sent),
+    /// Delivery may have happened; never automatically replay this prompt.
+    Unconfirmed(Sent),
 }
 
 /// What the app writes into a conversation itself. None of it says a CLI
 /// ever had the conversation; anything else there came from its agent.
 fn the_apps_own(payload: &Value) -> bool {
     match payload["type"].as_str() {
-        Some("status" | "recovery" | "error" | "settings_changed") => true,
+        Some("status" | "recovery" | "error" | "settings_changed" | "prompt_withdrawn") => true,
         // A CLI that exits with a turn open has the turn closed for it.
         Some("turn_completed") => payload["status"].as_str() != Some("ok"),
         _ => false,
@@ -67,6 +71,9 @@ fn the_apps_own(payload: &Value) -> bool {
 pub(super) fn said_in(log: &Path, conversation: Option<&str>) -> Said {
     use std::io::BufRead;
     let mut said = Said::default();
+    let mut messages: HashMap<u64, Sent> = HashMap::new();
+    let mut pending = std::collections::HashSet::new();
+    let mut withdrawn = std::collections::HashSet::new();
     let Ok(file) = std::fs::File::open(log) else { return said };
     let mut under: Option<String> = None;
     for line in std::io::BufReader::new(file).lines().map_while(std::result::Result::ok) {
@@ -80,15 +87,53 @@ pub(super) fn said_in(log: &Path, conversation: Option<&str>) -> Said {
             continue;
         }
         let subagent = !event["subagent"].is_null();
+        let prompt_seq = payload["promptSeq"].as_u64();
+        if !subagent {
+            match payload["type"].as_str() {
+                Some("prompt_withdrawn") => {
+                    if let Some(seq) = prompt_seq {
+                        pending.insert(seq);
+                        withdrawn.insert(seq);
+                        if let Some(sent) = messages.get(&seq) {
+                            let mut sent: Sent = sent.clone();
+                            sent.unconfirmed = payload["unconfirmed"].as_bool().unwrap_or(false);
+                            said.since.retain(|sent| sent.seq != seq);
+                            said.since.push(sent);
+                            said.since.sort_by_key(|sent| sent.seq);
+                        }
+                    }
+                    continue;
+                }
+                Some("prompt_absorbed" | "turn_started" | "prompt_joined" | "prompt_replaced") => {
+                    if let Some(seq) = prompt_seq {
+                        pending.remove(&seq);
+                        withdrawn.remove(&seq);
+                        said.since.retain(|sent| sent.seq != seq);
+                    }
+                }
+                _ => {}
+            }
+        }
         match event["seq"].as_u64() {
-            Some(seq) if payload["type"] == "user_message" && !subagent => said.since.push(Sent {
-                seq,
-                text: payload["text"].as_str().unwrap_or_default().to_string(),
-                images: serde_json::from_value(payload["images"].clone()).unwrap_or_default(),
-            }),
+            Some(seq) if payload["type"] == "user_message" && !subagent => {
+                // A deliberate new send moves past withdrawn prompts. Until
+                // then even late output/checkpoints must retain their text.
+                said.since.retain(|sent| !withdrawn.contains(&sent.seq));
+                pending.retain(|seq| !withdrawn.contains(seq));
+                withdrawn.clear();
+                let sent = Sent {
+                    seq,
+                    text: payload["text"].as_str().unwrap_or_default().to_string(),
+                    images: serde_json::from_value(payload["images"].clone()).unwrap_or_default(),
+                    unconfirmed: false,
+                };
+                if payload["queued"].as_bool() == Some(true) { pending.insert(seq); }
+                messages.insert(seq, sent.clone());
+                said.since.push(sent);
+            }
             _ if subagent || !the_apps_own(payload) => {
                 said.answered = true;
-                said.since.clear();
+                said.since.retain(|sent| pending.contains(&sent.seq));
             }
             _ => {}
         }
@@ -108,6 +153,7 @@ pub(super) fn sent_at(log: &Path, seq: u64) -> Option<Sent> {
             seq,
             text: payload["text"].as_str().unwrap_or_default().to_string(),
             images: serde_json::from_value(payload["images"].clone()).unwrap_or_default(),
+            unconfirmed: false,
         })
     })
 }
@@ -124,9 +170,10 @@ pub(super) fn restart(said: Said, continuation: Option<u64>, its_own: bool) -> O
     // Prompts sent after the brief, while it went unanswered, were sent to an
     // agent that had not read it: the brief is what goes again.
     if let Some(at) = continuation.and_then(|seq| since.iter().position(|sent| sent.seq == seq)) {
-        return Some(Restart::Resend(since.swap_remove(at)));
+        let sent = since.swap_remove(at);
+        return Some(if sent.unconfirmed { Restart::Unconfirmed(sent) } else { Restart::Resend(sent) });
     }
-    since.pop().map(Restart::Unsent)
+    since.pop().map(|sent| if sent.unconfirmed { Restart::Unconfirmed(sent) } else { Restart::Unsent(sent) })
 }
 
 /// An image the reader sent, read back from where it was archived, to be
@@ -158,6 +205,7 @@ impl SessionManager {
                 self.publish(rt, Payload::Status { text }, None);
                 self.redeliver(rt, rt_arc, sent);
             }
+            Restart::Unconfirmed(_) => self.needs_recovery(rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery),
             Restart::Unsent(_) if prompting => {
                 let text = format!("{agent} never received your earlier prompt, so its conversation starts with this one.");
                 self.publish(rt, Payload::Status { text }, None);
@@ -228,11 +276,13 @@ impl SessionManager {
         let mut said = said_in(&log, tab.follow.conversation.as_deref());
         let last = if codex_stdio::selected(tab) {
             match restart(said, tab.continuation, false) {
-                Some(Restart::Resend(sent) | Restart::Unsent(sent)) => Some(sent),
+                Some(Restart::Resend(sent) | Restart::Unsent(sent) | Restart::Unconfirmed(sent)) => Some(sent),
                 _ => None,
             }
         } else { said.since.pop() };
-        last.ok_or_else(|| anyhow!("There is no unanswered prompt to send again."))
+        let last = last.ok_or_else(|| anyhow!("There is no unanswered prompt to send again."))?;
+        anyhow::ensure!(!last.unconfirmed, "Delivery of this prompt is unconfirmed. Check the conversation and the outcome of its work before sending it again.");
+        Ok(last)
     }
 }
 
@@ -249,7 +299,7 @@ mod tests {
     }
 
     fn sent(seq: u64, text: &str) -> Sent {
-        Sent { seq, text: text.into(), images: Vec::new() }
+        Sent { seq, text: text.into(), images: Vec::new(), unconfirmed: false }
     }
 
     fn log(lines: &[String]) -> (tempfile::TempDir, PathBuf) {
@@ -285,6 +335,48 @@ mod tests {
         assert_eq!(restart_of(None), Some(Restart::Unsent(sent(35, "continue"))));
         // A continuation that is not among them was taken long ago.
         assert_eq!(restart_of(Some(99)), Some(Restart::Unsent(sent(35, "continue"))));
+    }
+
+    #[test]
+    fn a_delivery_failure_does_not_count_as_an_agent_answer() {
+        for unconfirmed in [false, true] {
+            let (_dir, path) = log(&[
+                line(1, serde_json::json!({ "type": "user_message", "text": "keep me", "queued": true })),
+                line(2, serde_json::json!({ "type": "prompt_withdrawn", "promptSeq": 1, "unconfirmed": unconfirmed })),
+            ]);
+            let mut expected = sent(1, "keep me");
+            expected.unconfirmed = unconfirmed;
+            let expected = if unconfirmed { Restart::Unconfirmed(expected) } else { Restart::Unsent(expected) };
+            assert_eq!(restart(said_in(&path, None), None, true), Some(expected));
+        }
+    }
+
+    #[test]
+    fn queued_prompts_survive_other_turns_output_and_withdrawal_restores_their_identity() {
+        for unconfirmed in [false, true] {
+            let (_dir, path) = log(&[
+                prompt(1, "A"),
+                line(2, serde_json::json!({"type":"user_message","text":"B","queued":true,"images":[{"url":"/saved.png","mediaType":"image/png","name":"saved.png"}]})),
+                line(3, serde_json::json!({"type":"assistant_text","text":"A's answer"})),
+                line(4, serde_json::json!({"type":"turn_completed","status":"ok"})),
+            ]);
+            let pending = said_in(&path, None);
+            assert_eq!(pending.since.len(), 1);
+            assert_eq!(pending.since[0].seq, 2);
+            store::append_line(&path, line(5, serde_json::json!({"type":"prompt_withdrawn","promptSeq":2,"unconfirmed":unconfirmed})).trim()).unwrap();
+            store::append_line(&path, line(6, serde_json::json!({"type":"turn_completed","status":"ok"})).trim()).unwrap();
+            let withdrawn = said_in(&path, None);
+            assert_eq!(withdrawn.since[0].seq, 2);
+            assert_eq!(withdrawn.since[0].text, "B");
+            assert_eq!(withdrawn.since[0].images[0].url, "/saved.png");
+            assert_eq!(withdrawn.since[0].unconfirmed, unconfirmed);
+            assert!(matches!(restart(withdrawn, None, false), Some(Restart::Unsent(_)) if !unconfirmed)
+                || matches!(restart(said_in(&path, None), Some(2), false), Some(Restart::Unconfirmed(_)) if unconfirmed));
+            // A delayed acknowledgement settles only B, not another queued C.
+            store::append_line(&path, line(7, serde_json::json!({"type":"user_message","text":"C","queued":true})).trim()).unwrap();
+            store::append_line(&path, line(8, serde_json::json!({"type":"prompt_absorbed","promptSeq":2})).trim()).unwrap();
+            assert_eq!(said_in(&path, None).since, [sent(7, "C")]);
+        }
     }
 
     #[test]
