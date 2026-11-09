@@ -61,6 +61,7 @@ try {
   await search.getByRole("button", { name: "Match case" }).click();
   await page.waitForFunction(() => document.querySelector('[role="search"] [role="status"]')?.textContent?.endsWith("of 2"));
   await input.fill("absent match");
+  await page.waitForFunction(() => document.querySelector('[role="search"] [role="status"]')?.textContent === "No matches");
   assert.equal(await search.getByRole("status").textContent(), "No matches");
   await page.keyboard.press("Escape");
   assert.equal(await page.evaluate(() => window.__TERMINAL_CHECKS__.interrupted), 0, "closing terminal search must not interrupt the running agent");
@@ -82,9 +83,9 @@ try {
   // Moving into a closed panel must acquire the new host without recreating xterm.
   await page.getByRole("button", { name: "Toggle panel", exact: true }).click();
   await dock.waitFor({ state: "detached" });
-  await full.locator(".xterm-helper-textarea").focus();
-  await page.keyboard.press("Shift+Tab");
-  await page.keyboard.press("Shift+Tab");
+  // Tab in xterm belongs to the shell; enter application navigation at its search control.
+  await full.getByRole("button", { name: "Search terminal", exact: true }).focus();
+  await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
   assert(await full.getByRole("button", { name: "Move to dock" }).evaluate((el) => document.activeElement === el), "the corner toolbar exposes Move to dock to keyboard navigation");
   await page.keyboard.press("Enter");
   await dock.locator(".xterm").waitFor();
