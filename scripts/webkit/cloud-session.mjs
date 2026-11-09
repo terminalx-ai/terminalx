@@ -594,11 +594,22 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   await page.locator('main [data-composer-toolbar] [data-testid="composer-options"]').waitFor();
   let measured = await permissionButton(page);
   const options = page.locator('main [data-composer-toolbar] [data-testid="composer-options"]');
-  // Reproduce the preceding control's tooltip being open. A single synthetic
-  // pointer jump can leave Radix's hover-transition state on that tooltip.
+  // Pin the scheduling case where opening the panel leaves Refresh's tooltip
+  // open under the pointer. Start from a fresh pointer entry, not a second
+  // hover over a trigger whose tooltip was already dismissed.
+  await page.mouse.move(0, 0);
+  await page.keyboard.press("Escape");
+  await page.getByRole("tooltip").waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "Refresh", exact: true }).hover();
+  await page.getByRole("tooltip", { name: "Refresh", exact: true }).waitFor();
+  // A synthetic jump from any open tooltip can leave Radix in pointer transit.
+  // Dismiss and observe its closure before entering the next trigger.
+  await page.keyboard.press("Escape");
+  await page.getByRole("tooltip").waitFor({ state: "hidden" });
   await page.getByRole("button", { name: "Toggle panel" }).hover();
   await page.getByRole("tooltip", { name: /^Hide panel/ }).waitFor();
   await page.keyboard.press("Escape");
+  await page.getByRole("tooltip").waitFor({ state: "hidden" });
   await options.hover();
   // Wait for this trigger's tooltip, independently of the text we assert below.
   const tooltip = page.locator('xpath=//*[@role="tooltip"][@id=//main//*[@data-testid="composer-options"]/@aria-describedby]');
