@@ -567,7 +567,11 @@ const permissionMenuItem = (page) =>
     const shield = icon?.getBoundingClientRect();
     const iconInside = !!shield && shield.width > 0 && shield.height > 0 && shield.left >= rect.left && shield.right <= rect.right && shield.top >= rect.top && shield.bottom <= rect.bottom;
     const tint = !icon ? null : icon.classList.contains("text-destructive") ? "danger" : icon.classList.contains("text-info") ? "plan" : "plain";
-    return { name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1, tint, iconInside };
+    return {
+      tint, name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1,
+      iconInside,
+      tone: icon?.classList.contains("text-destructive") ? "danger" : icon?.classList.contains("text-info") ? "plan" : "guarded",
+    };
   });
 
 function permissionChecks(measured) {
@@ -579,6 +583,7 @@ function permissionChecks(measured) {
   };
 }
 
+const MODE_TONE = { bypassPermissions: "danger", manual: "guarded", plan: "plan" };
 const MODE_LABEL = { bypassPermissions: "Bypass permissions", manual: "Ask every time", plan: "Plan" };
 const MODE_TINT = { bypassPermissions: "danger", manual: "plain", plan: "plan" };
 for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
@@ -625,6 +630,7 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
     {
       "the side panel is open": !!measured?.panel,
       ...permissionChecks(measured),
+      "the permission shield is visible inside the menu with the mode's tone": !!item && item.iconInside && item.tone === MODE_TONE[permissionMode],
       "the options tooltip names the mode in force": tooltipText === `More options · ${MODE_LABEL[permissionMode]}`,
       "the More options menu names the mode, whole": !!item && item.label === MODE_LABEL[permissionMode] && item.whole,
       "the menu item's accessible name says which mode is in force": !!item && item.name === `Permission mode: ${MODE_LABEL[permissionMode]}`,
