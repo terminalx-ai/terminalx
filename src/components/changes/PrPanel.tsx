@@ -218,7 +218,7 @@ export function PrPanel({
   }, [active, loading, working, tick, pendingRuns]);
 
   const actionLock = useRef<number | null>(null);
-  const act = async (label: string, fn: () => Promise<string | null | void>) => {
+  const act = async (label: string, fn: () => Promise<string | null | void>, reconcile = true) => {
     if (actionLock.current === generation) return false;
     actionLock.current = generation;
     actionError.current = null;
@@ -229,7 +229,7 @@ export function PrPanel({
       const said = await fn();
       if (!mounted.current || selected.current.generation !== generation) return false;
       if (said) setNotice(said);
-      setTick((t) => t + 1);
+      if (reconcile) setTick((t) => t + 1);
       return true;
     } catch (e) {
       if (!mounted.current || selected.current.generation !== generation) return false;
@@ -238,7 +238,7 @@ export function PrPanel({
       setErrorFrom("action");
       // Reconcile a lost answer, but a revoked action cannot start a fresh
       // generation of reads. Normal refresh/new actions remain available.
-      if (!actionError.current.includes(PRIVACY_MESSAGE)) setTick((t) => t + 1);
+      if (reconcile && !actionError.current.includes(PRIVACY_MESSAGE)) setTick((t) => t + 1);
       return false;
     } finally {
       if (actionLock.current === generation) actionLock.current = null;
@@ -261,7 +261,10 @@ export function PrPanel({
       }]);
     }
     return `Re-run requested for ${checks.length} Actions ${checks.length === 1 ? "run" : "runs"}.`;
-  });
+  // An Actions reply can arrive after its ticket expires, including success or
+  // an ordinary error. Keep its result, then let independent polling/manual
+  // refresh read again; this old action cannot initiate unscoped reconciliation.
+  }, false);
 
   /** Merged from here: where workspaces are removed once merged, this one is looked at now rather than at the next pass. */
   const merge = (row: SessionPr, method: "merge" | "squash" | "rebase" | "queue") =>

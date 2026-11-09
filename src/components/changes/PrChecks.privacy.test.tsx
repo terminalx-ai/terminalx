@@ -21,9 +21,12 @@ let writes: number[], collections: number, prompts: number;
 let hold: "rerun" | "discovery" | "associated" | undefined;
 let release: (() => void) | undefined;
 let associatedOnly: boolean;
+let current: PullRequest;
+let holdRun: number | undefined, refuseRun: number | undefined;
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  current = structuredClone(pr); holdRun = undefined; refuseRun = undefined;
   policy = { enabled: false, managed: false, epoch: 0 };
   writes = []; collections = 0; prompts = 0; release = undefined; hold = undefined; associatedOnly = false;
   mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
@@ -38,14 +41,21 @@ beforeEach(async () => {
     if (command === "data_privacy_set") { if (args.enabled && !policy.enabled) policy.epoch++; policy.enabled = args.enabled as boolean; return policy; }
     if (command === "data_privacy_status") return policy;
     if (command === "gh_available") return true;
+    if (command === "workspace_disposition") return { exists: true, checked: true, branch: "feature", isMain: true };
     if (command === "work_status") return { branch: "feature", defaultBranch: "main", aheadOfBase: 1 };
     if (command === "pr_check_authority") { admit(); return { owner: "native", epoch: policy.epoch }; }
-    if (command === "pr_list") { admit(); return complete("discovery", associatedOnly ? [] : [pr]); }
+    if (command === "pr_list") { admit(); return complete("discovery", associatedOnly ? [] : [current]); }
     if (command === "pr_associations") return [{ url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd: input.cwd } }];
-    if (command === "pr_details") { admit(); return complete("associated", pr); }
+    if (command === "pr_details") { admit(); return complete("associated", current); }
     if (command === "pr_check_rerun") {
-      admit(); writes.push(Number(String(args.checkUrl).split("/").at(-1)));
-      return complete("rerun", undefined);
+      admit();
+      const run = Number(String(args.checkUrl).split("/").at(-1));
+      // The provider outcome exists before the reply is delivered to the UI.
+      const refused = run === refuseRun;
+      if (!refused) writes.push(run);
+      if (holdRun === undefined || holdRun === run) await complete("rerun", undefined);
+      if (refused) throw new Error("GitHub rejected this workflow rerun");
+      return undefined;
     }
     if (command === "pr_check_fix_attachment") { admit(); collections++; return { path: "/logs/failure.log", truncated: false }; }
     if (command === "send_message") { prompts++; return { queued: false, events: [] }; }
@@ -118,4 +128,52 @@ for (const boundary of ["discovery", "associated"] as const) {
     const attachment = mocks.invoke.mock.calls.filter(([command]) => command === "pr_check_fix_attachment").at(-1)!;
     expect(attachment[1].authority).toEqual({ owner: "native", epoch: 1 });
   });
+}
+
+// Freeze independent poll timers: every read observed before clicking Refresh
+// must come from the completed action, not the separate background scheduler.
+for (const count of [1, 2]) {
+  for (const outcome of ["success", "ordinary-error"] as const) {
+    it.each(cases)(`does not reconcile a delayed final ${outcome} for ${count} workflow(s): %o`, async ({ managed, cycle }) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        current.checks = current.checks.slice(0, count);
+        const finalRun = count === 1 ? 12 : 56;
+        hold = "rerun"; holdRun = finalRun;
+        if (outcome === "ordinary-error") refuseRun = finalRun;
+        await act(async () => {
+          render(<PrPanel cwd={input.cwd} sessionId="s" branch="feature" active busy={false}
+            workspace={{ projectPath: input.cwd, onDelete: vi.fn() }} />);
+        });
+        const reads = () => mocks.invoke.mock.calls.filter(([command]) => ["work_status", "pr_list", "pr_details", "pr_associations", "pr_landed", "workspace_disposition"].includes(command));
+        const before = [...reads()];
+        expect(before.some(([command]) => command === "pr_list")).toBe(true);
+        expect(before.some(([command]) => command === "workspace_disposition")).toBe(true);
+        const button = screen.getByRole("button", { name: "Re-run all" });
+        expect((button as HTMLButtonElement).disabled).toBe(false);
+        await act(async () => { fireEvent.click(button); });
+        expect(release).toBeTypeOf("function");
+        const completed = current.checks.map((check) => check.actions!.runId).filter((run) => run !== refuseRun);
+        expect(writes).toEqual(completed);
+        await act(async () => { await revoke(managed, cycle); release!(); });
+        if (outcome === "success") expect(screen.getByRole("status").textContent).toContain(`Re-run requested for ${count} Actions`);
+        else expect(screen.getByRole("alert").textContent).toContain("GitHub rejected this workflow rerun");
+        for (const check of current.checks) {
+          expect(screen.getByLabelText(`${check.name}: ${completed.includes(check.actions!.runId) ? "queued" : "failure"}`)).toBeTruthy();
+        }
+        expect(reads()).toEqual(before); // no immediate unscoped reconciliation
+        expect(writes).toEqual(completed); // no mutation replay
+        await act(async () => { policy.enabled = false; policy.managed = false; await refreshDataPrivacy(); });
+        expect(reads()).toEqual(before);
+        await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh pull requests" })); });
+        expect(reads().filter(([command]) => command === "pr_list")).toHaveLength(2);
+        expect(reads().filter(([command]) => command === "workspace_disposition")).toHaveLength(2);
+        expect(writes).toEqual(completed);
+        if (outcome === "ordinary-error") expect(screen.getByRole("alert").textContent).toContain("GitHub rejected this workflow rerun");
+      } finally {
+        cleanup();
+        vi.useRealTimers();
+      }
+    });
+  }
 }
