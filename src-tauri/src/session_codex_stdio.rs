@@ -530,13 +530,16 @@ impl SessionManager {
     /// A prompt refused at its write, as `cancel_shared_prompt` ends a PTY
     /// one: the turn it opened ends as stopped and the tab is idle again. A
     /// manual compaction opened no user turn, so it only closes.
-    fn withdraw_codex_prompt(&self, rt: &mut TabRuntime, seq: Option<u64>) {
+    fn withdraw_codex_prompt(&self, rt: &mut TabRuntime, seq: Option<u64>) -> Result<()> {
         if rt.stdio_followups.active.take().is_some() {
             if let Some(seq) = seq { self.publish(rt, Payload::PromptWithdrawn { prompt_seq: seq, unconfirmed: false }, None); }
         }
-        self.withdraw_codex_followups(rt);
         if seq.is_some() { self.end_open_turn(rt, TurnStatus::Aborted, None); } else { rt.turn_open = false; }
         self.set_status(rt, TabStatus::Idle);
+        // Only this unsent request lost admission. The connection is still
+        // usable, and each successor keeps its own original authority. Stop
+        // and connection failure use withdraw_codex_followups instead.
+        self.deliver_codex_followup(rt)
     }
 
     /// `sender`: the phone's or share's authority a prompt frame carries,
@@ -595,7 +598,7 @@ impl SessionManager {
                     (Err(error), _) | (_, Err(error)) => {
                         engine.withdraw(&frame);
                         log::warn!("[{}] withdrew a Codex prompt before delivery: {error:#}", rt.key());
-                        if frame.delivers_prompt() { self.withdraw_codex_prompt(&mut rt, sender.as_ref().and_then(|sender| sender.seq)); }
+                        if frame.delivers_prompt() { self.withdraw_codex_prompt(&mut rt, sender.as_ref().and_then(|sender| sender.seq))?; }
                         return Ok(());
                     }
                 };

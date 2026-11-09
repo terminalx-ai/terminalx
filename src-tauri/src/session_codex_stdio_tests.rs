@@ -1949,27 +1949,44 @@ fn native3_fixture(case: &str, manager: &SessionManager, root: &Path, bin: &Path
         let queued = manager.queued("stdio-owner", "tab");
         assert_eq!(queued.len(), 1);
         let seq: u64 = queued[0].id.parse().unwrap();
+        let child = rt.lock().unwrap().child.clone().unwrap();
+        let local_texts = ["first local queued before activation", "second local queued before activation"];
+        let local_seqs: Vec<_> = local_texts.iter().map(|text| {
+            let sent = manager.send("stdio-owner", "tab", (*text).into(), vec![]).unwrap();
+            assert!(sent.queued);
+            sent.events[0].seq
+        }).collect();
+        assert_eq!(manager.queued("stdio-owner", "tab").iter().map(|q| q.id.clone()).collect::<Vec<_>>(),
+            vec![seq.to_string(), local_seqs[0].to_string(), local_seqs[1].to_string()]);
         assert_eq!(requests().len(), 1, "the remote follow-up waits for the running turn");
         policy(true); if case.ends_with("cycle") { policy(false); }
         std::fs::remove_file(bin.join("hold-finish")).unwrap();
         wait("queued remote authority withdrawn", &|| events().iter().any(|e| matches!(e.payload,
-            Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if prompt_seq == seq)) && !rt.lock().unwrap().turn_open);
-        assert_eq!(requests().len(), 1, "an expired queued ticket reached physical stdin");
+            Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if prompt_seq == seq)));
+        wait("both already-queued local messages delivered", &|| requests().len() == 3 && !rt.lock().unwrap().turn_open);
+        assert_eq!(requests().iter().map(|f| f["params"]["input"][0]["text"].as_str().unwrap().to_owned()).collect::<Vec<_>>(),
+            vec!["local running turn", local_texts[0], local_texts[1]]);
+        let withdrawn: Vec<_> = events().iter().filter_map(|e| match e.payload {
+            Payload::PromptWithdrawn { prompt_seq, unconfirmed } => Some((prompt_seq, unconfirmed)), _ => None,
+        }).collect();
+        assert_eq!(withdrawn, vec![(seq, false)], "only the stale remote request may be withdrawn");
+        for seq in &local_seqs {
+            assert_eq!(events().iter().filter(|e| matches!(e.payload, Payload::TurnStarted { prompt_seq: Some(s), .. } if s == *seq)).count(), 1);
+        }
+        assert!(rt.lock().unwrap().child.as_ref().is_some_and(|live| Arc::ptr_eq(live, &child)), "refusal must preserve the usable child");
         assert!(manager.queued("stdio-owner", "tab").is_empty());
-        manager.send("stdio-owner", "tab", "local after withdrawal".into(), vec![]).unwrap();
-        wait("local restoration", &|| requests().len() == 2 && !rt.lock().unwrap().turn_open);
-        assert_eq!(requests()[1]["params"]["input"][0]["text"], "local after withdrawal");
         policy(false);
         // Positive control follows the same busy queue path with fresh authority.
         std::fs::write(bin.join("hold-finish"), "").unwrap();
         manager.send("stdio-owner", "tab", "fresh running turn".into(), vec![]).unwrap();
-        wait("fresh running turn acknowledged", &|| requests().len() == 3 && events().iter().filter(|e| matches!(e.payload, Payload::TurnStarted { .. })).count() == 3);
+        wait("fresh running turn acknowledged", &|| requests().len() == 4 && events().iter().filter(|e| matches!(e.payload, Payload::TurnStarted { .. })).count() == 4);
         assert_eq!(send("fresh queued relay")["ok"], true);
         assert_eq!(manager.queued("stdio-owner", "tab").len(), 1);
         std::fs::remove_file(bin.join("hold-finish")).unwrap();
-        wait("fresh queued relay delivered", &|| requests().len() == 4 && !rt.lock().unwrap().turn_open);
-        assert_eq!(requests()[3]["params"]["input"][0]["text"], "fresh queued relay");
+        wait("fresh queued relay delivered", &|| requests().len() == 5 && !rt.lock().unwrap().turn_open);
+        assert_eq!(requests()[4]["params"]["input"][0]["text"], "fresh queued relay");
         assert!(requests().iter().all(|f| f["params"]["input"][0]["text"] != "expired relay follow-up"));
+        assert_eq!(events().iter().filter(|e| matches!(e.payload, Payload::PromptWithdrawn { .. })).count(), 1);
     } else if case.contains("handshake") {
         std::fs::write(bin.join("hold"), "").unwrap();
         let result = send("expired relay prompt");
