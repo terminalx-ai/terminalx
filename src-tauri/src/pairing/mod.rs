@@ -161,13 +161,6 @@ impl PairingManager {
                 events.mobile.capture_agent_event(&events, payload);
             }),
         );
-        let statuses = self.clone();
-        sink.listen(
-            "tab_status",
-            Box::new(move |_| {
-                statuses.mobile.broadcast_sessions_changed();
-            }),
-        );
         if !self.registry.list()?.is_empty() {
             // Tauri setup runs outside Tokio. Restore the listener on the
             // runtime so saved LAN pairings work without a new code or Relay.

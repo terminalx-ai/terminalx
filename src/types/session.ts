@@ -1,3 +1,5 @@
+import type { ManualStatus } from "@terminalx/portable/manualStatus";
+export type { ManualStatus } from "@terminalx/portable/manualStatus";
 import type { AutomationRef } from "@/types/automations";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 
@@ -108,6 +110,8 @@ export interface RemovedWorkspace {
 export type SessionKind = "project" | "quick";
 
 export interface SessionEntry {
+  /** The person’s workflow status; older entries default to Backlog. */
+  manualStatus?: ManualStatus;
   id: string;
   kind?: SessionKind;
   /**

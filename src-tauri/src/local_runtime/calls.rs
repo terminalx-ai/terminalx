@@ -135,6 +135,12 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
                 else { manager.workspace(operation, params["params"].clone()) }
             });
         }
+        "manualStatus" => {
+            let patch = crate::session_ops::SessionPatch { manual_status: Some(serde_json::from_value(params["status"].clone())?), ..Default::default() };
+            let session = crate::session_ops::update_session_meta(string(&params, "sessionId")?, &patch).map_err(anyhow::Error::msg)?;
+            manager.sink().emit("session_updated", &session);
+            return Ok(Value::Null);
+        }
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
         "automations" => return Ok(serde_json::to_value(crate::store::automations::list()?)?),
         "automationRuns" => return Ok(serde_json::to_value(crate::store::automations::list_runs(string(&params, "id")?)?)?),

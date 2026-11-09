@@ -271,6 +271,7 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         archived: false,
         archive: Default::default(),
         pinned: false,
+        manual_status: Default::default(),
         active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
         link: None,
         tabs: first_tab.into_iter().collect(),
@@ -382,6 +383,7 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
             tabs: first_tab.into_iter().collect(),
             unknown: BTreeMap::new(),
@@ -1024,7 +1026,7 @@ pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
     Ok(())
 }
 
-/// Title, pin and archive changes to one session. `None` leaves a field as it is.
+/// Metadata changes to one session. `None` leaves a field as it is.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionPatch {
@@ -1034,11 +1036,13 @@ pub struct SessionPatch {
     pub pinned: Option<bool>,
     #[serde(default)]
     pub archived: Option<bool>,
+    #[serde(default)]
+    pub manual_status: Option<index::ManualStatus>,
 }
 
 impl SessionPatch {
     pub fn is_empty(&self) -> bool {
-        self.title.is_none() && self.pinned.is_none() && self.archived.is_none()
+        self.title.is_none() && self.pinned.is_none() && self.archived.is_none() && self.manual_status.is_none()
     }
 }
 
@@ -1080,6 +1084,9 @@ pub(crate) fn update_session_meta(session_id: &str, patch: &SessionPatch) -> Res
         }
         if let Some(pinned) = patch.pinned {
             s.pinned = pinned;
+        }
+        if let Some(status) = patch.manual_status {
+            s.manual_status = Some(status);
         }
         // A person's archive, as every other way in or out marks it (#718).
         if let Some(archived) = patch.archived {

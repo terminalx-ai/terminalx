@@ -2764,7 +2764,7 @@ impl WorkspaceRpc {
             patch.title = Some(title);
         }
         if patch.is_empty() {
-            return Err(RpcError::invalid("name a title, pinned or archived"));
+            return Err(RpcError::invalid("name a title, pinned, archived or manualStatus"));
         }
         let updated = crate::session_ops::update_session_meta(&session.id, &patch).map_err(RpcError::internal)?;
         self.sink.emit("session_updated", &updated);

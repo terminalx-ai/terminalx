@@ -54,13 +54,14 @@ fn privacy_relay_child() {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).max_blocking_threads(1).enable_all().build().unwrap();
     let rpc = WorkspaceRpc::new(&root, 1, rig.manager.sink.clone(), rig.manager.terminals.clone(), Some(rig.manager.clone())).unwrap();
     let (peer, _events) = Peer::new("relay-privacy".into(), Authority::Manage);
-    let hello = json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["fs/1","session/1","ports/1"]}});
+    let hello = json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["fs/1","session/1","session/2","session-status/1","ports/1"]}});
     assert_eq!(runtime.block_on(rpc.handle(&peer,&hello))["ok"],true);
     let request = |method: &str| json!({"id":"mutation","method":method,"params":{
         "clientRequestId":uuid::Uuid::new_v4().to_string(),"path":"target","text":"remote",
-        "sessionId":SESSION,"tabId":TAB}});
+        "sessionId":SESSION,"tabId":TAB,"manualStatus":"in_review"}});
     let target = root.join("target");
-    for method in ["fs.write", "fs.delete", "session.send"] {
+    for method in ["fs.write", "fs.delete", "session.send", "session.update"] {
+        index::update_session(SESSION, |session| { session.manual_status = Some(index::ManualStatus::Backlog); Ok(()) }).unwrap();
         std::fs::write(&target,"original").unwrap();
         policy(true,managed);
         refused(&runtime.block_on(rpc.handle_owned(peer.clone(),request(method))));
@@ -78,8 +79,9 @@ fn privacy_relay_child() {
         refused(&runtime.block_on(pending));
         assert_eq!(std::fs::read_to_string(&target).unwrap(),"original");
         assert!(std::fs::read(&input).unwrap_or_default().is_empty());
+        assert_eq!(index::get(SESSION).unwrap().manual_status, Some(index::ManualStatus::Backlog), "queued remote status must not mutate after off/on");
     }
-    for method in ["fs.write", "fs.delete"] {
+    for method in ["fs.write", "fs.delete", "session.update"] {
         std::fs::write(&target,"original").unwrap();
         let (entered,arrived)=mpsc::channel(); let (release,released)=mpsc::channel();
         *crate::remote::server::BEFORE_REMOTE_WORK.lock().unwrap()=Some(Box::new(move || {
@@ -91,17 +93,24 @@ fn privacy_relay_child() {
         let (acknowledged,ack)=mpsc::channel();
         let activation=std::thread::spawn(move || { policy(true,managed); acknowledged.send(()).unwrap(); });
         wait_for("policy withdrew authority", crate::data_privacy::enabled);
-        assert!(ack.recv_timeout(Duration::from_millis(100)).is_err(), "acknowledged before an admitted filesystem mutation finished");
+        assert!(ack.recv_timeout(Duration::from_millis(100)).is_err(), "acknowledged before an admitted mutation finished");
         release.send(()).unwrap();
         assert_eq!(runtime.block_on(pending).unwrap()["ok"],true);
         ack.recv_timeout(WAIT).unwrap(); activation.join().unwrap();
         let after=std::fs::read(&target).ok();
+        let status = index::get(SESSION).unwrap().manual_status;
+        if method == "session.update" { assert_eq!(status, Some(index::ManualStatus::InReview), "admitted metadata work completes before acknowledgement"); }
         policy(false,managed);
         assert_eq!(std::fs::read(&target).ok(),after);
+        assert_eq!(index::get(SESSION).unwrap().manual_status, status);
         // A fresh remote request still works without restarting/signing in.
         assert_eq!(runtime.block_on(rpc.handle_owned(peer.clone(),request("fs.write")))["ok"],true);
         assert_eq!(std::fs::read_to_string(&target).unwrap(),"remote");
     }
+    let mut fresh_status = request("session.update");
+    fresh_status["params"]["manualStatus"] = json!("done");
+    assert_eq!(runtime.block_on(rpc.handle_owned(peer.clone(),fresh_status))["ok"], true);
+    assert_eq!(index::get(SESSION).unwrap().manual_status, Some(index::ManualStatus::Done));
     // Return from session.send while its real PTY write is behind an older
     // FIFO item. Only the captured ticket can prevent off/on resurrection.
     let queue=rig.manager.writers.lock().unwrap().entry(rig.pane.clone()).or_default().ticket();

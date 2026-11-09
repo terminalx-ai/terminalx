@@ -85,6 +85,27 @@ fn forwarding(root: &Path, fixture: &FetchFixture, managed: bool) {
     assert!(connected.ok);
     assert_eq!(connected.result.unwrap()["localRuntime"]["epoch"], client.epoch(), "handover must freeze the owner this client actually discovered");
     assert_eq!(control(&endpoint, "wrong-token", "runtime.session.workspace", json!({})).error.unwrap().code, "unauthorized");
+    // Manual status is local metadata even when the desktop is attached to an
+    // authenticated owner. It neither needs nor grants network authority.
+    let status_session: store::index::SessionEntry = serde_json::from_value(json!({
+        "id":"privacy-status","projectPath":fixture.project,"cwd":fixture.project,
+        "title":"Local status","created":store::index::now(),"modified":store::index::now()
+    })).unwrap();
+    store::index::update(|entries| { entries.push(status_session); Ok(()) }).unwrap();
+    let before = launches(root);
+    acknowledge(&endpoint, true, managed);
+    client.refresh_data_privacy().unwrap();
+    Sessions::new(client.clone()).set_manual_status("privacy-status", store::index::ManualStatus::InReview).unwrap();
+    assert_eq!(store::index::get("privacy-status").unwrap().manual_status, Some(store::index::ManualStatus::InReview));
+    let refused = control(&endpoint, "wrong-token", "runtime.session.manualStatus", json!({"sessionId":"privacy-status","status":"done"}));
+    assert_eq!(refused.error.unwrap().code, "unauthorized");
+    assert_eq!(store::index::get("privacy-status").unwrap().manual_status, Some(store::index::ManualStatus::InReview));
+    let updated = control(&endpoint, &endpoint.token, "sessions.status", json!({"session":"privacy-status","status":"done"}));
+    assert!(updated.ok, "{updated:?}");
+    assert_eq!(updated.result.unwrap()["session"]["manualStatus"], "done");
+    assert_eq!(launches(root), before, "local status must not initiate network work");
+    acknowledge(&endpoint, false, managed);
+    client.refresh_data_privacy().unwrap();
     let before = launches(root);
     scanned(&scan(&client, fixture), fixture, true);
     assert!(launches(root) > before, "a fresh forwarded scan must fetch through the owner");

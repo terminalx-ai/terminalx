@@ -79,6 +79,13 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
     if (!open || !chat) return;
     const native = typeof Highlight !== "undefined" && typeof CSS !== "undefined" && !!CSS.highlights;
     let pending = true;
+    let revealedNodes: [Node, Node] | undefined;
+    // Syntax rendering can replace a scrolled code container. Keep this
+    // selection visible across that replacement, until the reader takes over.
+    const stopFollowing = () => { pending = false; revealedNodes = undefined; };
+    const readerKey = (event: KeyboardEvent) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stopFollowing();
+    };
     const paint = () => {
       const all: Range[] = [];
       let chosen: Range | undefined;
@@ -94,8 +101,9 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
         highlight.priority = 1;
         CSS.highlights.set(`${name}-active`, highlight);
       }
-      if (chosen && pending) {
+      if (chosen && (pending || revealedNodes?.some((node) => !chat.contains(node)))) {
         pending = false;
+        revealedNodes = [chosen.startContainer, chosen.endContainer];
         chat.dispatchEvent(new Event(READER_SCROLL_EVENT));
         revealSearchRange(chosen, chat, footerHeight);
       }
@@ -105,6 +113,10 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
     // Markdown syntax highlighting and virtual rows can finish after the find bar's commit.
     const observer = new MutationObserver(paint);
     observer.observe(chat, { childList: true, characterData: true, subtree: true });
+    chat.addEventListener("wheel", stopFollowing, { passive: true });
+    chat.addEventListener("touchstart", stopFollowing, { passive: true });
+    chat.addEventListener("pointerdown", stopFollowing);
+    chat.addEventListener("keydown", readerKey);
     const resize = new ResizeObserver(paint);
     if (!native) {
       resize.observe(chat);
@@ -113,6 +125,10 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
     }
     return () => {
       observer.disconnect();
+      chat.removeEventListener("wheel", stopFollowing);
+      chat.removeEventListener("touchstart", stopFollowing);
+      chat.removeEventListener("pointerdown", stopFollowing);
+      chat.removeEventListener("keydown", readerKey);
       resize.disconnect();
       chat.removeEventListener("scroll", paint, true);
       window.removeEventListener("resize", paint);

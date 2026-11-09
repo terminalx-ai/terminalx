@@ -381,9 +381,10 @@ function OrgProjects({
   onLifecycle: (request: LifecycleRequest) => void;
 }) {
   const filter = useSidebarFilter();
-  // Unread or Needs you: only the projects with such a session, and no archive (nothing archived runs or answers).
+  // Unread and Needs you hide the archive; a project filter keeps matching archived workspaces.
   const projects = filtered ? all.filter((project) => filter.showsProject(project.key)) : all;
-  if (filtered && !projects.length) {
+  const visibleArchived = filter.filter === "all" ? archived.filter((node) => filter.showsWorkspace(node.key)) : [];
+  if (filtered && !projects.length && !visibleArchived.length) {
     return (
       <p className="px-2 py-1 text-[12px] text-faint" data-testid="cloud-org-filtered-empty">
         {empty}
@@ -409,7 +410,7 @@ function OrgProjects({
       {grouped.ungrouped.map((project) => (
         <CloudProjectGroup key={project.key} project={project} onLifecycle={onLifecycle} />
       ))}
-      {!filtered && archived.length > 0 && <ArchivedWorkspaces orgId={orgId} nodes={archived} onLifecycle={onLifecycle} />}
+      {visibleArchived.length > 0 && <ArchivedWorkspaces orgId={orgId} nodes={visibleArchived} onLifecycle={onLifecycle} />}
     </>
   );
 }
