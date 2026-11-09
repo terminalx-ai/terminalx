@@ -281,6 +281,8 @@ fn a_runtime_handover_keeps_the_incident() {
 fn a_name_that_is_a_file_location_is_never_kept() {
     for path in ["/Users/alice/models/x.gguf", "~/models/x.gguf", "./x.gguf", "../models/x", "models/x.gguf", "x.safetensors", "C:\\Users\\alice\\m.bin",
         "c:/models/m", "a/b/c/d", "models//x", "/opt/llm", "home/alice/models/q",
+        "models/alice/checkpoint", "alice/checkpoint", "models/private-weights", "vendor/model",
+        "openai/private-checkpoint", "openai/gpt-6-astra/private", "hf.co/org/model/private", "hf.co/org/private file",
         // What the character filter would turn into a location (#820 security review).
         "x /Users/alice", "é/Users/alice", " ~/m", "x\tUsers/alice", "users/alice", "#/home/alice"] {
         assert_eq!(name(path), PATH, "{path}");
@@ -288,6 +290,7 @@ fn a_name_that_is_a_file_location_is_never_kept() {
     for id in ["gpt-6-astra", "openai/gpt-6-astra", "anthropic/claude-3.5-sonnet", "hf.co/org/model", "llama3:8b", "xhigh", "codex_stdio", "0.2.25"] {
         assert_eq!(name(id), id, "{id}");
     }
+    for id in ["openai/o3", "openai/o4-mini"] { assert_eq!(name(id), id); }
     assert_eq!(Agent::new("codex", "codex_stdio", Some("/Users/alice/models/x.gguf"), None).model.as_deref(), Some(PATH));
 
     let _home = crate::store::temp_home();
@@ -344,4 +347,60 @@ fn persisted_names_are_redacted_in_the_summary_and_full_export() {
     assert_eq!(name(PATH), PATH);
     // Reading/exporting must leave the user's original evidence untouched.
     assert_eq!(read_all().unwrap(), stored);
+}
+
+#[test]
+fn relative_and_truncated_names_are_redacted_on_write_and_export() {
+    let old_name = |text: &str| text.chars().filter(|c| c.is_ascii_alphanumeric() || "._:/-".contains(*c)).take(64).collect::<String>();
+    let long_path = format!("models/customer-acme/{}.gguf", "x".repeat(80));
+    let truncated = old_name(&long_path);
+    assert_eq!(truncated.len(), 64);
+    assert!(truncated.starts_with("models/customer-acme/") && !truncated.ends_with(".gguf"));
+    let paths = ["models/alice/checkpoint".to_owned(), "alice/checkpoint".to_owned(), long_path, truncated,
+        // Even a recognized prefix is unsafe once the old filter lost the suffix.
+        old_name(&format!("hf.co/customer-acme/{}.gguf", "x".repeat(80))),
+        old_name(&format!("openai/gpt-{}.gguf", "x".repeat(80))),
+        old_name(&format!("customer-acme-{}.gguf", "x".repeat(80)))];
+    let _home = crate::store::temp_home();
+    for path in &paths {
+        let mut t = Tracker::default();
+        t.set_agent(Agent::new("codex", "codex_stdio", Some(path), None));
+        note(&mut t, true, |t, c| t.raised(c, RecoveryKind::Timeout, Source::Watcher, 1));
+    }
+    let written = read_all().unwrap();
+    assert_eq!(written.len(), paths.len());
+    for line in &written { assert_eq!(line["agent"]["model"], PATH); }
+    let raw = std::fs::read_to_string(dir().unwrap().join(FILE)).unwrap();
+    assert!(!raw.contains("alice") && !raw.contains("customer-acme"), "{raw}");
+
+    // Actual persisted legacy records: export and Settings must also protect
+    // values whose identifying directories survived while the suffix did not.
+    let ids: Vec<_> = (0..paths.len()).map(|i| format!("legacy-{i}")).collect();
+    for (path, id) in paths.iter().zip(&ids) {
+        let kept = old_name(path);
+        append(&json!({ "v": VERSION, "kind": "recovery_raised", "incident": id,
+            "session": "session-1", "tab": "tab-1", "reason": "timeout", "source": "watcher", "mono_ms": 42,
+            "runtime": kept, "appBuild": kept,
+            "agent": { "harness": kept, "transport": kept, "model": kept, "effort": kept } }).to_string()).unwrap();
+    }
+    let stored = read_all().unwrap();
+    assert!(stored.iter().any(|line| line.to_string().contains("customer-acme")), "the legacy input contains the identifying directory");
+    let summary = summarize(&stored);
+    let group = summary["groups"].as_array().unwrap().iter().find(|g| g["runtime"] == PATH).unwrap();
+    assert_eq!(group["transport"], PATH);
+    assert_eq!(group["outcomes"], json!({ "unresolved": paths.len() }));
+    assert_eq!(group["evidence"], json!(ids));
+
+    let target = crate::store::root().unwrap().join("export.json");
+    export(&target).unwrap();
+    let text = std::fs::read_to_string(&target).unwrap();
+    assert!(!text.contains("alice") && !text.contains("customer-acme"), "{text}");
+    let exported: Value = serde_json::from_str(&text).unwrap();
+    for line in exported["lines"].as_array().unwrap() { assert_eq!(line["agent"]["model"], PATH); }
+    for line in &exported["lines"].as_array().unwrap()[written.len()..] {
+        for key in ["runtime", "appBuild"] { assert_eq!(line[key], PATH, "{key}"); }
+        for key in ["harness", "transport", "model", "effort"] { assert_eq!(line["agent"][key], PATH, "{key}"); }
+    }
+    assert_eq!(exported["summary"], summary);
+    assert_eq!(read_all().unwrap(), stored, "export preserves the original evidence");
 }

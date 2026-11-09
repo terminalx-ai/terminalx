@@ -161,17 +161,21 @@ impl Agent {
 
 /// What a name that is a file's location is kept as.
 pub const PATH: &str = "[path]";
+const NAME_LIMIT: usize = 64;
 
 /// A model, effort, harness or build name as a line keeps it: letters,
 /// digits and `._:/-` only, at most 64 of them. A name can be configured as
-/// a file (a local model's weights, `/Users/<name>/models/x.gguf`), and no
-/// line keeps a file's location: such a name is kept as [`PATH`]. An id
-/// with a provider or a host in front (`openai/gpt-6-astra`,
-/// `hf.co/org/model`) is a name, not a location, and is kept.
+/// a file (a local model's weights, `/Users/<name>/models/x.gguf`). Ambiguous
+/// relative paths and names at the old truncation limit are kept as [`PATH`].
+/// Only recognized qualified model ids (`openai/gpt-6-astra`,
+/// `anthropic/claude-3.5-sonnet`, `hf.co/org/model`) keep their slashes.
 pub fn name(text: &str) -> String {
     // A stored redaction stays a redaction when an older line is exported.
     if text == PATH { return PATH.to_owned(); }
-    let kept: String = text.chars().filter(|c| c.is_ascii_alphanumeric() || "._:/-".contains(*c)).take(64).collect();
+    let kept: String = text.chars().filter(|c| c.is_ascii_alphanumeric() || "._:/-".contains(*c)).take(NAME_LIMIT).collect();
+    // An older line has no truncation flag: its missing suffix could have
+    // named a file, even when the remaining prefix looks like a model id.
+    if kept.len() == NAME_LIMIT { return PATH.to_owned(); }
     // Judged as given and as kept: dropping a space or a mark can make a
     // location of what did not read as one (`x /Users/alice` keeps as
     // `x/Users/alice`).
@@ -181,16 +185,29 @@ pub fn name(text: &str) -> String {
 
 /// Whether `text` names a place on disk rather than a thing: absolute, in a
 /// home folder, explicitly relative, written with Windows separators or a
-/// drive, deeper than a host, an owner and a name, or a file with a model's
-/// or a configuration's extension.
+/// drive, an unrecognized slash-qualified name, or a file with a model's
+/// or a configuration's extension. Unknown qualified names are ambiguous
+/// with relative paths, so diagnostics omit them conservatively.
 fn is_path(text: &str) -> bool {
     const FILES: &[&str] = &["gguf", "ggml", "bin", "safetensors", "onnx", "pt", "pth", "ckpt", "mlx", "mlmodel", "json", "yaml", "yml", "toml"];
     let drive = text.len() >= 2 && text.as_bytes()[0].is_ascii_alphabetic() && text.as_bytes()[1] == b':';
     let file = text.rsplit_once('.').is_some_and(|(_, extension)| FILES.contains(&extension.to_ascii_lowercase().as_str()));
     // A home folder anywhere in it names its owner.
     let home = text.split(|c: char| c == '/' || c == '\\' || c.is_whitespace()).any(|part| part.eq_ignore_ascii_case("users") || part.eq_ignore_ascii_case("home"));
-    text.starts_with(['/', '~', '.']) || text.contains('\\') || drive || home || text.matches('/').count() > 2 || file
+    text.starts_with(['/', '~', '.']) || text.contains('\\') || drive || home || file
+        || text.contains('/') && !qualified_model_id(text)
         || text.split('/').any(|part| part == ".." || part == "." || part.is_empty() && text.contains('/'))
+}
+
+fn qualified_model_id(text: &str) -> bool {
+    if !text.chars().all(|c| c.is_ascii_alphanumeric() || "._:/-".contains(c)) { return false; }
+    let Some((provider, model)) = text.split_once('/') else { return false };
+    match provider {
+        "openai" => !model.contains('/') && (model.starts_with("gpt-") || matches!(model.split('-').next(), Some("o1" | "o3" | "o4"))),
+        "anthropic" => !model.contains('/') && model.starts_with("claude-"),
+        "hf.co" => model.split_once('/').is_some_and(|(owner, model)| !owner.is_empty() && !model.is_empty() && !model.contains('/')),
+        _ => false,
+    }
 }
 
 /// The tab a line is about, and what it was doing.
