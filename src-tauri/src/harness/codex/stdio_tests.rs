@@ -254,7 +254,10 @@ fn resolved_approval_revokes_its_queued_reply() {
     let mut actions = client.answer("\"server-request\"", "allow").unwrap();
     let Action::Write(frame) = actions.remove(0) else { panic!("approval frame missing") };
     assert!(client.write_is_current(&frame));
-    client.handle(r#"{"method":"serverRequest/resolved","params":{"threadId":"thread","requestId":"server-request"}}"#).unwrap();
+    let resolution = r#"{"method":"serverRequest/resolved","params":{"threadId":"thread","requestId":"server-request"}}"#;
+    let actions = client.handle(resolution).unwrap();
+    assert!(matches!(&actions[..], [Action::Emit(Payload::PermissionDecided { request_id, allowed: false, automatic: true, label, .. })] if request_id == "\"server-request\"" && label == "Lapsed"));
+    assert!(client.handle(resolution).unwrap().is_empty(), "duplicate resolution must not invent another decision");
     assert!(!client.write_is_current(&frame));
     client.retire_write(&frame, false);
     assert!(!client.blocked);

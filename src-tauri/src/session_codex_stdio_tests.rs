@@ -1525,6 +1525,7 @@ fn privacy_native3_codex_handshake_and_approval_delivery() {
 }
 
 fn native3_fixture(case: &str, manager: &SessionManager, root: &Path, bin: &Path) {
+    if case == "native3-resolved" { return native3_resolved_fixture(manager, bin); }
     use crate::remote::{protocol::{Authority as RemoteAuthority, PROTOCOL}, server::{Peer, WorkspaceRpc}};
     let policy = |enabled| {
         let managed = case.contains("managed");
@@ -1601,4 +1602,79 @@ fn native3_fixture(case: &str, manager: &SessionManager, root: &Path, bin: &Path
         wait("delivered approval settled", &|| rt.lock().unwrap().pending.is_empty());
         assert_eq!(events().iter().filter(|e| matches!(e.payload, Payload::PermissionDecided { allowed: false, automatic: false, .. })).count(), 1);
     }
+}
+
+#[test]
+fn privacy_native3_codex_provider_resolution_retires_queued_answer_once() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "session::codex_stdio::tests::child_fixture", "--nocapture"])
+        .env(CASE, "native3-resolved").output().unwrap();
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
+fn native3_resolved_fixture(manager: &SessionManager, bin: &Path) {
+    struct Owner(SessionManager);
+    impl Drop for Owner { fn drop(&mut self) { let _ = self.0.stop("stdio-owner", "tab"); } }
+    let _owner = Owner(manager.clone());
+    let wait = |why: &str, done: &dyn Fn() -> bool| {
+        let until = Instant::now() + Duration::from_secs(8);
+        while !done() { assert!(Instant::now() < until, "{why}"); std::thread::sleep(Duration::from_millis(5)); }
+    };
+    // Only the provider emits resolution, over its real stdout while the
+    // approval writer is paused. The second request stays live throughout.
+    let first_turn = r#"      if [ ! -f "$here/resolve" ]; then
+        turn_id="$id"
+        for request in approval unrelated; do
+          printf '{"id":"%s","method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1","turnId":"turn-%s","itemId":"%s","command":"echo approval"}}\n' "$request" "$id" "$request"
+        done
+        while [ ! -f "$here/resolve" ]; do sleep 0.005; done
+        for duplicate in 1 2; do
+          printf '{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"approval"}}\n'
+        done
+        continue
+      fi
+"#;
+    let needle = "      printf '{\"method\":\"item/agentMessage/delta\"";
+    let script = RESUMING_CODEX.replace(needle, &format!("{first_turn}{needle}"))
+        .replace("  case \"$line\" in\n", r#"  case "$line" in
+    *'"id":"unrelated"'*)
+      printf '{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"unrelated"}}\n'
+      printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$turn_id" ;;
+"#);
+    assert!(script.contains(first_turn));
+    std::fs::write(bin.join("codex"), script).unwrap();
+    let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    let events = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+    let frames = || std::fs::read_to_string(bin.join("received")).unwrap_or_default().lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+    let request = "\"approval\"";
+    let other = "\"unrelated\"";
+    manager.send("stdio-owner", "tab", "initial task".into(), vec![]).unwrap();
+    wait("both live provider requests", &|| rt.lock().unwrap().pending.len() == 2);
+    let (entered, arrived) = mpsc::channel(); let (release, released) = mpsc::channel();
+    *APPROVAL_QUEUED.lock().unwrap() = Some(Box::new(move || {
+        entered.send(()).unwrap(); released.recv_timeout(Duration::from_secs(8)).unwrap();
+    }));
+    manager.respond_permission("stdio-owner", "tab", request, "allow").unwrap();
+    arrived.recv_timeout(WAIT).unwrap();
+    assert_eq!(rt.lock().unwrap().pending.len(), 2);
+    std::fs::write(bin.join("resolve"), "").unwrap();
+    wait("provider resolution retires queued card before writer resumes", &|| !rt.lock().unwrap().pending.contains_key(request));
+    assert!(rt.lock().unwrap().pending.contains_key(other));
+    assert!(manager.respond_permission("stdio-owner", "tab", request, "allow").is_err());
+    release.send(()).unwrap();
+    // This reply fences the discarded frame through the same FIFO writer.
+    manager.respond_permission("stdio-owner", "tab", other, "deny").unwrap();
+    wait("unrelated reply delivered and turn completed", &|| !rt.lock().unwrap().turn_open);
+    let received = frames();
+    assert!(!received.iter().any(|frame| frame["id"] == "approval"), "resolved consent reached provider: {received:?}");
+    assert_eq!(received.iter().filter(|frame| frame["id"] == "unrelated" && frame["result"]["decision"] == "decline").count(), 1);
+    let decisions: Vec<_> = events().into_iter().filter(|e| matches!(e.payload, Payload::PermissionDecided { .. })).collect();
+    assert_eq!(decisions.len(), 2, "each request must settle exactly once: {decisions:?}");
+    assert!(matches!(&decisions[0].payload, Payload::PermissionDecided { request_id, allowed: false, automatic: true, label, .. } if request_id == request && label == "Lapsed"));
+    assert!(matches!(&decisions[1].payload, Payload::PermissionDecided { request_id, allowed: false, automatic: false, .. } if request_id == other));
+    manager.send("stdio-owner", "tab", "fresh task".into(), vec![]).unwrap();
+    wait("fresh turn remains usable", &|| frames().iter().any(|f| f["params"]["input"][0]["text"] == "fresh task") && !rt.lock().unwrap().turn_open);
+    assert!(rt.lock().unwrap().pending.is_empty());
+    assert_eq!(events().iter().filter(|e| matches!(e.payload, Payload::PermissionDecided { .. })).count(), 2);
 }

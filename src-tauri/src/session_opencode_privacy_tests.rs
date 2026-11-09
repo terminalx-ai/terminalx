@@ -36,7 +36,7 @@ fn opening_child() {
     let port_file = root.join("port");
     let records = root.join("requests");
     std::fs::write(&script, r#"
-import http.server, json, pathlib, queue
+import http.server, json, pathlib, queue, socket, time
 root = pathlib.Path(__file__).parent
 news = queue.Queue()
 class Provider(http.server.BaseHTTPRequestHandler):
@@ -52,6 +52,12 @@ class Provider(http.server.BaseHTTPRequestHandler):
         data = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
         with (root/'requests').open('a') as f:
             f.write(json.dumps({'path':self.path, 'body':data})+'\n')
+        if '/permissions/' in self.path and (root/'fail-answer').exists():
+            while not (root/'release-failure').exists(): time.sleep(0.005)
+            if (root/'fail-answer').read_text() == 'transport':
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR); self.connection.close(); return
+            self.send_response(500); self.send_header('Content-Length', '0'); self.end_headers(); return
         body = b'{"id":"local-session"}' if self.path == '/session' else b'{}'
         self.send_response(200); self.send_header('Content-Length', str(len(body))); self.end_headers()
         self.wfile.write(body); self.wfile.flush()
@@ -95,6 +101,46 @@ server.serve_forever()
     assert_eq!(runtime.block_on(rpc.handle(&peer, &json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["session/1"]}})))["ok"], true);
     let send = |text: &str| runtime.block_on(rpc.handle(&peer, &json!({"id":"send","method":"session.send","params":{
         "sessionId":SESSION,"tabId":TAB,"text":text,"clientRequestId":uuid::Uuid::new_v4().to_string()}})));
+    if let Some(failure) = kind.strip_prefix("failed-answer-") {
+        std::fs::write(root.join("approval"), "").unwrap();
+        std::fs::write(root.join("fail-answer"), failure).unwrap();
+        rig.manager.send(SESSION, TAB, "local task".into(), vec![]).unwrap();
+        wait_for("provider approval card", || !rig.rt.lock().unwrap().pending.is_empty());
+        let request = rig.rt.lock().unwrap().pending.keys().next().unwrap().clone();
+        let replies = || std::fs::read_to_string(&records).unwrap_or_default().lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["path"].as_str().unwrap().contains("/permissions/")).collect::<Vec<_>>();
+        // The IPC contract is enqueue success; the real HTTP reply is still
+        // held, then fails without a provider terminal/decision event.
+        rig.manager.respond_permission(SESSION, TAB, &request, "once").unwrap();
+        wait_for("physical first approval request", || replies().len() == 1);
+        assert!(rig.manager.respond_permission(SESSION, TAB, &request, "reject").unwrap_err().to_string().contains("still being delivered"));
+        assert!(rig.rt.lock().unwrap().pending.contains_key(&request));
+        assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
+        std::fs::write(root.join("release-failure"), "").unwrap();
+        wait_for("failed delivery released its in-flight answer", || {
+            let rt = rig.rt.lock().unwrap();
+            matches!(&rt.engine, Engine::OpenCode(o) if !o.answer_pending(&request))
+        });
+        {
+            let rt = rig.rt.lock().unwrap();
+            assert!(rt.pending.contains_key(&request) && rt.turn_open);
+            assert!(matches!(&rt.engine, Engine::OpenCode(o) if o.has_ask(&request)));
+        }
+        assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
+        std::fs::remove_file(root.join("fail-answer")).unwrap();
+        rig.manager.respond_permission(SESSION, TAB, &request, "reject").unwrap();
+        wait_for("retried HTTP answer delivered and settled", || rig.rt.lock().unwrap().pending.is_empty());
+        let rows = replies();
+        assert_eq!(rows.len(), 2, "failure must not replay consent: {rows:?}");
+        assert_eq!(rows[0]["body"]["response"], "once");
+        assert_eq!(rows[1]["body"]["response"], "reject");
+        let decisions: Vec<_> = rig.events().into_iter().filter(|e| matches!(e.payload, Payload::PermissionDecided { .. })).collect();
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(&decisions[0].payload, Payload::PermissionDecided { request_id, allowed: false, automatic: false, .. } if request_id == &request));
+        rig.manager.stop(SESSION, TAB).unwrap(); pump.join().unwrap();
+        return;
+    }
     if kind.starts_with("approval-") {
         std::fs::write(root.join("approval"), "").unwrap();
         rig.manager.send(SESSION, TAB, "local task".into(), vec![]).unwrap();
@@ -183,5 +229,15 @@ fn privacy_native3_opencode_revoked_approval_stays_answerable() {
             .args(["--exact", "session::watch_tests::prompts::privacy::opencode_privacy::opening_child", "--nocapture"])
             .env(CASE, format!("approval-{kind}")).output().unwrap();
         assert!(output.status.success(), "{kind}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[test]
+fn privacy_native3_opencode_failed_approval_delivery_can_be_retried() {
+    for failure in ["http500", "transport"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::watch_tests::prompts::privacy::opencode_privacy::opening_child", "--nocapture"])
+            .env(CASE, format!("failed-answer-{failure}")).output().unwrap();
+        assert!(output.status.success(), "{failure}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }
 }
