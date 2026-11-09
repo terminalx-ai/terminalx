@@ -327,6 +327,24 @@ pub(crate) fn head_push_destination(cwd: &Path, branch: &str, repository: &str) 
     bail!("The pull request head repository has no matching single push destination in this checkout. Configure its fork remote before resolving conflicts.");
 }
 
+/// A PR belongs to its base repository, which need not be this checkout's
+/// origin. Keep a matching configured transport (including SSH aliases), or
+/// fetch the canonical GitHub repository when no local remote names it.
+pub(crate) fn base_fetch_destination(cwd: &Path, pr: &PrSnapshot) -> Result<String> {
+    let (repository, number) = pr_url_parts(&pr.url).context("GitHub did not identify the pull request's base repository.")?;
+    if number != pr.number { bail!("The pull request URL does not match its number."); }
+    for remote in crate::git::run(cwd, &["remote"])?.lines() {
+        let Ok(urls) = crate::git::run(cwd, &["config", "--get-all", &format!("remote.{remote}.url")]) else { continue };
+        let urls: Vec<_> = urls.lines().filter(|url| !url.is_empty()).collect();
+        if let [url] = urls.as_slice() {
+            if remote_repo(url).is_some_and(|repo| repo.eq_ignore_ascii_case(&repository)) {
+                return Ok((*url).into());
+            }
+        }
+    }
+    Ok(format!("https://github.com/{repository}.git"))
+}
+
 fn head_repository(pr: &Value) -> Option<String> {
     let owner = pr["headRepositoryOwner"]["login"].as_str().filter(|s| !s.is_empty())?;
     let name = pr["headRepository"]["name"].as_str().filter(|s| !s.is_empty())?;

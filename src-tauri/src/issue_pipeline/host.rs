@@ -229,9 +229,20 @@ fn remote_head(cwd: &Path, url: &str, branch: &str) -> Result<Option<String>> {
 /// whatever `git merge-tree` says. The two can differ: with more than one
 /// merge base, git merges the bases into one first and GitHub does not.
 fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
-    crate::git::run_within(cwd, &["fetch", "--no-tags", "origin"], PUSH_TIMEOUT, &|| false).map_err(|error| anyhow!("Fetching the base failed: {error:?}"))?;
-    let base_ref = format!("refs/remotes/origin/{base}");
-    let base_commit = crate::git::run(cwd, &["rev-parse", "--verify", &base_ref])?.trim().to_string();
+    let base_commit = if let Some(pr) = pr {
+        if pr.base != base { bail!("The requested base branch does not match the pull request."); }
+        let url = crate::github::base_fetch_destination(cwd, pr)?;
+        let commit = remote_head(cwd, &url, base)?.context("The pull request's base branch is missing from its repository.")?;
+        // Fetch the exact observed base object. Neither stale origin refs nor
+        // another fetch replacing FETCH_HEAD can select a different merge input.
+        crate::git::run_within(cwd, &["fetch", "--no-tags", "--no-write-fetch-head", "--", &url, &commit], PUSH_TIMEOUT, &|| false)
+            .map_err(|error| anyhow!("Fetching the pull request base failed: {error:?}"))?;
+        crate::git::run(cwd, &["rev-parse", "--verify", &format!("{commit}^{{commit}}")])?.trim().to_string()
+    } else {
+        crate::git::run_within(cwd, &["fetch", "--no-tags", "origin"], PUSH_TIMEOUT, &|| false).map_err(|error| anyhow!("Fetching the base failed: {error:?}"))?;
+        let base_ref = format!("refs/remotes/origin/{base}");
+        crate::git::run(cwd, &["rev-parse", "--verify", &base_ref])?.trim().to_string()
+    };
     let head = crate::git::run(cwd, &["rev-parse", "HEAD"])?.trim().to_string();
     let ahead = crate::git::run(cwd, &["rev-list", "--count", &format!("{base_commit}..{head}")])?;
     let behind_count = crate::git::run(cwd, &["rev-list", "--count", &format!("{head}..{base_commit}")])?;
@@ -613,6 +624,7 @@ mod tests {
             git(root, &["config", &format!("url.{}.insteadOf", bare.path().display()), &url]);
         }
         git(root, &["push", "-q", "origin", "main"]);
+        git(root, &["push", "-q", "fork", "main"]);
         std::fs::write(root.join("README.md"), "branch intent\n").unwrap();
         git(root, &["commit", "-qam", "branch"]);
         git(root, &["push", "-q", "fork", "raccoon/433-work"]);
@@ -706,6 +718,61 @@ mod tests {
         let error = resolution_needed(root, branch, "main", true, Some(&pr)).unwrap_err();
         assert!(error.to_string().contains("missing or changed"));
         assert!(git(root, &["ls-remote", upstream.path().to_str().unwrap(), "refs/heads/raccoon/433-work"]).is_empty());
+    }
+
+    #[test]
+    fn fork_origin_resolves_the_actual_upstream_base_even_when_its_own_main_is_stale() {
+        for configured_upstream in [true, false] {
+            let (dir, upstream, fork, pr) = fork_with_conflicts();
+            let root = dir.path();
+            let branch = "raccoon/433-work";
+            git(root, &["remote", "rename", "origin", "upstream"]);
+            git(root, &["remote", "rename", "fork", "origin"]);
+            let stale_base = git(root, &["rev-parse", "origin/main"]);
+            let actual_base = git(upstream.path(), &["rev-parse", "main"]);
+            assert_ne!(stale_base, actual_base);
+            assert_eq!(git(root, &["rev-list", "--count", "HEAD..origin/main"]), "0");
+            if configured_upstream {
+                let alias = "git@github-work:acme/widgets.git";
+                git(root, &["remote", "set-url", "upstream", alias]);
+                git(root, &["config", "--add", &format!("url.{}.insteadOf", upstream.path().display()), alias]);
+                assert_eq!(crate::github::base_fetch_destination(root, &pr).unwrap(), alias);
+            } else {
+                git(root, &["remote", "remove", "upstream"]);
+                assert_eq!(crate::github::base_fetch_destination(root, &pr).unwrap(), "https://github.com/acme/widgets.git");
+            }
+            let resolution = resolution_needed(root, branch, "main", true, Some(&pr)).unwrap().expect("the upstream main really conflicts");
+            assert_eq!(resolution.base_commit, actual_base);
+            assert_eq!(resolution.target.as_ref().unwrap().remote, "origin");
+            assert_eq!(resolution.target.as_ref().unwrap().repository.as_deref(), Some("me/widgets"));
+            let merge = std::process::Command::new("git").current_dir(root)
+                .args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-edit", &resolution.base_commit]).output().unwrap();
+            assert!(!merge.status.success());
+            assert_eq!(workspace(root).unwrap().merging, [actual_base.clone()]);
+            std::fs::write(root.join("README.md"), "branch intent\nbase intent\n").unwrap();
+            git(root, &["add", "README.md"]);
+            git(root, &["commit", "-qm", "resolve against upstream"]);
+            let head = git(root, &["rev-parse", "HEAD"]);
+            verify_resolution(root, &resolution, &head, branch).unwrap();
+            push_resolution(root, &resolution, branch, &head).unwrap();
+            assert_eq!(git(fork.path(), &["rev-parse", &format!("refs/heads/{branch}")]), head);
+            assert_eq!(git(fork.path(), &["rev-parse", "main"]), stale_base);
+            assert_eq!(git(upstream.path(), &["rev-parse", "main"]), actual_base);
+            assert!(git(root, &["ls-remote", upstream.path().to_str().unwrap(), &format!("refs/heads/{branch}")]).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_missing_pr_base_never_falls_back_to_the_forks_main() {
+        let (dir, upstream, _fork, mut pr) = fork_with_conflicts();
+        let root = dir.path();
+        git(root, &["remote", "rename", "origin", "upstream"]);
+        git(root, &["remote", "rename", "fork", "origin"]);
+        git(upstream.path(), &["update-ref", "-d", "refs/heads/main"]);
+        let error = resolution_needed(root, "raccoon/433-work", "main", true, Some(&pr)).unwrap_err();
+        assert!(error.to_string().contains("base branch is missing"));
+        pr.url = "https://github.com/acme/widgets/pull/8".into();
+        assert!(resolution_needed(root, "raccoon/433-work", "main", true, Some(&pr)).unwrap_err().to_string().contains("does not match"));
     }
 
     /// #748: the branch merged another pull request's branch before main
