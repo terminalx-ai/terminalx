@@ -136,6 +136,12 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     if method == "running" { return Ok(serde_json::to_value(manager.running_tabs())?); }
     if method == "permissions" { return Ok(serde_json::to_value(manager.pending_permissions())?); }
     match method {
+        "manualStatus" => {
+            let patch = crate::session_ops::SessionPatch { manual_status: Some(serde_json::from_value(params["status"].clone())?), ..Default::default() };
+            let session = crate::session_ops::update_session_meta(string(&params, "sessionId")?, &patch).map_err(anyhow::Error::msg)?;
+            manager.sink().emit("session_updated", &session);
+            return Ok(Value::Null);
+        }
         "pipeline" => return manager.pipeline(string(&params, "operation")?, params["params"].clone()),
         "workspace" => return manager.workspace(string(&params, "operation")?, params["params"].clone()),
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }

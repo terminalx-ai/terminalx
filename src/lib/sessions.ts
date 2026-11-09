@@ -4,7 +4,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api, workStatus, type WorkspaceRemoveOptions } from "@/lib/api";
-import { getPrefs, setPrefs } from "@/lib/prefs";
+import { forgetSidebarWindow, getPrefs, pruneSidebarWindows, setPrefs, sidebarChatWindowLabels } from "@/lib/prefs";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
 import { activateLatestTerminal, closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
@@ -91,7 +91,7 @@ let state: State = {
   newIssueRequested: false,
   selectedAutomationId: null,
   skillsFilter: null,
-  showArchived: false,
+  showArchived: getPrefs().sidebarShowArchived,
   selectedProject: null,
   workspaces: {},
   workspacesLoading: {},
@@ -221,6 +221,11 @@ async function loadIndex() {
     await listen("projects_changed", () => void refreshProjects());
     // The floating window hands a session over ("Open in main window").
     if (!isCompactWindow()) {
+      await listen<string>("chat_window_closed", (e) => forgetSidebarWindow(e.payload));
+      // Include leftovers from a crash or quit, without deleting a window opened during this read.
+      const candidates = sidebarChatWindowLabels();
+      void import("@tauri-apps/api/window").then(({ getAllWindows }) => getAllWindows())
+        .then((windows) => pruneSidebarWindows(windows.map((window) => window.label), candidates)).catch(() => {});
       await listen<OpenTarget>("open_session", (e) => openTarget(e.payload));
       await listenForChatWindowDrafts();
     }
@@ -589,6 +594,7 @@ export function debug(message: string) {
 
 /** Show archived: each project's archived sessions, and the chats', under a fold of their own (#718). */
 export function setShowArchived(v: boolean) {
+  setPrefs({ sidebarShowArchived: v });
   set({ showArchived: v });
 }
 
