@@ -120,7 +120,7 @@ pub trait Host: Send + Sync {
     /// The base pinned for a merge into the branch, if one is due: where git
     /// finds a conflict, or wherever `required`, GitHub asking for the merge
     /// whatever git finds. `None` once the branch contains its base.
-    fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _required: bool) -> Result<Option<super::Resolution>> { Ok(None) }
+    fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _required: bool, _pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> { Ok(None) }
     fn open_resolver(&self, _pipeline: &Pipeline, _author: &SessionEntry) -> Result<SessionRef> { bail!("Conflict resolution is not available on this host") }
     fn verify_resolution(&self, _cwd: &Path, _resolution: &super::Resolution, _head: &str, _branch: &str) -> Result<()> { bail!("Resolution verification is not available on this host") }
     /// `git merge --abort`, only while HEAD is `head` and the merge in
@@ -137,7 +137,7 @@ pub trait Host: Send + Sync {
     /// What `head` changes relative to where it left `base`.
     fn diff(&self, cwd: &Path, base: &str, head: &str) -> Result<Diff>;
     fn push(&self, cwd: &Path) -> Result<()>;
-    fn push_resolution(&self, cwd: &Path, _branch: &str, _head: &str) -> Result<()> { self.push(cwd) }
+    fn push_resolution(&self, cwd: &Path, _resolution: &super::Resolution, _branch: &str, _head: &str) -> Result<()> { self.push(cwd) }
     /// The open pull request whose head is `branch`, if there is one.
     fn open_pull_request(&self, cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>>;
     /// Open a pull request for the current branch; its number.
@@ -952,7 +952,7 @@ impl Step<'_> {
             // history (two merge bases) git merges the bases first and GitHub
             // does not. Merging the base in leaves one merge base, and GitHub
             // then agrees.
-            (pr.base, true, Some(pr.head_sha))
+            (pr.base.clone(), true, Some(pr))
         } else {
             let Some(base) = workspace.default_branch else { return Ok(false) };
             (base, false, None)
@@ -966,9 +966,9 @@ impl Step<'_> {
             self.needs_you(StopReason::UncommittedChanges { files: workspace.dirty });
             return Ok(true);
         }
-        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &base, required)? else { return Ok(false) };
-        if remote.as_ref().is_some_and(|head| !same_commit(head, &resolution.head)) {
-            self.needs_you(StopReason::HeadMoved { reviewed: resolution.head, head: remote.unwrap() });
+        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &base, required, remote.as_ref())? else { return Ok(false) };
+        if remote.as_ref().is_some_and(|pr| !same_commit(&pr.head_sha, &resolution.head)) {
+            self.needs_you(StopReason::HeadMoved { reviewed: resolution.head, head: remote.unwrap().head_sha });
             return Ok(true);
         }
         self.start_resolution(resolution)
@@ -1140,7 +1140,7 @@ impl Step<'_> {
         self.host.verify_resolution(&self.cwd, resolution, &workspace.head, &self.p.branch)?;
         if self.halted() { return Ok(false); }
         self.doing = "Pushing conflict resolution";
-        self.host.push_resolution(&self.cwd, &self.p.branch, &workspace.head)?;
+        self.host.push_resolution(&self.cwd, resolution, &self.p.branch, &workspace.head)?;
         self.record("resolved", format!("Resolved conflicts with {}; requesting review of the new head.", resolution.base)).commit = Some(workspace.head);
         // Keep the previous verdict and findings until a fresh independent
         // review explicitly replaces them. They never authorize the new head.
@@ -1411,7 +1411,7 @@ impl Step<'_> {
         // `watch_conflicts` (#748), but only while it is about this head: a
         // merge made here and not pushed yet is git's to judge.
         let required = same_commit(&workspace.head, &pr.head_sha) && (pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY");
-        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &pr.base, required)? else {
+        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &pr.base, required, Some(&pr))? else {
             return self.push_and_review();
         };
         if !store::get(&self.p.id)?.resolve_conflicts {

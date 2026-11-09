@@ -1375,11 +1375,25 @@ pub fn remote_url(cwd: &Path) -> Option<String> {
 /// `pushRemote`, else `remote.pushDefault`, else the branch's `remote`. Often
 /// a fork when the work goes to someone else's repository by pull request.
 pub fn push_remote_url(cwd: &Path, branch: &str) -> Option<String> {
-    let config = |key: String| run(cwd, &["config", "--get", &key]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let remote = config(format!("branch.{branch}.pushRemote"))
-        .or_else(|| config("remote.pushDefault".into()))
-        .or_else(|| config(format!("branch.{branch}.remote")))?;
+    let remote = push_remote(cwd, branch)?;
     run(cwd, &["remote", "get-url", &remote]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+pub(crate) fn push_remote(cwd: &Path, branch: &str) -> Option<String> {
+    let config = |key: String| run(cwd, &["config", "--get", &key]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    config(format!("branch.{branch}.pushRemote"))
+        .or_else(|| config("remote.pushDefault".into()))
+        .or_else(|| config(format!("branch.{branch}.remote")))
+}
+
+/// A single explicit destination, before Git's transport URL rewrites. Multiple
+/// push URLs are refused: pipeline automation must write to exactly one repo.
+pub(crate) fn configured_push_url(cwd: &Path, remote: &str) -> Result<String> {
+    let configured = run(cwd, &["config", "--get-all", &format!("remote.{remote}.pushurl")])
+        .or_else(|_| run(cwd, &["config", "--get-all", &format!("remote.{remote}.url")]))?;
+    let urls: Vec<_> = configured.lines().filter(|url| !url.is_empty()).collect();
+    if urls.len() != 1 { anyhow::bail!("Remote {remote} must have exactly one push URL for conflict resolution."); }
+    Ok(urls[0].into())
 }
 
 #[cfg(test)]

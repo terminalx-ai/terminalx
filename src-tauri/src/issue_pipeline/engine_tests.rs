@@ -105,6 +105,7 @@ struct World {
     checks: Vec<PrCheck>,
     sent: Vec<(String, String)>,
     pushes: Vec<String>,
+    resolution_push_targets: Vec<Option<super::ResolutionTarget>>,
     created: Vec<(String, String)>,
     associations: Vec<(String, String)>,
     association_error: bool,
@@ -192,6 +193,7 @@ impl FakeHost {
             checks: vec![check("build", "success")],
             sent: Vec::new(),
             pushes: Vec::new(),
+            resolution_push_targets: Vec::new(),
             created: Vec::new(),
             associations: Vec::new(),
             association_error: false,
@@ -377,9 +379,13 @@ impl Host for FakeHost {
         Ok(())
     }
 
-    fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, required: bool) -> Result<Option<super::Resolution>> {
+    fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
         let world = self.world();
-        Ok((world.conflict || required).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work, waiting_since: None }))
+        Ok((world.conflict || required).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), target: Some(super::ResolutionTarget { remote: "fixture".into(), repository: pr.and_then(|pr| pr.head_repository.clone()), url_hash: "fixture".into() }), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work, waiting_since: None }))
+    }
+    fn push_resolution(&self, cwd: &Path, resolution: &super::Resolution, _branch: &str, _head: &str) -> Result<()> {
+        self.world().resolution_push_targets.push(resolution.target.clone());
+        self.push(cwd)
     }
     fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let mut resolver = session("resolver", None);
@@ -463,6 +469,7 @@ impl Host for FakeHost {
             base: "main".into(),
             head: "raccoon/433-open-a-pull-request".into(),
             head_sha: head,
+            head_repository: Some("acme/widgets".into()),
             mergeable: "MERGEABLE".into(),
             merge_state: "CLEAN".into(),
             review_decision: None,
@@ -1200,7 +1207,7 @@ fn a_pull_request_the_session_opened_itself_is_used_and_linked_to_the_issue() {
         let checks = world.checks.clone();
         world.pr = Some(PrSnapshot {
             number: 12, url: "https://github.com/acme/widgets/pull/12".into(), title: "wip".into(), body: "Pads minutes.".into(), state: "OPEN".into(), is_draft: false,
-            base: "main".into(), head: "raccoon/433-open-a-pull-request".into(), head_sha: C1.into(), mergeable: "MERGEABLE".into(), merge_state: "CLEAN".into(),
+            base: "main".into(), head: "raccoon/433-open-a-pull-request".into(), head_sha: C1.into(), head_repository: Some("acme/widgets".into()), mergeable: "MERGEABLE".into(), merge_state: "CLEAN".into(),
             review_decision: None, checks, required_checks: None, checks_unread: false, validation: Some(vec![check("CI", "success")]),
         });
     }
@@ -3797,4 +3804,30 @@ fn adoption_does_not_overwrite_a_stopped_pipeline() {
     engine::act_from_agent(&host, &p.id, Action::Stop).unwrap();
     assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err());
     assert!(store::get(&p.id).unwrap().stopped);
+}
+
+#[test]
+fn adopted_fork_identity_reaches_resolution_detection_and_the_push() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    {
+        let mut world = host.world();
+        world.conflict = true;
+        let pr = world.pr.as_mut().unwrap();
+        pr.head_repository = Some("me/widgets".into());
+        pr.merge_state = "DIRTY".into();
+    }
+    let p = engine::start_existing(&host, "author", "t1", Some(false), Some(true), true, cli_actor()).unwrap();
+    poll(&host);
+    let resolving = store::get(&p.id).unwrap();
+    assert_eq!(resolving.stage, Stage::Resolve);
+    let target = resolving.resolution.as_ref().unwrap().target.clone();
+    assert_eq!(target.as_ref().unwrap().repository.as_deref(), Some("me/widgets"));
+    host.commit(C2);
+    host.world().conflict = false;
+    host.world().pr.as_mut().unwrap().merge_state = "CLEAN".into();
+    turn_completed(&host, "resolver", "t1", Some(&done("Resolved conflicts")));
+    assert_eq!(host.world().resolution_push_targets, [target]);
+    assert_eq!(host.world().pushes, [C2]);
+    assert_eq!(store::get(&p.id).unwrap().stage, Stage::Review);
 }

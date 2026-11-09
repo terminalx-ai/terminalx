@@ -422,6 +422,7 @@ pub(crate) mod tests {
             base: "main".into(),
             head: "raccoon/11-fix-login-timeout".into(),
             head_sha: HEAD.into(),
+            head_repository: Some("acme/widgets".into()),
             mergeable: "MERGEABLE".into(),
             merge_state: "CLEAN".into(),
             review_decision: None,
