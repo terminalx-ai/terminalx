@@ -139,9 +139,19 @@ describe("local Git recovery", () => {
     await screen.findByText("GitHub connected");
   });
 
-  it("offers a remote URL instead of invoking a push with no remote, then allows a real push", async () => {
+  it("keeps file review controls while adding a remote, then allows an explicit push", async () => {
     remote = false;
+    const original = backend.invoke.getMockImplementation()!;
+    backend.invoke.mockImplementation((command, args) => command === "working_changes" ? Promise.resolve(["abc", [
+      { path: "src/recovery.ts", status: "modified", additions: 1, deletions: 0 },
+      { path: "README.md", status: "modified", additions: 1, deletions: 0 },
+    ]]) : original(command, args));
     repo();
+    await screen.findByRole("button", { name: /recovery.ts/ });
+    fireEvent.click(screen.getByRole("radio", { name: "Folders" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Filter changed files" }), { target: { value: "recovery" } });
+    expect(screen.queryByRole("button", { name: /README.md/ })).toBeNull();
+    expect(screen.getByRole("checkbox", { name: "Viewed src/recovery.ts" })).toHaveProperty("disabled", true);
     fireEvent.click(screen.getByRole("button", { name: "Push" }));
     const url = await screen.findByRole("textbox", { name: "Remote URL" });
     expect(backend.invoke.mock.calls.some(([command]) => command === "git_push")).toBe(false);
@@ -150,6 +160,10 @@ describe("local Git recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add remote" }));
     await screen.findByText("Remote added. Push when you’re ready.");
     expect(backend.invoke).toHaveBeenCalledWith("git_add_remote", { cwd, url: "https://github.com/owner/repo.git" });
+    expect(backend.invoke.mock.calls.some(([command]) => command === "git_push")).toBe(false);
+    expect(screen.getByRole("searchbox", { name: "Filter changed files" })).toHaveProperty("value", "recovery");
+    expect(screen.getByRole("radio", { name: "Folders" }).getAttribute("aria-checked")).toBe("true");
+    expect(await screen.findByRole("button", { name: /recovery.ts/ })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Push" }));
     await waitFor(() => expect(backend.invoke).toHaveBeenCalledWith("git_push", { cwd }));
   });

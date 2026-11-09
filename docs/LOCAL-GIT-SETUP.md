@@ -50,7 +50,9 @@ form offers repository creation through `gh repo create --source <primary>
 worktree list identifies the primary checkout (or bare repository), whose config
 is shared with the session. This avoids gh 2.70 rejecting linked checkouts' `.git`
 files, and leaves all branches and commits in place. Both flows leave publishing
-commits to Push. The PR panel also offers remote setup after
+commits to Push. Remote setup retains the Repo panel’s file filter and folder
+view, including when Uncommitted is embedded in Changes; review scopes and
+Viewed controls keep their existing behavior. The PR panel also offers remote setup after
 connecting GitHub. Cloud workspaces continue using their existing GitHub App
 credentials and error explanations; local login does not affect them.
 
