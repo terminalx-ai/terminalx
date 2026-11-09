@@ -16,12 +16,17 @@ export function HandoffScene({ className }: { className?: string }) {
         <Line width="54%" />
         <Line width="66%" />
       </Window>
-      {/* The path the context travels, quiet until it is on its way. */}
-      <span className="absolute left-[38%] right-[38%] top-1/2 border-t border-dashed border-foreground/15" />
-      <span className="hs-packet absolute top-1/2 flex w-7 -translate-y-1/2 flex-col gap-0.5 rounded-md bg-accent/90 p-1 shadow-sm">
-        <span className="h-0.5 w-full rounded-full bg-accent-foreground/70" />
-        <span className="h-0.5 w-3/4 rounded-full bg-accent-foreground/70" />
-        <span className="h-0.5 w-1/2 rounded-full bg-accent-foreground/70" />
+      {/* The path the context travels, quiet until it is on its way. The chip is centred on it by its animation
+          (translateY(-50%)), not a class as well, which would lift it twice. */}
+      {/* The path the context travels between the two windows; the chip rides it, centred on it by its animation
+          (translate(-50%, -50%)) rather than a class as well, which would lift it twice. */}
+      <span className="absolute inset-y-0 left-[38%] right-[38%]">
+        <span className="absolute inset-x-1 top-1/2 border-t border-dashed border-foreground/15" />
+        <span className="hs-packet absolute top-1/2 flex w-7 flex-col gap-0.5 rounded-md bg-accent/90 p-1 shadow-sm">
+          <span className="h-0.5 w-full rounded-full bg-accent-foreground/70" />
+          <span className="h-0.5 w-3/4 rounded-full bg-accent-foreground/70" />
+          <span className="h-0.5 w-1/2 rounded-full bg-accent-foreground/70" />
+        </span>
       </span>
       <Window className="hs-target right-0" label="New session">
         <Line className="hs-fill hs-fill-1" width="72%" />
