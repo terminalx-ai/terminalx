@@ -212,17 +212,17 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   const isGit = into?.project.kind !== "folder";
   return (
     <Dialog open onOpenChange={(open) => { if (!open && canClose) close(); }}>
-      <DialogContent width="max-w-[28rem]" className="max-h-[calc(100vh-2rem)] overflow-y-auto p-6" showClose={canClose} onEscapeKeyDown={(e) => e.stopPropagation()}>
-        {/* Only what the reader decides here: which agent picks it up, and, folded away, Autopilot and how much
-            context to carry. Where it runs and what it came from are the session they are in; the rest is said
+      <DialogContent width="max-w-[34rem]" className="max-h-[calc(100vh-2rem)] overflow-y-auto p-6" showClose={canClose} onEscapeKeyDown={(e) => e.stopPropagation()}>
+        {/* Only what the reader decides here: which agent picks it up and how much context it carries, both in
+            view; Autopilot, set less often, is folded away. Where it runs and what it came from are the session they are in; the rest is said
             once, in the line under the title. */}
         <HandoffScene className="mb-5 mt-1" />
         <DialogHeader>
           <DialogTitle className="text-base font-semibold">{into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
           <DialogDescription className="text-[13px] text-muted-foreground">
             {into
-              ? `Starts in ${into.project.name} with this chat's context. The chat is archived once it starts.`
-              : <>Picks up <span className="text-foreground">{context?.title ?? source.title ?? session.title}</span> on the same branch and files. This conversation stays open.</>}
+              ? `Opens a new session in ${into.project.name} that carries over this chat's context. This chat is archived once it starts.`
+              : "Opens a new conversation that carries over this chat's context, so the agent picks up where it left off. This chat stays open."}
           </DialogDescription>
         </DialogHeader>
         {into && (isGit ? (
@@ -232,33 +232,31 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
           </label>
         ) : <p className="mt-4 text-xs text-muted-foreground">In the folder · no Git</p>)}
         {loading ? <p role="status" className="mt-5 flex h-8 items-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin" />Preparing context…</p> : <>
-          <div role="group" aria-label="New session settings" className="mt-5 flex flex-wrap items-center gap-1.5">
+          <div role="group" aria-label="New session settings" className="mt-5 flex min-w-0 flex-nowrap items-center gap-1.5">
             <SessionAgentControls selection={selection} disabled={locked} />
           </div>
-          <Fold label="More settings" className="mt-3" testId="continuation-more-settings">
-            <div className="flex flex-col gap-4 pt-3 pb-1">
-              <fieldset disabled={locked} className="flex flex-col gap-2">
-                <legend className="mb-2 text-xs font-medium text-foreground">Context</legend>
-                <div className="grid grid-cols-2 gap-1 rounded-lg bg-veil-raised p-1 text-xs">
-                  <Choice name="continuation-mode" checked={mode === "focused"} onChange={() => setMode("focused")} label="Recent context" />
-                  <Choice name="continuation-mode" checked={mode === "full"} disabled={!context?.transcriptPath} onChange={() => setMode("full")} label="Full transcript" />
-                </div>
-                <p id="full-context-help" className="text-xs text-faint">
-                  {mode === "focused"
-                    ? "Recent status and the workspace; older history is read only when needed."
-                    : "Reads the whole saved history first: slower, and uses more context."}
-                  {!context?.transcriptPath && <> <span>{context?.fullUnavailableReason ?? "The full transcript is not available."}</span></>}
-                  {context?.partialCapture && " Older content is left out."}
-                </p>
-              </fieldset>
-              {project?.kind !== "folder" && project && (
-                <div className="flex flex-col gap-2">
-                  <span className="text-xs font-medium text-foreground">Autopilot</span>
-                  <PipelineLaunchControls launch={pipelineLaunch} disabled={locked} plain />
-                </div>
-              )}
+          <fieldset disabled={locked} className="mt-5 flex flex-col gap-2">
+            <legend className="mb-2 text-xs font-medium text-foreground">Context</legend>
+            <div className="grid grid-cols-2 gap-1 rounded-lg bg-veil-raised p-1 text-xs">
+              <Choice name="continuation-mode" checked={mode === "focused"} onChange={() => setMode("focused")} label="Recent context" />
+              <Choice name="continuation-mode" checked={mode === "full"} disabled={!context?.transcriptPath} onChange={() => setMode("full")} label="Full transcript" />
             </div>
-          </Fold>
+            <p id="full-context-help" className="text-xs text-faint">
+              {mode === "focused"
+                ? "Recent status and the workspace; older history is read only when needed."
+                : "Reads the whole saved history first: slower, and uses more context."}
+              {!context?.transcriptPath && <> <span>{context?.fullUnavailableReason ?? "The full transcript is not available."}</span></>}
+              {context?.partialCapture && " Older content is left out."}
+            </p>
+          </fieldset>
+          {/* The one setting left to fold away, so the fold is named for it rather than "More settings". */}
+          {project?.kind !== "folder" && project && (
+            <Fold label="Autopilot" className="mt-3" testId="continuation-autopilot">
+              <div className="pt-2 pb-1">
+                <PipelineLaunchControls launch={pipelineLaunch} disabled={locked} plain />
+              </div>
+            </Fold>
+          )}
         </>}
         {starting && delivering && <p role="status" className="mt-4 text-sm text-muted-foreground">{progress ? delivery : `Waiting for ${agentName} to start…`} You can open it to follow progress; do not send the handoff again.</p>}
         {inInput && <p role="status" className="mt-4 text-sm">{inInput.pressed

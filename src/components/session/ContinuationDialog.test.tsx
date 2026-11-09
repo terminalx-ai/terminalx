@@ -28,9 +28,9 @@ import { getPrefs, setPrefs } from "@/lib/prefs";
 import { continuationPrompt, IN_INPUT } from "@/lib/continuation";
 import { ContinuationDialog } from "./ContinuationDialog";
 
-/** The fold the less-used settings sit in, opened. */
+/** The Autopilot fold, opened. */
 const inMore = () => {
-  const fold = screen.queryByRole("button", { name: "More settings" });
+  const fold = screen.queryByRole("button", { name: "Autopilot" });
   if (fold?.getAttribute("aria-expanded") === "false") fireEvent.click(fold);
   return screen;
 };
