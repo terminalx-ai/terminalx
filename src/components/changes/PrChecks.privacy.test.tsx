@@ -44,6 +44,7 @@ beforeEach(async () => {
     if (command === "workspace_disposition") return { exists: true, checked: true, branch: "feature", isMain: true };
     if (command === "work_status") return { branch: "feature", defaultBranch: "main", aheadOfBase: 1 };
     if (command === "pr_check_authority") { admit(); return { owner: "native", epoch: policy.epoch }; }
+    if (command === "pr_conversation") { admit(); return { ...current, viewer: "reviewer", canEdit: false, reviewers: [], unresolvedThreads: 0, activity: [] }; }
     if (command === "pr_list") { admit(); return complete("discovery", associatedOnly ? [] : [current]); }
     if (command === "pr_associations") return [{ url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd: input.cwd } }];
     if (command === "pr_details") { admit(); return complete("associated", current); }

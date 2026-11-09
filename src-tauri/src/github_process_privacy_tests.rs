@@ -882,3 +882,6 @@ fn privacy_native3_git_child() {
 
 #[path = "github_checks_privacy_tests.rs"]
 mod checks;
+
+#[path = "github_conversation_privacy_tests.rs"]
+mod conversation;
