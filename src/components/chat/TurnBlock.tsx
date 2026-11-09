@@ -561,7 +561,7 @@ function ReasoningRow({ name, text, linkContext }: { name: string; text: string;
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2.5 rounded-md -mx-1.5 px-1.5 py-1.5 text-left text-[13.5px] hover:bg-veil-raised"
       >
-        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning" : "Expand reasoning"}><Brain className="size-4 shrink-0 text-muted-foreground" /></button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning" : "Expand reasoning"}><Brain className="size-4 shrink-0 text-thinking" /></button>
         <span className="shrink-0 text-foreground/90">Thinking</span>
         <span className="flex min-w-0 flex-1">
           {!open && first && <span className="min-w-0 max-w-[36rem] truncate rounded-md bg-veil-raised px-1.5 py-0.5 text-[12.5px] text-muted-foreground"><LinkedText text={first} context={linkContext} /></span>}

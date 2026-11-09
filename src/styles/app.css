@@ -324,11 +324,11 @@
   color: var(--foreground);
   text-decoration: none;
 }
-/* A quiet pill: set apart from the words by its face and a soft ground, not by an outline that pulls the eye. */
+/* A quiet pill: set apart from the words by its face, a soft ground and a warm tint, not by an outline that pulls the eye. */
 .prose-chat code:not(pre code) {
   font-family: var(--font-mono);
   font-size: 0.84em;
-  color: var(--foreground);
+  color: color-mix(in oklab, var(--accent) 55%, var(--foreground));
   background: var(--veil-raised);
   border: 1px solid var(--hairline);
   border-radius: 5px;

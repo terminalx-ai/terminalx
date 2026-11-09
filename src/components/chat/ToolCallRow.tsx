@@ -32,6 +32,28 @@ function iconFor(toolType: string) {
   }
 }
 
+/**
+ * A step's icon colour, by what it did, so a turn reads at a glance: reading blue, writing amber, running a command
+ * green, searching or the web violet, anything else (tools, helpers, plans) the thinking colour. Only the icon is
+ * coloured: the label and its chip stay neutral, so colour stays a cue and never noise.
+ */
+function toneFor(toolType: string): string {
+  switch (toolType) {
+    case "file_read":
+      return "text-info";
+    case "file_edit":
+    case "file_write":
+      return "text-accent";
+    case "shell":
+      return "text-add";
+    case "search":
+    case "web":
+      return "text-merged";
+    default:
+      return "text-thinking";
+  }
+}
+
 /** The verb the row leads with, in running and done forms. */
 export function toolVerb(name: string, done: boolean): string {
   const table: Record<string, [string, string]> = {
@@ -103,7 +125,7 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
         ) : failed ? (
           <CircleAlert className="size-3.5 shrink-0 text-destructive" />
         ) : (
-          <Icon className="size-4 shrink-0 text-muted-foreground" />
+          <Icon className={cn("size-4 shrink-0", toneFor(call.toolType))} />
         )}
         <span className={cn("shrink-0", pending ? "text-shimmer" : failed ? "text-destructive" : "text-foreground/90")}>
           {call.abandoned && !call.result ? "Interrupted" : toolVerb(call.name, done)}
@@ -205,7 +227,7 @@ export function ToolGroupRow({ name, calls, cwd, linkContext }: { name: string; 
         ) : endedFailed ? (
           <CircleAlert className="size-3.5 shrink-0 text-destructive" />
         ) : (
-          <Icon className="size-4 shrink-0 text-muted-foreground" />
+          <Icon className={cn("size-4 shrink-0", toneFor(calls[0].toolType))} />
         )}
         </button>
         <span className={cn("shrink-0 truncate", !done ? "text-shimmer" : "text-foreground/90")}><LinkedText text={label} context={linkContext} /></span>
