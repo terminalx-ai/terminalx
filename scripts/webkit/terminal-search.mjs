@@ -8,12 +8,13 @@ function setup() {
   localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: true, panelTerminalOpen: true, tabStrip: true }));
   const { answers, emit } = window.__PW_STUB__;
   const session = answers.list_sessions[0];
-  session.tabs.forEach((tab) => { tab.status = "idle"; });
+  session.tabs.forEach((tab) => { tab.status = "in_progress"; });
   const shell = { id: `${session.id}:dock-search`, sessionId: session.id, title: "Search shell", cwd: session.cwd, exited: false, docked: true, created: new Date().toISOString() };
-  const checks = window.__TERMINAL_CHECKS__ = { attached: 0, spawned: 0, killed: 0, inputs: [] };
+  const checks = window.__TERMINAL_CHECKS__ = { attached: 0, spawned: 0, killed: 0, interrupted: 0, inputs: [] };
   Object.assign(answers, {
     load_tab_events: [], tab_pane: null, ensure_tab_started: null, browser_pages: [], set_active_tab: null,
     pty_shells: [shell], pane_agents: [], pty_detach_all: null, pty_detach: null, pty_ack: null, pty_resize: null,
+    interrupt_turn: () => { checks.interrupted++; return true; },
     pty_write: ({ data }) => { checks.inputs.push(data); },
     pty_spawn: () => { checks.spawned++; },
     pty_kill: () => { checks.killed++; },
@@ -62,6 +63,7 @@ try {
   await input.fill("absent match");
   assert.equal(await search.getByRole("status").textContent(), "No matches");
   await page.keyboard.press("Escape");
+  assert.equal(await page.evaluate(() => window.__TERMINAL_CHECKS__.interrupted), 0, "closing terminal search must not interrupt the running agent");
   await search.waitFor({ state: "detached" });
   assert(await dock.locator(".xterm-helper-textarea").evaluate((el) => document.activeElement === el), "Escape restores terminal focus");
   assert.equal(await dock.locator(".xterm-decoration").count(), 0, "closing clears highlights");
@@ -77,10 +79,13 @@ try {
   await input.fill("needle first");
   await page.waitForFunction(() => document.querySelector('[role="search"] [role="status"]')?.textContent === "1 of 1");
   await page.keyboard.press("Escape");
+  // Moving into a closed panel must acquire the new host without recreating xterm.
+  await page.getByRole("button", { name: "Toggle panel", exact: true }).click();
+  await dock.waitFor({ state: "detached" });
   await full.getByRole("button", { name: "Move to dock" }).click();
   await dock.locator(".xterm").waitFor();
   assert(await dock.locator(".xterm").evaluate((el) => el === window.__MOVED_XTERM__), "same xterm moved back to dock");
-  assert.deepEqual(await page.evaluate(() => window.__TERMINAL_CHECKS__), { attached: 1, spawned: 0, killed: 0, inputs: [] }, "moves never restart or reattach the PTY; search keys do not reach it");
+  assert.deepEqual(await page.evaluate(() => window.__TERMINAL_CHECKS__), { attached: 1, spawned: 0, killed: 0, interrupted: 0, inputs: [] }, "moves never restart or reattach the PTY; search keys do not reach it");
   await dock.locator(".xterm-helper-textarea").focus();
   await page.keyboard.press("Meta+a");
   await page.getByRole("button", { name: "Add to chat", exact: true }).click();

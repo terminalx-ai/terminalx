@@ -1,8 +1,8 @@
-import { useContext, useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, type RefObject } from "react";
 import { SearchAddon, type ISearchResultChangeEvent } from "@xterm/addon-search";
 import { ChevronDown, ChevronUp, Search, X } from "@/icons";
 import { useTheme } from "@/lib/theme";
-import { useShortcut } from "@/lib/hotkeys";
+import { hasEscapeOverlay, useHotkey, useShortcut } from "@/lib/hotkeys";
 import { peekInstance } from "@/lib/terminal";
 import { TerminalChatContext } from "./TerminalChat";
 
@@ -33,15 +33,25 @@ export function TerminalTools({ id, shown, frame }: { id: string; shown: boolean
   const search = useRef<SearchAddon | null>(null);
   const adding = useRef(false);
 
-  const show = () => {
+  const show = useCallback(() => {
     setOpen(true);
     input.current?.focus();
     input.current?.select();
-  };
-  useShortcut("files.find", () => {
+  }, []);
+  const findFocused = useCallback(() => {
     if (!frame.current?.contains(document.activeElement)) return false;
     show();
-  }, { enabled: shown });
+  }, [frame, show]);
+  useShortcut("files.find", findFocused, { enabled: shown });
+
+  const close = useCallback(() => { setOpen(false); peekInstance(id)?.term.focus(); }, [id]);
+  const closeFocused = useCallback(() => {
+    if (!frame.current?.contains(document.activeElement) || hasEscapeOverlay()) return false;
+    close();
+  }, [frame, close]);
+  // The window dispatches shortcuts in capture, before React's key handler.
+  // Search owns Escape ahead of a running agent's interrupt, just as chat find does.
+  useHotkey("escape", closeFocused, { enabled: shown && open, global: true, priority: 10 });
 
   useEffect(() => {
     if (!shown || !open) return;
@@ -93,7 +103,6 @@ export function TerminalTools({ id, shown, frame }: { id: string; shown: boolean
   // The context callback changes with session state; selection belongs to the terminal.
   }, [id, shown, !!addToChat, open]);
 
-  const close = () => { setOpen(false); peekInstance(id)?.term.focus(); };
   const find = (previous: boolean) => {
     const options = { caseSensitive: matchCase, decorations };
     if (previous) search.current?.findPrevious(query, options);
@@ -120,7 +129,6 @@ export function TerminalTools({ id, shown, frame }: { id: string; shown: boolean
   return <>
     {open && <div role="search" aria-label="Find in terminal" className="absolute top-1 right-2 left-2 z-30 flex items-center gap-1 rounded border border-hairline bg-popover px-2 py-1 text-xs shadow-md"
       onKeyDown={(event) => {
-        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
         if (event.key === "Enter" && event.target === input.current) { event.preventDefault(); find(event.shiftKey); }
       }}>
       <Search className="size-3 shrink-0" aria-hidden />
