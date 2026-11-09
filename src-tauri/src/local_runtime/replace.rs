@@ -167,6 +167,8 @@ pub(crate) enum Due {
 pub struct Replacement {
     inner: Mutex<Inner>,
     wake: Condvar,
+    #[cfg(test)]
+    before_wait: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 /// This app's version, which its bundled runtime shares.
@@ -292,6 +294,10 @@ impl Replacement {
             outdated.failed = false;
             inner.busy_attempts = 0;
         }
+        drop(inner);
+        // A manual retry can make a failed replacement checkable again
+        // while the watcher is parked without a timeout.
+        self.wake.notify_all();
     }
 
     /// A stop may already have succeeded before collecting the handover
@@ -313,6 +319,10 @@ impl Replacement {
         } else {
             inner.outdated(epoch).expect("checked above").failed = false;
         }
+        drop(inner);
+        // Resume the watcher's timed checks after a refused manual retry;
+        // due stays false, so the normal busy retry interval still applies.
+        self.wake.notify_all();
     }
 
     fn retry_requested(&self, epoch: &str) {
@@ -412,6 +422,10 @@ impl Replacement {
         let mut inner = self.inner.lock().unwrap();
         loop {
             if inner.checkable().is_none() {
+                // Signal while still holding inner: a test that receives this
+                // cannot change the predicate until wait atomically unlocks.
+                #[cfg(test)]
+                if let Some(waiting) = self.before_wait.lock().unwrap().take() { waiting.send(()).unwrap(); }
                 inner = self.wake.wait(inner).unwrap();
                 continue;
             }
@@ -1128,6 +1142,54 @@ mod tests {
         let retry = Supervisor::new(&replacement, |_| Ok(()));
         switch(&replacement, &retry, "old", true, &[]).unwrap();
         assert!(replacement.outdated("old").is_none(), "an explicit retry can still hand over safely");
+    }
+
+    fn refused_manual_retry_wakes_the_waiting_loop(code: &'static str) {
+        use std::sync::{mpsc, Arc};
+        let replacement = Arc::new(Replacement::default());
+        replacement.attached("old", &handing(&older()), None);
+        let refusal = |code: &'static str| move |_| Err(Refused { code: code.into(), message: "still blocked".into() }.into());
+        let busy = Supervisor::new(&replacement, refusal("handover_busy"));
+        for _ in 0..BUSY_ATTEMPTS { switch(&replacement, &busy, "old", false, &[]).unwrap(); }
+        assert!(replacement.outdated("old").unwrap().failed);
+
+        let (waiting, parked) = mpsc::channel();
+        *replacement.before_wait.lock().unwrap() = Some(waiting);
+        let (returned, result) = mpsc::channel();
+        let watcher = replacement.clone();
+        let thread = std::thread::spawn(move || {
+            let due = watcher.next();
+            returned.send((due, Instant::now())).unwrap();
+        });
+        parked.recv_timeout(Duration::from_secs(2)).unwrap();
+        let retried = Instant::now();
+        let retry = Supervisor::new(&replacement, refusal(code));
+        switch(&replacement, &retry, "old", true, &[]).unwrap();
+        assert!(!replacement.outdated("old").unwrap().failed);
+        let outcome = result.recv_timeout(CHECK_EVERY + Duration::from_secs(2));
+        // Also join on failure: this regression must not leak a sleeping
+        // watcher when the production notification is missing.
+        if outcome.is_err() {
+            replacement.inner.lock().unwrap().due = true;
+            replacement.wake.notify_all();
+        }
+        thread.join().unwrap();
+        let (due, returned_at) = outcome.expect("a refused manual retry must wake the paused watcher");
+        assert_eq!(due, Due::Check("old".into()));
+        if code == "handover_busy" {
+            assert!(returned_at.duration_since(retried) >= CHECK_EVERY, "waking the watcher must preserve the busy retry delay");
+        }
+        assert!(retry.steps.borrow().iter().all(|step| !step.starts_with("retire")), "no broader stop consent");
+    }
+
+    #[test]
+    fn manual_busy_retry_wakes_the_paused_watcher() {
+        refused_manual_retry_wakes_the_waiting_loop("handover_busy");
+    }
+
+    #[test]
+    fn manual_unadoptable_retry_wakes_the_paused_watcher() {
+        refused_manual_retry_wakes_the_waiting_loop("handover_unadoptable");
     }
 
     /// #765: a handover refused for something it cannot carry, or for work
