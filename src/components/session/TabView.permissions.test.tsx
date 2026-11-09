@@ -29,7 +29,7 @@ class QuietResizeObserver { observe() {} unobserve() {} disconnect() {} }
 beforeEach(() => {
   const id = `approval-${Math.random().toString(36).slice(2)}`;
   session = { id, projectPath: "/workspace", cwd: "/workspace", title: "Approval", created: "", modified: "", archived: false, pinned: false, worktreeRemoved: false,
-    tabs: [{ id: `${id}-tab`, harness: "opencode", permissionMode: "default", status: "waiting", created: "", modified: "" }] };
+    tabs: [{ id: `${id}-tab`, harness: "opencode", model: "default", permissionMode: "default", status: "waiting", created: "", modified: "" }] };
   request = { id: "asked", sessionId: id, tabId: session.tabs[0].id, harness: "opencode", seq: 1, ts: "2026-11-09T09:00:00Z",
     payload: { type: "permission_requested", requestId: "approval", toolUseId: "tool", toolName: "Bash", input: { command: "echo approved" }, options: [
       { id: "once", label: "Allow once", kind: "allow_once" }, { id: "reject", label: "Reject", kind: "deny" },
