@@ -300,11 +300,21 @@ fn relay_scope_reads(fixture: &Fixture, managed: bool, runtime: &tokio::runtime:
     use std::task::{Context, Waker};
     use crate::remote::{protocol::{Authority, PROTOCOL}, server::{Peer, WorkspaceRpc}};
     let rpc = WorkspaceRpc::new(&fixture.cwd, 1, Arc::new(crate::sink::BroadcastSink::new(64)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
-    let (peer, _events) = Peer::new("scope-reader".into(), Authority::Participate);
+    let (peer, _events) = Peer::for_user("scope-reader".into(), Authority::Participate, Some("scope-reader".into()));
     let hello = json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["git/1"]}});
     assert_eq!(runtime.block_on(rpc.handle(&peer, &hello))["ok"], true);
     let request = |method: &str| json!({"id":uuid::Uuid::new_v4().to_string(),"method":method,"params":{
         "repo":".","base":fixture.base,"head":fixture.head,"limit":1,"target":"main","uncommitted":false}});
+    // Participation alone is not workspace access. Prove the early refusal,
+    // then supply a real viewer membership so the queue tests reach execution.
+    let unknown = runtime.block_on(rpc.handle_owned(peer.clone(), request("git.log")));
+    assert_eq!(unknown["error"]["data"]["reason"], "access-unknown");
+    rpc.set_collaboration(Some(serde_json::from_value(json!({"v":1,"members":[
+        {"userId":"scope-reader","role":"viewer","canApprove":false}
+    ]})).unwrap()));
+    let allowed = runtime.block_on(rpc.handle_owned(peer.clone(), request("git.log")));
+    assert_eq!(allowed["ok"], true, "{allowed}");
+    assert_eq!(allowed["result"]["commits"].as_array().unwrap().len(), 1);
     let refused = |answer: Value| {
         assert_eq!(answer["ok"], false, "{answer}");
         assert_eq!(answer["error"]["code"], "forbidden", "{answer}");
@@ -325,7 +335,7 @@ fn relay_scope_reads(fixture: &Fixture, managed: bool, runtime: &tokio::runtime:
         let blocker = runtime.spawn_blocking(move || { entered.send(()).unwrap(); released.recv_timeout(Duration::from_secs(10)).unwrap(); });
         arrived.recv_timeout(Duration::from_secs(5)).unwrap();
         let mut queued = Box::pin(rpc.handle_owned(peer.clone(), request(method)));
-        { let _runtime = runtime.enter(); assert!(queued.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending()); }
+        { let _runtime = runtime.enter(); let state = queued.as_mut().poll(&mut Context::from_waker(Waker::noop())); assert!(state.is_pending(), "{method} bypassed the blocking queue: {state:?}"); }
         policy(true, managed); policy(false, managed);
         release.send(()).unwrap(); runtime.block_on(blocker).unwrap();
         refused(runtime.block_on(queued));
