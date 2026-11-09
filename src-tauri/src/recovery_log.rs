@@ -169,6 +169,8 @@ pub const PATH: &str = "[path]";
 /// with a provider or a host in front (`openai/gpt-6-astra`,
 /// `hf.co/org/model`) is a name, not a location, and is kept.
 pub fn name(text: &str) -> String {
+    // A stored redaction stays a redaction when an older line is exported.
+    if text == PATH { return PATH.to_owned(); }
     let kept: String = text.chars().filter(|c| c.is_ascii_alphanumeric() || "._:/-".contains(*c)).take(64).collect();
     // Judged as given and as kept: dropping a space or a mark can make a
     // location of what did not read as one (`x /Users/alice` keeps as
@@ -803,8 +805,9 @@ pub fn summarize(lines: &[Value]) -> Value {
                 let seen = incidents.entry(id.clone()).or_default();
                 seen.reason = line["reason"].as_str().unwrap_or_default().to_owned();
                 seen.source = line["source"].as_str().unwrap_or_default().to_owned();
-                seen.runtime = line["runtime"].as_str().unwrap_or_default().to_owned();
-                seen.transport = line["agent"]["transport"].as_str().unwrap_or_default().to_owned();
+                // Settings can summarize persisted lines without exporting them.
+                seen.runtime = name(line["runtime"].as_str().unwrap_or_default());
+                seen.transport = name(line["agent"]["transport"].as_str().unwrap_or_default());
                 seen.occurrences += 1;
                 seen.raised_ms.push(line["mono_ms"].as_u64().unwrap_or(0));
                 if line["recurred_after_ms"].is_u64() { seen.recurred += 1; }

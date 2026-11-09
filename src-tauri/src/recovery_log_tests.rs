@@ -306,3 +306,42 @@ fn a_name_that_is_a_file_location_is_never_kept() {
     let exported = serde_json::to_string(&pseudonymized(older, "salt")).unwrap();
     assert!(!exported.contains("alice") && !exported.contains("gguf") && !exported.contains("builds"), "{exported}");
 }
+
+#[test]
+fn persisted_names_are_redacted_in_the_summary_and_full_export() {
+    let _home = crate::store::temp_home();
+    // Earlier builds kept only the allowed characters, even when they named
+    // a file. Feed that actual persisted shape through both reader paths.
+    let mut older = json!({ "v": VERSION, "kind": "recovery_raised", "incident": "incident-1",
+        "session": "session-1", "tab": "tab-1", "reason": "timeout", "source": "watcher", "mono_ms": 42,
+        "runtime": "x /Users/alice", "appBuild": "~/private/build",
+        "agent": { "harness": "C:\\Users\\alice\\agent", "transport": "/home/alice/runtime",
+            "model": "models/private.safetensors", "effort": "../private/config" } });
+    let old_name = |text: &str| text.chars().filter(|c| c.is_ascii_alphanumeric() || "._:/-".contains(*c)).take(64).collect::<String>();
+    // Use a Unix location for transport and a Windows drive for harness:
+    // old character filtering drops backslashes but leaves the drive.
+    for key in ["runtime", "appBuild"] { older[key] = json!(old_name(older[key].as_str().unwrap())); }
+    for key in ["harness", "transport", "model", "effort"] { older["agent"][key] = json!(old_name(older["agent"][key].as_str().unwrap())); }
+    append(&older.to_string()).unwrap();
+    let stored = read_all().unwrap();
+    assert!(stored[0].to_string().contains("alice"), "the legacy input exercises redaction");
+    let summary = summarize(&stored);
+    assert_eq!(summary["groups"][0]["runtime"], PATH);
+    assert_eq!(summary["groups"][0]["transport"], PATH);
+    assert_eq!(summary["groups"][0]["outcomes"], json!({ "unresolved": 1 }));
+    assert_eq!(summary["groups"][0]["evidence"], json!(["incident-1"]));
+
+    let target = crate::store::root().unwrap().join("export.json");
+    export(&target).unwrap();
+    let text = std::fs::read_to_string(&target).unwrap();
+    for private in ["alice", "private", "safetensors", "session-1", "tab-1"] { assert!(!text.contains(private), "{private}: {text}"); }
+    let exported: Value = serde_json::from_str(&text).unwrap();
+    let line = &exported["lines"][0];
+    for key in ["runtime", "appBuild"] { assert_eq!(line[key], PATH, "{key}"); }
+    for key in ["harness", "transport", "model", "effort"] { assert_eq!(line["agent"][key], PATH, "{key}"); }
+    assert_eq!(exported["summary"], summary);
+    assert_eq!(pseudonymized(exported["lines"].as_array().unwrap().clone(), "another salt")[0]["agent"]["model"], PATH);
+    assert_eq!(name(PATH), PATH);
+    // Reading/exporting must leave the user's original evidence untouched.
+    assert_eq!(read_all().unwrap(), stored);
+}
