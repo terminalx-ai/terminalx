@@ -617,8 +617,9 @@ pub fn actor(params: &Value) -> Result<Actor> {
 ///   `interrupt`, `resendUnsent`, `setModel`, `setEffort`, `setMode` and `continue`.
 /// - `sessionCreate`: `create`. `macSettings`: `settings` and `setSettings`.
 /// - `terminal`: `openTerminal`, and observations whose output says the pane's size.
+/// - `closeTab`: `closeTab`, closing a tab as the desktop's tab strip does.
 pub fn features() -> Value {
-    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 })
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1 })
 }
 
 /// What a runtime too old to name its features serves, by its version
@@ -804,7 +805,7 @@ fn phone_send(manager: &crate::session::SessionManager, actor: &Actor, grant: &G
 /// which come before a device's grant in the lock order. `None` for any other
 /// method.
 fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Grant, method: &str, params: &Value) -> Option<Result<Value>> {
-    const CHANGES: &[&str] = &["stop", "interrupt", "setModel", "setEffort", "setMode", "resendUnsent", "continue"];
+    const CHANGES: &[&str] = &["stop", "interrupt", "setModel", "setEffort", "setMode", "resendUnsent", "continue", "closeTab"];
     const READS: &[&str] = &["tab", "models", "prepareContinuation"];
     if !CHANGES.contains(&method) && !READS.contains(&method) { return None; }
     Some((|| {
@@ -826,6 +827,8 @@ fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Gra
                 "transport": current.transport,
             }),
             "stop" => { manager.stop(session, tab)?; Value::Null }
+            // Closing a tab as the desktop's tab strip does: its agent stops, its history stays.
+            "closeTab" => { manager.close_tab(session, tab)?; Value::Null }
             "interrupt" => serde_json::json!({ "interrupted": manager.interrupt(session, tab)? }),
             "setModel" => { manager.set_model(session, tab, string("model")?)?; Value::Null }
             "setEffort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }
