@@ -23,6 +23,14 @@ vi.mock("@/lib/models", async (original) => ({
   useModels: () => [{ harness: "claude", id: "opus", label: "Opus", efforts: ["high"], defaultEffort: "high", isDefault: true, acceptsImages: true }],
 }));
 import { ContinuationDialog } from "./ContinuationDialog";
+
+/** The Autopilot fold, opened. */
+const inMore = () => {
+  const fold = screen.queryByRole("button", { name: "Autopilot" });
+  if (fold?.getAttribute("aria-expanded") === "false") fireEvent.click(fold);
+  return screen;
+};
+
 const source = { id: "source", harness: "claude", model: "opus", effort: "high", permissionMode: "plan", status: "completed" } as TabEntry;
 const session = { id: "author", projectPath: "/repo", cwd: "/repo/work", title: "Work", tabs: [source] } as SessionEntry;
 beforeEach(() => {
@@ -51,7 +59,7 @@ it.each(["existing", "absent", "merged", "cleaned", "refused", "stopped"])("carr
   render(<ContinuationDialog session={launchSession} source={source} onClose={vi.fn()} />);
   await waitFor(() => expect(screen.getByRole("button", { name: "Start New Session" }).hasAttribute("disabled")).toBe(false));
   for (const name of ["Merge when green", "Resolve conflicts automatically"]) {
-    const toggle = screen.getByRole("switch", { name });
+    const toggle = inMore().getByRole("switch", { name });
     expect(toggle.getAttribute("aria-checked")).toBe("true");
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-checked")).toBe("false");
