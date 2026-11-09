@@ -192,6 +192,9 @@ pub const METHODS: &[Method] = &[
     method("git.log", "git/1", Participate, false),
     method("git.branches", "git/1", Participate, false),
     method("git.prs", "git/1", Participate, false),
+    method("git.prConversation", "git/1", Participate, false),
+    method("git.prReviewerSearch", "git/1", Manage, false),
+    method("git.prConversationAction", "git/1", Manage, true),
     method("git.prAssociations", "git/1", Participate, false),
     method("git.prLanded", "git/1", Manage, false),
     method("git.checkout", "git/1", Manage, true),
@@ -513,6 +516,11 @@ mod tests {
             assert!(find_method(name).unwrap().idempotent, "{name}");
         }
         assert_eq!(find_method("git.prAssociations").unwrap().authority, Participate);
+        assert_eq!(find_method("git.prConversation").unwrap().authority, Participate);
+        assert_eq!(find_method("git.prReviewerSearch").unwrap().authority, Manage);
+        let conversation_action = find_method("git.prConversationAction").unwrap();
+        assert_eq!(conversation_action.authority, Manage);
+        assert!(conversation_action.idempotent);
         assert_eq!(find_method("git.prLanded").unwrap().authority, Manage);
         // A pipeline is read by whoever sees the sessions and steered by the manager.
         assert_eq!(find_method("pipeline.list").map(|method| (method.capability, method.authority, method.idempotent)), Some(("pipeline/1", Participate, false)));
