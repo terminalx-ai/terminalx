@@ -308,6 +308,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.turnChanges" },
   }),
   defineSetting({
+    id: "general.fixErrorsInstructions", section: "general", title: "Fix errors instructions",
+    description: "Extra instructions sent to the agent with failed CI logs when you choose Fix errors.",
+    searchTerms: ["CI", "checks", "GitHub", "fix", "errors", "prompt", "instructions"], scope: "user",
+    storage: { kind: "localStorage", location: "raccoon.prefs#fixErrorsInstructions" },
+  }),
+  defineSetting({
     id: "general.promptMap", section: "general", title: "Prompt map",
     description: "A mark for each of your prompts down the right edge of a conversation. Hover one to read it, click to go back to it.",
     searchTerms: ["general", "prompt", "map"], scope: "user",
