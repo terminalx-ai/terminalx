@@ -12,6 +12,7 @@ import { completeStreamingMarkdown, remarkCodexFileCitations } from "@/lib/codex
 import { LinkedText } from "./LinkedText";
 import { MarkdownTable } from "./MarkdownTable";
 import { LinkedCode } from "./LinkedCode";
+import { openImageViewer } from "@/lib/imageViewer";
 
 const codePlugin = createCodePlugin({ themes: ["github-light", "github-dark"] });
 // Codex file citations (#776) become links with or without a workspace; with one, every other link is routed too.
@@ -28,7 +29,7 @@ const Block = memo(function Block({ text, streaming, mode, linkContext, remoteIm
     } : chatLinkComponent(linkContext),
     table: MarkdownTable,
     // A picture on this computer is drawn under the message (ChatMedia); the web view cannot load its path.
-    img: ({ src, alt }: { src?: string | Blob; alt?: string }) => typeof src === "string" && /^(https?:|data:image\/)/i.test(src) ? !remoteImages && /^https?:/i.test(src) ? <span>{alt || "Remote image"} (image blocked)</span> : <img src={src} alt={alt ?? ""} className="max-h-96 max-w-full rounded-lg" /> : null,
+    img: ({ src, alt }: { src?: string | Blob; alt?: string }) => typeof src === "string" && /^(https?:|data:image\/)/i.test(src) ? !remoteImages && /^https?:/i.test(src) ? <span>{alt || "Remote image"} (image blocked)</span> : <button type="button" aria-label={`View ${alt || "image"}`} onClick={() => openImageViewer([{ src, name: alt || "Image" }])} className="block max-w-full cursor-zoom-in rounded-lg"><img src={src} alt={alt ?? ""} className="max-h-96 max-w-full rounded-lg" /></button> : null,
     // Untrusted code stays literal instead of turning file: URLs into actions.
     inlineCode: ({ children }: { children?: ReactNode }) => <code className="rounded bg-well px-1 py-0.5 font-mono text-[0.9em]">{webLinksOnly ? children : <LinkedText text={String(children ?? "")} context={linkContext} />}</code>,
     pre: ({ children }: { children?: ReactNode }) => {

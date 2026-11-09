@@ -21,6 +21,7 @@ import { ChatMedia } from "./ChatMedia";
 import { mediaMentions } from "@/lib/chatMedia";
 import { classifyRecovery } from "@/lib/recovery";
 import { useExposure, useInView, useRecoveryReporter } from "@/lib/recoveryReports";
+import { openImageViewer, type ViewerImage } from "@/lib/imageViewer";
 
 /**
  * One exchange: the prompt, the work under it, the answer, and a footer.
@@ -458,7 +459,15 @@ function ReaderMessage({
             {message.images.map((im, i) =>
               // A cloud tab's image is a file on its workspace, not here: its name, not a broken thumbnail.
               cwd || isLoadableUrl(im.url) ? (
-                <img key={i} src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
+                <button
+                  key={i}
+                  type="button"
+                  aria-label={`View ${im.name || "image"}`}
+                  onClick={() => openImageViewer(viewable(message.images ?? [], cwd), viewable(message.images ?? [], cwd).findIndex((v) => v.src === toAssetUrl(im.url)))}
+                  className="cursor-zoom-in rounded-md outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  <img src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
+                </button>
               ) : (
                 <span key={i} className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-veil-raised px-2 py-1 text-xs text-muted-foreground" data-testid="prompt-image-name">
                   <ImageIcon className="size-3.5 shrink-0" />
@@ -577,6 +586,13 @@ function ReasoningRow({ name, text, linkContext }: { name: string; text: string;
 function isLoadableUrl(p: string): boolean {
   // `blob:`: a composer's own thumbnail, on a message drawn while it is being sent (#727).
   return p.startsWith("data:") || p.startsWith("blob:") || p.startsWith("http") || p.startsWith("asset:");
+}
+
+/** A message's images the viewer can draw: loadable ones, or files when there is a checkout to read them from. */
+function viewable(images: { url: string; name?: string | null }[], cwd?: string): ViewerImage[] {
+  return images
+    .filter((im) => cwd || isLoadableUrl(im.url))
+    .map((im) => ({ src: toAssetUrl(im.url), name: im.name || (isLoadableUrl(im.url) ? "Image" : im.url.split("/").pop() || "Image"), path: isLoadableUrl(im.url) ? undefined : im.url }));
 }
 
 export function toAssetUrl(p: string): string {

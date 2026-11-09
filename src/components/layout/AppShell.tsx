@@ -71,6 +71,7 @@ import { openLocalProject } from "@/lib/projectStart";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { REPO_URL, repoFile } from "@/lib/repo";
 import { stepVisibleSession } from "@/lib/sessionNavigation";
+import { ImageViewerHost } from "@/components/ui/ImageViewer";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
@@ -240,6 +241,7 @@ export function AppShell() {
         <CleanupIndicator onOpenStorage={openStorageSettings} />
       </div>
       <BypassDialog />
+      <ImageViewerHost />
       <SessionDialogs />
       <CloudShareDialogHost />
       <CloudSchedulesDialogHost />
