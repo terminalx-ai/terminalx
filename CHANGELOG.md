@@ -11,6 +11,9 @@
   failed login output stays available, and repository creation works from linked
   worktrees. (PRO-166)
 
+- Keep native resend regression fixtures within their existing deadlines by
+  removing shell helper launches from the simulated protocol. (PRO-166 validation)
+
 ## 0.2.28
 
 - User settings reload when `settings.json` changes. General shows its location
