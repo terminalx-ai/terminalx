@@ -450,7 +450,7 @@ fn continuation_fixture(case: &str) {
 fn remote_input_fixture(case: &str) {
     use std::os::unix::fs::PermissionsExt;
     let _home = store::temp_home();
-    let root = store::root().unwrap();
+    let root = store::root().unwrap().canonicalize().unwrap();
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(bin.join("codex"), RESUMING_CODEX).unwrap();
@@ -489,6 +489,7 @@ fn remote_input_fixture(case: &str) {
         _ => None,
     }).collect::<Vec<_>>();
     let ready = || matches!(&manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().engine, Engine::CodexStdio(engine) if engine.ready && !engine.blocked && !engine.exited);
+    if case.starts_with("native3-") { return native3_fixture(case, &manager, &root, &bin); }
     if case.starts_with("phone-") {
         let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
         let lease = lifetime.command("runtime.attach", json!({"protocol":1})).unwrap();
@@ -1312,6 +1313,7 @@ fn a_busy_refusal_says_the_words_the_window_knows_it_by() {
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
     if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings" | "to-terminal") { return resume_fixture(&case); }
+    if case.starts_with("native3-") { return remote_input_fixture(&case); }
     if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
     if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart") { return continuation_fixture(&case); }
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
@@ -1497,5 +1499,105 @@ fn child_fixture() {
         drop(rt);
         manager.stop("stdio-owner", "tab").unwrap();
         assert!(rt_arc.lock().unwrap().child.is_none());
+    }
+}
+
+static APPROVAL_QUEUED: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+pub(super) fn before_approval(frame: &Outbound) {
+    if frame.approval().is_some() {
+        let hook = APPROVAL_QUEUED.lock().unwrap().take();
+        if let Some(hook) = hook { hook(); }
+    }
+}
+
+#[test]
+fn privacy_native3_codex_handshake_and_approval_delivery() {
+    for action in ["handshake", "approval"] {
+        for kind in ["personal-on", "personal-cycle", "managed-on", "managed-cycle"] {
+            let case = format!("native3-{action}-{kind}");
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "session::codex_stdio::tests::child_fixture", "--nocapture"])
+                .env(CASE, &case).output().unwrap();
+            assert!(out.status.success(), "{case}\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        }
+    }
+}
+
+fn native3_fixture(case: &str, manager: &SessionManager, root: &Path, bin: &Path) {
+    use crate::remote::{protocol::{Authority as RemoteAuthority, PROTOCOL}, server::{Peer, WorkspaceRpc}};
+    let policy = |enabled| {
+        let managed = case.contains("managed");
+        if enabled && managed { std::env::set_var("TERMINALX_TEST_MANAGED_PRIVACY", "1"); }
+        else { std::env::remove_var("TERMINALX_TEST_MANAGED_PRIVACY"); }
+        store::write_json(&root.join("data-privacy.json"), &json!({"enabled":enabled && !managed})).unwrap();
+        assert_eq!(crate::data_privacy::refresh().enabled, enabled);
+    };
+    let wait = |why: &str, done: &dyn Fn() -> bool| {
+        let until = Instant::now() + Duration::from_secs(8);
+        while !done() { assert!(Instant::now() < until, "{why}"); std::thread::sleep(Duration::from_millis(5)); }
+    };
+    policy(false);
+    struct Owner(SessionManager);
+    impl Drop for Owner { fn drop(&mut self) { let _ = self.0.stop("stdio-owner", "tab"); } }
+    let _owner = Owner(manager.clone());
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).max_blocking_threads(2).enable_all().build().unwrap();
+    let rpc = WorkspaceRpc::new(root, 1, manager.sink.clone(), manager.terminals.clone(), Some(manager.clone())).unwrap();
+    let (peer, _events) = Peer::new("native3-relay".into(), RemoteAuthority::Manage);
+    assert_eq!(runtime.block_on(rpc.handle(&peer, &json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["session/1"]}})))["ok"], true);
+    let send = |text: &str| runtime.block_on(rpc.handle(&peer, &json!({"id":"send","method":"session.send","params":{
+        "sessionId":"stdio-owner","tabId":"tab","text":text,"clientRequestId":uuid::Uuid::new_v4().to_string()}})));
+    let frames = || std::fs::read_to_string(bin.join("received")).unwrap_or_default().lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+    let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    let events = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+    if case.contains("handshake") {
+        std::fs::write(bin.join("hold"), "").unwrap();
+        let result = send("expired relay prompt");
+        assert_eq!(result["ok"], true, "{result}");
+        wait("physical delayed thread request", &|| frames().iter().any(|f| f["method"] == "thread/resume"));
+        policy(true); if case.ends_with("cycle") { policy(false); }
+        std::fs::remove_file(bin.join("hold")).unwrap();
+        wait("withdrawn remote turn", &|| !rt.lock().unwrap().turn_open);
+        assert_eq!(frames().len(), 3, "revoked startup prompt reached Codex");
+        assert!(events().iter().any(|e| matches!(e.payload, Payload::TurnCompleted { status: TurnStatus::Aborted, .. })));
+        manager.send("stdio-owner", "tab", "valid local".into(), vec![]).unwrap();
+        wait("local turn delivered", &|| frames().len() == 4 && !rt.lock().unwrap().turn_open);
+        assert_eq!(frames()[3]["params"]["input"][0]["text"], "valid local");
+        policy(false); assert_eq!(send("fresh relay")["ok"], true);
+        wait("fresh relay delivered", &|| frames().len() == 5 && !rt.lock().unwrap().turn_open);
+        assert_eq!(frames()[4]["params"]["input"][0]["text"], "fresh relay");
+    } else {
+        // A real stdio provider waits for the JSON-RPC approval reply. It does
+        // not fabricate a completion while the approval remains unanswered.
+        let script = RESUMING_CODEX.replace("      printf '{\"method\":\"item/agentMessage/delta\"", "      printf '{\"id\":\"approval\",\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-%s\",\"itemId\":\"tool\",\"command\":\"echo approved\"}}\\n' \"$id\"\n      continue\n      printf '{\"method\":\"item/agentMessage/delta\"");
+        assert_ne!(script, RESUMING_CODEX);
+        std::fs::write(bin.join("codex"), script).unwrap();
+        manager.send("stdio-owner", "tab", "local task".into(), vec![]).unwrap();
+        wait("provider approval request", &|| !rt.lock().unwrap().pending.is_empty());
+        let request = rt.lock().unwrap().pending.keys().next().unwrap().clone();
+        let (entered, arrived) = mpsc::channel(); let (release, released) = mpsc::channel();
+        *APPROVAL_QUEUED.lock().unwrap() = Some(Box::new(move || { entered.send(()).unwrap(); released.recv_timeout(Duration::from_secs(8)).unwrap(); }));
+        // Same remote admission used by relay permission RPC; the physical
+        // writer is a different thread and must retain this original ticket.
+        { let ticket = crate::data_privacy::Ticket::default(); let _scope = ticket.scope().unwrap();
+          manager.respond_permission("stdio-owner", "tab", &request, "allow").unwrap(); }
+        arrived.recv_timeout(WAIT).unwrap();
+        assert!(manager.respond_permission("stdio-owner", "tab", &request, "deny").unwrap_err().to_string().contains("still being delivered"));
+        assert!(rt.lock().unwrap().pending.contains_key(&request));
+        assert!(!events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
+        policy(true); if case.ends_with("cycle") { policy(false); }
+        release.send(()).unwrap();
+        // A writer fence proves the rejected answer was processed, without
+        // inventing a provider response or sleeping to guess queue progress.
+        let (tx, rx) = mpsc::channel();
+        *APPROVAL_QUEUED.lock().unwrap() = Some(Box::new(move || { tx.send(()).unwrap(); }));
+        wait("approval restored", &|| {
+            manager.respond_permission("stdio-owner", "tab", &request, "deny").is_ok()
+        });
+        rx.recv_timeout(WAIT).unwrap();
+        wait("local answer physically delivered", &|| frames().iter().any(|f| f["id"] == "approval" && f["result"]["decision"] == "decline"));
+        assert!(frames().iter().all(|f| f["result"]["decision"] != "accept"));
+        wait("delivered approval settled", &|| rt.lock().unwrap().pending.is_empty());
+        assert_eq!(events().iter().filter(|e| matches!(e.payload, Payload::PermissionDecided { allowed: false, automatic: false, .. })).count(), 1);
     }
 }

@@ -18,7 +18,7 @@ fn privacy_opencode_denied_opening_preserves_local_followups() {
 #[test]
 fn opening_child() {
     let Ok(kind) = std::env::var(CASE) else { return };
-    let managed = kind.starts_with("managed");
+    let managed = kind.contains("managed");
     let cycle = kind.ends_with("cycle");
     let rig = Rig::of(CliKind::Claude, "");
     let policy = |enabled| {
@@ -56,6 +56,10 @@ class Provider(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Length', str(len(body))); self.end_headers()
         self.wfile.write(body); self.wfile.flush()
         if self.path.endswith('/message'):
+            if (root/'approval').exists():
+                news.put({'type':'session.status','properties':{'sessionID':'local-session','status':{'type':'busy'}}})
+                news.put({'type':'permission.asked','properties':{'sessionID':'local-session','id':'approval','type':'bash','input':{'command':'echo allowed'}}})
+                return
             for status in ['busy', 'idle']:
                 news.put({'type':'session.status','properties':{'sessionID':'local-session','status':{'type':status}}})
 server = http.server.ThreadingHTTPServer(('127.0.0.1',0), Provider)
@@ -90,6 +94,34 @@ server.serve_forever()
     assert_eq!(runtime.block_on(rpc.handle(&peer, &json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["session/1"]}})))["ok"], true);
     let send = |text: &str| runtime.block_on(rpc.handle(&peer, &json!({"id":"send","method":"session.send","params":{
         "sessionId":SESSION,"tabId":TAB,"text":text,"clientRequestId":uuid::Uuid::new_v4().to_string()}})));
+    if kind.starts_with("approval-") {
+        std::fs::write(root.join("approval"), "").unwrap();
+        rig.manager.send(SESSION, TAB, "local task".into(), vec![]).unwrap();
+        wait_for("provider approval card", || !rig.rt.lock().unwrap().pending.is_empty());
+        let request = rig.rt.lock().unwrap().pending.keys().next().unwrap().clone();
+        let (entered, arrived) = mpsc::channel(); let (release, released) = mpsc::channel();
+        *BEFORE_OPENCODE_HTTP.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap(); released.recv_timeout(WAIT).unwrap();
+        }));
+        { let ticket = crate::data_privacy::Ticket::default(); let _scope = ticket.scope().unwrap();
+          rig.manager.respond_permission(SESSION, TAB, &request, "once").unwrap(); }
+        arrived.recv_timeout(WAIT).unwrap();
+        assert!(rig.manager.respond_permission(SESSION, TAB, &request, "reject").unwrap_err().to_string().contains("still being delivered"));
+        assert!(rig.rt.lock().unwrap().pending.contains_key(&request));
+        assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
+        policy(true); if cycle { policy(false); }
+        release.send(()).unwrap();
+        wait_for("revoked HTTP answer restored for local reply", || rig.manager.respond_permission(SESSION, TAB, &request, "reject").is_ok());
+        wait_for("local HTTP answer settled", || rig.rt.lock().unwrap().pending.is_empty());
+        let rows = std::fs::read_to_string(&records).unwrap().lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+        let replies: Vec<_> = rows.iter().filter(|row| row["path"].as_str().unwrap().contains("/permissions/")).collect();
+        assert_eq!(replies.len(), 1, "revoked approval reached provider: {rows:?}");
+        assert_eq!(replies[0]["body"]["response"], "reject");
+        assert_eq!(rig.events().iter().filter(|e| matches!(e.payload, Payload::PermissionDecided { allowed: false, automatic: false, .. })).count(), 1);
+        policy(false);
+        rig.manager.stop(SESSION, TAB).unwrap(); pump.join().unwrap();
+        return;
+    }
     let (entered, arrived) = mpsc::channel(); let (release, released) = mpsc::channel();
     *BEFORE_OPENCODE_HTTP.lock().unwrap() = Some(Box::new(move || {
         entered.send(()).unwrap(); released.recv_timeout(WAIT).unwrap();
@@ -141,4 +173,14 @@ server.serve_forever()
     assert_eq!(rows[3]["body"]["parts"][0]["text"], "fresh remote");
     rig.manager.stop(SESSION, TAB).unwrap();
     pump.join().unwrap();
+}
+
+#[test]
+fn privacy_native3_opencode_revoked_approval_stays_answerable() {
+    for kind in ["personal-on", "personal-cycle", "managed-on", "managed-cycle"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::watch_tests::prompts::privacy::opencode_privacy::opening_child", "--nocapture"])
+            .env(CASE, format!("approval-{kind}")).output().unwrap();
+        assert!(output.status.success(), "{kind}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
 }

@@ -60,8 +60,7 @@ pub(crate) fn fetch_admitted(cwd: &Path, branch: &str, timeout: std::time::Durat
     let _request = crate::github_process::scope();
     let mut command = git();
     command.current_dir(cwd).args(["fetch", "--quiet", "--no-recurse-submodules", "origin", branch]);
-    let _transport = ssh::prepare(&mut command)?;
-    let output = crate::github_process::output(command, timeout, None)?;
+    let output = crate::github_process::git_verification_output(command, timeout)?;
     if !output.status.success() {
         bail!("git fetch: {}", String::from_utf8_lossy(&output.stderr).trim());
     }

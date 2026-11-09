@@ -108,13 +108,28 @@ impl Fixture {
         let held = dir.join("held");
         let first = dir.join("first-fetch");
         let ssh = dir.join("configured-ssh");
-        // A simple configured transport accepts exactly its identity argument,
+        // An observed transport validates containment and its identity argument,
         // host and remote command. First transfer fetches refs with blob:none;
         // second transfer is checkout's demanded object. Hold that second call,
         // including a pipe-owning child that ignores SIGTERM, to require the
         // runner's hard group cleanup before privacy can acknowledge.
         std::fs::write(&ssh, format!(r#"#!/bin/sh
-[ "$#" = 3 ] && [ "$1" = --fixture-key ] || exit 92
+[ "$1" = --fixture-key ] || exit 92
+shift
+if [ "$1" = -G ]; then
+ printf 'hostname privacy-pull\nuser fixture\nport 22\nproxycommand none\nproxyjump none\n'; exit 0
+fi
+contained=no
+while [ "$#" -gt 2 ]; do
+ case "$1" in
+  -S) [ "$2" = none ] || exit 92; contained=yes; shift 2 ;;
+  -o) case "$2" in SendEnv=GIT_PROTOCOL|ProxyCommand=none|ForkAfterAuthentication=no|PermitLocalCommand=no) ;; *) exit 92 ;; esac; shift 2 ;;
+  *) exit 92 ;;
+ esac
+done
+[ "$contained" = yes ] || [ "$TERMINALX_TEST_ORDINARY_GIT" = 1 ] || exit 92
+set -- --fixture-key "$@"
+[ "$#" = 3 ] || exit 92
 case "$2" in privacy-pull|git@github.com) ;; *) exit 92 ;; esac
 printf '%s %s %s\n' "$$" "${{GIT_NO_LAZY_FETCH:-unset}}" "$*" >> {transfers}
 case "$3" in
@@ -329,4 +344,11 @@ mod openssh;
 pub(super) fn native_review_ssh(root: &Path, managed: bool) {
     openssh::identity(root, managed);
     openssh::run(root, managed, None);
+}
+
+#[path = "git_native3_privacy_tests.rs"]
+mod native3;
+pub(super) fn native3_regressions(root: &Path, managed: bool) {
+    openssh::strict_wrapper(root, managed);
+    native3::run(root, managed);
 }

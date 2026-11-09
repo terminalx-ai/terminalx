@@ -95,6 +95,12 @@ pub(crate) fn git_output_admitted(command: Command, timeout: Duration, ticket: T
     git_output_reporting(command, timeout, ticket, &|| false, None)
 }
 
+/// Verification fetches use Git's graceful lock cleanup without permitting
+/// implicit object acquisition by any inspection performed along the way.
+pub(crate) fn git_verification_output(command: Command, timeout: Duration) -> Result<Output> {
+    output_process(command, timeout, None, ticket(), Execution { git: true, stop: &|| false, progress: None })
+}
+
 type Progress = Box<dyn Fn(&str) + Send>;
 
 pub(crate) fn git_output_reporting(mut command: Command, timeout: Duration, ticket: Ticket, stop: &dyn Fn() -> bool, progress: Option<Progress>) -> Result<Output> {

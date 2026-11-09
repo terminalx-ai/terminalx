@@ -69,6 +69,37 @@ fn exercise(root: &Path, fixture: &FetchFixture, managed: bool, probes: usize) {
     }
 }
 
+fn unsupported(root: &Path, fixture: &FetchFixture, managed: bool) {
+    policy(false, managed);
+    // The wrapper is functional with Git's own selected grammar, but cannot
+    // establish the app's containment contract. Refuse before any transfer.
+    real_git(&fixture.project, &["fetch", "origin", "main"]);
+    let transfers = count(root, "transfer");
+    let refused = || {
+        let error = crate::git::fetch_admitted(&fixture.project, "main", Duration::from_secs(5)).unwrap_err();
+        assert!(error.to_string().contains("Cannot verify configured SSH transport containment"), "{error:#}");
+        assert_eq!(count(root, "transfer"), transfers);
+    };
+    refused();
+    policy(true, managed);
+    assert!(crate::git::fetch_admitted(&fixture.project, "main", Duration::from_secs(5)).unwrap_err().to_string().contains(data_privacy::MESSAGE));
+    policy(false, managed);
+    let stale = super::super::super::queued(|| crate::git::fetch_admitted(&fixture.project, "main", Duration::from_secs(5)));
+    policy(true, managed); policy(false, managed);
+    assert!(stale().unwrap_err().to_string().contains(data_privacy::MESSAGE));
+    std::fs::write(root.join("hold-variant"), "probe").unwrap();
+    std::thread::scope(|scope| {
+        let work = scope.spawn(super::super::super::queued(|| crate::git::fetch_admitted(&fixture.project, "main", Duration::from_secs(10))));
+        let until = Instant::now() + Duration::from_secs(5);
+        while held(root).is_empty() { assert!(Instant::now() < until && !work.is_finished()); std::thread::sleep(Duration::from_millis(5)); }
+        cancel_fetch(root, managed);
+        assert!(work.join().unwrap().unwrap_err().to_string().contains(data_privacy::MESSAGE));
+    });
+    std::fs::remove_file(root.join("hold-variant")).unwrap();
+    for pid in held(root) { std::fs::remove_file(root.join(format!("held-{pid}"))).unwrap(); }
+    policy(false, managed); refused();
+}
+
 pub(super) fn run(root: &Path, fixture: &FetchFixture, managed: bool) {
     let saved: Vec<_> = ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"].into_iter()
         .map(|key| (key, std::env::var_os(key))).collect();
@@ -153,7 +184,8 @@ exec /bin/sh -c "$remote"
         }
         let port = if matches!(grammar, "plink" | "tortoiseplink") { ":2222" } else { "" };
         real_git(&fixture.project, &["remote", "set-url", "origin", &format!("ssh://configured-user@fixture.invalid{port}{}", remote.display())]);
-        exercise(root, fixture, managed, probes);
+        if grammar == "ssh" { exercise(root, fixture, managed, probes); }
+        else { unsupported(root, fixture, managed); }
     }
     real_git(&fixture.project, &["remote", "set-url", "origin", remote.to_str().unwrap()]);
     for key in ["core.sshCommand", "ssh.variant"] {

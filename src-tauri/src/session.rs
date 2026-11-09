@@ -3314,11 +3314,20 @@ impl SessionManager {
                         let line = opencode::perform(&tag, &method, &url, body);
                         let mut rt = runtime.lock().unwrap();
                         if !current(&rt) { return; }
-                        let actions = if let Engine::OpenCode(o) = &mut rt.engine { o.handle(&line) } else { Vec::new() };
+                        let (actions, answer) = if let Engine::OpenCode(o) = &mut rt.engine {
+                            let answer = o.settle_answer(&tag, &line);
+                            (o.handle(&line), answer)
+                        } else { (Vec::new(), None) };
                         rt.last_activity = Instant::now();
                         rt.incidents.progress("agent_output");
                         manager.stall_disproved(&mut rt);
                         manager.apply_actions(&mut rt, actions);
+                        if let Some((request, allow)) = answer {
+                            manager.permission_delivered(&mut rt, &request, allow);
+                            let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+                            drop(rt);
+                            manager.observer.answered(&session, &tab);
+                        }
                     });
                 }
                 Action::Write(line) => {
@@ -3862,15 +3871,17 @@ impl SessionManager {
                 (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
             }
             Engine::OpenCode(o) => {
+                anyhow::ensure!(!o.answer_pending(request_id), "An answer to this request is still being delivered; try again when it settles");
                 let actions = o.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
-                let allow = option_id != "reject";
                 self.apply_actions(&mut rt, actions);
-                (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
+                // The card remains open until the HTTP response confirms delivery.
+                return Ok(());
             }
             Engine::CodexStdio(engine) => {
                 let actions = engine.answer(request_id, option_id)?;
                 self.apply_codex_actions(&mut rt, actions)?;
-                (option_id == "allow", if option_id == "allow" { "Allowed".into() } else { "Denied".into() })
+                // Enqueueing is not delivery. A revoked unsent reply is retryable.
+                return Ok(());
             }
             Engine::None => bail!("no engine"),
         };
@@ -3886,6 +3897,13 @@ impl SessionManager {
         drop(rt);
         self.observer.answered(session_id, tab_id);
         Ok(())
+    }
+
+    fn permission_delivered(&self, rt: &mut TabRuntime, request_id: &str, allow: bool) {
+        let Some(ask) = rt.pending.remove(request_id) else { return };
+        self.publish(rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: allow,
+            label: if allow { "Allowed".into() } else { "Denied".into() }, automatic: false }, None);
+        if rt.pending.is_empty() { self.set_status(rt, TabStatus::InProgress); }
     }
 
     /// Answer an AskUserQuestion: the answers ride inside an allow.

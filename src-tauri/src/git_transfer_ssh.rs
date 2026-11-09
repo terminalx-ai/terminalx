@@ -1,6 +1,6 @@
 //! A per-invocation SSH adapter, including recursive submodule transports.
-//! Resolve configuration in the invoking Git child's directory, not once in
-//! the superproject. The parent keeps one admission/process group until every
+//! Resolve configuration in the Git child's repository (the destination for
+//! a clone), not once in the superproject. The parent keeps one admission/process group until every
 //! probe, transport and pipe is drained. This entry never starts app services.
 use super::{command_word, quote};
 use std::ffi::{OsStr, OsString};
@@ -16,9 +16,45 @@ const ENTRY: &str = "--terminalx-git-ssh";
 struct Settings {
     git: Vec<u8>,
     config_args: Vec<Vec<u8>>,
+    clone: Option<CloneContext>,
     // Git strips repository-local config environment before executing SSH.
     // Preserve the original command-line config, not the parent's local config.
     environment: Vec<(String, Option<Vec<u8>>)>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CloneContext {
+    // Git clone invokes its first transport from the original directory, even
+    // after it has created the destination. Recursive submodule transports
+    // run from their own checkout and must discover their own configuration.
+    from: std::path::PathBuf,
+    git_dir: std::path::PathBuf,
+}
+
+fn clone_context(command: &Command, args: &[&OsStr]) -> Result<Option<CloneContext>> {
+    if args.first() != Some(&OsStr::new("clone")) { return Ok(None); }
+    let mut paths = Vec::new();
+    let mut bare = false;
+    let mut literal = false;
+    let mut args = args[1..].iter();
+    while let Some(arg) = args.next() {
+        let bytes = arg.as_bytes();
+        if literal || !bytes.starts_with(b"-") { paths.push(*arg); continue; }
+        if bytes == b"--" { literal = true; continue; }
+        if matches!(bytes, b"--bare" | b"--mirror") { bare = true; continue; }
+        if matches!(bytes, b"-c" | b"--config" | b"-b" | b"--branch" | b"-o" | b"--origin" | b"-u" | b"--upload-pack" | b"--template" | b"--reference" | b"--reference-if-able" | b"--separate-git-dir" | b"--depth" | b"--shallow-since" | b"--shallow-exclude" | b"--filter" | b"-j" | b"--jobs" | b"--revision" | b"--server-option") {
+            anyhow::ensure!(bytes != b"--separate-git-dir", "App clone transport does not support a separate Git directory; use your terminal or agent");
+            args.next().context("missing clone option value")?;
+        } else {
+            anyhow::ensure!(!bytes.starts_with(b"--separate-git-dir="), "App clone transport does not support a separate Git directory; use your terminal or agent");
+        }
+    }
+    // App clones always name their staging destination explicitly. Refuse
+    // ambiguous invocations rather than reading an enclosing repository.
+    anyhow::ensure!(paths.len() == 2, "App clone requires an explicit destination for SSH configuration");
+    let from = command.get_current_dir().map(std::path::PathBuf::from).unwrap_or(std::env::current_dir()?).canonicalize()?;
+    let destination = from.join(paths[1]);
+    Ok(Some(CloneContext { from, git_dir: if bare { destination } else { destination.join(".git") } }))
 }
 
 fn environment(command: &Command, key: &str) -> Option<OsString> {
@@ -35,17 +71,21 @@ pub(crate) fn prepare(command: &mut Command) -> Result<tempfile::TempDir> {
         for i in 0..count { keys.extend([format!("GIT_CONFIG_KEY_{i}"), format!("GIT_CONFIG_VALUE_{i}")]); }
     }
     let mut config_args = Vec::new();
-    let mut args = command.get_args();
-    while let Some(arg) = args.next() {
+    let arguments: Vec<_> = command.get_args().collect();
+    let mut args = arguments.iter().copied().peekable();
+    while let Some(arg) = args.peek().copied() {
         let bytes = arg.as_bytes();
         if bytes == b"-c" || bytes == b"--config-env" {
+            args.next();
             config_args.push(bytes.to_vec());
             config_args.push(args.next().context("missing Git config argument")?.as_bytes().to_vec());
         } else if bytes.starts_with(b"-c") || bytes.starts_with(b"--config-env=") {
+            args.next();
             config_args.push(bytes.to_vec());
         } else { break; }
     }
-    let settings = Settings { git: command.get_program().as_bytes().to_vec(), config_args,
+    let clone = clone_context(command, &args.collect::<Vec<_>>())?;
+    let settings = Settings { git: command.get_program().as_bytes().to_vec(), config_args, clone,
         environment: keys.into_iter().map(|key| { let value = environment(command, &key).map(|v| v.into_vec()); (key, value) }).collect() };
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("transport.json");
@@ -73,6 +113,13 @@ impl Settings {
         for (key, value) in &self.environment {
             if let Some(value) = value { command.env(key, OsString::from_vec(value.clone())); }
             else { command.env_remove(key); }
+        }
+        if let Some(clone) = &self.clone {
+            if std::env::current_dir()?.canonicalize()? == clone.from {
+                // Read the newly initialized clone, including clone -c values
+                // and gitdir-conditional includes, never the enclosing checkout.
+                command.arg("--git-dir").arg(&clone.git_dir);
+            }
         }
         command.args(self.config_args.iter().cloned().map(OsString::from_vec));
         let out = command.args(["config", "--get", key]).env("GIT_NO_LAZY_FETCH", "1")
@@ -165,12 +212,11 @@ fn execute(settings: Settings, args: Vec<OsString>) -> Result<()> {
     }
     let configuration = probe.arg("-G").args(&arguments)
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output()?;
-    let openssh = configuration.status.success();
-    let named_ssh = variant(None, word.as_deref()) == Variant::Ssh;
-    anyhow::ensure!(openssh || (selected != Variant::Ssh && !named_ssh),
-        "Cannot verify configured SSH transport: {}", String::from_utf8_lossy(&configuration.stderr));
+    anyhow::ensure!(configuration.status.success(),
+        "Cannot verify configured SSH transport containment. Use your terminal or agent, or configure an SSH command that supports effective-configuration inspection: {}",
+        String::from_utf8_lossy(&configuration.stderr));
     let mut command = transport(&effective, shell);
-    if openssh {
+    {
         crate::ssh_containment::direct_configuration(&configuration.stdout)?;
         // Last -S wins, preserving identity/port but never sharing a master.
         // Pin the verified direct route before configuration is read again.

@@ -364,3 +364,60 @@ exit 1
     }
     std::fs::write(wrapper, saved).unwrap();
 }
+
+pub(super) fn strict_wrapper(root: &Path, managed: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    for variant in ["simple", "auto"] {
+        let _environment = Environment::new(root);
+        policy(false, managed);
+        let f = Fixture::new(root, &format!("strict-openssh-{variant}"));
+        let ssh = Ssh::new(&f);
+        let wrapper = f.cwd.parent().unwrap().join("strict-two-arguments");
+        let held = f.cwd.parent().unwrap().join("probe-held");
+        let hold = f.cwd.parent().unwrap().join("hold-probe");
+        std::fs::write(&wrapper, format!(r#"#!/bin/sh
+if [ "$#" != 2 ]; then
+ if [ -f {hold} ]; then printf '%s\n' "$$" > {held}; exec /bin/sleep 30; fi
+ exit 91
+fi
+exec /usr/bin/ssh -F {config} "$@"
+"#, hold=quote(&hold), held=quote(&held), config=quote(&ssh.config))).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&f.cwd, &["config", "core.sshCommand", &quote(&wrapper)]);
+        git(&f.cwd, &["config", "ssh.variant", variant]);
+        // This exact strict wrapper really starts a detached OpenSSH master.
+        checked(Command::new("/usr/bin/git").current_dir(&f.cwd).args(["ls-remote", "origin"]));
+        assert!(ssh.socket.exists(), "strict-wrapper control did not create a master");
+        checked(Command::new("/usr/bin/ssh").arg("-F").arg(&ssh.config).args(["-O", "exit", ssh.master_host]));
+        let until = Instant::now() + Duration::from_secs(5);
+        while ssh.socket.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
+        let connections = ssh.connections();
+        let refused = || {
+            assert!(f.workspace("git.fetch").unwrap_err().contains("Cannot verify configured SSH transport containment"));
+            assert_eq!(ssh.connections(), connections);
+            assert!(!ssh.socket.exists());
+        };
+        refused();
+        policy(true, managed); denied(f.workspace("git.fetch"));
+        policy(false, managed);
+        let stale = crate::github_process::queued(|| f.workspace("git.fetch"));
+        policy(true, managed); policy(false, managed); denied(stale());
+        std::fs::write(&hold, "").unwrap();
+        std::thread::scope(|scope| {
+            let work = scope.spawn(crate::github_process::queued(|| f.workspace("git.fetch")));
+            let until = Instant::now() + Duration::from_secs(5);
+            while !held.exists() { assert!(Instant::now() < until && !work.is_finished()); std::thread::sleep(Duration::from_millis(5)); }
+            let pid: i32 = std::fs::read_to_string(&held).unwrap().trim().parse().unwrap();
+            policy(true, managed);
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "probe survives acknowledgement");
+            denied(work.join().unwrap());
+        });
+        policy(false, managed);
+        std::fs::remove_file(&hold).unwrap(); refused();
+        // Restoring a verifiable command restores real fetch without sign-in.
+        git(&f.cwd, &["config", "core.sshCommand", &format!("/usr/bin/ssh -F {}", quote(&ssh.config))]);
+        f.workspace("git.fetch").unwrap();
+        assert_eq!(git(&f.cwd, &["rev-parse", "origin/main"]), f.after);
+        ssh.clients_dead();
+    }
+}

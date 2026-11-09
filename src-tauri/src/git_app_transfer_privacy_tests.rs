@@ -51,34 +51,23 @@ exec {command} "$@"
         git(&f.cwd, &["config", "core.sshCommand", &format!("{} --identity", quote(&wrapper))]);
         git(&f.cwd, &["config", "ssh.variant", variant]);
         git(&f.cwd, &["remote", "set-url", "origin", "ssh://privacy-pull:2222/fixture.git"]);
-        f.workspace("git.fetch").unwrap();
-        assert_eq!(git(&f.cwd, &["rev-parse", "origin/main"]), f.after);
         let before = f.transfers();
+        let plain = Command::new("/usr/bin/git").current_dir(&f.cwd).args(["fetch", "origin"])
+            .env("TERMINALX_TEST_ORDINARY_GIT", "1").output().unwrap();
+        assert!(plain.status.success(), "{}", String::from_utf8_lossy(&plain.stderr));
+        assert!(f.transfers() > before, "ordinary Git must exercise this grammar");
+        let before = f.transfers();
+        let refuse = || {
+            let error = f.workspace("git.fetch").unwrap_err();
+            assert!(error.to_string().contains("Cannot verify configured SSH transport containment"), "{error:#}");
+            assert_eq!(f.transfers(), before);
+        };
+        refuse();
         policy(true, managed); denied(f.workspace("git.fetch"));
         policy(false, managed);
         let stale = crate::github_process::queued(|| f.workspace("git.fetch"));
         policy(true, managed); policy(false, managed); denied(stale());
-        assert_eq!(f.transfers(), before);
-        std::fs::write(&f.hold, "").unwrap();
-        std::thread::scope(|scope| {
-            let worker = scope.spawn(crate::github_process::queued(|| f.workspace("git.fetch")));
-            let until = Instant::now() + Duration::from_secs(10);
-            let pids: Vec<i32> = loop {
-                if let Ok(text) = std::fs::read_to_string(&f.held) {
-                    let pids: Vec<_> = text.split_whitespace().map(|p| p.parse().unwrap()).collect();
-                    if pids.len() == 2 { break pids; }
-                }
-                assert!(Instant::now() < until && !worker.is_finished());
-                std::thread::sleep(Duration::from_millis(5));
-            };
-            policy(true, managed);
-            for pid in pids { assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "{variant} transfer survived acknowledgement"); }
-            denied(worker.join().unwrap());
-        });
-        policy(false, managed);
-        std::fs::remove_file(&f.hold).unwrap();
-        f.workspace("git.fetch").unwrap();
-        assert!(f.transfers() > before);
+        refuse();
     }
 }
 

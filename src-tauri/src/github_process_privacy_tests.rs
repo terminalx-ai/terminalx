@@ -861,3 +861,21 @@ fn privacy_native_ssh_child() {
     fixture(&root);
     pull::native_review_ssh(&root, kind == "managed");
 }
+
+#[test]
+fn privacy_native3_ssh_clone_and_reference_transaction() {
+    for managed in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "github_process::tests::privacy_native3_git_child", "--nocapture"])
+            .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
+            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+        assert!(output.status.success(), "policy={managed}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+#[test]
+fn privacy_native3_git_child() {
+    let Ok(kind) = std::env::var("TERMINALX_TEST_GITHUB_ENTRIES") else { return };
+    let root = store::root().unwrap(); fixture(&root);
+    pull::native3_regressions(&root, kind == "managed");
+}
