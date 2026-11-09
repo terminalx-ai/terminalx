@@ -1,0 +1,39 @@
+{
+  "jobs": [
+    {
+      "databaseId": 128157610050,
+      "name": "headless-serve",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42294938164/job/128157610050"
+    },
+    {
+      "databaseId": 128157610305,
+      "name": "legacy-runtime-probe (instabox-medium)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42294938164/job/128157610305"
+    },
+    {
+      "databaseId": 128157610421,
+      "name": "legacy-runtime-probe (macos-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42294938164/job/128157610421"
+    },
+    {
+      "databaseId": 128157610454,
+      "name": "desktop-platforms (instabox-medium)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42294938164/job/128157610454"
+    },
+    {
+      "databaseId": 128157610557,
+      "name": "check",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42294938164/job/128157610557"
+    }
+  ]
+}

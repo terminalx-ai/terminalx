@@ -160,7 +160,7 @@ struct World {
 struct FakeHost(Mutex<World>);
 
 fn check(name: &str, state: &str) -> PrCheck {
-    PrCheck { name: name.into(), state: state.into(), url: None }
+    PrCheck { name: name.into(), state: state.into(), url: None, actions: None }
 }
 
 fn github_issue() -> IssueRef {
