@@ -26,6 +26,20 @@
     "plugins": [
       "expo-router",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow TerminalX to attach the photos you choose to a message for your agent.",
+          "cameraPermission": false
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow TerminalX to hear what you dictate to your agent.",
+          "speechRecognitionPermission": "Allow TerminalX to turn what you dictate into a message for your agent."
+        }
+      ],
+      [
         "expo-secure-store",
         {
           "configureAndroidBackup": false
