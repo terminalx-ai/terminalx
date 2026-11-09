@@ -72,6 +72,24 @@ async function refresh() {
     connectThemeFile(save);
   }
   apply(file);
+  unfoldToolCallsOnce(file);
+}
+
+/**
+ * Fold tool calls turned off by default (steps stay in view, in order), but moving preferences into the settings
+ * file wrote every value of the time into it, defaults included, so for most people `true` there is the old default,
+ * not a choice. Once per computer, a `true` becomes the new default; turned back on after that, it stays on.
+ */
+const UNFOLDED = "raccoon.migrated.foldToolCallsOff";
+function unfoldToolCallsOnce(file: SettingsFileStatus) {
+  if (!connected || file.error) return;
+  try {
+    if (localStorage.getItem(UNFOLDED)) return;
+    localStorage.setItem(UNFOLDED, "1");
+  } catch {
+    return;
+  }
+  if (file.preferences?.foldToolCalls === true) save({ foldToolCalls: false });
 }
 
 /** Subscribe before reading so edits during startup cannot be missed. */
