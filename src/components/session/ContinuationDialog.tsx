@@ -216,7 +216,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
         {/* Only what the reader decides here: which agent picks it up and how much context it carries, both in
             view; Autopilot, set less often, is folded away. Where it runs and what it came from are the session they are in; the rest is said
             once, in the line under the title. */}
-        <HandoffScene className="mb-5 mt-1" />
+        <HandoffScene className="mb-8 mt-6" />
         <DialogHeader>
           <DialogTitle className="text-base font-semibold">{into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
           <DialogDescription className="text-[13px] text-muted-foreground">
