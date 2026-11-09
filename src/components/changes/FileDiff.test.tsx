@@ -20,7 +20,8 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 it("hides whitespace highlights without changing the displayed or copied new text", async () => {
   const { container } = render(<><DiffOptions /><FileDiff {...props} /></>);
   await screen.findByRole("button", { name: "Copy file" });
-  expect(container.querySelector(".cm-changedLine")).not.toBeNull();
+  // The loaded header can appear before DiffPane's effect mounts CodeMirror.
+  await waitFor(() => expect(container.querySelector(".cm-changedLine")).not.toBeNull());
   fireEvent.click(screen.getByLabelText("Hide whitespace changes"));
   expect(container.querySelector(".cm-changedLine")).toBeNull();
   expect(container.querySelector(".cm-content")?.textContent).toContain("const x=1;");
