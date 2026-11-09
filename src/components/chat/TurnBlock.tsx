@@ -294,17 +294,16 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
           <div className="flex flex-wrap items-center gap-2">
             <Clock className="size-3.5 shrink-0" />
             {!item.withdrawn && <span className="text-xs">Queued</span>}
-            {item.author && <span data-user-id={item.author.userId}>{item.author.displayName}:</span>}
-            {/* Wrap the row before its controls squeeze the message to zero width. */}
-            <div className="min-w-0 flex-[1_1_12rem] whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={item.text} context={linkContext} /></span><MessageTime ts={item.messageTs} /></div>
+            {item.author && <span className="min-w-0 wrap-anywhere" data-user-id={item.author.userId}>{item.author.displayName}:</span>}
             {onSendQueuedNow && !item.inputOccupied && !item.withdrawn && (
               <WithTooltip label="Interrupt the agent and send this now">
-                <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
+                <Button size="xs" variant="outline" className="ml-auto shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
                   <Send /> Send now
                 </Button>
               </WithTooltip>
             )}
           </div>
+          <div className="mt-1 min-w-0 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={item.text} context={linkContext} /></span><MessageTime ts={item.messageTs} /></div>
           {item.inputOccupied && <InputOccupiedNote />}
           {item.withdrawn && <WithdrawnNote unconfirmed={item.unconfirmed} seq={item.seq} onSendAgain={onSendAgain} />}
         </div>

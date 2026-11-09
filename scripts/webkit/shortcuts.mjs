@@ -129,7 +129,7 @@ const fits = (layout) => ({
   // and for the slide to end after the new ones.
   await page.keyboard.press("Meta+B");
   await page.waitForTimeout(600);
-  const afterOld = await sidebarShown();
+  const afterOld = await sidebarShown() && await page.locator('[data-testid="panel-presence"][data-side="left"]').getAttribute("data-state") === "open";
   await page.keyboard.press("Meta+Shift+Y");
   const afterNew = await page.locator('[data-testid="sidebar-rail"]').waitFor({ state: "hidden", timeout: 2000 }).then(() => false, () => true);
   await page.keyboard.press("Meta+Shift+Y");

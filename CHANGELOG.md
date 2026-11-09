@@ -2,9 +2,6 @@
 
 ## Unreleased
 
-- Keep queued messages readable in narrow or zoomed chats by letting their
-  controls and text wrap onto separate lines.
-
 - Keep sidebar New chat conversations in Chats with ordinary retention and
   project linking, while using the shared composer and saved agent settings.
   Branch drafts retain their requested project and advertised source branch.

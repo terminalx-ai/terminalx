@@ -76,6 +76,7 @@ const ACTIONS = [
   // No keys inside the window by default: the floating window has a system-wide shortcut of its own (Settings → Shortcuts).
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
+  { id: "session.fixErrors", label: "Fix failing CI checks", group: "Session", keys: ["mod+shift+x"] },
   { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"], menu: { section: "file", order: 4, label: "Close Tab", target: "focused", separator: true } },
   { id: "session.nextTab", label: "Next tab", group: "Session", keys: ["mod+shift+]"] },
   { id: "session.previousTab", label: "Previous tab", group: "Session", keys: ["mod+shift+["] },

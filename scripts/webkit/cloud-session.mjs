@@ -563,11 +563,14 @@ const permissionMenuItem = (page) =>
     const label = item?.querySelector('[data-testid="permission-mode-label"]');
     if (!item || !label) return null;
     const icon = item.querySelector('[data-testid="permission-mode-icon"]');
+    const rect = item.getBoundingClientRect();
+    const shield = icon?.getBoundingClientRect();
+    const iconInside = !!shield && shield.width > 0 && shield.left >= rect.left && shield.right <= rect.right && shield.top >= rect.top && shield.bottom <= rect.bottom;
     const tint = !icon ? null : icon.classList.contains("text-destructive") ? "danger" : icon.classList.contains("text-info") ? "plan" : "plain";
-    return { name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1, tint };
+    return { name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1, tint, iconInside };
   });
 
-function permissionChecks(measured, mode) {
+function permissionChecks(measured) {
   if (!measured) return { "the More options button is there": false };
   return {
     "the More options button is inside the composer toolbar": measured.inToolbar,
@@ -587,7 +590,12 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   await page.locator('main [data-composer-toolbar] [data-testid="composer-options"]').waitFor();
   await page.waitForTimeout(300);
   let measured = await permissionButton(page);
-  await page.locator('main [data-composer-toolbar] [data-testid="composer-options"]').click();
+  const options = page.locator('main [data-composer-toolbar] [data-testid="composer-options"]');
+  await options.hover();
+  const tooltip = page.getByRole("tooltip");
+  await tooltip.waitFor();
+  const tooltipText = await tooltip.textContent();
+  await options.click();
   await page.locator('[role="menu"] [data-testid="permission-mode"]').waitFor();
   const item = await permissionMenuItem(page);
   await page.keyboard.press("Escape");
@@ -595,10 +603,11 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
     `permission mode (960x700, side panel open, ${permissionMode})`,
     {
       "the side panel is open": !!measured?.panel,
-      ...permissionChecks(measured, permissionMode),
+      ...permissionChecks(measured),
+      "the options tooltip names the mode in force": tooltipText === `More options · ${MODE_LABEL[permissionMode]}`,
       "the More options menu names the mode, whole": !!item && item.label === MODE_LABEL[permissionMode] && item.whole,
       "the menu item's accessible name says which mode is in force": !!item && item.name === `Permission mode: ${MODE_LABEL[permissionMode]}`,
-      [`the menu item wears the mode's shield (${MODE_TINT[permissionMode]})`]: !!item && item.tint === MODE_TINT[permissionMode],
+      [`the menu item wears the mode's shield (${MODE_TINT[permissionMode]})`]: !!item && item.iconInside && item.tint === MODE_TINT[permissionMode],
     },
     { button: measured, item },
   );
@@ -610,7 +619,7 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
     await page.setViewportSize({ width, height: 700 });
     await page.waitForTimeout(40);
     measured = await permissionButton(page);
-    const checks = permissionChecks(measured, permissionMode);
+    const checks = permissionChecks(measured);
     if (Object.values(checks).some((ok) => !ok)) failures.push(measured ?? { viewport: width, missing: true });
   }
   await page.setViewportSize({ width: 1680, height: 800 });
@@ -620,7 +629,7 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
     `permission mode (960 to 1400 px, side panel open, ${permissionMode})`,
     {
       "at every width the button stays in the toolbar, pressable, with its icon": failures.length === 0,
-      "with room (1680 px) the same holds": Object.values(permissionChecks(measured, permissionMode)).every(Boolean),
+      "with room (1680 px) the same holds": Object.values(permissionChecks(measured)).every(Boolean),
     },
     { failures, wide: measured },
   );
