@@ -1,3 +1,4 @@
+import type { RepositorySettings, WorktreeCopyReport } from "@/types/repositorySettings";
 import type { AutomationRef } from "@/types/automations";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 
@@ -121,7 +122,7 @@ export interface SessionEntry {
   branch?: string | null;
   baseRef?: string | null;
   /** `from`: the ref the worktree was made from, which its branch is read against. */
-  worktreeBase?: { commit: string; fetched: boolean; warning: string | null; from?: string | null } | null;
+  worktreeBase?: { commit: string; fetched: boolean; warning: string | null; from?: string | null; fileCopy?: WorktreeCopyReport | null } | null;
   worktreeRemoved: boolean;
   removedWorkspace?: RemovedWorkspace | null;
   /** The issue the session works on: the one it was started from, or one linked later (`issueWork.link`). */
@@ -170,6 +171,7 @@ export interface Project {
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;
   scripts?: RepositoryScripts | null;
+  repositorySettings?: RepositorySettings;
 }
 
 export interface ProjectPatch {
@@ -184,6 +186,7 @@ export interface ProjectPatch {
   agentIssueUpdates?: boolean;
   /** Set one branch's label; null or blank clears it. */
   branchLabel?: { branch: string; label: string | null };
+  repositorySettings?: RepositorySettings;
 }
 
 /** One checkout of a project: the root or any worktree, whoever made it. */
