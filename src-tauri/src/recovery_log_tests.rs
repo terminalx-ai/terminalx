@@ -315,7 +315,7 @@ fn persisted_names_are_redacted_in_the_summary_and_full_export() {
     let _home = crate::store::temp_home();
     // Earlier builds kept only the allowed characters, even when they named
     // a file. Feed that actual persisted shape through both reader paths.
-    let mut older = json!({ "v": VERSION, "kind": "recovery_raised", "incident": "incident-1",
+    let mut older = json!({ "v": 1, "kind": "recovery_raised", "incident": "incident-1",
         "session": "session-1", "tab": "tab-1", "reason": "timeout", "source": "watcher", "mono_ms": 42,
         "runtime": "x /Users/alice", "appBuild": "~/private/build",
         "agent": { "harness": "C:\\Users\\alice\\agent", "transport": "/home/alice/runtime",
@@ -378,7 +378,7 @@ fn relative_and_truncated_names_are_redacted_on_write_and_export() {
     let ids: Vec<_> = (0..paths.len()).map(|i| format!("legacy-{i}")).collect();
     for (path, id) in paths.iter().zip(&ids) {
         let kept = old_name(path);
-        append(&json!({ "v": VERSION, "kind": "recovery_raised", "incident": id,
+        append(&json!({ "v": 1, "kind": "recovery_raised", "incident": id,
             "session": "session-1", "tab": "tab-1", "reason": "timeout", "source": "watcher", "mono_ms": 42,
             "runtime": kept, "appBuild": kept,
             "agent": { "harness": kept, "transport": kept, "model": kept, "effort": kept } }).to_string()).unwrap();
@@ -403,4 +403,98 @@ fn relative_and_truncated_names_are_redacted_on_write_and_export() {
     }
     assert_eq!(exported["summary"], summary);
     assert_eq!(read_all().unwrap(), stored, "export preserves the original evidence");
+}
+
+#[test]
+fn legacy_names_with_erased_path_syntax_are_redacted_across_versions() {
+    let _home = crate::store::temp_home();
+    let old_name = |text: &str| text.chars().filter(|c| c.is_ascii_alphanumeric() || "._:/-".contains(*c)).take(64).collect::<String>();
+    let paths = [r"models\alice\checkpoint", r"\models\alice\checkpoint",
+        r"\\server-acme\models\checkpoint", r"~\alice\checkpoint", r"gpt-6-\astra"];
+    let ids: Vec<_> = (0..paths.len()).map(|i| format!("legacy-{i}")).collect();
+    for (path, id) in paths.iter().zip(&ids) {
+        let kept = old_name(path);
+        assert_eq!(name(path), PATH, "new recording sees the original path syntax");
+        assert_eq!(name(&kept), kept, "the legacy filter erased every path marker");
+        assert!(kept.len() < 64);
+        append(&json!({ "v": 1, "kind": "recovery_raised", "incident": id,
+            "session": "session-1", "tab": "tab-1", "reason": "timeout", "source": "watcher",
+            "runtime": kept, "appBuild": kept,
+            "agent": { "harness": kept, "transport": kept, "model": kept, "effort": kept } }).to_string()).unwrap();
+    }
+    assert_eq!(old_name(paths[0]), "modelsalicecheckpoint");
+    assert_eq!(old_name(paths[4]), "gpt-6-astra", "even a recognized model can hide a legacy path");
+    // Keep reading legacy evidence across rotation, without admitting unknown
+    // formats. The current writer must never label newly checked names as v1.
+    for line in [json!({ "v": 99 }), json!({ "kind": "unversioned" })] { append(&line.to_string()).unwrap(); }
+    append("not JSON").unwrap();
+    std::fs::rename(dir().unwrap().join(FILE), dir().unwrap().join(OLDER)).unwrap();
+    let current_ids = ["gpt-6-astra", "openai/gpt-6-astra", "anthropic/claude-3.5-sonnet", "hf.co/org/model", "llama3:8b"];
+    for model in current_ids {
+        let mut t = Tracker::default();
+        t.set_agent(Agent::new("codex", "codex_stdio", Some(model), Some("xhigh")));
+        note(&mut t, true, |t, c| t.raised(c, RecoveryKind::Timeout, Source::Watcher, 1));
+        let shown = report(json!({ "kind": "exposure", "phase": "shown", "reason": "timeout" })).unwrap().bounded("0.2.25");
+        note(&mut t, true, |t, c| t.ui(c, &shown));
+    }
+    // An incident can clear after an upgrade: retain that evidence and its
+    // denominator without inventing a click or a completed turn.
+    append(&json!({ "v": VERSION, "kind": "recovery_cleared", "incident": ids[0], "cause": "progress", "raised_for_ms": 17 }).to_string()).unwrap();
+    let stored = read_all().unwrap();
+    assert_eq!(stored.len(), paths.len() + current_ids.len() * 2 + 1);
+    for (line, id) in stored.iter().zip(&ids) { assert_eq!(line["incident"], *id); assert_eq!(line["v"], 1); }
+    for (pair, model) in stored[paths.len()..stored.len() - 1].chunks_exact(2).zip(current_ids) {
+        assert_eq!(pair[0]["v"], 2);
+        assert_eq!(pair[0]["agent"]["model"], model);
+        assert_eq!(pair[1]["appBuild"], "0.2.25");
+    }
+    let summary = summarize(&stored);
+    let legacy = summary["groups"].as_array().unwrap().iter().find(|g| g["runtime"] == PATH).unwrap();
+    assert_eq!(legacy["transport"], PATH);
+    assert_eq!(legacy["incidents"], paths.len());
+    assert_eq!(legacy["outcomes"], json!({ "unresolved": paths.len() - 1, "cleared_without_action:progress": 1 }));
+    assert_eq!(legacy["visible"]["incidents_shown"], 0);
+    assert_eq!(legacy["with_any_action"], 0);
+    assert_eq!(legacy["cleared"]["latency_ms"]["median"], 17);
+    assert_eq!(legacy["evidence"], json!(ids));
+    let target = crate::store::root().unwrap().join("export.json");
+    export(&target).unwrap();
+    let text = std::fs::read_to_string(target).unwrap();
+    for private in ["alice", "server-acme", "checkpoint", "session-1", "tab-1"] { assert!(!text.contains(private), "{private}: {text}"); }
+    let exported: Value = serde_json::from_str(&text).unwrap();
+    let lines = exported["lines"].as_array().unwrap();
+    for line in &lines[..paths.len()] {
+        assert_eq!(line["v"], 1, "export does not upgrade legacy provenance");
+        for key in ["runtime", "appBuild"] { assert_eq!(line[key], PATH); }
+        for key in ["harness", "transport", "model", "effort"] { assert_eq!(line["agent"][key], PATH); }
+    }
+    for (pair, model) in lines[paths.len()..lines.len() - 1].chunks_exact(2).zip(current_ids) {
+        assert_eq!(pair[0]["runtime"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(pair[0]["agent"], json!({ "harness": "codex", "transport": "codex_stdio", "model": model, "effort": "xhigh" }));
+        assert_eq!(pair[1]["appBuild"], "0.2.25");
+    }
+    assert_eq!(exported["summary"], summary);
+    assert_eq!(summarize(&pseudonymized(lines.clone(), "another salt")), summary);
+    assert_eq!(read_all().unwrap(), stored, "the original private evidence is untouched");
+}
+
+#[test]
+fn names_without_current_provenance_are_omitted_without_inventing_metadata() {
+    for version in [Value::Null, json!(0), json!(1), json!(99), json!("2")] {
+        let mut line = json!({ "kind": "recovery_raised", "incident": "incident-1", "reason": "timeout",
+            "runtime": "0.2.25", "appBuild": "", "agent": { "harness": "codex", "transport": "codex_stdio", "model": "gpt-6-astra", "effort": null } });
+        if !version.is_null() { line["v"] = version; }
+        let original = vec![line];
+        let exported = pseudonymized(original.clone(), "salt");
+        assert_eq!(exported[0]["runtime"], PATH);
+        for key in ["harness", "transport", "model"] { assert_eq!(exported[0]["agent"][key], PATH); }
+        assert_eq!(exported[0]["appBuild"], "");
+        assert_eq!(exported[0]["agent"]["effort"], Value::Null);
+        assert_eq!(exported[0].get("v"), original[0].get("v"));
+        assert!(exported[0].get("session").is_none());
+        assert_eq!(summarize(&original), summarize(&exported));
+        assert_eq!(pseudonymized(exported.clone(), "again"), exported);
+    }
+    let absent = vec![json!({ "v": 1, "kind": "recovery_cleared" }), json!({ "v": 1, "agent": null })];
+    assert_eq!(pseudonymized(absent.clone(), "salt"), absent);
 }

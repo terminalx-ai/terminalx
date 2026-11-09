@@ -32,8 +32,9 @@ use serde_json::{json, Value};
 use crate::events::{Payload, TurnStatus};
 use crate::recovery::RecoveryKind;
 
-/// The version every line carries. A reader skips lines of a version it does not know.
-pub const VERSION: u32 = 1;
+/// The version every new line carries. Version 2 checks names before filtering
+/// can erase path syntax; version 1 remains readable with its names redacted.
+pub const VERSION: u32 = 2;
 /// The most one file holds before it is moved aside for a new one.
 pub const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const FILE: &str = "recovery-incidents.jsonl";
@@ -159,7 +160,7 @@ impl Agent {
     }
 }
 
-/// What a name that is a file's location is kept as.
+/// What a name that is, or could conceal, a file's location is kept as.
 pub const PATH: &str = "[path]";
 const NAME_LIMIT: usize = 64;
 
@@ -181,6 +182,14 @@ pub fn name(text: &str) -> String {
     // `x/Users/alice`).
     if is_path(text.trim()) || is_path(&kept) { return PATH.to_owned(); }
     kept
+}
+
+/// Version 1's lossy filter erased Windows separators and other path syntax.
+/// Even an ordinary-looking name could have been a path; only version 2 has
+/// the provenance to keep it. Empty or absent names remain empty or absent.
+fn stored_name(version: &Value, text: &str) -> String {
+    if text.is_empty() { return String::new(); }
+    if version == VERSION { name(text) } else { PATH.to_owned() }
 }
 
 /// Whether `text` names a place on disk rather than a thing: absolute, in a
@@ -718,14 +727,14 @@ fn append(line: &str) -> Result<()> {
 }
 
 /// Every line kept, oldest first: the older file, then the current one.
-/// A line that is not JSON, or of another version, is left out.
+/// A line that is not JSON, or of an unknown version, is left out.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))] // Read by the app's commands; the headless runtime only writes.
 pub fn read_all() -> Result<Vec<Value>> {
     let dir = dir()?;
     let mut lines = Vec::new();
     for file in [OLDER, FILE] {
         let Ok(text) = std::fs::read_to_string(dir.join(file)) else { continue };
-        lines.extend(text.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).filter(|line| line["v"] == VERSION));
+        lines.extend(text.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).filter(|line| line["v"] == 1 || line["v"] == VERSION));
     }
     Ok(lines)
 }
@@ -767,13 +776,13 @@ pub fn pseudonymized(mut lines: Vec<Value>, salt: &str) -> Vec<Value> {
         for key in ["session", "tab", "targetSession", "targetTab"] {
             if let Some(id) = line[key].as_str().map(hide) { line[key] = json!(id); }
         }
-        // Names as this build keeps them, whatever the build that wrote the
-        // line kept: an export never carries a file's location.
+        // Keep each line's original version: exporting must not upgrade
+        // legacy names to the current version's provenance.
         for key in ["harness", "transport", "model", "effort"] {
-            if let Some(kept) = line["agent"][key].as_str().map(name) { line["agent"][key] = json!(kept); }
+            if let Some(kept) = line["agent"][key].as_str().map(|text| stored_name(&line["v"], text)) { line["agent"][key] = json!(kept); }
         }
         for key in ["runtime", "appBuild"] {
-            if let Some(kept) = line[key].as_str().map(name) { line[key] = json!(kept); }
+            if let Some(kept) = line[key].as_str().map(|text| stored_name(&line["v"], text)) { line[key] = json!(kept); }
         }
     }
     lines
@@ -823,8 +832,8 @@ pub fn summarize(lines: &[Value]) -> Value {
                 seen.reason = line["reason"].as_str().unwrap_or_default().to_owned();
                 seen.source = line["source"].as_str().unwrap_or_default().to_owned();
                 // Settings can summarize persisted lines without exporting them.
-                seen.runtime = name(line["runtime"].as_str().unwrap_or_default());
-                seen.transport = name(line["agent"]["transport"].as_str().unwrap_or_default());
+                seen.runtime = stored_name(&line["v"], line["runtime"].as_str().unwrap_or_default());
+                seen.transport = stored_name(&line["v"], line["agent"]["transport"].as_str().unwrap_or_default());
                 seen.occurrences += 1;
                 seen.raised_ms.push(line["mono_ms"].as_u64().unwrap_or(0));
                 if line["recurred_after_ms"].is_u64() { seen.recurred += 1; }
