@@ -173,6 +173,12 @@ impl Fixture {
                 let files = files.as_array().unwrap();
                 assert_eq!(files.len(), 3);
                 assert!(files.iter().any(|file| file["path"] == PNG));
+                for file in files {
+                    let path = file["path"].as_str().unwrap();
+                    let expected = if operation == "working" { git(&self.cwd, &["hash-object", path]) }
+                        else { git(&self.cwd, &["rev-parse", &format!("{}:{path}", self.head)]) };
+                    assert_eq!(file["blobHash"], expected, "review identity must name the actual snapshot blob");
+                }
             }
         }
     }
@@ -282,4 +288,70 @@ pub(super) fn ipc_queues(root: &Path, managed: bool, runtime: &tokio::runtime::R
     policy(false, managed);
     for &operation in OPERATIONS { fixture.restored(operation, runtime.block_on(fixture.ipc(operation)).unwrap()); }
     assert_eq!(fixture.transfers(), before);
+    relay_scope_reads(&fixture, managed, runtime);
+}
+
+/// Commit/turn review still uses the original remote request admission even
+/// though all its Git inspection is local-only. A restored connection may
+/// issue fresh reads, but queued reads from an older generation cannot revive.
+#[cfg(feature = "desktop")]
+fn relay_scope_reads(fixture: &Fixture, managed: bool, runtime: &tokio::runtime::Runtime) {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    use crate::remote::{protocol::{Authority, PROTOCOL}, server::{Peer, WorkspaceRpc}};
+    let rpc = WorkspaceRpc::new(&fixture.cwd, 1, Arc::new(crate::sink::BroadcastSink::new(64)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+    let (peer, _events) = Peer::new("scope-reader".into(), Authority::Participate);
+    let hello = json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["git/1"]}});
+    assert_eq!(runtime.block_on(rpc.handle(&peer, &hello))["ok"], true);
+    let request = |method: &str| json!({"id":uuid::Uuid::new_v4().to_string(),"method":method,"params":{
+        "repo":".","base":fixture.base,"head":fixture.head,"limit":1,"target":"main","uncommitted":false}});
+    let refused = |answer: Value| {
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(answer["error"]["code"], "forbidden", "{answer}");
+        assert_eq!(answer["error"]["message"], data_privacy::MESSAGE);
+    };
+    let before = fixture.transfers();
+    for method in ["git.log", "git.branches", "git.reviewRange", "git.changesBetween"] {
+        policy(true, managed);
+        refused(runtime.block_on(rpc.handle_owned(peer.clone(), request(method))));
+        // Local commit metadata remains available while remote control is off.
+        assert_eq!(crate::git::log_commits(&fixture.cwd, None, 1).unwrap().len(), 1);
+        policy(false, managed);
+        let queued = rpc.handle_owned(peer.clone(), request(method));
+        policy(true, managed); policy(false, managed);
+        refused(runtime.block_on(queued));
+        let (entered, arrived) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || { entered.send(()).unwrap(); released.recv_timeout(Duration::from_secs(10)).unwrap(); });
+        arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut queued = Box::pin(rpc.handle_owned(peer.clone(), request(method)));
+        { let _runtime = runtime.enter(); assert!(queued.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending()); }
+        policy(true, managed); policy(false, managed);
+        release.send(()).unwrap(); runtime.block_on(blocker).unwrap();
+        refused(runtime.block_on(queued));
+        let fresh = runtime.block_on(rpc.handle_owned(peer.clone(), request(method)));
+        assert_eq!(fresh["ok"], true, "{fresh}");
+        if method == "git.changesBetween" { fixture.restored("stats", fresh["result"].clone()); }
+    }
+    let (entered, arrived) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    *crate::remote::server::BEFORE_REMOTE_WORK.lock().unwrap() = Some(Box::new(move || {
+        assert!(data_privacy::remote_ticket().is_some());
+        entered.send(()).unwrap(); released.recv_timeout(Duration::from_secs(10)).unwrap();
+    }));
+    let pending = runtime.spawn(rpc.handle_owned(peer.clone(), request("git.changesBetween")));
+    arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (acknowledged, ack) = std::sync::mpsc::channel();
+    let activation = std::thread::spawn(move || { policy(true, managed); acknowledged.send(()).unwrap(); });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !data_privacy::enabled() { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(5)); }
+    assert!(ack.recv_timeout(Duration::from_millis(100)).is_err(), "remote read admission ended before its work finished");
+    release.send(()).unwrap();
+    let completed = runtime.block_on(pending).unwrap();
+    assert_eq!(completed["ok"], true, "{completed}");
+    fixture.restored("stats", completed["result"].clone());
+    ack.recv_timeout(Duration::from_secs(5)).unwrap(); activation.join().unwrap();
+    policy(false, managed);
+    assert_eq!(runtime.block_on(rpc.handle_owned(peer, request("git.log")))["ok"], true);
+    assert_eq!(fixture.transfers(), before, "scope reads must never implicitly fetch");
 }
