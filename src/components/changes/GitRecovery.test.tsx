@@ -147,7 +147,7 @@ describe("local Git recovery", () => {
       { path: "README.md", status: "modified", additions: 1, deletions: 0 },
     ]]) : original(command, args));
     repo();
-    await screen.findByRole("button", { name: /recovery.ts/ });
+    await screen.findByTitle("Modified · src/recovery.ts");
     fireEvent.click(screen.getByRole("radio", { name: "Folders" }));
     fireEvent.change(screen.getByRole("searchbox", { name: "Filter changed files" }), { target: { value: "recovery" } });
     expect(screen.queryByRole("button", { name: /README.md/ })).toBeNull();
@@ -163,7 +163,7 @@ describe("local Git recovery", () => {
     expect(backend.invoke.mock.calls.some(([command]) => command === "git_push")).toBe(false);
     expect(screen.getByRole("searchbox", { name: "Filter changed files" })).toHaveProperty("value", "recovery");
     expect(screen.getByRole("radio", { name: "Folders" }).getAttribute("aria-checked")).toBe("true");
-    expect(await screen.findByRole("button", { name: /recovery.ts/ })).toBeTruthy();
+    expect(await screen.findByTitle("Modified · src/recovery.ts")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Push" }));
     await waitFor(() => expect(backend.invoke).toHaveBeenCalledWith("git_push", { cwd }));
   });
