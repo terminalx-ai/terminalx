@@ -47,8 +47,14 @@ pub(super) fn run(root: &Path, managed: bool) {
     let lock = f.cwd.join(".git/refs/remotes/origin/main.lock");
     std::thread::scope(|scope| {
         let work = scope.spawn(crate::github_process::queued(|| crate::git::fetch_admitted(&f.cwd, "main", Duration::from_secs(15))));
-        let until = Instant::now() + Duration::from_secs(8);
-        while !entered.exists() { assert!(Instant::now() < until && !work.is_finished()); std::thread::sleep(Duration::from_millis(5)); }
+        // Let the fetch's own 15-second deadline report a launch/transport
+        // failure, rather than racing it with a shorter fixture deadline.
+        let until = Instant::now() + Duration::from_secs(17);
+        while !entered.exists() {
+            if work.is_finished() { panic!("fetch ended before the prepared hook: {:?}", work.join().unwrap()); }
+            assert!(Instant::now() < until, "fetch did not reach the prepared hook or settle its deadline");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(lock.exists(), "must cancel inside the prepared reference transaction");
         let pid: i32 = std::fs::read_to_string(&entered).unwrap().trim().parse().unwrap();
         policy(true, managed);

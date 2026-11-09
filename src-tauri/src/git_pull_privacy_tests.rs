@@ -45,8 +45,10 @@ impl Drop for Environment {
 }
 
 fn raw(cwd: &Path, args: &[&str]) -> std::process::Output {
+    // Fixture setup and ordinary-Git controls deliberately use Git's own
+    // transport; only app entrypoints must supply containment options.
     Command::new("/usr/bin/git").current_dir(cwd).args(args)
-        .env("GIT_NO_LAZY_FETCH", "1").output().unwrap()
+        .env("GIT_NO_LAZY_FETCH", "1").env("TERMINALX_TEST_ORDINARY_GIT", "1").output().unwrap()
 }
 
 fn git(cwd: &Path, args: &[&str]) -> String {
