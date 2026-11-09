@@ -566,6 +566,12 @@ impl ControlService {
                     "publishesHome": self.endpoint.publishes(),
                     "projects": projects,
                     "runningTabs": self.manager.running_tabs(),
+                    "startupIncident": crate::startup::snapshot().ok().and_then(|state| state.active().cloned()).map(|incident| json!({
+                        "id": incident.id, "detectedAt": incident.detected_at, "escalatedAt": incident.escalated_at,
+                        "affectedLaunches": incident.launches.len(), "blockedPipelines": incident.blocked_pipelines,
+                        "probePending": incident.probe.is_some_and(|probe| probe.result.is_none()),
+                        "action": "Inspect Local startup diagnostics. Pending or host-blocked validation is not a pass."
+                    })),
                 });
                 if let Some(kind) = &self.runtime_kind {
                     status["runtimeKind"] = json!(kind);

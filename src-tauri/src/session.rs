@@ -2426,6 +2426,18 @@ impl SessionManager {
         out
     }
 
+    /// The startup observer must never wait behind a child launch holding a
+    /// tab lock. This is observational only; it cannot answer any prompt.
+    pub(crate) fn startup_prompt_panes(&self) -> Option<Vec<String>> {
+        let tabs = self.tabs.try_lock().ok()?;
+        let mut panes = Vec::new();
+        for runtime in tabs.values() {
+            let runtime = runtime.try_lock().ok()?;
+            if !runtime.pending.is_empty() { panes.push(Self::pane_id(&runtime.tab_id)); }
+        }
+        Some(panes)
+    }
+
     pub fn queued(&self, session_id: &str, tab_id: &str) -> Vec<QueuedMessage> {
         self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().queued.clone()).unwrap_or_default()
     }
