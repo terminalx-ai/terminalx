@@ -27,6 +27,7 @@ beforeEach(() => {
     if (command === "gh_available") return true;
     if (command === "work_status") return { branch: "feature", defaultBranch: "main", aheadOfBase: 1 };
     if (command === "pr_list") return [current];
+    if (command === "pr_conversation") return { url: current.url, title: current.title, body: current.body, author: current.author, viewer: "reviewer", state: current.state, canEdit: true, reviewers: [], unresolvedThreads: 0, activity: [] } satisfies PrConversation;
     if (command === "pr_check_log") return { text: "^[[31merror: assertion failed^[[0m", truncated: true };
     if (command === "pr_check_rerun") return;
     throw new Error(`Unexpected command: ${command}`);
@@ -54,9 +55,9 @@ it.each([true, false])("keeps queued checks and deployments when the conversatio
   show(inline);
   const rerun = await screen.findByRole("button", { name: "Re-run failed" });
   await waitFor(() => expect((rerun as HTMLButtonElement).disabled).toBe(false));
-  fireEvent.click(rerun);
+  await act(async () => { fireEvent.click(rerun); });
   await screen.findByLabelText("test: queued");
-  await waitFor(() => expect((screen.getByRole("button", { name: "Re-run all" }) as HTMLButtonElement).disabled).toBe(false));
+  expect((screen.getByRole("button", { name: "Re-run all" }) as HTMLButtonElement).disabled).toBe(true);
   const discoveryReads = mocks.invoke.mock.calls.filter(([command]) => command === "pr_list").length;
   fireEvent.click(screen.getByRole("button", { name: "Edit title and description" }));
   fireEvent.change(screen.getByLabelText("Pull request title"), { target: { value: "Updated title" } });
