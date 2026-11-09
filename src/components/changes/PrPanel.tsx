@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/menu";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
 import { NextLine } from "./NextStep";
+import { PrConversation, useDocumentVisible } from "./PrConversation";
 import { ReviewThreads } from "./ReviewThreads";
 
 type WorkspaceCleanup = {
@@ -90,6 +91,8 @@ export function PrPanel({
    */
   held?: boolean;
 }) {
+  const documentVisible = useDocumentVisible();
+  active = active && documentVisible;
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const [available, setAvailable] = useState<boolean | null>(null);
   const [rows, setRows] = useState<SessionPr[]>([]);
@@ -117,6 +120,8 @@ export function PrPanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [working, setWorking] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  // Conversation pagination is independent of check/discovery polling.
+  const [conversationRefresh, setConversationRefresh] = useState(0);
   const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
   useEffect(() => {
@@ -260,7 +265,7 @@ export function PrPanel({
       {/* Inline, the tab's own refresh reads it again, and it is read every 30 seconds besides. */}
       {!inline && (
         <div className="flex items-center justify-end px-3 pt-2">
-          <Button size="xs" variant="ghost" disabled={loading || !!working} onClick={() => setTick((t) => t + 1)} aria-label="Refresh pull requests">
+          <Button size="xs" variant="ghost" disabled={loading || !!working} onClick={() => { setTick((t) => t + 1); setConversationRefresh((value) => value + 1); }} aria-label="Refresh pull requests">
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Refresh
           </Button>
         </div>
@@ -292,9 +297,14 @@ export function PrPanel({
           <button type="button" onClick={() => void openUrl(row.identity)} className="hover:underline">{row.identity}</button>
           <div className="text-destructive">Could not refresh: {row.error}</div>
         </div>;
+        // This owns the description as well as its editor, including in a PR tab.
+        const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={conversationRefresh} onEdited={(title, body) => {
+          if (selected.current.generation !== generation) return;
+          setRows((previous) => previous.map((entry) => entry.identity === row.identity && entry.pr && (entry.pr.title !== title || entry.pr.body !== body) ? { ...entry, pr: { ...entry.pr, title, body } } : entry));
+        }} />;
         const ready = mergeReadiness(pr);
         const reviews = <ReviewThreads source={source} url={pr.url} sessionId={sessionId} active={active} prState={pr.state} />;
-        if (inline) return <InlinePr reviews={reviews} key={row.identity} pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
+        if (inline) return <div key={row.identity}><InlinePr reviews={reviews} pr={pr} ready={ready} held={held} actions={pr.state === "OPEN" && source.canWrite && (
           <>
             {pr.isDraft && (
               <Button size="xs" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
@@ -304,7 +314,7 @@ export function PrPanel({
             {canQueue(pr) && <Button size="xs" disabled={!!working || loading || !fresh} onClick={() => merge(row, "queue")}>Add to merge queue</Button>}
             {ready.ok && !pr.mergeQueueEnabled && <MergeMenu disabled={!!working || loading || !fresh} working={working === "merge"} onMerge={(method) => merge(row, method)} />}
           </>
-        )} />;
+        )} /><div className="px-4 pb-3">{conversation}</div></div>;
         return (
           <div key={row.identity} className="border-b border-hairline px-3 py-3">
             <div className="flex items-start gap-2">
@@ -358,6 +368,7 @@ export function PrPanel({
                 </div>
               </div>
             )}
+            {conversation}
             {reviews}
           </div>
         );
