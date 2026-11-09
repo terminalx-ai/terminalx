@@ -26,6 +26,14 @@ vi.mock("@/lib/models", async (original) => ({
 import { upsertPipeline } from "@/lib/issuePipeline";
 import { ContinuationDialog } from "./ContinuationDialog";
 
+/** The fold the less-used settings sit in, opened. */
+const inMore = () => {
+  const fold = screen.queryByRole("button", { name: "More settings" });
+  if (fold?.getAttribute("aria-expanded") === "false") fireEvent.click(fold);
+  return screen;
+};
+
+
 const source = { id: "source", harness: "claude", model: "opus", effort: "high", permissionMode: "plan", status: "completed" } as TabEntry;
 const issue = { provider: "github", id: "700", identifier: "#700", title: "Merge issue sessions when green", url: "https://example.test/issues/700" };
 let sessionCount = 0;
@@ -57,7 +65,7 @@ async function continueIn(session: SessionEntry) {
   mocks.prepare.mockResolvedValue({ sessionId: session.id, tabId: "source", title: session.title, cwd: session.cwd, provider: "claude", sourceActive: false, transcriptPath: "/history", lastPrompt: "Work", lastUpdate: "Ready" });
   render(<ContinuationDialog session={session} source={source} onClose={vi.fn()} />);
   await waitFor(() => expect(screen.getByRole("button", { name: "Start New Session" }).hasAttribute("disabled")).toBe(false));
-  const shown = ["Resolve conflicts automatically", "Merge when green"].map((name) => screen.getByRole("switch", { name }).getAttribute("aria-checked"));
+  const shown = ["Resolve conflicts automatically", "Merge when green"].map((name) => inMore().getByRole("switch", { name }).getAttribute("aria-checked"));
   fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("issue_pipeline_continue", expect.anything()));
   const [, args] = mocks.invoke.mock.calls.find(([command]) => command === "issue_pipeline_continue")!;

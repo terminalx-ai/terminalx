@@ -542,8 +542,31 @@ body:has([role="alertdialog"]) [data-star-reminder] {
 .cs-cursor-me { animation-name: cs-cursor-me; }
 .cs-cursor-designer { animation-name: cs-cursor-designer; }
 
+/* HandoffScene: context carried from this session to a new one. Five seconds a loop. */
+.hs-packet, .hs-fill, .hs-target { animation: 5s cubic-bezier(0.65, 0, 0.35, 1) infinite both; }
+@keyframes hs-packet {
+  0%, 8% { left: 26%; opacity: 0; transform: translateY(-50%) scale(0.6); }
+  14% { left: 30%; opacity: 1; transform: translateY(-50%) scale(1); }
+  40% { left: calc(70% - 1.75rem); opacity: 1; transform: translateY(-50%) scale(1); }
+  48%, 100% { left: calc(74% - 1.75rem); opacity: 0; transform: translateY(-50%) scale(0.6); }
+}
+.hs-packet { animation-name: hs-packet; }
+@keyframes hs-target { 0%, 38% { box-shadow: none; } 44% { box-shadow: inset 0 0 0 1.5px var(--color-accent); } 60%, 100% { box-shadow: none; } }
+.hs-target { animation-name: hs-target; }
+.hs-fill { transform-origin: left; animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes hs-fill-1 { 0%, 44% { opacity: 0; transform: scaleX(0); } 52%, 90% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; transform: none; } }
+@keyframes hs-fill-2 { 0%, 50% { opacity: 0; transform: scaleX(0); } 58%, 90% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; transform: none; } }
+@keyframes hs-fill-3 { 0%, 58% { opacity: 0; } 64%, 90% { opacity: 1; } 98%, 100% { opacity: 0; } }
+.hs-fill-1 { animation-name: hs-fill-1; }
+.hs-fill-2 { animation-name: hs-fill-2; }
+.hs-fill-3 { animation-name: hs-fill-3; }
+@keyframes hs-caret { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+.hs-caret { animation: hs-caret 1s steps(1) infinite; }
+
 @media (prefers-reduced-motion: reduce) {
   .cs-row, .cs-typing, .cs-ring, .cs-cursor, .cs-send, .cs-think, .cs-reply, .cs-dot, .cs-joined { animation: none; }
+  .hs-packet, .hs-fill, .hs-target, .hs-caret { animation: none; }
+  .hs-packet { opacity: 0; }
   .cs-typing, .cs-ring, .cs-think { opacity: 0; }
   .cs-cursor-me { left: 0%; top: 30%; }
   .cs-cursor-designer { left: 72%; top: 18%; }
