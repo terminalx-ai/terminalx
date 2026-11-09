@@ -102,6 +102,19 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 if let Some(shell) = terminals.shell(id) { sink.emit("pty_renamed", &shell); }
                 Ok(Value::Null)
             }
+            "setDocked" => {
+                let _admission = crate::issue_pipeline::admission::lock();
+                manager.accepting_work()?;
+                let session = crate::pty::shell_session(id).context("only shell terminals can be moved")?;
+                crate::issue_pipeline::admission::open(session, None)?;
+                let entry = crate::store::index::get(session)?;
+                if entry.tabs.iter().any(|tab| tab.follow.pane.as_deref() == Some(id)) {
+                    bail!("an agent tab owns this terminal");
+                }
+                let shell = terminals.set_docked(id, params["docked"].as_bool().context("docked must be a boolean")?)?;
+                sink.emit("pty_renamed", &shell);
+                Ok(serde_json::to_value(shell)?)
+            }
             "kill" => {
                 terminals.kill(id);
                 if crate::pty::is_shell_id(id) { sink.emit("pty_closed", id); }
@@ -147,6 +160,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     let tab = string(&params, "tabId")?;
     let value = match method {
         "resetChat" => serde_json::to_value(manager.reset_chat(session, tab, serde_json::from_value(params.get("endSeq").context("endSeq is required (null for Undo)")?.clone())?, params["resetFiles"].as_bool().context("resetFiles is required")?)?)?,
+        "saveTerminalSelection" => json!(save_terminal_selection(session, tab, string(&params, "text")?)?),
         "resumeConversation" => { manager.resume_conversation(session, tab, string(&params, "harness")?, string(&params, "providerSessionId")?)?; Value::Null }
         // `opened`: only shown, which does not start an agent nobody is about to use.
         "ensureStarted" if params["opened"].as_bool() == Some(true) => { manager.start_on_open(session, tab)?; Value::Null }
@@ -192,4 +206,48 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         _ => bail!("unsupported local session operation"),
     };
     Ok(value)
+}
+
+/// Attachment writes use the same owner and admission lock as session deletion.
+fn save_terminal_selection(session: &str, tab: &str, text: &str) -> Result<String> {
+    uuid::Uuid::parse_str(session)?;
+    if text.is_empty() || text.len() > 4 * 1024 * 1024 { bail!("Terminal selection must be between 1 byte and 4 MB."); }
+    let _admission = crate::issue_pipeline::admission::lock();
+    crate::issue_pipeline::admission::open(session, Some(tab))?;
+    let entry = crate::store::index::get(session)?;
+    if !entry.tabs.iter().any(|entry| entry.id == tab) { bail!("The destination agent tab is closed."); }
+    let path = crate::store::attachments_dir(session)?.join(format!("terminal-{}.txt", uuid::Uuid::now_v7()));
+    crate::store::write_atomic(&path, text.as_bytes())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn saves_private_session_text_and_refuses_invalid_destinations_and_oversize_output() {
+        let _home = crate::store::temp_home();
+        let id = uuid::Uuid::now_v7().to_string();
+        let entry = serde_json::from_value(json!({
+            "id": id, "projectPath": "/fixture", "cwd": "/fixture", "title": "selection",
+            "created": "now", "modified": "now", "tabs": [{ "id": "agent", "harness": "claude", "created": "now", "modified": "now" }],
+        })).unwrap();
+        crate::store::index::save(&[entry]).unwrap();
+        let text = "error: 漢字\n```\n".repeat(500);
+        let path = std::path::PathBuf::from(save_terminal_selection(&id, "agent", &text).unwrap());
+        assert!(path.starts_with(crate::store::attachments_dir(&id).unwrap()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert!(save_terminal_selection("../escape", "agent", "output").is_err());
+        assert!(save_terminal_selection(&id, "closed", "output").is_err());
+        assert!(save_terminal_selection(&id, "agent", "").is_err());
+        assert!(save_terminal_selection(&id, "agent", &"x".repeat(4 * 1024 * 1024 + 1)).is_err());
+        crate::store::index::save(&[]).unwrap();
+        assert!(save_terminal_selection(&id, "agent", "output").is_err());
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
 }

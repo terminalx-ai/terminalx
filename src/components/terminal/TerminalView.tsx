@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react"
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { TerminalMoveButton } from "./TerminalMoveButton";
+import { TerminalTools } from "./TerminalTools";
 import { EnvironmentNotice } from "./EnvironmentNotice";
 import { pty } from "@/lib/api";
 import { disposeInstance, getInstance, isAgentPane, peekInstance, registerTerminalFactory, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
@@ -209,6 +211,7 @@ export function TerminalView({
   fit = true,
   dropRefusal,
   redraw = true,
+  moveToDock = false,
 }: {
   id: string;
   visible: boolean;
@@ -217,6 +220,8 @@ export function TerminalView({
   dropRefusal?: TerminalDropRefusal;
   /** The "Redraw terminal" control above it; a compact view leaves it out. */
   redraw?: boolean;
+  /** A standalone local shell can move into the session dock. */
+  moveToDock?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLDivElement>(null);
@@ -306,9 +311,13 @@ export function TerminalView({
     const inst = getInstance(id, make, el);
     showWebgl(inst.term);
     return () => {
-      hideWebgl(inst.term);
-      if (inst.el.parentNode === el) el.removeChild(inst.el);
-      trimTerminalInstances();
+      if (inst.el.parentNode === el) {
+        hideWebgl(inst.term);
+        el.removeChild(inst.el);
+      }
+      // A dock/tab move mounts its new host in this same commit. Trim only
+      // afterward, so an archived or full idle cache cannot evict it mid-move.
+      queueMicrotask(() => trimTerminalInstances());
     };
   }, [id, shown]);
 
@@ -332,9 +341,11 @@ export function TerminalView({
 
   return (
     <div ref={frame} className="relative flex h-full w-full flex-col" data-testid="terminal-drop-target" {...drop.zoneProps}>
+      <TerminalTools id={id} shown={shown} frame={frame} />
       <EnvironmentNotice id={id} active={visible && !create} />
-      {redraw && <div className="flex h-6 shrink-0 justify-end px-3">
-        <button
+      {(redraw || moveToDock) && <div className="flex h-6 shrink-0 justify-end px-3">
+        {moveToDock && <TerminalMoveButton id={id} docked={false} />}
+        {redraw && <button
           type="button"
           className="rounded px-2 text-xs text-muted-foreground hover:text-foreground"
           onClick={recover}
@@ -342,7 +353,7 @@ export function TerminalView({
           tabIndex={visible ? 0 : -1}
         >
           Redraw terminal
-        </button>
+        </button>}
       </div>}
       <div ref={host} className="terminal-host min-h-0 w-full flex-1 px-2 pt-1" />
       <TerminalDropHint drop={drop} />

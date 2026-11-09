@@ -715,6 +715,8 @@ pub fn run() {
             commands::pty_spawn,
             commands::pty_shells,
             commands::pty_rename,
+            commands::pty_set_docked,
+            commands::save_terminal_selection,
             commands::pty_busy,
             commands::pty_write,
             commands::pty_attach,
