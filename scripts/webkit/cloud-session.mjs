@@ -594,10 +594,20 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   await page.locator('main [data-composer-toolbar] [data-testid="composer-options"]').waitFor();
   let measured = await permissionButton(page);
   const options = page.locator('main [data-composer-toolbar] [data-testid="composer-options"]');
+  // Reproduce the preceding control's tooltip being open. A single synthetic
+  // pointer jump can leave Radix's hover-transition state on that tooltip.
+  await page.getByRole("button", { name: "Toggle panel" }).hover();
+  await page.getByRole("tooltip", { name: /^Hide panel/ }).waitFor();
+  await page.keyboard.press("Escape");
   await options.hover();
-  const tooltip = page.getByRole("tooltip");
+  // Wait for this trigger's tooltip, independently of the text we assert below.
+  const tooltip = page.locator('xpath=//*[@role="tooltip"][@id=//main//*[@data-testid="composer-options"]/@aria-describedby]');
   await tooltip.waitFor();
   const tooltipText = await tooltip.textContent();
+  const tooltipState = await tooltip.evaluate((node) => {
+    const trigger = document.querySelector('main [data-testid="composer-options"]');
+    return { id: node.id, describedBy: trigger?.getAttribute("aria-describedby"), hovered: trigger?.matches(":hover"), focused: document.activeElement === trigger };
+  });
   await options.click();
   await page.locator('[role="menu"] [data-testid="permission-mode"]').waitFor();
   const item = await permissionMenuItem(page);
@@ -613,7 +623,7 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
       "the menu item's accessible name says which mode is in force": !!item && item.name === `Permission mode: ${MODE_LABEL[permissionMode]}`,
       [`the menu item wears the mode's shield (${MODE_TINT[permissionMode]})`]: !!item && item.iconInside && item.tint === MODE_TINT[permissionMode],
     },
-    { button: measured, item },
+    { button: measured, item, tooltip: { expected: `More options · ${MODE_LABEL[permissionMode]}`, actual: tooltipText, ...tooltipState } },
   );
   if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/permission-mode-960-${permissionMode}.png` });
 
