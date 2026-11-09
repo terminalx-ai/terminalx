@@ -23,6 +23,17 @@ impl std::fmt::Display for Busy {
 
 impl std::error::Error for Busy {}
 
+/// Refuse only the extra request; accepted queue entries and the turn survive.
+#[derive(Debug)]
+pub(super) struct QueueFull;
+
+impl std::fmt::Display for QueueFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Codex's follow-up queue is full. Wait for a message to be delivered before sending again.")
+    }
+}
+impl std::error::Error for QueueFull {}
+
 /// Follow-ups use the shared visible queue. Their message sequence is the
 /// queue id, and their writer authority survives until actual delivery.
 #[derive(Default)]
@@ -294,7 +305,7 @@ impl SessionManager {
             if manual || receipt.is_some() { return Err(Busy.into()); }
             anyhow::ensure!(matches!(&rt.engine, Engine::CodexStdio(engine) if !engine.failed() && !engine.exited && !engine.blocked),
                 "Codex's connection ended. Stop the session before sending again; this message was not queued.");
-            anyhow::ensure!(rt.queued.len() < 32, "Codex's follow-up queue is full. Wait for a message to be delivered before sending again.");
+            if rt.queued.len() >= 32 { return Err(QueueFull.into()); }
             let event = self.publish(rt, Payload::UserMessage {
                 author: prompt.author, text: prompt.display, images, baseline: None, queued: true, cwd: Some(entry.cwd.clone()),
             }, None);
@@ -689,7 +700,7 @@ impl SessionManager {
         self.cancel_asks(rt);
         self.codex_stdio_loss(rt, CompactionLoss::Disconnected);
         if let Some((_, receipt)) = rt.stdio_receipt.take() {
-            let _ = receipt.send(Err(format!("The new session opened, but Codex did not receive its continuation prompt: {}. The prepared prompt is retained.", said.trim_end_matches('.'))));
+            let _ = receipt.send(Err(format!("The new session opened, but Codex did not acknowledge its continuation prompt; delivery is unconfirmed: {}. The prepared prompt is retained.", said.trim_end_matches('.'))));
         }
         match exit {
             Some(exit) if exit.sign_in_refused && rt.turn_open => self.fail_open_turn(rt, &exit),
@@ -704,7 +715,7 @@ impl SessionManager {
                 let detail = exit.and_then(|exit| exit.detail).or_else(|| recovery::detail(&said));
                 self.apply(rt, Payload::Error { message: format!("Codex did not acknowledge this prompt; delivery is unconfirmed: {}", said.trim_end_matches('.')), fatal: false, detail }, None);
                 self.close_open_turn(rt, TurnStatus::Aborted, None);
-                self.needs_recovery(rt, RecoveryKind::Unsent, crate::recovery_log::Source::Unsent);
+                self.needs_recovery(rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery);
             }
             exit => {
                 let message = format!("Experimental Codex connection failed: {said}. Stop this session, then send again to resume it; input will not be replayed.");
@@ -799,22 +810,22 @@ impl SessionManager {
     /// `retire`: the connection of a refused turn, let go with the tab left
     /// as it is, still showing the refusal.
     fn end_codex_stdio(&self, rt_arc: &Arc<Mutex<TabRuntime>>, keep_unread: bool, retire: bool) -> Result<()> {
-        let (launch, unsent) = {
+        let (launch, unconfirmed) = {
             let mut rt = rt_arc.lock().unwrap();
             anyhow::ensure!(!rt.stop_in_flight, "Stop is already in progress");
-            // Stopped before Codex took the prompt: never received, so offered
-            // back like any prompt a CLI never took. Decided now: the reader's
+            // Stopped before acknowledgement: delivery is uncertain, not
+            // proof the prompt was never received. Decided now: the reader's
             // drain closes the turn before the exit below is confirmed.
             let turn_open = rt.turn_open;
             let Engine::CodexStdio(engine) = &mut rt.engine else { bail!("Codex owner changed") };
-            let unsent = turn_open && !engine.is_manual_compact() && engine.unaccepted();
+            let unconfirmed = turn_open && !engine.is_manual_compact() && engine.unaccepted();
             engine.exited = true;
             let launch = engine.launch.clone();
             rt.stop_in_flight = true; rt.stopping = true;
             self.withdraw_codex_followups(&mut rt);
             rt.stdio_writer = None;
             self.codex_stdio_loss(&mut rt, CompactionLoss::Exited);
-            (launch, unsent)
+            (launch, unconfirmed)
         };
         let deadline = Instant::now() + RESTART_WAIT;
         let mut signalled = None;
@@ -845,7 +856,7 @@ impl SessionManager {
         self.cancel_asks(&mut rt);
         let manual = matches!(&rt.engine, Engine::CodexStdio(e) if e.is_manual_compact());
         if let Some((_, receipt)) = rt.stdio_receipt.take() {
-            let _ = receipt.send(Err("The new session was stopped before Codex received its continuation prompt. The prepared prompt is retained.".into()));
+            let _ = receipt.send(Err("The new session was stopped before Codex acknowledged its continuation prompt; delivery is unconfirmed. The prepared prompt is retained.".into()));
         }
         if manual { rt.turn_open = false; }
         else { self.close_open_turn(&mut rt, TurnStatus::Aborted, None); }
@@ -854,7 +865,7 @@ impl SessionManager {
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
         if retiring(&rt, &launch) { rt.stdio_retiring = None; }
-        if unsent { self.needs_recovery(&mut rt, RecoveryKind::Unsent, crate::recovery_log::Source::Unsent); }
+        if unconfirmed { self.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery); }
         else if !retire && !(keep_unread && rt.status == TabStatus::Completed) { self.set_status(&mut rt, TabStatus::Idle); }
         Ok(())
     }
@@ -874,9 +885,8 @@ impl SessionManager {
 }
 
 /// What an experimental tab's history means when it is opened with no
-/// connection: a prompt whose turn Codex never started (its `turn_started` is
-/// what `unsent::said_in` counts as the agent answering) was never received,
-/// and is offered back rather than called a lost connection.
+/// connection: missing acknowledgement is uncertain delivery, including
+/// legacy native logs that predate the explicit queued/withdrawn events.
 pub(super) fn recovery_on_open(tab: &TabEntry, log: &Path, kind: RecoveryKind) -> RecoveryKind {
     if kind != RecoveryKind::Disconnected { return kind; }
     // A later pending follow-up must not hide an acknowledged turn that
@@ -892,7 +902,7 @@ pub(super) fn recovery_on_open(tab: &TabEntry, log: &Path, kind: RecoveryKind) -
             _ => {}
         }
     }
-    if unsent::said_in(log, tab.follow.conversation.as_deref()).since.is_empty() { kind } else { RecoveryKind::Unsent }
+    if unsent::said_in(log, tab.follow.conversation.as_deref()).since.is_empty() { kind } else { RecoveryKind::DeliveryUnconfirmed }
 }
 
 /// A phone's or a share's prompt, as `type_prompt` holds a PTY one: what the

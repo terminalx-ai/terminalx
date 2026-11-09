@@ -351,21 +351,26 @@ pub const SESSION_CLOSED_MESSAGE: &str = "Session closed. Untracked or remote co
 pub fn from_history(events: &[crate::events::AgentEvent]) -> Option<RecoveryKind> {
     let mut recovery = None;
     let mut open = false;
+    let mut unconfirmed = false;
     for event in events.iter().filter(|event| event.subagent.is_none()) {
         match &event.payload {
             // Older logs raised one for every failed tool, mid-turn (#400).
-            Payload::Recovery { kind } => recovery = kind.filter(|kind| *kind != RecoveryKind::Tool),
-            Payload::UserMessage { queued: false, .. } => { open = true; recovery = None; }
-            Payload::TurnStarted { .. } => { open = true; recovery = None; }
+            Payload::Recovery { kind } => recovery = kind.filter(|kind| *kind != RecoveryKind::Tool)
+                .map(|kind| if kind == RecoveryKind::Unsent && unconfirmed { RecoveryKind::DeliveryUnconfirmed } else { kind }),
+            Payload::UserMessage { queued: false, .. } => { open = true; recovery = None; unconfirmed = false; }
+            Payload::TurnStarted { .. } => { open = true; recovery = None; unconfirmed = false; }
             // Native submission is acknowledged before turn/started. That
             // interval is already an accepted turn, even after a crash.
-            Payload::PromptAbsorbed { .. } if !open => { open = true; recovery = None; }
-            Payload::PromptWithdrawn { unconfirmed: true, .. } if !open && recovery.is_none() => recovery = Some(RecoveryKind::Unsent),
+            Payload::PromptAbsorbed { .. } if !open => { open = true; recovery = None; unconfirmed = false; }
+            Payload::PromptWithdrawn { unconfirmed: true, .. } => {
+                unconfirmed = true;
+                if !open && recovery.is_none() { recovery = Some(RecoveryKind::DeliveryUnconfirmed); }
+            }
             Payload::TurnCompleted { .. } => open = false,
-            Payload::Status { text } if text == SESSION_CLOSED_MESSAGE => { open = false; recovery = None; }
+            Payload::Status { text } if text == SESSION_CLOSED_MESSAGE => { open = false; recovery = None; unconfirmed = false; }
             // Another conversation took the tab's terminal (#437): whatever
             // was owed to the one before is not owed by this one.
-            Payload::Conversation { .. } => { open = false; recovery = None; }
+            Payload::Conversation { .. } => { open = false; recovery = None; unconfirmed = false; }
             Payload::PermissionDecided { label, .. } if label == "Lapsed" => recovery = Some(RecoveryKind::PermissionExpired),
             _ => {}
         }
@@ -567,6 +572,16 @@ mod lifecycle_tests {
         assert!(is_stale(true, Duration::from_secs(300), Patience::DEFAULT));
         assert!(!is_stale(false, Duration::from_secs(3600), Patience::DEFAULT));
     }
+    #[test]
+    fn unconfirmed_withdrawal_does_not_restore_a_legacy_unsent_claim() {
+        let events = vec![
+            event(Payload::UserMessage { author: None, text: "possibly delivered".into(), images: vec![], baseline: None, queued: true, cwd: None }),
+            event(Payload::PromptWithdrawn { prompt_seq: 1, unconfirmed: true }),
+            event(Payload::Recovery { kind: Some(RecoveryKind::Unsent) }),
+        ];
+        assert_eq!(from_history(&events), Some(RecoveryKind::DeliveryUnconfirmed));
+    }
+
     #[test]
     fn restore_failure_stop_and_unknown_delivery() {
         let mut events = vec![event(Payload::Recovery { kind: Some(RecoveryKind::Capacity) })];

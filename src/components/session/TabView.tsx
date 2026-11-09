@@ -29,7 +29,7 @@ import { cn } from "@/lib/cn";
 import { cancelTerminalView, clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
 import { useSessionStore } from "@/lib/sessions";
-import { BUSY_NOTICE, classifyRecovery, CONTINUE_PROMPT, isBusyRefusal, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
+import { classifyRecovery, CONTINUE_PROMPT, requestRefusalNotice, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
 import { actionReports, inputOf, RecoveryReports, reporterFor, useExposure, type RecoveryAction, type Surface } from "@/lib/recoveryReports";
 import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
@@ -132,8 +132,9 @@ export function TabView({
   const sendState = useComposerSend(sendScope);
   // Native Codex still on its turn refused a send (#815): a refusal of the request, not a failure of the turn.
   // The composer says so with the message back in it; nothing is raised and the tab is left as it is.
-  const sendBusy = local && sendState.error != null && isBusyRefusal(sendState.error);
-  const [busyRefused, setBusyRefused] = useState(false);
+  const sendNotice = local && sendState.error != null ? requestRefusalNotice(sendState.error) : null;
+  const sendBusy = sendNotice !== null;
+  const [busyRefused, setBusyRefused] = useState<string | null>(null);
   const [resetTarget, setResetTarget] = useState<{ endSeq: number | null } | null>(null);
   const [localError, setError] = useState<string | null>(null);
   const error = localError ?? (sendState.error != null && !sendBusy ? (local ? safeError(sendState.error) : commandError(sendState.error)) : null);
@@ -258,9 +259,9 @@ export function TabView({
     && (tab.harness === "claude" || tab.harness === "codex") && !session.worktreeRemoved;
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
   // Only while the turn it met runs: once that has ended, the message in the composer is simply unsent.
-  const busyNotice = (sendBusy || busyRefused) && live ? BUSY_NOTICE : null;
+  const busyNotice = live ? sendNotice ?? busyRefused : null;
   useEffect(() => {
-    if (!live) setBusyRefused(false);
+    if (!live) setBusyRefused(null);
   }, [live]);
   const projected = view.transcript(live);
   const transcript = useMemo(() => log.permissionResponses?.size
@@ -313,7 +314,7 @@ export function TabView({
       // A viewer, or someone else holds this tab's lease (PRO-30): nothing is queued.
       if (blockedRef.current) throw new Error(blockedRef.current);
       setError(null);
-      setBusyRefused(false);
+      setBusyRefused(null);
       setStopped(false);
       // Each local send is timed, by this window's clock: Send pressed, the
       // message first on screen as sending, the runtime's answer here, and the
@@ -333,7 +334,7 @@ export function TabView({
         }
       } catch (e) {
         // The composer keeps the message and says why (`busyNotice`); the running turn is not touched.
-        if (local && isBusyRefusal(e)) throw e;
+        if (local && requestRefusalNotice(e)) throw e;
         setError(local ? safeError(e) : commandError(e));
         backend.setTabStatus(tab.id, "waiting");
         throw e;
@@ -446,12 +447,12 @@ export function TabView({
   // A failed send or recovery's error, said as a warning; native Codex still on its turn
   // refused the request instead (#815), which the composer says without raising anything.
   function refused(e: unknown) {
-    if (local && isBusyRefusal(e)) setBusyRefused(true);
+    if (local && requestRefusalNotice(e)) setBusyRefused(requestRefusalNotice(e));
     else setError(safeError(e));
   }
   // What a failed action's result says of its error: the warning it would be, never its words.
   function failure(e: unknown): { errorKind?: RecoveryKind } {
-    return local && isBusyRefusal(e) ? {} : { errorKind: classifyRecovery(String(e)) };
+    return local && requestRefusalNotice(e) ? {} : { errorKind: classifyRecovery(String(e)) };
   }
 
   // One recovery at a time. It sends through the backend, not the composer's

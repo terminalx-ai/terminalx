@@ -119,7 +119,7 @@ describe("native Codex follow-ups (#866)", () => {
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "send_message")).toHaveLength(1);
   });
 
-  it("preserves an unacknowledged follow-up with an explicit retry action", async () => {
+  it("preserves an unacknowledged follow-up without offering a blind resend", async () => {
     render(<Tab />);
     queueSends = true;
     send("Keep this follow-up");
@@ -127,13 +127,24 @@ describe("native Codex follow-ups (#866)", () => {
     emit({ type: "prompt_withdrawn", promptSeq: seq, unconfirmed: true });
     await waitFor(() => expect(screen.getByTestId("prompt-withdrawn").textContent).toContain("Delivery was not confirmed"));
     expect(screen.getByText("Keep this follow-up")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Send again" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Send again" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
     expect(screen.queryByText("Queued")).toBeNull();
   });
 });
 
 describe("a send native Codex refuses while it works (#815)", () => {
+  it("keeps an overflowed message in the composer without changing the running turn", async () => {
+    render(<Tab />);
+    refuse = "Codex's follow-up queue is full. Wait for a message to be delivered before sending again.";
+    send("The thirty-third follow-up");
+    await waitFor(() => expect(field().value).toBe("The thirty-third follow-up"));
+    expect(banner()).toBeNull();
+    expect(status()).toBe("in_progress");
+    expect(screen.getByText(/follow-up queue is full/)).toBeTruthy();
+    expect(of("banner")).toEqual([]);
+  });
+
   it("keeps the message and leaves the running turn as it was", async () => {
     render(<Tab />);
     refuse = BUSY;

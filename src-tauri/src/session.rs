@@ -2774,7 +2774,7 @@ impl SessionManager {
         // Native Codex still on its turn refused the request, not the turn
         // (#815): the turn goes on, nothing is raised in the tab, and the
         // sender is told why in words of its own.
-        if outcome.as_ref().is_err_and(|error| error.is::<codex_stdio::Busy>()) {
+        if outcome.as_ref().is_err_and(|error| error.is::<codex_stdio::Busy>() || error.is::<codex_stdio::QueueFull>()) {
             return outcome;
         }
         if let Err(error) = &outcome {

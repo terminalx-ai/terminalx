@@ -162,10 +162,16 @@ fn recreated_runtime_reconciles_pending_prompts_and_acknowledged_turns() {
         let rt = reopened.runtime("stdio-recovery", "tab").unwrap();
         let expected_recovery = match state {
             "acknowledged" | "started" | "active-with-pending" => Some(RecoveryKind::Disconnected),
-            "pending" | "completed-with-pending" => Some(RecoveryKind::Unsent),
+            "pending" | "completed-with-pending" => Some(RecoveryKind::DeliveryUnconfirmed),
             _ => None,
         };
         assert_eq!(rt.lock().unwrap().recovery, expected_recovery, "{state}");
+        if matches!(state, "pending" | "completed-with-pending") {
+            let saved = unsent::said_in(&store::log_path("stdio-recovery", "tab").unwrap(), None);
+            assert_eq!(saved.since.last().unwrap().seq, pending, "{state}: restore by prompt identity");
+            assert!(saved.since.last().unwrap().unconfirmed);
+            assert!(reopened.resend_unsent("stdio-recovery", "tab").unwrap_err().to_string().contains("unconfirmed"));
+        }
         assert!(events.iter().any(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text == "first")));
         assert_eq!(rt.lock().unwrap().queued.len(), usize::from(state == "live"));
         let again = reopened.load_events("stdio-recovery", "tab").unwrap();
@@ -184,7 +190,7 @@ fn owned_stdio_lifecycle_is_process_bounded() {
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
         "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
-        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "handover-stop", "handover-exit", "handover-descendant"] {
+        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -615,9 +621,9 @@ fn continuation_fixture(case: &str) {
                 manager.send_confirmed("stdio-owner", "tab", "the brief".into()).unwrap_err()
             };
             let said = format!("{refused:#}");
-            assert!(said.contains(if case == "continuation-stopped" { "stopped before Codex received" } else { "did not receive" }), "{said}");
+            assert!(said.contains("delivery is unconfirmed"), "{said}");
             assert!(starts().is_empty(), "Codex never took the brief");
-            assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::Unsent));
+            assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::DeliveryUnconfirmed));
             assert!(!rt.lock().unwrap().turn_open);
             let ended: Vec<_> = events().iter().filter_map(|event| match &event.payload { Payload::TurnCompleted { status, .. } => Some(*status), _ => None }).collect();
             assert_eq!(ended, [TurnStatus::Aborted]);
@@ -629,13 +635,14 @@ fn continuation_fixture(case: &str) {
                 std::thread::sleep(Duration::from_millis(20));
             }
             std::fs::write(bin.join("mode"), "").unwrap();
-            manager.resend_unsent("stdio-owner", "tab").unwrap();
+            assert!(manager.resend_unsent("stdio-owner", "tab").unwrap_err().to_string().contains("unconfirmed"));
+            manager.send("stdio-owner", "tab", "the brief".into(), vec![]).unwrap();
             settled(1);
             assert_eq!(starts(), ["the brief"], "the brief goes once, when the reader resends it");
         }
         "resend-after-restart" => {
             manager.load_events("stdio-owner", "tab").unwrap();
-            assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::Unsent), "never taken, so not a lost connection");
+            assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::DeliveryUnconfirmed), "missing acknowledgement cannot prove non-delivery");
             manager.resend_unsent("stdio-owner", "tab").unwrap();
             settled(1);
             let methods: Vec<_> = frames().iter().map(|frame| frame["method"].as_str().unwrap().to_owned()).collect();
@@ -1372,7 +1379,7 @@ while read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
-    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
+    *'"method":"thread/start"'*|*'"method":"thread/resume"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
     *'"method":"turn/start"'*)
       printf '%s\n' "$line" >> "$here/requests"
       held hold-accept none
@@ -1455,6 +1462,36 @@ fn busy_fixture() {
     assert_eq!(count(&events(), &|p| matches!(p, Payload::PromptAbsorbed { .. })), 0);
     release("hold-accept");
     wait("the first turn starts", &|events| count(events, &|payload| matches!(payload, Payload::TurnStarted { .. })) == 1);
+    if std::env::var(CASE).unwrap() == "queued-overflow" {
+        wait("a tool is waiting", &|events| count(events, &|p| matches!(p, Payload::ToolCallStarted { .. })) == 1);
+        let mut accepted = Vec::new();
+        for n in 0..32 {
+            let outcome = manager.send("stdio-owner", "tab", format!("follow-up-{n}"), vec![]).unwrap();
+            assert!(outcome.queued);
+            accepted.push(outcome.events[0].seq);
+        }
+        let error = manager.send("stdio-owner", "tab", "overflow".into(), vec![]).unwrap_err();
+        assert!(error.is::<QueueFull>());
+        assert_eq!(manager.queued("stdio-owner", "tab").len(), 32);
+        assert_eq!(warned(&events()), 0);
+        assert_eq!(rt_arc.lock().unwrap().recovery, None);
+        assert_eq!(rt_arc.lock().unwrap().status, TabStatus::InProgress);
+        // No further tool or assistant output can clear a mistaken recovery
+        // before interruption. It must dispatch the already accepted queue.
+        manager.send_queued_now("stdio-owner", "tab", accepted[0]).unwrap();
+        wait("first accepted follow-up starts", &|events| count(events, &|p| matches!(p, Payload::TurnStarted { prompt_seq: Some(seq), .. } if *seq == accepted[0])) == 1);
+        assert_eq!(manager.queued("stdio-owner", "tab").len(), 31);
+        release("hold-progress");
+        release("hold-finish");
+        wait("all accepted follow-ups finish", &|events| count(events, &|p| matches!(p, Payload::TurnCompleted { .. })) == 33);
+        for seq in accepted {
+            assert_eq!(count(&events(), &|p| matches!(p, Payload::TurnStarted { prompt_seq: Some(s), .. } if *s == seq)), 1);
+        }
+        assert!(!events().iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { .. })));
+        assert_eq!(std::fs::read_to_string(bin.join("requests")).unwrap().lines().count(), 33);
+        manager.stop("stdio-owner", "tab").unwrap();
+        return;
+    }
     if std::env::var(CASE).unwrap() == "queued-share-ended" {
         let now = chrono::Utc::now().timestamp_millis();
         let mut share = crate::local_sharing::tests::fixture();
@@ -1564,6 +1601,15 @@ fn busy_fixture() {
         assert_eq!(requests().len(), 15, "neither a refusal nor a completion is replayed");
         assert!(manager.queued("stdio-owner", "tab").is_empty());
         manager.stop("stdio-owner", "tab").unwrap();
+        // The queued successor was never written. Earlier-turn output must
+        // not erase it from the actual resend path.
+        assert_eq!(manager.unsent_prompt("stdio-owner", "tab").unwrap().0, "retain this unsent successor");
+        release("fail-start");
+        let resent = manager.resend_unsent("stdio-owner", "tab").unwrap();
+        wait("the retained successor is resent", &|events| starts(events, resent.events[0].seq) == 1
+            && events.iter().any(|event| matches!(event.payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. }) && event.seq > resent.events[0].seq));
+        assert_eq!(requests().iter().filter(|request| request.contains("retain this unsent successor")).count(), 1);
+        manager.stop("stdio-owner", "tab").unwrap();
         return;
     }
     let opened = rt_arc.lock().unwrap().turn_started_at.unwrap();
@@ -1648,7 +1694,7 @@ fn child_fixture() {
     if case == "cloud-launch" { return cloud_launch_fixture(); }
     if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }
-    if matches!(case.as_str(), "busy-while-working" | "queued-while-working" | "queued-stop" | "queued-interrupt" | "queued-share-ended") { return busy_fixture(); }
+    if matches!(case.as_str(), "busy-while-working" | "queued-while-working" | "queued-stop" | "queued-interrupt" | "queued-share-ended" | "queued-overflow") { return busy_fixture(); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({

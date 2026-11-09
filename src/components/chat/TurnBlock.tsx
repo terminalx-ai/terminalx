@@ -393,7 +393,7 @@ function WithdrawnNote({ seq, unconfirmed, onSendAgain }: { seq?: number; unconf
     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-warning" data-testid="prompt-withdrawn">
       <CircleAlert className="size-3.5 shrink-0" />
       <span className="min-w-0 flex-1">{unconfirmed ? "Delivery was not confirmed. Check the conversation before sending again." : "Not sent: the agent was stopped before it took this message."}</span>
-      {onSendAgain && seq !== undefined && (
+      {onSendAgain && seq !== undefined && !unconfirmed && (
         <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendAgain(seq)}>
           <Send /> Send again
         </Button>
