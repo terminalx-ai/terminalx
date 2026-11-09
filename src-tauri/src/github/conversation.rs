@@ -174,7 +174,7 @@ fn parse(value: &Value) -> Result<Conversation> {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Action {
     Edit { title: String, body: String, #[serde(rename = "expectedTitle")] expected_title: String, #[serde(rename = "expectedBody")] expected_body: String },
     Request { login: String, team: bool },
