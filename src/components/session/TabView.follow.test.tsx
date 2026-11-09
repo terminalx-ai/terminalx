@@ -22,7 +22,7 @@ vi.mock("@/lib/tabViews", () => ({
   useTabViews: () => mocks.views, isPtyFirst: () => true, startTabAgent: mocks.start,
   clearTabViewError: vi.fn(), forgetTabView: mocks.forget, leaveTerminalView: mocks.leave,
 }));
-vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="terminal" data-pane={id} /> }));
+vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id, actions }: { id: string; actions?: React.ReactNode }) => <><div data-testid="terminal" data-pane={id} />{actions}</> }));
 // The chat's own drawing is not under test: which conversation it is given, and what stands under it, are.
 vi.mock("@/components/chat/Chat", () => ({
   Chat: ({ transcript, footer }: { transcript: { turns: { key: string; prompt?: { text: string }; work: { kind: string; text?: string }[] }[] }; footer: React.ReactNode }) => (
@@ -100,7 +100,6 @@ describe("a tab that is a terminal", () => {
       event("claude", { type: "status", text: "Claude Code exited before the turn finished." }),
     ]);
     await waitFor(() => expect(screen.getByTestId("terminal-view-title").textContent).toBe("Terminal"));
-    expect(screen.getByText(/No agent is running in this tab/)).toBeTruthy();
     expect(screen.getByTestId("terminal").getAttribute("data-pane")).toBe(`tab:${tabId()}`);
     expect(screen.queryByLabelText("Session recovery")).toBeNull();
     expect(screen.queryByRole("button", { name: "Stop session" })).toBeNull();
@@ -145,7 +144,6 @@ describe("a tab that is a terminal", () => {
     become({ front: "by_hand", harness: "codex", status: "in_progress" });
     expect(mocks.forget).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("terminal-view-title").textContent).toBe("Terminal view · Working");
-    expect(screen.getByText(/Codex was started in this terminal\. The chat is the same conversation\./)).toBeTruthy();
   });
 });
 

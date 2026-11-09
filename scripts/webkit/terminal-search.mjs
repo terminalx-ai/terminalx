@@ -82,7 +82,11 @@ try {
   // Moving into a closed panel must acquire the new host without recreating xterm.
   await page.getByRole("button", { name: "Toggle panel", exact: true }).click();
   await dock.waitFor({ state: "detached" });
-  await full.getByRole("button", { name: "Move to dock" }).click();
+  await full.locator(".xterm-helper-textarea").focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Shift+Tab");
+  assert(await full.getByRole("button", { name: "Move to dock" }).evaluate((el) => document.activeElement === el), "the corner toolbar exposes Move to dock to keyboard navigation");
+  await page.keyboard.press("Enter");
   await dock.locator(".xterm").waitFor();
   assert(await dock.locator(".xterm").evaluate((el) => el === window.__MOVED_XTERM__), "same xterm moved back to dock");
   assert.deepEqual(await page.evaluate(() => window.__TERMINAL_CHECKS__), { attached: 1, spawned: 0, killed: 0, interrupted: 0, inputs: [] }, "moves never restart or reattach the PTY; search keys do not reach it");

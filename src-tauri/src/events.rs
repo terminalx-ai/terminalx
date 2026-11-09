@@ -376,6 +376,10 @@ pub enum Payload {
     /// not sent, and will not be. It can be sent again.
     PromptWithdrawn {
         prompt_seq: u64,
+        /// A native request may have reached Codex, but no acknowledgement
+        /// arrived. Retain the text without claiming definite non-delivery.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unconfirmed: bool,
     },
     AssistantText {
         #[serde(default, skip_serializing_if = "Option::is_none")]

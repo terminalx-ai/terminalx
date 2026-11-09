@@ -14,7 +14,11 @@ import { Terminal, type IBufferCell } from "@xterm/headless";
 export interface Span { text: string; fg?: string; bg?: string; bold?: boolean; italic?: boolean; underline?: boolean; dim?: boolean }
 export interface Row { key: string; spans: Span[] }
 /** What the program running in the terminal asked for, which shapes what a key or a paste sends. */
-export interface ScreenModes { bracketedPaste: boolean; applicationCursorKeys: boolean }
+/**
+ * `mouse`: the program asked for mouse reports (a wheel is told to it, not scrolled here).
+ * `alternate`: a full-screen program's own screen, which keeps no history of its own to scroll.
+ */
+export interface ScreenModes { bracketedPaste: boolean; applicationCursorKeys: boolean; mouse: boolean; alternate: boolean }
 
 export const FOREGROUND = "#e6e6e6";
 export const BACKGROUND = "#171719";
@@ -84,7 +88,10 @@ export class TerminalScreen {
 
   modes(): ScreenModes {
     const modes = this.term.modes;
-    return { bracketedPaste: modes.bracketedPasteMode, applicationCursorKeys: modes.applicationCursorKeysMode };
+    return {
+      bracketedPaste: modes.bracketedPasteMode, applicationCursorKeys: modes.applicationCursorKeysMode,
+      mouse: modes.mouseTrackingMode !== "none", alternate: this.term.buffer.active.type === "alternate",
+    };
   }
 
   /**
@@ -94,7 +101,20 @@ export class TerminalScreen {
    */
   lines(): Row[] {
     const buffer = this.term.buffer.active;
-    const first = buffer.type === "alternate" ? buffer.baseY : 0;
+    return this.rowsFrom(buffer.type === "alternate" ? buffer.baseY : 0);
+  }
+
+  /** Only what the screen shows now, its history aside. */
+  viewport(): Row[] { return this.rowsFrom(this.term.buffer.active.baseY); }
+
+  /** Whether the terminal kept a history of its own: lines that scrolled off a normal screen. */
+  hasHistory(): boolean {
+    const buffer = this.term.buffer.active;
+    return buffer.type === "normal" && buffer.baseY > 0;
+  }
+
+  private rowsFrom(first: number): Row[] {
+    const buffer = this.term.buffer.active;
     const out: Row[] = [];
     const cell = buffer.getNullCell();
     for (let y = first; y < buffer.length; y++) {
