@@ -14,36 +14,6 @@ const SHOWN = 3;
  */
 const NOTICE = "pointer-events-auto rounded-xl bg-(--surface-card) p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in";
 
-/** Several workspaces kept after their merges, as one card: a line each, and one way to review them all. */
-function KeptGroup({ notices }: { notices: MergedNotice[] }) {
-  return (
-    <aside role="status" data-testid="merged-kept-group" className={NOTICE}>
-      <div className="flex items-start gap-2.5">
-        <ShieldCheck aria-hidden className="mt-0.5 size-4 shrink-0 text-warning" />
-        <div className="min-w-0 flex-1">
-          <div className="font-medium">Kept {notices.length} merged workspaces</div>
-          <ul className="mt-1 flex flex-col gap-0.5 text-xs text-muted-foreground">
-            {notices.map(({ id, status }) => (
-              <li key={id} className="flex min-w-0 gap-1.5" title={`${status.reason ?? "it could not be checked"}. ${status.detail ?? ""}`.trim()}>
-                <span className="shrink-0 text-foreground">{status.name}</span>
-                <span className="min-w-0 truncate">{status.reason ?? "could not be checked"}</span>
-              </li>
-            ))}
-          </ul>
-          <div className="mt-2">
-            <Button size="sm" variant="secondary" onClick={() => { notices.forEach(({ id }) => dismissMergedNotice(id)); openWorktreeCleanup(); }}>
-              Review in clean-up
-            </Button>
-          </div>
-        </div>
-        <Button variant="ghost" size="icon-xs" aria-label="Dismiss" onClick={() => notices.forEach(({ id }) => dismissMergedNotice(id))}>
-          <X />
-        </Button>
-      </div>
-    </aside>
-  );
-}
-
 function NoticeCard({ notice }: { notice: MergedNotice }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -129,15 +99,12 @@ function NoticeCard({ notice }: { notice: MergedNotice }) {
  * AppShell.
  */
 export function MergedCleanupNotices() {
-  const { notices } = useMergedCleanup();
+  // A kept workspace is not urgent: it is said in its session's Branch tab, marked on its sidebar row, and counted
+  // under the projects. Only what has a short window to answer pops up: a deletion coming (Keep), or done (Undo).
+  const notices = useMergedCleanup().notices.filter((notice) => notice.kind !== "kept");
   if (!notices.length) return null;
-  // Kept workspaces only need reviewing, together: two or more are one card. One that needs its own answer
-  // (a removal to review, an undo, a keep) stays a card of its own.
-  const groupable = notices.filter((notice) => notice.kind === "kept" && !(notice.status.archiveBlocked && notice.hostId === "local"));
-  const grouped = groupable.length > 1 ? groupable : [];
-  const single = notices.filter((notice) => !grouped.includes(notice));
-  const shown = single.slice(-(grouped.length ? SHOWN - 1 : SHOWN));
-  const more = single.length - shown.length;
+  const shown = notices.slice(-SHOWN);
+  const more = notices.length - shown.length;
   return (
     <div className="pointer-events-none flex max-h-[50dvh] shrink-0 flex-col gap-2 overflow-y-auto">
       {more > 0 ? (
@@ -145,7 +112,6 @@ export function MergedCleanupNotices() {
           {more} more {more === 1 ? "workspace" : "workspaces"}; see Settings → Storage.
         </div>
       ) : null}
-      {grouped.length ? <KeptGroup notices={grouped} /> : null}
       {shown.map((notice) => (
         <NoticeCard key={notice.id} notice={notice} />
       ))}
