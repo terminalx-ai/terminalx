@@ -99,7 +99,12 @@ const client = {
   attachPty: vi.fn(async (_ptyId: string, _handlers: Record<string, unknown>) => ({ cursor: () => undefined, detach: vi.fn() })),
   write: vi.fn(async (_ptyId: string, _data: string) => undefined),
   resizePty: vi.fn(async () => ({})),
-  controlPty: vi.fn(async () => info({ control: "you", cols: 132, rows: 40 })),
+  controlPty: vi.fn(async () => {
+    const controlled = info({ control: "you", cols: 132, rows: 40 });
+    // Subsequent polling sees the same ownership as the control response.
+    listed = listed.map((terminal) => terminal.ptyId === controlled.ptyId ? controlled : terminal);
+    return controlled;
+  }),
   killPty: vi.fn(async () => undefined),
   call: vi.fn(async (method: string, _params?: unknown): Promise<unknown> => (method === "collab.state" ? collabState : {})),
   mutate: vi.fn(async () => ({})),
