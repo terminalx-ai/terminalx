@@ -482,7 +482,11 @@ mod tests {
         // SAFETY: setsid is async-signal-safe.
         unsafe { terminal.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
         let mut terminal = terminal.spawn().unwrap();
-        std::fs::write(home.join("terminal.pid"), terminal.id().to_string()).unwrap();
+        // The parent treats existence as readiness. Publish complete bytes:
+        // write() alone exposes an empty file between creation and writing.
+        let pending = home.join("terminal.pid.pending");
+        std::fs::write(&pending, terminal.id().to_string()).unwrap();
+        std::fs::rename(pending, home.join("terminal.pid")).unwrap();
         std::thread::sleep(Duration::from_secs(600));
         let _ = terminal.kill();
         let _ = terminal.wait();
