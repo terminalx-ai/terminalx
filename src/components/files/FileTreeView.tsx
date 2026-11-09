@@ -11,7 +11,6 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import type { ChangeStatus } from "@/types/session";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { copyText } from "@/lib/clipboard";
-import { FreeBuildFiles } from "./FreeBuildFiles";
 
 interface Row {
   path: string;
@@ -54,15 +53,7 @@ const TINT: Record<ChangeStatus, string> = {
  * usual file actions.
  */
 export function FileTreeView(props: FileTreeViewProps) {
-  const tree = <RootedFileTreeView key={`${props.source?.key ?? "local"}:${props.root}`} {...props} />;
-  // A local Git checkout may offer to free its build output, above the tree (never inside it: the tree is one list).
-  if (props.source || props.isGit === false) return tree;
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <FreeBuildFiles key={props.root} sessionId={props.sessionId} root={props.root} />
-      <div className="min-h-0 flex-1">{tree}</div>
-    </div>
-  );
+  return <RootedFileTreeView key={`${props.source?.key ?? "local"}:${props.root}`} {...props} />;
 }
 
 function RootedFileTreeView({

@@ -1,5 +1,7 @@
 //! Build output a workspace can free: the folders that a build or an install
-//! makes again, offered for the Trash from the Files tab.
+//! makes again. Not offered for a workspace in use, where deleting it only
+//! buys a slow rebuild and the space comes back; it is for freeing space when
+//! the disk runs low, from workspaces that are idle.
 //!
 //! Nothing useful is ever in the offer. A folder is offered only when every
 //! one of these holds:
