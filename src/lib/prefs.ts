@@ -362,7 +362,7 @@ export function applyFilePreferences(values: Record<string, unknown>, persist = 
   for (const listener of listeners) listener();
 }
 
-function persistLocal(saveWindow = false) {
+function persistLocal(patch: Partial<Prefs> = {}) {
   try {
     // Keep inherited choices for windows that have no record yet. File-backed
     // layout is only a default; choosing a view never edits settings.json.
@@ -371,7 +371,13 @@ function persistLocal(saveWindow = false) {
     const local: Record<string, unknown> = { ...legacy, ...Object.fromEntries(Object.entries(state).filter(([key]) => !WINDOW_KEYS.includes(key as typeof WINDOW_KEYS[number]))) };
     if (fileWriter) for (const key of fileKeys) delete local[key];
     localStorage.setItem(KEY, JSON.stringify(local));
-    if (saveWindow) localStorage.setItem(windowKey(), JSON.stringify(windowChoices(state)));
+    const changed = windowChoices(patch);
+    if (Object.keys(changed).length) {
+      let own: Partial<Prefs> = {};
+      try { own = windowChoices(JSON.parse(localStorage.getItem(windowKey()) ?? "{}")); } catch { /* Replace a broken window record. */ }
+      // Only an explicit view choice overrides the inherited file default.
+      localStorage.setItem(windowKey(), JSON.stringify({ ...own, ...changed }));
+    }
   } catch { /* storage unavailable */ }
 }
 
@@ -381,7 +387,7 @@ export function getPrefs(): Prefs {
 
 export function setPrefs(patch: Partial<Prefs>) {
   state = { ...state, ...patch };
-  persistLocal(true);
+  persistLocal(patch);
   const saved = Object.fromEntries(Object.entries(patch).filter(([key]) => fileKeys.includes(key as keyof Prefs) && !WINDOW_KEYS.includes(key as typeof WINDOW_KEYS[number])));
   if (Object.keys(saved).length) fileWriter?.(saved);
   applyFontScale();

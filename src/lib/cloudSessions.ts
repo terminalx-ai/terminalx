@@ -6,7 +6,7 @@ import { applyLiveTabs, getCloudAgents, loadCloudAgents, markCloudAgentsOffline,
 import { cacheCloudSessions, dropCachedCloudSessions, getCloudCatalog, useCloudCatalog, type CachedWorkspaceSessions } from "@/lib/cloudCatalog";
 import { onWorkspaceAccess } from "@/lib/cloudCollab";
 import { cloudTabTitle } from "@/lib/cloudRowState";
-import { onCloudConnected, retainCloudConnection, waitCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
+import { onCloudConnected, retainCloudConnection, useCloudConnection, waitCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
 import { getSessionStore, openWelcome } from "@/lib/sessions";
 import { clearSessionTabsUnder } from "@/lib/terminal";
@@ -442,6 +442,20 @@ export function useCloudWorkspaceSessions(node: CloudWorkspaceNode, options: { l
 }
 
 const NO_ITEM = { workspace: { orgId: "", id: "" } } as CloudWorkspaceListItem;
+
+/** Resolve a status command from known session rows and access, without loading or connecting. */
+export function useCloudSessionForStatus(key: string | null): CloudSessionRow | null {
+  const target = parseCloudWorkspaceKey(key ?? "");
+  const catalog = useCloudCatalog();
+  const item = target && catalog.orgs[target.orgId]?.workspaces.find((item) => item.workspace.id === target.workspaceId);
+  const node = useMemo(() => ({ key: cloudWorkspaceKey(item?.workspace.orgId ?? "", item?.workspace.id ?? ""), item: item ?? NO_ITEM, placedBy: null }), [item]);
+  const { sessions, capabilities, manage } = useCloudWorkspaceSessions(node, { load: false, showArchived: false, selectedKey: key });
+  const connection = useCloudConnection(node.key);
+  const authority = connection.authority ?? item?.workspace.authority ?? null;
+  const granted = connection.capabilities ?? capabilities;
+  if (!item || !target?.sessionId || !manage || (authority !== null && authority !== "manage") || !granted?.includes("session/2") || !granted.includes("session-status/1")) return null;
+  return sessions.find((session) => session.key === key) ?? null;
+}
 
 /** `cloudAgentRan`, following the sessions as they change: a failed first task is then history (#499). */
 export function useCloudAgentRan(item: CloudWorkspaceListItem | null): boolean {

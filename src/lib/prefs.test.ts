@@ -308,6 +308,39 @@ describe("cloud pipeline switches saved by a newer version", () => {
 
 
 describe("sidebar choices per window (PRO-164)", () => {
+  it.each([
+    { sounds: false },
+    { panelWidth: 520 },
+    { lastAgent: "codex" },
+    { sidebarSort: "created" as const, sidebarProject: "/a" },
+  ])("keeps the file layout inherited after saving %j and reloading", async (patch) => {
+    const prefs = await import("./prefs");
+    prefs.connectPreferenceFile(vi.fn());
+    prefs.applyFilePreferences({ sidebarLayout: "list" });
+    prefs.setPrefs(patch);
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs.sidebar.main") ?? "{}")).not.toHaveProperty("sidebarLayout");
+    prefs.applyFilePreferences({ sidebarLayout: "status" });
+    expect(prefs.getPrefs().sidebarLayout).toBe("status");
+    vi.resetModules();
+    const reloaded = await import("./prefs");
+    reloaded.connectPreferenceFile(vi.fn());
+    reloaded.applyFilePreferences({ sidebarLayout: "simple" });
+    expect(reloaded.getPrefs().sidebarLayout).toBe("simple");
+    // An explicit layout remains an override through subsequent unrelated saves.
+    reloaded.setPrefs({ sidebarLayout: "status" });
+    reloaded.setPrefs(patch);
+    reloaded.applyFilePreferences({ sidebarLayout: "list" });
+    expect(reloaded.getPrefs().sidebarLayout).toBe("status");
+  });
+
+  it("does not freeze the default before the settings file loads", async () => {
+    const prefs = await import("./prefs");
+    prefs.setPrefs({ panelWidth: 520 });
+    prefs.connectPreferenceFile(vi.fn());
+    prefs.applyFilePreferences({ sidebarLayout: "status" });
+    expect(prefs.getPrefs().sidebarLayout).toBe("status");
+  });
+
   it("migrates the old shared layout without promoting a window override into the settings file", async () => {
     localStorage.setItem("raccoon.prefs", JSON.stringify({ sidebarLayout: "list", sounds: false }));
     localStorage.setItem("raccoon.prefs.sidebar.main", JSON.stringify({ sidebarLayout: "status" }));

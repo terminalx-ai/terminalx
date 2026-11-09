@@ -85,6 +85,7 @@ import {
 } from "@/lib/sessions";
 import { SHORTCUT_ACTIONS, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
 import { openCloudSession, useCloudDashboard } from "@/lib/cloudDashboard";
+import { updateCloudSession, useCloudSessionForStatus } from "@/lib/cloudSessions";
 import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { useAccount } from "@/lib/account";
 import { defaultOrgId, lastActivity, liveCloudOrgIds } from "@/lib/cloudCatalog";
@@ -290,6 +291,19 @@ export function CommandPalette({
   }, [onOpenChange]);
 
   const selectedSession = store.sessions.find((session) => session.id === store.selectedSessionId) ?? null;
+  const statusLocalSession = store.sessions.find((session) => session.id === (statusSessionId ?? store.selectedSessionId));
+  const statusCloudSession = useCloudSessionForStatus(statusSessionId ?? store.selectedSessionId);
+  const statusTarget = useMemo(() => {
+    if (statusLocalSession) return {
+      key: statusLocalSession.id, title: statusLocalSession.title, manualStatus: statusLocalSession.manualStatus,
+      setStatus: (status: ManualStatus) => api.setSessionStatus(statusLocalSession.id, status),
+    };
+    if (statusCloudSession) return {
+      key: statusCloudSession.key, title: statusCloudSession.title, manualStatus: statusCloudSession.manualStatus,
+      setStatus: (status: ManualStatus) => updateCloudSession(statusCloudSession, { manualStatus: status }),
+    };
+    return null;
+  }, [statusLocalSession, statusCloudSession]);
   const activeProjectPath = selectedSession?.projectPath ?? store.selectedProject ?? store.lastProject ?? store.projects[0]?.path ?? null;
   const activeProject = store.projects.find((project) => project.path === activeProjectPath) ?? null;
   const preset = store.newSessionPreset;
@@ -444,11 +458,11 @@ export function CommandPalette({
       }, keymap[shortcut.id]),
     );
     const extras: CommandEntry[] = [
-      ...(selectedSession ? [indexPaletteItem({
+      ...(statusTarget ? [indexPaletteItem({
         id: "command:session-status", group: "commands" as const, primary: "Set status…",
-        secondary: `${selectedSession.title} · ${manualStatusLabel(selectedSession.manualStatus)}`,
+        secondary: `${statusTarget.title} · ${manualStatusLabel(statusTarget.manualStatus)}`,
         recentAt: 25, icon: CircleDot, keepOpen: true,
-        run: () => { setStatusSessionId(selectedSession.id); setQuery(""); setSelected(0); setError(null); },
+        run: () => { setStatusSessionId(statusTarget.key); setQuery(""); setSelected(0); setError(null); },
       }, ["session backlog progress review done canceled workflow"])] : []),
       indexPaletteItem({
         id: "command:status-toggle",
@@ -519,7 +533,7 @@ export function CommandPalette({
         : []),
     ];
     return [...shortcutEntries, ...extras];
-  }, [selectedSession, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
+  }, [selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({
@@ -617,17 +631,17 @@ export function CommandPalette({
 
   const groups = useMemo<PaletteGroup[]>(() => {
     if (statusSessionId) {
-      const session = store.sessions.find((entry) => entry.id === statusSessionId);
-      return [{ id: "statuses", label: `Set status · ${session?.title ?? "Session"}`, rows: MANUAL_STATUSES
+      if (!statusTarget) return [{ id: "statuses", label: "Status is unavailable for this session", rows: [] }];
+      return [{ id: "statuses", label: `Set status · ${statusTarget.title}`, rows: MANUAL_STATUSES
         .filter((status) => manualStatusLabel(status).toLocaleLowerCase().includes(deferredQuery.toLocaleLowerCase()))
         .map((status) => ({
           id: `status:${status}`, kind: "command", primary: manualStatusLabel(status),
-          secondary: status === normalizeManualStatus(session?.manualStatus) ? "Current status" : "", primaryRanges: [], secondaryRanges: [], manualStatus: status,
+          secondary: status === normalizeManualStatus(statusTarget.manualStatus) ? "Current status" : "", primaryRanges: [], secondaryRanges: [], manualStatus: status,
           closeBefore: false,
           run: async () => {
             if (settingStatus) return;
             setSettingStatus(true); setError(null);
-            try { await api.setSessionStatus(statusSessionId, status); setOpen(false); }
+            try { await statusTarget.setStatus(status); setOpen(false); }
             catch (cause) { setError(errorMessage(cause)); }
             finally { setSettingStatus(false); }
           },
@@ -738,7 +752,7 @@ export function CommandPalette({
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
       ...(settingsFirst ? [settingsGroup, commandGroup] : [commandGroup, settingsGroup]),
     ];
-  }, [statusSessionId, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
+  }, [statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
 
   const renderedGroups = useMemo(() => {
     let offset = 0;
