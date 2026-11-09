@@ -493,7 +493,9 @@ export function Chat({
       </div>
       {/* Over the transcript's foot: what scrolls down passes behind the see-through composer, fading into the chat as it goes. */}
       <div ref={footerRef} className="pointer-events-none absolute inset-x-0 bottom-0 z-10 [&>*]:pointer-events-auto">
-        <div aria-hidden className="pointer-events-none! absolute inset-x-0 -top-6 bottom-0 -z-10 bg-[linear-gradient(to_bottom,transparent,var(--color-chat)_70%)]" />
+        {/* The fade is only the 1.5rem above the footer: from its top down it is solid, so nothing shows through the
+            gaps between a banner, the composer and what sits above them, however tall the footer grows. */}
+        <div aria-hidden className="pointer-events-none! absolute inset-x-0 -top-6 bottom-0 -z-10 bg-[linear-gradient(to_bottom,transparent,var(--color-chat)_1.5rem)]" />
         {/* Above the composer, never behind it: the composer is see-through. */}
         <div
           className={cn(
