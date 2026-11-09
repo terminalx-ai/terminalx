@@ -477,7 +477,7 @@ function ReaderMessage({
     <div className={cn(className, "group/msg relative flex", layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
       <div
         className={cn(
-          "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl bg-card px-4 py-3 text-[15px] leading-relaxed",
+          "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl bg-card px-4 py-3 text-[14px] leading-relaxed",
           layout === "chat" ? "max-w-[85%]" : "w-full",
         )}
       >
