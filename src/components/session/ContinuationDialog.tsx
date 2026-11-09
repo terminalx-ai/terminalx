@@ -232,12 +232,17 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
           </label>
         ) : <p className="mt-4 text-xs text-muted-foreground">In the folder · no Git</p>)}
         {loading ? <p role="status" className="mt-5 flex h-8 items-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin" />Preparing context…</p> : <>
-          <div role="group" aria-label="New session settings" className="mt-5 flex min-w-0 flex-nowrap items-center gap-1.5">
-            <SessionAgentControls selection={selection} disabled={locked} />
+          {/* Two rows of the same make: a label, then controls across the full width at one height, so the
+              pills and the context switch line up edge to edge. */}
+          <div role="group" aria-label="New session settings" className="mt-5 flex flex-col gap-2">
+            <span className="text-xs font-medium text-foreground">Agent</span>
+            <div className="flex min-w-0 flex-nowrap items-center gap-1.5">
+              <SessionAgentControls selection={selection} disabled={locked} fill />
+            </div>
           </div>
-          <fieldset disabled={locked} className="mt-5 flex flex-col gap-2">
+          <fieldset disabled={locked} className="mt-4 flex flex-col gap-2">
             <legend className="mb-2 text-xs font-medium text-foreground">Context</legend>
-            <div className="grid grid-cols-2 gap-1 rounded-lg bg-veil-raised p-1 text-xs">
+            <div className="grid h-8 grid-cols-2 gap-0.5 rounded-md bg-veil-raised p-0.5 text-xs">
               <Choice name="continuation-mode" checked={mode === "focused"} onChange={() => setMode("focused")} label="Recent context" />
               <Choice name="continuation-mode" checked={mode === "full"} disabled={!context?.transcriptPath} onChange={() => setMode("full")} label="Full transcript" />
             </div>
@@ -277,7 +282,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
 /** One side of a two-way choice drawn as a segmented control; a real radio underneath. */
 function Choice({ name, checked, disabled, onChange, label }: { name: string; checked: boolean; disabled?: boolean; onChange: () => void; label: string }) {
   return (
-    <label className={cn("flex h-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring/40", checked && "bg-card text-foreground shadow-sm", disabled && "cursor-not-allowed opacity-50")}>
+    <label className={cn("flex cursor-pointer items-center justify-center rounded-[5px] text-muted-foreground transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring/40", checked && "bg-card text-foreground shadow-sm", disabled && "cursor-not-allowed opacity-50")}>
       <input type="radio" name={name} checked={checked} disabled={disabled} onChange={onChange} aria-describedby="full-context-help" className="sr-only" />
       {label}
     </label>
