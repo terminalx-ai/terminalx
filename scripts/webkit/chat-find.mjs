@@ -8,7 +8,7 @@ const server = await serve();
 let browser;
 try {
   browser = await launch();
-  for (const [fallback, delayedCode] of [[false, false], [true, false], [false, true], [true, true], [false, "scrolled"], [true, "scrolled"]]) {
+  for (const [fallback, delayedCode, clippedCode] of [[false, false, true], [true, false, true], [false, false], [true, false], [false, true], [true, true], [false, "scrolled"], [true, "scrolled"]]) {
     const extra = `(() => {
       ${fallback ? 'window.Highlight = undefined;' : ''}
       localStorage.setItem("raccoon.prefs", JSON.stringify({ foldToolCalls: true }));
@@ -30,6 +30,12 @@ try {
       };
     })();`;
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width: 1100, height: 800 }, { extra });
+    if (clippedCode) {
+      // Replay the smaller wrapper from the failed deferred-layout geometry
+      // without depending on WebKit's intermittent content-visibility timing.
+      // The actual code scroller still needs to reveal through overflow:hidden.
+      await page.addStyleTag({ content: '[data-streamdown="code-block"] { height: 202px !important; content-visibility: visible !important; } [data-streamdown="code-block-body"] { height: 384px !important; min-height: 384px !important; }' });
+    }
     // Hold the real lazy renderer until find has revealed the plain-code fallback.
     // Its replacement must retain the active result's nested scroll position.
     let releaseCode;
@@ -84,6 +90,9 @@ try {
     await chat.getByRole("status").filter({ hasText: "1 of 2" }).waitFor();
     await input.fill("codeNeedle");
     await visibleHighlight("codeNeedle");
+    if (clippedCode) {
+      assert.ok(await scroller.locator('[data-streamdown="code-block"]').evaluate((el) => el.scrollTop > 0), "reveal through the clipping wrapper");
+    }
     if (delayedCode) {
       assert.equal(codeRequested, true);
       const codeBody = scroller.locator('[data-streamdown="code-block-body"]');
@@ -120,7 +129,7 @@ try {
     await input.waitFor({ state: "hidden" });
     assert.equal(await scroller.getByText("A hidden thought", { exact: true }).count(), 0);
     assert.equal(await page.locator('[data-chat-search-highlight]').count(), 0);
-    console.log(`ok  ${fallback ? 'fallback overlays' : 'native highlights'}${delayedCode ? ', delayed code renderer' : ''}${delayedCode === 'scrolled' ? ', reader scrolled away' : ''}: 2,000 virtual turns, Markdown, code, folded output, navigation and options`);
+    console.log(`ok  ${fallback ? 'fallback overlays' : 'native highlights'}${clippedCode ? ', clipped code wrapper' : ''}${delayedCode ? ', delayed code renderer' : ''}${delayedCode === 'scrolled' ? ', reader scrolled away' : ''}: 2,000 virtual turns, Markdown, code, folded output, navigation and options`);
     await page.close();
   }
 } finally {
