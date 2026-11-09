@@ -12,7 +12,7 @@ import { HoverTime, MessageTime } from "./MessageTime";
 import { messageTime } from "@terminalx/portable/transcript";
 import { Markdown } from "./Markdown";
 import { LinkedText } from "./LinkedText";
-import { ToolCallRow, ToolGroupRow } from "./ToolCallRow";
+import { STEP_CHIP, ToolCallRow, ToolGroupRow } from "./ToolCallRow";
 import { usePrefs } from "@/lib/prefs";
 import { turnFileChanges } from "@/lib/turnChanges";
 import { TurnChanges } from "./TurnChanges";
@@ -426,9 +426,36 @@ export function SendingMessage({ message, cwd }: { message: { text: string; imag
   );
 }
 
-/** A GitHub-style table: a row of cells, then the row of dashes under it. */
+/** A table's row of dashes: cells of `-` (with `:` for alignment) between pipes, at least one pipe. */
+const TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+/**
+ * A message split into its GitHub-style tables and the text around them: a table is a row with a pipe, the row of
+ * dashes under it, and the rows with pipes after that.
+ */
+export function splitMarkdownTables(text: string): { table: boolean; text: string }[] {
+  const lines = text.split("\n");
+  const parts: { table: boolean; text: string }[] = [];
+  const push = (table: boolean, line: string) => {
+    const last = parts.at(-1);
+    if (last && last.table === table) last.text += `\n${line}`;
+    else parts.push({ table, text: line });
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const rule = lines[i + 1];
+    if (lines[i].includes("|") && rule !== undefined && rule.includes("|") && TABLE_RULE.test(rule)) {
+      // A new block even right after another table, so two tables stay two.
+      parts.push({ table: true, text: `${lines[i]}\n${rule}` });
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) parts.at(-1)!.text += `\n${lines[i++]}`;
+      i--;
+    } else push(false, lines[i]);
+  }
+  return parts;
+}
+
 export function hasMarkdownTable(text: string): boolean {
-  return /^ *\|?.*\|.*\n *\|? *:?-{3,}:? *(\| *:?-{3,}:? *)+\|? *$/m.test(text);
+  return splitMarkdownTables(text).some((part) => part.table);
 }
 
 function ReaderMessage({
@@ -463,7 +490,10 @@ function ReaderMessage({
                   key={i}
                   type="button"
                   aria-label={`View ${im.name || "image"}`}
-                  onClick={() => openImageViewer(viewable(message.images ?? [], cwd), viewable(message.images ?? [], cwd).findIndex((v) => v.src === toAssetUrl(im.url)))}
+                  onClick={() => {
+                    const all = viewable(message.images ?? [], cwd);
+                    openImageViewer(all, all.findIndex((v) => v.src === toAssetUrl(im.url)));
+                  }}
                   className="cursor-zoom-in rounded-md outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring/50"
                 >
                   <img src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
@@ -479,10 +509,13 @@ function ReaderMessage({
         ) : null}
         {message.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={message.author.userId}>{message.author.displayName}</div>}
         <div {...(message.seq == null ? {} : section)} className={cn((message.replaced || message.withdrawn) && "text-muted-foreground")}>
-          {/* A pasted table reads as a table; anything else stays the plain text that was typed. Web links only, no
+          {/* A pasted table reads as a table; every other line stays the plain text that was typed. Web links only, no
               remote images: it is someone's paste, not the agent's reply. */}
           {hasMarkdownTable(message.text)
-            ? <div className="whitespace-normal"><Markdown text={message.text} streaming={false} linkContext={linkContext} webLinksOnly remoteImages={false} /></div>
+            ? splitMarkdownTables(message.text).map((part, i) =>
+                part.table
+                  ? <div key={i} className="my-2 whitespace-normal"><Markdown text={part.text} streaming={false} linkContext={linkContext} webLinksOnly remoteImages={false} /></div>
+                  : <LinkedText key={i} text={part.text.replace(/^\n+|\n+$/g, "")} context={linkContext} />)
             : <LinkedText text={message.text} context={linkContext} />}
         </div>
         {message.sent !== undefined && (
@@ -573,7 +606,7 @@ function ReasoningRow({ name, text, linkContext }: { name: string; text: string;
         <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning" : "Expand reasoning"}><Brain className="size-4 shrink-0 text-thinking" /></button>
         <span className="shrink-0 text-foreground/90">Thinking</span>
         <span className="flex min-w-0 flex-1">
-          {!open && first && <span className="min-w-0 max-w-[36rem] truncate rounded-md bg-veil-raised px-1.5 py-0.5 text-[12.5px] text-muted-foreground"><LinkedText text={first} context={linkContext} /></span>}
+          {!open && first && <span className={cn(STEP_CHIP, "font-sans text-[12.5px]")}><LinkedText text={first} context={linkContext} /></span>}
         </span>
         <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning details" : "Expand reasoning details"}><ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} /></button>
       </div>

@@ -32,6 +32,9 @@ function iconFor(toolType: string) {
   }
 }
 
+/** What a step acted on, beside its label: code, in a quiet chip. Shared with the Thinking row. */
+export const STEP_CHIP = "min-w-0 max-w-[36rem] truncate rounded-md bg-veil-raised px-1.5 py-0.5 font-mono text-[12px] text-muted-foreground";
+
 /**
  * A step's icon colour, by what it did, so a turn reads at a glance: reading blue, writing amber, running a command
  * green, searching or the web violet, anything else (tools, helpers, plans) the thinking colour. Only the icon is
@@ -121,9 +124,9 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
       >
         <button type="button" disabled={!hasBody || isWholeRead} onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={`${open ? "Collapse" : "Expand"} ${toolVerb(call.name, done)} ${target}`} className="flex shrink-0 items-center gap-2 rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
         {pending ? (
-          <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+          <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
         ) : failed ? (
-          <CircleAlert className="size-3.5 shrink-0 text-destructive" />
+          <CircleAlert className="size-4 shrink-0 text-destructive" />
         ) : (
           <Icon className={cn("size-4 shrink-0", toneFor(call.toolType))} />
         )}
@@ -135,7 +138,7 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
             it, not pushed to the far edge), and the reply's prose around it. */}
         <span className="flex min-w-0 flex-1">
           {target && (
-            <span className="min-w-0 max-w-[36rem] truncate rounded-md bg-veil-raised px-1.5 py-0.5 font-mono text-[12px] text-muted-foreground" title={target}>
+            <span className={STEP_CHIP} title={target}>
               <LinkedText text={target} context={linkContext} />
             </span>
           )}
@@ -223,17 +226,17 @@ export function ToolGroupRow({ name, calls, cwd, linkContext }: { name: string; 
       >
         <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={`${open ? "Collapse" : "Expand"} ${label}`} className="rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
         {!done ? (
-          <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+          <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
         ) : endedFailed ? (
-          <CircleAlert className="size-3.5 shrink-0 text-destructive" />
+          <CircleAlert className="size-4 shrink-0 text-destructive" />
         ) : (
           <Icon className={cn("size-4 shrink-0", toneFor(calls[0].toolType))} />
         )}
         </button>
-        <span className={cn("shrink-0 truncate", !done ? "text-shimmer" : "text-foreground/90")}><LinkedText text={label} context={linkContext} /></span>
+        <span className={cn("min-w-0 truncate", !done ? "text-shimmer" : "text-foreground/90")}><LinkedText text={label} context={linkContext} /></span>
         <span className="flex min-w-0 flex-1">
           {targets.length > 1 && names.length > 0 && (
-            <span className="min-w-0 max-w-[36rem] truncate rounded-md bg-veil-raised px-1.5 py-0.5 font-mono text-[12px] text-muted-foreground">
+            <span className={STEP_CHIP}>
               {names.slice(0, 4).join(", ")}
             </span>
           )}
