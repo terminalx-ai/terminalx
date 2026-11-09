@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { GitMerge } from "@/icons";
-import { errorMessage } from "@/lib/api";
+import { api, errorMessage } from "@/lib/api";
+import { bytesText } from "@/lib/cloudResources";
 import { cn } from "@/lib/cn";
 import { openWorkspaceDelete } from "@/lib/dialogs";
 import { holdMergedWorkspace, LOCAL_HOST, mergedDue, useMergedStatus } from "@/lib/mergedCleanup";
@@ -20,7 +21,17 @@ export function MergedWorkspaceStep({ cwd }: { cwd: string }) {
   const status = useMergedStatus(LOCAL_HOST, cwd);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // What deleting it frees, for good: its whole folder, build output included. Measured once it has merged.
+  const [size, setSize] = useState<number | null>(null);
+  const measured = status && status.phase !== "removed" ? `${status.projectPath}\n${status.path}` : null;
+  useEffect(() => {
+    if (!measured || !status) return;
+    let live = true;
+    api.workspaceSize(status.projectPath, status.path).then((bytes) => { if (live) setSize(bytes); }).catch(() => {});
+    return () => { live = false; };
+  }, [measured]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!status || status.phase === "removed") return null;
+  const frees = size && size >= 1024 * 1024 ? bytesText(size) : null;
   const hold = (held: boolean) => {
     setBusy(true);
     setError(null);
@@ -43,22 +54,20 @@ export function MergedWorkspaceStep({ cwd }: { cwd: string }) {
       ? {
           tone: "warn" as const,
           label: `Not deleted: ${status.reason ?? "it could not be checked"}`,
-          body: status.detail
-            ? `${status.detail} Clean-up left the workspace so nothing is lost.`
-            : "Clean-up left the workspace because deleting it could lose something.",
+          body: `${status.detail ? `${status.detail} Clean-up left the workspace so nothing is lost.` : "Clean-up left the workspace because deleting it could lose something."}${frees ? ` Once that is dealt with, deleting it frees ${frees}.` : ""}`,
           actions: <>{keep}{remove}</>,
         }
       : status.phase === "scheduled"
         ? {
             tone: "muted" as const,
             label: `Deleting ${mergedDue(status)}`,
-            body: "Its folder and branch go then. The conversations stay under the project.",
+            body: `Its folder and branch go then${frees ? `, freeing ${frees}` : ""}. The conversations stay under the project.`,
             actions: keep,
           }
         : {
             tone: "muted" as const,
             label: "Kept by you",
-            body: "Clean-up leaves it until you delete it.",
+            body: `Clean-up leaves it until you delete it.${frees ? ` Deleting it frees ${frees}.` : ""}`,
             actions: <>{remove}<Button size="sm" variant="ghost" disabled={busy} onClick={() => hold(false)}>Let clean-up delete it</Button></>,
           };
   return (
