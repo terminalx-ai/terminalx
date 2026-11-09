@@ -1,18 +1,20 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { GitMerge } from "@/icons";
 import { errorMessage } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { openWorkspaceDelete } from "@/lib/dialogs";
 import { holdMergedWorkspace, LOCAL_HOST, mergedDue, useMergedStatus } from "@/lib/mergedCleanup";
-import { NextLine } from "./NextStep";
 
 /**
  * The branch's last step, once its pull request has merged: what clean-up will do with this workspace, or why it
  * has not. It is said here, in the Branch tab, where the reader already follows the branch to done, rather than in
- * a notice over the conversation: a kept workspace is waiting, not urgent. The sidebar row carries a quiet marker
- * of the same, and the list of every one is the clean-up dialog.
+ * a notice over the conversation (docs/CLEANUP-PLACEMENT.md).
  *
- * Kept: why, in full, with Keep (stop asking) and Delete… (the remove dialog, which says what would be lost).
- * Deleting soon: when, with Keep. Kept by you: Stop keeping, or Delete….
+ * It reads top to bottom as three answers: what happened (the pull request merged), where the workspace stands
+ * (deleting soon, not deleted and why, kept by you), and what can be done, each button saying exactly what it does:
+ * Keep workspace (clean-up stops asking; it stays until deleted), Delete workspace… (the remove dialog, which says
+ * what would be lost), Let clean-up delete it (undo a keep).
  */
 export function MergedWorkspaceStep({ cwd }: { cwd: string }) {
   const status = useMergedStatus(LOCAL_HOST, cwd);
@@ -26,22 +28,55 @@ export function MergedWorkspaceStep({ cwd }: { cwd: string }) {
       .catch((e: unknown) => setError(errorMessage(e)))
       .finally(() => setBusy(false));
   };
-  const remove = (
-    <Button size="xs" variant="ghost" disabled={busy} onClick={() => openWorkspaceDelete(status.projectPath, status.path, status.name)}>
-      Delete…
+  const keep = (
+    <Button size="sm" variant="secondary" disabled={busy} onClick={() => hold(true)} title="Clean-up stops asking about it; it stays until you delete it">
+      Keep workspace
     </Button>
   );
-  // A short headline the panel's width never cuts (the pull request and the detail go in the line under it).
-  const pr = `Pull request #${status.pr.number} merged.`;
-  const line =
+  const remove = (
+    <Button size="sm" variant="ghost" disabled={busy} onClick={() => openWorkspaceDelete(status.projectPath, status.path, status.name)}>
+      Delete workspace…
+    </Button>
+  );
+  const state =
     status.phase === "kept"
-      ? { tone: "warn" as const, text: `Merged, kept: ${status.reason ?? "could not be checked"}`, why: `${pr} ${status.detail ?? "Clean-up keeps a merged workspace when deleting it could lose something."}`, actions: <>{remove}<Button size="xs" variant="secondary" disabled={busy} onClick={() => hold(true)}>Keep</Button></> }
+      ? {
+          tone: "warn" as const,
+          label: `Not deleted: ${status.reason ?? "it could not be checked"}`,
+          body: status.detail
+            ? `${status.detail} Clean-up left the workspace so nothing is lost.`
+            : "Clean-up left the workspace because deleting it could lose something.",
+          actions: <>{keep}{remove}</>,
+        }
       : status.phase === "scheduled"
-        ? { tone: "muted" as const, text: `Merged, deleting ${mergedDue(status)}`, why: `${pr} This workspace's folder and branch go then; its conversations stay under the project.`, actions: <Button size="xs" variant="secondary" disabled={busy} onClick={() => hold(true)}>Keep</Button> }
-        : { tone: "muted" as const, text: "Merged, kept by you", why: `${pr} Clean-up leaves this workspace until you delete it or stop keeping it.`, actions: <>{remove}<Button size="xs" variant="ghost" disabled={busy} onClick={() => hold(false)}>Stop keeping</Button></> };
+        ? {
+            tone: "muted" as const,
+            label: `Deleting ${mergedDue(status)}`,
+            body: "Its folder and branch go then. The conversations stay under the project.",
+            actions: keep,
+          }
+        : {
+            tone: "muted" as const,
+            label: "Kept by you",
+            body: "Clean-up leaves it until you delete it.",
+            actions: <>{remove}<Button size="sm" variant="ghost" disabled={busy} onClick={() => hold(false)}>Let clean-up delete it</Button></>,
+          };
   return (
-    <NextLine tone={line.tone} text={line.text} why={line.why} actions={line.actions} testId="merged-workspace-step">
-      {error && <p role="alert" className="pl-3.5 text-[11px] text-destructive">{error}</p>}
-    </NextLine>
+    <section aria-label="Merged workspace" data-testid="merged-workspace-step" data-tone={state.tone} className="flex flex-col gap-2.5 rounded-lg bg-well p-3">
+      <div className="flex min-w-0 items-center gap-2">
+        <GitMerge aria-hidden className="size-4 shrink-0 text-merged" />
+        <span className="min-w-0 truncate text-[13px] font-medium text-foreground">Pull request #{status.pr.number} merged</span>
+      </div>
+      <div className="flex flex-col gap-1 pl-6">
+        {/* The dot hangs in the margin, so the state's words and the line under them start on one edge. */}
+        <span className={cn("-ml-3 flex min-w-0 items-center gap-1.5 text-xs font-medium", state.tone === "warn" ? "text-warning" : "text-muted-foreground")}>
+          <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", state.tone === "warn" ? "bg-warning" : "bg-muted-foreground/60")} />
+          <span className="min-w-0">{state.label}</span>
+        </span>
+        <p className="text-xs leading-relaxed text-muted-foreground">{state.body}</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5 pl-6">{state.actions}</div>
+      {error && <p role="alert" className="pl-6 text-xs text-destructive">{error}</p>}
+    </section>
   );
 }
