@@ -27,7 +27,8 @@ import { relativeTime } from "@/lib/time";
 import type { Project } from "@/types/session";
 import { sessionStatus, type SessionEntry } from "@/types/session";
 import { AppDestinations, ProjectGlyph, type RailProps } from "./ProjectRail";
-import { PROJECT_COLORS, colorCss } from "./PixelMascot";
+import { colorCss } from "./PixelMascot";
+import { projectHueByName } from "@terminalx/portable/botFace";
 import { BotFace } from "./BotFace";
 import { ArchivedSessions, FilteredEmpty, RemovedWorkspaces, ConversationMenuItems, RowContextMenu, UnarchiveButton, archivedConversations, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
 import { SidebarBulkBar } from "./SidebarBulkBar";
@@ -280,10 +281,7 @@ function ChatRow({
  */
 export function projectHue(project: Pick<Project, "name" | "color">): string {
   if (project.color && project.color !== "slate") return colorCss(project.color);
-  const hues = PROJECT_COLORS.filter((c) => c.id !== "slate");
-  let hash = 0;
-  for (const char of project.name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  return hues[hash % hues.length]!.css;
+  return projectHueByName(project.name);
 }
 
 /**

@@ -1817,6 +1817,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "chat.list",
         "sessions.summaries",
         "session.tail",
+        // A prompt's image, from the session's own attachments.
+        "session.image",
         "session.sync",
         "sync.capabilities",
         "transport.negotiate",
@@ -1868,6 +1870,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "session.setEffort",
         "session.setMode",
         "session.continue",
+        // Closing a tab as the desktop's tab strip does.
+        "session.closeTab",
     ];
     VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
 }
@@ -1900,7 +1904,7 @@ mod tests {
             assert!(allowed_method(DeviceScope::Viewer, read), "{read}");
         }
         for control in ["session.stop", "session.interrupt", "session.resendUnsent", "session.setModel", "session.setEffort",
-            "session.setMode", "session.continue", "terminal.open", "steerLease.queueInput"] {
+            "session.setMode", "session.continue", "session.closeTab", "terminal.open", "steerLease.queueInput"] {
             assert!(allowed_method(DeviceScope::Driver, control), "{control}");
             assert!(!allowed_method(DeviceScope::Viewer, control), "{control} is a driver's");
         }
