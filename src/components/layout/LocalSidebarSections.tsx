@@ -7,7 +7,9 @@ import { useFold } from "./useFold";
 import { cn } from "@/lib/cn";
 import { holdMenuFocus, keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { openSectionDialog, runSectionEdit, useLocalSections, type LocalSection } from "@/lib/localSections";
-import { startSessionInSection } from "@/lib/sessions";
+import { conversationTitle, startSessionInSection } from "@/lib/sessions";
+import { customSessionOrder, useSidebarOrder } from "@/lib/sidebarOrder";
+import { SidebarSortList } from "./SidebarSort";
 import type { SessionEntry } from "@/types/session";
 
 function openDialog(dialog: Parameters<typeof openSectionDialog>[0]) { holdMenuFocus(); openSectionDialog(dialog); }
@@ -35,8 +37,9 @@ export function LocalSidebarSections({ groups, filtered, renderSession }: {
   renderSession: (session: SessionEntry) => ReactNode;
 }) {
   const { error } = useLocalSections();
+  const order = useSidebarOrder();
   return <>
-    {groups.map(({ section, items }, index) => (!filtered || items.length > 0) && <Section key={section.id} section={section} sessions={items} index={index} count={groups.length} filtered={filtered} renderSession={renderSession} />)}
+    {groups.map(({ section, items }, index) => (!filtered || items.length > 0) && <Section key={section.id} section={section} sessions={order.custom ? customSessionOrder(items, order) : items} index={index} count={groups.length} filtered={filtered} renderSession={renderSession} />)}
     {/* No standing "New section…" row: a section is made from a chat's menu, Move to section → New section…, where there is a chat to put in it. */}
     {error && <p role="alert" className="px-2 py-1 text-xs text-destructive">{error}</p>}
   </>;
@@ -69,6 +72,6 @@ function Section({ section, sessions, index, count, filtered, renderSession }: {
         <DropdownMenuItem destructive onSelect={() => openDialog({ kind: "delete", section })}>Delete section…</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-    {open && (sessions.length ? <ul className="flex flex-col gap-px">{sessions.map(renderSession)}</ul> : <p className="mx-2 rounded-md border border-dashed border-border px-3 py-3 text-xs text-faint">Move sessions here using their menu or ⌘K.</p>)}
+    {open && (sessions.length ? <ul className="flex flex-col gap-px"><SidebarSortList items={sessions.map((session) => ({ id: session.id, name: conversationTitle(session) }))}>{sessions.map(renderSession)}</SidebarSortList></ul> : <p className="mx-2 rounded-md border border-dashed border-border px-3 py-3 text-xs text-faint">Move sessions here using their menu or ⌘K.</p>)}
   </section>;
 }

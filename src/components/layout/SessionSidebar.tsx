@@ -1,7 +1,7 @@
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
-import { Fragment, createContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useMemo, useState, type ReactNode } from "react";
 import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -61,6 +61,9 @@ import { IssueLinkContextItems, IssueLinkMenuItems } from "@/components/session/
 
 import { compareMessageActivity, conversationTime } from "@/lib/messageActivity";
 
+import { bySavedOrder, customSessionOrder, useSidebarOrder, type SidebarOrder } from "@/lib/sidebarOrder";
+import { SidebarSortList, SidebarSortGroup, SidebarOrderError, useSidebarSortable } from "./SidebarSort";
+
 const canon = (path: string) => path.replace(/\/+$/, "");
 
 export { conversationTitle };
@@ -68,16 +71,18 @@ export { conversationTitle };
 const byRecency = (a: SessionEntry, b: SessionEntry) => compareMessageActivity(a, b, a.id, b.id);
 
 /**
- * Every live conversation as one list, pinned first, then newest. The open one stays even when archived, unless
+ * Every live conversation as one list, in custom order or pinned first, then newest. The open one stays even when archived, unless
  * Show archived is on (`showArchived`): it is then among the archived, whose fold it keeps open.
  */
-export function orderConversations(sessions: SessionEntry[], selectedId: string | null, showArchived = false): SessionEntry[] {
-  return sessions.filter((session) => !session.archived || (!showArchived && session.id === selectedId)).sort(byRecency);
+export function orderConversations(sessions: SessionEntry[], selectedId: string | null, showArchived = false, order?: SidebarOrder): SessionEntry[] {
+  const live = sessions.filter((session) => !session.archived || (!showArchived && session.id === selectedId));
+  return order?.custom ? customSessionOrder(live, order) : live.sort(byRecency);
 }
 
-/** The archived conversations, as Show archived lists them (#718): pinned first, then newest. */
-export function archivedConversations(sessions: SessionEntry[]): SessionEntry[] {
-  return sessions.filter((session) => session.archived).sort(byRecency);
+/** The archived conversations, with the same ordering preference as the live list (#718). */
+export function archivedConversations(sessions: SessionEntry[], order?: SidebarOrder): SessionEntry[] {
+  const archived = sessions.filter((session) => session.archived);
+  return order?.custom ? customSessionOrder(archived, order) : archived.sort(byRecency);
 }
 
 /**
@@ -134,6 +139,7 @@ export function groupConversations(
   /** List every open project, one with no conversations yet too: one just added is there at once (off while a filter narrows the list). */
   everyProject = false,
   showArchived = false,
+  order?: SidebarOrder,
 ): { groups: ConversationGroup[]; chats: SessionEntry[]; archivedChats: SessionEntry[] } {
   const groups = new Map<string, ConversationGroup>();
   const chats: SessionEntry[] = [];
@@ -150,8 +156,8 @@ export function groupConversations(
     group.branches[session.id] = link.branch;
     groups.set(key, group);
   };
-  for (const session of orderConversations(sessions, selectedId, showArchived)) add(session, false);
-  if (showArchived) for (const session of archivedConversations(sessions)) add(session, true);
+  for (const session of orderConversations(sessions, selectedId, showArchived, order)) add(session, false);
+  if (showArchived) for (const session of archivedConversations(sessions, order)) add(session, true);
   if (everyProject) {
     for (const project of projects) {
       const key = canon(project.path);
@@ -164,7 +170,7 @@ export function groupConversations(
     ? Math.max(...group.sessions.map((session) => Date.parse(conversationTime(session)) || 0))
     : Date.parse(group.project?.lastOpened ?? "") || 0;
   const ordered = [...groups.values()].sort((a, b) => Number(!!b.project?.pinned) - Number(!!a.project?.pinned) || latest(b) - latest(a) || a.path.localeCompare(b.path));
-  return { groups: ordered, chats, archivedChats };
+  return { groups: order?.custom ? bySavedOrder(ordered, order.projects, (g) => canon(g.path), (a, b) => a.path.localeCompare(b.path)) : ordered, chats, archivedChats };
 }
 
 /**
@@ -215,6 +221,7 @@ const PEEK = 3;
  */
 export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
+  const order = useSidebarOrder();
   const filter = useSidebarFilter();
   const [error, setError] = useState<string | null>(null);
   // A chat on its way into a project: the dialog that chooses how its new session starts there.
@@ -230,8 +237,8 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   const { sections: localSections } = useLocalSections();
   const sectionedSessions = useMemo(() => groupLocalSessions(listed, localSections), [listed, localSections]);
   const { groups, chats, archivedChats } = useMemo(
-    () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived),
-    [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived],
+    () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived, order),
+    [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived, order],
   );
 
   const run = (action: () => Promise<unknown>) => () => {
@@ -277,6 +284,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
 
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
+      <SidebarOrderError />
       <ShowAgents.Provider value={showAgents}>
       <nav className="mt-3 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 pb-2 pt-3" aria-label="Conversations" data-testid="conversation-list">
         <LocalSidebarSections
@@ -303,6 +311,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
           <>
             {groups.length > 0 && (
               <ListSection id="projects" label={sectioned ? "Local" : "Projects"} actions={<AddProjectMenu run={(action) => run(async () => action.run())()} />}>
+                <SidebarSortList kind="projects" items={groups.map((group) => ({ id: canon(group.path), name: group.name }))}>
                 {groups.map((group) => (
                   <ProjectGroup
                     key={group.path}
@@ -314,15 +323,16 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                     onNewSession={(place) => run(() => startChat({ projectPath: group.path, ...place }))()}
                   />
                 ))}
+                </SidebarSortList>
               </ListSection>
             )}
             {(chats.length > 0 || archivedChats.length > 0) && (
               <ListSection id="chats" label="Chats">
                 <ul className="flex flex-col gap-0.5">
-                  {chats.map(chatRow)}
+                  <SidebarSortList items={chats.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{chats.map(chatRow)}</SidebarSortList>
                   {archivedChats.length > 0 && (
                     <ArchivedSessions id="chats" count={archivedChats.length} opened={archivedChats.some((session) => session.id === store.selectedSessionId)}>
-                      {archivedChats.map(chatRow)}
+                      <SidebarSortList items={archivedChats.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{archivedChats.map(chatRow)}</SidebarSortList>
                     </ArchivedSessions>
                   )}
                 </ul>
@@ -480,6 +490,7 @@ function ProjectGroup({
   const [renaming, setRenaming] = useState<string | null>(null);
   const renameBranch = (branch: string) => (branch && group.project && group.project.kind !== "folder" ? () => setRenaming(branch) : null);
   const nav = useSessionStore();
+  const sort = useSidebarSortable(canon(group.path));
   const overviewOpen = nav.view === "project" && !!nav.selectedProject && canon(nav.selectedProject) === canon(group.path);
   const [all, toggleAll] = useFold(`project-all:${canon(group.path)}`, false);
   // The project folds its branches away: its picture turns into a chevron on hover, and stays one while folded.
@@ -511,9 +522,17 @@ function ProjectGroup({
   const removed = branches.filter((entry) => entry.key.startsWith("removed:"));
   const shown = all || filtered ? live : live.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
   const more = !filtered && (live.length > shown.length || (all && live.length > PEEK));
-  const branchRow = (key: string, branch: string, sessions: SessionEntry[]) => (
+  const sortBranch = ({ key, branch, sessions }: { key: string; branch: string; sessions: SessionEntry[] }) => {
+    const tabbed = asTabs ? sessions.filter((session) => session.tabs.length > 0) : sessions;
+    const represented = tabbed.length ? tabbed : sessions;
+    const current = represented.find((session) => session.id === selectedId) ?? represented[0];
+    const byTitle = (sessions.length === 1 || asTabs) && !current.worktreeRemoved && placeholders.has(branch);
+    return { id: `branch:${key}`, name: byTitle ? conversationTitle(current) : labels[branch] ?? (branch || "No branch"), members: sessions.map((session) => session.id) };
+  };
+  const branchRow = (key: string, branch: string, sessions: SessionEntry[], sortId = `branch:${key}`) => (
     <ConversationRow
       key={key}
+      sortId={sortId}
       // The branch's row opens the session that is open on it, else its latest.
       session={sessions.find((session) => session.id === selectedId) ?? sessions[0]}
       peers={sessions}
@@ -535,8 +554,9 @@ function ProjectGroup({
     const bare = sessions.filter((session) => !session.tabs.length);
     if (!bare.length || sessions.length === 1) return branchRow(key, branch, sessions);
     return (
-      <Fragment key={key}>
-        {tabbed.length > 0 && branchRow(key, branch, tabbed)}
+      <SidebarSortGroup key={key} id={`branch:${key}`}>
+        {tabbed.length > 0 && branchRow(key, branch, tabbed, `display:${key}`)}
+        <SidebarSortList items={bare.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>
         {bare.map((session) => (
           <ConversationRow
             key={session.id}
@@ -547,7 +567,8 @@ function ProjectGroup({
             linkTo={null}
           />
         ))}
-      </Fragment>
+        </SidebarSortList>
+      </SidebarSortGroup>
     );
   };
   const row = ({ key, branch, sessions }: { key: string; branch: string; sessions: SessionEntry[] }) =>
@@ -556,6 +577,7 @@ function ProjectGroup({
     ) : (
       <BranchRow
         key={key}
+        sortId={`branch:${key}`}
         path={group.path}
         branch={branch}
         label={labels[branch]}
@@ -568,9 +590,10 @@ function ProjectGroup({
       />
     );
   return (
-    <div role="group" aria-label={group.name} className="mb-3 last:mb-0">
+    <div ref={sort.ref} style={sort.style} role="group" aria-label={group.name} className="mb-3 last:mb-0">
       <DropdownMenu {...menu.root}>
         <div {...menu.surface} className={cn(actionRow, "relative -mx-2 flex h-9 items-center gap-2 px-4 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
+          {sort.handle}
           {/* Only the picture (a chevron on hover) folds the project; its name opens the project's overview. */}
           <button
             type="button"
@@ -659,7 +682,9 @@ function ProjectGroup({
         <div className="-mx-2 min-h-0 overflow-hidden px-2">
       {/* Rows run the full width, so a selection spans it; their content is indented by `--indent` instead. */}
       <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:10px] [--indent-2:24px]">
-        {shown.map(row)}
+        <SidebarSortList items={shown.map(sortBranch)}>
+          {shown.map(row)}
+        </SidebarSortList>
         {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint">{hasSections ? "No chats in the main list" : "No chats yet"}</li>}
         {more && (
           <li>
@@ -678,14 +703,16 @@ function ProjectGroup({
             count={removed.length}
             opened={filtered || removed.some((entry) => entry.sessions.some((session) => session.id === selectedId))}
           >
-            {removed.map(row)}
+            <SidebarSortList items={removed.map(sortBranch)}>{removed.map(row)}</SidebarSortList>
           </RemovedWorkspaces>
         )}
         {group.archived.length > 0 && (
           <ArchivedSessions id={canon(group.path)} count={group.archived.length} opened={group.archived.some((session) => session.id === selectedId)}>
+            <SidebarSortList items={group.archived.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>
             {group.archived.map((session) => (
               <ConversationRow key={session.id} session={session} selected={session.id === selectedId} branch={group.branches[session.id] || null} linkTo={null} inArchive />
             ))}
+            </SidebarSortList>
           </ArchivedSessions>
         )}
       </ul>
@@ -769,6 +796,7 @@ export function UnarchiveButton({ session, title }: { session: SessionEntry; tit
 
 /** A branch more than one conversation works on: the branch, how many, and the conversations under it. */
 function BranchRow({
+  sortId,
   path,
   branch,
   label: named,
@@ -779,6 +807,7 @@ function BranchRow({
   onNewSession,
   onRename,
 }: {
+  sortId: string;
   path: string;
   branch: string;
   /** What the reader named the branch, shown instead of it. */
@@ -792,6 +821,7 @@ function BranchRow({
   merged: boolean;
   onNewSession: NewSessionAction | null;
 }) {
+  const sort = useSidebarSortable(sortId);
   const holdsSelected = sessions.some((session) => session.id === selectedId);
   const removed = sessions.every((session) => session.worktreeRemoved);
   const foldKey = removed ? `removed:${sessions[0].removedWorkspace?.path ?? sessions[0].id}` : branch;
@@ -799,10 +829,11 @@ function BranchRow({
   const expanded = open || holdsSelected || opened;
   const label = `${named ?? (branch || "No branch")}${removed ? " (workspace removed)" : ""}`;
   return (
-    <li>
+    <li ref={sort.ref} style={sort.style}>
       <ContextMenu>
       <ContextMenuTrigger asChild>
       <div className={cn(actionRow, "relative -mx-2 flex h-9 items-center pr-3 text-foreground/90 hover:bg-selected/50")}>
+        {sort.handle}
         <button
           type="button"
           onClick={toggle}
@@ -838,9 +869,11 @@ function BranchRow({
       </ContextMenu>
       {expanded && (
         <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:var(--indent-2)]">
+          <SidebarSortList items={sessions.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>
           {sessions.map((session) => (
             <ConversationRow key={session.id} session={session} selected={selectedId === session.id} branch={null} linkTo={null} />
           ))}
+          </SidebarSortList>
         </ul>
       )}
     </li>
@@ -1024,6 +1057,7 @@ function pressingStatus(statuses: TabStatus[]): TabStatus {
 
 function ConversationRow({
   session,
+  sortId = session.id,
   peers = [session],
   selected,
   branch,
@@ -1037,6 +1071,7 @@ function ConversationRow({
   inArchive = false,
 }: {
   session: SessionEntry;
+  sortId?: string;
   /** A branch row's sessions (as tabs, the row stands for all of them): the row shows the most pressing state among them. */
   peers?: SessionEntry[];
   selected: boolean;
@@ -1059,6 +1094,7 @@ function ConversationRow({
   /** Drawn under an Archived fold, which says it already. */
   inArchive?: boolean;
 }) {
+  const sort = useSidebarSortable(sortId);
   const title = named === "branch" && peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session);
   // The sessions the row stands for, picked as one for the bulk bar (#718).
   const ids = peers.map((peer) => peer.id);
@@ -1073,7 +1109,7 @@ function ConversationRow({
   // Rename is of what the row shows: its branch's label, or its conversation's title.
   const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
   return (
-    <li>
+    <li ref={sort.ref} style={sort.style}>
       <DropdownMenu>
         <ContextMenu>
         <ContextMenuTrigger asChild>
@@ -1088,6 +1124,7 @@ function ConversationRow({
           title={location ?? (branchName ? `${branchName} · ${title}` : title)}
           {...{ [ROW_ATTRIBUTE]: ids.join(" ") }}
         >
+          {sort.handle}
           <button
             type="button"
             onClick={(event) => {

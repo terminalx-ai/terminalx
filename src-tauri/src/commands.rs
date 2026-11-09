@@ -1956,6 +1956,18 @@ pub fn tab_state() -> CmdResult<index::TabState> {
     index::tab_state().map_err(err)
 }
 
+#[tauri::command]
+pub async fn sidebar_order() -> CmdResult<index::SidebarOrder> {
+    tauri::async_runtime::spawn_blocking(index::sidebar_order).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_sidebar_order(app: AppHandle, patch: index::SidebarOrderPatch) -> CmdResult<index::SidebarOrder> {
+    let saved = tauri::async_runtime::spawn_blocking(move || index::set_sidebar_order(patch)).await.map_err(err)?.map_err(err)?;
+    let _ = app.emit("sidebar_order_changed", &saved);
+    Ok(saved)
+}
+
 /// Save one workspace's tab order, pins, mutes and titles, for every window and every device.
 #[tauri::command]
 pub fn set_tab_layout(app: AppHandle, workspace: String, layout: index::TabLayout) -> CmdResult<()> {

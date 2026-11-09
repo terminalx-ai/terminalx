@@ -1,3 +1,4 @@
+import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
 import { Archive, Check, FolderPlus, FolderTree, LayoutList, PanelLeft, Plus, Search, SquarePen } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -91,6 +92,7 @@ export function SidebarTitlebar({
 function ViewMenu({ grouped }: { grouped: boolean }) {
   const filter = useSidebarFilter();
   const { showArchived } = useSessionStore();
+  const order = useSidebarOrder();
   const menu = useRowMenu();
   const showing = SIDEBAR_FILTERS.find((entry) => entry.id === filter.filter)!.label;
   const label = filter.active ? `View: showing ${showing}` : showArchived ? "View: showing archived" : "View";
@@ -119,6 +121,10 @@ function ViewMenu({ grouped }: { grouped: boolean }) {
         <DropdownMenuItem role="menuitemradio" aria-checked={!grouped} onSelect={() => setPrefs({ sidebarLayout: "list" })}>
           <LayoutList /> One list of chats
           {!grouped && <Check className="ml-auto" />}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem role="menuitemcheckbox" aria-checked={order.custom} disabled={!order.loaded || order.pending} onSelect={() => void saveSidebarOrder({ custom: !order.custom })}>
+          {order.custom ? <Check /> : <span aria-hidden className="size-4 shrink-0" />} Custom order
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Show</DropdownMenuLabel>
