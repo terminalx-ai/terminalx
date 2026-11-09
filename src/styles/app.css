@@ -199,7 +199,8 @@
   }
 }
 
-.animate-fade-in {
+/* A utility so `data-[state=open]:animate-fade-in` (menus, popovers) applies at all. */
+@utility animate-fade-in {
   animation: fade-in 140ms ease-out both;
 }
 .animate-pulse-soft {
@@ -439,22 +440,27 @@ body:has([role="alertdialog"]) [data-star-reminder] {
 }
 
 /* Dialogs ease in and out instead of appearing at once: the backdrop fades,
-   the dialog rises a touch and grows from 96%. The open is a little slower
-   than the close, so arriving reads as deliberate and leaving as quick. */
+   the dialog rises into place and grows from 94% on a long, soft ease; it
+   leaves quicker, sinking a little as it fades. Arriving reads as deliberate,
+   leaving as quick. A dialog its caller removes at once still plays the exit
+   (`ui/dialog.tsx`, `leaveGracefully`). */
 @keyframes dialog-in {
-  from { opacity: 0; transform: translateY(6px) scale(0.96); }
+  from { opacity: 0; transform: translateY(12px) scale(0.94); }
   to { opacity: 1; transform: none; }
 }
 @keyframes dialog-out {
   from { opacity: 1; transform: none; }
-  to { opacity: 0; transform: translateY(4px) scale(0.98); }
+  to { opacity: 0; transform: translateY(8px) scale(0.96); }
 }
 @keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes overlay-out { from { opacity: 1; } to { opacity: 0; } }
-.animate-dialog-in { animation: dialog-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both; }
-.animate-dialog-out { animation: dialog-out 140ms ease-in both; }
-.animate-overlay-in { animation: overlay-in 220ms ease-out both; }
-.animate-overlay-out { animation: overlay-out 140ms ease-in both; }
+/* Utilities, not plain classes: they are applied through `data-[state=…]:`
+   variants, and Tailwind drops a variant of a class it did not define, which
+   left every dialog appearing and vanishing at once. */
+@utility animate-dialog-in { animation: dialog-in 340ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+@utility animate-dialog-out { animation: dialog-out 200ms cubic-bezier(0.4, 0, 1, 1) both; }
+@utility animate-overlay-in { animation: overlay-in 280ms ease-out both; }
+@utility animate-overlay-out { animation: overlay-out 200ms ease-in both; }
 
 /* The share dialog's collaboration scene (CollaborationScene.tsx), told at
    the prompt over a nine-second loop:
