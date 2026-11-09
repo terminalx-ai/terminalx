@@ -79,6 +79,8 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
     if (!open || !chat) return;
     const native = typeof Highlight !== "undefined" && typeof CSS !== "undefined" && !!CSS.highlights;
     let pending = true;
+    let chosenNode: Node | undefined;
+    let chosenVisible = false;
     const paint = () => {
       const all: Range[] = [];
       let chosen: Range | undefined;
@@ -94,11 +96,15 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
         highlight.priority = 1;
         CSS.highlights.set(`${name}-active`, highlight);
       }
-      if (chosen && pending) {
+      // A lazy code renderer can replace both the matched text and its scroller.
+      // Follow that replacement only while the reader still has the match in view.
+      if (chosen && (pending || (chosenVisible && chosenNode && !chosenNode.isConnected))) {
         pending = false;
         chat.dispatchEvent(new Event(READER_SCROLL_EVENT));
         revealSearchRange(chosen, chat, footerHeight);
       }
+      chosenNode = chosen?.startContainer;
+      chosenVisible = !!chosen && searchRangeRects(chosen, chat, footerHeight).length > 0;
       if (!native) setRects(all.flatMap((range) => searchRangeRects(range, chat, footerHeight).map((rect) => ({ ...rect, active: range === chosen }))));
     };
     paint();
@@ -108,9 +114,9 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
     const resize = new ResizeObserver(paint);
     if (!native) {
       resize.observe(chat);
-      chat.addEventListener("scroll", paint, true);
       window.addEventListener("resize", paint);
     }
+    chat.addEventListener("scroll", paint, true);
     return () => {
       observer.disconnect();
       resize.disconnect();
