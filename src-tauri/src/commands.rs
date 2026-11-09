@@ -4761,6 +4761,20 @@ pub async fn workspace_size(project_path: String, path: String) -> CmdResult<u64
     tauri::async_runtime::spawn_blocking(move || crate::workspaces::size(Path::new(&project_path), Path::new(&path)).map_err(err)).await.map_err(err)?
 }
 
+/// Build output the workspace can free: ignored folders tools rebuild
+/// (`node_modules`, `dist`…), never new work or local settings
+/// (`crate::rebuildable`). Walks them to size them, off the main thread.
+#[tauri::command]
+pub async fn workspace_rebuildable(project_path: String, path: String) -> CmdResult<crate::rebuildable::RebuildableScan> {
+    tauri::async_runtime::spawn_blocking(move || crate::rebuildable::scan(Path::new(&project_path), Path::new(&path)).map_err(err)).await.map_err(err)?
+}
+
+/// Move the named build folders to the Trash: only those a fresh scan still offers.
+#[tauri::command]
+pub async fn workspace_free_rebuildable(project_path: String, path: String, folders: Vec<String>) -> CmdResult<crate::rebuildable::Freed> {
+    tauri::async_runtime::spawn_blocking(move || crate::rebuildable::free(Path::new(&project_path), Path::new(&path), &folders).map_err(err)).await.map_err(err)?
+}
+
 /// Resolve the name shown before a new worktree-backed session is created.
 /// Supplying a requested name applies the same sanitising and collision rules
 /// as creation, so the preview is normally the name that lands on disk.

@@ -16,6 +16,7 @@ mod automations;
 mod binpath;
 mod chat_link;
 mod cleanup;
+mod rebuildable;
 #[cfg(feature = "desktop")]
 mod cloud_catalog;
 mod cloud_activity;
@@ -763,6 +764,8 @@ pub fn run() {
             commands::workspace_disposition,
             commands::remove_workspace,
             commands::workspace_size,
+            commands::workspace_rebuildable,
+            commands::workspace_free_rebuildable,
             commands::scan_leftovers,
             commands::remove_leftovers,
             commands::worktree_cleanup_scan,
