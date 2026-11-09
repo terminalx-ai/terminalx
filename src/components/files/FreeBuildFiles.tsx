@@ -1,8 +1,17 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Check } from "@/icons";
 import { api, errorMessage, type RebuildableScan } from "@/lib/api";
 import { bytesText } from "@/lib/cloudResources";
 import { useSessionStore } from "@/lib/sessions";
+
+/** Why the offered files are safe to remove, each one a fact the backend's rules guarantee (`rebuildable.rs`). */
+const SAFE = [
+  "Not in main",
+  "Not in any branch or commit",
+  "Made again automatically when you install or build",
+  "Never includes .env, settings or files you created",
+];
 
 /** Below this, a workspace's build output is not worth a prompt. */
 const WORTH = 100 * 1024 * 1024;
@@ -75,10 +84,18 @@ export function FreeBuildFiles({ sessionId, root }: { sessionId: string; root: s
     <section aria-label="Free build files" className="m-3 flex flex-col gap-2 rounded-lg bg-well p-3" data-testid="free-build-files">
       {step === "offer" ? (
         <>
-          <p className="text-[13px] font-medium text-foreground">{bytesText(scan.bytes)} of build files</p>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            In {names(scan.folders)}: in no commit, and your next install or build makes them again. Your .env and new files are
-            never included.
+          <p className="text-[13px] font-medium text-foreground">{bytesText(scan.bytes)} of build files you can safely remove</p>
+          {/* Why it is safe, as checks anyone can read at a glance, not a paragraph about git. */}
+          <ul className="flex flex-col gap-1 text-xs text-muted-foreground" aria-label="Why they are safe to remove">
+            {SAFE.map((reason) => (
+              <li key={reason} className="flex items-start gap-2">
+                <Check aria-hidden className="mt-0.5 size-3.5 shrink-0 text-add" />
+                <span>{reason}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="truncate text-[11px] text-faint" title={scan.folders.map((folder) => folder.path).join(", ")}>
+            {scan.files.toLocaleString()} files in {names(scan.folders)}
           </p>
           <div className="flex flex-wrap items-center gap-1.5">
             <Button size="sm" variant="secondary" disabled={working} onClick={() => setStep("confirm")} title={working ? "An agent is working here; free them once it stops" : undefined}>
