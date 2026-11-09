@@ -748,7 +748,7 @@ mod tests {
             let merge = std::process::Command::new("git").current_dir(root)
                 .args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-edit", &resolution.base_commit]).output().unwrap();
             assert!(!merge.status.success());
-            assert_eq!(workspace(root).unwrap().merging, [actual_base.clone()]);
+            assert_eq!(workspace(root).unwrap().merging.as_slice(), std::slice::from_ref(&actual_base));
             std::fs::write(root.join("README.md"), "branch intent\nbase intent\n").unwrap();
             git(root, &["add", "README.md"]);
             git(root, &["commit", "-qm", "resolve against upstream"]);
