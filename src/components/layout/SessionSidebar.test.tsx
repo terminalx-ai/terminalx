@@ -65,10 +65,10 @@ describe("new-chat entry points", () => {
     const titlebar = screen.getByTestId("sidebar-titlebar");
     fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "New chat" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: true, selectedSessionId: null });
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: true, selectedSessionId: null });
     fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "web" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
     expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat"].includes(command))).toBe(false);
   });
 });

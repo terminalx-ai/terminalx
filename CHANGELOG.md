@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep sidebar New chat conversations in Chats with ordinary retention and
+  project linking, while using the shared composer and saved agent settings.
+  Branch drafts retain their requested project and advertised source branch.
+  (PRO-173 follow-up)
+
 ## 0.2.28
 
 - User settings reload when `settings.json` changes. General shows its location
