@@ -125,7 +125,7 @@ describe("chat scroll follow", () => {
     const event: AgentEvent = { id: "goal", seq: 1, sessionId: "s", tabId: "t", harness: "codex", ts: "",
       payload: { type: "goal_updated", goal: { objective: "Finish the migration", status: "active", tokenBudget: 1000, tokensUsed: 0 } } };
     const props = { sessionId: "s", live: false, progressing: false, answering: false, stream: [], onAnswerPermission: () => {}, onAnswerQuestions: () => {}, footer: null };
-    const view = render(<Chat {...props} transcript={buildTranscript([event], false)} />);
+    const view = render(<Chat {...props} transcript={buildTranscript([event], false)} />, { wrapper: TooltipProvider });
     const banner = screen.getByRole("region", { name: "Codex goal" });
     expect(banner.textContent).toContain("Finish the migration");
     expect(view.container.querySelector("[data-chat-scroller]")?.contains(banner)).toBe(false);
