@@ -425,6 +425,11 @@ export function SendingMessage({ message, cwd }: { message: { text: string; imag
   );
 }
 
+/** A GitHub-style table: a row of cells, then the row of dashes under it. */
+export function hasMarkdownTable(text: string): boolean {
+  return /^ *\|?.*\|.*\n *\|? *:?-{3,}:? *(\| *:?-{3,}:? *)+\|? *$/m.test(text);
+}
+
 function ReaderMessage({
   message,
   cwd,
@@ -464,7 +469,13 @@ function ReaderMessage({
           </div>
         ) : null}
         {message.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={message.author.userId}>{message.author.displayName}</div>}
-        <div {...(message.seq == null ? {} : section)} className={cn((message.replaced || message.withdrawn) && "text-muted-foreground")}><LinkedText text={message.text} context={linkContext} /></div>
+        <div {...(message.seq == null ? {} : section)} className={cn((message.replaced || message.withdrawn) && "text-muted-foreground")}>
+          {/* A pasted table reads as a table; anything else stays the plain text that was typed. Web links only, no
+              remote images: it is someone's paste, not the agent's reply. */}
+          {hasMarkdownTable(message.text)
+            ? <div className="whitespace-normal"><Markdown text={message.text} streaming={false} linkContext={linkContext} webLinksOnly remoteImages={false} /></div>
+            : <LinkedText text={message.text} context={linkContext} />}
+        </div>
         {message.sent !== undefined && (
           <details className="mt-2 text-xs text-muted-foreground" data-testid="prompt-changed">
             <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded focus-visible:outline focus-visible:outline-2">
