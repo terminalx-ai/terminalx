@@ -411,13 +411,13 @@ export function SessionView({
   const compact = !!chrome?.compact;
   // PRO-28: the side panel's Ports tab, from the header's menus; a compact window has no panel.
   const showPorts = cloud?.ports.offered && !compact ? () => showPanelTab("ports") : undefined;
-  const isGit = useSessionIsGit(session);
+  const backend = cloud?.backend ?? localSessionBackend(session.id);
+  const local = backend.caps.local;
+  const isGit = useSessionIsGit(session, local);
   const quick = isQuickChat(session);
   const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
   const prefs = usePrefs();
   const store = useSessionStore();
-  const backend = cloud?.backend ?? localSessionBackend(session.id);
-  const local = backend.caps.local;
   // The workspace's tabs as a row under the title bar: a local session's, unless the reader turned the row off
   // (the floating window says for itself whether it has one).
   const stripRow = local && !cloud && (chrome ? !!chrome.tabStrip : prefs.tabStrip);

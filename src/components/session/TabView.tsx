@@ -118,7 +118,7 @@ export function TabView({
 }) {
   const backend = given ?? localSessionBackend(session.id);
   const local = backend.caps.local;
-  const isGit = useSessionIsGit(session);
+  const isGit = useSessionIsGit(session, local);
   const log = useTabLog(backend.logSessionId, tab.id);
   const draft = useDraft(tab.id);
   const safeError = (e: unknown) => RECOVERY_MESSAGES[classifyRecovery(String(e))];
