@@ -9,7 +9,7 @@ import { holdMenuFocus, keepFocusForNameField } from "@/lib/cloudSidebarSections
 import { openSectionDialog, runSectionEdit, useLocalSections, type LocalSection } from "@/lib/localSections";
 import { conversationTitle, startSessionInSection } from "@/lib/sessions";
 import { customSessionOrder, useSidebarOrder } from "@/lib/sidebarOrder";
-import { SidebarSortList } from "./SidebarSort";
+import { SortableStatusGroups, SidebarSortList } from "./SidebarSort";
 import type { SessionEntry } from "@/types/session";
 
 function openDialog(dialog: Parameters<typeof openSectionDialog>[0]) { holdMenuFocus(); openSectionDialog(dialog); }
@@ -31,22 +31,23 @@ export function MoveToLocalSectionItems({ sessionIds, contextMenu = false }: { s
   </Sub>;
 }
 
-export function LocalSidebarSections({ groups, filtered, renderSession }: {
+export function LocalSidebarSections({ groups, filtered, groupByStatus = false, renderSession }: {
   groups: { section: LocalSection; items: SessionEntry[] }[];
   filtered: boolean;
+  groupByStatus?: boolean;
   renderSession: (session: SessionEntry) => ReactNode;
 }) {
   const { error } = useLocalSections();
   const order = useSidebarOrder();
   return <>
-    {groups.map(({ section, items }, index) => (!filtered || items.length > 0) && <Section key={section.id} section={section} sessions={order.custom ? customSessionOrder(items, order) : items} index={index} count={groups.length} filtered={filtered} renderSession={renderSession} />)}
+    {groups.map(({ section, items }, index) => (!filtered || items.length > 0) && <Section key={section.id} section={section} sessions={order.custom ? customSessionOrder(items, order) : items} index={index} count={groups.length} filtered={filtered} groupByStatus={groupByStatus} renderSession={renderSession} />)}
     {/* No standing "New section…" row: a section is made from a chat's menu, Move to section → New section…, where there is a chat to put in it. */}
     {error && <p role="alert" className="px-2 py-1 text-xs text-destructive">{error}</p>}
   </>;
 }
 
-function Section({ section, sessions, index, count, filtered, renderSession }: {
-  section: LocalSection; sessions: SessionEntry[]; index: number; count: number; filtered: boolean; renderSession: (session: SessionEntry) => ReactNode;
+function Section({ section, sessions, index, count, filtered, groupByStatus, renderSession }: {
+  section: LocalSection; sessions: SessionEntry[]; index: number; count: number; filtered: boolean; groupByStatus: boolean; renderSession: (session: SessionEntry) => ReactNode;
 }) {
   const [expanded, toggle] = useFold(`local-section:${section.id}`, true);
   const menu = useRowMenu();
@@ -72,6 +73,6 @@ function Section({ section, sessions, index, count, filtered, renderSession }: {
         <DropdownMenuItem destructive onSelect={() => openDialog({ kind: "delete", section })}>Delete section…</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-    {open && (sessions.length ? <ul className="flex flex-col gap-px"><SidebarSortList items={sessions.map((session) => ({ id: session.id, name: conversationTitle(session) }))}>{sessions.map(renderSession)}</SidebarSortList></ul> : <p className="mx-2 rounded-md border border-dashed border-border px-3 py-3 text-xs text-faint">Move sessions here using their menu or ⌘K.</p>)}
+    {open && (sessions.length ? <ul className="flex flex-col gap-px">{groupByStatus ? <SortableStatusGroups sessions={sessions} scope={`local-section:${section.id}`}>{renderSession}</SortableStatusGroups> : <SidebarSortList items={sessions.map((session) => ({ id: session.id, name: conversationTitle(session) }))}>{sessions.map(renderSession)}</SidebarSortList>}</ul> : <p className="mx-2 rounded-md border border-dashed border-border px-3 py-3 text-xs text-faint">Move sessions here using their menu or ⌘K.</p>)}
   </section>;
 }

@@ -1,4 +1,9 @@
-import "@testing-library/dom";
+import { configure } from "@testing-library/dom";
+
+// Shared development hosts can spend seconds paging while a UI update settles.
+// Opt in for local validation without relaxing the normal suite's wait limit.
+const asyncTimeout = Number(process.env.VITEST_ASYNC_TIMEOUT);
+if (Number.isFinite(asyncTimeout) && asyncTimeout > 0) configure({ asyncUtilTimeout: asyncTimeout });
 
 // jsdom lays nothing out and ships no ResizeObserver. Components observe
 // their own boxes for re-fitting, so give them an observer that never fires;

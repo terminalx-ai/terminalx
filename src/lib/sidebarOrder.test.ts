@@ -4,7 +4,7 @@ import type { SessionEntry } from "@/types/session";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), handlers: new Map<string, (event: { payload: unknown }) => void>() }));
 vi.mock("@/lib/api", () => ({ invoke: mocks.invoke, errorMessage: String }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name, handler) => { mocks.handlers.set(name, handler); return () => {}; }) }));
-import { bySavedOrder, customSessionOrder, DEFAULT_SIDEBAR_ORDER, mergeSidebarOrder, getSidebarOrder, bootSidebarOrder, saveSidebarOrder, useSidebarOrder } from "./sidebarOrder";
+import { bySavedOrder, customSessionOrder, DEFAULT_SIDEBAR_ORDER, mergeSidebarOrder, getSidebarOrder, bootSidebarOrder, saveSidebarOrder, selectSidebarSort, useSidebarOrder } from "./sidebarOrder";
 import { act, renderHook } from "@testing-library/react";
 
 const entry = (id: string, created: string, extra: Partial<SessionEntry> = {}) => ({ id, created, ...extra }) as SessionEntry;
@@ -39,7 +39,20 @@ describe("custom sidebar ordering", () => {
     expect(hook.result.current).toMatchObject({ custom: false, sessions: ["b", "a"], error: null });
     mocks.invoke.mockResolvedValueOnce({ ...remote, revision: 4 });
     await act(async () => { mocks.handlers.get("local_runtime_reattached")!({ payload: null }); });
-    expect(hook.result.current).toMatchObject({ ...remote, revision: 4 });
+    // Shared order changes still arrive, but cannot change this window's explicit Updated selection.
+    expect(hook.result.current).toMatchObject({ ...remote, custom: false, revision: 4 });
+    mocks.invoke.mockResolvedValueOnce({ ...remote, custom: false, revision: 5 });
+    await act(() => selectSidebarSort("created"));
+    expect((await import("./prefs")).getPrefs().sidebarSort).toBe("created");
+    mocks.invoke.mockRejectedValueOnce(new Error("disk full"));
+    await act(() => selectSidebarSort("custom"));
+    expect(hook.result.current.custom).toBe(false);
+    expect((await import("./prefs")).getPrefs().sidebarSort).toBe("created");
+    mocks.invoke.mockResolvedValueOnce({ ...remote, revision: 6 });
+    await act(() => selectSidebarSort("custom"));
+    expect(hook.result.current.custom).toBe(true);
+    await act(() => mocks.handlers.get("sidebar_order_changed")!({ payload: { ...remote, custom: false, sessions: ["a", "b"], revision: 7 } }));
+    expect(hook.result.current).toMatchObject({ custom: true, sessions: ["a", "b"] });
     hook.unmount();
   });
 });

@@ -1,7 +1,10 @@
 import { createContext, useContext, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
-import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors, type Announcements, type KeyboardCoordinateGetter } from "@dnd-kit/core";
+import { closestCenter, pointerWithin, DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors, type Announcements, type KeyboardCoordinateGetter } from "@dnd-kit/core";
 import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { StatusGroups } from "./StatusGroups";
+import { conversationTitle } from "@/lib/sessions";
+import type { SessionEntry } from "@/types/session";
 import { GripVertical } from "@/icons";
 import { usePrefs } from "@/lib/prefs";
 import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
@@ -11,7 +14,16 @@ const EMPTY_ITEMS = new Map<string, SidebarSortItem>();
 const Items = createContext<ReadonlyMap<string, SidebarSortItem>>(EMPTY_ITEMS);
 type ListProps = { items: SidebarSortItem[]; kind?: "sessions" | "projects"; children: ReactNode };
 
-/** A sortable scope never moves a session into another project or branch. */
+/** Status groups retain the shared header/count/fold, each with an isolated drag scope.
+ * Cloud callers use StatusGroups directly and never acquire local drag handles.
+ */
+export function SortableStatusGroups({ sessions, children, scope }: { sessions: SessionEntry[]; children: (session: SessionEntry) => ReactNode; scope?: string }) {
+  return <StatusGroups sessions={sessions} scope={scope} renderGroup={(rows, content) =>
+    <SidebarSortList items={rows.map((session) => ({ id: session.id, name: conversationTitle(session) }))}>{content}</SidebarSortList>
+  }>{children}</StatusGroups>;
+}
+
+/** A sortable scope never moves a session into another project, branch or status group. */
 export function SidebarSortList(props: ListProps) {
   const { custom } = useSidebarOrder();
   return custom ? <SortableList {...props} /> : <Items.Provider value={EMPTY_ITEMS}>{props.children}</Items.Provider>;
@@ -22,6 +34,13 @@ function SortableList({ items, kind = "sessions", children }: ListProps) {
   const latest = useRef(items);
   latest.current = items;
   const dragRows = useRef(items);
+  const dropAccepted = useRef(false);
+  const unchanged = () => {
+    const before = dragRows.current;
+    const now = latest.current;
+    return before.length === now.length && before.every((row, i) => row.id === now[i].id
+      && (row.members ?? [row.id]).join("\0") === (now[i].members ?? [now[i].id]).join("\0"));
+  };
   // Move by row, not pixels: handles variable-height project groups and gives
   // every arrow press exactly one step, including Left/Right for VoiceOver.
   const coordinates: KeyboardCoordinateGetter = (event, { currentCoordinates, context }) => {
@@ -54,13 +73,14 @@ function SortableList({ items, kind = "sessions", children }: ListProps) {
       announced.current = over?.id ?? null;
       return over ? `Moved ${description(active.id, over.id)}` : "Outside the list. Drop to cancel.";
     },
-    onDragEnd: ({ active, over }) => over ? `Dropped ${description(active.id, over.id)}` : `Cancelled. ${description(active.id)}`,
+    onDragEnd: ({ active, over }) => over && dropAccepted.current ? `Dropped ${description(active.id, over.id)}` : `Cancelled. ${description(active.id)}`,
     onDragCancel: ({ active }) => `Cancelled. ${description(active.id)}`,
   };
   return (
     <Items.Provider value={byId}>
-      <DndContext sensors={sensors} collisionDetection={closestCenter} accessibility={{ container: document.body, announcements, screenReaderInstructions: { draggable: "To reorder, press Space to pick up. Use the arrow keys to move, Space to drop, or Escape to cancel." } }} onDragEnd={({ active, over }) => {
-        if (!over || active.id === over.id) return;
+      <DndContext sensors={sensors} collisionDetection={(args) => args.pointerCoordinates ? pointerWithin(args) : closestCenter(args)} accessibility={{ container: document.body, announcements, screenReaderInstructions: { draggable: "To reorder, press Space to pick up. Use the arrow keys to move, Space to drop, or Escape to cancel." } }} onDragEnd={({ active, over }) => {
+        dropAccepted.current = !!over && unchanged();
+        if (!over || active.id === over.id || !dropAccepted.current) return;
         const from = items.findIndex((item) => item.id === active.id);
         const to = items.findIndex((item) => item.id === over.id);
         if (from < 0 || to < 0) return;

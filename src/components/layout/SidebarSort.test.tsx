@@ -2,7 +2,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ save: vi.fn(), state: { custom: true, pending: false, error: null } }));
 vi.mock("@/lib/sidebarOrder", () => ({ useSidebarOrder: () => mocks.state, saveSidebarOrder: mocks.save }));
-import { SidebarSortList, useSidebarSortable } from "./SidebarSort";
+import type { SessionEntry } from "@/types/session";
+import { setPrefs } from "@/lib/prefs";
+import { SidebarSortList, SortableStatusGroups, useSidebarSortable } from "./SidebarSort";
 
 function Row({ id }: { id: string }) {
   const sort = useSidebarSortable(id);
@@ -14,6 +16,7 @@ const key = async (target: Element | Document, code: string) => { await act(asyn
 const announcement = () => [...document.querySelectorAll('[role="status"]')].map((node) => node.textContent).join(" ");
 
 beforeEach(() => {
+  setPrefs({ sidebarSections: {}, animations: false });
   mocks.save.mockReset();
   mocks.state.custom = true;
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
@@ -69,4 +72,60 @@ describe("sidebar keyboard drag with the real dnd-kit sensors", () => {
     expect(document.querySelector('[role="status"]')).toBeNull();
     expect(document.querySelector('[id^="DndDescribedBy"]')).toBeNull();
   });
+});
+
+const sessions: SessionEntry[] = items.map(({ id }, index) => ({
+  id, title: id, tabs: [], activeTab: "", manualStatus: index < 2 ? "backlog" : "done",
+  projectPath: "/a", cwd: "/a", created: "2026-01-01", modified: "2026-01-01",
+  archived: false, pinned: false, worktreeRemoved: false,
+}));
+const grouped = (rows = sessions) => <ul><SortableStatusGroups sessions={rows}>{({ id }) => <Row key={id} id={id} />}</SortableStatusGroups></ul>;
+
+it("steps only within the current status and saves only that group's rows", async () => {
+  render(grouped());
+  const handle = screen.getByRole("button", { name: "Reorder Alpha" });
+  handle.focus();
+  await key(handle, "Space");
+  await waitFor(() => expect(announcement()).toContain("Picked up Alpha. Position 1 of 2."));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await key(document, "ArrowDown");
+  await waitFor(() => expect(announcement()).toContain("Moved Alpha. Position 2 of 2."));
+  await key(document, "ArrowDown"); // Charlie is next on screen, in Done: cannot cross.
+  await key(document, "Space");
+  expect(mocks.save).toHaveBeenCalledExactlyOnceWith({ sessions: ["Bravo", "Alpha"] });
+  expect(announcement()).toContain("Dropped Alpha. Position 2 of 2.");
+  expect(screen.getByRole("button", { name: "Done 1" })).toBeTruthy();
+});
+
+it("cancels a stale drop when a remote status change moves its target to another group", async () => {
+  const view = render(grouped());
+  const handle = screen.getByRole("button", { name: "Reorder Alpha" });
+  handle.focus();
+  await key(handle, "Space");
+  await waitFor(() => expect(announcement()).toContain("Picked up Alpha. Position 1 of 2."));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await key(document, "ArrowDown");
+  await waitFor(() => expect(announcement()).toContain("Moved Alpha. Position 2 of 2."));
+  view.rerender(grouped(sessions.map((row) => row.id === "Bravo" ? { ...row, manualStatus: "done" } : row)));
+  expect(screen.getByRole("button", { name: "Backlog 1" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Done 2" })).toBeTruthy();
+  await key(document, "Space");
+  expect(mocks.save).not.toHaveBeenCalled();
+});
+
+it("keeps status collapse independent across sections while counts react to a status change", () => {
+  const content = (rows: SessionEntry[]) => <ul>
+    <SortableStatusGroups sessions={rows} scope="local-section:release">{({ id }) => <Row key={id} id={id} />}</SortableStatusGroups>
+    <SortableStatusGroups sessions={[{ ...sessions[2], id: "other", title: "Other", manualStatus: "backlog" }]} scope="local">{({ id }) => <Row key={id} id={id} />}</SortableStatusGroups>
+  </ul>;
+  const view = render(content(sessions));
+  fireEvent.click(screen.getByRole("button", { name: "Backlog 2" }));
+  expect(screen.queryByRole("button", { name: "Reorder Alpha" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Reorder Charlie" })).toBeTruthy();
+  view.rerender(content(sessions.map((row) => row.id === "Alpha" ? { ...row, manualStatus: "done" } : row)));
+  const backlog = screen.getAllByRole("button", { name: "Backlog 1" });
+  expect(backlog.map((button) => button.getAttribute("aria-expanded"))).toEqual(["false", "true"]);
+  expect(screen.getByRole("button", { name: "Done 2" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Reorder Alpha" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Reorder Bravo" })).toBeNull();
 });

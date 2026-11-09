@@ -136,7 +136,7 @@ it("opens a Scripts row link on its repository's page and focuses its registered
   expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
 });
 
-it("opens the custom order registry row and keeps it connected to the shared Rust preference", async () => {
+it("opens the custom order registry row and keeps the window choice independent of shared order events", async () => {
   const view = render(<SettingsPage initialTab="appearance.customOrder" onBack={vi.fn()} />);
   const row = view.container.querySelector('[data-setting-id="appearance.customOrder"]');
   expect(row).not.toBeNull();
@@ -147,6 +147,11 @@ it("opens the custom order registry row and keeps it connected to the shared Rus
   fireEvent.click(toggle);
   await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
   expect(mocks.saveOrder).toHaveBeenCalledWith({ custom: true });
-  act(() => mocks.listeners.get("sidebar_order_changed")!({ payload: { custom: false, sessions: ["second", "first"], projects: [], revision: 2 } }));
-  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  act(() => mocks.listeners.get("sidebar_order_changed")!({ payload: { custom: false, sessions: ["first", "second"], projects: [], revision: 2 } }));
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect((await import("@/lib/sidebarOrder")).getSidebarOrder().sessions).toEqual(["first", "second"]);
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+  expect(mocks.saveOrder).toHaveBeenCalledWith({ custom: false });
+  expect((await import("@/lib/prefs")).getPrefs().sidebarSort).toBe("updated");
 });

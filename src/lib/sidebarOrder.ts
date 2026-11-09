@@ -1,6 +1,8 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { errorMessage, invoke } from "@/lib/api";
+import { getSidebarSortChoice, setPrefs, usePrefs } from "@/lib/prefs";
+import type { SidebarSort } from "@/lib/sidebarView";
 
 export interface SidebarOrder {
   custom: boolean;
@@ -14,7 +16,11 @@ let state = { ...DEFAULT_SIDEBAR_ORDER, error: null as string | null, pending: f
 let confirmed: SidebarOrder = DEFAULT_SIDEBAR_ORDER;
 const queued: Patch[] = [];
 const listeners = new Set<() => void>();
-export const getSidebarOrder = () => state;
+function effectiveOrder(snapshot: typeof state) {
+  const choice = getSidebarSortChoice();
+  return { ...snapshot, custom: choice === null ? snapshot.custom : choice === "custom" };
+}
+export const getSidebarOrder = () => effectiveOrder(state);
 
 /** Merge only the named slots, including newly encountered rows at the top. */
 export function mergeSidebarOrder(saved: readonly string[], requested: readonly string[]): string[] {
@@ -61,18 +67,33 @@ function subscribe(listener: () => void) {
 }
 export function useSidebarOrder() {
   useEffect(() => { void bootSidebarOrder(); }, []);
-  return useSyncExternalStore(subscribe, () => state);
+  const snapshot = useSyncExternalStore(subscribe, () => state);
+  const prefs = usePrefs();
+  return useMemo(() => effectiveOrder(snapshot), [snapshot, prefs]);
 }
 
 // Serialize writes from this window. The Rust transaction merges only the rows
 // named by a drop; another window's unrelated group is preserved.
 let writes = Promise.resolve();
 export function saveSidebarOrder(patch: Patch): Promise<void> {
+  return writeSidebarOrder(patch, patch.custom === undefined ? undefined : patch.custom ? "custom" : "updated");
+}
+
+/** The sequence is shared; each window keeps its own effective sort selection. */
+export function selectSidebarSort(sort: SidebarSort): Promise<void> {
+  return writeSidebarOrder({ custom: sort === "custom" }, sort);
+}
+
+function writeSidebarOrder(patch: Patch, selectedSort?: SidebarSort): Promise<void> {
   queued.push(patch);
   set({ error: null });
   publish();
   const write = writes.then(async () => {
-    try { receive(await invoke<SidebarOrder>("set_sidebar_order", { patch })); }
+    try {
+      receive(await invoke<SidebarOrder>("set_sidebar_order", { patch }));
+      // Wait for Rust's initial seed, and retain the previous selection on failure.
+      if (selectedSort) setPrefs({ sidebarSort: selectedSort });
+    }
     catch (error) { set({ error: `Could not save custom order: ${errorMessage(error)}` }); }
     finally { queued.shift(); publish(); }
   });

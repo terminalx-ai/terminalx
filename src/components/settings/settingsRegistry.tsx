@@ -183,7 +183,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "appearance.customOrder", section: "appearance", title: "Custom order",
-    description: "Arrange sessions and projects with their drag handles. Press Space to pick up, arrows to move, Space to drop, or Escape to cancel. Pins do not change custom order. Off restores pin and recency order and keeps your arrangement.",
+    description: "Use your saved arrangement in this window; row order is shared across windows. Arrange sessions and projects with their drag handles. Press Space to pick up, arrows to move, Space to drop, or Escape to cancel. Pins do not change custom order. Off restores pin and recency order and keeps your arrangement.",
     searchTerms: ["appearance", "custom order", "drag", "reorder", "sidebar", "sessions", "projects"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/sessions/index.json#sidebarOrder" },
   }),

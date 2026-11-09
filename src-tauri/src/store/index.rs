@@ -428,6 +428,25 @@ impl<'de> Deserialize<'de> for SessionKind {
     }
 }
 
+/// A person's workflow status, independent of what any agent tab is doing.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualStatus {
+    #[default]
+    Backlog,
+    InProgress,
+    InReview,
+    Done,
+    Canceled,
+}
+
+/// Stored metadata may come from a newer build. An unknown status must not
+/// prevent loading or updating any session. Mutations still use the strict enum.
+fn stored_manual_status<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<ManualStatus>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
@@ -477,6 +496,8 @@ pub struct SessionEntry {
     pub archive: ArchiveMark,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default, deserialize_with = "stored_manual_status", skip_serializing_if = "Option::is_none")]
+    pub manual_status: Option<ManualStatus>,
     #[serde(default)]
     pub tabs: Vec<TabEntry>,
     #[serde(default)]
@@ -1057,11 +1078,63 @@ mod tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: vec![],
             active_tab: None,
             link: None,
             unknown: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn manual_status_defaults_and_survives_index_updates() {
+        let _home = crate::store::temp_home();
+        let mut legacy = serde_json::to_value(entry("one")).unwrap();
+        legacy.as_object_mut().unwrap().remove("manualStatus");
+        let legacy: SessionEntry = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.manual_status, None);
+        save(&[legacy, entry("two")]).unwrap();
+        for (status, wire) in [(ManualStatus::Backlog, "backlog"), (ManualStatus::InProgress, "in_progress"), (ManualStatus::InReview, "in_review"), (ManualStatus::Done, "done"), (ManualStatus::Canceled, "canceled")] {
+            let patch = crate::session_ops::SessionPatch { manual_status: Some(status), ..Default::default() };
+            assert!(!patch.is_empty());
+            crate::session_ops::update_session_meta("one", &patch).unwrap();
+            // An unrelated metadata edit must retain the manual status.
+            crate::session_ops::update_session_meta("one", &crate::session_ops::SessionPatch { title: Some("renamed".into()), ..Default::default() }).unwrap();
+            let saved = load().unwrap();
+            assert_eq!(saved[0].manual_status, Some(status));
+            assert_eq!(serde_json::to_value(&saved[0]).unwrap()["manualStatus"], wire);
+            assert!(!saved[0].archived);
+            assert_eq!(saved[1].manual_status, None);
+        }
+        assert!(serde_json::from_value::<crate::session_ops::SessionPatch>(serde_json::json!({"manualStatus":"broken"})).is_err());
+    }
+
+    #[test]
+    fn an_unknown_manual_status_does_not_cost_the_index_or_block_writes() {
+        let _home = crate::store::temp_home();
+        let mut rows = Vec::new();
+        for (id, value) in [("future", serde_json::json!("triage")), ("null", serde_json::Value::Null), ("malformed", serde_json::json!(42)), ("known", serde_json::json!("in_review"))] {
+            let mut row = serde_json::to_value(entry(id)).unwrap();
+            row["manualStatus"] = value;
+            rows.push(row);
+        }
+        std::fs::write(file_path().unwrap(), serde_json::to_vec(&serde_json::json!({
+            "sessions": rows,
+            "localSections": [{"id":"release", "name":"Release", "sessions":["future", "known"]}],
+            "localSectionsRevision": 17
+        })).unwrap()).unwrap();
+        let loaded = load().expect("a newer build's status must not hide every session");
+        assert_eq!(loaded.len(), 4);
+        assert!(loaded[..3].iter().all(|session| session.manual_status.is_none()));
+        assert_eq!(loaded[3].manual_status, Some(ManualStatus::InReview));
+        let sections = local_sections::load().unwrap();
+        crate::session_ops::update_session_meta("future", &crate::session_ops::SessionPatch { title: Some("renamed".into()), ..Default::default() }).unwrap();
+        assert_eq!(get("future").unwrap().title, "renamed");
+        save(&load().unwrap()).unwrap();
+        assert_eq!(load().unwrap().len(), 4);
+        assert_eq!(get("known").unwrap().manual_status, Some(ManualStatus::InReview));
+        assert_eq!(get("future").unwrap().manual_status, None);
+        assert_eq!(local_sections::load().unwrap(), sections, "status edits preserve section membership and revision");
     }
 
     fn tab(id: &str) -> TabEntry {
