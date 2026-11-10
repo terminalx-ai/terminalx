@@ -18,7 +18,11 @@ use crate::control::ControlError;
 /// spend up to 60 s on one request and 10 s more starting up.
 pub const CLI_TIMEOUT: Duration = Duration::from_secs(90);
 
-pub const HELP: &str = r#"  terminalx computer permissions [--id accessibility|screenshots] [--json]
+pub const HELP: &str = r#"  terminalx computer self-ui authorize --session ID --tab ID --window main --actions ACTIONS [--seconds 300] [--json]
+  terminalx computer self-ui snapshot GRANT --window main [--json]
+  terminalx computer self-ui click GRANT --window main --control CONTROL [--json]
+  terminalx computer self-ui revoke GRANT [--json]
+  terminalx computer permissions [--id accessibility|screenshots] [--json]
   terminalx computer capabilities [--json]
   terminalx computer list-apps [--json]
   terminalx computer list-windows --app <name|bundle|pid:N> [--json]
@@ -68,6 +72,27 @@ pub(crate) fn parse(
     stdin: &mut dyn FnMut() -> Result<String, ControlError>,
 ) -> Result<Action, ControlError> {
     let command = tokens.required_front("computer command")?;
+    if command == "self-ui" {
+        let operation = tokens.required_front("self-ui operation")?;
+        let mut params = Map::new();
+        match operation.as_str() {
+            "authorize" => {
+                params.insert("caller".into(), crate::cli::issue_caller());
+                for name in ["session", "tab", "window", "actions"] {
+                    params.insert(name.into(), Value::String(tokens.required_option(&format!("--{name}"))?));
+                }
+                if let Some(seconds) = option_positive_integer(tokens, "--seconds")? { params.insert("seconds".into(), seconds); }
+            }
+            "snapshot" | "click" | "revoke" => {
+                if operation != "revoke" { params.insert("window".into(), Value::String(tokens.required_option("--window")?)); }
+                if operation == "click" { params.insert("control".into(), Value::String(tokens.required_option("--control")?)); }
+                params.insert("grant".into(), Value::String(tokens.required_front("authorization grant")?));
+            }
+            _ => return Err(invalid("Unknown self-ui operation.")),
+        }
+        tokens.finish()?;
+        return Ok(Action::Rpc { command: format!("computer.selfUi.{operation}"), params: Value::Object(params), timeout: CLI_TIMEOUT });
+    }
     let outcome = parse_command(&command, tokens, stdin);
     // Every computer error is invalid_argument: that is the code the skill
     // guide teaches, and the generic invalid_arguments recovery would send
@@ -887,6 +912,16 @@ mod tests {
             }
             other => panic!("expected rpc, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn self_ui_requires_an_explicit_scope_and_no_raw_input() {
+        let (command, params) = rpc(parse_args(&["self-ui", "authorize", "--session", "s", "--tab", "t", "--window", "main", "--actions", "open-autopilot,start-autopilot", "--seconds", "120"]).unwrap());
+        assert_eq!(command, "computer.selfUi.authorize");
+        assert_eq!(params["seconds"], 120);
+        assert!(parse_args(&["self-ui", "authorize", "--session", "s"]).is_err());
+        assert!(parse_args(&["self-ui", "click", "g", "--window", "main", "--x", "1", "--y", "2"]).is_err());
+        assert_eq!(rpc(parse_args(&["self-ui", "revoke", "g"]).unwrap()).0, "computer.selfUi.revoke");
     }
 
     #[test]
