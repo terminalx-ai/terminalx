@@ -433,9 +433,22 @@ Codex worker stays on the terminal connection whatever Native Codex is set to, a
 Creation returns `"report": true`, and a `reportNote` that is null unless the worker was briefed
 but could not be recorded as owing a report (it is then not reminded).
 
-`sessions report` takes one session or tab. To read every worker's report, ask for each
-`sessionId`: the ones `sessions create` returned, or the `workers` rows of
-`terminalx sessions list --children-of <session> --json`.
+To read every worker's report at once, name the session that started them:
+
+```text
+terminalx sessions report --children-of <session> --json
+```
+
+It returns `parent` (the lead, as `sessions list --children-of` gives it) and `reports`, one
+row for each session that session started: the same sessions `sessions list --children-of`
+lists, in any project or worktree, quick chats and archived ones included. Each row is what
+`sessions report <session>` returns, described below, plus the session's `title`. A row is
+read from the worker's own agent, the first tab it was given, which is the `tabId` of its
+`workers` row and the tab `--report` holds to a report; to read another tab, name that tab.
+A lead that started nothing gets `"reports": []` and exit code 0. A worker with no agent tab
+is `missing` with reason `noAgent`, and one whose transcript cannot be read is `missing`
+with reason `unreadable`; neither hides the other rows. `--children-of` takes a session on
+this computer and no other target: an empty value and a cloud session are refused.
 
 The worker ends its final reply with a `terminalx-report` block, JSON in a fenced code block:
 

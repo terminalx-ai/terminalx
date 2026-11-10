@@ -65,6 +65,7 @@ Usage:
   terminalx floating show|hide|toggle [--session SESSION] [--json]
   terminalx sessions show SESSION [--json]
   terminalx sessions report SESSION_OR_TAB [--json]
+  terminalx sessions report --children-of SESSION [--json]
   terminalx share create SESSION [--can-drive|--read-only] [--people EMAIL,EMAIL]
       [--expires-in SECONDS] [--no-approve|--approve] [--can-approve] [--max-people COUNT]
       [--single-use] [--local-only] [--json]
@@ -629,6 +630,10 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
         }
         // What a worker's last turn reported (`worker_report`), parsed.
         "report" => {
+            // Every worker a lead started (PRO-270), one row each.
+            if let Some(lead) = children_of(tokens)? {
+                return rpc("sessions.report", json!({"childrenOf": lead}), tokens);
+            }
             let session = tokens.required_front("session or tab")?;
             if is_cloud_key(&session) {
                 return Err(invalid("sessions report reads a session on this computer; read a cloud session's transcript with `terminalx read`."));
@@ -1438,6 +1443,14 @@ mod tests {
         for refused in [&["sessions", "report"][..], &["sessions", "report", "0198a", "0198b"], &["sessions", "report", "cloud:org-a:ws-1:s1"]] {
             assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
         }
+        // Every worker of a lead at once: the lead `sessions list --children-of` takes, refused the same way.
+        assert_eq!(rpc_of(&["sessions", "report", "--children-of", "0198c", "--json"]), ("sessions.report".into(), json!({"childrenOf": "0198c"}), Duration::from_secs(30)));
+        for refused in [
+            &["sessions", "report", "--children-of"][..], &["sessions", "report", "--children-of", ""], &["sessions", "report", "--children-of", "cloud:org-a:ws-1:s1"],
+            &["sessions", "report", "--children-of", "0198c", "0198a"], &["sessions", "report", "0198a", "--children-of", "0198c"],
+        ] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
         // Asked for when the worker is started, in a project or as a quick chat; never said otherwise.
         let (_, params, _) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "claude", "--prompt", "Audit the handlers", "--report"]);
         assert_eq!(params["report"], json!(true));
@@ -1445,7 +1458,7 @@ mod tests {
         assert_eq!(params["report"], json!(true));
         assert!(rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "claude", "--prompt", "go"]).1.get("report").is_none());
         for text in [help_text(), GUIDE.to_string()] {
-            for said in ["sessions report", "--report"] {
+            for said in ["sessions report", "sessions report --children-of", "--report"] {
                 assert!(text.contains(said), "missing {said}");
             }
         }

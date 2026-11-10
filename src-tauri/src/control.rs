@@ -1057,14 +1057,45 @@ impl ControlService {
 
     /// The report a tab's last turn ended with (`worker_report`).
     fn sessions_report(&self, params: Value) -> Result<Value, ControlError> {
+        if params.get("childrenOf").is_some() {
+            return self.sessions_reports(params);
+        }
         let target = resolve_target(&required_string(&params, "session")?)?;
         let events = self.manager.load_events(&target.session.id, &target.tab.id).map_err(ControlError::internal)?;
+        Ok(self.report_of(&target.session.id, &target.tab.id, &events))
+    }
+
+    /// What `tab`'s last turn reported, as `sessions report` returns it.
+    fn report_of(&self, session_id: &str, tab_id: &str, events: &[crate::events::AgentEvent]) -> Value {
         // Held to a report, and so reminded of one: asked for it at its start, and no pipeline's tab.
-        let owed = crate::worker_report::expected(&target.session.id, &target.tab.id) && !crate::issue_pipeline::store::takes_part(&target.session.id, &target.tab.id);
-        let mut report = crate::worker_report::of_tab(&events, open_turn(&self.manager.wait_view(&target.session.id, &target.tab.id)), owed);
-        report["sessionId"] = json!(target.session.id);
-        report["tabId"] = json!(target.tab.id);
-        Ok(report)
+        let owed = crate::worker_report::expected(session_id, tab_id) && !crate::issue_pipeline::store::takes_part(session_id, tab_id);
+        let mut report = crate::worker_report::of_tab(events, open_turn(&self.manager.wait_view(session_id, tab_id)), owed);
+        report["sessionId"] = json!(session_id);
+        report["tabId"] = json!(tab_id);
+        report
+    }
+
+    /// `sessions report --children-of`: one report row for each session a
+    /// lead started, the sessions `sessions list --children-of` lists. A row
+    /// is read from the worker's own agent, the first it was given, which is
+    /// the one `--report` holds to a report. One worker that cannot be read
+    /// does not hide the others: its row is `missing` and says why.
+    fn sessions_reports(&self, params: Value) -> Result<Value, ControlError> {
+        let sessions = index::load().map_err(ControlError::internal)?;
+        let lead = resolve_lead(&sessions, &required_string(&params, "childrenOf")?)?;
+        let reports: Vec<Value> = sessions.iter().filter(|session| session.started_by(&lead.session_id)).map(|session| {
+            let tab = session.tabs.iter().filter(|tab| !tab.is_terminal()).min_by(|a, b| a.created.cmp(&b.created));
+            let mut row = match tab {
+                Some(tab) => match self.manager.load_events(&session.id, &tab.id) {
+                    Ok(events) => self.report_of(&session.id, &tab.id, &events),
+                    Err(error) => json!({"status": "missing", "reason": "unreadable", "detail": format!("{error:#}"), "sessionId": session.id, "tabId": tab.id}),
+                },
+                None => json!({"status": "missing", "reason": "noAgent", "detail": "This session has no agent tab.", "sessionId": session.id, "tabId": null}),
+            };
+            row["title"] = json!(session.title);
+            row
+        }).collect();
+        Ok(json!({"parent": lead, "reports": reports}))
     }
 
     fn pipeline_host(&self) -> crate::issue_pipeline::host::LocalHost {
@@ -2470,6 +2501,36 @@ mod tests {
             assert_eq!(service.execute("sessions.children", params.clone(), "r").unwrap_err().code, code);
             assert_eq!(service.execute("sessions.stop", params, "r").unwrap_err().code, code);
         }
+
+        // One report row for each of them, read from the worker's own agent; a worker that has said nothing is missing.
+        let log = crate::store::log_path(&in_worktree.id, &in_worktree.tabs[0].id).unwrap();
+        for (seq, payload) in [
+            json!({"type": "user_message", "text": "Audit the handlers."}), json!({"type": "turn_started"}),
+            json!({"type": "assistant_text", "text": "Audited.\n\n```terminalx-report\n{\"status\":\"partial\",\"result\":\"Two of three handlers checked.\",\"notDone\":[\"admin handler: no access\"]}\n```"}),
+            json!({"type": "turn_completed", "status": "ok"}),
+        ].into_iter().enumerate() {
+            let event = json!({"id": format!("e{seq}"), "sessionId": in_worktree.id, "tabId": in_worktree.tabs[0].id, "harness": "codex", "seq": seq + 1, "ts": "2026-11-10T10:00:00.000Z", "payload": payload});
+            crate::store::append_line(&log, &event.to_string()).unwrap();
+        }
+        let read = service.execute("sessions.report", json!({"childrenOf": lead.id}), "r").unwrap();
+        assert_eq!(read["parent"], listed["parent"]);
+        let reports = read["reports"].as_array().unwrap();
+        assert_eq!(reports.iter().map(|report| report["sessionId"].as_str().unwrap().to_string()).collect::<std::collections::BTreeSet<_>>(), mine);
+        let report = |session: &SessionEntry| reports.iter().find(|report| report["sessionId"] == session.id.as_str()).unwrap().clone();
+        let done = report(&in_worktree);
+        assert_eq!((done["status"].as_str(), done["result"].as_str(), &done["notDone"], done["seq"].as_u64()), (Some("partial"), Some("Two of three handlers checked."), &json!(["admin handler: no access"]), Some(3)));
+        assert_eq!((done["tabId"].as_str(), done["title"].as_str()), (Some(in_worktree.tabs[0].id.as_str()), Some("worker")));
+        // The row is the one `sessions report <session>` gives, with the session's title.
+        let mut alone = service.execute("sessions.report", json!({"session": in_worktree.id}), "r").unwrap();
+        alone["title"] = json!("worker");
+        assert_eq!(done, alone);
+        for silent in [&in_other_project, &archived] {
+            assert_eq!((report(silent)["status"].as_str(), report(silent)["reason"].as_str()), (Some("missing"), Some("noTurn")));
+        }
+        assert_eq!((report(&quick)["status"].as_str(), report(&quick)["reason"].as_str(), &report(&quick)["tabId"], report(&quick)["title"].as_str()), (Some("missing"), Some("noAgent"), &Value::Null, Some("Quick look")));
+        // A lead with no workers has no reports, which is not an error; a session that is not there is.
+        assert_eq!(service.execute("sessions.report", json!({"childrenOf": unowned.id}), "r").unwrap()["reports"], json!([]));
+        assert_eq!(service.execute("sessions.report", json!({"childrenOf": "no-such-session"}), "r").unwrap_err().code, "not_found");
 
         // Nothing of the lead's is running: stopping them stops nothing, and says how many it looked at.
         let stopped = service.execute("sessions.stop", json!({"childrenOf": lead.id}), "r").unwrap();
