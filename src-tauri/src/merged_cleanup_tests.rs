@@ -178,6 +178,7 @@ impl Fixture {
             id: uuid::Uuid::now_v7().to_string(),
             kind: crate::store::index::SessionKind::Project,
             link: None,
+            parent: None,
             project_path: project.to_string_lossy().into_owned(),
             cwd: cwd.to_string_lossy().into_owned(),
             worktree_name: (cwd != project).then(|| cwd.file_name().unwrap().to_string_lossy().into_owned()),

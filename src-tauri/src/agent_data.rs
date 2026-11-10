@@ -320,6 +320,7 @@ mod tests {
             manual_status: Default::default(),
             active_tab: None,
             link: None,
+            parent: None,
             tabs,
             unknown: BTreeMap::new(),
         }

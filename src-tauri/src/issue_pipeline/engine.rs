@@ -120,7 +120,7 @@ pub trait Host: Send + Sync {
     /// The base pinned for a merge into the branch, if one is due: where git
     /// finds a conflict, or wherever `required`, GitHub asking for the merge
     /// whatever git finds. `None` once the branch contains its base.
-    fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _required: bool) -> Result<Option<super::Resolution>> { Ok(None) }
+    fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _required: bool, _pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> { Ok(None) }
     fn open_resolver(&self, _pipeline: &Pipeline, _author: &SessionEntry) -> Result<SessionRef> { bail!("Conflict resolution is not available on this host") }
     fn verify_resolution(&self, _cwd: &Path, _resolution: &super::Resolution, _head: &str, _branch: &str) -> Result<()> { bail!("Resolution verification is not available on this host") }
     /// `git merge --abort`, only while HEAD is `head` and the merge in
@@ -137,7 +137,7 @@ pub trait Host: Send + Sync {
     /// What `head` changes relative to where it left `base`.
     fn diff(&self, cwd: &Path, base: &str, head: &str) -> Result<Diff>;
     fn push(&self, cwd: &Path) -> Result<()>;
-    fn push_resolution(&self, cwd: &Path, _branch: &str, _head: &str) -> Result<()> { self.push(cwd) }
+    fn push_resolution(&self, cwd: &Path, _resolution: &super::Resolution, _branch: &str, _head: &str) -> Result<()> { self.push(cwd) }
     /// The open pull request whose head is `branch`, if there is one.
     fn open_pull_request(&self, cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>>;
     /// Open a pull request for the current branch; its number.
@@ -952,7 +952,7 @@ impl Step<'_> {
             // history (two merge bases) git merges the bases first and GitHub
             // does not. Merging the base in leaves one merge base, and GitHub
             // then agrees.
-            (pr.base, true, Some(pr.head_sha))
+            (pr.base.clone(), true, Some(pr))
         } else {
             let Some(base) = workspace.default_branch else { return Ok(false) };
             (base, false, None)
@@ -966,9 +966,9 @@ impl Step<'_> {
             self.needs_you(StopReason::UncommittedChanges { files: workspace.dirty });
             return Ok(true);
         }
-        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &base, required)? else { return Ok(false) };
-        if remote.as_ref().is_some_and(|head| !same_commit(head, &resolution.head)) {
-            self.needs_you(StopReason::HeadMoved { reviewed: resolution.head, head: remote.unwrap() });
+        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &base, required, remote.as_ref())? else { return Ok(false) };
+        if remote.as_ref().is_some_and(|pr| !same_commit(&pr.head_sha, &resolution.head)) {
+            self.needs_you(StopReason::HeadMoved { reviewed: resolution.head, head: remote.unwrap().head_sha });
             return Ok(true);
         }
         self.start_resolution(resolution)
@@ -1140,7 +1140,7 @@ impl Step<'_> {
         self.host.verify_resolution(&self.cwd, resolution, &workspace.head, &self.p.branch)?;
         if self.halted() { return Ok(false); }
         self.doing = "Pushing conflict resolution";
-        self.host.push_resolution(&self.cwd, &self.p.branch, &workspace.head)?;
+        self.host.push_resolution(&self.cwd, resolution, &self.p.branch, &workspace.head)?;
         self.record("resolved", format!("Resolved conflicts with {}; requesting review of the new head.", resolution.base)).commit = Some(workspace.head);
         // Keep the previous verdict and findings until a fresh independent
         // review explicitly replaces them. They never authorize the new head.
@@ -1411,7 +1411,7 @@ impl Step<'_> {
         // `watch_conflicts` (#748), but only while it is about this head: a
         // merge made here and not pushed yet is git's to judge.
         let required = same_commit(&workspace.head, &pr.head_sha) && (pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY");
-        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &pr.base, required)? else {
+        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &pr.base, required, Some(&pr))? else {
             return self.push_and_review();
         };
         if !store::get(&self.p.id)?.resolve_conflicts {
@@ -1524,6 +1524,15 @@ impl Step<'_> {
     }
 
     fn evaluate_snapshot(&mut self, pr: PrSnapshot, merger: Merger) -> Result<()> {
+        // Adoption waits for the original author to yield the checkout. It
+        // does not trust an agent's assertion that an earlier review passed.
+        if pr.state == "OPEN" && self.p.round == 0 && self.p.events.iter().any(|event| event.kind == "adopted") {
+            if !self.ready_for_review(&pr.head_sha)? || !self.host.workspace_idle(&self.p, &self.cwd)? {
+                self.settle(State::Waiting, None, "Waiting for the original author to be idle on the adopted pull request's clean head.");
+                return Ok(());
+            }
+            return self.request_review(false);
+        }
         if merger == Merger::Pipeline && pr.state == "OPEN" && self.p.stage != Stage::Resolve && self.watch_conflicts()? { return Ok(()); }
         if pr.state == "OPEN" && self.local_checks_failed(&pr.head_sha) {
             self.needs_you(StopReason::LocalChecksFailed);
@@ -1831,8 +1840,13 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
 
 /// Explicit launch choices override defaults independently.
 pub fn start_with_switches(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
+    let lock = step_lock(&format!("start:{session_id}"));
+    let _start = lock.lock().unwrap_or_else(|error| error.into_inner());
+    start_locked(host, session_id, tab_id, auto_merge, resolve_conflicts, issue_body)
+}
+
+fn start_locked(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
     let session = host.session(session_id)?;
-    let issue = session.issue.clone();
     if session.tab(tab_id).is_none() {
         bail!("tab {tab_id} not found in session {session_id}");
     }
@@ -1866,6 +1880,16 @@ pub fn start_with_switches(host: &dyn Host, session_id: &str, tab_id: &str, auto
             Ok(())
         });
     }
+    let pipeline = new_pipeline(host, &session, tab_id, auto_merge, resolve_conflicts, issue_body)?;
+    store::insert(&pipeline)?;
+    host.changed(&pipeline);
+    Ok(pipeline)
+}
+
+/// Construct privately: callers must finish initialization before publishing.
+fn new_pipeline(host: &dyn Host, session: &SessionEntry, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
+    let session_id = &session.id;
+    let issue = session.issue.clone();
     let settings = host.settings(&session.project_path).context("The project's issue pipeline settings could not be read.")?;
     if !settings.enabled {
         bail!("The issue pipeline is turned off for this project.");
@@ -1941,9 +1965,90 @@ pub fn start_with_switches(host: &dyn Host, session_id: &str, tab_id: &str, auto
     if cloud {
         pipeline.record(&now, "note", "In a cloud workspace the pipeline stops at Ready to merge. The merge is yours, from the issue page in TerminalX or on GitHub.");
     }
-    store::insert(&pipeline)?;
-    host.changed(&pipeline);
     Ok(pipeline)
+}
+
+/// Attach automation to the existing author, without a handoff or a new PR.
+/// Repeating a successful request returns the existing pipeline unchanged.
+/// Agent authority never imports a review verdict or extends its round budget.
+pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, adopt_pr: bool, actor: super::SwitchActor) -> Result<Pipeline> {
+    let lock = step_lock(&format!("start:{session_id}"));
+    let _start = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let existing = store::for_session(session_id)?;
+    if let Some(existing) = &existing {
+        if existing.author.session_id != session_id || existing.author.tab_id != tab_id {
+            bail!("This session already participates in a pipeline. Use its original author tab.");
+        }
+        if !adopt_pr || existing.pr.is_some() { return Ok(existing.clone()); }
+        if existing.stopped || existing.stage != Stage::Work {
+            bail!("Only an active author pipeline still at Work can adopt a pull request.");
+        }
+    }
+    let session = host.session(session_id)?;
+    let tab = session.tab(tab_id).context("The author tab is no longer in this session.")?;
+    if tab.transport == crate::store::index::AgentTransport::ExperimentalCodexStdio {
+        bail!("Autopilot requires a PTY author conversation.");
+    }
+    let pr = if adopt_pr {
+        let workspace = host.workspace(Path::new(&session.cwd))?;
+        let branch = workspace.branch.as_deref().context("The author needs a branch.")?;
+        let pr = host.open_pull_request(Path::new(&session.cwd), branch)?.context("No open pull request exists for this branch. Nothing was started.")?;
+        if pr.state != "OPEN" || pr.head != branch || !same_commit(&pr.head_sha, &workspace.head) || !workspace.dirty.is_empty() || !workspace.merging.is_empty() {
+            bail!("Adoption needs a clean checkout on the open pull request's exact branch and head. Commit and push the intended work first.");
+        }
+        Some(pr)
+    } else { None };
+    if existing.is_none() {
+        if let Some(pr) = &pr {
+            let mut pipeline = new_pipeline(host, &session, tab_id, auto_merge, resolve_conflicts, None)?;
+            host.associate_pull_request(session_id, Path::new(&session.cwd), pr)?;
+            // Completion events and polling may run as soon as insert returns.
+            // They must see the adopted PR, never a Work pipeline that can push.
+            record_attachment(&mut pipeline, &stamp(host.now()), &actor);
+            initialize_adoption(&mut pipeline, &stamp(host.now()), pr, &actor);
+            store::insert(&pipeline)?;
+            host.changed(&pipeline);
+            return Ok(pipeline);
+        }
+    }
+    let p = match existing { Some(existing) => existing, None => start_locked(host, session_id, tab_id, auto_merge, resolve_conflicts, None)? };
+    run(host, &p.id, false, if adopt_pr { OnError::Report } else { OnError::NeedsYou }, |step| {
+        // The author or poller may have advanced while the attachment waited
+        // for this lock. Never overwrite a review, resolution or handoff.
+        if adopt_pr && (step.p.author != p.author || step.p.stage != Stage::Work || step.p.pr.is_some() || step.p.resolution.is_some()) {
+            bail!("The pipeline advanced while adoption was being prepared. Inspect its current state before retrying.");
+        }
+        record_attachment(&mut step.p, &stamp(host.now()), &actor);
+        if let Some(pr) = pr {
+            step.host.associate_pull_request(session_id, &step.cwd, &pr)?;
+            initialize_adoption(&mut step.p, &stamp(host.now()), &pr, &actor);
+        } else {
+            step.save()?;
+            step.host.send(&step.p.author, &prompts::author_brief())?;
+        }
+        Ok(())
+    })
+}
+
+fn record_attachment(pipeline: &mut Pipeline, now: &str, actor: &super::SwitchActor) {
+    let by = match actor { super::SwitchActor::Person => "the person", super::SwitchActor::SelfUi { .. } => "an agent through scoped self-UI", _ => "an agent through the CLI" };
+    pipeline.record(now, "attached", format!("Autopilot attached to the existing author conversation by {by}.")).actor = Some(actor.clone());
+}
+
+fn initialize_adoption(pipeline: &mut Pipeline, now: &str, pr: &PrSnapshot, actor: &super::SwitchActor) {
+    let note = "Existing pull request adopted. Independent review starts when the author is idle.";
+    pipeline.pr = Some(PrLink { number: pr.number, url: pr.url.clone(), base: pr.base.clone() });
+    pipeline.stage = Stage::Merge;
+    if pipeline.state != State::Waiting || pipeline.reason.is_some() {
+        pipeline.record(now, "waiting", note);
+    }
+    pipeline.state = State::Waiting;
+    pipeline.reason = None;
+    pipeline.note = Some(note.into());
+    pipeline.answered = None;
+    let event = pipeline.record(now, "adopted", format!("Adopted existing pull request #{} without pushing or opening another pull request.", pr.number));
+    event.url = Some(pr.url.clone());
+    event.actor = Some(actor.clone());
 }
 
 /// A turn ended in some session. Nothing happens unless that tab is the
@@ -2086,6 +2191,8 @@ fn record_switch(host: &dyn Host, pipeline: &mut Pipeline, kind: &str, label: &s
     let who = match &actor {
         super::SwitchActor::Person => "the person in the app".into(),
         super::SwitchActor::System => "TerminalX".into(),
+        super::SwitchActor::SelfUi { session_id: Some(session_id), .. } => format!("agent in session {session_id} through authorized self-UI"),
+        super::SwitchActor::SelfUi { session_id: None, .. } => "an agent through authorized self-UI".into(),
         super::SwitchActor::Cli { session_id: Some(id), .. } if *id == pipeline.author.session_id => format!("author session {id} through the CLI"),
         super::SwitchActor::Cli { session_id: Some(id), .. } => format!("session {id} through the CLI"),
         super::SwitchActor::Cli { session_id: None, .. } => "the CLI (outside a session)".into(),
