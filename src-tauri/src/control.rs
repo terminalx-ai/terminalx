@@ -624,6 +624,7 @@ impl ControlService {
                     .map_err(ControlError::internal)?)
             }
             "sessions.create" => self.sessions_create(params),
+            "sessions.report" => self.sessions_report(params),
             // The floating window is the desktop app's; the request is handed
             // to it as an event, so this service needs no window of its own.
             "floating.show" | "floating.hide" | "floating.toggle" => {
@@ -825,9 +826,15 @@ impl ControlService {
             effort: Option<String>,
             #[serde(default)]
             mode: Option<String>,
+            /// A worker: told to end with a report block, and held to it (`worker_report`).
+            #[serde(default)]
+            report: bool,
         }
         let mut p: Params = serde_json::from_value(params)
             .map_err(|e| ControlError::invalid(format!("Invalid session request: {e}")))?;
+        if p.report && (p.issue.is_some() || p.auto_merge.is_some() || p.resolve_conflicts.is_some()) {
+            return Err(ControlError::invalid("--report is for a worker that answers the session that started it; a session with a pipeline (--issue, --auto-merge, --resolve-conflicts) reports to its pipeline instead."));
+        }
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = crate::store::index::requested_mode(p.mode.take());
         if p.prompt.trim().is_empty() && p.issue.is_none() {
@@ -937,7 +944,8 @@ impl ControlService {
         let mut pipeline_note = Value::Null;
         // A session not started from an issue gets a pipeline only where the project turned a switch on.
         let pipeline_default = crate::store::projects::issue_pipeline_settings(&entry.project_path).is_ok_and(|settings| settings.enabled && (settings.auto_merge == Some(true) || settings.resolve_conflicts == Some(true)));
-        if (issue.is_some() || p.auto_merge.is_some() || p.resolve_conflicts.is_some() || pipeline_default) && !p.no_pipeline {
+        // A worker hands its result to its lead, not to a pipeline of its own.
+        if (issue.is_some() || p.auto_merge.is_some() || p.resolve_conflicts.is_some() || pipeline_default) && !p.no_pipeline && !p.report {
             match self.start_pipeline(&entry.id, &tab.id, p.auto_merge, p.resolve_conflicts, issue.as_ref().and_then(|issue| issue.body.as_deref())) {
                 Ok((started, brief)) => {
                     prompt = format!("{prompt}\n\n{brief}");
@@ -947,13 +955,33 @@ impl ControlService {
                 Err(reason) => pipeline_note = json!(reason),
             }
         }
+        if p.report {
+            // Recorded before the prompt goes: the turn it starts may end first.
+            crate::worker_report::expect(&entry.id, &tab.id).map_err(ControlError::internal)?;
+            prompt = format!("{prompt}\n\n{}", crate::worker_report::brief());
+        }
         let outcome = self
             .manager
             .send(&entry.id, &tab.id, prompt, Vec::new())
             .map_err(ControlError::internal)?;
-        Ok(json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title, "kind": entry.kind,
+        let mut created = json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title, "kind": entry.kind,
             "worktreeName": entry.worktree_name, "branch": entry.branch, "path": entry.cwd,
-            "session": entry, "outcome": outcome, "pipeline": pipeline, "pipelineNote": pipeline_note}))
+            "session": entry, "outcome": outcome, "pipeline": pipeline, "pipelineNote": pipeline_note});
+        // Only a worker's start says so; every other response is word for word what it was.
+        if p.report {
+            created["report"] = json!(true);
+        }
+        Ok(created)
+    }
+
+    /// The report a tab's last turn ended with (`worker_report`).
+    fn sessions_report(&self, params: Value) -> Result<Value, ControlError> {
+        let target = resolve_target(&required_string(&params, "session")?)?;
+        let events = self.manager.load_events(&target.session.id, &target.tab.id).map_err(ControlError::internal)?;
+        let mut report = crate::worker_report::of_tab(&events, open_turn(&self.manager.wait_view(&target.session.id, &target.tab.id)));
+        report["sessionId"] = json!(target.session.id);
+        report["tabId"] = json!(target.tab.id);
+        Ok(report)
     }
 
     fn pipeline_host(&self) -> crate::issue_pipeline::host::LocalHost {
@@ -1652,6 +1680,17 @@ fn wait_end(view: &WaitView) -> Option<WaitEnd> {
     }
 }
 
+/// The turn a tab is in, for `sessions report`: a report an earlier turn
+/// ended with is not the answer of one still open. A tab that only sits idle
+/// with its agent running is in none.
+fn open_turn(view: &WaitView) -> Option<crate::worker_report::OpenTurn> {
+    use crate::worker_report::OpenTurn;
+    if view.asks || view.status == TabStatus::Waiting {
+        return Some(OpenTurn::Waiting);
+    }
+    (view.status == TabStatus::InProgress || (view.queued && view.running)).then_some(OpenTurn::Working)
+}
+
 fn resolve_permission(
     pending: &[PendingPermission],
     selector: &str,
@@ -1847,6 +1886,75 @@ mod tests {
     /// `terminalx sessions archive|unarchive` run the app's own archive, so
     /// the sidebar hears of each session at once; `list --archived` lists
     /// what the sidebar keeps under Show archived (#718).
+    #[test]
+    fn a_sessions_report_is_read_from_its_tabs_last_turn_and_a_worker_is_recorded_as_owing_one() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let session = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "title": "worker", "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let tab = session.tabs[0].id.clone();
+        let (service, _sink) = headless_service();
+        let log = crate::store::log_path(&session.id, &tab).unwrap();
+        let mut seq = 0;
+        let mut say = |payload: Value| {
+            seq += 1;
+            let event = json!({"id": format!("e{seq}"), "sessionId": session.id, "tabId": tab, "harness": "codex", "seq": seq, "ts": "2026-11-10T10:00:00.000Z", "payload": payload});
+            crate::store::append_line(&log, &event.to_string()).unwrap();
+        };
+
+        // Nothing said yet: missing, by the session's id or the start of it, or by its tab.
+        let report = service.execute("sessions.report", json!({"session": &session.id[..session.id.len() - 2]}), "r1").unwrap();
+        assert_eq!((report["status"].as_str(), report["reason"].as_str(), report["sessionId"].as_str(), report["tabId"].as_str()), (Some("missing"), Some("noTurn"), Some(session.id.as_str()), Some(tab.as_str())));
+
+        say(json!({"type": "user_message", "text": "Audit the handlers."}));
+        say(json!({"type": "turn_started"}));
+        say(json!({"type": "assistant_text", "text": "Audited.\n\n```terminalx-report\n{\"status\":\"done\",\"result\":\"Every handler checks the token.\",\"couldNotRead\":[\"vendor/closed.bin\"]}\n```"}));
+        say(json!({"type": "turn_completed", "status": "ok"}));
+        let report = service.execute("sessions.report", json!({"session": tab}), "r2").unwrap();
+        assert_eq!((report["status"].as_str(), report["result"].as_str(), report["noEvidence"].as_bool(), report["seq"].as_u64()), (Some("done"), Some("Every handler checks the token."), Some(true), Some(3)));
+        assert_eq!((&report["couldNotRead"], &report["changed"], report["sessionId"].as_str()), (&json!(["vendor/closed.bin"]), &Value::Null, Some(session.id.as_str())));
+
+        say(json!({"type": "user_message", "text": "And the admin ones?"}));
+        say(json!({"type": "turn_started"}));
+        say(json!({"type": "assistant_text", "text": "They look fine to me."}));
+        say(json!({"type": "turn_completed", "status": "ok"}));
+        let report = service.execute("sessions.report", json!({"session": session.id}), "r3").unwrap();
+        assert_eq!((report["status"].as_str(), report["reason"].as_str(), report["tail"].as_str()), (Some("missing"), Some("noBlock"), Some("They look fine to me.")));
+        assert_eq!(service.execute("sessions.report", json!({"session": "no-such-session"}), "r4").unwrap_err().code, "not_found");
+        assert_eq!(service.execute("sessions.report", json!({}), "r5").unwrap_err().code, "invalid_arguments");
+
+        // Only a tab asked for a report owes one, and a worker has no pipeline of its own to report to.
+        assert!(!crate::worker_report::expected(&session.id, &tab));
+        crate::worker_report::expect(&session.id, &tab).unwrap();
+        crate::worker_report::expect(&session.id, &tab).unwrap();
+        crate::worker_report::expect("a-session-that-is-gone", "t").unwrap();
+        assert!(crate::worker_report::expected(&session.id, &tab) && !crate::worker_report::expected(&session.id, "another-tab"));
+        crate::worker_report::expect(&session.id, "another-tab").unwrap();
+        assert!(!crate::worker_report::expected("a-session-that-is-gone", "t"), "a deleted session's tabs are dropped");
+        for switch in [json!({"issue": "433"}), json!({"autoMerge": true}), json!({"resolveConflicts": false})] {
+            let mut params = json!({"project": project.path, "agent": "codex", "prompt": "go", "useWorktree": true, "report": true});
+            params.as_object_mut().unwrap().extend(switch.as_object().unwrap().clone());
+            let refused = service.execute("sessions.create", params, "r6").unwrap_err();
+            assert!(refused.code == "invalid_arguments" && refused.message.contains("--report"), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_report_is_not_read_while_its_tabs_turn_is_open() {
+        use crate::worker_report::OpenTurn;
+        let view = |status, asks, queued, running| WaitView { status, asks, recovery: None, queued, running };
+        assert_eq!(open_turn(&view(TabStatus::InProgress, false, false, true)), Some(OpenTurn::Working));
+        assert_eq!(open_turn(&view(TabStatus::Completed, false, true, true)), Some(OpenTurn::Working), "a prompt behind the turn starts as it ends");
+        assert_eq!(open_turn(&view(TabStatus::Waiting, false, false, true)), Some(OpenTurn::Waiting));
+        assert_eq!(open_turn(&view(TabStatus::InProgress, true, false, true)), Some(OpenTurn::Waiting));
+        // Finished, looked at or not, with the agent still there or gone: the last turn is the answer.
+        for (status, running) in [(TabStatus::Completed, true), (TabStatus::Idle, true), (TabStatus::Idle, false)] {
+            assert_eq!(open_turn(&view(status, false, false, running)), None, "{status:?} {running}");
+        }
+    }
+
     #[test]
     fn the_cli_archives_and_brings_back_sessions_as_the_app_does_and_lists_the_archived_ones() {
         let _home = crate::store::temp_home();

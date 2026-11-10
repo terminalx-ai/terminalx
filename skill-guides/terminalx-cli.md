@@ -326,6 +326,78 @@ still reports that `recovery`.
 The safe polling loop is: capture the largest `seq` from `read`, `wait`, then `read --since`
 that sequence. Do not scrape terminal escape sequences.
 
+### Worker reports
+
+When you start a session to do part of your work (a worker), ask it for a report and read
+that instead of its whole transcript:
+
+```text
+terminalx sessions create --project <project> --agent <agent> --prompt <text> --report --json
+terminalx sessions create --quick --agent <agent> --prompt <text> --report --json
+terminalx wait <session-or-tab> --json
+terminalx sessions report <session-or-tab> --json
+```
+
+`--report` adds the report instructions to the worker's prompt and holds it to them: a worker
+whose turn ends without a readable report is asked for it once more, and after that its report
+stays `missing`. A worker never gets an issue pipeline of its own, so `--report` cannot be
+combined with `--issue`, `--auto-merge` or `--resolve-conflicts`, and it is not available for
+cloud sessions. Creation returns `"report": true`.
+
+The worker ends its final reply with a `terminalx-report` block, JSON in a fenced code block:
+
+````text
+```terminalx-report
+{
+  "status": "done",
+  "result": "Two or three sentences on what you did or found.",
+  "evidence": ["cargo test auth: exit 0", "src/auth.rs:42"],
+  "changed": {"files": ["src/auth.rs"], "branch": "fix-login", "commit": "abc1234"},
+  "notDone": [],
+  "couldNotRead": [],
+  "uncertain": []
+}
+```
+````
+
+- `status`: `done`, `partial`, `blocked` or `failed`. Nothing else is accepted.
+- `result`: two or three sentences.
+- `evidence`: commands run with their exit codes, or `file:line` for a claim.
+- `changed`: `files`, `branch` and `commit`, or null when nothing changed.
+- `notDone`: what was skipped, and why.
+- `couldNotRead`: sources the worker tried to read and could not. A failed read is listed
+  here; it is never the same as "nothing found".
+- `uncertain`: claims made without direct evidence.
+
+`status` and `result` are required. A list that is left out is empty. If you write a worker's
+prompt yourself and send it without `--report`, include the block above in it; `sessions
+report` reads any session's last reply, but only a session started with `--report` is reminded.
+
+`sessions report` reads the tab's last turn (a session's active tab, like `read` and `wait`)
+and returns `sessionId`, `tabId` and one of two shapes:
+
+- A report: the seven fields, plus `seq` (the transcript sequence number of the reply that
+  holds the block) and `at` (when the turn ended).
+  - `noEvidence: true` is added when `status` is `done` and `evidence` is empty. Treat such a
+    result as a claim: check it before you rely on it.
+  - A block over 8,000 characters is cut to that much text, and `truncated` says so:
+    `limit`, `chars` (the full size), `seq`, and `cut` (the fields that lost text; `evidence`
+    gives way first). The whole block is in the transcript: `terminalx read <tab> --since <seq - 1>`
+    returns the event that holds it first.
+- `"status": "missing"`: there is no readable report. `reason` says why, `detail` says it in
+  a sentence, `tail` is the last 2,000 characters of the reply, and `reminded` is true once
+  the worker has been asked again and still sent none. A status is never guessed from prose.
+  - `noBlock`: the reply has no report block. `malformed`: the block is not JSON, has no
+    valid `status` or `result`, or has a field of the wrong shape.
+  - `working`: the tab is still in a turn, the reminder's turn included. `wait`, then ask
+    again. `waiting`: its turn has stopped on a permission request, a question or an error;
+    `wait` says which.
+  - `turnAborted`, `turnFailed`: the last turn was interrupted or ended on an error.
+    `noReply`, `noTurn`: it said nothing, or has not finished a turn.
+
+Handle `missing` yourself: read the `tail`, read the transcript, or `send` the worker a
+question. Do not treat it as done, and do not treat it as failed.
+
 ### Permissions
 
 ```text

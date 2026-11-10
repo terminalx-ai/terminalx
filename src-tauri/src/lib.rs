@@ -135,6 +135,7 @@ mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
+mod reply_block;
 mod recovery_log;
 mod continuation;
 pub mod skills;
@@ -149,6 +150,7 @@ mod summaries;
 mod terminal_perf;
 #[cfg(feature = "desktop")]
 mod work_claims;
+mod worker_report;
 mod workspaces;
 mod worktree_cleanup;
 mod worktree_control;
