@@ -98,6 +98,7 @@ terminalx status --json
 terminalx projects list --json
 terminalx sessions list [--project <project> | --quick] [--archived] --json
 terminalx sessions list --worktree <path-or-name> [--project <project>] --json
+terminalx sessions list --children-of <session> --json
 terminalx sessions show <session> --json
 terminalx tabs list <session> --json
 ```
@@ -110,6 +111,44 @@ only the archived ones, as the sidebar's Show archived does; it combines with `-
 `--quick`. Each entry carries `archived`, and `autoArchived` when the app archived it for
 sitting idle. `sessions show` and every other session command take an archived session's id
 as they take any other.
+
+### Sessions a session started (`parent`)
+
+```text
+terminalx sessions list --children-of <session> --json
+terminalx sessions stop --children-of <session> --json
+```
+
+A session started with `sessions create` from inside another session records that session as
+its `parent`: `{"sessionId": …, "tabId": …}`, the session and the tab the command ran in.
+`sessions create` returns it as `parent`, and `sessions list` and `sessions show` carry it on
+the entry. A session nobody else started has no `parent` field. The field is a record of who
+started whom and nothing more: it gives the parent no hold over the session and changes no
+permission. Archiving or deleting the parent leaves the sessions it started, and their
+`parent`, exactly as they are, so a `parent` may name a session that no longer exists.
+
+`sessions list --children-of <session>` returns exactly the sessions that session started
+(its workers), in every project and worktree, quick chats and archived ones included; for
+that reason it does not combine with `--project`, `--worktree`, `--quick`, `--archived` or
+`--cloud`. Only direct children are listed: a worker's own workers are listed under the
+worker. The result has:
+
+- `parent`: the lead's `sessionId` and `title`, and `exists` (`false` once it was deleted;
+  name a deleted lead by its full id).
+- `workers`: one row per session, with `sessionId`, `title`, `kind`, `tabId`, `agent`,
+  `status`, `model`, `effort`, `running`, `worktree` (its name; `null` on the project's own
+  checkout), `path`, `branch`, `archived`, `created` and `parent`. `status`, `model` and
+  `effort` are those of the session's own agent; `running` says whether any of its agents has
+  a live process.
+- `sessions`: the same sessions as full entries.
+
+`sessions stop --children-of <session>` stops every running agent of those sessions, as Stop
+in the app does: the agent's process ends, the conversation stays, and its next prompt
+resumes it. Nothing is deleted or archived, the lead itself is not stopped, and a terminal or
+an agent a person started by hand in one is left running. The result lists `stopped` (each
+with `sessionId`, `tabId`, `title`), `failed` (the same with an `error`; the rest are still
+stopped) and `workers`, the number of sessions it looked at. Stop only the workers of a lead
+you are, or were asked to manage.
 
 ### Archive sessions
 
@@ -166,6 +205,7 @@ terminalx sessions create \
   --prompt <text> \
   [--title <text>] [--name <name>] \
   [--worktree | --on-main] \
+  [--parent <session> | --no-parent] \
   [--model <id>] [--effort <level>] [--mode <mode>] \
   --json
 ```
@@ -194,9 +234,17 @@ terminalx sessions create --project <project> --agent codex --prompt "Fix the ti
 terminalx sessions rename <session> --title "#203 ready for review" --json
 ```
 
-Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`, `branch`, and
-`path`, alongside the full `session` and prompt delivery `outcome`. Renaming a session changes
-its title without changing its worktree name.
+Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`, `branch`,
+`path`, and `parent`, alongside the full `session` and prompt delivery `outcome`. Renaming a
+session changes its title without changing its worktree name.
+
+`parent` is the session that started this one (see "Sessions a session started" above). Run
+from inside a TerminalX session, `sessions create` records that session and tab without being
+told; run from any other shell it records none, and `parent` is `null`. `--parent <session>`
+records the named session instead, whoever runs the command; one that matches no session
+fails with `parent_not_found` before anything is created. `--no-parent` records none. The two
+flags are mutually exclusive, and both also apply to `--quick` and `--issue` sessions. A cloud
+session records no parent: `--parent` is refused there.
 
 ### Experimental Codex connection (new local sessions only)
 
@@ -249,6 +297,7 @@ terminalx sessions create --quick \
   --agent <claude|codex> \
   --prompt <text> \
   [--title <text>] [--cwd <directory>] \
+  [--parent <session> | --no-parent] \
   [--model <id>] [--effort <level>] [--mode <mode>] \
   --json
 ```
@@ -384,8 +433,9 @@ Codex worker stays on the terminal connection whatever Native Codex is set to, a
 Creation returns `"report": true`, and a `reportNote` that is null unless the worker was briefed
 but could not be recorded as owing a report (it is then not reminded).
 
-`sessions report` takes one session or tab. There is no form that lists every worker a session
-started yet: keep the `sessionId` each `sessions create` returned and ask for each.
+`sessions report` takes one session or tab. To read every worker's report, ask for each
+`sessionId`: the ones `sessions create` returned, or the `workers` rows of
+`terminalx sessions list --children-of <session> --json`.
 
 The worker ends its final reply with a `terminalx-report` block, JSON in a fenced code block:
 
@@ -929,6 +979,8 @@ JSON failures have this shape:
   it receives the new launch environment.
 - `not_found`: refresh the relevant list and use an id from the result.
 - `ambiguous_selector`: use the full id or exact project path.
+- `parent_not_found`: `sessions create --parent` named a session the app does not have.
+  Nothing was created; use an id from `sessions list`, or `--no-parent` to record none.
 - `invalid_arguments`: correct the named flag or missing value; do not invent a substitute.
 - `confirmation_required`: inspect the target, then repeat the destructive command with
   `--yes` only when deletion is intended.
