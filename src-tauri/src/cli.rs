@@ -316,6 +316,29 @@ fn wait_many(first: String, tokens: &mut Tokens, all: bool, tab: &Option<String>
     })
 }
 
+/// `wait` on named targets: one session or tab, a cloud session, or several.
+fn wait_named(tokens: &mut Tokens, (any, all): (bool, bool), tab: &Option<String>, seconds: u64) -> Result<Action, ControlError> {
+    let target = tokens.required_front("session or tab")?;
+    // Several targets, or one with --any or --all, get the answer that lists each (PRO-271).
+    if any || all || !tokens.values.is_empty() {
+        wait_many(target, tokens, all, tab, seconds)
+    } else if is_cloud_key(&target) {
+        // Asked in short calls until the timeout (see `cloud_wait`), so nothing outlives this process in the app.
+        Ok(Action::Rpc {
+            command: "cloud.wait".into(),
+            params: json!({"target": target, "timeoutSeconds": seconds, "tab": tab}),
+            timeout: CLOUD_TIMEOUT,
+        })
+    } else {
+        local_only(tab, "--tab")?;
+        Ok(Action::Rpc {
+            command: "wait".into(),
+            params: json!({"target": target, "timeoutSeconds": seconds}),
+            timeout: Duration::from_secs(seconds.saturating_add(10).max(30)),
+        })
+    }
+}
+
 /// `wait` on a cloud session: the app waits at most
 /// [`crate::cloud_control::WAIT_CHUNK_SECONDS`] per call, so the wait is asked
 /// for again until the tab settles or the caller's timeout passes. When this
@@ -467,27 +490,22 @@ fn parse_with_stdin(
             let seconds = tokens.option_u64("--timeout")?.unwrap_or(600);
             let tab = tokens.option("--tab")?;
             let (any, all) = (tokens.flag("--any")?, tokens.flag("--all")?);
-            let target = tokens.required_front("session or tab")?;
-            // Several targets, or one with --any or --all, get the answer that lists each (PRO-271).
             if any && all {
                 return Err(invalid("Pass --any or --all, not both."));
             }
-            if any || all || !tokens.values.is_empty() {
-                wait_many(target, &mut tokens, all, &tab, seconds)
-            } else if is_cloud_key(&target) {
-                // Asked in short calls until the timeout (see `cloud_wait`), so nothing outlives this process in the app.
-                Ok(Action::Rpc {
-                    command: "cloud.wait".into(),
-                    params: json!({"target": target, "timeoutSeconds": seconds, "tab": tab}),
-                    timeout: CLOUD_TIMEOUT,
-                })
-            } else {
+            // Every session a lead started, found once when the call begins (PRO-328).
+            if let Some(lead) = children_of(&mut tokens)? {
+                if let Some(extra) = tokens.take_front() {
+                    return Err(invalid(format!("--children-of waits on the sessions that session started; it cannot be combined with a named target ({extra}).")));
+                }
                 local_only(&tab, "--tab")?;
                 Ok(Action::Rpc {
                     command: "wait".into(),
-                    params: json!({"target": target, "timeoutSeconds": seconds}),
+                    params: json!({"childrenOf": lead, "mode": if all { "all" } else { "any" }, "timeoutSeconds": seconds}),
                     timeout: Duration::from_secs(seconds.saturating_add(10).max(30)),
                 })
+            } else {
+                wait_named(&mut tokens, (any, all), &tab, seconds)
             }
         }
         "permissions" => parse_permissions(&mut tokens),
@@ -1582,6 +1600,19 @@ mod tests {
         // A cloud session is waited on in short calls of its own (`cloud_wait`).
         assert!(refused(&["wait", "s1", "cloud:org-a:ws-1:s1"]).contains("cloud session by itself"));
         assert!(refused(&["wait", "s1", "s2", "--tab", "t1"]).contains("cloud session"));
+
+        // Every session a lead started (PRO-328).
+        let (command, params, timeout) = rpc_of(&["wait", "--children-of", "lead", "--timeout", "40"]);
+        assert_eq!((command.as_str(), params, timeout), ("wait", json!({"childrenOf": "lead", "mode": "any", "timeoutSeconds": 40}), Duration::from_secs(50)));
+        assert_eq!(rpc_of(&["wait", "--all", "--children-of", "lead"]).1, json!({"childrenOf": "lead", "mode": "all", "timeoutSeconds": 600}));
+        assert_eq!(rpc_of(&["wait", "--children-of", "lead", "--any"]).1["mode"], "any");
+        assert!(refused(&["wait", "--children-of", "lead", "s1"]).contains("named target"));
+        assert!(refused(&["wait", "s1", "--children-of", "lead"]).contains("named target"));
+        assert!(refused(&["wait", "--children-of", ""]).contains("--children-of needs a session"));
+        assert!(refused(&["wait", "--children-of", "cloud:org-a:ws-1:s1"]).contains("cloud session"));
+        assert!(refused(&["wait", "--children-of", "lead", "--any", "--all"]).contains("not both"));
+        assert!(refused(&["wait", "--children-of", "lead", "--tab", "t1"]).contains("cloud session"));
+        assert!(refused(&["wait", "--children-of"]).contains("--children-of"));
     }
 
     #[test]

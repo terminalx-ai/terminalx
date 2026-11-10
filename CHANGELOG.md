@@ -6,6 +6,9 @@
   session records it as its `parent` (`--parent`, `--no-parent`).
   `sessions list --children-of` lists the sessions a session started, and
   `sessions stop --children-of` stops their running agents. (PRO-270)
+- `terminalx wait --children-of <session>` waits on every session that session
+  started, with `--any` or `--all`, and returns at once when it started none.
+  (PRO-328)
 
 ## 0.2.29
 

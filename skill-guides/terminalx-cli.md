@@ -411,6 +411,22 @@ One target with neither flag gives the single-target result above. Pass `--any` 
 with one target to get the list. A target that names no session fails the call before any
 waiting. Several targets are local sessions or tabs: wait on a cloud session by itself.
 
+#### Wait on all of a lead's workers
+
+```text
+terminalx wait --children-of <session> [--any|--all] [--timeout <seconds>] --json
+```
+
+Waits on every session that session started, the ones `sessions list --children-of` shows,
+archived workers and quick chats included. The result is the one above, with the workers as
+its targets. The workers are found once, when the call begins: a session the lead starts
+after that is not waited on, so make the call again to include it.
+
+`--children-of` cannot be combined with named targets, an empty value or a cloud session
+(each is refused as on `sessions list`). A lead with no workers returns at once with
+`"targets": []`, `"timedOut": false` and a `reason` saying there was nothing to wait for;
+the exit code is 0.
+
 ### Permissions
 
 ```text
