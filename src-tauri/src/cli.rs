@@ -48,16 +48,20 @@ Usage:
   terminalx projects list [--json]
   terminalx sessions list [--project PROJECT|--quick] [--archived] [--json]
   terminalx sessions list --worktree WORKTREE [--project PROJECT] [--json]
+  terminalx sessions list --children-of SESSION [--json]
+  terminalx sessions stop --children-of SESSION [--json]
   terminalx sessions archive|unarchive SESSION... [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
-      [--title TEXT] [--name NAME] [--experimental-codex-stdio]
+      [--title TEXT] [--name NAME] [--experimental-codex-stdio] [--parent SESSION|--no-parent]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --issue ISSUE [--prompt TEXT]
       [--provider github|linear] [--auto-merge|--no-auto-merge]
       [--resolve-conflicts|--no-resolve-conflicts] [--no-pipeline]
-      [--title TEXT] [--name NAME] [--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
+      [--title TEXT] [--name NAME] [--on-main] [--parent SESSION|--no-parent]
+      [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --quick --agent AGENT --prompt TEXT
-      [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
+      [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--parent SESSION|--no-parent]
+      [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx floating show|hide|toggle [--session SESSION] [--json]
   terminalx sessions show SESSION [--json]
   terminalx share create SESSION [--can-drive|--read-only] [--people EMAIL,EMAIL]
@@ -582,6 +586,13 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let archived = tokens.flag("--archived")?;
             let worktree = tokens.option("--worktree")?;
             let in_cloud = cloud || org.is_some() || project.as_deref().is_some_and(is_cloud_key);
+            // The sessions a lead started (PRO-270), wherever they are.
+            if let Some(lead) = children_of(tokens)? {
+                if in_cloud || project.is_some() || quick || archived || worktree.is_some() {
+                    return Err(invalid("--children-of lists every session that session started, in any project or worktree, quick chats and archived ones included; it cannot be combined with --project, --worktree, --quick, --archived, --cloud or --org."));
+                }
+                return rpc("sessions.children", json!({"childrenOf": lead}), tokens);
+            }
             if quick && (in_cloud || project.is_some()) {
                 return Err(invalid("--quick lists the chats that have no project; it cannot be combined with --project, --cloud or --org."));
             }
@@ -614,6 +625,11 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
         "show" => {
             let session = tokens.required_front("session")?;
             rpc("sessions.show", json!({"session": session}), tokens)
+        }
+        // Every running agent of the sessions a lead started (PRO-270).
+        "stop" => {
+            let lead = children_of(tokens)?.ok_or_else(|| invalid("sessions stop needs --children-of SESSION: it stops the running agents of the sessions that session started."))?;
+            rpc("sessions.stop", json!({"childrenOf": lead}), tokens)
         }
         "create" if tokens.peek_option("--project").is_some_and(|project| is_cloud_key(&project)) => parse_cloud_session_create(tokens),
         "rename" => {
@@ -660,6 +676,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                     "mode": mode,
                 });
             if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
+            started_by(&mut params, tokens)?;
             rpc("sessions.create", params, tokens)
         }
         "create" => {
@@ -707,6 +724,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 "mode": mode,
             });
             if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
+            started_by(&mut params, tokens)?;
             // Only an issue start carries these, so every other request is
             // word for word what it was.
             if let Some(issue) = issue {
@@ -726,6 +744,54 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
         }
         other => Err(invalid(format!("Unknown sessions command {other}."))),
     }
+}
+
+/// `--children-of SESSION`: the lead whose sessions are meant.
+fn children_of(tokens: &mut Tokens) -> Result<Option<String>, ControlError> {
+    match tokens.option("--children-of")? {
+        Some(lead) if lead.trim().is_empty() => Err(invalid("--children-of needs a session.")),
+        Some(lead) if is_cloud_key(&lead) => Err(invalid("--children-of names a session on this computer; a cloud session records no parent.")),
+        lead => Ok(lead),
+    }
+}
+
+/// Who a new session is recorded as started by (PRO-270): the session
+/// `--parent` names, nobody with `--no-parent`, and otherwise the session
+/// the command runs in, which the app put in its agent's environment. A
+/// command run anywhere else adds nothing, so its request is word for word
+/// what it was.
+fn started_by(params: &mut Value, tokens: &mut Tokens) -> Result<(), ControlError> {
+    let parent = tokens.option("--parent")?;
+    let no_parent = tokens.flag("--no-parent")?;
+    match (parent, no_parent) {
+        (Some(_), true) => return Err(invalid("--parent and --no-parent are mutually exclusive.")),
+        (Some(parent), false) if parent.trim().is_empty() => return Err(invalid("--parent needs a session.")),
+        (Some(parent), false) if is_cloud_key(&parent) => return Err(invalid("--parent names a session on this computer, not a cloud session.")),
+        (Some(parent), false) => params["parent"] = json!(parent),
+        (None, true) => {
+            params["noParent"] = json!(true);
+            return Ok(());
+        }
+        (None, false) => {}
+    }
+    if let Some(caller) = calling_session() {
+        params["caller"] = caller;
+    }
+    Ok(())
+}
+
+/// The session and tab this command runs in, when it runs in one.
+#[cfg(not(test))]
+fn calling_session() -> Option<Value> {
+    let caller = issue_caller();
+    caller["session"].is_string().then(|| json!({"session": caller["session"], "tab": caller["tab"]}))
+}
+
+/// Tests say where the command runs: the suite may itself be run by an agent
+/// in a session, whose environment must not reach what they compare.
+#[cfg(test)]
+fn calling_session() -> Option<Value> {
+    tests::CALLING_SESSION.with(|caller| caller.borrow().clone())
 }
 
 /// A cloud project, workspace or session is named by its key (`cloud:…`).
@@ -791,6 +857,11 @@ fn parse_cloud_session_create(tokens: &mut Tokens) -> Result<Action, ControlErro
     let effort = tokens.option("--effort")?;
     let mode = tokens.option("--mode")?;
     let idempotency_key = tokens.option("--idempotency-key")?;
+    // A cloud workspace keeps its own sessions and records no parent (PRO-270).
+    if tokens.option("--parent")?.is_some() {
+        return Err(invalid("--parent applies to a session on this computer; a cloud session records no parent."));
+    }
+    let _no_parent = tokens.flag("--no-parent")?;
     let worktree = tokens.flag("--worktree")?;
     let on_main = tokens.flag("--on-main")?;
     let wake = tokens.flag("--wake")?;
@@ -1230,6 +1301,69 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    thread_local! {
+        /// What `calling_session` answers: nothing, unless a test says the
+        /// command runs in a session.
+        pub(super) static CALLING_SESSION: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[test]
+    fn a_new_session_names_who_started_it_and_a_leads_workers_are_listed_and_stopped() {
+        let create = ["sessions", "create", "--project", "p", "--agent", "claude", "--prompt", "go"];
+        let quick = ["sessions", "create", "--quick", "--agent", "claude", "--prompt", "go"];
+        let issue = ["sessions", "create", "--project", "p", "--agent", "claude", "--issue", "42"];
+        let with = |base: &[&'static str], extra: &[&'static str]| rpc_of(&[base, extra].concat()).1;
+        for base in [&create[..], &quick, &issue] {
+            // Run outside a session, the request says nothing of a parent.
+            let plain = with(base, &[]);
+            for key in ["parent", "noParent", "caller"] { assert!(plain.get(key).is_none(), "{key} in {plain}"); }
+            // Run inside one, it says which, and the app records it.
+            let caller = json!({"session": "lead", "tab": "lead-tab"});
+            CALLING_SESSION.with(|calling| *calling.borrow_mut() = Some(caller.clone()));
+            let inside = with(base, &[]);
+            let named = with(base, &["--parent", "0198c"]);
+            let nobody = with(base, &["--no-parent"]);
+            CALLING_SESSION.with(|calling| *calling.borrow_mut() = None);
+            assert_eq!(inside["caller"], caller);
+            assert!(inside.get("parent").is_none() && inside.get("noParent").is_none());
+            // The named parent goes with the caller, whose tab is recorded when they are the same session.
+            assert_eq!((&named["parent"], &named["caller"]), (&json!("0198c"), &caller));
+            // Nobody: not even where it ran.
+            assert_eq!(nobody["noParent"], true);
+            assert!(nobody.get("caller").is_none() && nobody.get("parent").is_none());
+            assert_eq!(with(base, &["--parent", "0198c"])["parent"], "0198c");
+            for refused in [&["--parent", "0198c", "--no-parent"][..], &["--parent", ""], &["--parent"], &["--parent", "cloud:org:ws:s"]] {
+                assert_eq!(parse(&args(&[base, refused].concat())).unwrap_err().code, "invalid_arguments", "{refused:?}");
+            }
+        }
+        // A cloud session records none, and says so rather than dropping the flag.
+        let cloud = ["sessions", "create", "--project", "cloud:org:github.com/acme/api", "--prompt", "go"];
+        assert!(parse(&args(&[&cloud[..], &["--parent", "0198c"]].concat())).unwrap_err().message.contains("records no parent"));
+        assert_eq!(rpc_of(&[&cloud[..], &["--no-parent"]].concat()).0, "cloud.sessions.create");
+
+        // The help and the guide both name the field's flags and the two commands.
+        for text in [help_text(), GUIDE.to_string()] {
+            for named in ["--parent", "--no-parent", "sessions list --children-of", "sessions stop --children-of"] {
+                assert!(text.contains(named), "{named}");
+            }
+        }
+        assert!(GUIDE.contains("parent_not_found") && GUIDE.contains("`parent`"));
+
+        // Commands of their own: an older runtime refuses them instead of listing every session.
+        assert_eq!(rpc_of(&["sessions", "list", "--children-of", "0198c", "--json"]), ("sessions.children".into(), json!({"childrenOf": "0198c"}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["sessions", "stop", "--children-of", "0198c"]), ("sessions.stop".into(), json!({"childrenOf": "0198c"}), Duration::from_secs(30)));
+        for refused in [
+            &["sessions", "list", "--children-of", "0198c", "--project", "p"][..], &["sessions", "list", "--children-of", "0198c", "--worktree", "w"],
+            &["sessions", "list", "--children-of", "0198c", "--quick"], &["sessions", "list", "--children-of", "0198c", "--archived"],
+            &["sessions", "list", "--children-of", "0198c", "--cloud"], &["sessions", "list", "--children-of", "cloud:org:ws:s"],
+            &["sessions", "list", "--children-of"], &["sessions", "list", "--children-of", ""],
+            // Stopping is always of one lead's workers: never of everything, and never of a session by position.
+            &["sessions", "stop"], &["sessions", "stop", "0198c"], &["sessions", "stop", "--children-of", "0198c", "extra"],
+        ] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
     }
 
     fn rpc_of(values: &[&str]) -> (String, Value, Duration) {

@@ -115,6 +115,69 @@ fn issue_start_child() {
     });
 }
 
+/// PRO-270: `sessions create` records who started the session it creates.
+#[test]
+fn a_session_created_from_inside_another_records_it_as_its_parent() {
+    run_child("session_parent_child");
+}
+
+#[test]
+fn session_parent_child() {
+    if std::env::var(CHILD).as_deref() != Ok("1") { return; }
+    let _home = crate::store::temp_home();
+    let bin = crate::store::root().unwrap().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // Availability only: the prompt is queued, and no real agent is invoked.
+    std::fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let repo = super::tests::git_repo();
+    let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+    let (service, _sink) = super::tests::headless_service();
+    let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(Duration::from_secs(60)));
+    let create = |extra: Value| {
+        let mut params = json!({"project": project.path, "agent": "claude", "prompt": "go", "useWorktree": true, "noPipeline": true});
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        service.execute("sessions.create", params, "create")
+    };
+    let stored = |created: &Value| index::get(created["sessionId"].as_str().unwrap()).unwrap().parent;
+
+    // Started by a person, from a shell: nobody is recorded, and the entry has no such field.
+    let lead = create(json!({})).unwrap();
+    assert_eq!((&lead["parent"], stored(&lead)), (&Value::Null, None));
+    assert!(lead["session"].get("parent").is_none());
+    let caller = json!({"session": lead["sessionId"], "tab": lead["tabId"]});
+    let from_lead = json!({"sessionId": lead["sessionId"], "tabId": lead["tabId"]});
+
+    // Started from inside the lead: the response and the index both say so.
+    let worker = create(json!({"caller": caller})).unwrap();
+    assert_eq!((&worker["parent"], &worker["session"]["parent"]), (&from_lead, &from_lead));
+    assert_eq!(serde_json::to_value(stored(&worker)).unwrap(), from_lead);
+    // A quick chat started there is the lead's too.
+    let quick = service.execute("sessions.create", json!({"quick": true, "agent": "claude", "prompt": "go", "caller": caller}), "quick").unwrap();
+    assert_eq!(quick["parent"], from_lead);
+    // --parent names another session; --no-parent records nobody though the lead asked.
+    let named = create(json!({"caller": caller, "parent": worker["sessionId"]})).unwrap();
+    assert_eq!(named["parent"], json!({"sessionId": worker["sessionId"]}));
+    let nobody = create(json!({"caller": caller, "noParent": true})).unwrap();
+    assert_eq!((&nobody["parent"], stored(&nobody)), (&Value::Null, None));
+
+    // An unknown parent is refused by its own code, with no session and no worktree left behind.
+    let (sessions, worktrees) = (index::load().unwrap().len(), crate::git::list_worktrees(repo.path()).unwrap().len());
+    let refused = create(json!({"caller": caller, "parent": "no-such-session"})).unwrap_err();
+    assert_eq!(refused.code, "parent_not_found");
+    assert_eq!(create(json!({"parent": lead["sessionId"], "noParent": true})).unwrap_err().code, "invalid_arguments");
+    assert_eq!((index::load().unwrap().len(), crate::git::list_worktrees(repo.path()).unwrap().len()), (sessions, worktrees));
+
+    // The lead's workers are exactly the two it started, each in a worktree of its own or none.
+    let listed = service.execute("sessions.children", json!({"childrenOf": lead["sessionId"]}), "list").unwrap();
+    let workers: std::collections::BTreeSet<&str> = listed["workers"].as_array().unwrap().iter().map(|row| row["sessionId"].as_str().unwrap()).collect();
+    assert_eq!(workers, [worker["sessionId"].as_str().unwrap(), quick["sessionId"].as_str().unwrap()].into());
+    let row = listed["workers"].as_array().unwrap().iter().find(|row| row["sessionId"] == worker["sessionId"]).unwrap();
+    assert_eq!((&row["worktree"], &row["branch"], &row["path"], &row["agent"]), (&worker["worktreeName"], &worker["branch"], &worker["path"], &json!("claude")));
+    assert_eq!(service.execute("sessions.children", json!({"childrenOf": worker["sessionId"]}), "list").unwrap()["workers"].as_array().unwrap().len(), 1);
+}
+
 #[test]
 fn local_issue_creation_dispatches_without_a_desktop() {
     run_child("issue_creation_child");

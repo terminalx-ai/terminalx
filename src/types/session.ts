@@ -109,11 +109,24 @@ export interface RemovedWorkspace {
  */
 export type SessionKind = "project" | "quick";
 
+/**
+ * The session that started another (PRO-270): `terminalx sessions create` run
+ * from inside it, or told `--parent`. A record only: the parent may since
+ * have been archived or deleted.
+ */
+export interface SessionParent {
+  sessionId: string;
+  /** The tab the command ran in; absent when `--parent` named the session. */
+  tabId?: string | null;
+}
+
 export interface SessionEntry {
   /** The person’s workflow status; older entries default to Backlog. */
   manualStatus?: ManualStatus;
   id: string;
   kind?: SessionKind;
+  /** Absent for a session no other session started. */
+  parent?: SessionParent | null;
   /**
    * The session's project. A quick chat has none: this is then its scratch
    * directory under the TerminalX home, which is in no project list. Ask

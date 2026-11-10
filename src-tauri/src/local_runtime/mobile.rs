@@ -913,7 +913,7 @@ fn create_session(manager: &crate::session::SessionManager, params: &Value) -> R
     let title = p.title.filter(|title| !title.trim().is_empty())
         .or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
     let entry = match (p.quick, p.project_id) {
-        (true, None) => crate::session_ops::create_quick_chat_blocking(&**manager.sink(), NewQuickChat { section_id: None, title, cwd: None, tab: Some(tab) })
+        (true, None) => crate::session_ops::create_quick_chat_blocking(&**manager.sink(), NewQuickChat { parent: None, section_id: None, title, cwd: None, tab: Some(tab) })
             .map_err(|error| anyhow::anyhow!(error))?,
         (false, Some(id)) => {
             let project = crate::store::projects::by_public_id(&id)?;
@@ -922,6 +922,7 @@ fn create_session(manager: &crate::session::SessionManager, params: &Value) -> R
             }
             let named = crate::names::from_prompt(&p.prompt);
             let req = NewSession {
+                parent: None,
                 section_id: None,
                 project_path: project.path, title, use_worktree: p.use_worktree, on_main: !p.use_worktree,
                 base_ref: None, worktree_name: (p.use_worktree && !named.is_empty()).then_some(named),

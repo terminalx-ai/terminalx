@@ -510,6 +510,7 @@ mod tests {
             manual_status: Default::default(),
             active_tab: tabs.first().map(|t| t.id.clone()),
             link: None,
+            parent: None,
             tabs,
             unknown: Default::default(),
         }
