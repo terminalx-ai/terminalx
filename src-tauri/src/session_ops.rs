@@ -109,6 +109,9 @@ pub struct NewSession {
     /// The first agent conversation. Omitted when a checkout is opened directly.
     #[serde(default)]
     pub tab: Option<NewTab>,
+    /// The session that starts this one (PRO-270), recorded on the entry.
+    #[serde(default)]
+    pub parent: Option<index::ParentRef>,
 }
 
 pub(crate) fn validate_session_target(req: &NewSession) -> Result<()> {
@@ -270,8 +273,10 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         archived: false,
         archive: Default::default(),
         pinned: false,
+        manual_status: Default::default(),
         active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
         link: None,
+        parent: req.parent.clone(),
         tabs: first_tab.into_iter().collect(),
         unknown: BTreeMap::new(),
     };
@@ -330,6 +335,9 @@ pub struct NewQuickChat {
     /// a terminal.
     #[serde(default)]
     pub tab: Option<NewTab>,
+    /// The session that starts this one (PRO-270), recorded on the entry.
+    #[serde(default)]
+    pub parent: Option<index::ParentRef>,
 }
 
 pub(crate) const QUICK_CHAT_TITLE: &str = "Quick chat";
@@ -362,6 +370,7 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
             id: id.clone(),
             kind: SessionKind::Quick,
             link: None,
+            parent: req.parent.clone(),
             project_path: scratch.clone(),
             // The scratch directory is on no branch even when the TerminalX
             // home happens to sit inside a repository (dotfiles kept in git).
@@ -381,6 +390,7 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
             tabs: first_tab.into_iter().collect(),
             unknown: BTreeMap::new(),
@@ -1021,7 +1031,7 @@ pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
     Ok(())
 }
 
-/// Title, pin and archive changes to one session. `None` leaves a field as it is.
+/// Metadata changes to one session. `None` leaves a field as it is.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionPatch {
@@ -1031,11 +1041,13 @@ pub struct SessionPatch {
     pub pinned: Option<bool>,
     #[serde(default)]
     pub archived: Option<bool>,
+    #[serde(default)]
+    pub manual_status: Option<index::ManualStatus>,
 }
 
 impl SessionPatch {
     pub fn is_empty(&self) -> bool {
-        self.title.is_none() && self.pinned.is_none() && self.archived.is_none()
+        self.title.is_none() && self.pinned.is_none() && self.archived.is_none() && self.manual_status.is_none()
     }
 }
 
@@ -1077,6 +1089,9 @@ pub(crate) fn update_session_meta(session_id: &str, patch: &SessionPatch) -> Res
         }
         if let Some(pinned) = patch.pinned {
             s.pinned = pinned;
+        }
+        if let Some(status) = patch.manual_status {
+            s.manual_status = Some(status);
         }
         // A person's archive, as every other way in or out marks it (#718).
         if let Some(archived) = patch.archived {
@@ -1198,7 +1213,7 @@ mod tests {
         let mut settings = store::settings::load();
         settings.experimental.native_codex = true;
         store::settings::save(&settings).unwrap();
-        let mut issue = NewSession { section_id: None, project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)) };
+        let mut issue = NewSession { parent: None, section_id: None, project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)) };
         prefer_native_codex_session(&mut issue);
         assert_eq!(issue.tab.as_ref().unwrap().transport, index::AgentTransport::ExperimentalCodexStdio);
         issue.tab = Some(tab("codex", None));
@@ -1244,6 +1259,7 @@ mod tests {
 
     fn worktree_session(project: &Path) -> SessionEntry {
         create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: None,
@@ -1571,6 +1587,7 @@ mod tests {
     /// Another session running in an existing checkout.
     fn session_in(project: &Path, cwd: &str, title: &str) -> SessionEntry {
         create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some(title.into()),
@@ -1705,6 +1722,7 @@ mod tests {
 
     fn quick_chat(cwd: Option<&Path>) -> SessionEntry {
         create_quick_chat_entry(NewQuickChat {
+            parent: None,
             section_id: None,
             title: None,
             cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
@@ -1723,7 +1741,7 @@ mod tests {
         assert!(projects::list().unwrap().0.is_empty());
         let sink = sink();
         let mut events = sink.subscribe();
-        let first = create_quick_chat_blocking(&sink, NewQuickChat { section_id: None, title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
+        let first = create_quick_chat_blocking(&sink, NewQuickChat { parent: None, section_id: None, title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
         assert_eq!(&*events.try_recv().unwrap().event, "session_created");
 
         assert_eq!(first.kind, SessionKind::Quick);
@@ -1775,7 +1793,7 @@ mod tests {
     fn a_quick_chat_that_cannot_be_created_leaves_no_session_and_no_directory() {
         let _home = crate::store::temp_home();
         let missing = tempfile::tempdir().unwrap().path().join("gone");
-        let error = create_quick_chat_entry(NewQuickChat { section_id: None, title: None, cwd: Some(missing.to_string_lossy().into_owned()), tab: None }).unwrap_err();
+        let error = create_quick_chat_entry(NewQuickChat { parent: None, section_id: None, title: None, cwd: Some(missing.to_string_lossy().into_owned()), tab: None }).unwrap_err();
         assert!(error.contains("resolve"), "{error}");
         assert!(index::load().unwrap().is_empty());
         assert_eq!(std::fs::read_dir(store::quick::root().unwrap()).unwrap().count(), 0);

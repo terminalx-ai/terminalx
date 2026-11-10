@@ -183,6 +183,9 @@ jobs:
       - name: CLI issue starts in the shipped runtime (#786)
         working-directory: src-tauri/serve
         run: cargo test --locked --features local-ui --test local_issue_start
+      - name: A lead lists and stops the sessions it started (PRO-270)
+        working-directory: src-tauri/serve
+        run: cargo test --locked --test session_parent
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test

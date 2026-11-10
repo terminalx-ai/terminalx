@@ -288,23 +288,8 @@ fn prs_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]
     let fields = format!("{FIELDS},isCrossRepository,headRepository,headRepositoryOwner");
     let out = run(cwd, &["pr", "list", "--head", branch, "--state", "all", "--json", &fields, "--limit", "1000"])?;
     let v: Value = serde_json::from_str(&out)?;
-    // The repositories this branch's head can be ours in: origin, and the one
-    // the branch is pushed to, which is a fork when the work goes to origin by
-    // pull request from it.
-    let ours: Vec<String> = [crate::git::remote_url(cwd), crate::git::push_remote_url(cwd, branch)]
-        .into_iter()
-        .flatten()
-        .filter_map(|url| remote_repo(&url))
-        .collect();
-    let mut prs: Vec<PullRequest> = v.as_array().map(|a| a.iter().filter(|pr| {
-        // Another fork can reuse the same branch name, so a PR from another
-        // repository counts only when its head is one of ours.
-        pr["isCrossRepository"].as_bool() != Some(true) || {
-            let owner = pr["headRepositoryOwner"]["login"].as_str().unwrap_or_default();
-            let repo = pr["headRepository"]["name"].as_str().unwrap_or_default();
-            ours.iter().any(|ours| ours.eq_ignore_ascii_case(&format!("{owner}/{repo}")))
-        }
-    }).map(parse_pr).collect()).unwrap_or_default();
+    let ours = branch_head_repositories(cwd, branch);
+    let mut prs: Vec<PullRequest> = v.as_array().map(|a| a.iter().filter(|pr| has_own_head(pr, &ours)).map(parse_pr).collect()).unwrap_or_default();
     prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
     // Lookup is also used by workspace deletion checks, and runs while Stats
     // is closed. Only known workspaces/branches contribute installation totals.
@@ -319,6 +304,60 @@ fn prs_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]
         crate::store::activity::report_error(format!("PRs were discovered, but their activity could not be saved: {error:#}"));
     }
     Ok(prs)
+}
+
+/// Origin and the branch's push remote identify heads owned by this checkout.
+fn branch_head_repositories(cwd: &Path, branch: &str) -> Vec<String> {
+    [crate::git::remote_url(cwd), crate::git::push_remote_url(cwd, branch)]
+        .into_iter()
+        .flatten()
+        .filter_map(|url| remote_repo(&url))
+        .collect()
+}
+
+/// Match the PR's repository to one configured push destination. Return the
+/// URL from that same observation so a remote edit cannot replace its identity.
+pub(crate) fn head_push_destination(cwd: &Path, branch: &str, repository: &str) -> Result<(String, String)> {
+    for remote in crate::git::push_remote(cwd, branch).into_iter().chain(std::iter::once("origin".into())) {
+        if let Ok(url) = crate::git::configured_push_url(cwd, &remote) {
+            if remote_repo(&url).is_some_and(|repo| repo.eq_ignore_ascii_case(repository)) {
+                return Ok((remote, url));
+            }
+        }
+    }
+    bail!("The pull request head repository has no matching single push destination in this checkout. Configure its fork remote before resolving conflicts.");
+}
+
+/// A PR belongs to its base repository, which need not be this checkout's
+/// origin. Keep a matching configured transport (including SSH aliases), or
+/// fetch the canonical GitHub repository when no local remote names it.
+pub(crate) fn base_fetch_destination(cwd: &Path, pr: &PrSnapshot) -> Result<String> {
+    let (repository, number) = pr_url_parts(&pr.url).context("GitHub did not identify the pull request's base repository.")?;
+    if number != pr.number { bail!("The pull request URL does not match its number."); }
+    for remote in crate::git::run(cwd, &["remote"])?.lines() {
+        let Ok(urls) = crate::git::run(cwd, &["config", "--get-all", &format!("remote.{remote}.url")]) else { continue };
+        let urls: Vec<_> = urls.lines().filter(|url| !url.is_empty()).collect();
+        if let [url] = urls.as_slice() {
+            if remote_repo(url).is_some_and(|repo| repo.eq_ignore_ascii_case(&repository)) {
+                return Ok((*url).into());
+            }
+        }
+    }
+    Ok(format!("https://github.com/{repository}.git"))
+}
+
+fn head_repository(pr: &Value) -> Option<String> {
+    let owner = pr["headRepositoryOwner"]["login"].as_str().filter(|s| !s.is_empty())?;
+    let name = pr["headRepository"]["name"].as_str().filter(|s| !s.is_empty())?;
+    Some(format!("{owner}/{name}"))
+}
+
+fn has_own_head(pr: &Value, ours: &[String]) -> bool {
+    // Another fork can reuse the same branch name, so a cross-repository PR
+    // counts only when its head repository is one of this checkout's remotes.
+    pr["isCrossRepository"].as_bool() != Some(true) || {
+        head_repository(pr).is_some_and(|repo| ours.iter().any(|ours| ours.eq_ignore_ascii_case(&repo)))
+    }
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
@@ -465,6 +504,10 @@ pub struct PrSnapshot {
     pub base: String,
     pub head: String,
     pub head_sha: String,
+    /// GitHub's head repository, including fork ownership. Missing identity
+    /// cannot authorize a conflict-resolution push.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_repository: Option<String>,
     /// MERGEABLE | CONFLICTING | UNKNOWN
     pub mergeable: String,
     /// CLEAN | UNSTABLE | BLOCKED | BEHIND | DIRTY | DRAFT | HAS_HOOKS | UNKNOWN
@@ -488,7 +531,7 @@ pub struct PrSnapshot {
     pub validation: Option<Vec<PrCheck>>,
 }
 
-const SNAPSHOT_FIELDS: &str = "number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body,author";
+const SNAPSHOT_FIELDS: &str = "number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body,author,headRepository,headRepositoryOwner";
 
 pub(crate) fn parse_snapshot(v: &Value) -> PrSnapshot {
     let pr = parse_pr(v);
@@ -502,6 +545,7 @@ pub(crate) fn parse_snapshot(v: &Value) -> PrSnapshot {
         base: pr.base,
         head: pr.head,
         head_sha: v["headRefOid"].as_str().unwrap_or("").into(),
+        head_repository: head_repository(v),
         mergeable: pr.mergeable,
         merge_state: v["mergeStateStatus"].as_str().unwrap_or("UNKNOWN").into(),
         review_decision: pr.review_decision,
@@ -762,17 +806,18 @@ fn failed_validation(state: &str) -> bool {
     matches!(state, "failure" | "error" | "cancelled" | "timed_out" | "action_required" | "startup_failure" | "stale")
 }
 
-/// The open pull request whose head is `branch` in this repository (not a
-/// fork's branch of the same name), by number. Asks for nothing but that, so
-/// a token that may not read checks is answered too.
+/// The open pull request whose head is `branch` in this checkout's origin or
+/// push remote, including its own fork. Does not request checks, so a token
+/// that may not read them is answered too.
 pub fn open_pr_for_branch(cwd: &Path, branch: &str) -> Result<Option<u64>> {
     open_pr_for_branch_with(cwd, branch, run)
 }
 
 fn open_pr_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<Option<u64>> {
-    let out = run(cwd, &["pr", "list", "--head", branch, "--state", "open", "--json", "number,isCrossRepository", "--limit", "100"])?;
+    let out = run(cwd, &["pr", "list", "--head", branch, "--state", "open", "--json", "number,isCrossRepository,headRepository,headRepositoryOwner", "--limit", "100"])?;
     let listed: Value = serde_json::from_str(&out)?;
-    Ok(listed.as_array().into_iter().flatten().filter(|pr| pr["isCrossRepository"] != Value::Bool(true)).filter_map(|pr| pr["number"].as_u64()).max())
+    let ours = branch_head_repositories(cwd, branch);
+    Ok(listed.as_array().into_iter().flatten().filter(|pr| has_own_head(pr, &ours)).filter_map(|pr| pr["number"].as_u64()).max())
 }
 
 /// Leave a comment on a pull request; the comment's URL.
@@ -1628,6 +1673,7 @@ mod tests {
         .unwrap();
         assert!(snapshot.checks_unread);
         assert!(!asked[1].contains("statusCheckRollup") && asked[1].contains("headRefOid") && asked[1].contains("mergeStateStatus"));
+        assert!(asked.iter().all(|fields| fields.contains("headRepositoryOwner") && fields.contains("headRepository")));
         assert_eq!((snapshot.head_sha.as_str(), snapshot.mergeable.as_str(), snapshot.required_checks.clone()), ("1111111111111111111111111111111111111111", "MERGEABLE", None));
         // The required checks alone refused: the checks read are not taken for the whole story.
         let partly = pr_snapshot_with(cwd, 7, |_, _| Ok(OPEN_PR.into()), |_, _| Ok(output(false, "", refused))).unwrap();
@@ -1640,11 +1686,33 @@ mod tests {
     #[test]
     fn the_open_pull_request_of_a_branch_is_this_repositorys_and_asks_for_no_checks() {
         let found = open_pr_for_branch_with(Path::new("/repo"), "raccoon/x", |_, args| {
-            assert_eq!(args, ["pr", "list", "--head", "raccoon/x", "--state", "open", "--json", "number,isCrossRepository", "--limit", "100"]);
+            assert_eq!(args, ["pr", "list", "--head", "raccoon/x", "--state", "open", "--json", "number,isCrossRepository,headRepository,headRepositoryOwner", "--limit", "100"]);
             Ok(r#"[{"number":9,"isCrossRepository":true},{"number":7,"isCrossRepository":false}]"#.into())
         });
         assert_eq!(found.unwrap(), Some(7));
         assert_eq!(open_pr_for_branch_with(Path::new("/repo"), "b", |_, _| Ok("[]".into())).unwrap(), None);
+    }
+
+    #[test]
+    fn open_pr_lookup_accepts_our_fork_but_not_unrelated_forks_with_the_same_branch() {
+        let _home = crate::store::temp_home();
+        let cwd = crate::store::root().unwrap();
+        crate::git::run(&cwd, &["init", "-q"]).unwrap();
+        crate::git::run(&cwd, &["remote", "add", "origin", "https://github.com/acme/widgets.git"]).unwrap();
+        crate::git::run(&cwd, &["remote", "add", "fork", "git@github-work:me/widgets.git"]).unwrap();
+        crate::git::run(&cwd, &["config", "branch.feature.remote", "fork"]).unwrap();
+        let listed = serde_json::json!([
+            {"number":9,"isCrossRepository":true,"headRepositoryOwner":{"login":"Me"},"headRepository":{"name":"Widgets"}},
+            {"number":10,"isCrossRepository":true,"headRepositoryOwner":{"login":"someone"},"headRepository":{"name":"widgets"}},
+            {"number":11,"isCrossRepository":true,"headRepositoryOwner":{"login":"me"},"headRepository":{"name":"other"}},
+            {"number":12,"isCrossRepository":true}
+        ]).to_string();
+        assert_eq!(open_pr_for_branch_with(&cwd, "feature", |_, _| Ok(listed.clone())).unwrap(), Some(9));
+        // An unrelated branch does not inherit the configured fork push remote.
+        assert_eq!(open_pr_for_branch_with(&cwd, "other", |_, _| Ok(listed.clone())).unwrap(), None);
+        // A checkout with the fork as origin works without a separate push remote.
+        crate::git::run(&cwd, &["remote", "set-url", "origin", "https://github.com/me/widgets.git"]).unwrap();
+        assert_eq!(open_pr_for_branch_with(&cwd, "other", |_, _| Ok(listed.clone())).unwrap(), Some(9));
     }
 
     #[test]

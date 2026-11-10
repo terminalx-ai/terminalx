@@ -1686,6 +1686,13 @@ pub fn list_projects() -> CmdResult<ProjectsResponse> {
     Ok(ProjectsResponse { projects, last_selected })
 }
 
+/// Preview effective copy patterns, including unsaved edits. No file contents leave Rust.
+#[tauri::command]
+pub async fn repository_files_preview(path: String, patterns: Option<Vec<String>>, snapshot: Option<String>) -> CmdResult<crate::worktree_files::Preview> {
+    tauri::async_runtime::spawn_blocking(move || crate::worktree_files::preview(Path::new(&path), patterns.as_deref(), snapshot.as_deref()).map_err(err))
+        .await.map_err(err)?
+}
+
 /// The project list changed: a window that did not make the change reads it again.
 pub(crate) const PROJECTS_CHANGED_EVENT: &str = "projects_changed";
 
@@ -2119,6 +2126,12 @@ pub fn set_session_pinned(app: AppHandle, session_id: String, pinned: bool) -> C
 }
 
 #[tauri::command]
+pub async fn set_session_status(state: State<'_, crate::AppState>, session_id: String, status: index::ManualStatus) -> CmdResult<()> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.set_manual_status(&session_id, status).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub fn set_active_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<()> {
     let session = index::update_session(&session_id, |s| {
         if s.tab(&tab_id).is_some() {
@@ -2369,9 +2382,11 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: vec![new_tab.clone()],
             active_tab: Some(new_tab.id.clone()),
             link: None,
+            parent: None,
             unknown: BTreeMap::new(),
         };
         if src.worktree_name.is_some() && !src.worktree_removed {
@@ -3699,6 +3714,12 @@ pub async fn issue_pipeline_start(app: AppHandle, session_id: String, tab_id: St
 }
 
 #[tauri::command]
+pub async fn issue_pipeline_attach(app: AppHandle, session_id: String, tab_id: String, auto_merge: bool, resolve_conflicts: bool) -> CmdResult<StartedIssuePipeline> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("attach", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"autoMerge":auto_merge,"resolveConflicts":resolve_conflicts})).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn issue_pipeline_continue(app: AppHandle, session_id: String, tab_id: String, options: crate::issue_pipeline::LaunchOptions) -> CmdResult<Option<StartedIssuePipeline>> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.pipeline("continue", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"options":options})).map_err(err)).await.map_err(err)?
@@ -4022,6 +4043,7 @@ mod command_tests {
         let before = git(&project, &["worktree", "list", "--porcelain"]);
 
         let session = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: None,
@@ -4061,6 +4083,7 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let first = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
@@ -4081,6 +4104,7 @@ mod command_tests {
         })
         .unwrap();
         let second = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Second".into()),
@@ -4129,6 +4153,7 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let session = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
@@ -4180,6 +4205,7 @@ mod command_tests {
         git(&project, &["worktree", "add", "-q", "-b", "feature/attached", worktree.to_str().unwrap()]);
 
         let created = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Attached session".into()),
@@ -4206,6 +4232,7 @@ mod command_tests {
         })
         .unwrap();
         let companion = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Companion session".into()),
@@ -4221,6 +4248,7 @@ mod command_tests {
         })
         .unwrap();
         let bystander = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Session on main".into()),
@@ -4341,8 +4369,10 @@ mod command_tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: Vec::new(),
             link: None,
+            parent: None,
             active_tab: None,
             unknown: Default::default(),
         };

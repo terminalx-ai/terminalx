@@ -16,7 +16,7 @@ export const SETTINGS_SECTIONS = {
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
-  repositories: { title: "Repositories", group: "Repositories", entry: "repositories.mergedCleanup" },
+  repositories: { title: "Repositories", group: "Repositories", entry: "repositories.rootPath" },
   organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar" },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup" },
   shortcuts: { title: "Shortcuts", group: "More", entry: "shortcuts.systemWide" },
@@ -291,7 +291,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "general.foldToolCalls", section: "general", title: "Fold tool calls",
-    description: "Once an agent starts answering, the tool calls it made collapse under one line. Off keeps every call expanded.",
+    description: "Once an agent starts answering, the tool calls it made collapse under one line. Off (the default) keeps every step in view.",
     searchTerms: ["general", "fold", "tool", "calls"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.foldToolCalls" },
   }),
@@ -468,6 +468,24 @@ export const SETTINGS_ROWS = [
     description: "Create or join an organization.",
     searchTerms: ["organizations", "create", "organization"], scope: "user",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.rootPath", section: "repositories", title: "Root path",
+    description: "Reveal or copy the repository's root path.",
+    searchTerms: ["repositories", "general", "root", "path"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects.path" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.workspacesPath", section: "repositories", title: "Workspaces path",
+    description: "Reveal or copy the directory used for new workspaces.",
+    searchTerms: ["repositories", "general", "workspaces", "worktrees", "path"], scope: "repository",
+    storage: { kind: "action", location: "Repository worktree directory" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.filesToCopy", section: "repositories", title: "Files to copy",
+    description: "Copy matching ignored, untracked files into new workspaces.",
+    searchTerms: ["repositories", "files", "copy", "ignored", "globs", "worktreeinclude", "env"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects.repositorySettings.filesToCopy; repository .worktreeinclude overrides" }, layout: "content",
   }),
   defineSetting({
     id: "repositories.mergedCleanup", section: "repositories", title: "Workspace cleanup",

@@ -15,7 +15,7 @@ pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 #[path = "git_checkpoints.rs"]
 pub mod checkpoints;
 
-fn git() -> Command {
+pub(crate) fn git() -> Command {
     let mut c = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     c.env("PATH", crate::binpath::login_path());
     c.env("GIT_TERMINAL_PROMPT", "0");
@@ -24,12 +24,59 @@ fn git() -> Command {
 }
 
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = git().current_dir(cwd).args(args).output().with_context(|| format!("git {}", args.join(" ")))?;
+    run_command(git().current_dir(cwd), args)
+}
+
+pub(crate) fn run_command(command: &mut Command, args: &[&str]) -> Result<String> {
+    let out = command.args(args).output().with_context(|| format!("git {}", args.join(" ")))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// A bounded ignored-file scan. Stop Git when its output reaches the byte
+/// limit; never decode a partial NUL-delimited name at that boundary.
+pub(crate) fn file_names_bounded(mut command: Command, args: &[&str], max_files: usize, max_bytes: usize) -> Result<(Vec<String>, bool)> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = command.args(args).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let mut bytes = Vec::new();
+    let read = child.stdout.take().context("Missing Git output")?.take(max_bytes as u64 + 1).read_to_end(&mut bytes);
+    let byte_limit = bytes.len() > max_bytes;
+    if read.is_err() || byte_limit { let _ = child.kill(); }
+    let status = child.wait()?;
+    read?;
+    anyhow::ensure!(byte_limit || status.success(), "Git ignored-file listing failed");
+    if byte_limit {
+        bytes.truncate(max_bytes);
+        bytes.truncate(bytes.iter().rposition(|byte| *byte == 0).map_or(0, |index| index + 1));
+    }
+    let names = String::from_utf8(bytes).context("A file name is not valid UTF-8")?;
+    let mut all = names.split('\0').filter(|name| !name.is_empty());
+    let files = all.by_ref().take(max_files).map(String::from).collect();
+    Ok((files, byte_limit || all.next().is_some()))
+}
+
+/// Unlike --no-index, check-ignore's default also rejects tracked paths,
+/// including tracked files absent from disk. Both conditions must hold before
+/// copying secrets into a checkout whose ignore rules may differ from the source.
+pub(crate) fn ignored_untracked_paths(mut command: Command, paths: &[String]) -> Result<std::collections::BTreeSet<String>> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = command.args(["check-ignore", "-z", "--stdin"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut stdin = child.stdin.take().context("Missing Git input")?;
+    let input = paths.join("\0") + "\0";
+    // Feed stdin while wait_with_output drains stdout, avoiding pipe deadlocks.
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output();
+    let written = writer.join().map_err(|_| anyhow!("Git input writer stopped"))?;
+    let output = output?;
+    anyhow::ensure!(matches!(output.status.code(), Some(0 | 1)), "Git ignore check failed: {}", String::from_utf8_lossy(&output.stderr));
+    written?;
+    Ok(String::from_utf8(output.stdout)?.split('\0').filter(|name| !name.is_empty()).map(String::from).collect())
 }
 
 /// `run` for a command whose exit code is an answer (`merge-tree`): the code
@@ -469,6 +516,10 @@ pub struct ChangedFile {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
+    /// Content identity at the reviewed head. Deletions retain the removed blob's
+    /// identity with a prefix; live diffs without a snapshot have no identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_hash: Option<String>,
     pub status: ChangeStatus,
     pub additions: u32,
     pub deletions: u32,
@@ -493,14 +544,15 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
             bail!("bad head tree id");
         }
     }
-    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", "--name-status", "-z", base];
+    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", "--raw", "--no-abbrev", "-z", base];
     if let Some(h) = head {
         args.push(h);
     }
     args.push("--");
-    // --numstat and --name-status can't be combined in one call; run both.
+    // Read raw statuses separately from line counts, keeping identities independent
+    // of the whitespace display option. -z preserves tabs/newlines in file names.
     let status_out = run(cwd, &args.iter().filter(|a| **a != "--numstat").cloned().collect::<Vec<_>>())?;
-    let mut num_args = args.iter().filter(|a| **a != "--name-status").copied().collect::<Vec<_>>();
+    let mut num_args = args.iter().filter(|a| **a != "--raw").copied().collect::<Vec<_>>();
     if hide_whitespace { num_args.insert(1, "-w"); }
     let num_out = run(cwd, &num_args)?;
 
@@ -530,13 +582,18 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
             i += 1;
             continue;
         }
-        let code = st.chars().next().unwrap_or('M');
+        let raw: Vec<&str> = st.split_whitespace().collect();
+        if raw.len() != 5 || !st.starts_with(':') {
+            bail!("Malformed git diff raw record");
+        }
+        let code = raw[4].chars().next().unwrap_or('M');
+        let blob_hash = head.map(|_| if code == 'D' { format!("deleted:{}", raw[2]) } else { raw[3].to_string() });
         match code {
             'R' | 'C' => {
                 let old = fields.get(i + 1).copied().unwrap_or("").to_string();
                 let new = fields.get(i + 2).copied().unwrap_or("").to_string();
                 let (a, d) = counts.get(&new).copied().unwrap_or((0, 0));
-                out.push(ChangedFile { path: new, old_path: Some(old), status: ChangeStatus::Renamed, additions: a, deletions: d });
+                out.push(ChangedFile { path: new, old_path: Some(old), blob_hash, status: ChangeStatus::Renamed, additions: a, deletions: d });
                 i += 3;
             }
             _ => {
@@ -547,7 +604,7 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
                     'D' => ChangeStatus::Deleted,
                     _ => ChangeStatus::Modified,
                 };
-                out.push(ChangedFile { path: p, old_path: None, status, additions: a, deletions: d });
+                out.push(ChangedFile { path: p, old_path: None, blob_hash, status, additions: a, deletions: d });
                 i += 2;
             }
         }
@@ -714,6 +771,9 @@ pub struct WorktreeBase {
     /// an existing branch, and for sessions made before it was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// Copy outcome at creation, retained for clients that were not connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_copy: Option<crate::worktree_files::CopyReport>,
 }
 
 const WORKTREE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -789,7 +849,7 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     let from = Some(base.clone()).filter(|b| b != "HEAD");
     Ok(CreatedWorktree {
         name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree,
-        worktree_base: Some(WorktreeBase { commit, fetched, warning, from }),
+        worktree_base: Some(WorktreeBase { commit, fetched, warning, from, file_copy: crate::worktree_files::copy_on_create(project, &path) }),
     })
 }
 
@@ -830,7 +890,7 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         branch: local,
         base: commit.clone(),
         base_tree,
-        worktree_base: Some(WorktreeBase { commit, fetched: false, warning: None, from: None }),
+        worktree_base: Some(WorktreeBase { commit, fetched: false, warning: None, from: None, file_copy: crate::worktree_files::copy_on_create(project, &path) }),
     })
 }
 
@@ -1375,11 +1435,25 @@ pub fn remote_url(cwd: &Path) -> Option<String> {
 /// `pushRemote`, else `remote.pushDefault`, else the branch's `remote`. Often
 /// a fork when the work goes to someone else's repository by pull request.
 pub fn push_remote_url(cwd: &Path, branch: &str) -> Option<String> {
-    let config = |key: String| run(cwd, &["config", "--get", &key]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let remote = config(format!("branch.{branch}.pushRemote"))
-        .or_else(|| config("remote.pushDefault".into()))
-        .or_else(|| config(format!("branch.{branch}.remote")))?;
+    let remote = push_remote(cwd, branch)?;
     run(cwd, &["remote", "get-url", &remote]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+pub(crate) fn push_remote(cwd: &Path, branch: &str) -> Option<String> {
+    let config = |key: String| run(cwd, &["config", "--get", &key]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    config(format!("branch.{branch}.pushRemote"))
+        .or_else(|| config("remote.pushDefault".into()))
+        .or_else(|| config(format!("branch.{branch}.remote")))
+}
+
+/// A single explicit destination, before Git's transport URL rewrites. Multiple
+/// push URLs are refused: pipeline automation must write to exactly one repo.
+pub(crate) fn configured_push_url(cwd: &Path, remote: &str) -> Result<String> {
+    let configured = run(cwd, &["config", "--get-all", &format!("remote.{remote}.pushurl")])
+        .or_else(|_| run(cwd, &["config", "--get-all", &format!("remote.{remote}.url")]))?;
+    let urls: Vec<_> = configured.lines().filter(|url| !url.is_empty()).collect();
+    if urls.len() != 1 { anyhow::bail!("Remote {remote} must have exactly one push URL for conflict resolution."); }
+    Ok(urls[0].into())
 }
 
 #[cfg(test)]
@@ -1467,6 +1541,70 @@ mod tests {
         let ws = work_status(p);
         assert!(ws.is_repo && ws.dirty);
         assert_eq!(ws.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn review_blob_identities_cover_renames_deletions_binary_and_live_changes() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        std::fs::write(p.join("old name"), "a unique file to rename\n").unwrap();
+        std::fs::write(p.join("gone"), "removed\n").unwrap();
+        commit_all(p, "fixtures", None).unwrap();
+        let base = head_tree(p).unwrap();
+        let renamed = "new\tname\n.txt";
+        std::fs::rename(p.join("old name"), p.join(renamed)).unwrap();
+        std::fs::remove_file(p.join("gone")).unwrap();
+        std::fs::write(p.join("binary"), [0, 1, 255, 2]).unwrap();
+        std::fs::write(p.join("a.txt"), "hello\nmodified\n").unwrap();
+        let head = snapshot_tree(p).unwrap();
+        let files = changes_between(p, &base, Some(&head)).unwrap();
+        assert_eq!(files.len(), 4);
+        for file in &files {
+            let expected = if file.status == ChangeStatus::Deleted {
+                format!("deleted:{}", run(p, &["rev-parse", &format!("{base}:{}", file.path)]).unwrap().trim())
+            } else {
+                run(p, &["rev-parse", &format!("{head}:{}", file.path)]).unwrap().trim().to_string()
+            };
+            assert_eq!(file.blob_hash.as_deref(), Some(expected.as_str()));
+        }
+        let rename = files.iter().find(|file| file.path == renamed).unwrap();
+        assert_eq!(rename.old_path.as_deref(), Some("old name"));
+        assert_eq!(rename.status, ChangeStatus::Renamed);
+        std::fs::write(p.join("binary"), [0, 3, 255, 2]).unwrap();
+        let next = snapshot_tree(p).unwrap();
+        let updated = changes_between_options(p, &base, Some(&next), true).unwrap();
+        for file in &files {
+            let changed = updated.iter().find(|other| other.path == file.path).unwrap();
+            assert_eq!(file.blob_hash == changed.blob_hash, file.path != "binary");
+        }
+        assert!(changes_between(p, &base, None).unwrap().iter().all(|file| file.blob_hash.is_none()));
+    }
+
+    #[test]
+    fn commit_scope_counts_match_git_show_for_root_regular_and_merge_commits() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let mut commits = log_commits(p, None, 1).unwrap();
+        std::fs::write(p.join("a.txt"), "hello\nmore\n").unwrap();
+        commit_all(p, "regular", None).unwrap();
+        commits.extend(log_commits(p, None, 1).unwrap());
+        run(p, &["checkout", "-b", "other"]).unwrap();
+        std::fs::write(p.join("other.txt"), "other branch\n").unwrap();
+        commit_all(p, "other", None).unwrap();
+        run(p, &["checkout", "main"]).unwrap();
+        std::fs::write(p.join("main.txt"), "main branch\n").unwrap();
+        commit_all(p, "main", None).unwrap();
+        run(p, &["merge", "--no-ff", "other", "-m", "merge"]).unwrap();
+        commits.extend(log_commits(p, None, 1).unwrap());
+        for commit in commits {
+            let base = commit.parent.as_deref().map(|sha| log_commits(p, Some(sha), 1).unwrap()[0].tree.clone()).unwrap_or_else(|| EMPTY_TREE.into());
+            let files = changes_between(p, &base, Some(&commit.tree)).unwrap();
+            let expected = run(p, &["show", "--format=", "--numstat", &commit.sha, "--"]).unwrap();
+            let actual = files.iter().map(|file| format!("{}\t{}\t{}\n", file.additions, file.deletions, file.path)).collect::<String>();
+            assert_eq!(actual.trim(), expected.trim(), "commit {}", commit.sha);
+        }
     }
 
     #[test]

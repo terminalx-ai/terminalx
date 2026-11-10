@@ -62,6 +62,14 @@ describe("transcript search", () => {
     expect(searchTranscript(index, "\r\n a.*b\t", options)[0]).toMatchObject({ from: 7, to: 13 });
   });
 
+  it("normalizes whitespace runs without trimming boundaries or changing Unicode match offsets", () => {
+    const t = { ...turn("spaces"), prompt: { seq: 1, ts: "", text: "\t\r\nİ\u00a0\u2003😀\t\tσ\u2028\u2029a.*b \r\n" } };
+    const index = createChatSearchIndex()(transcript([t]));
+    expect(index[0].text).toBe(" İ 😀 σ a.*b ");
+    expect(searchTranscript(index, "\u00a0😀\r\nσ\t", options)).toMatchObject([{ from: 2, to: 8 }]);
+    expect(searchTranscript(index, "a.*b", options)).toMatchObject([{ from: 8, to: 12 }]);
+  });
+
   it("indexes error summaries and the agent's details separately", () => {
     const t = turn("failed");
     t.work = [{ kind: "error", key: "err", seq: 1, text: "request failed", detail: "missing credential" }];

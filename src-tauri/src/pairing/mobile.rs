@@ -108,10 +108,15 @@ impl MobileRuntime {
         let _ = self.codex_models.set(cache);
     }
 
-    pub(super) fn configure(&self, sink: Arc<dyn EventSink>) -> Result<()> {
-        self.sink
-            .set(sink)
-            .map_err(|_| anyhow!("mobile runtime was already configured"))
+    pub(super) fn configure(self: &Arc<Self>, sink: Arc<dyn EventSink>) -> Result<()> {
+        self.sink.set(sink.clone()).map_err(|_| anyhow!("mobile runtime was already configured"))?;
+        for event in ["tab_status", "session_created", "session_updated", crate::session_ops::SESSION_DELETED_EVENT] {
+            let runtime = Arc::downgrade(self);
+            sink.listen(event, Box::new(move |_| {
+                if let Some(runtime) = runtime.upgrade() { runtime.broadcast_sessions_changed(); }
+            }));
+        }
+        Ok(())
     }
 
     fn register_client(&self, id: &str, outbound: mpsc::Sender<Value>, overflowed: Arc<std::sync::atomic::AtomicBool>) {
@@ -674,6 +679,7 @@ fn session_summaries() -> Result<Value> {
             "kind": if quick { "quick" } else { "project" },
             "branch": branch,
             "title": session.title,
+            "manualStatus": session.manual_status,
             "project": project,
             "worktree": worktree,
             "modified": summary.map(|row| row.updated_at.clone()).unwrap_or(session.modified),
@@ -1187,6 +1193,7 @@ fn phone_projects() -> Result<Vec<Value>> {
         "id": store::projects::public_id(&project.path),
         "name": project.name,
         "git": project.kind == store::projects::ProjectKind::Git,
+        "repositorySettings": project.repository_settings,
         "lastUsed": last.as_deref() == Some(project.path.as_str()),
     })).collect())
 }
@@ -1751,6 +1758,30 @@ fn collapse_notification_text(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::events::TurnStatus;
+
+    #[test]
+    fn manual_status_changes_notify_the_phone_and_change_its_summary() {
+        let _home = store::temp_home();
+        let session: SessionEntry = serde_json::from_value(json!({
+            "id":"manual", "projectPath":"/repo", "cwd":"/repo", "title":"Review", "created":"2026-01-01", "modified":"2026-01-01"
+        })).unwrap();
+        index::save(&[session]).unwrap();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(16));
+        let runtime = Arc::new(MobileRuntime::new());
+        runtime.configure(sink.clone()).unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        runtime.register_client("phone", tx, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let before = session_summaries().unwrap();
+        assert!(before["sessions"][0]["manualStatus"].is_null());
+        let patch = crate::session_ops::SessionPatch { manual_status: Some(index::ManualStatus::InReview), ..Default::default() };
+        let updated = crate::session_ops::update_session_meta("manual", &patch).unwrap();
+        sink.emit("session_updated", &updated);
+        assert_eq!(rx.try_recv().unwrap(), json!({"method":"sessions.changed"}));
+        let after = session_summaries().unwrap();
+        assert_eq!(after["sessions"][0]["manualStatus"], "in_review");
+        // Conditional summary reads must also see the metadata change.
+        assert_ne!(conditional(before, None).unwrap()["version"], conditional(after, None).unwrap()["version"]);
+    }
 
     #[test]
     fn a_prompt_image_is_read_only_from_its_session_attachments() {
@@ -2585,8 +2616,9 @@ mod tests {
         let repo = store::projects::add(root.join("repo").to_str().unwrap()).unwrap();
         let old = store::projects::add(root.join("old").to_str().unwrap()).unwrap();
         store::projects::update(&old.path, store::projects::ProjectPatch { archived: Some(true), ..Default::default() }).unwrap();
+        store::projects::update(&repo.path, store::projects::ProjectPatch { repository_settings: Some(store::projects::RepositorySettings { files_to_copy: vec![".env*".into()] }), ..Default::default() }).unwrap();
         let projects = phone_projects().unwrap();
-        assert_eq!(projects, vec![json!({ "id": store::projects::public_id(&repo.path), "name": "repo", "git": false, "lastUsed": false })]);
+        assert_eq!(projects, vec![json!({ "id": store::projects::public_id(&repo.path), "name": "repo", "git": false, "repositorySettings": {"filesToCopy": [".env*"]}, "lastUsed": false })]);
         assert!(!serde_json::to_string(&projects).unwrap().contains(&root.to_string_lossy().into_owned()));
         assert_eq!(store::projects::by_public_id(projects[0]["id"].as_str().unwrap()).unwrap().path, repo.path);
     }

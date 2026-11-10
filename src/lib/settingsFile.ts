@@ -39,9 +39,9 @@ function enqueue(work: () => Promise<void>) {
   return queue;
 }
 
-function save(patch: Record<string, unknown>) {
+function save(patch: Record<string, unknown>): Promise<void> {
   pending.push(patch);
-  void enqueue(async () => {
+  return enqueue(async () => {
     try {
       const file = await invoke<SettingsFileStatus>("update_user_preferences", { patch, migrate: false });
       pending.splice(pending.indexOf(patch), 1);
@@ -72,6 +72,26 @@ async function refresh() {
     connectThemeFile(save);
   }
   apply(file);
+  unfoldToolCallsOnce(file);
+}
+
+/**
+ * Fold tool calls turned off by default (steps stay in view, in order), but moving preferences into the settings
+ * file wrote every value of the time into it, defaults included, so for most people `true` there is the old default,
+ * not a choice. Once per computer, a `true` becomes the new default; turned back on after that, it stays on.
+ */
+const UNFOLDED = "raccoon.migrated.foldToolCallsOff";
+function unfoldToolCallsOnce(file: SettingsFileStatus) {
+  if (!connected || file.error) return;
+  try {
+    if (localStorage.getItem(UNFOLDED)) return;
+  } catch {
+    return;
+  }
+  const done = () => { try { localStorage.setItem(UNFOLDED, "1"); } catch { /* storage unavailable */ } };
+  if (file.preferences?.foldToolCalls !== true) return done();
+  // Marked done only once the file says so: a save that failed is tried again at the next start.
+  void save({ foldToolCalls: false }).then(() => { if (state.file?.preferences?.foldToolCalls === false) done(); });
 }
 
 /** Subscribe before reading so edits during startup cannot be missed. */

@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn the_resolver_commits_its_merge_before_any_check_and_amends_fixes_into_it() {
-        let resolution = crate::issue_pipeline::Resolution { head: "1111111111aa".into(), remote_head: None, base: "main".into(), base_commit: "2222222222bb".into(), return_stage: crate::issue_pipeline::Stage::Work, waiting_since: None };
+        let resolution = crate::issue_pipeline::Resolution { head: "1111111111aa".into(), remote_head: None, target: None, base: "main".into(), base_commit: "2222222222bb".into(), return_stage: crate::issue_pipeline::Stage::Work, waiting_since: None };
         let prompt = resolve(&resolution);
         assert!(prompt.contains("The original head is 1111111111aa. The base main is pinned to 2222222222bb."));
         // `--no-ff` stays: verification wants exactly one commit with both parents.

@@ -74,6 +74,10 @@ impl Sessions {
         self.call("runtime.session.deleteSession", json!({"sessionId":session}))
     }
 
+    pub fn set_manual_status(&self, session: &str, status: crate::store::index::ManualStatus) -> Result<()> {
+        self.call("runtime.session.manualStatus", json!({"sessionId":session,"status":status}))
+    }
+
     pub fn automations(&self) -> Result<Vec<crate::automations::Automation>> {
         self.quick("runtime.session.automations", json!({}))
     }

@@ -253,9 +253,30 @@
 
 /* ---------- Transcript prose ---------- */
 .prose-chat {
-  font-size: 14px;
-  line-height: 1.65;
+  /* 15px reads without effort at a desk; 14px was small for long replies. Body text a step softer than full white, so
+     what is bold, a heading or a link stands out of it. */
+  font-size: 15px;
+  line-height: 1.7;
   overflow-wrap: anywhere;
+  color: color-mix(in oklab, var(--foreground) 86%, transparent);
+}
+/* A line the eye can follow back: about 70 characters, not the column's 110. Tables and code keep the full width. */
+.prose-chat p,
+.prose-chat li,
+.prose-chat blockquote,
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3,
+.prose-chat h4 {
+  max-width: 72ch;
+}
+.prose-chat strong,
+.prose-chat b,
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3,
+.prose-chat h4 {
+  color: var(--foreground);
 }
 .prose-chat > :first-child {
   margin-top: 0;
@@ -268,7 +289,7 @@
 .prose-chat ol,
 .prose-chat blockquote,
 .prose-chat table {
-  margin: 0.6em 0;
+  margin: 0.75em 0;
 }
 .prose-chat h1,
 .prose-chat h2,
@@ -303,12 +324,20 @@
   color: var(--foreground);
   text-decoration: none;
 }
+/* A quiet pill: set apart from the words by its face, a soft ground and a warm tint, not by an outline that pulls the eye. */
 .prose-chat code:not(pre code) {
   font-family: var(--font-mono);
-  font-size: 0.92em;
-  background: var(--code-bg);
-  border-radius: 4px;
-  padding: 0.1em 0.35em;
+  font-size: 0.84em;
+  color: color-mix(in oklab, var(--accent) 55%, var(--foreground));
+  background: var(--veil-raised);
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  padding: 0.12em 0.38em;
+  /* Its own line box is no taller than the text's, so a pill on a line does not open it up. */
+  line-height: 1;
+  /* Broken across lines, each part is a whole pill. */
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 .prose-chat pre {
   font-family: var(--font-mono);

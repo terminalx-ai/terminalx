@@ -559,7 +559,7 @@ export function SessionView({
             <div className="flex min-w-0 flex-1 items-center gap-1 text-sm" data-testid="session-compact-leading">{chrome?.leading}</div>
           ) : (
           /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
-          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
+          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden @max-[360px]/session-header:gap-0.5 @max-[360px]/session-header:px-0 @max-[360px]/session-header:[&>*]:ml-0")} data-testid="session-breadcrumb">
             {/* Where the project lives, first: GitHub's mark (the account on hover; a click asks GitHub again), GitLab's, another host, or this computer when it has no remote yet. */}
             {identityPath && githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(identityPath)} />}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}

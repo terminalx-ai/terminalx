@@ -31,7 +31,8 @@ export interface ChatMatch {
 export const MAX_CHAT_MATCHES = 10_000;
 
 export const searchId = (turn: string, part: string) => `chat-find:${encodeURIComponent(turn)}:${encodeURIComponent(part)}`;
-// Join normalized pieces while indexing, avoiding deferred string flattening on the first query.
+// Join materializes normalized text while building the index. Repeated replace
+// can leave a chain of string fragments whose first search pays to flatten it.
 export const searchText = (text: string) => text.split(/\s+/).join(" ");
 
 const markdown = unified().use(remarkParse).use(remarkGfm).use(remarkCodexFileCitations);

@@ -5,7 +5,7 @@ vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (path: string) => `asse
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@/lib/browser", () => ({ openBrowserTab: vi.fn() }));
 
-import { TurnBlock } from "./TurnBlock";
+import { TurnBlock, hasMarkdownTable, splitMarkdownTables } from "./TurnBlock";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Turn } from "@/lib/transcript";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -347,4 +347,26 @@ it("resets only a completed successful turn using its completion sequence", () =
   expect(onReset).toHaveBeenCalledWith(19);
   view.rerender(<TurnBlock turn={{ ...value, completed: { ...value.completed, status: "aborted" } }} sessionId="s" stream={[]} working={false} onReset={onReset} />);
   expect(screen.queryByRole("button", { name: "Reset to here" })).toBeNull();
+});
+
+describe("a pasted Markdown table in a message", () => {
+  it("is told apart from text that only has pipes in it", () => {
+    expect(hasMarkdownTable("| PR | State |\n|---|---|\n| #829 | merged |")).toBe(true);
+    expect(hasMarkdownTable("Before\nName | Size\n:--- | ---:\nx | 1")).toBe(true);
+    expect(hasMarkdownTable("use a || b here\nand then go")).toBe(false);
+    expect(hasMarkdownTable("x | y\n- a list item")).toBe(false);
+    expect(hasMarkdownTable("plain text")).toBe(false);
+    expect(hasMarkdownTable("|a|b|\n|-|-|")).toBe(true);
+    expect(hasMarkdownTable("| one |\n| --- |\n| x |")).toBe(true);
+    expect(hasMarkdownTable("a heading\n---")).toBe(false);
+  });
+
+  it("keeps the lines around a table as they were typed", () => {
+    const parts = splitMarkdownTables("Check these:\n*not* a list\n| A | B |\n|---|---|\n| 1 | 2 |\nThanks");
+    expect(parts).toEqual([
+      { table: false, text: "Check these:\n*not* a list" },
+      { table: true, text: "| A | B |\n|---|---|\n| 1 | 2 |" },
+      { table: false, text: "Thanks" },
+    ]);
+  });
 });
