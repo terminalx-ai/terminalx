@@ -52,6 +52,8 @@ jobs:
         run: pnpm exec tsc --noEmit
       - name: tsc (phone app)
         run: pnpm --dir mobile exec tsc --noEmit
+      - name: Install shells used by the tests
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - name: vitest
         run: pnpm vitest run
 
@@ -79,8 +81,8 @@ jobs:
 
   check:
     runs-on: macos-latest
-    # Main's step timings put the Rust/native suite at about 45–50m. Leave room
-    # for a rebuild and main's cache upload; frontend and WebKit run above.
+    # Without frontend, WebKit, or #786, the Rust/native suite is expected
+    # to take 42–48m. Leave room for code generation and main's cache upload.
     timeout-minutes: 60
 
     steps:
@@ -147,10 +149,6 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test
-
-      - name: Local issue starts without desktop features (#786)
-        working-directory: src-tauri
-        run: cargo test --no-default-features --features local-ui --lib control::issue_tests
 
       - name: Save the cargo cache
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
@@ -252,6 +250,11 @@ jobs:
       - name: Computer contract tests
         working-directory: src-tauri
         run: "cargo test --lib computer::"
+      # The local owner path needs no macOS APIs; reuse Linux's build setup.
+      - name: Local issue starts without desktop features (#786)
+        if: runner.os == 'Linux'
+        working-directory: src-tauri
+        run: cargo test --no-default-features --features local-ui --lib control::issue_tests
       - name: Windows process exit observation
         if: runner.os == 'Windows'
         working-directory: src-tauri
