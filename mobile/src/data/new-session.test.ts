@@ -6,7 +6,7 @@ import { agentDefaults, blocked, chooseModel, initialChoices, request } from "./
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client-id" }));
 
 const options: NewSessionOptions = {
-  projects: [{ id: "p-notes", name: "notes", git: false, lastUsed: false }, { id: "p-repo", name: "terminalx", git: true, lastUsed: true }],
+  projects: [{ id: "p-notes", name: "notes", git: false, lastUsed: false }, { id: "p-repo", name: "terminalx", git: true, lastUsed: true, repositorySettings: { filesToCopy: [".env*"] } }],
   agents: [
     { id: "opencode", name: "OpenCode", available: false, installHint: "brew install opencode", effort: false, permissionModes: false, models: [] },
     { id: "codex", name: "Codex", available: true, installHint: "", effort: true, permissionModes: true, models: [

@@ -1,8 +1,8 @@
 import { configure } from "@testing-library/dom";
 
-// Shared development hosts can spend seconds paging while a UI update settles.
-// Opt in for local validation without relaxing the normal suite's wait limit.
-const asyncTimeout = Number(process.env.VITEST_ASYNC_TIMEOUT);
+// Keep Testing Library's default unless a run explicitly opts into a budget.
+// Retain the older _MS alias; the main branch's name takes precedence.
+const asyncTimeout = Number(process.env.VITEST_ASYNC_TIMEOUT ?? process.env.VITEST_ASYNC_TIMEOUT_MS);
 if (Number.isFinite(asyncTimeout) && asyncTimeout > 0) configure({ asyncUtilTimeout: asyncTimeout });
 
 // jsdom lays nothing out and ships no ResizeObserver. Components observe
