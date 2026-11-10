@@ -2379,6 +2379,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             tabs: vec![new_tab.clone()],
             active_tab: Some(new_tab.id.clone()),
             link: None,
+            parent: None,
             unknown: BTreeMap::new(),
         };
         if src.worktree_name.is_some() && !src.worktree_removed {
@@ -4035,6 +4036,7 @@ mod command_tests {
         let before = git(&project, &["worktree", "list", "--porcelain"]);
 
         let session = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: None,
@@ -4074,6 +4076,7 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let first = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
@@ -4094,6 +4097,7 @@ mod command_tests {
         })
         .unwrap();
         let second = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Second".into()),
@@ -4142,6 +4146,7 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let session = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
@@ -4193,6 +4198,7 @@ mod command_tests {
         git(&project, &["worktree", "add", "-q", "-b", "feature/attached", worktree.to_str().unwrap()]);
 
         let created = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Attached session".into()),
@@ -4219,6 +4225,7 @@ mod command_tests {
         })
         .unwrap();
         let companion = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Companion session".into()),
@@ -4234,6 +4241,7 @@ mod command_tests {
         })
         .unwrap();
         let bystander = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Session on main".into()),
@@ -4357,6 +4365,7 @@ mod command_tests {
             manual_status: Default::default(),
             tabs: Vec::new(),
             link: None,
+            parent: None,
             active_tab: None,
             unknown: Default::default(),
         };

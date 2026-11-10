@@ -624,6 +624,11 @@ impl ControlService {
                     .map_err(ControlError::internal)?)
             }
             "sessions.create" => self.sessions_create(params),
+            // Commands of their own, not switches on `sessions.list`: a
+            // runtime that does not know them refuses, where one handed an
+            // unknown switch would answer with every session there is.
+            "sessions.children" => self.sessions_children(params),
+            "sessions.stop" => self.sessions_stop(params),
             // The floating window is the desktop app's; the request is handed
             // to it as an event, so this service needs no window of its own.
             "floating.show" | "floating.hide" | "floating.toggle" => {
@@ -779,6 +784,58 @@ impl ControlService {
         Ok(json!({"sessions": sessions}))
     }
 
+    /// `sessions list --children-of`: the sessions a lead started (PRO-270),
+    /// in every project and worktree, quick chats and archived ones included.
+    fn sessions_children(&self, params: Value) -> Result<Value, ControlError> {
+        let sessions = index::load().map_err(ControlError::internal)?;
+        let lead = resolve_lead(&sessions, &required_string(&params, "childrenOf")?)?;
+        let children: Vec<_> = sessions.into_iter().filter(|session| session.started_by(&lead.session_id)).collect();
+        let workers: Vec<_> = children.iter().map(|session| self.worker(session)).collect();
+        Ok(json!({"parent": lead, "workers": workers, "sessions": children}))
+    }
+
+    /// One row of `sessions list --children-of`: what a lead asks of a worker
+    /// without reading its whole entry. Model, effort and status are those of
+    /// the session's own agent, the first it was given.
+    fn worker(&self, session: &SessionEntry) -> Value {
+        let agents = || session.tabs.iter().filter(|tab| !tab.is_terminal());
+        let tab = agents().min_by(|a, b| a.created.cmp(&b.created));
+        json!({
+            "sessionId": session.id, "title": session.title, "kind": session.kind,
+            "tabId": tab.map(|tab| &tab.id), "agent": tab.map(|tab| &tab.harness),
+            "status": tab.map(|tab| tab.status), "model": tab.map(|tab| &tab.model), "effort": tab.and_then(|tab| tab.effort.as_ref()),
+            "running": agents().any(|tab| self.manager.is_running(&session.id, &tab.id)),
+            "worktree": session.worktree_name, "path": session.cwd, "branch": session.branch,
+            "archived": session.archived, "created": session.created, "parent": session.parent,
+        })
+    }
+
+    /// `sessions stop --children-of`: stop every running agent of the
+    /// sessions a lead started. As Stop in the window does, it ends the
+    /// agent and keeps the conversation, which its next prompt resumes. A
+    /// terminal, and an agent a person started by hand in one, are theirs
+    /// and are left running. The lead itself is not touched.
+    fn sessions_stop(&self, params: Value) -> Result<Value, ControlError> {
+        let sessions = index::load().map_err(ControlError::internal)?;
+        let lead = resolve_lead(&sessions, &required_string(&params, "childrenOf")?)?;
+        let (mut stopped, mut failed, mut workers) = (Vec::new(), Vec::new(), 0);
+        for session in sessions.iter().filter(|session| session.started_by(&lead.session_id)) {
+            workers += 1;
+            for tab in session.tabs.iter().filter(|tab| !tab.is_terminal() && !tab.by_hand()) {
+                if !self.manager.is_running(&session.id, &tab.id) {
+                    continue;
+                }
+                let row = json!({"sessionId": session.id, "tabId": tab.id, "title": session.title});
+                match self.manager.stop(&session.id, &tab.id) {
+                    Ok(()) => stopped.push(row),
+                    // One that would not stop does not keep the rest running.
+                    Err(error) => failed.push(json!({"sessionId": session.id, "tabId": tab.id, "title": session.title, "error": format!("{error:#}")})),
+                }
+            }
+        }
+        Ok(json!({"parent": lead, "workers": workers, "stopped": stopped, "failed": failed}))
+    }
+
     fn sessions_create(&self, params: Value) -> Result<Value, ControlError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -825,6 +882,15 @@ impl ControlService {
             effort: Option<String>,
             #[serde(default)]
             mode: Option<String>,
+            /// `--parent`: the session to record as having started this one.
+            #[serde(default)]
+            parent: Option<String>,
+            /// `--no-parent`: record none, whoever asks.
+            #[serde(default)]
+            no_parent: bool,
+            /// Where the command ran, as the CLI found it in its environment.
+            #[serde(default)]
+            caller: Value,
         }
         let mut p: Params = serde_json::from_value(params)
             .map_err(|e| ControlError::invalid(format!("Invalid session request: {e}")))?;
@@ -855,6 +921,9 @@ impl ControlService {
                 return Err(ControlError::invalid("--name requires a new worktree and cannot be used with --on-main."));
             }
         }
+        // Settled before anything is created: a parent nobody knows must not
+        // leave a session or a worktree behind.
+        let parent = parent_of_new_session(p.parent.as_deref(), p.no_parent, &p.caller)?;
         let available = crate::harness::offered()
             .into_iter()
             .find(|h| h.id == p.agent)
@@ -887,7 +956,7 @@ impl ControlService {
             None => {
                 // The title a quick chat started from the window gets: the prompt's first line.
                 let title = p.title.or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
-                let quick = crate::session_ops::NewQuickChat { section_id: None, title, cwd: p.cwd, tab: Some(first_tab) };
+                let quick = crate::session_ops::NewQuickChat { section_id: None, title, cwd: p.cwd, tab: Some(first_tab), parent };
                 crate::session_ops::create_quick_chat_blocking(&*self.sink, quick).map_err(ControlError::invalid)?
             }
             Some(selector) => {
@@ -903,6 +972,7 @@ impl ControlService {
                 crate::session_ops::create_named_session_blocking(
                     &*self.sink,
                     NewSession {
+                        parent,
                         section_id: None,
                         project_path: project.path,
                         title: p.title,
@@ -952,7 +1022,7 @@ impl ControlService {
             .send(&entry.id, &tab.id, prompt, Vec::new())
             .map_err(ControlError::internal)?;
         Ok(json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title, "kind": entry.kind,
-            "worktreeName": entry.worktree_name, "branch": entry.branch, "path": entry.cwd,
+            "worktreeName": entry.worktree_name, "branch": entry.branch, "path": entry.cwd, "parent": entry.parent,
             "session": entry, "outcome": outcome, "pipeline": pipeline, "pipelineNote": pipeline_note}))
     }
 
@@ -1546,6 +1616,66 @@ fn validate_control_session_target(use_worktree: bool, on_main: bool) -> Result<
     Ok(())
 }
 
+/// Who a new session is recorded as started by (PRO-270). `--no-parent`
+/// records nobody and `--parent` the session it names, which must exist.
+/// Otherwise it is the session the command ran in, when the app knows it:
+/// that is only what the command's environment says, which is enough for a
+/// record that grants nothing, and a session the app does not know (the
+/// environment of one since deleted) is simply not recorded.
+fn parent_of_new_session(parent: Option<&str>, no_parent: bool, caller: &Value) -> Result<Option<index::ParentRef>, ControlError> {
+    if no_parent {
+        return match parent {
+            Some(_) => Err(ControlError::invalid("--parent and --no-parent are mutually exclusive.")),
+            None => Ok(None),
+        };
+    }
+    let calling = caller["session"].as_str().and_then(|id| index::get(id).ok());
+    let session = match parent.map(str::trim) {
+        Some("") => return Err(ControlError::invalid("--parent needs a session.")),
+        Some(selector) => resolve_session(selector).map_err(|error| match error.code.as_str() {
+            "not_found" => ControlError::new(
+                "parent_not_found",
+                format!("No session matches --parent {selector}."),
+                Some("Use a session id from `terminalx sessions list --json`, or --no-parent to record none.".into()),
+            ),
+            _ => error,
+        })?,
+        None => match calling.clone() {
+            Some(session) => session,
+            None => return Ok(None),
+        },
+    };
+    // The tab is the caller's own: `--parent` naming another session says
+    // nothing of which of its tabs asked.
+    let tab_id = calling.filter(|calling| calling.id == session.id)
+        .and_then(|_| caller["tab"].as_str())
+        .filter(|tab| session.tab(tab).is_some())
+        .map(str::to_owned);
+    Ok(Some(index::ParentRef { session_id: session.id, tab_id }))
+}
+
+/// The lead `--children-of` names.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Lead {
+    session_id: String,
+    title: Option<String>,
+    /// False once the lead was deleted: its workers still name it.
+    exists: bool,
+}
+
+/// A session by id or the start of one, as everywhere else; or the full id
+/// of a lead that is gone, which the sessions it started still record.
+fn resolve_lead(sessions: &[SessionEntry], selector: &str) -> Result<Lead, ControlError> {
+    match resolve_session(selector) {
+        Ok(session) => Ok(Lead { session_id: session.id, title: Some(session.title), exists: true }),
+        Err(error) if error.code == "not_found" && sessions.iter().any(|session| session.started_by(selector)) => {
+            Ok(Lead { session_id: selector.to_owned(), title: None, exists: false })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn resolve_target(selector: &str) -> Result<Target, ControlError> {
     let sessions = index::load().map_err(ControlError::internal)?;
     if let Some(session) = sessions
@@ -1823,6 +1953,7 @@ mod tests {
         })).unwrap()).unwrap();
         // Pointed at the project's own folder: still not one of the project's sessions.
         let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            parent: None,
             section_id: None,
             title: Some("Quick question".into()), cwd: Some(project.path.clone()), tab: None,
         }).unwrap();
@@ -1934,6 +2065,7 @@ mod tests {
             "projectPath": other.path, "title": "Another project's", "useWorktree": false, "cwd": cwd,
         })).unwrap()).unwrap();
         let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            parent: None,
             section_id: None,
             title: Some("Quick look".into()), cwd: Some(cwd.clone()), tab: None,
         }).unwrap();
@@ -2033,6 +2165,133 @@ mod tests {
         // Another folder is still another project.
         let unrelated = projects::add(links.path().to_str().unwrap()).unwrap();
         assert!(ids(&service.execute("sessions.list", json!({"project": unrelated.path}), "r").unwrap()["sessions"]).is_empty());
+    }
+
+    /// PRO-270: who started a new session, settled before it is created.
+    #[test]
+    fn a_new_sessions_parent_is_the_caller_the_named_session_or_nobody() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let session = || crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let (lead, other) = (session(), session());
+        let lead_tab = lead.tabs[0].id.clone();
+        let from_lead = json!({"session": lead.id, "tab": lead_tab});
+        let parent = |session: &SessionEntry, tab: Option<&str>| Some(index::ParentRef { session_id: session.id.clone(), tab_id: tab.map(str::to_owned) });
+
+        // Run in a session: that session and the tab that asked.
+        assert_eq!(parent_of_new_session(None, false, &from_lead).unwrap(), parent(&lead, Some(&lead_tab)));
+        // A tab that is not the session's is not recorded as one of its tabs.
+        assert_eq!(parent_of_new_session(None, false, &json!({"session": lead.id, "tab": other.tabs[0].id})).unwrap(), parent(&lead, None));
+        // Run anywhere else, or in a session the app no longer has: nobody, and no failure.
+        for nobody in [Value::Null, json!({}), json!({"session": null, "tab": null}), json!({"session": "gone", "tab": "t"}), json!({"session": &lead.id[..lead.id.len() - 2]})] {
+            assert_eq!(parent_of_new_session(None, false, &nobody).unwrap(), None, "{nobody}");
+        }
+        // --parent wins over where it ran, by id or the start of one; the tab is known only when it is the caller's own session.
+        assert_eq!(parent_of_new_session(Some(&other.id), false, &from_lead).unwrap(), parent(&other, None));
+        assert_eq!(parent_of_new_session(Some(&lead.id[..lead.id.len() - 2]), false, &from_lead).unwrap(), parent(&lead, Some(&lead_tab)));
+        assert_eq!(parent_of_new_session(Some(&lead.id), false, &Value::Null).unwrap(), parent(&lead, None));
+        // --no-parent: nobody, whoever asks.
+        assert_eq!(parent_of_new_session(None, true, &from_lead).unwrap(), None);
+        assert_eq!(parent_of_new_session(Some(&lead.id), true, &from_lead).unwrap_err().code, "invalid_arguments");
+        // An unknown parent is its own error, and an ambiguous one stays ambiguous.
+        let unknown = parent_of_new_session(Some("no-such-session"), false, &from_lead).unwrap_err();
+        assert_eq!(unknown.code, "parent_not_found");
+        assert!(unknown.message.contains("no-such-session") && unknown.recovery.unwrap().contains("--no-parent"));
+        assert_eq!(parent_of_new_session(Some(""), false, &from_lead).unwrap_err().code, "invalid_arguments");
+        let shared: String = lead.id.chars().zip(other.id.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect();
+        assert!(!shared.is_empty(), "two ids made in the same moment share their timestamp");
+        assert_eq!(parent_of_new_session(Some(&shared), false, &Value::Null).unwrap_err().code, "ambiguous_selector");
+
+        // The request refuses an unknown parent before it creates anything.
+        let (service, _sink) = headless_service();
+        for request in [
+            json!({"project": project.path, "agent": "claude", "prompt": "hi", "useWorktree": true, "parent": "no-such-session"}),
+            json!({"quick": true, "agent": "claude", "prompt": "hi", "parent": "no-such-session"}),
+        ] {
+            let before = index::load().unwrap().len();
+            let refused = service.execute("sessions.create", request, "r").unwrap_err();
+            assert_eq!(refused.code, "parent_not_found");
+            assert_eq!(index::load().unwrap().len(), before);
+        }
+    }
+
+    /// PRO-270: exactly the sessions a lead started, wherever they are.
+    #[test]
+    fn a_leads_workers_are_listed_across_projects_and_worktrees_and_outlive_it() {
+        let _home = crate::store::temp_home();
+        let (repo, elsewhere) = (git_repo(), tempfile::tempdir().unwrap());
+        let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+        let second = projects::add(elsewhere.path().to_str().unwrap()).unwrap();
+        let started_by = |lead: Option<&SessionEntry>| lead.map(|lead| json!({"sessionId": lead.id, "tabId": lead.tabs[0].id})).unwrap_or(Value::Null);
+        let create = |project: &Project, worktree: bool, lead: Option<&SessionEntry>| crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": worktree, "title": "worker", "parent": started_by(lead),
+            "tab": {"harness": "codex", "model": "gpt-5.5", "effort": "high"},
+        })).unwrap()).unwrap();
+        let lead = create(&project, false, None);
+        let rival = create(&project, false, None);
+        // The lead's: one in a worktree of its own project, one in another project, a quick chat, an archived one.
+        let in_worktree = create(&project, true, Some(&lead));
+        let in_other_project = create(&second, false, Some(&lead));
+        let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            parent: Some(index::ParentRef { session_id: lead.id.clone(), tab_id: None }),
+            section_id: None, title: Some("Quick look".into()), cwd: None, tab: None,
+        }).unwrap();
+        let archived = create(&project, false, Some(&lead));
+        // Not the lead's: another lead's worker, a worker's own worker, and one nobody started.
+        let rivals = create(&project, true, Some(&rival));
+        let grandchild = create(&project, false, Some(&in_worktree));
+        let unowned = create(&project, true, None);
+        let (service, _sink) = headless_service();
+        service.execute("sessions.archive", json!({"sessions": [archived.id]}), "r").unwrap();
+
+        let listed = service.execute("sessions.children", json!({"childrenOf": lead.id}), "r").unwrap();
+        let mine: std::collections::BTreeSet<String> = [&in_worktree, &in_other_project, &quick, &archived].iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids(&listed["sessions"]), mine);
+        assert_eq!(listed["parent"], json!({"sessionId": lead.id, "title": lead.title, "exists": true}));
+        let workers = listed["workers"].as_array().unwrap();
+        assert_eq!(workers.iter().map(|worker| worker["sessionId"].as_str().unwrap().to_string()).collect::<std::collections::BTreeSet<_>>(), mine);
+        let row = |session: &SessionEntry| workers.iter().find(|worker| worker["sessionId"] == session.id.as_str()).unwrap().clone();
+        let worker = row(&in_worktree);
+        assert_eq!(worker, json!({
+            "sessionId": in_worktree.id, "title": "worker", "kind": "project",
+            "tabId": in_worktree.tabs[0].id, "agent": "codex", "status": "idle", "model": "gpt-5.5", "effort": "high", "running": false,
+            "worktree": in_worktree.worktree_name, "path": in_worktree.cwd, "branch": in_worktree.branch,
+            "archived": false, "created": in_worktree.created, "parent": {"sessionId": lead.id, "tabId": lead.tabs[0].id},
+        }));
+        assert!(worker["worktree"].is_string() && worker["branch"].is_string() && worker["path"] != json!(project.path));
+        assert_eq!((&row(&in_other_project)["path"], &row(&in_other_project)["worktree"]), (&json!(in_other_project.cwd), &Value::Null));
+        assert_eq!(row(&archived)["archived"], true);
+        // A quick chat with no agent yet has none of an agent's fields.
+        assert_eq!((&row(&quick)["kind"], &row(&quick)["tabId"], &row(&quick)["status"], &row(&quick)["model"]), (&json!("quick"), &Value::Null, &Value::Null, &Value::Null));
+
+        // By the start of the id too; each lead has its own, and a worker is a lead of what it started.
+        assert_eq!(ids(&service.execute("sessions.children", json!({"childrenOf": &rival.id[..rival.id.len() - 1]}), "r").unwrap()["sessions"]), [rivals.id.clone()].into());
+        assert_eq!(ids(&service.execute("sessions.children", json!({"childrenOf": in_worktree.id}), "r").unwrap()["sessions"]), [grandchild.id.clone()].into());
+        assert!(ids(&service.execute("sessions.children", json!({"childrenOf": unowned.id}), "r").unwrap()["sessions"]).is_empty());
+        // The plain list is what it was: the link filters nothing there.
+        assert_eq!(service.execute("sessions.list", json!({}), "r").unwrap()["sessions"].as_array().unwrap().len(), 8);
+        for (params, code) in [(json!({}), "invalid_arguments"), (json!({"childrenOf": "no-such-session"}), "not_found")] {
+            assert_eq!(service.execute("sessions.children", params.clone(), "r").unwrap_err().code, code);
+            assert_eq!(service.execute("sessions.stop", params, "r").unwrap_err().code, code);
+        }
+
+        // Nothing of the lead's is running: stopping them stops nothing, and says how many it looked at.
+        let stopped = service.execute("sessions.stop", json!({"childrenOf": lead.id}), "r").unwrap();
+        assert_eq!((&stopped["workers"], &stopped["stopped"], &stopped["failed"]), (&json!(4), &json!([]), &json!([])));
+
+        // Archiving the lead, then deleting it, leaves its workers and their record as they are.
+        service.execute("sessions.archive", json!({"sessions": [lead.id]}), "r").unwrap();
+        assert_eq!(ids(&service.execute("sessions.children", json!({"childrenOf": lead.id}), "r").unwrap()["sessions"]), mine);
+        index::update(|sessions| { sessions.retain(|session| session.id != lead.id); Ok(()) }).unwrap();
+        let orphaned = service.execute("sessions.children", json!({"childrenOf": lead.id}), "r").unwrap();
+        assert_eq!(ids(&orphaned["sessions"]), mine);
+        assert_eq!(orphaned["parent"], json!({"sessionId": lead.id, "title": null, "exists": false}));
+        assert!(orphaned["sessions"].as_array().unwrap().iter().all(|session| session["parent"]["sessionId"] == lead.id.as_str()));
+        // A lead that is gone is named in full: the start of its id matches nothing any more.
+        assert_eq!(service.execute("sessions.children", json!({"childrenOf": &lead.id[..lead.id.len() - 1]}), "r").unwrap_err().code, "not_found");
     }
 
     #[test]
@@ -2172,6 +2431,7 @@ mod tests {
             tabs: Vec::new(),
             active_tab: None,
             link: None,
+            parent: None,
             unknown: std::collections::BTreeMap::new(),
         };
         index::update(|sessions| {

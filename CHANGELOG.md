@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A session started with `terminalx sessions create` from inside another
+  session records it as its `parent` (`--parent`, `--no-parent`).
+  `sessions list --children-of` lists the sessions a session started, and
+  `sessions stop --children-of` stops their running agents. (PRO-270)
+
 ## 0.2.29
 
 - Review changes from a turn checkpoint or a single commit, browse files in a
