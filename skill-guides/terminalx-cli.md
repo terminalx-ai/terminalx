@@ -342,7 +342,14 @@ terminalx sessions report <session-or-tab> --json
 whose turn ends without a readable report is asked for it once more, and after that its report
 stays `missing`. A worker never gets an issue pipeline of its own, so `--report` cannot be
 combined with `--issue`, `--auto-merge` or `--resolve-conflicts`, and it is not available for
-cloud sessions. Creation returns `"report": true`.
+cloud sessions. It needs an agent that runs in its own terminal, `claude` or `codex`: such a
+Codex worker stays on the terminal connection whatever Native Codex is set to, and
+`--experimental-codex-stdio` and other agents are refused, because they could not be reminded.
+Creation returns `"report": true`, and a `reportNote` that is null unless the worker was briefed
+but could not be recorded as owing a report (it is then not reminded).
+
+`sessions report` takes one session or tab. There is no form that lists every worker a session
+started yet: keep the `sessionId` each `sessions create` returned and ask for each.
 
 The worker ends its final reply with a `terminalx-report` block, JSON in a fenced code block:
 
@@ -384,11 +391,19 @@ and returns `sessionId`, `tabId` and one of two shapes:
     `limit`, `chars` (the full size), `seq`, and `cut` (the fields that lost text; `evidence`
     gives way first). The whole block is in the transcript: `terminalx read <tab> --since <seq - 1>`
     returns the event that holds it first.
+- Either shape may carry `laterTurn: {"seq": N}`: after the turn this was read from, the
+  agent started a turn of its own (a background task reporting in, a scheduled check) that
+  ended without a report. The report stands; read what it said from `seq` if it matters. A
+  turn of its own that ends with a report block is read as the newer report instead.
 - `"status": "missing"`: there is no readable report. `reason` says why, `detail` says it in
   a sentence, `tail` is the last 2,000 characters of the reply, and `reminded` is true once
   the worker has been asked again and still sent none. A status is never guessed from prose.
   - `noBlock`: the reply has no report block. `malformed`: the block is not JSON, has no
     valid `status` or `result`, or has a field of the wrong shape.
+  - `reminderPending: true` is added for a `--report` worker whose turn has just ended and
+    whose reminder has not reached it yet. Do not `send` it anything: `wait` again, then ask
+    again. If it is still pending after that, the reminder could not be delivered; treat the
+    report as missing.
   - `working`: the tab is still in a turn, the reminder's turn included. `wait`, then ask
     again. `waiting`: its turn has stopped on a permission request, a question or an error;
     `wait` says which.

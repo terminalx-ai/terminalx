@@ -252,6 +252,53 @@ fn missing(reason: &str, detail: String, reply: Option<&(u64, String)>, events: 
     row
 }
 
+/// Whether the agent started the turn that ends at `events[end]` itself
+/// (#540): a background task reporting in, a scheduled check.
+fn self_started(events: &[AgentEvent], end: usize) -> bool {
+    events[..end]
+        .iter()
+        .rev()
+        .filter(|event| top_level(event))
+        .take_while(|event| !matches!(event.payload, Payload::TurnCompleted { .. }))
+        .find_map(|event| match &event.payload {
+            Payload::TurnStarted { started_by, .. } => Some(started_by.is_some()),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// The turn a tab's report is read from.
+struct Deciding {
+    /// Where its `turn_completed` is.
+    end: usize,
+    reply: Option<(u64, String)>,
+    /// A later turn the agent started itself and ended without a report:
+    /// the sequence number of what it said.
+    later: Option<u64>,
+}
+
+/// The last turn somebody prompted, or a later one the agent started itself
+/// that carries a report block. A turn the agent starts itself to note that a
+/// background task finished does not unsay the report before it, and is not
+/// a reply anyone asked a report of.
+fn deciding(events: &[AgentEvent]) -> Option<Deciding> {
+    let ends: Vec<usize> = events.iter().enumerate().rev().filter(|(_, event)| top_level(event) && matches!(event.payload, Payload::TurnCompleted { .. })).map(|(at, _)| at).collect();
+    let mut later = None;
+    for &end in &ends {
+        let reply = turn_reply(events, end);
+        let ok = matches!(events[end].payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. });
+        let carries = ok && reply.as_ref().is_some_and(|(_, text)| last_block(text, REPORT_FENCE).is_some());
+        if self_started(events, end) && !carries {
+            later.get_or_insert(reply.map_or(events[end].seq, |(seq, _)| seq));
+            continue;
+        }
+        return Some(Deciding { end, reply, later });
+    }
+    // Nothing but turns the agent started itself: the last of them is all there is.
+    let end = *ends.first()?;
+    Some(Deciding { end, reply: turn_reply(events, end), later: None })
+}
+
 /// A turn that has not ended: whatever an earlier turn reported is not its answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenTurn {
@@ -263,17 +310,30 @@ pub enum OpenTurn {
 
 /// One tab's report as `sessions report` returns it, read from its transcript:
 /// the report of its last turn, or `missing` with why and the end of what it
-/// said instead. `open` is the turn the tab is in now, if any.
-pub fn of_tab(events: &[AgentEvent], open: Option<OpenTurn>) -> Value {
+/// said instead. `open` is the turn the tab is in now, if any; `owed`, that
+/// the tab is held to a report and reminded of one.
+pub fn of_tab(events: &[AgentEvent], open: Option<OpenTurn>, owed: bool) -> Value {
     match open {
         Some(OpenTurn::Working) => return missing("working", "The tab is still in a turn. Wait for it with `terminalx wait`, then ask again.".into(), None, events),
         Some(OpenTurn::Waiting) => return missing("waiting", "The tab's turn has stopped on a permission request, a question or an error; `terminalx wait` says which.".into(), None, events),
         None => {}
     }
-    let Some(end) = events.iter().rposition(|event| top_level(event) && matches!(event.payload, Payload::TurnCompleted { .. })) else {
+    let Some(turn) = deciding(events) else {
         return missing("noTurn", "The tab has not finished a turn.".into(), None, events);
     };
-    let reply = turn_reply(events, end);
+    let mut row = of_turn(events, &turn);
+    if let Some(seq) = turn.later {
+        row["laterTurn"] = json!({ "seq": seq });
+    }
+    // The reminder goes out just after the turn ends: a lead that asks in between is told it is coming.
+    if owed && row["status"] == "missing" && reminder_due(events).is_some() {
+        row["reminderPending"] = json!(true);
+    }
+    row
+}
+
+fn of_turn(events: &[AgentEvent], turn: &Deciding) -> Value {
+    let (end, reply) = (turn.end, &turn.reply);
     match &events[end].payload {
         Payload::TurnCompleted { status: TurnStatus::Ok, .. } => {}
         Payload::TurnCompleted { status: TurnStatus::Aborted, .. } => return missing("turnAborted", "The last turn was interrupted before it finished.".into(), reply.as_ref(), events),
@@ -288,14 +348,15 @@ pub fn of_tab(events: &[AgentEvent], open: Option<OpenTurn>) -> Value {
     };
     // Judged on what the worker wrote, before anything is cut from it.
     let no_evidence = report.no_evidence();
-    let cut = if chars > REPORT_LIMIT { Some(clip(&mut report, REPORT_LIMIT)) } else { None };
+    // The block is measured as written; a long one whose fields all fit (padding, fields of its own) loses nothing.
+    let cut = if chars > REPORT_LIMIT { clip(&mut report, REPORT_LIMIT) } else { Vec::new() };
     let mut row = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
     row["seq"] = json!(seq);
     row["at"] = json!(events[end].ts);
     if no_evidence {
         row["noEvidence"] = json!(true);
     }
-    if let Some(cut) = cut {
+    if !cut.is_empty() {
         row["truncated"] = json!({ "limit": REPORT_LIMIT, "chars": chars, "seq": seq, "cut": cut });
     }
     row
@@ -330,12 +391,15 @@ pub fn reminder(problem: &NoReport) -> String {
     )
 }
 
-/// The reminder a worker is owed for the turn that just ended, if any: none
-/// when it reported, and none when it has been asked once already.
-fn reminder_due(final_message: Option<&str>, events: &[AgentEvent]) -> Option<String> {
-    let last = events.iter().rposition(|event| top_level(event) && matches!(event.payload, Payload::TurnCompleted { .. })).and_then(|end| turn_reply(events, end)).map(|(_, text)| text);
-    let reply = final_message.filter(|message| !message.trim().is_empty()).map(String::from).or(last).unwrap_or_default();
-    let problem = parse(&reply).err()?;
+/// The reminder a worker is owed, if any: none when the turn its report is
+/// read from has one, none for a turn that was cut short, and none when it has
+/// been asked once already.
+fn reminder_due(events: &[AgentEvent]) -> Option<String> {
+    let turn = deciding(events)?;
+    if !matches!(events[turn.end].payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. }) {
+        return None;
+    }
+    let problem = parse(turn.reply.as_ref().map_or("", |(_, text)| text.as_str())).err()?;
     (!reminded(events)).then(|| reminder(&problem))
 }
 
@@ -350,7 +414,7 @@ pub fn turn_completed(final_message: Option<&str>, events: impl FnOnce() -> Resu
         Ok(events) => events,
         Err(error) => return log::warn!("read a worker's transcript for its report: {error:#}"),
     };
-    if let Some(prompt) = reminder_due(final_message, &events) {
+    if let Some(prompt) = reminder_due(&events) {
         if let Err(error) = send(&prompt) {
             log::warn!("ask a worker again for its report: {error:#}");
         }
@@ -442,7 +506,7 @@ mod tests {
         );
         assert_eq!(chars, FULL.chars().count());
         // As `sessions report` returns it: the seven fields, and where the reply is.
-        let row = of_tab(&turn(1, "Fix the login.", &block(FULL)), None);
+        let row = of_tab(&turn(1, "Fix the login.", &block(FULL)), None, false);
         let mut expected: Value = serde_json::from_str(FULL).unwrap();
         expected["seq"] = json!(3);
         expected["at"] = json!("2026-11-10T10:04:00.000Z");
@@ -460,7 +524,7 @@ mod tests {
         let (report, _) = parse(&block(r#"{"status":"blocked","result":"Which database?","evidence":"none","changed":"none","notDone":null,"couldNotRead":"the staging dump"}"#)).unwrap();
         assert_eq!((report.evidence.len(), &report.changed, report.not_done.len(), report.uncertain.len()), (0, &None, 0, 0));
         assert_eq!(report.could_not_read, ["the staging dump"]);
-        let row = of_tab(&turn(1, "go", &block(r#"{"status":"blocked","result":"Which database?","changed":{"files":[],"branch":null}}"#)), None);
+        let row = of_tab(&turn(1, "go", &block(r#"{"status":"blocked","result":"Which database?","changed":{"files":[],"branch":null}}"#)), None, false);
         assert_eq!((&row["changed"], &row["evidence"], &row["couldNotRead"]), (&Value::Null, &json!([]), &json!([])));
         // Blocked without evidence is not flagged: only a "done" has to show something.
         assert!(row.get("noEvidence").is_none());
@@ -486,7 +550,7 @@ mod tests {
                 Err(NoReport::Malformed(said)) => assert!(said.contains(problem), "{body}: {said}"),
                 other => panic!("{body}: {other:?}"),
             }
-            let row = of_tab(&turn(1, "go", &reply), None);
+            let row = of_tab(&turn(1, "go", &reply), None, false);
             assert_eq!((row["status"].as_str(), row["reason"].as_str()), (Some("missing"), Some("malformed")), "{body}");
             assert!(row["detail"].as_str().unwrap().contains(problem), "{body}");
             assert!(row["tail"].as_str().unwrap().contains(body), "{body}");
@@ -497,7 +561,7 @@ mod tests {
     #[test]
     fn an_absent_block_is_missing_with_the_end_of_the_reply() {
         let prose = format!("{}All done, tests pass! status: done", "x".repeat(3_000));
-        let row = of_tab(&turn(1, "go", &prose), None);
+        let row = of_tab(&turn(1, "go", &prose), None, false);
         assert_eq!((row["status"].as_str(), row["reason"].as_str(), row["seq"].as_u64(), row["reminded"].as_bool()), (Some("missing"), Some("noBlock"), Some(3), Some(false)));
         let tail = row["tail"].as_str().unwrap();
         assert_eq!(tail.chars().count(), TAIL_LIMIT);
@@ -511,17 +575,17 @@ mod tests {
             assert_eq!(parse(&reply), Err(NoReport::NoBlock), "{reply}");
         }
         // A short reply comes back whole, cut on characters and not bytes.
-        assert_eq!(of_tab(&turn(1, "go", "Fertig — nichts gefunden."), None)["tail"], json!("Fertig — nichts gefunden."));
+        assert_eq!(of_tab(&turn(1, "go", "Fertig — nichts gefunden."), None, false)["tail"], json!("Fertig — nichts gefunden."));
     }
 
     #[test]
     fn a_tab_with_no_finished_reply_reports_nothing_and_says_why() {
-        assert_eq!(of_tab(&[], None)["reason"], json!("noTurn"));
+        assert_eq!(of_tab(&[], None, false)["reason"], json!("noTurn"));
         // Still in a turn: an earlier turn's report is not this one's answer.
         let mut events = turn(1, "go", &block(FULL));
-        let working = of_tab(&events, Some(OpenTurn::Working));
+        let working = of_tab(&events, Some(OpenTurn::Working), false);
         assert_eq!((working["status"].as_str(), working["reason"].as_str(), working["tail"].as_str()), (Some("missing"), Some("working"), Some("")));
-        assert_eq!(of_tab(&events, Some(OpenTurn::Waiting))["reason"], json!("waiting"));
+        assert_eq!(of_tab(&events, Some(OpenTurn::Waiting), false)["reason"], json!("waiting"));
         // A turn that was interrupted or failed is not a report either, whatever it said first.
         events.extend([
             event(5, false, json!({ "type": "user_message", "text": "And the logout?" })),
@@ -529,37 +593,37 @@ mod tests {
             event(7, false, json!({ "type": "assistant_text", "text": "Looking at the logout." })),
             event(8, false, json!({ "type": "turn_completed", "status": "aborted" })),
         ]);
-        let aborted = of_tab(&events, None);
+        let aborted = of_tab(&events, None, false);
         assert_eq!((aborted["status"].as_str(), aborted["reason"].as_str(), aborted["tail"].as_str()), (Some("missing"), Some("turnAborted"), Some("Looking at the logout.")));
         events.push(event(9, false, json!({ "type": "turn_started" })));
         events.push(event(10, false, json!({ "type": "turn_completed", "status": "error" })));
-        let failed = of_tab(&events, None);
+        let failed = of_tab(&events, None, false);
         assert_eq!((failed["reason"].as_str(), failed["tail"].as_str()), (Some("turnFailed"), Some("")));
         events.push(event(11, false, json!({ "type": "turn_started" })));
         events.push(event(12, false, json!({ "type": "turn_completed", "status": "ok" })));
-        assert_eq!(of_tab(&events, None)["reason"], json!("noReply"));
+        assert_eq!(of_tab(&events, None, false)["reason"], json!("noReply"));
         // The turn's own final text is its reply, and a subagent's report is not the tab's.
         events.push(event(13, false, json!({ "type": "turn_started" })));
         events.push(event(14, true, json!({ "type": "assistant_text", "text": block(r#"{"status":"done","result":"the subagent's"}"#) })));
         events.push(event(15, false, json!({ "type": "turn_completed", "status": "ok" })));
-        assert_eq!(of_tab(&events, None)["reason"], json!("noReply"));
+        assert_eq!(of_tab(&events, None, false)["reason"], json!("noReply"));
         events.push(event(16, false, json!({ "type": "turn_started" })));
         events.push(event(17, false, json!({ "type": "turn_completed", "status": "ok", "finalText": block(r#"{"status":"failed","result":"It does not build."}"#) })));
-        let last = of_tab(&events, None);
+        let last = of_tab(&events, None, false);
         assert_eq!((last["status"].as_str(), last["seq"].as_u64()), (Some("failed"), Some(17)));
     }
 
     #[test]
     fn done_without_evidence_is_returned_with_a_flag() {
-        let row = of_tab(&turn(1, "go", &block(r#"{"status":"done","result":"Fixed it.","evidence":[]}"#)), None);
+        let row = of_tab(&turn(1, "go", &block(r#"{"status":"done","result":"Fixed it.","evidence":[]}"#)), None, false);
         assert_eq!((row["status"].as_str(), row["noEvidence"].as_bool()), (Some("done"), Some(true)));
         // Blank entries are no evidence; one real entry is.
-        assert_eq!(of_tab(&turn(1, "go", &block(r#"{"status":"done","result":"Fixed it.","evidence":["  ",""]}"#)), None)["noEvidence"], json!(true));
-        let shown = of_tab(&turn(1, "go", &block(r#"{"status":"done","result":"Fixed it.","evidence":["cargo test: exit 0"]}"#)), None);
+        assert_eq!(of_tab(&turn(1, "go", &block(r#"{"status":"done","result":"Fixed it.","evidence":["  ",""]}"#)), None, false)["noEvidence"], json!(true));
+        let shown = of_tab(&turn(1, "go", &block(r#"{"status":"done","result":"Fixed it.","evidence":["cargo test: exit 0"]}"#)), None, false);
         assert!(shown.get("noEvidence").is_none());
         // The other statuses claim nothing that needs showing.
         for status in ["partial", "blocked", "failed"] {
-            assert!(of_tab(&turn(1, "go", &block(&format!(r#"{{"status":"{status}","result":"r"}}"#))), None).get("noEvidence").is_none(), "{status}");
+            assert!(of_tab(&turn(1, "go", &block(&format!(r#"{{"status":"{status}","result":"r"}}"#))), None, false).get("noEvidence").is_none(), "{status}");
         }
     }
 
@@ -569,7 +633,7 @@ mod tests {
         let body = json!({"status": "done", "result": "Audited every handler.", "evidence": evidence, "changed": {"files": ["a.rs"], "branch": "audit", "commit": "abc1234"}, "notDone": ["The admin handlers"], "couldNotRead": ["vendor/closed.bin: binary"], "uncertain": ["Whether the token is logged"]}).to_string();
         let chars = body.chars().count();
         assert!(chars > REPORT_LIMIT);
-        let row = of_tab(&turn(1, "go", &block(&body)), None);
+        let row = of_tab(&turn(1, "go", &block(&body)), None, false);
         assert_eq!(row["truncated"], json!({ "limit": REPORT_LIMIT, "chars": chars, "seq": 3, "cut": ["evidence"] }));
         // What a lead must not miss is whole; the evidence gives way, its last kept entry cut short.
         assert_eq!((row["status"].as_str(), &row["couldNotRead"], &row["notDone"], &row["uncertain"]), (Some("done"), &json!(["vendor/closed.bin: binary"]), &json!(["The admin handlers"]), &json!(["Whether the token is logged"])));
@@ -584,20 +648,24 @@ mod tests {
         assert!(row.get("noEvidence").is_none());
         // One long field is cut in place, and every field after it in the order says it lost its text.
         let long = json!({"status": "failed", "result": "é".repeat(REPORT_LIMIT + 500), "notDone": ["everything"], "evidence": ["make: exit 2"]}).to_string();
-        let row = of_tab(&turn(1, "go", &block(&long)), None);
+        let row = of_tab(&turn(1, "go", &block(&long)), None, false);
         assert_eq!(row["truncated"]["cut"], json!(["result", "notDone", "evidence"]));
         assert_eq!(row["result"].as_str().unwrap().chars().count(), REPORT_LIMIT + 1);
         assert!(row["result"].as_str().unwrap().ends_with('…'));
         assert_eq!((&row["notDone"], &row["evidence"]), (&json!([]), &json!([])));
         // A "done" whose evidence was all cut still showed some: the flag is about what the worker wrote.
         let crowded = json!({"status": "done", "result": "r".repeat(REPORT_LIMIT + 1), "evidence": ["cargo test: exit 0"]}).to_string();
-        let row = of_tab(&turn(1, "go", &block(&crowded)), None);
+        let row = of_tab(&turn(1, "go", &block(&crowded)), None, false);
         assert!(row.get("noEvidence").is_none() && row["truncated"]["cut"] == json!(["result", "evidence"]));
+        // A long block whose fields all fit (padding, a field of its own) is returned whole and says nothing was cut.
+        let padded = format!(r#"{{"status":"done","result":"r","evidence":["make: exit 0"],"notes":"{}"}}"#, "n".repeat(REPORT_LIMIT));
+        let row = of_tab(&turn(1, "go", &block(&padded)), None, false);
+        assert!(row.get("truncated").is_none() && row["evidence"] == json!(["make: exit 0"]));
         // At the limit nothing is cut.
         let padding = "p".repeat(REPORT_LIMIT - r#"{"status":"done","result":""}"#.len());
         let exact = format!(r#"{{"status":"done","result":"{padding}"}}"#);
         assert_eq!(exact.chars().count(), REPORT_LIMIT);
-        assert!(of_tab(&turn(1, "go", &block(&exact)), None).get("truncated").is_none());
+        assert!(of_tab(&turn(1, "go", &block(&exact)), None, false).get("truncated").is_none());
     }
 
     #[test]
@@ -631,7 +699,7 @@ mod tests {
         ended(Some("All done, tests pass!"), &events);
         assert_eq!(sent.borrow().len(), 1);
         assert!(sent.borrow()[0].starts_with(REMINDER_OPENING) && parse(&sent.borrow()[0]).is_ok());
-        assert_eq!(of_tab(&events, None)["reminded"], json!(false));
+        assert_eq!(of_tab(&events, None, false)["reminded"], json!(false));
 
         // The reminder's own turn ends without one too: it is not asked again, and the report says it was asked.
         let reminder = sent.borrow()[0].clone();
@@ -639,7 +707,7 @@ mod tests {
         ended(Some("I already told you it is done."), &events);
         ended(None, &events);
         assert_eq!(sent.borrow().len(), 1);
-        let row = of_tab(&events, None);
+        let row = of_tab(&events, None, false);
         assert_eq!((row["status"].as_str(), row["reminded"].as_bool()), (Some("missing"), Some(true)));
 
         // The lead sends more work: a reply without a report is owed one reminder again.
@@ -652,7 +720,43 @@ mod tests {
         events.extend(turn(13, &sent.borrow()[1].clone(), &block(FULL)));
         ended(None, &events);
         assert_eq!(sent.borrow().len(), 2);
-        assert_eq!(of_tab(&events, None)["status"], json!("partial"));
+        assert_eq!(of_tab(&events, None, false)["status"], json!("partial"));
+
+        // The agent then starts a turn of its own (a background task reports in) and ends it without a block:
+        // the report stands, with a pointer to what came after, and nobody is asked again.
+        let own = |from: u64, reply: &str| vec![
+            event(from, false, json!({ "type": "turn_started", "startedBy": "Background task" })),
+            event(from + 1, false, json!({ "type": "assistant_text", "text": reply })),
+            event(from + 2, false, json!({ "type": "turn_completed", "status": "ok" })),
+        ];
+        events.extend(own(17, "The watcher exited; nothing to add."));
+        ended(Some("The watcher exited; nothing to add."), &events);
+        assert_eq!(sent.borrow().len(), 2);
+        let row = of_tab(&events, None, true);
+        assert_eq!((row["status"].as_str(), row["seq"].as_u64(), &row["laterTurn"], row.get("reminderPending")), (Some("partial"), Some(15), &json!({"seq": 18}), None));
+        // One that carries a report of its own is the newer answer.
+        events.extend(own(20, &block(r#"{"status":"done","result":"The watcher finished clean.","evidence":["watch: exit 0"]}"#)));
+        let row = of_tab(&events, None, true);
+        assert_eq!((row["status"].as_str(), row.get("laterTurn")), (Some("done"), None));
+
+        // Between a turn's end and the reminder reaching the tab, a worker held to a report says one is coming;
+        // a session nobody asked a report of does not, and neither does a worker already asked.
+        let fresh = turn(1, "Fix the login.", "All done, tests pass!");
+        assert_eq!(of_tab(&fresh, None, true)["reminderPending"], json!(true));
+        assert!(of_tab(&fresh, None, false).get("reminderPending").is_none());
+        let mut asked = fresh.clone();
+        asked.extend(turn(5, &reminder, "It is done."));
+        let row = of_tab(&asked, None, true);
+        assert!(row.get("reminderPending").is_none() && row["reminded"] == json!(true));
+        // A self-started turn after a reply with no report does not use up or repeat the reminder.
+        let mut noted = fresh.clone();
+        noted.extend(own(5, "The watcher exited."));
+        ended(None, &noted);
+        assert_eq!(sent.borrow().len(), 3);
+        let row = of_tab(&noted, None, true);
+        assert_eq!((row["reason"].as_str(), row["tail"].as_str(), &row["laterTurn"]), (Some("noBlock"), Some("All done, tests pass!"), &json!({"seq": 6})));
+        // Only turns of its own: the last is all there is to read.
+        assert_eq!(of_tab(&own(1, "Scheduled check: nothing new."), None, false)["reason"], json!("noBlock"));
 
         // A transcript that cannot be read sends nothing rather than a guess.
         turn_completed(None, || anyhow::bail!("no log"), |_| panic!("nothing is sent"));

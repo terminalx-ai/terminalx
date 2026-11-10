@@ -835,6 +835,10 @@ impl ControlService {
         if p.report && (p.issue.is_some() || p.auto_merge.is_some() || p.resolve_conflicts.is_some()) {
             return Err(ControlError::invalid("--report is for a worker that answers the session that started it; a session with a pipeline (--issue, --auto-merge, --resolve-conflicts) reports to its pipeline instead."));
         }
+        // A worker is reminded of its report where a turn's end is heard: the terminal engine, as for a pipeline's sessions.
+        if p.report && (p.experimental_codex_stdio || !matches!(crate::harness::HarnessId::parse(&p.agent), crate::harness::HarnessId::Claude | crate::harness::HarnessId::Codex)) {
+            return Err(ControlError::invalid("--report needs an agent in its own terminal (claude, or codex without --experimental-codex-stdio): no other can be reminded of its report. Start the session without --report; `terminalx sessions report` still reads its reply."));
+        }
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = crate::store::index::requested_mode(p.mode.take());
         if p.prompt.trim().is_empty() && p.issue.is_none() {
@@ -888,7 +892,7 @@ impl ControlService {
         }
         let mut first_tab = NewTab { transport: if p.experimental_codex_stdio { index::AgentTransport::ExperimentalCodexStdio } else { index::AgentTransport::Pty }, harness: p.agent, model: p.model, effort: p.effort, permission_mode: p.mode };
         // Without the flag, Settings → Experimental → Native Codex decides.
-        if !p.experimental_codex_stdio { crate::session_ops::prefer_native_codex(&mut first_tab, p.issue.is_some()); }
+        if !p.experimental_codex_stdio { crate::session_ops::prefer_native_codex(&mut first_tab, p.issue.is_some() || p.report); }
         let mut issue = None;
         let entry = match p.project.as_deref() {
             None => {
@@ -955,9 +959,15 @@ impl ControlService {
                 Err(reason) => pipeline_note = json!(reason),
             }
         }
+        let mut report_note = Value::Null;
         if p.report {
             // Recorded before the prompt goes: the turn it starts may end first.
-            crate::worker_report::expect(&entry.id, &tab.id).map_err(ControlError::internal)?;
+            // The session exists by now, so it still starts if this cannot be
+            // written; it is told how to report and just is not reminded, and says so.
+            if let Err(error) = crate::worker_report::expect(&entry.id, &tab.id) {
+                log::warn!("record that {}/{} owes a report: {error:#}", entry.id, tab.id);
+                report_note = json!(format!("The session was told how to report, but TerminalX could not record that it owes one ({error:#}), so it will not be reminded."));
+            }
             prompt = format!("{prompt}\n\n{}", crate::worker_report::brief());
         }
         let outcome = self
@@ -970,6 +980,7 @@ impl ControlService {
         // Only a worker's start says so; every other response is word for word what it was.
         if p.report {
             created["report"] = json!(true);
+            created["reportNote"] = report_note;
         }
         Ok(created)
     }
@@ -978,7 +989,9 @@ impl ControlService {
     fn sessions_report(&self, params: Value) -> Result<Value, ControlError> {
         let target = resolve_target(&required_string(&params, "session")?)?;
         let events = self.manager.load_events(&target.session.id, &target.tab.id).map_err(ControlError::internal)?;
-        let mut report = crate::worker_report::of_tab(&events, open_turn(&self.manager.wait_view(&target.session.id, &target.tab.id)));
+        // Held to a report, and so reminded of one: asked for it at its start, and no pipeline's tab.
+        let owed = crate::worker_report::expected(&target.session.id, &target.tab.id) && !crate::issue_pipeline::store::takes_part(&target.session.id, &target.tab.id);
+        let mut report = crate::worker_report::of_tab(&events, open_turn(&self.manager.wait_view(&target.session.id, &target.tab.id)), owed);
         report["sessionId"] = json!(target.session.id);
         report["tabId"] = json!(target.tab.id);
         Ok(report)
@@ -1922,6 +1935,7 @@ mod tests {
         say(json!({"type": "turn_completed", "status": "ok"}));
         let report = service.execute("sessions.report", json!({"session": session.id}), "r3").unwrap();
         assert_eq!((report["status"].as_str(), report["reason"].as_str(), report["tail"].as_str()), (Some("missing"), Some("noBlock"), Some("They look fine to me.")));
+        assert!(report.get("reminderPending").is_none(), "nobody asked this session for a report");
         assert_eq!(service.execute("sessions.report", json!({"session": "no-such-session"}), "r4").unwrap_err().code, "not_found");
         assert_eq!(service.execute("sessions.report", json!({}), "r5").unwrap_err().code, "invalid_arguments");
 
@@ -1931,9 +1945,11 @@ mod tests {
         crate::worker_report::expect(&session.id, &tab).unwrap();
         crate::worker_report::expect("a-session-that-is-gone", "t").unwrap();
         assert!(crate::worker_report::expected(&session.id, &tab) && !crate::worker_report::expected(&session.id, "another-tab"));
+        assert_eq!(service.execute("sessions.report", json!({"session": session.id}), "r5b").unwrap()["reminderPending"], json!(true));
         crate::worker_report::expect(&session.id, "another-tab").unwrap();
         assert!(!crate::worker_report::expected("a-session-that-is-gone", "t"), "a deleted session's tabs are dropped");
-        for switch in [json!({"issue": "433"}), json!({"autoMerge": true}), json!({"resolveConflicts": false})] {
+        // Nor an agent or engine whose turn ends nobody hears, which could never be reminded.
+        for switch in [json!({"issue": "433"}), json!({"autoMerge": true}), json!({"resolveConflicts": false}), json!({"experimentalCodexStdio": true}), json!({"agent": "opencode"}), json!({"agent": "cursor"})] {
             let mut params = json!({"project": project.path, "agent": "codex", "prompt": "go", "useWorktree": true, "report": true});
             params.as_object_mut().unwrap().extend(switch.as_object().unwrap().clone());
             let refused = service.execute("sessions.create", params, "r6").unwrap_err();
