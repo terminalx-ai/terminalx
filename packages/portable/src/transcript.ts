@@ -934,7 +934,13 @@ function standsInGroup(call: ToolCall): boolean {
   return !call.result?.images?.length && !call.result?.safetyCheck;
 }
 
-/** Runs of two or more consecutive calls to one groupable tool fold into one row. */
+/**
+ * Runs of this many consecutive calls to one groupable tool fold into one row. Shorter runs keep a row per step, so a
+ * turn reads as what the agent did, in order; only a long run of the same thing (many reads) is worth folding.
+ */
+export const GROUP_AT = 4;
+
+/** Runs of `GROUP_AT` or more consecutive calls to one groupable tool fold into one row. */
 export function groupWork(items: WorkItem[]): WorkItem[] {
   const output: WorkItem[] = [];
   let index = 0;
@@ -950,7 +956,7 @@ export function groupWork(items: WorkItem[]): WorkItem[] {
           nextIndex++;
         } else break;
       }
-      if (run.length >= 2) {
+      if (run.length >= GROUP_AT) {
         output.push({ kind: "tool_group", name: item.call.name, calls: run, key: `g${item.call.callId}` });
         index = nextIndex;
         continue;

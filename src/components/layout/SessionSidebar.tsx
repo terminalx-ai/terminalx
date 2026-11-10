@@ -1,7 +1,7 @@
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
-import { Fragment, createContext, useMemo, useState, type ReactNode } from "react";
+import { Fragment, createContext, useId, useMemo, useState, type ReactNode } from "react";
 import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -10,6 +10,8 @@ import { useRowMenu } from "@/components/ui/useRowMenu";
 import { UpdateButton } from "./UpdateNotice";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
+  AsyncContextMenu,
+  AsyncDropdownMenu,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -33,7 +35,7 @@ import { SidebarTitlebar } from "./SidebarTitlebar";
 import { IssuePipelineSettingsDialog } from "@/components/issues/IssuePipelineSettingsDialog";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
-import { usePrefs } from "@/lib/prefs";
+import { setPrefs, usePrefs } from "@/lib/prefs";
 import { branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { branchMerged, conversationBranch } from "@/lib/checkout";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
@@ -41,7 +43,8 @@ import { addProject, archiveSession, archiveSessions, conversationTitle, openPro
 import { ROW_ATTRIBUTE, isPicked, pickOnClick, togglePicked, usePickedSessions } from "@/lib/rowSelection";
 import { SidebarBulkBar } from "./SidebarBulkBar";
 import { copyText } from "@/lib/clipboard";
-import { openRenameSession } from "@/lib/dialogs";
+import { openRenameSession, openWorktreeCleanup } from "@/lib/dialogs";
+import { LOCAL_HOST, mergedNote, useMergedCleanup, useMergedStatus, type HostedStatus } from "@/lib/mergedCleanup";
 import { copyShareLink } from "@/lib/localSharing";
 import { ContinuationDialog } from "@/components/session/ContinuationDialog";
 import { openSettle } from "@/lib/dialogs";
@@ -59,25 +62,26 @@ import { RenameBranchDialog } from "./RenameBranchDialog";
 import { isPlaceholderBranch } from "@/lib/worktreeNames";
 import { IssueLinkContextItems, IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
 
-import { compareMessageActivity, conversationTime } from "@/lib/messageActivity";
+import { compareSidebarSessions, type SidebarSort } from "@/lib/sidebarView";
+import { ManualStatusIcon, ManualStatusMenu } from "@/components/session/ManualStatus";
+import { manualStatusLabel } from "@terminalx/portable/manualStatus";
+import { conversationTime } from "@/lib/messageActivity";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
 export { conversationTitle };
 
-const byRecency = (a: SessionEntry, b: SessionEntry) => compareMessageActivity(a, b, a.id, b.id);
-
 /**
  * Every live conversation as one list, pinned first, then newest. The open one stays even when archived, unless
  * Show archived is on (`showArchived`): it is then among the archived, whose fold it keeps open.
  */
-export function orderConversations(sessions: SessionEntry[], selectedId: string | null, showArchived = false): SessionEntry[] {
-  return sessions.filter((session) => !session.archived || (!showArchived && session.id === selectedId)).sort(byRecency);
+export function orderConversations(sessions: SessionEntry[], selectedId: string | null, showArchived = false, sort: SidebarSort = "updated"): SessionEntry[] {
+  return sessions.filter((session) => !session.archived || (!showArchived && session.id === selectedId)).sort((a, b) => compareSidebarSessions(a, b, sort));
 }
 
 /** The archived conversations, as Show archived lists them (#718): pinned first, then newest. */
-export function archivedConversations(sessions: SessionEntry[]): SessionEntry[] {
-  return sessions.filter((session) => session.archived).sort(byRecency);
+export function archivedConversations(sessions: SessionEntry[], sort: SidebarSort = "updated"): SessionEntry[] {
+  return sessions.filter((session) => session.archived).sort((a, b) => compareSidebarSessions(a, b, sort));
 }
 
 /**
@@ -134,6 +138,7 @@ export function groupConversations(
   /** List every open project, one with no conversations yet too: one just added is there at once (off while a filter narrows the list). */
   everyProject = false,
   showArchived = false,
+  sort: SidebarSort = "updated",
 ): { groups: ConversationGroup[]; chats: SessionEntry[]; archivedChats: SessionEntry[] } {
   const groups = new Map<string, ConversationGroup>();
   const chats: SessionEntry[] = [];
@@ -150,8 +155,8 @@ export function groupConversations(
     group.branches[session.id] = link.branch;
     groups.set(key, group);
   };
-  for (const session of orderConversations(sessions, selectedId, showArchived)) add(session, false);
-  if (showArchived) for (const session of archivedConversations(sessions)) add(session, true);
+  for (const session of orderConversations(sessions, selectedId, showArchived, sort)) add(session, false);
+  if (showArchived) for (const session of archivedConversations(sessions, sort)) add(session, true);
   if (everyProject) {
     for (const project of projects) {
       const key = canon(project.path);
@@ -161,7 +166,7 @@ export function groupConversations(
   }
   // A populated group follows its messages; opening its project is not a message.
   const latest = (group: ConversationGroup) => group.sessions.length
-    ? Math.max(...group.sessions.map((session) => Date.parse(conversationTime(session)) || 0))
+    ? Math.max(...group.sessions.map((session) => Date.parse(sort === "created" ? session.created : conversationTime(session)) || 0))
     : Date.parse(group.project?.lastOpened ?? "") || 0;
   const ordered = [...groups.values()].sort((a, b) => Number(!!b.project?.pinned) - Number(!!a.project?.pinned) || latest(b) - latest(a) || a.path.localeCompare(b.path));
   return { groups: ordered, chats, archivedChats };
@@ -216,6 +221,7 @@ const PEEK = 3;
 export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
   const filter = useSidebarFilter();
+  const { sidebarSort } = usePrefs();
   const [error, setError] = useState<string | null>(null);
   // A chat on its way into a project: the dialog that chooses how its new session starts there.
   const [moving, setMoving] = useState<{ session: SessionEntry; source: TabEntry; project: Project; worktree: boolean } | null>(null);
@@ -226,12 +232,12 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   // Unread or Needs you: only the conversations that pass (and the open one), and so only their projects.
   const listed = useMemo(() => (filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions), [filter, store.sessions]);
   // Archived conversations never pass a filter, so Show archived shows nothing more while one is on.
-  const showArchived = store.showArchived && !filter.active;
+  const showArchived = store.showArchived && filter.filter === "all";
   const { sections: localSections } = useLocalSections();
   const sectionedSessions = useMemo(() => groupLocalSessions(listed, localSections), [listed, localSections]);
   const { groups, chats, archivedChats } = useMemo(
-    () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived),
-    [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived],
+    () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived, sidebarSort),
+    [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived, sidebarSort],
   );
 
   const run = (action: () => Promise<unknown>) => () => {
@@ -280,7 +286,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
       <ShowAgents.Provider value={showAgents}>
       <nav className="mt-3 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 pb-2 pt-3" aria-label="Conversations" data-testid="conversation-list">
         <LocalSidebarSections
-          groups={sectionedSessions.sections.map(({ section, items }) => ({ section, items: [...orderConversations(items, store.selectedSessionId, showArchived), ...(showArchived ? archivedConversations(items) : [])] }))}
+          groups={sectionedSessions.sections.map(({ section, items }) => ({ section, items: [...orderConversations(items, store.selectedSessionId, showArchived, sidebarSort), ...(showArchived ? archivedConversations(items, sidebarSort) : [])] }))}
           filtered={filter.active}
           renderSession={(session) => {
             const link = conversationLink(session, store.projects, chatsPath, store.workspaces);
@@ -314,6 +320,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                     onNewSession={(place) => run(() => startChat({ projectPath: group.path, ...place }))()}
                   />
                 ))}
+                <CleanupLine />
               </ListSection>
             )}
             {(chats.length > 0 || archivedChats.length > 0) && (
@@ -367,7 +374,7 @@ export function FilteredEmpty({ text }: { text: string }) {
   return (
     <div className="px-3 py-6 text-center text-[12px] text-faint" data-testid="sidebar-filter-empty">
       {text}{" "}
-      <button type="button" className="underline underline-offset-2 outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => setSidebarFilter("all")}>
+      <button type="button" className="underline underline-offset-2 outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => { setSidebarFilter("all"); setPrefs({ sidebarProject: null }); }}>
         Show all sessions
       </button>
     </div>
@@ -794,6 +801,7 @@ function BranchRow({
 }) {
   const holdsSelected = sessions.some((session) => session.id === selectedId);
   const removed = sessions.every((session) => session.worktreeRemoved);
+  const cleanup = useMergedStatus(LOCAL_HOST, removed ? null : sessions[0]?.cwd);
   const foldKey = removed ? `removed:${sessions[0].removedWorkspace?.path ?? sessions[0].id}` : branch;
   const [open, toggle] = useFold(`branch:${canon(path)}:${foldKey}`, false);
   const expanded = open || holdsSelected || opened;
@@ -810,7 +818,7 @@ function BranchRow({
           title={named ? `${named} · ${branch}` : label}
           className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-sm pl-[calc(1rem+var(--indent,0px))] pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
-          <BranchGlyph merged={merged} />
+          <BranchGlyph merged={merged} cleanup={cleanup} />
           <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branch || "No branch"}</span>
           {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
           <span className={cn("shrink-0 text-[11px] tabular-nums text-faint", yieldsToRowActions)}>{sessions.length}</span>
@@ -847,16 +855,44 @@ function BranchRow({
   );
 }
 
-/** A branch row's icon; a merged branch has a tick drawn into its empty corner, in the icon's own stroke. */
-function BranchGlyph({ merged }: { merged: boolean }) {
-  if (!merged) return <GitBranch className="size-4 shrink-0 text-muted-foreground" />;
+/**
+ * A branch row's icon; a merged branch has a tick drawn into its empty corner, in the icon's own stroke. A merged
+ * workspace clean-up has not deleted (`cleanup`) has the tick in amber, and its tooltip says why: the row's quiet
+ * marker, where the full story and its buttons are in the session's Branch tab.
+ */
+function BranchGlyph({ merged, cleanup }: { merged: boolean; cleanup?: HostedStatus }) {
+  const waiting = cleanup && cleanup.phase !== "removed";
+  if (!merged && !waiting) return <GitBranch className="size-4 shrink-0 text-muted-foreground" />;
+  const note = waiting ? mergedNote(cleanup) : "";
+  const title = waiting ? `${note.charAt(0).toUpperCase()}${note.slice(1)}` : "Merged: its commits are in the default branch";
   return (
-    <span className="flex shrink-0" title="Merged: its commits are in the default branch">
+    <span className="flex shrink-0" title={title} data-testid={waiting ? "branch-cleanup-marker" : undefined}>
       <GitBranch className="size-4 text-muted-foreground">
-        <path d="M9.25 3.75l1.75 1.75 3.5-3.75" className="text-info" />
+        <path d="M9.25 3.75l1.75 1.75 3.5-3.75" className={waiting && cleanup.phase === "kept" ? "text-warning" : "text-info"} />
       </GitBranch>
-      <span className="sr-only">merged</span>
+      <span className="sr-only">{waiting ? title : "merged"}</span>
     </span>
+  );
+}
+
+/**
+ * Under the projects: how many merged workspaces clean-up kept, as one line that opens the clean-up list. Only
+ * while there are some; nothing pops up for them.
+ */
+function CleanupLine() {
+  const { statuses } = useMergedCleanup();
+  const kept = Object.values(statuses).filter((status) => status.phase === "kept").length;
+  if (!kept) return null;
+  return (
+    <button
+      type="button"
+      onClick={openWorktreeCleanup}
+      data-testid="sidebar-cleanup-line"
+      className="-mx-2 mt-1 flex h-8 w-[calc(100%+1rem)] items-center gap-2.5 px-4 text-left text-[12.5px] text-muted-foreground outline-none hover:bg-selected/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+    >
+      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />
+      <span className="min-w-0 flex-1 truncate">Clean up {kept} merged {kept === 1 ? "workspace" : "workspaces"}</span>
+    </button>
   );
 }
 
@@ -972,6 +1008,7 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
           <Separator />
         </>
       )}
+      <ManualStatusMenu sessionId={session.id} status={session.manualStatus} contextMenu={contextMenu} />
       <MoveToLocalSectionItems sessionIds={ids} contextMenu={contextMenu} />
       <Item onSelect={() => void pinSession(session.id, !session.pinned)}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
@@ -1059,6 +1096,7 @@ function ConversationRow({
   /** Drawn under an Archived fold, which says it already. */
   inArchive?: boolean;
 }) {
+  const statusDescriptionId = useId();
   const title = named === "branch" && peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session);
   // The sessions the row stands for, picked as one for the bulk bar (#718).
   const ids = peers.map((peer) => peer.id);
@@ -1066,6 +1104,7 @@ function ConversationRow({
   const picking = pickedNow.length > 0;
   const picked = isPicked(ids, pickedNow);
   const removed = session.worktreeRemoved;
+  const cleanup = useMergedStatus(LOCAL_HOST, removed || named !== "branch" ? null : session.cwd);
   const location = removed ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null;
   const status = pressingStatus(peers.map(sessionStatus));
   // A row is its name and its age: which agent runs it is in the chat, not repeated on every row.
@@ -1074,8 +1113,8 @@ function ConversationRow({
   const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
   return (
     <li>
-      <DropdownMenu>
-        <ContextMenu>
+      <AsyncDropdownMenu>
+        <AsyncContextMenu>
         <ContextMenuTrigger asChild>
         <div
           className={cn(
@@ -1097,13 +1136,15 @@ function ConversationRow({
             onDoubleClick={picking ? undefined : (rename ?? undefined)}
             aria-current={selected ? "true" : undefined}
             aria-pressed={picking ? picked : undefined}
+            aria-describedby={statusDescriptionId}
             aria-label={named === "branch" ? `${branchName ?? "No branch"}${removed ? " (workspace removed)" : merged ? " (merged)" : ""}, ${title}` : undefined}
             className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
+            <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(session.manualStatus)}</span></span>
             {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             {named === "branch" ? (
               <>
-                <BranchGlyph merged={merged} />
+                <BranchGlyph merged={merged} cleanup={cleanup} />
                 <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchName ?? "No branch"}</span>
                 {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                 {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
@@ -1139,11 +1180,11 @@ function ConversationRow({
         </div>
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
-        </ContextMenu>
+        </AsyncContextMenu>
         <DropdownMenuContent align="end" className="w-56" onCloseAutoFocus={keepFocusForNameField}>
           <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </DropdownMenuContent>
-      </DropdownMenu>
+      </AsyncDropdownMenu>
     </li>
   );
 }
