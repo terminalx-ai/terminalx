@@ -1,8 +1,8 @@
 name: CI
 
-# The four checks a change has to pass, in the order they fail fastest.
-# macOS runs the full suite and Apple helper tests; desktop-platforms checks
-# the Linux/Windows build, provider contract, and native script renderers.
+# Frontend checks run on Linux in parallel with macOS WebKit layout checks
+# and the Rust/Apple helper suite. The other jobs cover the legacy runtime,
+# headless runtime, and desktop platform builds, contracts, and renderers.
 
 on:
   push:
@@ -36,12 +36,52 @@ jobs:
       - name: Test legacy AppImage diagnostic
         run: python3 scripts/linux-runtime-probe.test.py
 
+  frontend:
+    runs-on: instabox-medium
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+      - name: tsc
+        run: pnpm exec tsc --noEmit
+      - name: tsc (phone app)
+        run: pnpm --dir mobile exec tsc --noEmit
+      - name: vitest
+        run: pnpm vitest run
+
+  webkit-layout:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+      # Layout checks that jsdom cannot make: the built app in WebKit, measured.
+      - name: Build the frontend
+        run: pnpm build
+      - name: Install WebKit for the layout checks
+        run: pnpm exec playwright install webkit
+      - name: WebKit layout checks
+        run: |
+          pnpm test:webkit-layout
+          node scripts/webkit/permission-details.mjs
+
   check:
     runs-on: macos-latest
-    # Run 40125232605 spent 29m on setup/frontend/native checks, 9m on
-    # clippy and 34m building Rust tests despite a cache hit. Leave time
-    # for the full test run and main's cache upload after a rebuild.
-    timeout-minutes: 90
+    # Main's step timings put the Rust/native suite at about 45–50m. Leave room
+    # for a rebuild and main's cache upload; frontend and WebKit run above.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -87,26 +127,9 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
-      - name: tsc
-        run: pnpm exec tsc --noEmit
-
-      - name: tsc (phone app)
-        run: pnpm --dir mobile exec tsc --noEmit
-
-      - name: vitest
-        run: pnpm vitest run
-
-      # Layout checks that jsdom cannot make: the built app in WebKit, measured.
+      # tauri-build packages the frontend output into the Rust build.
       - name: Build the frontend
         run: pnpm build
-
-      - name: Install WebKit for the layout checks
-        run: pnpm exec playwright install webkit
-
-      - name: WebKit layout checks
-        run: |
-          pnpm test:webkit-layout
-          node scripts/webkit/permission-details.mjs
 
       # The computer-use helper is a Swift package with its own unit tests.
       # It is built before the Rust checks so tauri-build packages a real
