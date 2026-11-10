@@ -11,6 +11,7 @@ import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import type { CommitInfo } from "@/types/session";
 import { localStep, NextLine } from "./NextStep";
+import { MergedWorkspaceStep } from "./MergedWorkspaceStep";
 
 /**
  * Where the reader is working, read top down: the branch, the one thing to
@@ -213,6 +214,9 @@ export function BranchPanel({
             </span>
           )}
         </header>
+
+        {/* Merged: what clean-up does with this workspace comes first, as the branch's last step. */}
+        <MergedWorkspaceStep cwd={cwd} />
 
         {done && !step && (
           <p role="status" className="text-xs text-success">

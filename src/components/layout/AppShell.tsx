@@ -71,6 +71,7 @@ import { openLocalProject } from "@/lib/projectStart";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { REPO_URL, repoFile } from "@/lib/repo";
 import { stepVisibleSession } from "@/lib/sessionNavigation";
+import { ImageViewerHost } from "@/components/ui/ImageViewer";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
@@ -228,14 +229,19 @@ export function AppShell() {
 
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
-      <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
+      {/* Merged-workspace notices, top right under the tabs: a stack of them in the bottom corner covered the composer
+          and its send button. Toasts and close-undo notices, which answer what was just done there, stay below. */}
+      <div className="pointer-events-none fixed top-22 right-4 z-(--z-toast) flex max-h-[calc(100dvh-8rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <MergedCleanupNotices />
+      </div>
+      <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <CloseUndoNotices />
         <Toasts />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
         <CleanupIndicator onOpenStorage={openStorageSettings} />
       </div>
       <BypassDialog />
+      <ImageViewerHost />
       <SessionDialogs />
       <CloudShareDialogHost />
       <CloudSchedulesDialogHost />
