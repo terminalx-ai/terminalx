@@ -68,7 +68,7 @@ function GitHubLogin({ hostname, onClose }: { hostname: string; onClose: () => v
   </Dialog>;
 }
 
-export function GitHubSetup({ status, onRefresh }: { status: GitHubConnectionStatus; onRefresh: () => void }) {
+export function GitHubSetup({ status, onRefresh, onConnectingChange }: { status: GitHubConnectionStatus; onRefresh: () => void; onConnectingChange?: (connecting: boolean) => void }) {
   const [connecting, setConnecting] = useState(false);
   const missing = status.state === "missing";
   const unavailable = status.state === "unavailable";
@@ -81,12 +81,12 @@ export function GitHubSetup({ status, onRefresh }: { status: GitHubConnectionSta
       <Button size="sm" variant="accent" onClick={() => {
         if (missing) void openUrl("https://cli.github.com/");
         else if (unavailable) onRefresh();
-        else setConnecting(true);
+        else { setConnecting(true); onConnectingChange?.(true); }
       }}>{missing ? "Install GitHub CLI" : unavailable ? "Try again" : "Connect GitHub"}</Button>
       {!unavailable && <Button size="sm" variant="ghost" onClick={onRefresh}>Check again</Button>}
     </div>
     <CommandDetails key={status.details} details={status.details} />
-    {connecting && <GitHubLogin key={hostname} hostname={hostname} onClose={() => { setConnecting(false); onRefresh(); }} />}
+    {connecting && <GitHubLogin key={hostname} hostname={hostname} onClose={() => { setConnecting(false); onConnectingChange?.(false); onRefresh(); }} />}
   </section>;
 }
 

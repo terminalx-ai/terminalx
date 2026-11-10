@@ -103,6 +103,8 @@ export function PrPanel({
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const [available, setAvailable] = useState<boolean | null>(null);
   const [connection, setConnection] = useState<GitHubConnectionStatus | null>(null);
+  const [loginSource, setLoginSource] = useState<GitSource | null>(null);
+  const connecting = loginSource === source;
   const [hasRemote, setHasRemote] = useState<boolean | null>(null);
   const [pendingRuns, setPendingRuns] = useState<PendingCheckRun[]>([]);
   const [rows, setRows] = useState<SessionPr[]>([]);
@@ -137,8 +139,12 @@ export function PrPanel({
   const [conversationRefresh, setConversationRefresh] = useState(0);
   const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
+  useEffect(() => { setLoginSource(null); }, [source]);
+
   useEffect(() => {
-    if (!active) return;
+    // Returning from browser authentication must not unmount the login PTY.
+    // Recheck after its dialog closes, even if credentials become valid sooner.
+    if (!active || connecting) return;
     let cancelled = false;
     setAvailable(null);
     setConnection(null);
@@ -156,7 +162,7 @@ export function PrPanel({
       source.ghAvailable().then((value) => !cancelled && setAvailable(value)).catch(() => !cancelled && setAvailable(false));
     }
     return () => { cancelled = true; };
-  }, [source, active, tick]);
+  }, [source, active, tick, connecting]);
 
   useEffect(() => {
     if (!active || !available) return;
@@ -289,7 +295,7 @@ export function PrPanel({
     });
 
   if (connection && connection.state !== "connected") {
-    return <GitHubSetup status={connection} onRefresh={() => setTick((value) => value + 1)} />;
+    return <GitHubSetup key={source.key} status={connection} onConnectingChange={(value) => setLoginSource(value ? source : null)} onRefresh={() => setTick((value) => value + 1)} />;
   }
   if (connection?.state === "connected" && hasRemote === false && source.addRemote) {
     return <AddRemote key={source.key} source={source} onDone={() => setTick((value) => value + 1)} />;

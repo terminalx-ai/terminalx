@@ -37,7 +37,7 @@ beforeEach(() => {
     }
   });
 });
-afterEach(async () => { await act(async () => cleanup()); backend.invoke.mockReset(); backend.openUrl.mockReset(); backend.events.clear(); });
+afterEach(async () => { await act(async () => cleanup()); vi.restoreAllMocks(); backend.invoke.mockReset(); backend.openUrl.mockReset(); backend.events.clear(); });
 function pr() { return render(<PrPanel cwd={cwd} branch="feature" active busy={false} />); }
 function repo() { return render(<TooltipProvider><RepoPanel cwd={cwd} active view="uncommitted" onViewChange={() => {}} /></TooltipProvider>); }
 
@@ -69,6 +69,57 @@ describe("local Git recovery", () => {
     await screen.findByRole("button", { name: "Connect GitHub" });
     expect(screen.queryByText(signedOut)).toBeNull();
     expect(backend.invoke.mock.calls.filter(([command]) => command === "pty_kill")).toHaveLength(1);
+  });
+
+  it.each([false, true])("preserves the login PTY across visibility changes until closed or exited (authenticated=%s)", async (authenticated) => {
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    pr();
+    fireEvent.click(await screen.findByRole("button", { name: "Connect GitHub" }));
+    const terminal = await screen.findByTestId("login-terminal");
+    const id = terminal.textContent;
+    const checks = backend.invoke.mock.calls.filter(([command]) => command === "gh_connection_status").length;
+
+    await act(async () => {
+      visibility.mockReturnValue("hidden");
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    // Browser authentication can succeed before the login process has exited.
+    if (authenticated) connection = { state: "connected", details: null };
+    await act(async () => {
+      visibility.mockReturnValue("visible");
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    expect(backend.invoke.mock.calls.filter(([command]) => command === "pty_kill")).toHaveLength(0);
+    expect(screen.getByTestId("login-terminal")).toBe(terminal);
+    expect(backend.invoke.mock.calls.filter(([command]) => command === "gh_login_start")).toHaveLength(1);
+    if (authenticated) {
+      act(() => backend.events.get("pty_exit")?.({ payload: { id, code: 0 } }));
+      await screen.findByRole("button", { name: "Create pull request" });
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "Cancel sign-in" }));
+      await screen.findByRole("button", { name: "Connect GitHub" });
+    }
+    await waitFor(() => expect(backend.invoke).toHaveBeenCalledWith("pty_kill", { id }));
+    expect(backend.invoke.mock.calls.filter(([command]) => command === "pty_kill")).toHaveLength(1);
+    expect(backend.invoke.mock.calls.filter(([command]) => command === "gh_connection_status").length).toBeGreaterThan(checks);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("cancels the old repository's login when selecting another repository", async () => {
+    const view = pr();
+    fireEvent.click(await screen.findByRole("button", { name: "Connect GitHub" }));
+    const id = (await screen.findByTestId("login-terminal")).textContent;
+    view.rerender(<PrPanel cwd="/repos/other" branch="feature" active busy={false} />);
+    await waitFor(() => expect(backend.invoke).toHaveBeenCalledWith("pty_kill", { id }));
+    await screen.findByRole("button", { name: "Connect GitHub" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(backend.invoke).toHaveBeenCalledWith("gh_connection_status", { cwd: "/repos/other" });
+    const checks = backend.invoke.mock.calls.filter(([command]) => command === "gh_connection_status").length;
+    view.rerender(<PrPanel cwd={cwd} branch="feature" active busy={false} />);
+    await waitFor(() => expect(backend.invoke.mock.calls.filter(([command]) => command === "gh_connection_status").length).toBeGreaterThan(checks));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect GitHub" }));
+    expect((await screen.findByTestId("login-terminal")).textContent).not.toBe(id);
   });
 
   it.each([1, null])("retains failed login output until dismissed (exit %s)", async (code) => {
