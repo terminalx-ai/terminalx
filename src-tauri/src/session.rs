@@ -2193,6 +2193,19 @@ impl SessionManager {
         }
     }
 
+    /// Put a tab where `wait` reads it, as its agent would: for tests of
+    /// what waits on several tabs.
+    #[cfg(test)]
+    pub(crate) fn set_wait_state_for_tests(&self, session_id: &str, tab_id: &str, status: TabStatus, asks: bool) {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        let mut rt = runtime.lock().unwrap();
+        rt.pending.clear();
+        if asks {
+            rt.pending.insert("ask".into(), PendingAsk { tool_use_id: "tool".into(), tool_name: "Bash".into(), input: serde_json::json!({}), suggestions: Vec::new() });
+        }
+        self.set_display_status(&mut rt, status);
+    }
+
     fn running_agents(&self) -> std::collections::HashSet<String> {
         self.tabs
             .lock()

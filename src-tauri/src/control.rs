@@ -1036,6 +1036,9 @@ impl ControlService {
     }
 
     fn wait(&self, params: Value) -> Result<Value, ControlError> {
+        if params.get("targets").is_some() {
+            return self.wait_many(params);
+        }
         let target = resolve_target(&required_string(&params, "target")?)?;
         let timeout = params
             .get("timeoutSeconds")
@@ -1062,6 +1065,63 @@ impl ControlService {
                 return Ok(
                     json!({"sessionId": target.session.id, "tabId": target.tab.id, "reason": "timeout", "status": view.status}),
                 );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// `wait` on several tabs at once (PRO-271). `any` returns as soon as one
+    /// of them has settled, `all` when every one has; either returns at the
+    /// timeout with what has not settled marked `timedOut`. A target already
+    /// settled when the call begins counts at once, so nothing that ended
+    /// between two calls is missed. Every target is listed, with `changed`
+    /// on the ones whose state differs from when the call began.
+    fn wait_many(&self, params: Value) -> Result<Value, ControlError> {
+        let selectors: Vec<String> = params
+            .get("targets")
+            .and_then(Value::as_array)
+            .and_then(|targets| targets.iter().map(|target| target.as_str().map(String::from)).collect())
+            .filter(|targets: &Vec<String>| !targets.is_empty())
+            .ok_or_else(|| ControlError::invalid("targets takes one or more sessions or tabs."))?;
+        let mode = optional_string(&params, "mode").unwrap_or_else(|| "any".into());
+        if !matches!(mode.as_str(), "any" | "all") {
+            return Err(ControlError::invalid(format!("mode takes any or all, not {mode}.")));
+        }
+        // A target that names nothing fails the call before any waiting.
+        let targets = selectors.iter().map(|selector| resolve_target(selector)).collect::<Result<Vec<_>, _>>()?;
+        let timeout = params.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600).min(86_400);
+        let deadline = Instant::now() + Duration::from_secs(timeout);
+        // As for one target: it only waits and reads (#765).
+        let _resumable = crate::hooks::resumable();
+        let mut began: Option<Vec<Option<WaitEnd>>> = None;
+        loop {
+            if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
+                return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));
+            }
+            let views: Vec<WaitView> = targets.iter().map(|target| self.manager.wait_view(&target.session.id, &target.tab.id)).collect();
+            let ends: Vec<Option<WaitEnd>> = views.iter().map(wait_end).collect();
+            let began = began.get_or_insert_with(|| ends.clone());
+            let settled = ends.iter().flatten().count();
+            let done = if mode == "all" { settled == ends.len() } else { settled > 0 };
+            let timed_out = !done && Instant::now() >= deadline;
+            if done || timed_out {
+                let listed: Vec<Value> = (0..targets.len())
+                    .map(|i| {
+                        let state = ends[i].map_or(if timed_out { "timedOut" } else { "running" }, WaitEnd::state);
+                        let mut entry = json!({
+                            "target": selectors[i], "sessionId": targets[i].session.id, "tabId": targets[i].tab.id,
+                            "state": state, "status": views[i].status, "changed": ends[i] != began[i],
+                        });
+                        if let Some(end) = ends[i] {
+                            entry["reason"] = json!(end.reason());
+                            if let WaitEnd::Recovery(kind) = end {
+                                entry["recovery"] = json!(kind);
+                            }
+                        }
+                        entry
+                    })
+                    .collect();
+                return Ok(json!({"mode": mode, "timedOut": timed_out, "targets": listed}));
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1626,6 +1686,15 @@ impl WaitEnd {
             Self::Terminal => "terminal",
             Self::Stop => "stop",
             Self::Stopped => "stopped",
+        }
+    }
+
+    /// What a wait on several tabs calls it: the reason says which of them.
+    fn state(self) -> &'static str {
+        match self {
+            Self::Permission | Self::Terminal => "needsPermission",
+            Self::Recovery(_) => "failed",
+            Self::Stop | Self::Stopped => "stopped",
         }
     }
 }
@@ -2338,3 +2407,7 @@ mod tests {
 #[cfg(all(test, unix))]
 #[path = "control_issue_tests.rs"]
 mod issue_tests;
+
+#[cfg(test)]
+#[path = "control_wait_tests.rs"]
+mod wait_tests;

@@ -326,6 +326,42 @@ still reports that `recovery`.
 The safe polling loop is: capture the largest `seq` from `read`, `wait`, then `read --since`
 that sequence. Do not scrape terminal escape sequences.
 
+#### Wait on several sessions
+
+```text
+terminalx wait <session-or-tab>... [--any|--all] [--timeout <seconds>] --json
+```
+
+With several targets, one call waits on all of them. `--any`, the default, returns as soon as
+one target stops, asks for a decision or fails. `--all` returns when every target has. Either
+returns at the timeout. The result lists every target, in the order given:
+
+```json
+{"mode": "any", "timedOut": false, "targets": [
+  {"target": "s1", "sessionId": "…", "tabId": "…", "state": "stopped", "reason": "stop", "status": "completed", "changed": true},
+  {"target": "s2", "sessionId": "…", "tabId": "…", "state": "running", "status": "in_progress", "changed": false}
+]}
+```
+
+- `state` is `running`, `stopped`, `needsPermission`, `failed` or `timedOut`. `timedOut` is a
+  target still running when the timeout passed; top-level `timedOut` says whether it did.
+- `reason` is the single-target reason behind a settled state: `stop` or `stopped` for
+  `stopped`, `permission` or `terminal` for `needsPermission`, `recovery` for `failed` (with
+  `recovery` naming the error). It is absent for `running` and `timedOut`.
+- `changed` is true when the target's state differs from when the call began. Read those
+  targets; the others are as you last saw them.
+
+A target that has already settled when the call begins is reported at once and is not waited
+on, so nothing that ended between two calls is missed. To loop on `--any`, handle the targets
+it reports as settled, then leave them out of the next call (or send them more work first):
+a call that still names one returns at once. `--all` returns only while every target is
+settled, so a target waiting on a decision holds it until the timeout unless someone answers;
+use `--any` to react to requests.
+
+One target with neither flag gives the single-target result above. Pass `--any` or `--all`
+with one target to get the list. A target that names no session fails the call before any
+waiting. Several targets are local sessions or tabs: wait on a cloud session by itself.
+
 ### Permissions
 
 ```text
