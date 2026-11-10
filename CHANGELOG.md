@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.2.29
+
+- Review changes from a turn checkpoint or a single commit, browse files in a
+  folder tree, mark files as viewed, and choose a comparison branch. (#854)
+- Read pull request conversations, manage reviewers, inspect check logs,
+  rerun failed checks, and send check failures to an agent for help. (#829, #831)
+- Set a manual session status and use status groups to organize local and
+  cloud chats. (#811)
+- Improve Native Codex follow-up delivery and recovery after a background
+  runtime update. (#865, #867)
+- Diagnose stalled macOS child-process startup from Settings, with recorded
+  startup evidence and guided validation. (#830)
+- Create GitHub and Linear issues with pipeline policy options. (#864)
+- Refine chat overlays, image viewing, dialogs, sidebar styling, and the
+  post-merge workspace flow. (#868, #876)
+- Let explicitly authorized agents inspect and operate TerminalX's own UI
+  through a session-scoped grant. Human-only confirmations remain protected.
+  (#872)
+
 ## 0.2.28
 
 - User settings reload when `settings.json` changes. General shows its location
