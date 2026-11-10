@@ -74,6 +74,7 @@ Usage:
   terminalx send SESSION_OR_TAB TEXT [--json]
   terminalx read SESSION_OR_TAB [--since SEQ] [--tail COUNT] [--json]
   terminalx wait SESSION_OR_TAB [--timeout SECONDS] [--json]
+  terminalx wait SESSION_OR_TAB... [--any|--all] [--timeout SECONDS] [--json]
   terminalx permissions list [--json]
   terminalx permissions allow REQUEST [--option OPTION] [--json]
   terminalx permissions deny REQUEST [--json]
@@ -294,6 +295,24 @@ fn execute(args: &[String], out: &mut Output) -> (i32, io::Result<()>) {
     }
 }
 
+/// `wait` on several local sessions or tabs: one call the runtime answers
+/// when any (the default) or all of them have settled.
+fn wait_many(first: String, tokens: &mut Tokens, all: bool, tab: &Option<String>, seconds: u64) -> Result<Action, ControlError> {
+    let targets: Vec<String> = std::iter::once(first).chain(std::iter::from_fn(|| tokens.take_front())).collect();
+    if let Some(flag) = targets.iter().find(|target| target.starts_with("--")) {
+        return Err(invalid(format!("Unexpected argument {flag}.")));
+    }
+    if targets.iter().any(|target| is_cloud_key(target)) {
+        return Err(invalid("Waiting on several sessions takes local sessions. Wait on a cloud session by itself."));
+    }
+    local_only(tab, "--tab")?;
+    Ok(Action::Rpc {
+        command: "wait".into(),
+        params: json!({"targets": targets, "mode": if all { "all" } else { "any" }, "timeoutSeconds": seconds}),
+        timeout: Duration::from_secs(seconds.saturating_add(10).max(30)),
+    })
+}
+
 /// `wait` on a cloud session: the app waits at most
 /// [`crate::cloud_control::WAIT_CHUNK_SECONDS`] per call, so the wait is asked
 /// for again until the tab settles or the caller's timeout passes. When this
@@ -444,9 +463,15 @@ fn parse_with_stdin(
         "wait" => {
             let seconds = tokens.option_u64("--timeout")?.unwrap_or(600);
             let tab = tokens.option("--tab")?;
+            let (any, all) = (tokens.flag("--any")?, tokens.flag("--all")?);
             let target = tokens.required_front("session or tab")?;
-            tokens.finish()?;
-            if is_cloud_key(&target) {
+            // Several targets, or one with --any or --all, get the answer that lists each (PRO-271).
+            if any && all {
+                return Err(invalid("Pass --any or --all, not both."));
+            }
+            if any || all || !tokens.values.is_empty() {
+                wait_many(target, &mut tokens, all, &tab, seconds)
+            } else if is_cloud_key(&target) {
                 // Asked in short calls until the timeout (see `cloud_wait`), so nothing outlives this process in the app.
                 Ok(Action::Rpc {
                     command: "cloud.wait".into(),
@@ -1433,6 +1458,30 @@ mod tests {
             Err(ControlError::new("forbidden", "no", None::<String>))
         });
         assert_eq!((calls, refused.unwrap_err().code.as_str()), (1, "forbidden"));
+    }
+
+    #[test]
+    fn a_wait_on_several_sessions_is_one_call_that_names_them_all() {
+        // One target and no mode: the call and the answer of before.
+        let (command, params, timeout) = rpc_of(&["wait", "s1", "--timeout", "40"]);
+        assert_eq!((command.as_str(), params, timeout), ("wait", json!({"target": "s1", "timeoutSeconds": 40}), Duration::from_secs(50)));
+        // Several are waited on for the first of them unless --all is passed, wherever the flags sit.
+        let (command, params, timeout) = rpc_of(&["wait", "s1", "s2", "s3", "--timeout", "40"]);
+        assert_eq!((command.as_str(), params, timeout), ("wait", json!({"targets": ["s1", "s2", "s3"], "mode": "any", "timeoutSeconds": 40}), Duration::from_secs(50)));
+        assert_eq!(rpc_of(&["wait", "--all", "s1", "s2"]).1, json!({"targets": ["s1", "s2"], "mode": "all", "timeoutSeconds": 600}));
+        assert_eq!(rpc_of(&["wait", "s1", "--any", "s2"]).1["mode"], "any");
+        // A mode asks for the answer that lists, even for one target.
+        assert_eq!(rpc_of(&["wait", "s1", "--any"]).1, json!({"targets": ["s1"], "mode": "any", "timeoutSeconds": 600}));
+        assert_eq!(rpc_of(&["wait", "s1", "--all"]).1["targets"], json!(["s1"]));
+
+        let refused = |values: &[&str]| parse(&args(values)).expect_err("refused").message;
+        assert!(refused(&["wait", "s1", "s2", "--any", "--all"]).contains("not both"));
+        assert!(refused(&["wait", "--all"]).contains("Missing session or tab"));
+        assert!(refused(&["wait", "s1", "s2", "--bogus"]).contains("Unexpected argument --bogus"));
+        assert!(refused(&["wait", "s1", "--bogus"]).contains("Unexpected argument --bogus"));
+        // A cloud session is waited on in short calls of its own (`cloud_wait`).
+        assert!(refused(&["wait", "s1", "cloud:org-a:ws-1:s1"]).contains("cloud session by itself"));
+        assert!(refused(&["wait", "s1", "s2", "--tab", "t1"]).contains("cloud session"));
     }
 
     #[test]
