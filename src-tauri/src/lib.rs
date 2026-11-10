@@ -85,6 +85,7 @@ mod media_types;
 mod branch_overview;
 mod git;
 mod checkpoints;
+mod worktree_files;
 mod git_media;
 mod github;
 mod unfinished_merge;
@@ -427,6 +428,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
+            commands::repository_files_preview,
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,

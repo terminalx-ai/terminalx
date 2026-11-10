@@ -64,7 +64,7 @@ export type ControlResult = { done: true } | { done: false; message: string };
 export type ContinueResult = { started: true; tabId: string; delivered: boolean; inInput: boolean; message?: string } | { started: false; message: string };
 
 /** A project on the Mac, named by an id that is not its path. */
-export interface NewSessionProject { id: string; name: string; git: boolean; lastUsed: boolean }
+export interface NewSessionProject { id: string; name: string; git: boolean; lastUsed: boolean; repositorySettings?: { filesToCopy: string[] } }
 export interface NewSessionModel { id: string; label: string; isDefault: boolean; efforts: string[]; defaultEffort?: string | null }
 export interface NewSessionAgent { id: string; name: string; available: boolean; installHint: string; effort: boolean; permissionModes: boolean; models: NewSessionModel[] }
 /** What the Mac's new-session view lets a person choose. */

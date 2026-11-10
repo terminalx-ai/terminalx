@@ -31,6 +31,17 @@ describe("Settings search", () => {
     expect(screen.getByRole("alert").textContent).toContain("preferences.sounds, line 3");
   });
 
+  it("keeps repository settings reachable through search and grouped navigation", () => {
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "Search settings" });
+    fireEvent.change(input, { target: { value: "worktreeinclude" } });
+    fireEvent.click(screen.getByRole("option", { name: /Repositories/ }));
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Repositories");
+    const navigation = screen.getByRole("navigation", { name: "Settings sections" });
+    expect(within(navigation).getByRole("group", { name: "Repositories" })).toBeTruthy();
+    expect(screen.getByText("Choose a repository to view its settings.")).toBeTruthy();
+  });
+
   it("focuses with the find shortcut, highlights font matches, and opens the section with Enter", () => {
     render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
     const input = screen.getByRole("combobox", { name: "Search settings" });
