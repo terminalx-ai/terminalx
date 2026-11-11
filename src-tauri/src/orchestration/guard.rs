@@ -534,6 +534,24 @@ fn substitutions(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_verifier_cannot_edit_files_whatever_tool_it_reaches_for() {
+        // Every tool that writes a file, by the names Claude Code and Codex give them in a hook.
+        for tool in ["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch", "file_change", "write_file", "create_file", "mcp__filesystem__write_file", "mcp__github__create_or_update_file"] {
+            let reason = super::verifier_refusal(&serde_json::json!({"tool_name": tool, "tool_input": {"file_path": "src/cli.rs"}})).unwrap_or_else(|| panic!("{tool} is refused"));
+            assert!(reason.starts_with(&format!("TerminalX refused `{tool}`: a verifier of a run changes no file.")), "{reason}");
+            // What its agent's hook prints for it: a denial, not a question.
+            assert_eq!(super::refusal_output(&reason)["hookSpecificOutput"]["permissionDecision"], "deny");
+        }
+        // Reading is its work.
+        for tool in ["Read", "Grep", "Glob", "Bash", "mcp__filesystem__read_file"] {
+            assert_eq!(super::verifier_refusal(&serde_json::json!({"tool_name": tool, "tool_input": {"command": "git diff lead...HEAD"}})), None, "{tool}");
+        }
+        // And it starts where its agent itself changes nothing: Claude Code's plan mode, Codex's read-only sandbox.
+        assert_eq!(super::VERIFIER_MODE, "plan");
+        assert_eq!(crate::harness::codex::stance(super::VERIFIER_MODE).1, "read-only");
+    }
+
     use super::*;
 
     fn limit_of(command: &str) -> Option<Limit> {

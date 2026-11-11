@@ -648,9 +648,11 @@ The plan is a JSON file you write:
     worktree; exit code 0 passes. TerminalX runs it itself, so it costs no tokens. Prefer
     one wherever a test, a build, a type check or a search that must find nothing exists.
   - `{"type": "review", "text": "<what a reviewer must confirm>"}`: for what no command can
-    show. The reviewer sees the diff and this text, not the worker's reasoning.
-  - `{"type": "vote", "text": "…", "voters": 3, "threshold": 2}`: several reviewers judge
-    it separately. For high-cost claims only; it is stored with the plan.
+    show. A verifier session sees the diff and this text, not the worker's reasoning. It
+    costs tokens on every try of the piece, so ask for one only where a command cannot show it.
+  - `{"type": "vote", "text": "…", "voters": 3, "threshold": 2}`: several verifiers judge
+    it separately, and the piece passes when `threshold` of them do (three and two when you
+    name neither). For high-cost claims only: it runs only when the plan asks for it.
   A piece needs at least one `command` check. If no command can prove it (prose, a design
   note), set `"reviewOnly": true` and say why in `"reviewOnlyReason"`; without the reason
   the piece is refused. The worker is told every check and to run the commands itself
@@ -757,15 +759,68 @@ The loop:
 
 ```text
 terminalx runs start --json
-terminalx wait --children-of <your session> --any --json
-terminalx sessions report --children-of <your session> --json
+terminalx wait --children-of <your session> --json
+terminalx runs show --json
 terminalx runs start --json
 ```
 
+Do not poll, and do not wait on single workers. While your run is under way,
+`wait --children-of <your session>` waits on the run itself: it does not return each time a
+worker's turn ends, but when a piece's result is accepted (`done`), when a piece stops for
+good (`blocked`, `failed`), when a piece is ready for you to start, or when the run has
+ended. It returns `why` (a line for each of those), `ready` (the pieces `runs start` would
+start now), `state`, and every piece with its `state` and whether it `changed` since the
+wait began. `--all` returns only when nothing is under way any more. At the timeout it
+returns `timedOut: true`; wait again.
+
+#### How a result is checked
+
+A worker's `done` is a claim. The piece is `verifying`, not `done`, until TerminalX has
+checked the result itself, and nothing that depends on it starts before then. The checks run
+in this order and stop at the first that fails; the first four use no model:
+
+1. **Report.** The worker's report block parses and says `done`. A worker that ends without
+   a report that can be read, after one reminder, fails here.
+2. **Scope.** `git diff --name-only` against your branch names only files the piece `owns`.
+   A file outside them fails the piece, naming the file.
+3. **Branch state.** The work is committed on the piece's branch, the worktree is clean, and
+   your branch merges into it without conflicts (`git merge-tree`).
+4. **Command checks.** Every `command` done-check, then the project's own check command if
+   it has one and the piece changed files. TerminalX runs them in the worker's worktree. A
+   failure keeps the exit code and the last 100 lines.
+5. **Review**, only when one of these holds: the piece has no `command` check; the diff
+   touches a security area (the ones an issue pipeline runs its security pass for); the diff
+   is over 400 changed lines (a setting, `reviewDiffLines`); the piece's kind is `refactor`;
+   or the plan asks for one with a `review` or `vote` check.
+
+A piece with a passing `command` check, a small diff, no security area and a kind other than
+`refactor` is accepted after step 4 with no verifier session at all. So give every piece a
+command that really proves it, and keep pieces small: that is what keeps checking free.
+
+A verifier is a conversation of its own in the worker's worktree that cannot edit files. It
+is sent the piece's goal, its done-checks, the diff and what the gates printed, and none of
+the worker's transcript or report. It runs on the routing table's `verify` row (mid, at
+medium, unless the person changed it), not on the worker's model, and ends with a verdict:
+pass, or fail with `file:line` evidence.
+
+A result that fails any check is a try that fell short: the piece takes the next step below
+with what the check printed (or the verifier's evidence) as the failure text. You do not
+re-run the checks, rewrite the failure or brief the next worker. A review that nobody could
+answer (the verifier gave no verdict that can be read) leaves the piece `blocked` with that
+in its `note`: nothing says the result is wrong; read the diff yourself, or tell the person.
+
+Each try records its check under `verification`: `gates` (each one that ran, with `passed`,
+`detail`, and for the commands each `run`, `exitCode`, `millis` and, for one that failed,
+its `output`), `facts` (`files`, `changedLines`, `securityAreas`, and the `commit` that was
+checked), `review` when a model was asked (`reasons`, `voters`, `threshold`, and each
+verifier's `model`, `verdict`, `evidence` and `tokens`), and `outcome` (`passed`, `failed`,
+`inconclusive`). `runs show` also returns `verifierTokens`: what every verifier in the run
+used, apart from what the workers used.
+
 #### When a piece falls short
 
-A piece whose worker reports `failed` or `partial` is tried again without you asking, and
-you do not start, brief or message anything for it. Each try is a new worker session in a
+A piece whose worker reports `failed` or `partial`, or whose result fails a check, is tried
+again without you asking, and you do not start, brief or message anything for it. Each try is a new worker session in a
 new worktree, on what the next step names, briefed with the piece again plus what the try
 before fell short on and the branch it left. It never gets the earlier worker's
 conversation. A piece gets at most three tries:
@@ -776,21 +831,24 @@ conversation. A piece gets at most three tries:
 3. One model tier up, at one effort level lower.
 
 After the third try, or the second when no model tier above it is installed, the piece is
-`blocked` and its `note` says what was tried and what failed last. A run in which nothing
+`blocked` and its `note` says what was tried and what failed last. Three is also the most
+rounds of checking and fixing a piece gets: each try is checked once, and there is no fourth. A run in which nothing
 else can run is then `failed`, and `reason` names the piece. From there the choice is
 yours: `send` its last worker what it is missing (the piece is `running` again and takes
 its next report), do the piece yourself, or tell the person.
 
 So after `wait` returns, read the run, not only the reports: `sessions report` still lists
-the worker that fell short with its `failed` report, while `runs show` says the piece is
-`queued` or `running` on its next try. Do not `send` a worker whose piece moved on.
+the worker that fell short with its `failed` report (or with a `done` report whose result
+failed a check), while `runs show` says the piece is `queued` or `running` on its next try.
+Do not `send` a worker whose piece moved on.
 
 A worker that reports `blocked`, sends no report or waits on a person is not tried again: a
 different model would not have what it lacks. That piece is `blocked` after one try and
 waits on you.
 
-When a piece reports `done` and its done-check does not hold when you run it, say so
-instead of fixing it yourself or messaging the worker:
+TerminalX runs the done-checks, so you seldom need to. When a piece is `done` and you find
+something its checks did not catch, say so instead of fixing it yourself or messaging the
+worker:
 
 ```text
 terminalx runs check-failed <piece> --output check.log --reason "exit 101" --json
@@ -817,7 +875,7 @@ plan left that one to the piece's kind), `attempts`, `worker` (`sessionId`, `tab
 it differ from the one before), `model`, `effort`, `tier`, `worker`, `branch`, `outcome`
 (`done`, `failed`, `partial`, `checkFailed`, `blocked`, `stopped`; absent while it runs),
 `detail` (the result line, or the failure text the next try was given), `costUsd`,
-`started` and `ended`.
+`verification` (how its result was checked, above), `started` and `ended`.
 
 - Run `state`: `planned`, `awaitingApproval`, `running`, `verifying`, `merging`, `done`,
   `stopped`, `failed`. A run is `done` when every piece is. It is `failed` when a piece
@@ -825,14 +883,15 @@ it differ from the one before), `model`, `effort`, `tier`, `worker`, `branch`, `
   it holds up. A failed run goes back to `running` when that piece's worker finishes after
   all.
 - Piece `state` follows its worker's last report, each time the run is read: `queued` (no
-  worker yet, or its next try waits for one), `running`, `done` (it reported `done`),
-  `blocked` (it ran out of tries, reported `blocked`, sent no report, waits on a person, or
-  its session was deleted; `note` says which), `failed` (its worker could not be started),
-  `stopped`. A `done` piece stays done when its worker's session is deleted afterwards.
+  worker yet, or its next try waits for one), `running`, `verifying` (it reported `done`
+  and its result is being checked), `done` (its result passed every check), `blocked` (it
+  ran out of tries, reported `blocked`, waits on a person, its review could not be finished,
+  or its session was deleted; `note` says which), `failed` (its worker could not be
+  started), `stopped`. A `done` piece stays done when its worker's session is deleted
+  afterwards.
 
-A `done` piece is a worker's claim. Read its report and check the evidence before you build
-on it; when its done-check does not hold, report that with `runs check-failed`. To get a
-`blocked` piece moving, `send` its worker what it needs: the piece is `running` again while
+A `done` piece passed its checks; that is as much as they prove. When you find something
+they did not catch, report it with `runs check-failed`. To get a `blocked` piece moving, `send` its worker what it needs: the piece is `running` again while
 the worker works, and takes its next report.
 
 `runs stop` stops every running worker and marks the run `stopped`; pieces that were not
