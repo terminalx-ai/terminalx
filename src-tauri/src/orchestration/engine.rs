@@ -139,8 +139,9 @@ pub trait Host: Send + Sync {
     fn create_verifier(&self, run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef>;
     fn brief_verifier(&self, verifier: &SessionRef, prompt: &str) -> anyhow::Result<()>;
     fn verifier(&self, verifier: &SessionRef) -> VerifierNow;
-    /// A worker went back to work after its result was checked: what the
-    /// checks noted of its worktree ([`checks::forget_clean`]) no longer holds.
+    /// A worker went back to work after its result was checked, or reported
+    /// again: what the checks noted of its worktree ([`checks::forget_clean`])
+    /// no longer holds. Called before the gates of the new report run.
     fn check_reset(&self, worker: &SessionRef);
     /// The commit a worker's worktree is at now. A result is accepted as the
     /// commit its gates ran on; `None` when the worktree cannot be read.
@@ -606,7 +607,11 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                         if attempt.verification.is_none() {
                             attempt.verification = match (&short, state) {
                                 (Some(failure), _) => Some(Verification { gates: vec![GateResult::failed(Gate::Report, failure.clone())], outcome: Some(checks::Outcome::Failed), failure: Some(failure.clone()), started: Some(at.clone()), ended: Some(at), ..Verification::default() }),
-                                (None, PieceState::Verifying) => Some(Verification::reported(at)),
+                                (None, PieceState::Verifying) => {
+                                    // A new report is a new claim: what an earlier check noted of this worktree is not about it.
+                                    back_at_work.push(worker.clone());
+                                    Some(Verification::reported(at))
+                                }
                                 _ => None,
                             };
                         }

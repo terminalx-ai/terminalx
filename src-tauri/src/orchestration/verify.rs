@@ -319,8 +319,11 @@ pub fn may_run_commands(approved: bool, mode: &str) -> bool {
 /// store, a file a worktree, never inside the checkout a worker writes in.
 ///
 /// The note is the commit, then `running` while the commands run or `ran`
-/// and the lines `git status --porcelain` printed once they had. It is
-/// taken away when the worker goes back to work ([`forget_clean`]).
+/// and the lines `git status --porcelain` printed once they had. Only a
+/// finished one passes anything over: commands that never finished (the app
+/// stopped) are no account of what is in the worktree. It is taken away when
+/// the worker works again or reports again ([`forget_clean`]), and a check
+/// that ends after that writes none: its `running` note is gone.
 fn clean_mark(checkout: &Checkout) -> Option<PathBuf> {
     mark_of(checkout.marks.as_deref()?, &checkout.cwd)
 }
@@ -341,10 +344,18 @@ pub fn forget_clean(marks: &std::path::Path, cwd: &std::path::Path) {
 fn note_clean(checkout: &Checkout, commit: &str, after: Option<&str>) {
     let Some(mark) = clean_mark(checkout) else { return };
     let _ = mark.parent().map(std::fs::create_dir_all);
-    let _ = std::fs::write(mark, match after {
-        None => format!("{commit}\nrunning\n"),
-        Some(status) => format!("{commit}\nran\n{status}"),
-    });
+    let running = format!("{commit}\nrunning\n");
+    match after {
+        None => {
+            let _ = std::fs::write(mark, running);
+        }
+        // Only over this check's own `running` note: taken away meanwhile, the worker is at work
+        // again, and what is in the worktree now is not for this check to account for.
+        Some(status) if std::fs::read_to_string(&mark).is_ok_and(|noted| noted == running) => {
+            let _ = std::fs::write(mark, format!("{commit}\nran\n{status}"));
+        }
+        Some(_) => {}
+    }
 }
 
 const STATUS: [&str; 4] = ["status", "--porcelain", "--untracked-files=normal", "--"];
@@ -421,16 +432,12 @@ fn branch_state(checkout: &Checkout, commit: &str) -> GateResult {
     // This commit was found clean before, and its commands were run since. What they left in the
     // worktree (a lockfile, a snapshot) is not work left uncommitted: exactly those entries are
     // passed over, and anything else is still the worker's to commit. Commands that never
-    // finished (the app stopped) left nobody knows what: nothing is held against the worker.
-    let noted = clean_mark(checkout).and_then(|mark| std::fs::read_to_string(mark).ok()).filter(|noted| noted.lines().next() == Some(commit));
+    // finished (the app stopped) account for nothing: the worktree must be clean as for a first check.
+    let noted = clean_mark(checkout).and_then(|mark| std::fs::read_to_string(mark).ok()).filter(|noted| noted.lines().next() == Some(commit) && noted.lines().nth(1) == Some("ran"));
     let left: Vec<&str> = noted.as_deref().map(|noted| noted.lines().skip(2).collect()).unwrap_or_default();
-    let interrupted = noted.as_deref().is_some_and(|noted| noted.lines().nth(1) == Some("running"));
-    let status = match interrupted {
-        true => String::new(),
-        false => match git(checkout, &STATUS) {
-            Ok(status) => status,
-            Err(error) => return failed(format!("The worktree's state could not be read: {error:#}")),
-        },
+    let status = match git(checkout, &STATUS) {
+        Ok(status) => status,
+        Err(error) => return failed(format!("The worktree's state could not be read: {error:#}")),
     };
     let dirty: Vec<&str> = status.lines().filter(|line| !line.trim().is_empty() && !left.contains(line)).collect();
     if !dirty.is_empty() {
@@ -484,8 +491,8 @@ fn commands(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, cha
     // Clean at this commit, noted before anything is run in it; and what was left there, once it has run.
     let before = git(checkout, &STATUS).unwrap_or_default();
     let before: Vec<&str> = before.lines().collect();
-    // What an earlier run of them on this commit left stays theirs.
-    let earlier: Vec<String> = clean_mark(checkout).and_then(|mark| std::fs::read_to_string(mark).ok()).filter(|noted| noted.lines().next() == Some(commit)).map(|noted| noted.lines().skip(2).map(str::to_owned).collect()).unwrap_or_default();
+    // What an earlier, finished run of them on this commit left stays theirs.
+    let earlier: Vec<String> = clean_mark(checkout).and_then(|mark| std::fs::read_to_string(mark).ok()).filter(|noted| noted.lines().next() == Some(commit) && noted.lines().nth(1) == Some("ran")).map(|noted| noted.lines().skip(2).map(str::to_owned).collect()).unwrap_or_default();
     note_clean(checkout, commit, None);
     let mut runs = Vec::new();
     for (run, project) in wanted {
@@ -1213,18 +1220,25 @@ mod tests {
         assert!(detail.contains(" M src/store/mod.rs") && !detail.contains("snapshot.new") && !detail.contains("src/session.rs"), "{detail}");
         git(&checkout.cwd, &["checkout", "-q", "--", "src/store/mod.rs"]);
         assert!(gates(&checkout, &piece, None, QUICK).passed(), "and a third run still knows what the first left");
-        // Commands that never finished (the app stopped mid-check) left nobody knows what: nothing is held against the worker.
+        // Commands that never finished (the app stopped mid-check) account for nothing: the worktree
+        // must be clean as for a first check, whatever they may have left.
         let mark = checkout.marks.as_ref().unwrap().read_dir().unwrap().next().unwrap().unwrap().path();
+        let finished = std::fs::read_to_string(&mark).unwrap();
         std::fs::write(&mark, format!("{}\nrunning\n", git(&checkout.cwd, &["rev-parse", "HEAD"]).trim())).unwrap();
-        write(&checkout.cwd, "half-written.tmp", "x\n");
+        assert_eq!(names(&gates(&checkout, &piece, None, QUICK)), [(Gate::Scope, true), (Gate::Branch, false)]);
+        // When the worker works or reports again the note is taken away: what is there from then on is its own.
+        std::fs::write(&mark, &finished).unwrap();
         assert!(gates(&checkout, &piece, None, QUICK).passed());
-        // When the worker goes back to work the note is taken away: what it leaves from then on is its own.
-        std::fs::write(&mark, format!("{}\nrunning\n", git(&checkout.cwd, &["rev-parse", "HEAD"]).trim())).unwrap();
         forget_clean(checkout.marks.as_ref().unwrap(), &checkout.cwd);
         assert_eq!(names(&gates(&checkout, &piece, None, QUICK)), [(Gate::Scope, true), (Gate::Branch, false)]);
-        std::fs::remove_file(checkout.cwd.join("half-written.tmp")).unwrap();
+        // And a check that ends after it was taken away writes none: its commands ran while the worker was back at work.
         git(&checkout.cwd, &["checkout", "-q", "--", "src/session.rs"]);
         std::fs::remove_file(checkout.cwd.join("snapshot.new")).unwrap();
+        let slow = super::tests::piece(json!({"doneChecks": [{"type": "command", "run": format!("rm -f '{}' && echo late > late.new", mark.display())}]}));
+        assert!(gates(&checkout, &slow, None, QUICK).passed());
+        assert!(!mark.exists(), "no note is written over one that was taken away");
+        std::fs::remove_file(checkout.cwd.join("late.new")).unwrap();
+        assert_eq!(git(&checkout.cwd, &["status", "--porcelain"]), "");
         assert!(gates(&checkout, &piece, None, QUICK).passed());
         // The note of it is the app's own, outside the checkout: nothing a worker writes in its worktree stands in for it.
         assert!(checkout.marks.as_ref().unwrap().read_dir().unwrap().count() == 1 && !checkout.marks.as_ref().unwrap().starts_with(&checkout.cwd));

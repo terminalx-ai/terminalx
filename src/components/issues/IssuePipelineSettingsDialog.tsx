@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
 import { cloudPipelineSettings, pipelineSettings, switchChoiceOf, switchDefaultOf, type SwitchDefault } from "@/lib/issuePipeline";
-import { useExperimental } from "@/lib/experimental";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { EFFORT_LABEL, useModels } from "@/lib/models";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { updateProject } from "@/lib/sessions";
@@ -78,7 +78,7 @@ function lines(text: string, alsoCommas: boolean): string[] {
  * the rest of the project menu.
  */
 export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { project: Project; open: boolean; onOpenChange: (open: boolean) => void }) {
-  const reviewerChoice = useExperimental().orchestratorRuns;
+  const reviewerChoice = useExperimentalSettings()?.orchestratorRuns ?? false;
   const stored = pipelineSettings(project);
   // What was last asked for, until the project says the same. Two changes
   // made before the first is saved build on each other rather than on what

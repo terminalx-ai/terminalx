@@ -40,7 +40,6 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "experimental.nativeCodex",
   "experimental.sessionCost",
   "experimental.orchestratorRuns",
-  "experimental.sessionCost",
   "orchestrator.requireApproval",
   "orchestrator.pieceLimit",
   "orchestrator.workerMode",

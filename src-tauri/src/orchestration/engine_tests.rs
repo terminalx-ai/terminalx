@@ -1452,9 +1452,10 @@ fn a_check_under_way_ends_with_its_run_and_starts_again_when_its_worker_works_ag
     let run = engine::refreshed(&host, id).unwrap();
     let piece = run.piece("cli").unwrap();
     assert_eq!((piece.state, piece.tries[0].outcome, piece.tries[0].verification.is_none()), (PieceState::Running, None, true));
-    // What the checks noted of its worktree is forgotten with it, once: what it leaves there now is its own.
+    // What the checks noted of its worktree is forgotten when it reports and when it works again,
+    // once each: what it leaves there now is its own.
     engine::refreshed(&host, id).unwrap();
-    assert_eq!(host.world().resets, vec!["w1-cli"]);
+    assert_eq!(host.world().resets, vec!["w1-cli", "w1-cli"]);
     assert!(engine::verify(&host, id).unwrap().piece("cli").unwrap().state == PieceState::Running && host.world().checked.is_empty());
     // It reports again, and the run is stopped while that result waits: nothing is checked, nothing accepted.
     host.reports("cli", Status::Done, "Moved, again.");
