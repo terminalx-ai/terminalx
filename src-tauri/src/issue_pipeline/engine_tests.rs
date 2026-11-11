@@ -160,7 +160,7 @@ struct World {
 struct FakeHost(Mutex<World>);
 
 fn check(name: &str, state: &str) -> PrCheck {
-    PrCheck { name: name.into(), state: state.into(), url: None, actions: None }
+    PrCheck { name: name.into(), state: state.into(), url: None, actions: None, ..Default::default() }
 }
 
 fn github_issue() -> IssueRef {
@@ -862,6 +862,103 @@ fn checks_still_running_are_waited_for_and_left_to_a_person_if_they_never_finish
     // The project names it as a check that never holds a merge.
     run.host.world().settings.ignored_checks = vec!["windows-latest".into()];
     assert_eq!(run.poll().state, State::Merged);
+}
+
+fn timed(name: &str, state: &str, started: &str) -> PrCheck {
+    PrCheck { name: name.into(), state: state.into(), url: Some(format!("https://github.com/o/r/actions/runs/7/job/{}", name.len())), started_at: Some(started.into()), ..Default::default() }
+}
+
+#[test]
+fn a_wait_on_checks_carries_each_check_the_names_it_waits_on_and_its_clock() {
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![
+        timed("check", "in_progress", "2026-11-11T10:00:00Z"),
+        timed("headless-serve", "success", "2026-11-11T10:00:00Z"),
+        timed("lint", "success", "2026-11-11T10:00:00Z"),
+    ];
+    let run = Run::start_in(host, true);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().required_checks = Some(vec!["check".into(), "desktop-platforms".into(), "headless-serve".into()]);
+    let waiting = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(waiting.state, State::Waiting);
+    let checks = waiting.checks.clone().expect("the wait carries its checks");
+    assert_eq!(checks.commit, C1);
+    assert_eq!(checks.required, ["check", "desktop-platforms", "headless-serve"]);
+    assert_eq!(checks.limit_minutes, engine::CHECKS_WAIT_MINUTES);
+    assert_eq!((checks.since.as_deref(), checks.until.as_deref()), (waiting.waiting_since.as_deref(), None));
+    // Every reported check as GitHub gave it, and a required one it has not reported yet as expected.
+    let found = |name: &str| checks.checks.iter().find(|check| check.name == name).cloned().unwrap();
+    assert_eq!(found("check"), timed("check", "in_progress", "2026-11-11T10:00:00Z"));
+    assert_eq!(found("lint").state, "success", "an optional check is listed too");
+    assert_eq!((found("desktop-platforms").state.as_str(), found("desktop-platforms").url), ("expected", None));
+    // The words stay, for the sidebar and the phone.
+    assert_eq!(waiting.note.as_deref(), Some("Waiting for checks on 1111111111: check and desktop-platforms."));
+
+    // A later read with nothing changed writes nothing new: the clock is the wait's start, not the read's.
+    run.host.world().now += TimeDelta::minutes(5);
+    assert_eq!(run.poll().checks, Some(checks.clone()));
+
+    // When the stall stop fires, the list stays with the wait it ended.
+    // (Each poll is six minutes past the last: 11 so far, 60 at the next.)
+    run.host.world().now += TimeDelta::minutes(43);
+    let stalled = run.poll();
+    assert!(matches!(stalled.reason, Some(StopReason::ChecksStalled { .. })));
+    let after = stalled.checks.expect("the stop keeps the checks it stopped on");
+    assert_eq!(after.since, checks.since);
+    let until = after.until.clone().expect("the wait has ended");
+    let minutes = (DateTime::parse_from_rfc3339(&until).unwrap() - DateTime::parse_from_rfc3339(after.since.as_deref().unwrap()).unwrap()).num_minutes();
+    assert_eq!(minutes, i64::from(engine::CHECKS_WAIT_MINUTES), "the clock the page shows ends where the stop fired");
+    run.host.world().now += TimeDelta::minutes(5);
+    assert_eq!(run.poll().checks.and_then(|checks| checks.until), Some(until), "looked at again, the stop keeps when the wait ended");
+}
+
+#[test]
+fn a_failed_required_check_is_listed_with_the_wait_it_ended_and_a_rerun_starts_a_new_one() {
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![timed("check", "in_progress", "2026-11-11T10:00:00Z"), timed("lint", "success", "2026-11-11T10:00:00Z")];
+    let run = Run::start_in(host, true);
+    let started = run.to_gate().waiting_since.clone().unwrap();
+    run.host.world().now += TimeDelta::minutes(41);
+    run.host.world().pr.as_mut().unwrap().checks[0] = PrCheck { completed_at: Some("2026-11-11T10:41:00Z".into()), ..timed("check", "failure", "2026-11-11T10:00:00Z") };
+    let failed = run.poll();
+    assert_eq!(failed.reason, Some(StopReason::ChecksFailed { names: vec!["check".into()] }));
+    assert_eq!(failed.waiting_since, None);
+    let checks = failed.checks.expect("a failed check is listed");
+    assert_eq!(checks.since.as_deref(), Some(started.as_str()));
+    assert!(checks.until.is_some());
+    let failing = checks.checks.iter().find(|check| check.name == "check").unwrap();
+    assert_eq!((failing.state.as_str(), failing.url.is_some()), ("failure", true));
+
+    // Run again: a new wait, with its own clock.
+    run.host.world().now += TimeDelta::minutes(2);
+    run.host.world().pr.as_mut().unwrap().checks[0] = timed("check", "queued", "2026-11-11T10:43:00Z");
+    let again = run.poll();
+    assert_eq!(again.state, State::Waiting);
+    let checks = again.checks.unwrap();
+    assert_eq!((checks.since.as_deref(), checks.until), (again.waiting_since.as_deref(), None));
+    assert_ne!(checks.since.as_deref(), Some(started.as_str()));
+}
+
+#[test]
+fn checks_are_carried_only_while_the_merge_waits_on_them_or_stops_on_them() {
+    // Unreadable: no list, and the note says what it can.
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![check("build", "in_progress")];
+    let run = Run::start_in(host, false);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().checks_unread = true;
+    let unread = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(unread.checks, None);
+    assert!(unread.note.is_some());
+    drop(run);
+    // Passed and merged, or waiting on something else: nothing listed.
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![check("build", "in_progress")];
+    let run = Run::start_in(host, false);
+    assert!(run.to_gate().checks.is_some());
+    run.host.world().pr.as_mut().unwrap().checks = vec![check("build", "success")];
+    let ready = run.poll();
+    assert_eq!((ready.state, ready.checks), (State::ReadyToMerge, None));
 }
 
 #[test]

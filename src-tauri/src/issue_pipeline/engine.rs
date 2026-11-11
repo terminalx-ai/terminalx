@@ -17,13 +17,13 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 
-use crate::github::{PinnedMerge, PrSnapshot};
+use crate::github::{PinnedMerge, PrCheck, PrSnapshot};
 use crate::store::index::{IssueRef, SessionEntry};
 use crate::store::projects::IssuePipelineSettings;
 
 use super::gate::{self, same_commit, Facts, Gate, StopReason, Wait};
 use super::verdict::{self, AuthorReport, LocalChecks, ReviewError, SecurityPass, Verdict};
-use super::{categories, prompts, store, MergeRecord, MergeRequest, MergedBy, Pipeline, PrLink, Role, SessionRef, Stage, State};
+use super::{categories, prompts, store, MergeRecord, MergeRequest, MergedBy, Pipeline, PipelineChecks, PrLink, Role, SessionRef, Stage, State};
 
 /// How long checks may stay unfinished before a person is asked to look.
 pub const CHECKS_WAIT_MINUTES: u32 = 60;
@@ -479,6 +479,7 @@ impl Step<'_> {
 
     fn enter(&mut self, stage: Stage, note: impl Into<String>) {
         self.p.stage = stage;
+        self.p.checks = None;
         self.p.reminded = false;
         // At work again: a conversation told the pipeline had ended is not stopped for it now.
         self.p.releasing.clear();
@@ -1524,6 +1525,8 @@ impl Step<'_> {
     }
 
     fn evaluate_snapshot(&mut self, pr: PrSnapshot, merger: Merger) -> Result<()> {
+        // Listed again below only where this pass waits on the checks or stops on them.
+        let previous_checks = self.p.checks.take();
         // Adoption waits for the original author to yield the checkout. It
         // does not trust an agent's assertion that an earlier review passed.
         if pr.state == "OPEN" && self.p.round == 0 && self.p.events.iter().any(|event| event.kind == "adopted") {
@@ -1596,6 +1599,7 @@ impl Step<'_> {
         }, self.settings.local_checks_only && local_checked);
         self.p.stage = Stage::Merge;
         self.p.pr = Some(link.clone());
+        let waited_since = self.p.waiting_since.clone();
         if !matches!(decision, Gate::Wait(_)) {
             self.p.waiting_since = None;
         }
@@ -1633,10 +1637,16 @@ impl Step<'_> {
             Gate::Wait(wait) => {
                 let since = self.p.waiting_since.clone().unwrap_or_else(|| self.stamp());
                 let waited = DateTime::parse_from_rfc3339(&since).map(|since| (self.host.now() - since.with_timezone(&Utc)).num_minutes()).unwrap_or(0);
-                self.p.waiting_since = Some(since);
+                self.p.waiting_since = Some(since.clone());
                 match wait {
-                    Wait::Checks(names) if waited >= i64::from(CHECKS_WAIT_MINUTES) => self.needs_you(StopReason::ChecksStalled { names, minutes: CHECKS_WAIT_MINUTES }),
-                    Wait::Checks(names) => self.settle(State::Waiting, None, format!("Waiting for checks on {}: {}.", short(&pr.head_sha), list(&names))),
+                    Wait::Checks(names) if waited >= i64::from(CHECKS_WAIT_MINUTES) => {
+                        self.note_checks(&pr, previous_checks, Some(since), false);
+                        self.needs_you(StopReason::ChecksStalled { names, minutes: CHECKS_WAIT_MINUTES });
+                    }
+                    Wait::Checks(names) => {
+                        self.note_checks(&pr, previous_checks, Some(since), true);
+                        self.settle(State::Waiting, None, format!("Waiting for checks on {}: {}.", short(&pr.head_sha), list(&names)));
+                    }
                     Wait::Mergeability if waited >= i64::from(CHECKS_WAIT_MINUTES) => {
                         self.needs_you(StopReason::Failed { step: "Reading the pull request".into(), message: "GitHub has not said whether the branch can be merged.".into() });
                     }
@@ -1647,9 +1657,35 @@ impl Step<'_> {
                 let note = reason.describe();
                 self.settle(State::ReadyToMerge, Some(reason), note);
             }
-            Gate::NeedsYou(reason) => self.needs_you(reason),
+            Gate::NeedsYou(reason) => {
+                if matches!(reason, StopReason::ChecksFailed { .. }) {
+                    self.note_checks(&pr, previous_checks, waited_since, false);
+                }
+                self.needs_you(reason);
+            }
         }
         Ok(())
+    }
+
+    /// Keep the checks the merge is waiting on, or stopped on, for the issue
+    /// page to list (#881): every check on the head, required ones GitHub has
+    /// not reported yet as `expected`, and how long the wait has lasted. A
+    /// stop keeps the wait it ended, read after read, until the head moves.
+    fn note_checks(&mut self, pr: &PrSnapshot, previous: Option<PipelineChecks>, since: Option<String>, waiting: bool) {
+        if pr.checks_unread {
+            return;
+        }
+        let previous = previous.filter(|checks| checks.commit == pr.head_sha);
+        let required = gate::gating_names(pr, &self.settings.ignored_checks);
+        let mut checks = pr.checks.clone();
+        for name in &required {
+            if !checks.iter().any(|check| &check.name == name) {
+                checks.push(PrCheck { name: name.clone(), state: "expected".into(), ..Default::default() });
+            }
+        }
+        let since = since.or_else(|| previous.as_ref().and_then(|previous| previous.since.clone()));
+        let until = if waiting { None } else { previous.and_then(|previous| previous.until).or_else(|| since.as_ref().map(|_| self.stamp())) };
+        self.p.checks = Some(PipelineChecks { commit: pr.head_sha.clone(), checks, required, since, until, limit_minutes: CHECKS_WAIT_MINUTES });
     }
 
     fn merge(&mut self, link: &PrLink, commit: &str, merger: Merger) -> Result<()> {
@@ -1950,6 +1986,7 @@ fn new_pipeline(host: &dyn Host, session: &SessionEntry, tab_id: &str, auto_merg
         summary: None,
         reminded: false,
         waiting_since: None,
+        checks: None,
         merge_requested: None,
         merge_refused: None,
         merged: None,
