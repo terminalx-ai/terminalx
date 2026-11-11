@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+- Connect GitHub from the PR tab or Settings → Integrations in an embedded
+  sign-in terminal. Pushing a repository without a remote now offers a URL
+  field, or creation of a GitHub repository when signed in. Git failures show
+  a readable explanation with command output behind **Show details**. Connection
+  checks and login target the repository's host after resolving SSH aliases and
+  excluding unrelated remotes. Connection failures offer retry,
+  failed login output stays available, and repository creation works from linked
+  worktrees. PR conversations, check logs, reruns and Fix errors remain available after
+  connecting; failed reruns keep their output behind **Show details**. Remote setup
+  preserves file filters and folder view in the updated Changes panel. (PRO-166)
+
+- Keep native resend regression fixtures within their existing deadlines by
+  removing shell helper launches from the simulated protocol. (PRO-166 validation)
+
+- Keep sidebar New chat conversations in Chats with ordinary retention and
+  project linking, while using the shared composer and saved agent settings.
+  Branch drafts retain their requested project and advertised source branch.
+  Chat Git panels follow the working folder's actual repository status;
+  linked chats keep their repository account indicator and refresh control.
+  (PRO-173 follow-up)
+- A session started with `terminalx sessions create` from inside another
+  session records it as its `parent` (`--parent`, `--no-parent`).
+  `sessions list --children-of` lists the sessions a session started, and
+  `sessions stop --children-of` stops their running agents. (PRO-270)
+- `terminalx wait --children-of <session>` waits on every session that session
+  started, with `--any` or `--all`, and returns at once when it started none.
+  (PRO-328)
+
+## 0.2.29
+
+- Review changes from a turn checkpoint or a single commit, browse files in a
+  folder tree, mark files as viewed, and choose a comparison branch. (#854)
+- Read pull request conversations, manage reviewers, inspect check logs,
+  rerun failed checks, and send check failures to an agent for help. (#829, #831)
+- Set a manual session status and use status groups to organize local and
+  cloud chats. (#811)
+- Improve Native Codex follow-up delivery and recovery after a background
+  runtime update. (#865, #867)
+- Diagnose stalled macOS child-process startup from Settings, with recorded
+  startup evidence and guided validation. (#830)
+- Create GitHub and Linear issues with pipeline policy options. (#864)
+- Refine chat overlays, image viewing, dialogs, sidebar styling, and the
+  post-merge workspace flow. (#868, #876)
+- Let explicitly authorized agents inspect and operate TerminalX's own UI
+  through a session-scoped grant. Human-only confirmations remain protected.
+  (#872)
+
 ## 0.2.28
 
 - User settings reload when `settings.json` changes. General shows its location

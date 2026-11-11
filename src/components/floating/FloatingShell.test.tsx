@@ -70,11 +70,18 @@ let visible: boolean;
 let pending: { sessionId: string; tabId?: string | null } | null;
 let status: { shortcut: string | null; alwaysOnTop: boolean; retentionDays: number; shortcutError: string | null };
 
-async function mount(label: "floating" | `chat-${string}` = "floating") {
+async function loadWindow(label: "floating" | `chat-${string}` = "floating") {
   vi.resetModules();
   (await import("@/lib/appWindow")).setAppWindowForTest(label);
   const { FloatingShell } = await import("./FloatingShell");
   const sessions = await import("@/lib/sessions");
+  return { FloatingShell, sessions };
+}
+
+let windowModules: Awaited<ReturnType<typeof loadWindow>>;
+
+async function mount() {
+  const { FloatingShell, sessions } = windowModules;
   const utils = render(
     <TooltipProvider>
       <FloatingShell />
@@ -133,6 +140,12 @@ afterEach(() => {
 });
 
 describe("the floating chat window", () => {
+  beforeEach(async () => {
+    // Load the fresh window before the test can render. A cold import inside mount()
+    // can outlive a timed-out test and render after cleanup, in the next test.
+    windowModules = await loadWindow();
+  });
+
   it("starts on a quick-chat prompt with no project attached, and sends the first prompt once the chat exists", async () => {
     await mount();
     const start = await screen.findByTestId("start");
@@ -160,6 +173,7 @@ describe("the floating chat window", () => {
     cleanup();
 
     // The page is loaded afresh (the app restarted): it opens on the chat it showed last.
+    windowModules = await loadWindow();
     await mount();
     expect((await screen.findByTestId("session-view")).getAttribute("data-session")).toBe("chat-2");
   });
@@ -168,6 +182,8 @@ describe("the floating chat window", () => {
     stored = [chat("chat-1", "What is a monad?"), chat("chat-2", "Regex help")];
     localStorage.setItem("raccoon.floating.session", "chat-1");
     pending = { sessionId: "chat-2", tabId: "chat-2-tab" };
+    // Read the saved selection before applying the pending request on this page load.
+    windowModules = await loadWindow();
     const { sessions } = await mount();
     await waitFor(() => expect(sessions.getSessionStore().selectedSessionId).toBe("chat-2"));
 
@@ -291,63 +307,69 @@ describe("the floating chat window", () => {
   });
 });
 
-it("a new chat window neither restores nor replaces Quick Chat's selected conversation", async () => {
-  stored = [chat("chat-1", "Existing Quick Chat")];
-  localStorage.setItem("raccoon.floating.session", "chat-1");
-  const { sessions } = await mount("chat-test");
-  expect(await screen.findByTestId("start")).toBeTruthy();
-  expect(sessions.getSessionStore().selectedSessionId).toBeNull();
-  expect(localStorage.getItem("raccoon.floating.session")).toBe("chat-1");
-  act(() => sessions.selectSession("chat-1"));
-  act(() => sessions.selectSession(null));
-  expect(localStorage.getItem("raccoon.floating.session")).toBe("chat-1");
-  expect(called("floating_take_pending")).toHaveLength(0);
-  expect(screen.queryByRole("button", { name: "Keep on top" })).toBeNull();
-});
+describe("independent chat windows", () => {
+  beforeEach(async () => {
+    windowModules = await loadWindow("chat-test");
+  });
 
-it("keeps an independent chat visible and hands off only that window", async () => {
-  stored = [chat("chat-1", "Independent chat")];
-  visible = false;
-  pending = { sessionId: "chat-1" };
-  const { sessions } = await mount("chat-test");
-  expect(await screen.findByTestId("start")).toBeTruthy();
-  act(() => sessions.selectSession("chat-1"));
-  expect(await screen.findByTestId("session-view")).toBeTruthy();
-  fireEvent.keyDown(window, { key: "Escape" });
-  expect(called("floating_hide")).toHaveLength(0);
-  fireEvent.click(screen.getByRole("button", { name: "Open in main window" }));
-  expect(called("chat_window_open_in_main")).toEqual([{ sessionId: "chat-1", tabId: "chat-1-tab", closeSource: true }]);
-  expect(called("floating_open_in_main")).toHaveLength(0);
-});
+  it("a new chat window neither restores nor replaces Quick Chat's selected conversation", async () => {
+    stored = [chat("chat-1", "Existing Quick Chat")];
+    localStorage.setItem("raccoon.floating.session", "chat-1");
+    const { sessions } = await mount();
+    expect(await screen.findByTestId("start")).toBeTruthy();
+    expect(sessions.getSessionStore().selectedSessionId).toBeNull();
+    expect(localStorage.getItem("raccoon.floating.session")).toBe("chat-1");
+    act(() => sessions.selectSession("chat-1"));
+    act(() => sessions.selectSession(null));
+    expect(localStorage.getItem("raccoon.floating.session")).toBe("chat-1");
+    expect(called("floating_take_pending")).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "Keep on top" })).toBeNull();
+  });
 
-it("keeps the source window and its unsent drafts until the main window accepts them", async () => {
-  stored = [chat("chat-1", "A draft to move")];
-  const { sessions } = await mount("chat-test");
-  const drafts = await import("@/lib/drafts");
-  act(() => sessions.selectSession("chat-1"));
-  drafts.setDraft("chat-1-tab", "Please check this before I send it");
-  drafts.setDraft("another-tab", "An unfinished thought in another tab");
-  fireEvent.click(screen.getByRole("button", { name: "Open in main window" }));
-  expect(called("chat_window_open_in_main")).toHaveLength(0);
-  await waitFor(() => expect(mocks.emitTo).toHaveBeenCalledWith("main", "chat-window-drafts", expect.objectContaining({
-    source: "chat-test",
-    drafts: [["chat-1-tab", "Please check this before I send it"], ["another-tab", "An unfinished thought in another tab"]],
-  })));
-  const request = mocks.emitTo.mock.lastCall![2];
-  act(() => mocks.listeners.get("chat-window-drafts-result")?.({ payload: { id: request.id } }));
-  await waitFor(() => expect(called("chat_window_open_in_main")).toEqual([{ sessionId: "chat-1", tabId: "chat-1-tab", closeSource: true }]));
-});
+  it("keeps an independent chat visible and hands off only that window", async () => {
+    stored = [chat("chat-1", "Independent chat")];
+    visible = false;
+    pending = { sessionId: "chat-1" };
+    const { sessions } = await mount();
+    expect(await screen.findByTestId("start")).toBeTruthy();
+    act(() => sessions.selectSession("chat-1"));
+    expect(await screen.findByTestId("session-view")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(called("floating_hide")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Open in main window" }));
+    expect(called("chat_window_open_in_main")).toEqual([{ sessionId: "chat-1", tabId: "chat-1-tab", closeSource: true }]);
+    expect(called("floating_open_in_main")).toHaveLength(0);
+  });
 
-it("reports a failed draft transfer without closing the window", async () => {
-  stored = [chat("chat-1", "Keep my unsent text")];
-  const { sessions } = await mount("chat-test");
-  const drafts = await import("@/lib/drafts");
-  act(() => sessions.selectSession("chat-1"));
-  drafts.setDraft("chat-1-tab", "Still unsent");
-  mocks.emitTo.mockRejectedValueOnce(new Error("The main window is unavailable"));
-  fireEvent.click(screen.getByRole("button", { name: "Open in main window" }));
-  await waitFor(() => expect(mocks.message).toHaveBeenCalledWith("The main window is unavailable", expect.objectContaining({ kind: "error" })));
-  expect(called("chat_window_open_in_main")).toHaveLength(0);
-  expect(drafts.getDraft("chat-1-tab")).toBe("Still unsent");
-  expect(screen.getByTestId("session-view")).toBeTruthy();
+  it("keeps the source window and its unsent drafts until the main window accepts them", async () => {
+    stored = [chat("chat-1", "A draft to move")];
+    const { sessions } = await mount();
+    const drafts = await import("@/lib/drafts");
+    act(() => sessions.selectSession("chat-1"));
+    drafts.setDraft("chat-1-tab", "Please check this before I send it");
+    drafts.setDraft("another-tab", "An unfinished thought in another tab");
+    fireEvent.click(screen.getByRole("button", { name: "Open in main window" }));
+    expect(called("chat_window_open_in_main")).toHaveLength(0);
+    await waitFor(() => expect(mocks.emitTo).toHaveBeenCalledWith("main", "chat-window-drafts", expect.objectContaining({
+      source: "chat-test",
+      drafts: [["chat-1-tab", "Please check this before I send it"], ["another-tab", "An unfinished thought in another tab"]],
+    })));
+    const request = mocks.emitTo.mock.lastCall![2];
+    act(() => mocks.listeners.get("chat-window-drafts-result")?.({ payload: { id: request.id } }));
+    await waitFor(() => expect(called("chat_window_open_in_main")).toEqual([{ sessionId: "chat-1", tabId: "chat-1-tab", closeSource: true }]));
+  });
+
+  it("reports a failed draft transfer without closing the window", async () => {
+    stored = [chat("chat-1", "Keep my unsent text")];
+    const { sessions } = await mount();
+    const drafts = await import("@/lib/drafts");
+    act(() => sessions.selectSession("chat-1"));
+    drafts.setDraft("chat-1-tab", "Still unsent");
+    mocks.emitTo.mockRejectedValueOnce(new Error("The main window is unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Open in main window" }));
+    await waitFor(() => expect(mocks.message).toHaveBeenCalledWith("The main window is unavailable", expect.objectContaining({ kind: "error" })));
+    expect(called("chat_window_open_in_main")).toHaveLength(0);
+    expect(drafts.getDraft("chat-1-tab")).toBe("Still unsent");
+    expect(screen.getByTestId("session-view")).toBeTruthy();
+  });
 });

@@ -48,4 +48,3 @@ export function agentName(id: string): string {
 export function agentBrandColor(id: string): string | undefined {
   return lookupAgent(id)?.color;
 }
-

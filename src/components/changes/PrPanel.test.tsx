@@ -56,6 +56,8 @@ const cleanMerged: WorkspaceDisposition = {
 function mockBackend(disposition: WorkspaceDisposition, shouldFailDisposition: () => boolean = () => false) {
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "pr_list") return [mergedPr];
     if (command === "work_status") {
       return {
@@ -166,6 +168,8 @@ describe("merged workspace action", () => {
     failDisposition = true;
     view.rerender(<PrPanel cwd={cwd} branch={mergedPr.head} active busy onSettle={() => {}} workspace={workspace} />);
 
+    await screen.findByText("Could not complete Git operation");
+    fireEvent.click(screen.getByText("Show details"));
     await screen.findByText("Unable to verify workspace");
     expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
   });
@@ -183,6 +187,8 @@ describe("session PR history", () => {
     let check = "pending";
     mocks.invoke.mockImplementation(async (command: string, args: { branch?: string }) => {
       if (command === "gh_available") return true;
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
       if (command === "pr_associations") return [association(mergedPr), association(followup)];
       if (command === "work_status") return workStatus(followup.head, 1);
       if (command === "pr_list") return args.branch === mergedPr.head ? [mergedPr] : [{ ...followup, checks: [{ name: "Follow-up CI", state: check }] }];
@@ -205,6 +211,8 @@ describe("session PR history", () => {
   it("never offers settle for new commits on a reused merged branch", async () => {
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "gh_available") return true;
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
       if (command === "pr_associations") return [association(mergedPr)];
       if (command === "work_status") return workStatus(mergedPr.head, 2);
       if (command === "pr_landed") return { safe: false, merged: null, branch: mergedPr.head, head: "abc123" };
@@ -220,6 +228,8 @@ describe("session PR history", () => {
   it("keeps the create action scoped to current work when another branch has an open PR", async () => {
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "gh_available") return true;
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
       if (command === "pr_associations") return [association(followup)];
       if (command === "work_status") return workStatus("third-branch", 1);
       if (command === "pr_list") return [];
@@ -235,6 +245,8 @@ describe("session PR history", () => {
   it("keeps an unavailable association visible and blocks cleanup when its state is unknown", async () => {
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "gh_available") return true;
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
       if (command === "pr_associations") return [association(followup)];
       if (command === "work_status") return workStatus(mergedPr.head);
       if (command === "pr_list") return [mergedPr];
@@ -242,7 +254,9 @@ describe("session PR history", () => {
       throw Error(command);
     });
     render(<PrPanel cwd={cwd} sessionId="author" branch={mergedPr.head} active busy={false} onSettle={() => {}} />);
-    await screen.findByText("Could not refresh: PR unavailable");
+    await screen.findByText("Could not refresh this pull request.");
+    fireEvent.click(screen.getByText("Show details"));
+    await screen.findByText("PR unavailable");
     expect(screen.getByText(followup.url)).toBeTruthy();
     expect(screen.queryByText("This branch has been merged.")).toBeNull();
   });
@@ -252,6 +266,8 @@ describe("session PR history", () => {
     const delayed = new Promise<ReturnType<typeof association>[]>((resolve) => { finishOld = resolve; });
     mocks.invoke.mockImplementation(async (command: string, args: { sessionKey?: string }) => {
       if (command === "gh_available") return true;
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
       if (command === "pr_associations") return args.sessionKey === "old" ? delayed : [];
       if (command === "work_status") return workStatus("main");
       if (command === "pr_details") return mergedPr;
@@ -276,6 +292,8 @@ it("does not overwrite a newer refresh when an older request finishes last", asy
   let reads = 0;
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "work_status") return workStatus(followup.head, 1);
     if (command === "pr_list") return ++reads === 1 ? delayed : [followup];
     throw Error(command);
@@ -294,6 +312,8 @@ it("updates a follow-up's state and offers settle only after current work is con
   let merged = false;
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "pr_associations") return [association(mergedPr), association(followup)];
     if (command === "work_status") return workStatus(followup.head, merged ? 0 : 1);
     if (command === "pr_list") return [{ ...followup, state: merged ? "MERGED" : "OPEN" }];
@@ -314,6 +334,8 @@ it("updates a follow-up's state and offers settle only after current work is con
 it.each(["squash", "rebase"])("recognizes %s-merged work despite commits outside base ancestry", async (method) => {
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "pr_associations") return [association(mergedPr)];
     if (command === "work_status") return workStatus(mergedPr.head, 3);
     if (command === "pr_list") return [mergedPr];
@@ -328,6 +350,8 @@ it.each(["squash", "rebase"])("recognizes %s-merged work despite commits outside
 it("does not apply landed evidence from a different checkout HEAD", async () => {
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "pr_associations") return [association(mergedPr)];
     if (command === "work_status") return workStatus(mergedPr.head, 3);
     if (command === "pr_list") return [mergedPr];
@@ -389,6 +413,8 @@ it.each([false, true])("loads review threads for the selected PR URL (inline=%s)
   const pr = { ...followup, url: reviewSnapshot.url, number: 1 };
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "pr_associations") return [association(pr)];
     if (command === "work_status") return workStatus(pr.head);
     if (command === "pr_list") return [pr];
@@ -408,6 +434,8 @@ const openPr: PullRequest = { ...followup, mergeState: "CLEAN", checks: [], requ
 function panelBackend(read: () => PullRequest) {
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "work_status") return workStatus(followup.head, read().state === "MERGED" ? 0 : 1);
     if (command === "pr_list") return [read()];
     if (command === "pr_merge") return;
@@ -536,6 +564,8 @@ it("queues an associated PR by its own URL after the checkout changes branches",
   const pr = { ...openPr, mergeQueueEnabled: true };
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "work_status") return workStatus("main");
     if (command === "pr_associations") return [association(pr)];
     if (command === "pr_details") return pr;

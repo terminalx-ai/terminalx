@@ -25,6 +25,8 @@ beforeEach(() => {
   current = structuredClone(pr);
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "work_status") return { branch: "feature", defaultBranch: "main", aheadOfBase: 1 };
     if (command === "pr_list") return [current];
     if (command === "pr_conversation") return { url: current.url, title: current.title, body: current.body, author: current.author, viewer: "reviewer", state: current.state, canEdit: true, reviewers: [], unresolvedThreads: 0, activity: [] } satisfies PrConversation;
@@ -119,6 +121,9 @@ it("reruns all includes successful workflows, and a refusal never shows queued",
   const button = await screen.findByRole("button", { name: "Re-run all" });
   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(button);
+  await screen.findByText("Could not complete Git operation");
+  expect(screen.queryByText("GitHub denied re-run")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Show details" }));
   await screen.findByText("GitHub denied re-run");
   expect(screen.queryByLabelText("test: queued")).toBeNull();
   // The refusal remains readable while a fresh snapshot enables another try.

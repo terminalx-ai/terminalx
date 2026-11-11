@@ -459,6 +459,8 @@ impl SessionManager {
         current()?;
         let program = crate::binpath::resolve("codex").context("Codex is not installed")?;
         current()?;
+        #[cfg(test)]
+        tests::before_version_probe();
         let version = codex_version(&program).context("Could not verify experimental Codex stdio version. No prompt was sent.")?;
         anyhow::ensure!(codex::stdio::supported(&version), "Experimental stdio requires Codex {} or newer (found {}). No prompt was sent; PTY fallback is disabled.", codex::stdio::MIN_VERSION, version.trim());
         current()?;

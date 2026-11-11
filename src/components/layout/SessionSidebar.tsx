@@ -43,7 +43,8 @@ import { addProject, archiveSession, archiveSessions, conversationTitle, openPro
 import { ROW_ATTRIBUTE, isPicked, pickOnClick, togglePicked, usePickedSessions } from "@/lib/rowSelection";
 import { SidebarBulkBar } from "./SidebarBulkBar";
 import { copyText } from "@/lib/clipboard";
-import { openRenameSession } from "@/lib/dialogs";
+import { openRenameSession, openWorktreeCleanup } from "@/lib/dialogs";
+import { LOCAL_HOST, mergedNote, useMergedCleanup, useMergedStatus, type HostedStatus } from "@/lib/mergedCleanup";
 import { copyShareLink } from "@/lib/localSharing";
 import { ContinuationDialog } from "@/components/session/ContinuationDialog";
 import { openSettle } from "@/lib/dialogs";
@@ -329,6 +330,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                   />
                 ))}
                 </SidebarSortList>
+                <CleanupLine />
               </ListSection>
             )}
             {(chats.length > 0 || archivedChats.length > 0) && (
@@ -829,6 +831,7 @@ function BranchRow({
   const sort = useSidebarSortable(sortId);
   const holdsSelected = sessions.some((session) => session.id === selectedId);
   const removed = sessions.every((session) => session.worktreeRemoved);
+  const cleanup = useMergedStatus(LOCAL_HOST, removed ? null : sessions[0]?.cwd);
   const foldKey = removed ? `removed:${sessions[0].removedWorkspace?.path ?? sessions[0].id}` : branch;
   const [open, toggle] = useFold(`branch:${canon(path)}:${foldKey}`, false);
   const expanded = open || holdsSelected || opened;
@@ -846,7 +849,7 @@ function BranchRow({
           title={named ? `${named} · ${branch}` : label}
           className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-sm pl-[calc(1rem+var(--indent,0px))] pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
-          <BranchGlyph merged={merged} />
+          <BranchGlyph merged={merged} cleanup={cleanup} />
           <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branch || "No branch"}</span>
           {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
           <span className={cn("shrink-0 text-[11px] tabular-nums text-faint", yieldsToRowActions)}>{sessions.length}</span>
@@ -885,16 +888,44 @@ function BranchRow({
   );
 }
 
-/** A branch row's icon; a merged branch has a tick drawn into its empty corner, in the icon's own stroke. */
-function BranchGlyph({ merged }: { merged: boolean }) {
-  if (!merged) return <GitBranch className="size-4 shrink-0 text-muted-foreground" />;
+/**
+ * A branch row's icon; a merged branch has a tick drawn into its empty corner, in the icon's own stroke. A merged
+ * workspace clean-up has not deleted (`cleanup`) has the tick in amber, and its tooltip says why: the row's quiet
+ * marker, where the full story and its buttons are in the session's Branch tab.
+ */
+function BranchGlyph({ merged, cleanup }: { merged: boolean; cleanup?: HostedStatus }) {
+  const waiting = cleanup && cleanup.phase !== "removed";
+  if (!merged && !waiting) return <GitBranch className="size-4 shrink-0 text-muted-foreground" />;
+  const note = waiting ? mergedNote(cleanup) : "";
+  const title = waiting ? `${note.charAt(0).toUpperCase()}${note.slice(1)}` : "Merged: its commits are in the default branch";
   return (
-    <span className="flex shrink-0" title="Merged: its commits are in the default branch">
+    <span className="flex shrink-0" title={title} data-testid={waiting ? "branch-cleanup-marker" : undefined}>
       <GitBranch className="size-4 text-muted-foreground">
-        <path d="M9.25 3.75l1.75 1.75 3.5-3.75" className="text-info" />
+        <path d="M9.25 3.75l1.75 1.75 3.5-3.75" className={waiting && cleanup.phase === "kept" ? "text-warning" : "text-info"} />
       </GitBranch>
-      <span className="sr-only">merged</span>
+      <span className="sr-only">{waiting ? title : "merged"}</span>
     </span>
+  );
+}
+
+/**
+ * Under the projects: how many merged workspaces clean-up kept, as one line that opens the clean-up list. Only
+ * while there are some; nothing pops up for them.
+ */
+function CleanupLine() {
+  const { statuses } = useMergedCleanup();
+  const kept = Object.values(statuses).filter((status) => status.phase === "kept").length;
+  if (!kept) return null;
+  return (
+    <button
+      type="button"
+      onClick={openWorktreeCleanup}
+      data-testid="sidebar-cleanup-line"
+      className="-mx-2 mt-1 flex h-8 w-[calc(100%+1rem)] items-center gap-2.5 px-4 text-left text-[12.5px] text-muted-foreground outline-none hover:bg-selected/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+    >
+      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />
+      <span className="min-w-0 flex-1 truncate">Clean up {kept} merged {kept === 1 ? "workspace" : "workspaces"}</span>
+    </button>
   );
 }
 
@@ -1109,6 +1140,7 @@ function ConversationRow({
   const picking = pickedNow.length > 0;
   const picked = isPicked(ids, pickedNow);
   const removed = session.worktreeRemoved;
+  const cleanup = useMergedStatus(LOCAL_HOST, removed || named !== "branch" ? null : session.cwd);
   const location = removed ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null;
   const status = pressingStatus(peers.map(sessionStatus));
   // A row is its name and its age: which agent runs it is in the chat, not repeated on every row.
@@ -1149,7 +1181,7 @@ function ConversationRow({
             {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             {named === "branch" ? (
               <>
-                <BranchGlyph merged={merged} />
+                <BranchGlyph merged={merged} cleanup={cleanup} />
                 <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchName ?? "No branch"}</span>
                 {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                 {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}

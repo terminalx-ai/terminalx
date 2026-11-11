@@ -9,7 +9,7 @@
   "animations": true,
   "fontScale": "md",
   "transcriptLayout": "wide",
-  "foldToolCalls": true,
+  "foldToolCalls": false,
   "turnChanges": true,
   "promptMap": true,
   "autocorrect": false,

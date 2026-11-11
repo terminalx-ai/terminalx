@@ -105,8 +105,10 @@ struct World {
     checks: Vec<PrCheck>,
     sent: Vec<(String, String)>,
     pushes: Vec<String>,
+    resolution_push_targets: Vec<Option<super::ResolutionTarget>>,
     created: Vec<(String, String)>,
     associations: Vec<(String, String)>,
+    association_error: bool,
     edited: Vec<String>,
     comments: Vec<String>,
     merges: Vec<(String, String)>,
@@ -125,6 +127,7 @@ struct World {
     abort_error: Option<String>,
     reviewer_tabs: bool,
     announced: u32,
+    during_changed: Option<Hook>,
     issue_body: Option<String>,
     push_error: Option<String>,
     send_error: Option<String>,
@@ -190,8 +193,10 @@ impl FakeHost {
             checks: vec![check("build", "success")],
             sent: Vec::new(),
             pushes: Vec::new(),
+            resolution_push_targets: Vec::new(),
             created: Vec::new(),
             associations: Vec::new(),
+            association_error: false,
             edited: Vec::new(),
             comments: Vec::new(),
             merges: Vec::new(),
@@ -208,6 +213,7 @@ impl FakeHost {
             abort_error: None,
             reviewer_tabs: false,
             announced: 0,
+            during_changed: None,
             issue_body: Some("Sessions stop at code.".into()),
             push_error: None,
             send_error: None,
@@ -373,9 +379,13 @@ impl Host for FakeHost {
         Ok(())
     }
 
-    fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, required: bool) -> Result<Option<super::Resolution>> {
+    fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
         let world = self.world();
-        Ok((world.conflict || required).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work, waiting_since: None }))
+        Ok((world.conflict || required).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), target: Some(super::ResolutionTarget { remote: "fixture".into(), repository: pr.and_then(|pr| pr.head_repository.clone()), url_hash: "fixture".into() }), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work, waiting_since: None }))
+    }
+    fn push_resolution(&self, cwd: &Path, resolution: &super::Resolution, _branch: &str, _head: &str) -> Result<()> {
+        self.world().resolution_push_targets.push(resolution.target.clone());
+        self.push(cwd)
     }
     fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let mut resolver = session("resolver", None);
@@ -459,6 +469,7 @@ impl Host for FakeHost {
             base: "main".into(),
             head: "raccoon/433-open-a-pull-request".into(),
             head_sha: head,
+            head_repository: Some("acme/widgets".into()),
             mergeable: "MERGEABLE".into(),
             merge_state: "CLEAN".into(),
             review_decision: None,
@@ -471,7 +482,9 @@ impl Host for FakeHost {
     }
 
     fn associate_pull_request(&self, session_id: &str, _cwd: &Path, pr: &PrSnapshot) -> Result<()> {
-        self.world().associations.push((session_id.into(), pr.url.clone()));
+        let mut world = self.world();
+        if world.association_error { bail!("Could not associate the pull request."); }
+        world.associations.push((session_id.into(), pr.url.clone()));
         Ok(())
     }
 
@@ -539,7 +552,8 @@ impl Host for FakeHost {
     }
 
     fn changed(&self, _pipeline: &Pipeline) {
-        self.world().announced += 1;
+        let hook = { let mut world = self.world(); world.announced += 1; world.during_changed.take() };
+        if let Some(hook) = hook { hook(); }
     }
 }
 
@@ -1193,7 +1207,7 @@ fn a_pull_request_the_session_opened_itself_is_used_and_linked_to_the_issue() {
         let checks = world.checks.clone();
         world.pr = Some(PrSnapshot {
             number: 12, url: "https://github.com/acme/widgets/pull/12".into(), title: "wip".into(), body: "Pads minutes.".into(), state: "OPEN".into(), is_draft: false,
-            base: "main".into(), head: "raccoon/433-open-a-pull-request".into(), head_sha: C1.into(), mergeable: "MERGEABLE".into(), merge_state: "CLEAN".into(),
+            base: "main".into(), head: "raccoon/433-open-a-pull-request".into(), head_sha: C1.into(), head_repository: Some("acme/widgets".into()), mergeable: "MERGEABLE".into(), merge_state: "CLEAN".into(),
             review_decision: None, checks, required_checks: None, checks_unread: false, validation: Some(vec![check("CI", "success")]),
         });
     }
@@ -3639,4 +3653,181 @@ fn carrying_on_from_an_aborted_resolution_resolves_a_conflict_only_github_finds(
     assert_eq!(carried.resolution.as_ref().map(|resolution| resolution.head.as_str()), Some(C1));
     assert_eq!(run.host.prompts_to("resolver").len(), 2);
     assert_eq!(run.host.world().pushes, [C1]);
+}
+
+// #871: start/attach uses the original conversation and exact existing PR.
+fn existing_pr_host() -> FakeHost {
+    let host = FakeHost::new(&github_issue());
+    host.push(Path::new("/repo")).unwrap();
+    host.create_pull_request(Path::new("/repo"), "Already reviewed", "Keep this body").unwrap();
+    host.world().pushes.clear();
+    host.world().created.clear();
+    host.world().reviewer_tabs = true;
+    host
+}
+fn cli_actor() -> super::SwitchActor {
+    super::SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t1".into()) }
+}
+#[test]
+fn existing_session_start_is_idempotent_and_sends_the_brief_once() {
+    let _home = crate::store::temp_home();
+    let host = FakeHost::new(&github_issue());
+    let p = engine::start_existing(&host, "author", "t1", Some(false), Some(false), false, cli_actor()).unwrap();
+    assert_eq!(p.author, SessionRef { session_id: "author".into(), tab_id: "t1".into() });
+    assert_eq!(host.world().sessions.len(), 1);
+    assert_eq!(host.prompts_to("author").len(), 1);
+    assert_eq!(p.events.last().unwrap().actor, Some(cli_actor()));
+    let repeated = engine::start_existing(&host, "author", "t1", Some(true), Some(true), false, cli_actor()).unwrap();
+    assert_eq!(repeated.id, p.id);
+    assert!(!repeated.auto_merge && !repeated.resolve_conflicts);
+    assert_eq!(host.prompts_to("author").len(), 1);
+    assert_eq!(store::list().unwrap().len(), 1);
+}
+#[test]
+fn adoption_waits_for_idle_and_reviews_the_same_pr_without_push_or_history_changes() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+    let actor = super::SwitchActor::SelfUi { session_id: Some("author".into()), tab_id: Some("t1".into()) };
+    let p = engine::start_existing(&host, "author", "t1", Some(false), Some(false), true, actor.clone()).unwrap();
+    assert_eq!(p.pr.as_ref().unwrap().number, 7);
+    assert_eq!(p.stage, Stage::Merge);
+    assert_eq!(p.events.last().unwrap().actor, Some(actor));
+    poll(&host);
+    assert_eq!(host.world().reviewers, 0);
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::Idle;
+    poll(&host);
+    let reviewing = store::get(&p.id).unwrap();
+    assert_eq!(reviewing.stage, Stage::Review);
+    assert_eq!(reviewing.review_commit.as_deref(), Some(C1));
+    let reviewer = reviewing.reviewer.as_ref().unwrap();
+    assert_eq!(reviewer.session_id, "author");
+    assert_ne!(reviewer.tab_id, "t1");
+    let repeated = engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).unwrap();
+    assert_eq!(repeated.id, p.id);
+    let world = host.world();
+    assert_eq!(world.sessions.len(), 1);
+    assert_eq!(world.reviewers, 1);
+    assert!(world.pushes.is_empty() && world.created.is_empty() && world.edited.is_empty());
+    assert_eq!(world.pr.as_ref().unwrap().body, "Keep this body");
+}
+#[test]
+fn adoption_refuses_unmatched_or_dirty_work_without_creating_a_pipeline() {
+    let _home = crate::store::temp_home();
+    for condition in ["dirty", "head", "branch", "missing", "merging", "stdio"] {
+        let host = existing_pr_host();
+        {
+            let mut world = host.world();
+            match condition {
+                "dirty" => world.workspace.dirty.push("uncommitted.ts".into()),
+                "head" => world.workspace.head = C2.into(),
+                "branch" => world.pr.as_mut().unwrap().head = "another-branch".into(),
+                "missing" => world.pr = None,
+                "merging" => world.workspace.merging.push(BASE.into()),
+                "stdio" => world.sessions.get_mut("author").unwrap().tabs[0].transport = crate::store::index::AgentTransport::ExperimentalCodexStdio,
+                _ => unreachable!(),
+            }
+        }
+        assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err(), "{condition}");
+        assert!(store::list().unwrap().is_empty());
+        assert!(host.world().sent.is_empty());
+    }
+}
+#[test]
+fn adoption_preserves_person_only_merge_and_existing_author_ownership() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    host.world().settings.require_person = true;
+    // An existing issue pipeline at Work can adopt, too.
+    let original = start(&host, "author", "t1", Some(true), None).unwrap();
+    let p = engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).unwrap();
+    assert_eq!(p.id, original.id);
+    poll(&host);
+    let p = store::get(&p.id).unwrap();
+    let reviewer = p.reviewer.as_ref().unwrap();
+    assert!(engine::start_existing(&host, &reviewer.session_id, &reviewer.tab_id, None, None, true, cli_actor()).is_err());
+    turn_completed(&host, &reviewer.session_id, &reviewer.tab_id, Some(&reviewed(C1, "merge", "[]")));
+    assert!(host.world().merges.is_empty());
+    let p = store::get(&p.id).unwrap();
+    assert!(matches!(p.reason, Some(StopReason::PersonRequired)));
+    assert_eq!(p.author.tab_id, "t1");
+}
+
+#[test]
+fn adoption_is_initialized_before_completion_events_and_polling_can_see_it() {
+    let _home = crate::store::temp_home();
+    let host = std::sync::Arc::new(existing_pr_host());
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+    let callback_host = host.clone();
+    host.world().during_changed = Some(Box::new(move || {
+        let p = store::for_session("author").unwrap().unwrap();
+        assert_eq!((p.stage, p.state), (Stage::Merge, State::Waiting));
+        assert_eq!(p.pr.as_ref().unwrap().number, 7);
+        assert_eq!(p.events.iter().find(|event| event.kind == "adopted").unwrap().actor, Some(cli_actor()));
+        // These are the real entry points that could previously push and edit
+        // the PR between publishing Work and acquiring the adoption step lock.
+        turn_completed(callback_host.as_ref(), "author", "t1", Some(&done("Ready for review")));
+        poll(callback_host.as_ref());
+    }));
+    let p = engine::start_existing(host.as_ref(), "author", "t1", Some(false), Some(false), true, cli_actor()).unwrap();
+    assert_eq!(store::get(&p.id).unwrap().stage, Stage::Merge);
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::Idle;
+    poll(host.as_ref());
+    let reviewing = store::get(&p.id).unwrap();
+    assert_eq!(reviewing.stage, Stage::Review);
+    assert_eq!(reviewing.pr.as_ref().unwrap().number, 7);
+    assert_eq!(reviewing.author, p.author);
+    let world = host.world();
+    assert!(world.pushes.is_empty() && world.created.is_empty() && world.edited.is_empty());
+    assert_eq!(world.pr.as_ref().unwrap().body, "Keep this body");
+    assert_eq!(world.sessions.len(), 1);
+    assert_eq!(world.reviewers, 1);
+}
+
+#[test]
+fn adoption_association_failure_does_not_publish_a_work_pipeline() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    host.world().association_error = true;
+    assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err());
+    assert!(store::list().unwrap().is_empty());
+    assert_eq!(host.world().announced, 0);
+    turn_completed(&host, "author", "t1", Some(&done("Ready for review")));
+    assert!(host.world().pushes.is_empty());
+}
+
+#[test]
+fn adoption_does_not_overwrite_a_stopped_pipeline() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    let p = start(&host, "author", "t1", Some(false), None).unwrap();
+    engine::act_from_agent(&host, &p.id, Action::Stop).unwrap();
+    assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err());
+    assert!(store::get(&p.id).unwrap().stopped);
+}
+
+#[test]
+fn adopted_fork_identity_reaches_resolution_detection_and_the_push() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    {
+        let mut world = host.world();
+        world.conflict = true;
+        let pr = world.pr.as_mut().unwrap();
+        pr.head_repository = Some("me/widgets".into());
+        pr.merge_state = "DIRTY".into();
+    }
+    let p = engine::start_existing(&host, "author", "t1", Some(false), Some(true), true, cli_actor()).unwrap();
+    poll(&host);
+    let resolving = store::get(&p.id).unwrap();
+    assert_eq!(resolving.stage, Stage::Resolve);
+    let target = resolving.resolution.as_ref().unwrap().target.clone();
+    assert_eq!(target.as_ref().unwrap().repository.as_deref(), Some("me/widgets"));
+    host.commit(C2);
+    host.world().conflict = false;
+    host.world().pr.as_mut().unwrap().merge_state = "CLEAN".into();
+    turn_completed(&host, "resolver", "t1", Some(&done("Resolved conflicts")));
+    assert_eq!(host.world().resolution_push_targets, [target]);
+    assert_eq!(host.world().pushes, [C2]);
+    assert_eq!(store::get(&p.id).unwrap().stage, Stage::Review);
 }

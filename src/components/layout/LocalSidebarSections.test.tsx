@@ -166,7 +166,7 @@ describe("personal local sections", () => {
     nextSections = [section("Release")]; await submit("Move");
     expect(mocks.invoke).toHaveBeenCalledWith("edit_local_section", { edit: { kind: "move", sessionIds: ["one"], sectionId: null } });
     fireEvent.click(screen.getByRole("button", { name: "New session in Release" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: true, newSessionSectionId: "Release" });
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: true, newSessionSectionId: "Release" });
     act(() => store.closeNewSession());
     expect(store.getSessionStore().newSessionSectionId).toBeNull();
     await act(() => store.startChat());

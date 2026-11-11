@@ -85,6 +85,7 @@ mod media_types;
 mod branch_overview;
 mod git;
 mod checkpoints;
+mod worktree_files;
 mod git_media;
 mod github;
 mod unfinished_merge;
@@ -96,6 +97,8 @@ mod idle_agents;
 mod issue_control;
 #[cfg(feature = "desktop")]
 mod issue_confirmation;
+#[cfg(feature = "desktop")]
+mod self_ui;
 mod issue_pipeline;
 mod issue_ops;
 mod issues;
@@ -133,6 +136,7 @@ mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
+mod reply_block;
 mod recovery_log;
 mod continuation;
 pub mod skills;
@@ -147,6 +151,7 @@ mod summaries;
 mod terminal_perf;
 #[cfg(feature = "desktop")]
 mod work_claims;
+mod worker_report;
 mod workspaces;
 mod worktree_cleanup;
 mod worktree_control;
@@ -423,6 +428,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
+            commands::repository_files_preview,
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,
@@ -687,6 +693,11 @@ pub fn run() {
             commands::cloud_mirror_claim_owner,
             commands::cloud_mirror_note_unreadable,
             commands::git_push,
+            commands::git_has_remote,
+            commands::git_add_remote,
+            commands::gh_connection_status,
+            commands::gh_login_start,
+            commands::gh_create_repository,
             commands::git_pull,
             commands::git_discard,
             commands::turn_checkpoint,
@@ -736,6 +747,12 @@ pub fn run() {
             commands::pty_kill,
             commands::terminal_perf_reply,
             commands::cloud_control_reply,
+            self_ui::self_ui_claim,
+            self_ui::self_ui_validate,
+            self_ui::self_ui_reply,
+            self_ui::self_ui_start,
+            self_ui::self_ui_grants,
+            self_ui::self_ui_revoke,
             issue_confirmation::issue_confirmation_pending,
             issue_confirmation::issue_confirmation_reply,
             commands::cloud_control_setting,
@@ -815,6 +832,7 @@ pub fn run() {
             commands::issues_list,
             commands::issue_pipelines_list,
             commands::issue_pipeline_start,
+            commands::issue_pipeline_attach,
             commands::issue_pipeline_continue,
             commands::issue_pipeline_set_auto_merge,
             commands::issue_pipeline_set_resolve_conflicts,
