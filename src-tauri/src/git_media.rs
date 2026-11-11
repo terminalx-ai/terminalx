@@ -6,7 +6,6 @@ use serde::Serialize;
 use std::{
     io::Read,
     path::{Component, Path},
-    process::Command,
 };
 
 #[derive(Serialize)]
@@ -44,35 +43,11 @@ pub fn read(
             .clone(),
     };
     let bytes = if let Some(tree) = tree {
-        ensure!(
-            (7..=64).contains(&tree.len()) && tree.bytes().all(|c| c.is_ascii_hexdigit()),
-            "Invalid tree id"
-        );
-        crate::git::run(cwd, &["cat-file", "-e", &format!("{tree}^{{tree}}")])?;
-        let spec = format!("{tree}:{path}");
-        let mut command =
-            Command::new(crate::binpath::resolve("git").unwrap_or_else(|| "git".into()));
-        command.current_dir(cwd).env("GIT_TERMINAL_PROMPT", "0");
-        // A missing side of an addition/deletion is distinct from a corrupt tree.
-        let kind = command.args(["cat-file", "-t", &spec]).output()?;
-        if !kind.status.success() {
-            return Ok(None);
+        match crate::git::blob_bytes_at(cwd, tree, path, limit)? {
+            None => return Ok(None),
+            Some(crate::git::BlobContents::Bytes(bytes)) => bytes,
+            Some(crate::git::BlobContents::TooLarge) => bail!("Media preview exceeds the {} KiB limit", limit / 1024),
         }
-        ensure!(kind.stdout == b"blob\n", "Not a regular media blob");
-        let size: usize = crate::git::run(cwd, &["cat-file", "-s", &spec])?
-            .trim()
-            .parse()?;
-        ensure!(
-            size <= limit,
-            "Media preview exceeds the {} KiB limit",
-            limit / 1024
-        );
-        let output = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| "git".into()))
-            .current_dir(cwd)
-            .args(["cat-file", "blob", &spec])
-            .output()?;
-        ensure!(output.status.success(), "Could not read media revision");
-        output.stdout
     } else {
         let root = cwd.canonicalize()?;
         let resolved = match root.join(path).canonicalize() {
@@ -122,6 +97,7 @@ pub fn read(
 mod tests {
     use super::*;
     use crate::git::run;
+    use std::process::Command;
 
     #[test]
     fn reads_binary_revisions_missing_sides_and_limits_without_touching_files() {

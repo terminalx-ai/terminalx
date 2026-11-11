@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { TurnDetailsPopover } from "./UsagePopovers";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -504,7 +505,7 @@ function ReaderMessage({
                   }}
                   className="cursor-zoom-in rounded-md outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring/50"
                 >
-                  <img src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
+                  <PrivacyImage src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
                 </button>
               ) : (
                 <span key={i} className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-veil-raised px-2 py-1 text-xs text-muted-foreground" data-testid="prompt-image-name">

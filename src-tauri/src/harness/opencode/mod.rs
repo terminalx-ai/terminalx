@@ -70,6 +70,8 @@ pub struct OpenCode {
     pub base: String,
     pub session_id: Option<String>,
     pub ready: bool,
+    generation: u64,
+    prompt_seq: Option<u64>,
     stashed: Option<(String, Vec<(String, String)>)>,
     pub model: Option<String>,
     pub mode: String,
@@ -80,6 +82,7 @@ pub struct OpenCode {
     tools_started: HashMap<String, bool>,
     /// Open permission requests: our request id → the server's permission id.
     asks: HashMap<String, String>,
+    answers: HashMap<String, bool>,
     turn_open: bool,
     /// The app asked for the open turn to be aborted (`interrupt`): its idle
     /// is a stopped turn, not a finished one.
@@ -108,11 +111,12 @@ impl OpenCode {
     }
 
     fn http(&self, tag: &str, method: &str, path: &str, body: Option<Value>) -> Action {
-        Action::Http { tag: tag.into(), method: method.into(), url: format!("{}{}", self.base, path), body }
+        Action::Http { generation: self.generation, tag: tag.into(), method: method.into(), url: format!("{}{}", self.base, path), body }
     }
 
     /// The first prompt waits for a session; resume asks for the old one first.
     pub fn start(&mut self, text: String, images: Vec<(String, String)>) -> Vec<Action> {
+        self.generation += 1;
         self.stashed = Some((text, images));
         vec![self.open_session()]
     }
@@ -125,6 +129,7 @@ impl OpenCode {
     }
 
     fn begin_turn(&mut self, text: &str, images: &[(String, String)]) -> Vec<Action> {
+        self.generation += 1;
         let sid = self.session_id.clone().unwrap_or_default();
         let mut parts = vec![json!({"type": "text", "text": text})];
         for (i, (media, data)) in images.iter().enumerate() {
@@ -142,7 +147,7 @@ impl OpenCode {
         self.seen.clear();
         self.committed.clear();
         vec![
-            Action::Emit(Payload::TurnStarted { model: self.model.clone(), provider_session_id: self.session_id.clone(), prompt_seq: None, started_by: None, initiating_prompt: None }),
+            Action::Emit(Payload::TurnStarted { model: self.model.clone(), provider_session_id: self.session_id.clone(), prompt_seq: self.prompt_seq, started_by: None, initiating_prompt: None }),
             Action::Emit(Payload::ModelRequestStarted),
             self.http("prompt", "POST", &format!("/session/{sid}/message"), Some(body)),
         ]
@@ -150,10 +155,31 @@ impl OpenCode {
 
     pub fn prompt(&mut self, text: String, images: Vec<(String, String)>) -> Vec<Action> {
         if !self.ready {
-            self.stashed = Some((text, images));
-            return Vec::new();
+            // A cancelled request will never reply. Start another opening for
+            // this turn; the owner leaves later follow-ups in its queue.
+            return self.start(text, images);
         }
         self.begin_turn(&text, &images)
+    }
+
+    pub fn generation(&self) -> u64 { self.generation }
+
+    pub fn set_prompt_seq(&mut self, seq: u64) { self.prompt_seq = Some(seq); }
+
+    /// A remote HTTP action lost admission before it could write. Forget the
+    /// startup stash as well, so neither a late opening reply nor restart can
+    /// revive it. The owner verifies this is still the same child.
+    pub fn withdraw_prompt(&mut self, tag: &str) -> Vec<Action> {
+        if let Some(request) = tag.strip_prefix("permission:") {
+            self.answers.remove(request);
+            return Vec::new();
+        }
+        if !matches!(tag, "session_get" | "session_new" | "prompt") { return Vec::new(); }
+        self.generation += 1; // old opening/prompt callbacks cannot settle its successor
+        if self.stashed.take().is_some() { self.turn_open = true; }
+        let mut actions = self.prompt_seq.take().map(|prompt_seq| Action::Emit(Payload::PromptWithdrawn { prompt_seq, unconfirmed: false })).into_iter().collect::<Vec<_>>();
+        actions.extend(self.end_turn(TurnStatus::Aborted, None, false));
+        actions
     }
 
     /// Abort the open turn; the server keeps running. The turn ends when the
@@ -202,15 +228,31 @@ impl OpenCode {
         true
     }
 
+    pub fn answer_pending(&self, request_id: &str) -> bool { self.answers.contains_key(request_id) }
+
     pub fn answer(&mut self, request_id: &str, option_id: &str) -> Option<Vec<Action>> {
-        let pid = self.asks.remove(request_id)?;
+        if self.answers.contains_key(request_id) { return None; }
+        let pid = self.asks.get(request_id)?.clone();
+        self.answers.insert(request_id.into(), option_id != "reject");
         let sid = self.session_id.clone().unwrap_or_default();
         let response = match option_id {
             "always" => "always",
             "once" => "once",
             _ => "reject",
         };
-        Some(vec![self.http("permission", "POST", &format!("/session/{sid}/permissions/{pid}"), Some(json!({"response": response})))])
+        Some(vec![self.http(&format!("permission:{request_id}"), "POST", &format!("/session/{sid}/permissions/{pid}"), Some(json!({"response": response})))])
+    }
+
+    /// Only a confirmed HTTP delivery settles the card. Refusal, including
+    /// pre-admission withdrawal, leaves the provider request locally answerable.
+    pub fn settle_answer(&mut self, tag: &str, line: &str) -> Option<(String, bool)> {
+        let request = tag.strip_prefix("permission:")?;
+        let allow = self.answers.remove(request)?;
+        let reply: Value = serde_json::from_str(line).ok()?;
+        let status = reply["raccoon_http"]["status"].as_u64()?;
+        if !(200..300).contains(&status) { return None; }
+        self.asks.remove(request);
+        Some((request.into(), allow))
     }
 
     #[cfg(test)]
@@ -225,6 +267,7 @@ impl OpenCode {
         self.turn_open = false;
         // What it was asking went with it, and whatever still arrives for its messages is late.
         self.asks.clear();
+        self.answers.clear();
         self.retired.extend(self.messages.drain());
         let duration_ms = self.turn_started_at.take().map(|t| t.elapsed().as_millis() as u64);
         let usage = self.last_usage.map(|(used, max)| Usage { context_used: Some(used), context_max: max, ..Default::default() });
@@ -278,6 +321,7 @@ impl OpenCode {
             }
             "session_new" | "session_get" => {
                 if !ok {
+                    self.stashed = None;
                     self.turn_open = true;
                     return self.end_turn(TurnStatus::Error, Some(message), status == 401 || status == 403);
                 }
@@ -590,6 +634,20 @@ mod tests {
     }
 
     #[test]
+    fn withdrawn_remote_opening_restarts_without_a_reply() {
+        for tag in ["session_new", "session_get"] {
+            let mut o = OpenCode::new(4321, "/tmp/x", None, None, "default");
+            o.start("expired remote".into(), vec![]);
+            let withdrawn = o.withdraw_prompt(tag);
+            assert!(emits(&withdrawn).iter().any(|payload| matches!(payload, Payload::TurnCompleted { status: TurnStatus::Aborted, .. })));
+            let fresh = o.prompt("fresh local".into(), vec![]);
+            assert_eq!(https(&fresh)[0].0, "session_new", "no refused HTTP request will reply");
+            let ready = o.on_http("session_new", 200, &json!({"id":"local-session"}));
+            assert_eq!(https(&ready)[0].2.as_ref().unwrap()["parts"][0]["text"], "fresh local");
+        }
+    }
+
+    #[test]
     fn opens_a_session_then_prompts_with_agent_and_model() {
         let mut o = OpenCode::new(4321, "/tmp/x", None, Some("anthropic/claude-sonnet-4".into()), "plan");
         let acts = o.start("hi".into(), vec![]);
@@ -658,6 +716,14 @@ mod tests {
         let reply = https(&o.answer(request_id, "once").unwrap());
         assert!(reply[0].1.ends_with("/session/s/permissions/perm1"));
         assert_eq!(reply[0].2.as_ref().unwrap()["response"], "once");
+        assert!(o.has_ask(request_id), "enqueueing does not settle a permission");
+        assert!(o.answer(request_id, "once").is_none(), "one in-flight answer per request");
+        let tag = format!("permission:{request_id}");
+        assert!(o.withdraw_prompt(&tag).is_empty());
+        assert!(o.has_ask(request_id), "revoked answer must remain locally answerable");
+        o.answer(request_id, "once").unwrap();
+        let line = json!({"raccoon_http":{"tag":tag,"status":200,"body":{}}}).to_string();
+        assert_eq!(o.settle_answer(&tag, &line), Some((request_id.clone(), true)));
         assert!(!o.has_ask(request_id));
         let a = o.handle(r#"{"type":"message.part.updated","properties":{"part":{"id":"p2","sessionID":"s","type":"tool","callID":"c1","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"a\nb"}}}}"#);
         assert!(matches!(emits(&a)[0], Payload::ToolCallCompleted { result, .. } if result.text == "a\nb" && !result.is_error));
@@ -747,6 +813,7 @@ mod tests {
                 match action {
                     Action::Http { tag, body, .. } => asked.push(match tag.as_str() {
                         "prompt" => format!("prompt: {}", body.unwrap()["parts"][0]["text"].as_str().unwrap()),
+                        _ if tag.starts_with("permission:") => "permission".into(),
                         _ => tag,
                     }),
                     Action::Emit(Payload::TurnStarted { .. }) => told.push("start".to_string()),

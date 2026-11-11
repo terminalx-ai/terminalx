@@ -168,7 +168,7 @@ impl Closed {
     }
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Socket = crate::data_privacy::Socket;
 
 struct Connection {
     socket: Socket,
@@ -231,7 +231,7 @@ async fn connect(offer: &PairingOffer, credential: &Credential, ticket: Option<&
     let request = url.into_client_request().map_err(Closed::other)?;
     let (mut socket, _) = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        tokio_tungstenite::connect_async_with_config(request, Some(websocket_config()), false),
+        crate::data_privacy::connect(request, Some(websocket_config()), false),
     )
     .await
     .map_err(|_| Closed::other("relay connect timed out"))?

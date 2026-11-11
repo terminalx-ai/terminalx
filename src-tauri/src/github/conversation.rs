@@ -45,6 +45,25 @@ pub struct Conversation {
     pub activity: Vec<Activity>,
 }
 
+/// Mutation and reconciliation are one request. A completed mutation stays
+/// completed when its readback fails (including privacy revocation); callers
+/// must not retry it or start a new read from that delayed completion.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Update {
+    pub conversation: Option<Conversation>,
+    pub error: Option<String>,
+}
+
+pub fn update_with(target: &Target, action: Action, mut run: impl FnMut(&[&str]) -> Result<String>) -> Result<Update> {
+    let _request = crate::github_process::scope();
+    act_with(target, action, &mut run)?;
+    Ok(match read_with(target, run) {
+        Ok(conversation) => Update { conversation: Some(conversation), error: None },
+        Err(error) => Update { conversation: None, error: Some(format!("{error:#}")) },
+    })
+}
+
 /// Parse once and use the same host/repository identity for reads and writes.
 /// Full URL validation rejects query strings, credentials and path traversal.
 pub struct Target {
@@ -87,6 +106,7 @@ const CONNECTIONS: [(&str, &str, &str); 4] = [
 /// One query fetches all sections. Repeat only for connections with another
 /// page; never silently turn a partial thread count into an exact count.
 pub fn read_with(target: &Target, mut run: impl FnMut(&[&str]) -> Result<String>) -> Result<Conversation> {
+    let _request = crate::github_process::scope();
     let mut cursors: [Option<String>; 4] = Default::default();
     let mut done = [false; 4];
     let mut combined = Value::Null;
@@ -183,6 +203,7 @@ pub enum Action {
 }
 
 pub fn act_with(target: &Target, action: Action, mut run: impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
+    let _request = crate::github_process::scope();
     match action {
         Action::Edit { title, body, expected_title, expected_body } => {
             let title = title.trim();
@@ -221,6 +242,7 @@ pub fn act_with(target: &Target, action: Action, mut run: impl FnMut(&[&str]) ->
 }
 
 pub fn search_with(target: &Target, query: &str, mut run: impl FnMut(&[&str]) -> Result<String>) -> Result<Vec<String>> {
+    let _request = crate::github_process::scope();
     let query = query.trim();
     if query.len() < 2 { return Ok(Vec::new()); }
     if query.len() > 100 { bail!("Search is too long."); }

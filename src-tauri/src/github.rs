@@ -28,35 +28,12 @@ fn gh() -> Result<Command> {
 /// issue pipeline's step and its poller.
 const GH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-fn read_all(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut bytes);
-        }
-        bytes
-    })
+fn output_within(command: Command, timeout: std::time::Duration) -> Result<std::process::Output> {
+    crate::github_process::output(command, timeout, None)
 }
 
-/// `Command::output`, with a deadline after which the process is killed.
-fn output_within(mut command: Command, timeout: std::time::Duration) -> Result<std::process::Output> {
-    use std::process::Stdio;
-    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    // Read as it comes, so a full pipe never blocks gh.
-    let (stdout, stderr) = (read_all(child.stdout.take()), read_all(child.stderr.take()));
-    let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!("GitHub did not answer within {} seconds.", timeout.as_secs());
-            }
-            None => std::thread::sleep(std::time::Duration::from_millis(25)),
-        }
-    };
-    Ok(std::process::Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
+fn output_admitted(command: Command, timeout: std::time::Duration, ticket: crate::data_privacy::Ticket) -> Result<std::process::Output> {
+    crate::github_process::output_admitted(command, timeout, None, ticket)
 }
 
 fn run(cwd: &Path, args: &[&str]) -> Result<String> {
@@ -272,12 +249,14 @@ pub(crate) fn enrich_panel_pr(pr: &mut PullRequest, mut run: impl FnMut(&[&str])
 }
 
 pub fn panel_prs_for_branch(cwd: &Path, branch: &str) -> Result<Vec<PullRequest>> {
+    let _request = crate::github_process::scope();
     let mut prs = prs_for_branch(cwd, branch)?;
     for pr in &mut prs { enrich_panel_pr(pr, |args| run_output(&outside_checkouts(), args)); }
     Ok(prs)
 }
 
 pub fn panel_pr_details(cwd: &Path, number: u64, url: Option<&str>) -> Result<PullRequest> {
+    let _request = crate::github_process::scope();
     let mut pr = associated_pr_details(cwd, number, url)?;
     enrich_panel_pr(&mut pr, |args| run_output(&outside_checkouts(), args));
     Ok(pr)
@@ -285,6 +264,7 @@ pub fn panel_pr_details(cwd: &Path, number: u64, url: Option<&str>) -> Result<Pu
 
 /// `gh pr list` with the given flags (a `--json` among them), as its records.
 pub fn list_prs(cwd: &Path, flags: &[&str]) -> Result<Vec<Value>> {
+    let _request = crate::github_process::scope();
     let mut args = vec!["pr", "list"];
     args.extend_from_slice(flags);
     let out = run(cwd, &args)?;
@@ -310,6 +290,7 @@ fn remote_repo(url: &str) -> Option<String> {
 
 /// Every PR whose head is `branch`, open first then newest.
 pub fn prs_for_branch(cwd: &Path, branch: &str) -> Result<Vec<PullRequest>> {
+    let _request = crate::github_process::scope();
     prs_for_branch_with(cwd, branch, run)
 }
 
@@ -424,6 +405,7 @@ fn tracked_pr_branches() -> Result<BTreeSet<(PathBuf, String)>> {
 /// Repeatable startup discovery, including retained archived/removed branches.
 /// No account-wide PR search and no dependence on opening the PR/Stats panels.
 pub fn recover_workspace_prs() -> Result<()> {
+    let _request = crate::github_process::scope();
     let mut errors = Vec::new();
     for (cwd, branch) in tracked_pr_branches()? {
         if let Err(error) = prs_for_branch(&cwd, &branch) {
@@ -439,8 +421,8 @@ pub fn pr_conversation(url: &str) -> Result<conversation::Conversation> {
     conversation::read_with(&conversation::Target::new(url)?, |args| run(&outside_checkouts(), args))
 }
 
-pub fn pr_conversation_action(url: &str, action: conversation::Action) -> Result<()> {
-    conversation::act_with(&conversation::Target::new(url)?, action, |args| run(&outside_checkouts(), args))
+pub fn pr_conversation_action(url: &str, action: conversation::Action) -> Result<conversation::Update> {
+    conversation::update_with(&conversation::Target::new(url)?, action, |args| run(&outside_checkouts(), args))
 }
 
 pub fn pr_reviewer_search(url: &str, query: &str) -> Result<Vec<String>> {
@@ -449,6 +431,7 @@ pub fn pr_reviewer_search(url: &str, query: &str) -> Result<Vec<String>> {
 
 /// One pull request by number, for command-palette task URLs.
 pub fn pr_details(cwd: &Path, number: u64) -> Result<PullRequest> {
+    let _request = crate::github_process::scope();
     let out = run(cwd, &["pr", "view", &number.to_string(), "--json", FIELDS])?;
     let value: Value = serde_json::from_str(&out)?;
     Ok(parse_pr(&value))
@@ -466,6 +449,7 @@ fn associated_target(number: u64, url: Option<&str>) -> Result<String> {
 }
 
 pub fn associated_pr_details(cwd: &Path, number: u64, url: Option<&str>) -> Result<PullRequest> {
+    let _request = crate::github_process::scope();
     if url.is_none() { return pr_details(cwd, number); }
     let target = associated_target(number, url)?;
     let out = run(&outside_checkouts(), &["pr", "view", &target, "--json", FIELDS])?;
@@ -475,6 +459,7 @@ pub fn associated_pr_details(cwd: &Path, number: u64, url: Option<&str>) -> Resu
 /// A pull request's state alone (OPEN, MERGED or CLOSED), addressed by its
 /// URL when it has one, else by its number in `cwd`'s repository.
 pub fn pr_state(cwd: &Path, number: u64, url: Option<&str>) -> Result<String> {
+    let _request = crate::github_process::scope();
     let (dir, target) = match url {
         Some(_) => (outside_checkouts(), associated_target(number, url)?),
         None => (cwd.to_path_buf(), number.to_string()),
@@ -485,24 +470,28 @@ pub fn pr_state(cwd: &Path, number: u64, url: Option<&str>) -> Result<String> {
 }
 
 pub fn merge_associated_pr(cwd: &Path, number: u64, method: &str, url: Option<&str>) -> Result<()> {
+    let _request = crate::github_process::scope();
     if url.is_none() { return merge_pr(cwd, number, method); }
     let target = associated_target(number, url)?;
     merge_pr_target(&outside_checkouts(), &target, method)
 }
 
 pub fn ready_associated_pr(cwd: &Path, number: u64, url: Option<&str>) -> Result<()> {
+    let _request = crate::github_process::scope();
     if url.is_none() { return mark_ready(cwd, number); }
     let target = associated_target(number, url)?;
     run(&outside_checkouts(), &["pr", "ready", &target]).map(|_| ())
 }
 
 pub fn create_pr(cwd: &Path, title: &str, body: &str, base: Option<&str>, draft: bool) -> Result<String> {
+    let _request = crate::github_process::scope();
     create_pr_with(cwd, title, body, base, draft, run)
 }
 
 /// The account used by API writes, which may differ from the checkout's SSH key.
 #[cfg(feature = "desktop")]
 pub fn authenticated_login(cwd: &Path, destination: &str) -> Result<String> {
+    let _request = crate::github_process::scope();
     authenticated_login_with(cwd, destination, run)
 }
 
@@ -607,12 +596,14 @@ pub(crate) fn parse_snapshot(v: &Value) -> PrSnapshot {
 /// A bounded, batched GraphQL read for UI status. Full workflow/suite evidence
 /// is deliberately collected only when a Merge action is about to run.
 pub fn branch_snapshot(cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>> {
+    let _request = crate::github_process::scope();
     branch_snapshot_with(cwd, branch, false, run)
 }
 
 /// Explicit refreshes/actions preserve the PR tab's limited-checks permission
 /// fallback. Automatic polling still makes only one query and backs off.
 pub fn branch_snapshot_on_demand(cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>> {
+    let _request = crate::github_process::scope();
     branch_snapshot_with(cwd, branch, true, run)
 }
 
@@ -683,6 +674,7 @@ pub(crate) fn parse_required_checks(output: &GhOutput) -> Result<Option<Vec<Stri
 /// One pull request with its head commit, the checks on that commit, and
 /// which of them are required.
 pub fn pr_snapshot(cwd: &Path, number: u64) -> Result<PrSnapshot> {
+    let _request = crate::github_process::scope();
     pr_snapshot_with(cwd, number, run, run_output)
 }
 
@@ -915,6 +907,7 @@ fn failed_validation(state: &str) -> bool {
 /// push remote, including its own fork. Does not request checks, so a token
 /// that may not read them is answered too.
 pub fn open_pr_for_branch(cwd: &Path, branch: &str) -> Result<Option<u64>> {
+    let _request = crate::github_process::scope();
     open_pr_for_branch_with(cwd, branch, run)
 }
 
@@ -927,11 +920,13 @@ fn open_pr_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&
 
 /// Leave a comment on a pull request; the comment's URL.
 pub fn comment_pr(cwd: &Path, number: u64, body: &str) -> Result<String> {
+    let _request = crate::github_process::scope();
     let out = run(cwd, &["pr", "comment", &number.to_string(), "--body", body])?;
     Ok(out.trim().lines().last().unwrap_or("").to_string())
 }
 
 pub fn edit_pr_body(cwd: &Path, number: u64, body: &str) -> Result<()> {
+    let _request = crate::github_process::scope();
     run(cwd, &["pr", "edit", &number.to_string(), "--body", body]).map(|_| ())
 }
 
@@ -959,6 +954,7 @@ pub enum PinnedMerge {
 /// and never `--auto`: branch protection decides, and a merge GitHub would
 /// make later is one made of a head nobody pinned.
 pub fn merge_pr_at(cwd: &Path, number: u64, method: &str, commit: &str) -> Result<PinnedMerge> {
+    let _request = crate::github_process::scope();
     merge_pr_at_with(cwd, number, method, commit, run_output, pr_snapshot)
 }
 
@@ -1017,17 +1013,20 @@ fn outside_checkouts() -> PathBuf {
 
 /// [`pr_snapshot`] of a pull request in `repo` (`owner/name`).
 pub fn pr_snapshot_in(repo: &str, number: u64) -> Result<PrSnapshot> {
+    let _request = crate::github_process::scope();
     let cwd = outside_checkouts();
     pr_snapshot_with(&cwd, number, |cwd, args| if args.first() == Some(&"api") { run(cwd, args) } else { run(cwd, &in_repo(args, repo)) }, |cwd, args| run_output(cwd, &in_repo(args, repo)))
 }
 
 /// [`merge_pr_at`] of a pull request in `repo` (`owner/name`).
 pub fn merge_pr_at_in(repo: &str, number: u64, method: &str, commit: &str) -> Result<PinnedMerge> {
+    let _request = crate::github_process::scope();
     let cwd = outside_checkouts();
     merge_pr_at_with(&cwd, number, method, commit, |cwd, args| run_output(cwd, &in_repo(args, repo)), |_, number| pr_snapshot_in(repo, number))
 }
 
 pub fn merge_pr(cwd: &Path, number: u64, method: &str) -> Result<()> {
+    let _request = crate::github_process::scope();
     merge_pr_target(cwd, &number.to_string(), method)
 }
 
@@ -1065,6 +1064,7 @@ pub(crate) fn ensure_queue_enabled(queue: &Value) -> Result<()> {
 }
 
 pub fn mark_ready(cwd: &Path, number: u64) -> Result<()> {
+    let _request = crate::github_process::scope();
     run(cwd, &["pr", "ready", &number.to_string()]).map(|_| ())
 }
 
@@ -1084,6 +1084,7 @@ pub enum ProjectForge {
 /// Recognized forges work without gh. For opaque aliases and custom domains,
 /// ask gh using this checkout's host configuration.
 pub fn project_forge(cwd: &Path) -> ProjectForge {
+    let _request = crate::github_process::scope();
     let origin = crate::git::remote_url(cwd);
     let has_remote = if origin.is_some() { true } else {
         match crate::git::run(cwd, &["remote"]) {
@@ -1095,7 +1096,7 @@ pub fn project_forge(cwd: &Path) -> ProjectForge {
         let Ok(mut command) = gh() else { return ForgeLookup::MissingCli; };
         command.current_dir(cwd).args(["repo", "view", "--json", "name"])
             .env_remove("GH_REPO").env("GH_NO_UPDATE_NOTIFIER", "1");
-        forge_lookup(crate::git::capture_within(command, BOUNDED))
+        forge_lookup(output_within(command, BOUNDED).map_err(std::io::Error::other))
     })
 }
 
@@ -1183,7 +1184,7 @@ fn hostname_from_remote_with(remote: &str, translate_ssh: &mut impl FnMut(&str) 
 fn ssh_hostname(host: &str, mut command: Command) -> Option<String> {
     validate_hostname(host).ok()?;
     command.args(["-G", "--", host]);
-    let output = crate::git::capture_within(command, std::time::Duration::from_secs(5)).ok()?;
+    let output = output_within(command, std::time::Duration::from_secs(5)).ok()?;
     if !output.status.success() { return None; }
     String::from_utf8_lossy(&output.stdout).lines().find_map(|line| {
         let (key, value) = line.split_once(' ')?;
@@ -1276,6 +1277,7 @@ pub struct ConnectionStatus {
 }
 
 pub fn connection_status(cwd: Option<&Path>) -> ConnectionStatus {
+    let _request = crate::github_process::scope();
     connection_status_with(&connection_hostname(cwd), gh)
 }
 
@@ -1287,7 +1289,7 @@ fn connection_status_with(hostname: &str, command: impl Fn() -> Result<Command>)
     // Enterprise environment token must not be sent to an unknown remote host.
     check.args(["auth", "status", "--active", "--hostname", hostname]);
     let timeout = std::time::Duration::from_secs(15);
-    match crate::git::capture_within(check, timeout) {
+    match output_within(check, timeout) {
         Ok(output) if output.status.success() => return status("connected", None),
         Ok(output) => {
             let details = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
@@ -1305,7 +1307,7 @@ fn connection_status_with(hostname: &str, command: impl Fn() -> Result<Command>)
     let result = (|| -> Result<std::process::Output> {
         let mut probe = command()?;
         probe.args(["api", "--hostname", hostname, "--include", "--silent", "user"]);
-        Ok(crate::git::capture_within(probe, timeout)?)
+        output_within(probe, timeout)
     })();
     match result {
         Ok(output) => {
@@ -1592,6 +1594,7 @@ mod connection_tests {
 /// Create only on explicit submission, private by default in the UI. `gh`
 /// adds origin; publishing commits remains the separate Push action.
 pub fn create_repository(cwd: &Path, name: &str, private: bool) -> Result<()> {
+    let _request = crate::github_process::scope();
     create_repository_with(cwd, name, private, |cwd, args| {
         let mut command = gh()?;
         let hostname = default_hostname();
@@ -1633,7 +1636,9 @@ const BOUNDED: std::time::Duration = std::time::Duration::from_secs(30);
 fn run_bounded(cwd: &Path, args: &[&str]) -> Result<String> {
     let mut command = gh()?;
     command.current_dir(cwd).args(args).env("GH_NO_UPDATE_NOTIFIER", "1");
-    crate::git::output_within(command, BOUNDED).map_err(|error| anyhow!("gh {}: {error}", args.first().copied().unwrap_or_default()))
+    let out = output_within(command, BOUNDED)?;
+    anyhow::ensure!(out.status.success(), "gh {}: {}", args.first().copied().unwrap_or_default(), String::from_utf8_lossy(&out.stderr).trim());
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The GitHub repository a checkout's pull requests are in, as `gh` resolves it.
@@ -1758,6 +1763,7 @@ fn parse_branch_prs(out: &str, branches: &[String]) -> Result<std::collections::
 /// A branch with none is left out. An error means nothing is known, which is
 /// never the same as "no pull request".
 pub fn branch_prs(cwd: &Path, branches: &[String]) -> Result<std::collections::HashMap<String, BranchPr>> {
+    let _request = crate::github_process::scope();
     let mut found = std::collections::HashMap::new();
     if branches.is_empty() {
         return Ok(found);
@@ -1826,6 +1832,7 @@ fn parse_branch_pr_issues(out: &str, branches: &[String]) -> Result<std::collect
 
 /// [`branch_prs`], with the issues each pull request closes (#441).
 pub fn branch_pr_issues(cwd: &Path, branches: &[String]) -> Result<std::collections::HashMap<String, BranchPrIssues>> {
+    let _request = crate::github_process::scope();
     let mut found = std::collections::HashMap::new();
     if branches.is_empty() {
         return Ok(found);
@@ -1891,6 +1898,7 @@ fn parse_head_branch_setting(out: &str) -> Result<HeadBranchSetting> {
 }
 
 pub fn head_branch_setting(cwd: &Path) -> Result<HeadBranchSetting> {
+    let _request = crate::github_process::scope();
     let repo = repo_ref(cwd)?;
     parse_head_branch_setting(&run_bounded(cwd, &["api", "--hostname", &repo.host, &format!("repos/{}/{}", repo.owner, repo.name)])?)
 }
@@ -1898,6 +1906,7 @@ pub fn head_branch_setting(cwd: &Path) -> Result<HeadBranchSetting> {
 /// Turn "Automatically delete head branches" on. GitHub refuses unless the
 /// reader administers the repository.
 pub fn enable_head_branch_deletion(cwd: &Path) -> Result<HeadBranchSetting> {
+    let _request = crate::github_process::scope();
     let repo = repo_ref(cwd)?;
     let path = format!("repos/{}/{}", repo.owner, repo.name);
     parse_head_branch_setting(&run_bounded(cwd, &["api", "--hostname", &repo.host, "--method", "PATCH", &path, "-F", "delete_branch_on_merge=true"])?)
@@ -2247,6 +2256,63 @@ mod tests {
         answers.args(["-c", "printf out; printf err >&2; exit 3"]);
         let out = output_within(answers, std::time::Duration::from_secs(5)).unwrap();
         assert_eq!((out.status.code(), out.stdout.as_slice(), out.stderr.as_slice()), (Some(3), b"out".as_slice(), b"err".as_slice()));
+    }
+
+    #[test]
+    fn privacy_blocks_and_drains_app_github_processes() {
+        for managed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "github::tests::privacy_process_child", "--nocapture"])
+                .env("TERMINALX_TEST_GITHUB_PRIVACY", "1").env("TERMINALX_HOME", root.path());
+            if managed { child.env("TERMINALX_TEST_MANAGED_PRIVACY", "1"); }
+            let output = child.output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
+    #[test]
+    fn privacy_process_child() {
+        if std::env::var_os("TERMINALX_TEST_GITHUB_PRIVACY").is_none() { return; }
+        use std::time::{Duration, Instant};
+        let root = crate::store::root().unwrap();
+        let preference = root.join("data-privacy.json");
+        let marker = root.join("started");
+        let command = || {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "printf '%s' $$ > \"$1.tmp\"; /bin/mv \"$1.tmp\" \"$1\"; exec sleep 30", "privacy"]).arg(&marker);
+            command
+        };
+        crate::store::write_json(&preference, &serde_json::json!({"enabled":std::env::var_os("TERMINALX_TEST_MANAGED_PRIVACY").is_none()})).unwrap();
+        crate::data_privacy::initialize();
+        assert!(output_within(command(), Duration::from_secs(5)).is_err());
+        assert!(!marker.exists(), "disabled GitHub requests never spawn");
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        assert!(runtime.block_on(star_request(command(), &[])).is_none());
+        assert!(!marker.exists(), "star requests use the same admission");
+        std::env::remove_var("TERMINALX_TEST_MANAGED_PRIVACY");
+        crate::store::write_json(&preference, &serde_json::json!({"enabled":false})).unwrap();
+        crate::data_privacy::refresh();
+        let queued = crate::data_privacy::Ticket::default();
+        let pending = std::thread::spawn({ let command = command(); move || output_within(command, Duration::from_secs(30)) });
+        let until = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
+        let pid: i32 = std::fs::read_to_string(&marker).unwrap().parse().unwrap();
+        crate::store::write_json(&preference, &serde_json::json!({"enabled":true})).unwrap();
+        let started = Instant::now();
+        assert!(crate::data_privacy::refresh().enabled);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(pending.join().unwrap().is_err());
+        #[cfg(unix)]
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "activation acknowledges after the exact process exits");
+        crate::store::write_json(&preference, &serde_json::json!({"enabled":false})).unwrap();
+        crate::data_privacy::refresh();
+        std::fs::remove_file(&marker).unwrap();
+        assert!(output_admitted(command(), Duration::from_secs(5), queued).is_err(), "queued calls cannot revive across activation/restoration");
+        assert!(!marker.exists());
+        let mut restored = Command::new("/bin/sh");
+        restored.args(["-c", "printf restored"]);
+        assert_eq!(output_within(restored, Duration::from_secs(5)).unwrap().stdout, b"restored");
     }
 
     #[test]
@@ -2720,10 +2786,10 @@ fn parse_star_status(success: bool, output: &[u8]) -> StarStatus {
     }
 }
 
-async fn star_request(command: Command, args: &[&str]) -> Option<std::process::Output> {
-    let mut command = tokio::process::Command::from(command);
-    command.args(args).kill_on_drop(true);
-    tokio::time::timeout(std::time::Duration::from_secs(15), command.output()).await.ok()?.ok()
+async fn star_request(mut command: Command, args: &[&str]) -> Option<std::process::Output> {
+    let ticket = crate::github_process::ticket();
+    command.args(args);
+    tokio::task::spawn_blocking(move || output_admitted(command, std::time::Duration::from_secs(15), ticket)).await.ok()?.ok()
 }
 
 pub async fn star_status() -> StarStatus {
@@ -2806,6 +2872,7 @@ mod star_tests {
 pub(crate) mod rows;
 /// Exact numbers include closed/merged PRs; text searches titles and author logins.
 pub fn search_prs(cwd: &Path, query: &str) -> Result<Vec<PullRequest>> {
+    let _request = crate::github_process::scope();
     search_prs_with(cwd, query, run)
 }
 
@@ -2836,7 +2903,14 @@ fn search_prs_with(cwd: &Path, query: &str, mut run: impl FnMut(&Path, &[&str]) 
 
 /// gh resolves both same-repository and fork heads. No force, and no main checkout is touched.
 pub fn checkout_pr(cwd: &Path, number: u64, branch: &str) -> Result<()> {
-    checkout_pr_with(cwd, number, branch, run)
+    let _request = crate::github_process::scope();
+    checkout_pr_with(cwd, number, branch, |cwd, args| {
+        let mut command = gh()?;
+        command.current_dir(cwd).args(args);
+        let output = crate::github_process::git_host_output(command, cwd, GH_TIMEOUT)?;
+        if !output.status.success() { bail!("{}", String::from_utf8_lossy(&output.stderr).trim()); }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    })
 }
 
 fn checkout_pr_with(cwd: &Path, number: u64, branch: &str, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<()> {
@@ -2859,6 +2933,7 @@ fn pr_markdown(value: &Value) -> String {
 
 /// Store outside the checkout so a first prompt can refer to it from its future worktree too.
 pub fn attach_pr(cwd: &Path, number: u64) -> Result<String> {
+    let _request = crate::github_process::scope();
     attach_pr_with(cwd, number, run)
 }
 

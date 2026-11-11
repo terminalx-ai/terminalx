@@ -10,6 +10,10 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+#[path = "git_ssh.rs"]
+pub(crate) mod ssh;
+
 pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[path = "git_checkpoints.rs"]
@@ -19,11 +23,16 @@ pub(crate) fn git() -> Command {
     let mut c = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     c.env("PATH", crate::binpath::login_path());
     c.env("GIT_TERMINAL_PROMPT", "0");
+    // Inspection must not turn a missing partial-clone object into a transfer.
+    // Explicit fetches still use their admission boundary. This environment is
+    // scoped to our Git child, never the application or an agent's process.
+    c.env("GIT_NO_LAZY_FETCH", "1");
     c.env("LC_ALL", "C");
     c
 }
 
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
+    if transfer_args(args) { return transfer(cwd, args); }
     run_command(git().current_dir(cwd), args)
 }
 
@@ -34,6 +43,32 @@ pub(crate) fn run_command(command: &mut Command, args: &[&str]) -> Result<String
         bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn transfer_args(args: &[&str]) -> bool {
+    let mut args = args.iter().copied();
+    while let Some(arg) = args.next() {
+        if matches!(arg, "-c" | "--config-env") { args.next(); continue; }
+        if arg.starts_with("-c") || arg.starts_with("--config-env=") { continue; }
+        return matches!(arg, "fetch" | "pull" | "push" | "clone" | "ls-remote");
+    }
+    false
+}
+
+/// Refresh this project's comparison branch for landed/cleanup verification.
+/// Submodules are outside that check (and prevent a verified safe deletion).
+/// Never recurse: child repositories are outside this verification contract.
+/// The SSH boundary is shared with ordinary transfers, including its proxy
+/// refusal; agent processes keep their own runners.
+pub(crate) fn fetch_admitted(cwd: &Path, branch: &str, timeout: std::time::Duration) -> Result<()> {
+    let _request = crate::github_process::scope();
+    let mut command = git();
+    command.current_dir(cwd).args(["fetch", "--quiet", "--no-recurse-submodules", "origin", branch]);
+    let output = crate::github_process::git_verification_output(command, timeout)?;
+    if !output.status.success() {
+        bail!("git fetch: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
 }
 
 /// A bounded ignored-file scan. Stop Git when its output reaches the byte
@@ -82,8 +117,17 @@ pub(crate) fn ignored_untracked_paths(mut command: Command, paths: &[String]) ->
 /// `run` for a command whose exit code is an answer (`merge-tree`): the code
 /// and stdout, or `None` when git could not be started or was killed.
 pub fn raw(cwd: &Path, args: &[&str]) -> Option<(i32, String)> {
-    let out = git().current_dir(cwd).args(args).output().ok()?;
+    let mut command = git(); command.current_dir(cwd).args(args);
+    let out = if transfer_args(args) { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket()).ok()? }
+        else { command.output().ok()? };
     Some((out.status.code()?, String::from_utf8_lossy(&out.stdout).into_owned()))
+}
+
+/// Inspect local objects while retaining exit status and diagnostic output.
+/// Missing promised objects are errors, never an implicit network request.
+pub(crate) fn inspect_output(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
+    anyhow::ensure!(!transfer_args(args), "a transfer is not a local Git inspection");
+    git().current_dir(cwd).args(args).output().with_context(|| format!("git {}", args.join(" ")))
 }
 
 /// Why `run_within` did not succeed.
@@ -117,77 +161,31 @@ pub fn run_within_reporting(
     stop: &dyn Fn() -> bool,
     on_line: impl Fn(&str) + Send + 'static,
 ) -> std::result::Result<(), RunError> {
-    use std::io::Read;
+    let _request = crate::github_process::scope();
     let mut command = git();
-    command.current_dir(cwd).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(RunError::Spawn)?;
-    // Read as it comes, so a full pipe never blocks git.
-    let stderr = child.stderr.take();
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let Some(mut stderr) = stderr else { return text };
-        let mut pending = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let emit = |raw: &[u8], redrawn: bool, text: &mut String| {
-            let line = String::from_utf8_lossy(raw);
-            let line = line.trim();
-            if line.is_empty() {
-                return;
-            }
-            on_line(line);
-            // A redrawn line is progress, replaced by the next one.
-            if !redrawn {
-                text.push_str(line);
-                text.push('\n');
-            }
-        };
-        loop {
-            let read = match stderr.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(read) => read,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            };
-            for &byte in &chunk[..read] {
-                if byte == b'\r' || byte == b'\n' {
-                    emit(&pending, byte == b'\r', &mut text);
-                    pending.clear();
-                } else {
-                    pending.push(byte);
-                }
-            }
-        }
-        emit(&pending, false, &mut text);
-        text
-    });
-    let deadline = std::time::Instant::now() + timeout;
-    let outcome = loop {
-        let ended = match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if std::time::Instant::now() >= deadline => RunError::TimedOut,
-            Ok(None) if stop() => RunError::Stopped,
-            Ok(None) => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                continue;
-            }
-            Err(error) => RunError::Spawn(error),
-        };
-        #[cfg(unix)]
-        // SAFETY: signals the process group this function just created.
-        unsafe {
-            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        break Err(ended);
-    };
-    let err = reader.join().unwrap_or_default();
-    match outcome? {
-        status if status.success() => Ok(()),
-        status => Err(RunError::Failed(if err.trim().is_empty() { format!("exit {status}") } else { err.trim().to_string() })),
-    }
+    command.current_dir(cwd).args(args);
+    let out = crate::github_process::git_output_reporting(command, timeout, crate::github_process::ticket(), stop, Some(Box::new(on_line)))
+        .map_err(transfer_error)?;
+    transfer_result(out).map(|_| ())
+}
+
+fn transfer_error(error: anyhow::Error) -> RunError {
+    if error.is::<crate::github_process::TimedOut>() { RunError::TimedOut }
+    else if error.is::<crate::github_process::Stopped>() { RunError::Stopped }
+    else { match error.downcast::<std::io::Error>() { Ok(error) => RunError::Spawn(error), Err(error) => RunError::Failed(error.to_string()) } }
+}
+
+fn transfer_result(out: std::process::Output) -> std::result::Result<String, RunError> {
+    if out.status.success() { return Ok(String::from_utf8_lossy(&out.stdout).into_owned()); }
+    let err = String::from_utf8_lossy(&out.stderr);
+    Err(RunError::Failed(if err.trim().is_empty() { format!("exit {}", out.status) } else { err.trim().to_string() }))
+}
+
+pub(crate) fn transfer_output(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    let _request = crate::github_process::scope();
+    let mut command = git();
+    command.current_dir(cwd).args(args);
+    transfer_result(crate::github_process::git_output_admitted(command, timeout, crate::github_process::ticket()).map_err(transfer_error)?)
 }
 
 /// Run `command` to its end or to the deadline, whichever comes first, and
@@ -258,6 +256,7 @@ pub(crate) fn capture_within(mut command: Command, timeout: std::time::Duration)
 
 /// `run` with a deadline.
 pub fn run_bounded(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    if transfer_args(args) { return transfer_output(cwd, args, timeout); }
     let mut command = git();
     command.current_dir(cwd).args(args);
     output_within(command, timeout)
@@ -295,7 +294,9 @@ pub fn pipe(cwd: &Path, first: &[&str], second: &[&str]) -> Result<String> {
 
 /// Run git with extra environment variables.
 pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
-    let out = git().current_dir(cwd).args(args).envs(env.iter().copied()).output().with_context(|| format!("git {}", args.join(" ")))?;
+    let mut command = git(); command.current_dir(cwd).args(args).envs(env.iter().copied());
+    let out = if transfer_args(args) { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket())? }
+        else { command.output().with_context(|| format!("git {}", args.join(" ")))? };
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
@@ -304,6 +305,7 @@ pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String
 }
 
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
+    if transfer_args(args) { return transfer(cwd, args).is_ok(); }
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
@@ -612,20 +614,50 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
     Ok(out)
 }
 
-/// Contents of `path` at `tree`, or `None` if it doesn't exist there.
-pub fn blob_at(cwd: &Path, tree: &str, path: &str) -> Result<Option<String>> {
+pub(crate) enum BlobContents {
+    Bytes(Vec<u8>),
+    TooLarge,
+}
+
+/// Read only local objects. The tree proves absence; a missing promised blob
+/// (or an unavailable tree) is an error, never the empty side of a comparison.
+/// Shared by text/SVG and binary media so none can implicitly fetch a revision.
+pub(crate) fn blob_bytes_at(cwd: &Path, tree: &str, path: &str, limit: usize) -> Result<Option<BlobContents>> {
     if !is_tree_id(tree) {
         bail!("bad tree id");
     }
-    let spec = format!("{tree}:{path}");
-    let out = git().current_dir(cwd).args(["cat-file", "-p", &spec]).output()?;
-    if !out.status.success() {
-        return Ok(None);
+    if path.is_empty() || path.contains('\0') || !Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        bail!("Invalid repository-relative revision path");
     }
-    if out.stdout.len() > 4 * 1024 * 1024 {
-        return Ok(Some(String::from("<file too large to show>")));
+    // An unborn repository need not have written the well-known empty tree.
+    if tree == EMPTY_TREE { return Ok(None); }
+    let unavailable = || format!("Revision of {path} is unavailable locally. Fetch the missing objects in the workspace before comparing this revision.");
+    let listing = git().current_dir(cwd).env("GIT_LITERAL_PATHSPECS", "1")
+        .args(["ls-tree", "--full-tree", "-z", tree, "--", path]).output()?;
+    if !listing.status.success() { bail!("{}", unavailable()); }
+    if listing.stdout.is_empty() { return Ok(None); }
+    let listing = std::str::from_utf8(&listing.stdout)?;
+    let (header, found) = listing.split_once('\t').context("Invalid revision tree entry")?;
+    let fields: Vec<_> = header.split_whitespace().collect();
+    if found.strip_suffix('\0') != Some(path) || fields.len() != 3 || fields[1] != "blob" {
+        bail!("Not a regular revision blob");
     }
-    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+    let oid = fields[2];
+    let size = git().current_dir(cwd).args(["cat-file", "-s", oid]).output()?;
+    if !size.status.success() { bail!("{}", unavailable()); }
+    let size: usize = std::str::from_utf8(&size.stdout)?.trim().parse()?;
+    if size > limit { return Ok(Some(BlobContents::TooLarge)); }
+    let content = git().current_dir(cwd).args(["cat-file", "blob", oid]).output()?;
+    if !content.status.success() { bail!("{}", unavailable()); }
+    Ok(Some(if content.stdout.len() > limit { BlobContents::TooLarge } else { BlobContents::Bytes(content.stdout) }))
+}
+
+/// Contents of `path` at `tree`, or `None` only if the local tree proves absence.
+pub fn blob_at(cwd: &Path, tree: &str, path: &str) -> Result<Option<String>> {
+    Ok(blob_bytes_at(cwd, tree, path, 4 * 1024 * 1024)?.map(|content| match content {
+        BlobContents::TooLarge => "<file too large to show>".into(),
+        BlobContents::Bytes(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+    }))
 }
 
 pub fn working_file(cwd: &Path, path: &str) -> Option<String> {
@@ -846,6 +878,7 @@ pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result
 }
 
 fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, timeout: std::time::Duration) -> Result<CreatedWorktree> {
+    let _request = crate::github_process::scope();
     if !crate::names::is_worktree_name(name) && name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
         bail!("bad worktree name");
     }
@@ -1435,12 +1468,13 @@ pub fn commit_all(cwd: &Path, message: &str, paths: Option<&[String]>) -> Result
 }
 
 pub fn push(cwd: &Path) -> Result<String> {
+    let _request = crate::github_process::scope();
     let branch = current_branch(cwd).ok_or_else(|| anyhow!("detached HEAD"))?;
     let has_upstream = run_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
     if has_upstream {
-        run(cwd, &["push"])
+        transfer(cwd, &["push"])
     } else {
-        run(cwd, &["push", "-u", "origin", &branch])
+        transfer(cwd, &["push", "-u", "origin", &branch])
     }
 }
 
@@ -1459,6 +1493,7 @@ pub fn add_remote(cwd: &Path, url: &str) -> Result<()> {
 }
 
 pub fn pull(cwd: &Path) -> Result<String> {
+    let _request = crate::github_process::scope();
     // The Branch tab also offers incoming commits for --no-track worktrees.
     // Pull the published branch explicitly without changing its configuration.
     if run(cwd, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).is_err()
@@ -1468,6 +1503,16 @@ pub fn pull(cwd: &Path) -> Result<String> {
         }
     }
     run(cwd, &["pull", "--ff-only"])
+}
+
+fn transfer(cwd: &Path, args: &[&str]) -> Result<String> {
+    let mut command = git();
+    command.current_dir(cwd).args(args);
+    let out = crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket())?;
+    if !out.status.success() {
+        bail!("git {}: {}", args[0], String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 pub fn checkout_branch(cwd: &Path, name: &str, create: bool) -> Result<()> {

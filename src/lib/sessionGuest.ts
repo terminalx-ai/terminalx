@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/api";
 import { listen } from "@tauri-apps/api/event";
 import { PortableRpcClient, type RpcResponse } from "@terminalx/portable/rpc";
 

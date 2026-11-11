@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Read;
 use std::path::Path;
-use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -100,44 +99,25 @@ fn run_log(cwd: &Path, args: &[&str]) -> Result<CheckLog> {
     log_output(command, super::GH_TIMEOUT)
 }
 
-fn log_output(mut command: std::process::Command, timeout: std::time::Duration) -> Result<CheckLog> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let stdout = child.stdout.take().context("Missing gh output pipe")?;
-    let stderr = child.stderr.take().context("Missing gh error pipe")?;
-    let (out_tx, out_rx) = std::sync::mpsc::channel();
-    let (err_tx, err_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || { let _ = out_tx.send(read_tail(stdout, LOG_LIMIT)); });
-    std::thread::spawn(move || { let _ = err_tx.send(read_tail(stderr, 16 * 1024)); });
-    let deadline = std::time::Instant::now() + timeout;
-    let result = (|| -> Result<_> {
-        let status = loop {
-            match child.try_wait()? {
-                Some(status) => break status,
-                None if std::time::Instant::now() >= deadline => bail!("Timed out waiting for GitHub check logs."),
-                None => std::thread::sleep(std::time::Duration::from_millis(25)),
-            }
-        };
-        // Helpers can retain the pipes after gh exits. Collection has the same
-        // deadline, so a log viewer can never wait indefinitely on a join.
-        let log = out_rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).context("Timed out reading GitHub check logs")??;
-        let error = err_rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).context("Timed out reading GitHub's error")??;
-        if !status.success() {
-            bail!("{}", if error.text.trim().is_empty() { "GitHub could not load the check logs." } else { error.text.trim() });
+fn log_output(command: std::process::Command, timeout: std::time::Duration) -> Result<CheckLog> {
+    let captured = crate::github_process::output_bounded(command, timeout, LOG_LIMIT, 16 * 1024)
+        .map_err(|error| if error.is::<crate::github_process::TimedOut>() {
+            anyhow::anyhow!("Timed out waiting for GitHub check logs.")
+        } else { error })?;
+    let normalize = |bytes: &[u8], truncated: bool, limit: usize| -> Result<CheckLog> {
+        let mut log = read_tail(bytes, limit)?;
+        if truncated {
+            log = trim_log(&format!("{TRIMMED}{}", log.text), limit);
+            log.truncated = true;
         }
         Ok(log)
-    })();
-    if result.is_err() {
-        #[cfg(unix)]
-        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
-        let _ = child.kill();
-        let _ = child.wait();
+    };
+    let log = normalize(&captured.output.stdout, captured.truncated[0], LOG_LIMIT)?;
+    let error = normalize(&captured.output.stderr, captured.truncated[1], 16 * 1024)?;
+    if !captured.output.status.success() {
+        bail!("{}", if error.text.trim().is_empty() { "GitHub could not load the check logs." } else { error.text.trim() });
     }
-    result
+    Ok(log)
 }
 
 fn log_args(repo: &str, check: &ActionsCheck, failed: bool) -> Vec<String> {
@@ -147,6 +127,7 @@ fn log_args(repo: &str, check: &ActionsCheck, failed: bool) -> Vec<String> {
 }
 
 pub fn log(_cwd: &Path, pr_url: &str, check_url: &str, failed: bool) -> Result<CheckLog> {
+    let _request = crate::github_process::scope();
     log_with(&super::outside_checkouts(), pr_url, check_url, failed, super::run, run_log)
 }
 
@@ -171,6 +152,7 @@ fn log_with(cwd: &Path, pr_url: &str, check_url: &str, failed: bool,
 }
 
 pub fn rerun(_cwd: &Path, pr_url: &str, check_url: &str, failed: bool) -> Result<()> {
+    let _request = crate::github_process::scope();
     rerun_with(&super::outside_checkouts(), pr_url, check_url, failed, super::run)
 }
 
@@ -207,6 +189,7 @@ pub fn failing(state: &str) -> bool {
 /// Re-read GitHub before collecting, deduplicate jobs in the same run, and
 /// share the budget between runs so one verbose job cannot hide all others.
 pub fn failed_logs(cwd: &Path, pr_url: &str) -> Result<CheckLog> {
+    let _request = crate::github_process::scope();
     let identity = crate::pr_associations::identity(pr_url)?;
     let number = identity.rsplit('/').next().unwrap().parse()?;
     let pr = super::associated_pr_details(cwd, number, Some(&identity))?;
@@ -255,6 +238,7 @@ pub struct FixAttachment {
 }
 
 pub fn prepare_fix(session_id: &str, tab_id: &str, pr_url: &str) -> Result<FixAttachment> {
+    let _request = crate::github_process::scope();
     // Resolve the actual session before building a path; arbitrary IDs cannot
     // become attachment directories, and shell tabs cannot receive prompts.
     let session = crate::store::index::get(session_id)?;

@@ -35,14 +35,17 @@ pub(crate) struct Outbound {
     validity: WriteValidity,
 }
 #[derive(Debug)]
-enum WriteValidity { Connection, Request { id: u64, discard_if_stale: bool, prompt: bool }, Reply(String) }
+enum WriteValidity { Connection, Request { id: u64, discard_if_stale: bool, prompt: bool }, Reply { key: String, allow: Option<bool> } }
 impl Outbound {
     pub(crate) fn connection(line: String) -> Self { Self { line, validity: WriteValidity::Connection } }
     /// The frame that hands Codex a prompt: a turn or a manual compaction.
     /// Its sender's authority is checked before its first byte is written.
     pub(crate) fn delivers_prompt(&self) -> bool { matches!(self.validity, WriteValidity::Request { prompt: true, .. }) }
+    pub(crate) fn approval(&self) -> Option<(&str, bool)> {
+        match &self.validity { WriteValidity::Reply { key, allow: Some(allow) } => Some((key, *allow)), _ => None }
+    }
     pub(crate) fn can_discard_unsent(&self) -> bool {
-        matches!(self.validity, WriteValidity::Reply(_) | WriteValidity::Request { discard_if_stale: true, .. })
+        matches!(self.validity, WriteValidity::Reply { .. } | WriteValidity::Request { discard_if_stale: true, .. })
     }
 }
 struct Pending { kind: Request, epoch: u64, turn: Option<String> }
@@ -192,6 +195,7 @@ impl Stdio {
     pub(crate) fn answer(&mut self, request: &str, option: &str) -> Result<Vec<Action>> {
         ensure!(!self.exited && !self.blocked, "Codex permission request has expired");
         ensure!(matches!(option, "allow" | "deny"), "Unknown Codex permission decision");
+        ensure!(!self.answers.contains_key(request), "An answer to this request is still being delivered; try again when it settles");
         let ask = self.asks.get(request).ok_or_else(|| anyhow::anyhow!("Codex permission request has expired"))?;
         ensure!(Some(&ask.turn) == self.turn.as_ref(), "Codex permission belongs to an earlier turn");
         let result = match ask.method.as_str() {
@@ -201,14 +205,14 @@ impl Stdio {
         let ask = self.asks.remove(request).unwrap();
         let line = json!({"id": ask.id, "result": result}).to_string();
         self.answers.insert(request.to_owned(), ask);
-        Ok(vec![Action::Write(Outbound { line, validity: WriteValidity::Reply(request.to_owned()) })])
+        Ok(vec![Action::Write(Outbound { line, validity: WriteValidity::Reply { key: request.to_owned(), allow: Some(option == "allow") } })])
     }
 
     pub(crate) fn cancel_asks(&mut self) -> Vec<Action> {
         self.asks.drain().map(|(key, ask)| {
             let line = json!({"id": ask.id, "result": {"decision": "cancel"}}).to_string();
             self.answers.insert(key.clone(), ask);
-            Action::Write(Outbound { line, validity: WriteValidity::Reply(key) })
+            Action::Write(Outbound { line, validity: WriteValidity::Reply { key, allow: None } })
         }).collect()
     }
 
@@ -216,7 +220,7 @@ impl Stdio {
         if self.exited || self.blocked { return false; }
         match &frame.validity {
             WriteValidity::Connection => true,
-            WriteValidity::Reply(key) => self.answers.get(key).is_some_and(|ask| Some(&ask.turn) == self.turn.as_ref()),
+            WriteValidity::Reply { key, .. } => self.answers.get(key).is_some_and(|ask| Some(&ask.turn) == self.turn.as_ref()),
             WriteValidity::Request { id, .. } => self.pending.get(id).is_some_and(|pending| match pending.kind {
                 Request::Initialize | Request::Thread => true,
                 Request::Turn | Request::Compact => pending.epoch == self.turn_epoch && self.turn.is_none(),
@@ -230,7 +234,7 @@ impl Stdio {
     pub(crate) fn retire_write(&mut self, frame: &Outbound, sent: bool) {
         match &frame.validity {
             WriteValidity::Request { id, .. } if !sent => { self.pending.remove(id); }
-            WriteValidity::Reply(key) => { self.answers.remove(key); }
+            WriteValidity::Reply { key, .. } => { self.answers.remove(key); }
             _ => {},
         }
     }
@@ -247,6 +251,10 @@ impl Stdio {
     /// its request is forgotten and the connection stays ready for the next.
     /// It is settled as stopped, not awaited as one Codex has yet to take.
     pub(crate) fn withdraw(&mut self, frame: &Outbound) {
+        if let Some((key, _)) = frame.approval() {
+            if let Some(ask) = self.answers.remove(key) { self.asks.insert(key.to_owned(), ask); }
+            return;
+        }
         self.retire_write(frame, false);
         if frame.delivers_prompt() { self.manual_compact = false; self.awaiting = false; self.prompt_model = None; }
     }
@@ -417,8 +425,12 @@ impl Stdio {
             }
             "serverRequest/resolved" => {
                 let key = p["requestId"].to_string();
-                self.answers.remove(&key);
-                if self.asks.remove(&key).is_some() { out.push(Action::Emit(Payload::PermissionDecided { request_id: key, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true })); }
+                let queued = self.answers.remove(&key).is_some();
+                let asking = self.asks.remove(&key).is_some();
+                // The writer may still hold an unsent answer. Provider resolution
+                // retires that card too, without reporting the queued consent as
+                // delivered. A later duplicate sees neither state and emits nothing.
+                if queued || asking { out.push(Action::Emit(Payload::PermissionDecided { request_id: key, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true })); }
             }
             "error" if p["willRetry"].as_bool() == Some(true) => out.push(Action::Emit(Payload::Status { text: "Codex is retrying its request".into() })),
             "error" => out.push(Action::Emit(Payload::Error { message: p["error"]["message"].as_str().unwrap_or("Codex reported an error").to_owned(), fatal: false, detail: None })),
@@ -482,7 +494,7 @@ impl Stdio {
         if !matches!(method.as_str(), "item/commandExecution/requestApproval" | "item/fileChange/requestApproval") {
             // Fail closed for protocol extensions; never synthesize consent.
             self.answers.insert(key.clone(), Ask { id: id.clone(), turn, method: method.clone() });
-            return Ok(vec![Action::Write(Outbound { line: json!({"id":id,"error":{"code":-32601,"message":"This request is not supported by TerminalX experimental stdio"}}).to_string(), validity: WriteValidity::Reply(key) }), Action::Emit(Payload::Error { message: format!("Experimental Codex stdio cannot handle {method}. No approval was granted."), fatal: false, detail: None })]);
+            return Ok(vec![Action::Write(Outbound { line: json!({"id":id,"error":{"code":-32601,"message":"This request is not supported by TerminalX experimental stdio"}}).to_string(), validity: WriteValidity::Reply { key, allow: None } }), Action::Emit(Payload::Error { message: format!("Experimental Codex stdio cannot handle {method}. No approval was granted."), fatal: false, detail: None })]);
         }
         if let Some(decisions) = p.get("availableDecisions").and_then(Value::as_array) {
             ensure!(decisions.iter().any(|d| d == "accept") && decisions.iter().any(|d| d == "decline"), "Codex offers approval choices this experimental client cannot represent");

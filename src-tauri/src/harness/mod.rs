@@ -32,13 +32,19 @@ use crate::events::Payload;
 /// line. Nothing here touches a process, so a whole exchange can be replayed.
 pub enum Action {
     Write(String),
+    /// A prompt whose actual write must re-admit its original sender.
+    AcpPrompt(Box<acp::PromptWrite>),
+    /// An opening/live user model request, correlated independently of value.
+    AcpModelRefused { request_id: String, model: String, message: String },
+    /// Consume a deferred mode only at its physical write (or known no-op).
+    AcpMode { mode: String, line: Option<String> },
     Emit(Payload),
     /// The thread id the server minted; the manager records it as the
     /// tab's provider session id so resume works.
     ThreadReady(String),
     /// An HTTP request for a server-backed harness; the reply comes back
     /// to the engine as a line tagged `raccoon_http`.
-    Http { tag: String, method: String, url: String, body: Option<Value> },
+    Http { generation: u64, tag: String, method: String, url: String, body: Option<Value> },
 }
 
 /// Which CLI a PTY-first tab is running. The two differ in their launch line,

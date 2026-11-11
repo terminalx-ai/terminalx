@@ -205,7 +205,7 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
         transport: t.transport,
         title: None,
         model: t.model.clone(),
-        effort: t.effort.clone(), requested_model: None, requested_effort: None, requested_permission_mode: None,
+        effort: t.effort.clone(), requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
         permission_mode: index::permission_mode_or_default(t.permission_mode.as_deref()),
         provider_session_id: None,
         status: TabStatus::Idle,
@@ -244,6 +244,7 @@ pub(crate) fn create_named_session_blocking(sink: &dyn EventSink, req: NewSessio
 }
 
 fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
+    let _request = crate::github_process::scope();
     if crate::git::is_repo(Path::new(&req.project_path)) {
         crate::store::configuration::view(Some(&req.project_path)).and_then(|r| r.require_trust())
             .map_err(|e| WorkspaceError::InvalidArguments(e.to_string()))?;
@@ -758,6 +759,7 @@ pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
 /// verdict too ("cannot be checked"), so the dialog can ask about it rather
 /// than wave it through.
 pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) -> Result<crate::workspaces::WorkspaceDisposition> {
+    let _request = crate::github_process::scope();
     let mut disposition = crate::workspaces::disposition(project, path);
     if fetch && !disposition.is_main {
         disposition.landed = Some(crate::landed::check(project, path, crate::landed::Fetch::Fresh));
@@ -916,6 +918,7 @@ pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<
 
 /// A stop error leaves the workspace and conversation records intact.
 pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &WorkspaceRemoval<'_>, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<WorkspaceRemoved> {
+    let _github_request = crate::github_process::scope();
     let project = std::fs::canonicalize(request.project_path).unwrap_or_else(|_| PathBuf::from(request.project_path));
     let target = std::fs::canonicalize(request.path).unwrap_or_else(|_| PathBuf::from(request.path));
     if target == project {

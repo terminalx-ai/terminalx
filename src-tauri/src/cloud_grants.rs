@@ -399,7 +399,7 @@ pub struct HttpGrantApi {
 
 impl HttpGrantApi {
     pub fn new(origin: &str, cloud: Arc<crate::cloud_bootstrap::Bootstrapped>) -> Self {
-        let agent = ureq::AgentBuilder::new()
+        let agent = crate::data_privacy::http_agent()
             .timeout(REQUEST_TIMEOUT)
             .redirects(0)
             .user_agent(&format!("terminalx-serve/{}", crate::cloud_bootstrap::VERSION))

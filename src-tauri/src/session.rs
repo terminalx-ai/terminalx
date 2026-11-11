@@ -43,6 +43,9 @@ use crate::store::index::{self, TabEntry, TabStatus};
 use crate::sink::{EventSink, SessionObserver};
 use crate::{git, pty, store};
 
+#[cfg(test)]
+static ACP_FULL_PIPE: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
+
 #[path = "session_follow.rs"]
 pub mod follow;
 #[path = "session_row_status.rs"]
@@ -107,6 +110,18 @@ pub struct QueuedMessage {
     pub text: String,
     #[serde(default)]
     pub images: Vec<(String, String)>,
+}
+
+/// Private queue state; public list/cancel responses expose only the message.
+/// Handover retains the original ticket, never mints one for remote work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PendingMessage {
+    #[serde(flatten)]
+    message: QueuedMessage,
+    #[serde(default)]
+    privacy: Option<crate::data_privacy::Ticket>,
+    #[serde(default)]
+    seq: u64,
 }
 
 /// What the reader chose, in terms every CLI's hooks can express. The hook
@@ -873,7 +888,7 @@ pub struct TabRuntime {
     stdio_starting: bool,
     setup_failed: bool,
     /// Each frame with the phone or share a prompt came from, if any.
-    stdio_writer: Option<std::sync::mpsc::SyncSender<(codex::stdio::Outbound, Option<codex_stdio::Authority>)>>,
+    stdio_writer: Option<std::sync::mpsc::SyncSender<codex_stdio::Delivery>>,
     /// The phone or share the prompt just sent came from, until its frame is
     /// queued with it: it is held to its permits when that frame is written.
     stdio_authority: Option<codex_stdio::Authority>,
@@ -891,7 +906,7 @@ pub struct TabRuntime {
     pub environment: crate::store::environment::Stamp,
     pub engine: Engine,
     pub pending: HashMap<String, PendingAsk>,
-    pub queued: Vec<QueuedMessage>,
+    pub queued: Vec<PendingMessage>,
     pub held_queue: held::Queue,
     pub turn_open: bool,
     /// Allowlisted labels only; never retain prompt or hook payload text.
@@ -952,6 +967,7 @@ struct CliRestart {
     tail: Arc<tui::Tail>,
     pane: String,
     process: Option<pty::StoppingPane>,
+    _privacy: Vec<crate::data_privacy::RemoteWrite>,
 }
 
 impl TabRuntime {
@@ -2538,7 +2554,7 @@ impl SessionManager {
     }
 
     pub fn queued(&self, session_id: &str, tab_id: &str) -> Vec<QueuedMessage> {
-        self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().queued.clone()).unwrap_or_default()
+        self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).map(|r| r.lock().unwrap().queued.iter().map(|q| q.message.clone()).collect()).unwrap_or_default()
     }
 
     fn archive_images(session_id: &str, images: &[ImageInput]) -> Result<ArchivedImages> {
@@ -2564,7 +2580,7 @@ impl SessionManager {
 
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         self.accepting_work()?;
-        let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
+        let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone(), epoch: std::sync::atomic::AtomicU64::new(0) });
         let environment = crate::store::environment::launch(cwd)?;
         let mut env: Vec<_> = environment.values.into_iter().collect();
         env.extend([
@@ -2582,7 +2598,8 @@ impl SessionManager {
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
         env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
         env.extend(index::workspace_ports::environment(cwd)?);
-        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &["TERMINALX_PORT".into(), "TERMINALX_PORTS".into()] }, sink)?;
+        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &["TERMINALX_PORT".into(), "TERMINALX_PORTS".into()] }, sink.clone())?;
+        sink.epoch.store(child.epoch, std::sync::atomic::Ordering::Release);
         rt.environment = environment.stamp;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
@@ -2727,6 +2744,7 @@ impl SessionManager {
             let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
             let _sharing = self.sharing.lock().unwrap();
             let _admitted = permit.enter()?;
+            let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
             self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
@@ -2900,6 +2918,7 @@ impl SessionManager {
             let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
             let _sharing = self.sharing.lock().unwrap();
             let _admitted = permit.enter()?;
+            let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
             self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
@@ -2910,6 +2929,7 @@ impl SessionManager {
 
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
+        let _privacy = connection.privacy.scope()?;
         self.send_admitted(admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
@@ -3068,7 +3088,6 @@ impl SessionManager {
                 text: prompt.agent.clone(),
                 images: wire_images,
             };
-            rt.queued.push(q);
             let ev = self.publish(
                 &mut rt,
                 Payload::UserMessage { author: prompt.author.clone(),
@@ -3080,6 +3099,7 @@ impl SessionManager {
                 },
                 None,
             );
+            rt.queued.push(PendingMessage { message: q, privacy: crate::data_privacy::remote_ticket(), seq: ev.seq });
             return Ok(SendOutcome { queued: true, events: vec![ev], in_input: false });
         }
 
@@ -3105,16 +3125,20 @@ impl SessionManager {
             None,
         )];
 
+        let acp_delivery = acp::Delivery { seq: events[0].seq, privacy: crate::data_privacy::remote_ticket(),
+            mobile: prompt.mobile.clone(), shared: prompt.shared_connection.clone() };
+        let acp_waits = matches!(&rt.engine, Engine::Acp(_));
         match &mut rt.engine {
             Engine::Acp(a) => {
                 let actions = if a.ready {
-                    a.prompt(prompt.agent.clone(), wire_images)
+                    a.prompt_with_delivery(prompt.agent.clone(), wire_images, Some(acp_delivery))
                 } else {
-                    a.start(prompt.agent.clone(), wire_images)
+                    a.start_with_delivery(prompt.agent.clone(), wire_images, Some(acp_delivery))
                 };
                 self.apply_actions(&mut rt, actions);
             }
             Engine::OpenCode(o) => {
+                o.set_prompt_seq(events[0].seq);
                 let actions = if o.ready {
                     o.prompt(prompt.agent.clone(), wire_images)
                 } else {
@@ -3124,8 +3148,8 @@ impl SessionManager {
             }
             Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => bail!("no engine"),
         }
-        // A headless agent is given the prompt as it is written to it.
-        if let Some(event) = events.first() {
+        // ACP records delivery only at its admitted physical prompt write.
+        if let Some(event) = events.first().filter(|_| !acp_waits) {
             recovery::diagnose_send(&rt.diagnostics_path(), event.seq, "delivered", serde_json::json!({ "since_sent_ms": 0 }));
         }
         rt.open_turn();
@@ -3134,11 +3158,14 @@ impl SessionManager {
         Ok(SendOutcome { queued: false, events, in_input: false })
     }
 
-    /// With no process there is nobody left to answer a model or effort
-    /// change that was waiting on one: it is simply what the next launch is
-    /// given, and so what the tab is on.
+    /// With no process, local changes become launch defaults. Remote changes
+    /// retain their provenance until an admitted launch consumes them, so a
+    /// privacy toggle can still withdraw them while the process is stopped.
     fn settle_settings_without_process(&self, rt: &mut TabRuntime) -> Option<Settings> {
-        match self.update_settings(rt, |s| s.launched()) {
+        match self.update_settings(rt, |s| {
+            let _privacy = s.admit_pending();
+            s.settled_without_process();
+        }) {
             Ok((_, now)) => Some(now),
             Err(error) => {
                 log::warn!("settle the settings of {}/{}: {error:#}", rt.session_id, rt.tab_id);
@@ -3149,24 +3176,44 @@ impl SessionManager {
 
     /// The tab as a process started now should see it: a change left waiting
     /// by a process that has since gone rides with this one.
-    fn launching(&self, rt: &mut TabRuntime, tab: &TabEntry) -> TabEntry {
+    fn launching(&self, rt: &mut TabRuntime, tab: &TabEntry) -> Result<(TabEntry, Vec<crate::data_privacy::RemoteWrite>)> {
+        let privacy = self.admit_pending_settings(rt)?;
+        let (_, now) = self.update_settings(rt, |s| s.settled_without_process())?;
         let mut tab = tab.clone();
-        if let Some(now) = self.settle_settings_without_process(rt) {
-            now.write(&mut tab);
+        now.write(&mut tab);
+        Ok((tab, privacy))
+    }
+
+    // ACP chooses a model during its asynchronous session-opening handshake,
+    // after the process was spawned. Revalidate just before handling each
+    // opening reply and retain admission through the resulting stdio writes.
+    // The provider's acknowledgement consumes the request via Settings::reported.
+    fn prepare_acp_opening_settings(&self, rt: &mut TabRuntime) -> Result<Vec<crate::data_privacy::RemoteWrite>> {
+        if !matches!(&rt.engine, Engine::Acp(a) if !a.ready) { return Ok(Vec::new()); }
+        let privacy = self.admit_pending_settings(rt)?;
+        let entry = index::get(&rt.session_id)?;
+        let tab = entry.tab(&rt.tab_id).context("tab not found")?;
+        if let Engine::Acp(a) = &mut rt.engine {
+            a.model = Some(tab.requested_model.as_ref().unwrap_or(&tab.model).clone()).filter(|m| !m.is_empty());
+            a.mode = tab.requested_permission_mode.as_ref().unwrap_or(&tab.permission_mode).clone();
+            a.opening_model_request = Settings::of(tab).model_request_id().map(String::from);
         }
-        tab
+        Ok(privacy)
     }
 
     fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
-        let tab = &self.launching(rt, tab);
+        let (tab, _privacy) = self.launching(rt, tab)?;
         let plan = acp::spawn_plan(binary).ok_or_else(|| anyhow!("{binary} is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::Acp(acp::Acp::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
+        // Leave a remote model pending until the handshake actually asks
+        // the provider for it. The next reply rechecks its privacy ticket.
+        let _opening = self.prepare_acp_opening_settings(rt)?;
         self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).with_context(|| format!("start {binary}"))?;
         Ok(())
     }
 
     fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
-        let tab = &self.launching(rt, tab);
+        let (tab, _privacy) = self.launching(rt, tab)?;
         let plan = opencode::spawn_plan().ok_or_else(|| anyhow!("OpenCode is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::OpenCode(opencode::OpenCode::new(plan.port, cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
         self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).context("start OpenCode")?;
@@ -3189,33 +3236,246 @@ impl SessionManager {
         Ok(())
     }
 
+    fn withdraw_acp_input(&self, rt: &mut TabRuntime) {
+        let actions = match &mut rt.engine { Engine::Acp(a) => a.withdraw_input(), _ => Vec::new() };
+        self.apply_actions(rt, actions);
+    }
+
+    /// Re-admit the original sender outside runtime, in the same lock order
+    /// as phone/share sends. The lease covers the complete physical frame.
+    /// The exact child and adapter request must still own it after admission.
+    fn write_acp_prompt(&self, runtime: std::sync::Weak<Mutex<TabRuntime>>, child: Option<Arc<crate::harness::host::LiveChild>>,
+        session: String, tab: String, write: acp::PromptWrite) {
+        let mut started = Some(write.started);
+        let Some(runtime) = runtime.upgrade() else { return };
+        let current = |rt: &TabRuntime| !rt.stopping
+            && child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
+            && matches!(&rt.engine, Engine::Acp(a) if a.delivery_current(write.id, write.delivery.seq));
+        let mut attempted = false;
+        let privacy = write.delivery.privacy.as_ref()
+            .or_else(|| write.delivery.mobile.as_ref().map(|p| &p.grant.privacy))
+            .or_else(|| write.delivery.shared.as_ref().map(|p| &p.privacy));
+        let lease = privacy.map(|ticket| ticket.enter()).transpose();
+        // A complete frame has one writer. Waiting for that writer owns no
+        // session/admission/sender lock, so Stop and other tabs can progress.
+        let frame = child.as_ref().map(|child| child.input_frame()).transpose();
+        let mut bytes = write.line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        let mut offset = 0;
+        let mut stalled_until = Instant::now() + Duration::from_secs(5);
+        let result = (|| -> Result<()> {
+            lease.as_ref().map_err(|error| anyhow!("{error}"))?;
+            frame.as_ref().map_err(|error| anyhow!("{error}"))?;
+            while offset < bytes.len() {
+                let mut wait_for_capacity = false;
+                {
+                    let _admission = crate::issue_pipeline::admission::lock_for(&session, &tab);
+                    anyhow::ensure!(privacy.is_none_or(|ticket| ticket.valid()), crate::data_privacy::MESSAGE);
+                    anyhow::ensure!(Instant::now() < stalled_until, "ACP input pipe timed out; input will not be replayed");
+                    let mut sharing = (write.delivery.mobile.is_some() || write.delivery.shared.is_some()).then(|| self.sharing.lock().unwrap());
+                    let mut attachment = None;
+                    if let Some(permit) = &write.delivery.shared {
+                        let share = sharing.as_mut().and_then(|s| s.sessions.get_mut(&session)).context("Sharing ended before ACP delivery")?;
+                        share.admit_at_writer(permit, &tab, chrono::Utc::now().timestamp_millis())?;
+                        attachment = share.owner.as_ref().map(|owner| owner.attachment.clone());
+                        let entry = index::get(&session)?;
+                        anyhow::ensure!(entry.tab(&tab).is_some_and(|tab| settings::allowed_while_shared(&tab.permission_mode)), "Shared mode changed before ACP delivery");
+                    }
+                    if let Some(permit) = &write.delivery.mobile { permit.check_mode(&session, &tab)?; }
+                    let _mobile = write.delivery.mobile.as_ref().map(|permit| permit.enter()).transpose()?;
+                    let _owner = attachment.as_ref().map(|attachment| attachment.enter()).transpose()?;
+                    let mut rt = runtime.lock().unwrap();
+                    if !current(&rt) { return Ok(()); }
+                    self.accepting_work()?;
+                    crate::issue_pipeline::admission::check(&session, &tab)?;
+                    match child.as_ref().context("ACP child is missing")?.try_write_stdin(&bytes[offset..]) {
+                        Ok(0) => bail!("ACP input pipe closed"),
+                        Ok(written) => {
+                            offset += written;
+                            attempted = true;
+                            // Bound a stalled pipe, not the total size of an
+                            // image/prompt. Cancellation is checked on every
+                            // chunk even while the provider keeps reading.
+                            stalled_until = Instant::now() + Duration::from_secs(5);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            wait_for_capacity = true;
+                            #[cfg(test)]
+                            if let Some(observed) = ACP_FULL_PIPE.lock().unwrap().take() { let _ = observed.send(()); }
+                        },
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
+                        Err(error) => return Err(error).context("ACP input pipe failed"),
+                    }
+                    if offset == bytes.len() {
+                        if let Engine::Acp(a) = &mut rt.engine { a.delivered(write.id); }
+                        recovery::diagnose_send(&rt.diagnostics_path(), write.delivery.seq, "delivered", serde_json::json!({ "since_sent_ms": 0 }));
+                        self.apply(&mut rt, started.take().unwrap(), None);
+                        self.apply(&mut rt, Payload::ModelRequestStarted, None);
+                    }
+                }
+                if wait_for_capacity { std::thread::sleep(Duration::from_millis(5)); }
+            }
+            Ok(())
+        })();
+        let mut rt = runtime.lock().unwrap();
+        // Interrupt or Stop may have retired the request between chunks.
+        // Close that exact pipe even when a later request now owns the turn;
+        // no subsequent frame may complete the cancelled partial JSON line.
+        if attempted && offset < bytes.len() {
+            if let Some(child) = &child { child.close_stdin(); }
+            if child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live)) {
+                rt.stopping = true;
+                self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
+            }
+        }
+        // Success retired the queued write; failure may have raced Stop or
+        // replacement. Never close a later turn or write into a new child.
+        if let Err(error) = result {
+            if child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
+                && matches!(&rt.engine, Engine::Acp(a) if a.delivery_current(write.id, write.delivery.seq)) {
+                if let Engine::Acp(a) = &mut rt.engine { a.withdraw_delivery(write.id); }
+                log::warn!("ACP prompt delivery stopped: {error:#}");
+                self.prompt_withdrawn(&mut rt, write.delivery.seq, None);
+                self.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }, None);
+            }
+        }
+        let deferred = if child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live)) {
+            match &mut rt.engine {
+                Engine::Acp(a) if a.writing == Some(write.id) => { a.writing = None; std::mem::take(&mut a.deferred_writes) }
+                _ => Vec::new(),
+            }
+        } else { Vec::new() };
+        drop(frame);
+        // Publish the idle writer only once its frame is available to the
+        // next control; otherwise a concurrent control can fail try_lock.
+        drop(rt);
+        // The activation acknowledgement follows partial-frame cleanup.
+        drop(lease);
+        for (action, ticket) in deferred {
+            let _admission = crate::issue_pipeline::admission::lock_for(&session, &tab);
+            let privacy = ticket.as_ref().map(|ticket| ticket.enter()).transpose();
+            let mut rt = runtime.lock().unwrap();
+            if rt.stopping || !child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live)) { break; }
+            if privacy.is_err() || self.accepting_work().is_err() || crate::issue_pipeline::admission::check(&session, &tab).is_err() {
+                if let Engine::Acp(a) = &mut rt.engine { a.discard_write(&action); }
+                if let Err(error) = self.admit_pending_settings(&mut rt) { log::warn!("withdraw deferred ACP setting: {error:#}"); }
+                continue;
+            }
+            // A newer prompt may own the pipe now. Preserve this control's
+            // original authority if it has to wait for that frame too.
+            if let Engine::Acp(a) = &mut rt.engine {
+                if a.writing.is_some() { a.deferred_writes.push((action, ticket)); continue; }
+            }
+            self.apply_actions(&mut rt, vec![action]);
+        }
+    }
+
     fn apply_actions(&self, rt: &mut TabRuntime, actions: Vec<Action>) {
         for a in actions {
+            if matches!(&a, Action::Write(_) | Action::AcpMode { .. }) {
+                if let Engine::Acp(engine) = &mut rt.engine {
+                    if engine.writing.is_some() {
+                        engine.deferred_writes.push((a, crate::data_privacy::remote_ticket()));
+                        continue;
+                    }
+                }
+            }
             match a {
-                Action::Http { tag, method, url, body } => {
+                Action::AcpMode { mode, line } => {
+                    if rt.stopping { continue; }
+                    let result = line.as_deref().map(|line| self.write(rt, line)).unwrap_or(Ok(()))
+                        .and_then(|()| self.update_settings(rt, |s| s.reported_mode(&mode)).map(|_| ()));
+                    if let Err(error) = result {
+                        rt.stopping = true;
+                        self.needs_recovery(rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
+                        self.publish(rt, Payload::Status { text: format!("Could not apply ACP permission mode: {error:#}. Stop the agent before retrying.") }, None);
+                    }
+                }
+                Action::AcpPrompt(write) => {
+                    if let Engine::Acp(a) = &mut rt.engine { a.writing = Some(write.id); }
+                    let manager = self.clone();
+                    let runtime = rt.me.clone();
+                    let child = rt.child.clone();
+                    let session = rt.session_id.clone();
+                    let tab = rt.tab_id.clone();
+                    std::thread::spawn(move || manager.write_acp_prompt(runtime, child, session, tab, *write));
+                }
+                Action::AcpModelRefused { request_id, model, message } => {
+                    let mut dropped = None;
+                    let result = self.update_settings(rt, |settings| {
+                        dropped = if settings.model_request_id() == Some(request_id.as_str()) {
+                            settings.refused(Setting::Model, Some(&model))
+                        } else { None };
+                    });
+                    match result {
+                        Ok(_) if dropped.is_some() => { self.publish(rt, Payload::Status { text: format!("The agent did not change the model to {model}: {message}") }, None); }
+                        Err(error) => log::warn!("record ACP model refusal: {error:#}"),
+                        _ => {}
+                    }
+                }
+                Action::Http { generation, tag, method, url, body } => {
                     let manager = self.clone();
                     let me = rt.me.clone();
+                    let privacy = crate::data_privacy::remote_ticket();
+                    let child = rt.child.clone();
                     std::thread::spawn(move || {
+                        #[cfg(test)] {
+                            let hook = BEFORE_OPENCODE_HTTP.lock().unwrap().take();
+                            if let Some(hook) = hook { hook(); }
+                        }
+                        let admitted = crate::data_privacy::delivery_scope(privacy.as_ref());
+                        let Some(runtime) = me.upgrade() else { return };
+                        let current = |rt: &TabRuntime| !rt.stopping
+                            && child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
+                            && matches!(&rt.engine, Engine::OpenCode(o) if o.generation() == generation);
+                        {
+                            let mut rt = runtime.lock().unwrap();
+                            if !current(&rt) { return; }
+                            if admitted.is_err() {
+                                let actions = if let Engine::OpenCode(o) = &mut rt.engine { o.withdraw_prompt(&tag) } else { Vec::new() };
+                                manager.apply_actions(&mut rt, actions);
+                                return;
+                            }
+                        }
+                        // The original ticket and turn generation survive the whole
+                        // request, fallback opening, and subsequent physical prompt.
                         let line = opencode::perform(&tag, &method, &url, body);
-                        if let Some(r) = me.upgrade() {
-                            manager.on_line(&r, &line);
+                        let mut rt = runtime.lock().unwrap();
+                        if !current(&rt) { return; }
+                        let (actions, answer) = if let Engine::OpenCode(o) = &mut rt.engine {
+                            let answer = o.settle_answer(&tag, &line);
+                            (o.handle(&line), answer)
+                        } else { (Vec::new(), None) };
+                        rt.last_activity = Instant::now();
+                        rt.incidents.progress("agent_output");
+                        manager.stall_disproved(&mut rt);
+                        manager.apply_actions(&mut rt, actions);
+                        if let Some((request, allow)) = answer {
+                            manager.permission_delivered(&mut rt, &request, allow);
+                            let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+                            drop(rt);
+                            manager.observer.answered(&session, &tab);
                         }
                     });
                 }
                 Action::Write(line) => {
                     if let Err(e) = self.write(rt, &line) {
+                        if matches!(&rt.engine, Engine::Acp(_)) {
+                            if let Some(child) = &rt.child { child.close_stdin(); }
+                            rt.stopping = true;
+                            self.needs_recovery(rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
+                        }
                         self.apply(rt, Payload::Error { message: format!("Connection write failed: {e:#}"), fatal: false, detail: None }, None);
                     }
                 }
                 Action::Emit(p) => self.apply(rt, p, None),
                 Action::ThreadReady(id) => {
-                    let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
-                    std::thread::spawn(move || {
-                        let _ = index::update_tab(&s, &t, |tab| {
-                            tab.provider_session_id = Some(id);
-                            Ok(())
-                        });
-                    });
+                    // Ordered with this child's reply and Stop/replacement;
+                    // an old detached callback cannot rename the new session.
+                    if let Err(error) = index::update_tab(&rt.session_id, &rt.tab_id, |tab| {
+                        tab.provider_session_id = Some(id.clone());
+                        Ok(())
+                    }) { log::warn!("record provider session: {error:#}"); }
                 }
             }
         }
@@ -3340,7 +3600,7 @@ impl SessionManager {
         {
             let mut rt = rt_arc.lock().unwrap();
             if matches!(rt.engine, Engine::CodexStdio(_)) {
-                if !rt.turn_open || !rt.queued.iter().any(|q| q.id == seq.to_string()) { return Ok(()); }
+                if !rt.turn_open || !rt.queued.iter().any(|q| q.seq == seq) { return Ok(()); }
                 if !matches!(&rt.engine, Engine::CodexStdio(engine) if engine.can_interrupt()) { return Ok(()); }
                 self.cancel_asks(&mut rt);
                 let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
@@ -3381,15 +3641,15 @@ impl SessionManager {
     pub fn cancel_queued(&self, session_id: &str, tab_id: &str, message_id: &str) -> Result<Option<QueuedMessage>> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        let pos = rt.queued.iter().position(|q| q.id == message_id);
+        let pos = rt.queued.iter().position(|q| q.message.id == message_id);
         let removed = pos.map(|p| rt.queued.remove(p));
         if matches!(rt.engine, Engine::CodexStdio(_)) {
-            if let Some(seq) = removed.as_ref().and_then(|q| q.id.parse().ok()) {
+            if let Some(seq) = removed.as_ref().map(|q| q.seq) {
                 rt.stdio_followups.authorities.remove(&seq);
                 self.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: seq, unconfirmed: false }, None);
             }
         }
-        Ok(removed)
+        Ok(removed.map(|q| q.message))
     }
 
     /// Kill the agent but keep resume state, so the next prompt resumes.
@@ -3554,6 +3814,9 @@ impl SessionManager {
                 self.publish(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Cancelled".into(), automatic: true }, None);
             }
             rt.stopping_pid = pid;
+            // Unsent ACP prompts have no provider turn to cancel and cannot
+            // be handed to the next launch as local input.
+            self.withdraw_acp_input(&mut rt);
             // Settle before waiting for the OS. Late exits cannot reopen this turn.
             self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
             // Its status is settled below.
@@ -3758,15 +4021,17 @@ impl SessionManager {
                 (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
             }
             Engine::OpenCode(o) => {
+                anyhow::ensure!(!o.answer_pending(request_id), "An answer to this request is still being delivered; try again when it settles");
                 let actions = o.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
-                let allow = option_id != "reject";
                 self.apply_actions(&mut rt, actions);
-                (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
+                // The card remains open until the HTTP response confirms delivery.
+                return Ok(());
             }
             Engine::CodexStdio(engine) => {
                 let actions = engine.answer(request_id, option_id)?;
                 self.apply_codex_actions(&mut rt, actions)?;
-                (option_id == "allow", if option_id == "allow" { "Allowed".into() } else { "Denied".into() })
+                // Enqueueing is not delivery. A revoked unsent reply is retryable.
+                return Ok(());
             }
             Engine::None => bail!("no engine"),
         };
@@ -3782,6 +4047,13 @@ impl SessionManager {
         drop(rt);
         self.observer.answered(session_id, tab_id);
         Ok(())
+    }
+
+    fn permission_delivered(&self, rt: &mut TabRuntime, request_id: &str, allow: bool) {
+        let Some(ask) = rt.pending.remove(request_id) else { return };
+        self.publish(rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: allow,
+            label: if allow { "Allowed".into() } else { "Denied".into() }, automatic: false }, None);
+        if rt.pending.is_empty() { self.set_status(rt, TabStatus::InProgress); }
     }
 
     /// Answer an AskUserQuestion: the answers ride inside an allow.
@@ -3835,13 +4107,13 @@ impl SessionManager {
             // or once the turn it would interrupt is over.
             Engine::Cli(p) => {
                 if turn_open {
-                    p.restart_when_idle |= before != after;
+                    p.restart_when_idle = after.requested_permission_mode.is_some() || after.waiting();
                 } else {
                     restart = before != after;
                 }
             }
             Engine::Acp(a) => {
-                let actions = a.set_model(model);
+                let actions = a.set_requested_model(model, after.model_request_id().map(String::from));
                 self.apply_actions(&mut rt, actions);
             }
             Engine::OpenCode(o) => o.model = Some(model.into()),
@@ -3866,7 +4138,7 @@ impl SessionManager {
             (Engine::Cli(_), Apply::Live) => true,
             (Engine::Cli(_), Apply::Restart) => rt.turn_open,
             // The reply to `session/set_model` is its answer.
-            (Engine::Acp(a), Apply::Live) => a.session_id.is_some(),
+            (Engine::Acp(_), Apply::Live) => true,
             // OpenCode names the model on each prompt: nothing to wait for.
             _ => false,
         }
@@ -4057,7 +4329,7 @@ impl SessionManager {
         // Whatever it was doing, it was doing in a mode the share forbids.
         self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
         let current_tail = match &rt.engine { Engine::Cli(p) => p.tail.clone(), _ => return false };
-        let work = self.prepare_cli_restart(&mut rt, &current_tail);
+        let work = self.prepare_cli_restart(&mut rt, &current_tail, false);
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
         drop(rt);
         drop(sharing);
@@ -4101,7 +4373,7 @@ impl SessionManager {
         }
         let turn_open = rt.turn_open;
         let stdio = self.codex_stdio_mode_change(session_id, tab_id, mode, turn_open)?;
-        let waits = turn_open && matches!(rt.engine, Engine::Cli(_));
+        let waits = (turn_open && matches!(rt.engine, Engine::Cli(_))) || matches!(&rt.engine, Engine::Acp(a) if !a.ready || a.writing.is_some());
         let (before, after) = self.update_settings(&mut rt, |s| s.request_mode(mode, waits))?;
         let mut restart = false;
         match &mut rt.engine {
@@ -4153,7 +4425,8 @@ impl SessionManager {
             }
         }
         let turn_open = rt.turn_open;
-        let waits = self.change_waits(&rt, Setting::Effort);
+        let waits = self.change_waits(&rt, Setting::Effort)
+            && (HarnessId::parse(&rt.harness).settings().effort == Apply::Restart || effort.is_some_and(|e| !e.is_empty()));
         let (before, after) = self.update_settings(&mut rt, |s| s.request_effort(effort, waits))?;
         let mut respawn = false;
         let mut restart = false;
@@ -4168,7 +4441,7 @@ impl SessionManager {
             }
             Engine::Cli(p) => {
                 if turn_open {
-                    p.restart_when_idle |= before != after;
+                    p.restart_when_idle = after.requested_permission_mode.is_some() || after.waiting();
                 } else {
                     restart = before != after;
                 }
@@ -4405,6 +4678,7 @@ impl SessionManager {
                 return Ok(false);
             }
         }
+        let _privacy = self.admit_pending_settings(rt)?;
         // In use again: a stop for idleness is over.
         if tab.parked {
             if let Err(error) = index::set_parked(&rt.session_id, &rt.tab_id, false) {
@@ -4438,9 +4712,6 @@ impl SessionManager {
             launching.write(&mut tab);
             tab
         };
-        if launching != waited {
-            self.update_settings(rt, |s| s.launched())?;
-        }
         // A quick chat's scratch directory is ours to keep there: one removed
         // by hand is made again rather than failing the launch.
         if entry.is_quick() && crate::store::quick::is_scratch(&entry.id, &entry.cwd) {
@@ -4555,17 +4826,28 @@ impl SessionManager {
         });
         rt.turn_open = false;
         self.announce_pane(rt);
-        if let Some(id) = launch.minted {
-            index::update_tab(&rt.session_id, &rt.tab_id, |t| {
-                t.provider_session_id = Some(id.clone());
-                // `fork_from` stays: the CLI has only just started, and until
-                // it has written the fork's own transcript the parent's is
-                // the only copy of the conversation, and the one a launch
-                // before then makes the fork from again.
-                Ok(())
-            })?;
-        }
         self.follow_transcript(rt_arc, tail, pane, generation);
+        // The process is now fully owned, including its hook token and
+        // transcript follower. No fallible persistence may leave a live CLI
+        // unregistered. An uncommitted request keeps its original ticket.
+        // Persistence failure requires Stop before retrying; the normal
+        // Stop path still owns this process.
+        let committed = (|| -> Result<()> {
+            if launching != waited { self.update_settings(rt, |s| s.launched())?; }
+            if let Some(id) = launch.minted {
+                index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+                    t.provider_session_id = Some(id.clone());
+                    // Keep fork_from until the new CLI has its own transcript.
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = committed {
+            rt.stopping = true;
+            self.needs_recovery(rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
+            return Err(error.context("The agent started, but its launch settings could not be saved. Stop the agent before retrying"));
+        }
         if let Some(restart) = launch.restart {
             self.restarted(rt, rt_arc, restart, prompting);
         }
@@ -4793,7 +5075,7 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         if !Self::has_tail(&rt, tail) { return Ok(None); }
         if let Some(refusal) = Self::by_hand_refusal(&rt, "its settings") { bail!(refusal); }
-        Ok(self.prepare_cli_restart(&mut rt, tail))
+        Ok(self.prepare_cli_restart(&mut rt, tail, false))
     }
 
     /// A deferred settings restart must still be due and idle when its worker
@@ -4805,11 +5087,37 @@ impl SessionManager {
             || !matches!(&rt.engine, Engine::Cli(p) if p.restart_when_idle && p.by_hand.is_none()) {
             return None;
         }
-        self.prepare_cli_restart(&mut rt, tail)
+        self.prepare_cli_restart(&mut rt, tail, true)
     }
 
-    fn prepare_cli_restart(&self, rt: &mut TabRuntime, tail: &Arc<tui::Tail>) -> Option<CliRestart> {
+    /// Persist withdrawal before a launch can consume requested settings.
+    /// The returned leases belong to the whole physical restart/launch.
+    fn admit_pending_settings(&self, rt: &mut TabRuntime) -> Result<Vec<crate::data_privacy::RemoteWrite>> {
+        let mut privacy = Vec::new();
+        self.update_settings(rt, |s| privacy = s.admit_pending())?;
+        Ok(privacy)
+    }
+
+    fn prepare_cli_restart(&self, rt: &mut TabRuntime, tail: &Arc<tui::Tail>, idle: bool) -> Option<CliRestart> {
         if !Self::has_tail(rt, tail) || rt.restart_claim.is_some() { return None; }
+        // Immediate phone operations also retain their initiating authority
+        // through the process wait. Deferred work gets each request's ticket
+        // from the index; unrelated edits never replace that authority.
+        let mut privacy = match crate::data_privacy::remote_ticket().map(|ticket| ticket.enter()).transpose() {
+            Ok(lease) => lease.into_iter().collect::<Vec<_>>(),
+            Err(_) => return None,
+        };
+        match self.admit_pending_settings(rt) {
+            Ok(leases) => privacy.extend(leases),
+            Err(error) => { log::warn!("admit deferred settings: {error:#}"); return None; }
+        }
+        if idle {
+            let tab = index::get(&rt.session_id).ok()?.tab(&rt.tab_id)?.clone();
+            let Engine::Cli(p) = &mut rt.engine else { return None };
+            p.restart_when_idle = tab.requested_permission_mode.is_some()
+                || (p.harness == CliKind::Codex && (tab.requested_model.is_some() || tab.requested_effort.is_some()));
+            if !p.restart_when_idle { return None; }
+        }
         let pane = match &rt.engine { Engine::Cli(p) => p.pane_id.clone(), _ => return None };
         self.release_cli(rt);
         // Capture the actual group before dropping runtime. A later stop or
@@ -4817,7 +5125,7 @@ impl SessionManager {
         let process = self.terminals.begin_stop(&pane);
         rt.stopping_pid = process.as_ref().and_then(pty::StoppingPane::pid);
         rt.restart_claim = Some(tail.clone());
-        Some(CliRestart { tail: tail.clone(), pane, process })
+        Some(CliRestart { tail: tail.clone(), pane, process, _privacy: privacy })
     }
 
     fn claim_restart_completion<'a>(&self, rt_arc: &'a Arc<Mutex<TabRuntime>>, work: &CliRestart, exited: bool) -> Result<Option<MutexGuard<'a, TabRuntime>>> {
@@ -5473,6 +5781,7 @@ impl SessionManager {
         // Taken here, while the sender still has the tab, so it is the order
         // the prompts were sent in.
         let ticket = self.writers.lock().unwrap().entry(pane.to_string()).or_default().ticket();
+        let privacy = crate::data_privacy::remote_ticket();
         let terminals = self.terminals.clone();
         let manager = self.clone();
         let rt_arc = rt_arc.clone();
@@ -5512,7 +5821,7 @@ impl SessionManager {
                 None => Ok(()),
             };
             if let Some(ready) = &ready {
-                let readiness = manager.wait_ready(&pane, ready, shared.as_ref(), mobile.as_ref(), || stopped(&rt_arc.lock().unwrap()));
+                let readiness = manager.wait_ready(&pane, ready, shared.as_ref(), mobile.as_ref(), || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || stopped(&rt_arc.lock().unwrap()));
                 stage("ready", serde_json::json!({ "readiness": readiness.as_str() }));
                 let mut rt = rt_arc.lock().unwrap();
                 // Stop or a restart may have replaced the CLI while waiting.
@@ -5526,6 +5835,7 @@ impl SessionManager {
                 if readiness == Readiness::Cancelled {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -5535,13 +5845,15 @@ impl SessionManager {
             }
             // Nothing is typed into an input box that holds something: the
             // Enter would send that and this prompt as one (#722).
-            let revoked = || manager.delivery_revoked(shared.as_ref(), mobile.as_ref());
+            let revoked = || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || manager.delivery_revoked(shared.as_ref(), mobile.as_ref());
             let input = match manager.wait_for_empty_input(&rt_arc, &pane, seq, stops, &ticket, &mut held, revoked, &stage) {
                 InputWait::Type(input) => input,
                 InputWait::Revoked => {
                     let mut rt = rt_arc.lock().unwrap();
+                    if seq.is_none() { manager.command_not_typed(&mut rt, &text); }
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -5577,6 +5889,8 @@ impl SessionManager {
             let mut admitted_to_writer = false;
             // Whether the Enter was written: not after a stop (#746).
             let result = (|| -> Result<bool> {
+                let _control = privacy.as_ref().map(|ticket| ticket.enter()).transpose()?;
+                let _privacy = shared.as_ref().map(|(permit, _, _, _)| permit.privacy.enter()).transpose()?;
                 let mut sharing = (shared.is_some() || mobile.is_some()).then(|| manager.sharing.lock().unwrap());
                 let mut owner_attachment = None;
                 if let (Some((connection, session_id, tab_id, _)), Some(sharing)) = (&shared, &mut sharing) {
@@ -5641,9 +5955,14 @@ impl SessionManager {
             if let Err(e) = result {
                 log::warn!("[{pane}] write: {e:#}");
                 let mut rt = rt_arc.lock().unwrap();
-                if !admitted_to_writer && (shared.is_some() || mobile.is_some()) {
+                if !admitted_to_writer && seq.is_none() && privacy.is_some() {
+                    manager.command_not_typed(&mut rt, &text);
+                    return;
+                }
+                if !admitted_to_writer && (privacy.is_some() || shared.is_some() || mobile.is_some()) {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
+                    if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -6640,9 +6959,22 @@ impl SessionManager {
         Ok(HandoffInfo { command, provider_session_id: tab.provider_session_id.clone(), harness: tab.harness.clone() })
     }
 
-    fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) {
+    fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) { self.on_line_from(rt_arc, line, None); }
+
+    fn on_line_from(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str, epoch: Option<&std::sync::atomic::AtomicU64>) {
         let mut rt = rt_arc.lock().unwrap();
+        if epoch.is_some_and(|epoch| rt.child.as_ref().is_none_or(|child| child.epoch != epoch.load(std::sync::atomic::Ordering::Acquire))) { return; }
+        if rt.stopping && matches!(&rt.engine, Engine::Acp(_)) { return; }
         rt.last_activity = Instant::now();
+        let _privacy = match self.prepare_acp_opening_settings(&mut rt) {
+            Ok(privacy) => privacy,
+            Err(error) => {
+                rt.stopping = true;
+                self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
+                self.publish(&mut rt, Payload::Status { text: format!("Could not read the agent's launch settings. Stop the agent before retrying: {error:#}") }, None);
+                return;
+            }
+        };
         let actions = match &mut rt.engine {
             Engine::Acp(a) => a.handle(line),
             Engine::OpenCode(o) => o.handle(line),
@@ -6802,16 +7134,30 @@ impl SessionManager {
             // An interrupted turn hands over to the next queued message like
             // one that finished (#427): Escape stops a turn, not the queue. A
             // hard stop has emptied the queue before it closes the turn.
-            if !matches!(rt.engine, Engine::CodexStdio(_)) && !rt.stopping && rt.recovery.is_none() && !rt.queued.is_empty() {
-                let q = rt.queued.remove(0);
+            while !matches!(rt.engine, Engine::CodexStdio(_)) && !rt.stopping && rt.recovery.is_none() && !rt.queued.is_empty() {
+                let pending = rt.queued.remove(0);
+                let Ok(_privacy) = crate::data_privacy::delivery_scope(pending.privacy.as_ref()) else {
+                    self.publish(rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
+                    continue;
+                };
+                let q = pending.message;
+                let delivery = pending.privacy.map(|privacy| acp::Delivery { seq: pending.seq, privacy: Some(privacy), mobile: None, shared: None });
                 let actions = match &mut rt.engine {
-                    Engine::Acp(a) => a.prompt(q.text.clone(), q.images.clone()),
-                    Engine::OpenCode(o) => o.prompt(q.text.clone(), q.images.clone()),
+                    Engine::Acp(a) => match delivery {
+                        Some(delivery) => a.prompt_with_delivery(q.text.clone(), q.images.clone(), Some(delivery)),
+                        None => a.prompt(q.text.clone(), q.images.clone()),
+                    },
+                    Engine::OpenCode(o) => {
+                        o.set_prompt_seq(pending.seq);
+                        o.prompt(q.text.clone(), q.images.clone())
+                    },
                     // A PTY tab never queues here: the CLI holds typed input
                     // itself, so the message went in when it was written.
                     Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => Vec::new(),
                 };
-                let sent = !actions.is_empty();
+                // ACP may retain this local follow-up until its handshake
+                // completes. It owns the next turn even before it has writes.
+                let sent = !actions.is_empty() || matches!(&rt.engine, Engine::Acp(a) if a.waiting_for_session());
                 self.apply_actions(rt, actions);
                 if sent {
                     rt.open_turn();
@@ -6831,6 +7177,7 @@ impl SessionManager {
             return; // an older child; the live one is unaffected
         }
         crate::cloud_grants::forget_launch(&rt.key());
+        self.withdraw_acp_input(&mut rt);
         rt.child = None;
         rt.child_pid = None;
         rt.engine = Engine::None;
@@ -6856,11 +7203,12 @@ impl SessionManager {
 struct TabSink {
     manager: SessionManager,
     rt: Arc<Mutex<TabRuntime>>,
+    epoch: std::sync::atomic::AtomicU64,
 }
 
 impl Sink for TabSink {
     fn stdout_line(&self, line: String) {
-        self.manager.on_line(&self.rt, &line);
+        self.manager.on_line_from(&self.rt, &line, Some(&self.epoch));
     }
     fn stderr_line(&self, line: String) {
         let key = self.rt.lock().map(|r| r.key()).unwrap_or_default();
@@ -6898,6 +7246,9 @@ mod idle_tests;
 #[cfg(all(test, unix))]
 #[path = "session_send_tests.rs"]
 mod send_tests;
+
+#[cfg(test)]
+static BEFORE_OPENCODE_HTTP: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
 mod tests {

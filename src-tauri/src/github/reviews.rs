@@ -120,7 +120,10 @@ fn next_cursor(connection: &Value, seen: &mut HashSet<String>) -> Result<Option<
     }
 }
 
-pub fn list(url: &str) -> Result<ReviewThreads> { list_with(url, &mut run) }
+pub fn list(url: &str) -> Result<ReviewThreads> {
+    let _request = crate::github_process::scope();
+    list_with(url, &mut run)
+}
 
 fn list_with(url: &str, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Result<ReviewThreads> {
     let target = Target::new(url)?;
@@ -161,6 +164,7 @@ fn list_with(url: &str, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Resu
 }
 
 pub fn files(url: &str, head: &str, base: &str) -> Result<Vec<ReviewFile>> {
+    let _request = crate::github_process::scope();
     files_with(url, head, base, &mut run)
 }
 
@@ -202,7 +206,10 @@ fn check_thread(target: &Target, id: &str, run: &mut impl FnMut(&[&str]) -> Resu
     Ok(())
 }
 
-pub fn resolve(url: &str, id: &str, resolved: bool) -> Result<()> { resolve_with(url, id, resolved, &mut run) }
+pub fn resolve(url: &str, id: &str, resolved: bool) -> Result<()> {
+    let _request = crate::github_process::scope();
+    resolve_with(url, id, resolved, &mut run)
+}
 
 fn resolve_with(url: &str, id: &str, resolved: bool, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
     let target = Target::new(url)?;
@@ -215,7 +222,10 @@ fn resolve_with(url: &str, id: &str, resolved: bool, run: &mut impl FnMut(&[&str
     Ok(())
 }
 
-pub fn reply(url: &str, id: &str, body: &str) -> Result<()> { reply_with(url, id, body, &mut run) }
+pub fn reply(url: &str, id: &str, body: &str) -> Result<()> {
+    let _request = crate::github_process::scope();
+    reply_with(url, id, body, &mut run)
+}
 
 fn reply_with(url: &str, id: &str, body: &str, run: &mut impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
     if body.trim().is_empty() || body.len() > 65536 { bail!("A reply must contain between 1 and 65536 bytes of text"); }

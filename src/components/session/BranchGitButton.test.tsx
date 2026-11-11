@@ -33,6 +33,7 @@ beforeEach(() => {
   current = snapshot(); approved = false; fail = null; accountFailure = null;
   mocks.invoke.mockReset(); mocks.listeners.clear();
   mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "pr_check_authority") return { owner: "fixture", epoch: 1 };
     if (command === "branch_step_refresh") return current;
     if (command === "branch_step_account") {
       if (accountFailure) throw new Error(accountFailure);
@@ -141,7 +142,7 @@ describe("header Git action", () => {
   it("displays progress and prevents duplicate requests", async () => {
     current = snapshot("behind");
     let finish!: (value: string) => void;
-    mocks.invoke.mockImplementation((command: string) => command === "branch_step_refresh" ? Promise.resolve(current) : new Promise<string>((resolve) => { finish = resolve; }));
+    mocks.invoke.mockImplementation((command: string) => command === "pr_check_authority" ? Promise.resolve({ owner: "fixture", epoch: 1 }) : command === "branch_step_refresh" ? Promise.resolve(current) : new Promise<string>((resolve) => { finish = resolve; }));
     render(<BranchGitButton session={session} tabId="t1" />);
     fireEvent.click(await screen.findByRole("button", { name: "Pull latest" }));
     const progress = await screen.findByRole("button", { name: "Pulling latest…" });
@@ -216,11 +217,39 @@ describe("header Git action", () => {
   it("does not continue account preparation after leaving the session", async () => {
     current = snapshot("ahead");
     let finish!: (value: unknown) => void;
-    mocks.invoke.mockImplementation((command: string) => command === "branch_step_refresh" ? Promise.resolve(current) : new Promise((resolve) => { finish = resolve; }));
+    mocks.invoke.mockImplementation((command: string) => command === "pr_check_authority" ? Promise.resolve({ owner: "fixture", epoch: 1 }) : command === "branch_step_refresh" ? Promise.resolve(current) : new Promise((resolve) => { finish = resolve; }));
     const view = render(<BranchGitButton session={session} tabId="t1" />);
     fireEvent.click(await screen.findByRole("button", { name: "Push" }));
+    await waitFor(() => expect(finish).toBeDefined());
     view.unmount();
     await act(async () => finish({ login: "alice", destination: "origin", approved: true }));
     expect(calls()).toHaveLength(0);
   });
+});
+
+
+it("keeps the click authority through a delayed account answer and does only local reconciliation", async () => {
+  let answer!: (value: unknown) => void;
+  let epoch = 1;
+  mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
+    if (command === "pr_check_authority") return Promise.resolve({ owner: "fixture", epoch });
+    if (command === "branch_step_refresh") return Promise.resolve(current);
+    if (command === "branch_step_account") return new Promise((resolve) => { answer = resolve; });
+    if (command === "branch_step_action") {
+      expect(args.authority).toEqual({ owner: "fixture", epoch: 1 });
+      return Promise.reject(new Error("Turned off by data privacy mode"));
+    }
+    throw new Error(command);
+  });
+  render(<BranchGitButton session={session} tabId="t1" />);
+  fireEvent.click(await screen.findByRole("button", { name: "Merge" }));
+  await waitFor(() => expect(answer).toBeDefined());
+  // The native owner's acknowledged on/off cycle permanently expires epoch1.
+  epoch = 2;
+  const before = mocks.invoke.mock.calls.length;
+  await act(async () => answer({ login: "alice", destination: "git@github.com:example/repo.git", approved: true }));
+  await waitFor(() => expect(calls()).toHaveLength(1));
+  expect(mocks.invoke.mock.calls.slice(before).filter(([name]) => name === "branch_step_refresh").every(([, args]) => args.mode === "local")).toBe(true);
+  expect(mocks.invoke.mock.calls.filter(([name]) => name === "pr_check_authority")).toHaveLength(1);
+  expect(await screen.findByText("Turned off by data privacy mode")).toBeTruthy();
 });

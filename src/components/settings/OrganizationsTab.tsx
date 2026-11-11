@@ -1,3 +1,5 @@
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { PrivacyEmptyState } from "./DataPrivacySettings";
 import { RegisteredSetting, settingById } from "./settingsRegistry";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -11,7 +13,13 @@ import { forgetAgentLoginsRequest, onOpenOrganizationSettings, takeOrganizationR
 import { OrganizationSettings } from "./OrganizationSettings";
 import { OrganizationOnboarding } from "./OrganizationOnboarding";
 
-export function OrganizationsTab({ initialRow, openRequest = 0 }: { initialRow?: string | null; openRequest?: number } = {}) {
+interface OrganizationsTabProps { initialRow?: string | null; openRequest?: number }
+
+export function OrganizationsTab(props: OrganizationsTabProps = {}) {
+  return useDataPrivacy().enabled ? <PrivacyEmptyState /> : <OrganizationsTabContent {...props} />;
+}
+
+function OrganizationsTabContent({ initialRow, openRequest = 0 }: OrganizationsTabProps) {
   const prefs = usePrefs();
   const { status, busy } = useAccount();
   const { all, selectedOrganization, temporaryOrganization } = useOrganizationVisibility();

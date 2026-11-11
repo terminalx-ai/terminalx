@@ -307,6 +307,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.workerMode" },
   }),
   defineSetting({
+    id: "general.dataPrivacy", section: "general", title: "Data privacy mode",
+    description: "Keep TerminalX cloud and remote features off on this Mac. Your agents still use their own network connections. Your sign-in stays saved.",
+    searchTerms: ["privacy", "cloud", "remote", "organisations", "organizations", "pairing", "MCP", "logging", "managed"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/data-privacy.json#enabled; macOS managed DataPrivacyMode preference" },
+  }),
+  defineSetting({
     id: "general.websiteLinks", section: "general", title: "Website links",
     description: "Choose a browser for website links, or ask each time.",
     searchTerms: ["general", "website", "links"], scope: "user",

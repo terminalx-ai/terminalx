@@ -237,6 +237,12 @@ impl Peer {
     }
 }
 
+/// Authority belongs to the keystroke, not the later writer thread.
+struct PtyInput {
+    data: Vec<u8>,
+    privacy: crate::data_privacy::Ticket,
+}
+
 /// One remote terminal. Its bytes live only in `ring`: nothing here writes
 /// terminal output into a session transcript.
 struct PtyState {
@@ -272,7 +278,7 @@ struct PtyState {
     applied_seq: HashMap<(String, String), (u64, Instant)>,
     /// Accepted input, written by the terminal's own writer thread so a
     /// program that stops reading never stalls the connection.
-    input: std::sync::mpsc::Sender<Vec<u8>>,
+    input: std::sync::mpsc::Sender<PtyInput>,
     input_pending: Arc<AtomicUsize>,
     subscribers: HashMap<String, Arc<Peer>>,
     /// Set for an agent tab's own terminal (`agent-pty/1`): the pane the
@@ -829,18 +835,32 @@ impl WorkspaceRpc {
 
     /// Answer one request. Returns the response frame; notifications for
     /// this peer go through its outbound queue.
-    pub async fn handle(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value) -> Value {
+    pub fn handle<'a>(self: &'a Arc<Self>, peer: &'a Arc<Peer>, request: &'a Value) -> impl std::future::Future<Output = Value> + Send + 'a {
+        self.handle_admitted(peer, request, crate::github_process::ticket())
+    }
+
+    /// Capture at ingress, before the relay queues its first async task. The
+    /// request retains this ticket through idempotency waits and blocking work.
+    pub fn handle_owned(self: &Arc<Self>, peer: Arc<Peer>, request: Value) -> impl std::future::Future<Output = Value> + Send + 'static {
+        let rpc = self.clone();
+        let ticket = crate::github_process::ticket();
+        async move { rpc.handle_admitted(&peer, &request, ticket).await }
+    }
+
+    async fn handle_admitted(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value, ticket: crate::data_privacy::Ticket) -> Value {
         let id = request.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         let method = request.get("method").and_then(Value::as_str).unwrap_or("").to_string();
         let params = request.get("params").cloned().unwrap_or(Value::Null);
-        match self.dispatch(peer, &method, params).await {
+        match self.dispatch(peer, &method, params, ticket).await {
             Ok(result) => protocol::success(&id, result),
             Err(error) => protocol::failure(&id, &error),
         }
     }
 
-    async fn dispatch(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+    async fn dispatch(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        if !ticket.valid() { return Err(RpcError::forbidden(crate::data_privacy::MESSAGE)); }
         if method == "rpc.hello" {
+            let _privacy = ticket.scope().map_err(|error| RpcError::forbidden(error.to_string()))?;
             let granted = protocol::negotiate(&params)?;
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
             peer.phone.store(params["client"]["app"].as_str() == Some(MOBILE_APP), Ordering::SeqCst);
@@ -894,7 +914,7 @@ impl WorkspaceRpc {
             self.authorize_participant(peer, spec)?;
         }
         if !spec.idempotent {
-            return self.execute(peer, method, params).await;
+            return self.execute(peer, method, params, ticket).await;
         }
         let request_id = params
             .get("clientRequestId")
@@ -910,7 +930,7 @@ impl WorkspaceRpc {
             match previous {
                 Some(previous) => previous,
                 None => {
-                    let result = self.execute(peer, method, params).await;
+                    let result = self.execute(peer, method, params, ticket).await;
                     self.idempotency.lock().unwrap().put(&peer.device_id, &request_id, &result, Instant::now());
                     result
                 }
@@ -981,25 +1001,37 @@ impl WorkspaceRpc {
     /// Answer `ports.open` in order with the connection's notifications, and
     /// only then let the stream's data flow: an application that speaks
     /// first can never be heard before the client knows the stream's id.
-    pub async fn answer_port_open(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value) {
-        let response = self.handle(peer, request).await;
-        let stream_id = response.pointer("/result/streamId").and_then(Value::as_str).map(str::to_string);
-        peer.deliver(response);
-        if let Some(stream_id) = stream_id {
-            self.ports.start(peer, &stream_id);
+    pub fn answer_port_open<'a>(self: &'a Arc<Self>, peer: &'a Arc<Peer>, request: &'a Value) -> impl std::future::Future<Output = ()> + Send + 'a {
+        let response = self.handle(peer, request);
+        async move {
+            let response = response.await;
+            let stream_id = response.pointer("/result/streamId").and_then(Value::as_str).map(str::to_string);
+            peer.deliver(response);
+            if let Some(stream_id) = stream_id { self.ports.start(peer, &stream_id); }
         }
     }
 
-    async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+    async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
-            return self.ports.handle(peer, method, params, &|| self.may_use_ports(peer)).await;
+            return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket).await;
         }
         let rpc = self.clone();
         let peer = peer.clone();
         let method = method.to_string();
         // File, Git and process work blocks; keep it off the socket's task.
-        tokio::task::spawn_blocking(move || rpc.execute_blocking(&peer, &method, params))
+        tokio::task::spawn_blocking(move || {
+            // Remote mutations, including deferred SessionManager deliveries,
+            // need more than a thread-local GitHub ticket. Acquire before any
+            // state change; retain the lease until all synchronous work ends.
+            let _privacy = ticket.scope().map_err(|error| RpcError::forbidden(error.to_string()))?;
+            #[cfg(test)]
+            {
+                let hook = BEFORE_REMOTE_WORK.lock().unwrap().take();
+                if let Some(hook) = hook { hook(); }
+            }
+            crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params))
+        })
             .await
             .map_err(RpcError::internal)?
     }
@@ -1338,7 +1370,7 @@ impl WorkspaceRpc {
             if self.removed_agent_tabs.lock().unwrap().iter().any(|removed| removed == tab_id) {
                 return Err(RpcError::not_found("the terminal closed with its tab"));
             }
-            let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
+            let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
             let input_pending = Arc::new(AtomicUsize::new(0));
             let terminals = self.terminals.clone();
             let pending = input_pending.clone();
@@ -1349,8 +1381,8 @@ impl WorkspaceRpc {
                     // Ends when the entry (the sender) is dropped with its tab.
                     for data in queue {
                         // Between two CLIs there is nothing to type into.
-                        let _ = terminals.write(&pane, &data);
-                        pending.fetch_sub(data.len(), Ordering::SeqCst);
+                        let _ = terminals.write_remote(&pane, &data.data, &data.privacy);
+                        pending.fetch_sub(data.data.len(), Ordering::SeqCst);
                     }
                 })
                 .map_err(RpcError::internal)?;
@@ -1550,7 +1582,7 @@ impl WorkspaceRpc {
             return Err(RpcError::invalid("cwd is not a directory"));
         }
         let pty_id = format!("{PTY_PREFIX}{}", uuid::Uuid::new_v4().simple());
-        let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
         let input_pending = Arc::new(AtomicUsize::new(0));
         {
             let mut ptys = self.ptys.lock().unwrap();
@@ -1599,8 +1631,8 @@ impl WorkspaceRpc {
             // Ends when the terminal's entry (the sender) is dropped, or the
             // program is gone; its exit is reported through `pty.exit`.
             for data in queue {
-                let written = terminals.write(&writer_id, &data);
-                input_pending.fetch_sub(data.len(), Ordering::SeqCst);
+                let written = terminals.write_remote(&writer_id, &data.data, &data.privacy);
+                input_pending.fetch_sub(data.data.len(), Ordering::SeqCst);
                 // A program that stopped reading loses this input, not every
                 // later keystroke: it may read again.
                 if written.is_err_and(|error| !error.is::<crate::pty::InputStalled>()) {
@@ -1754,7 +1786,7 @@ impl WorkspaceRpc {
             return Err(RpcError::new("backpressure", "the program is not reading its input yet; retry"));
         }
         pty.input_pending.fetch_add(data.len(), Ordering::SeqCst);
-        if pty.input.send(data.as_bytes().to_vec()).is_err() {
+        if pty.input.send(PtyInput { data: data.as_bytes().to_vec(), privacy: crate::data_privacy::remote_ticket().unwrap_or_else(crate::data_privacy::Ticket::denied) }).is_err() {
             pty.input_pending.fetch_sub(data.len(), Ordering::SeqCst);
             return Err(RpcError::new("unavailable", "the terminal has exited"));
         }
@@ -3491,3 +3523,6 @@ mod pipeline_tests;
 #[cfg(test)]
 #[path = "pipeline_reviewer_tests.rs"]
 mod pipeline_reviewer_tests;
+
+#[cfg(test)]
+pub(crate) static BEFORE_REMOTE_WORK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);

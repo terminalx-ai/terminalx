@@ -34,6 +34,7 @@ beforeEach(() => {
     if (command === "pr_list") return [current];
     if (command === "pr_conversation") return { url: current.url, title: current.title, body: current.body, author: current.author, viewer: "reviewer", state: current.state, canEdit: true, reviewers: [], unresolvedThreads: 0, activity: [] } satisfies PrConversation;
     if (command === "pr_check_log") return { text: "^[[31merror: assertion failed^[[0m", truncated: true };
+    if (command === "pr_check_authority") return { owner: "test-policy", epoch: 0 };
     if (command === "pr_check_rerun") return;
     throw new Error(`Unexpected command: ${command}`);
   });
@@ -53,7 +54,7 @@ it.each([true, false])("keeps queued checks and deployments when the conversatio
         conversation.title = action.title;
         conversation.body = action.body;
       }
-      return;
+      return { conversation: structuredClone(conversation), error: null };
     }
     return backend(command, ...args);
   });
@@ -111,7 +112,7 @@ it("reruns each failing workflow once and keeps it queued through stale GitHub r
   fireEvent.click(button);
   await screen.findByLabelText("test: queued");
   await screen.findByLabelText("lint: queued");
-  expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_check_rerun")).toEqual([["pr_check_rerun", { cwd: "/repo", prUrl: pr.url, checkUrl: pr.checks[1].url, failed: true }]]);
+  expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_check_rerun")).toEqual([["pr_check_rerun", { cwd: "/repo", prUrl: pr.url, checkUrl: pr.checks[1].url, failed: true, authority: { owner: "test-policy", epoch: 0 } }]]);
   expect(screen.getByLabelText("deploy: success")).toBeTruthy();
   current = { ...pr, checks: pr.checks.map((c) => c.actions?.runId === 12 ? { ...c, state: "in_progress", url: c.url + "0" } : c) };
   fireEvent.click(screen.getByRole("button", { name: "Refresh pull requests" }));
@@ -133,7 +134,7 @@ it("reruns all includes successful workflows, and a refusal never shows queued",
   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(button);
   await screen.findByLabelText("deploy: queued");
-  expect(source.rerunCheck).toHaveBeenLastCalledWith(pr.url, pr.checks[2].url, false);
+  expect(source.rerunCheck).toHaveBeenLastCalledWith(pr.url, pr.checks[2].url, false, { owner: "test-policy", epoch: 0 });
 });
 
 it("discards late log responses after a different check is selected", async () => {

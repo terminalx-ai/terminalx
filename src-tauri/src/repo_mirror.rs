@@ -81,6 +81,7 @@ fn command(cwd: &Path) -> Command {
         .env("PATH", crate::binpath::login_path())
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .env("LC_ALL", "C")
         .args(["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"]);
     command

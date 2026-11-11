@@ -58,7 +58,7 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 crate::github::validate_login_pane(id)?;
                 let command = crate::github::login_command(string(&params, "hostname")?)?;
                 let cwd = dirs::home_dir().context("home directory is unavailable")?;
-                terminals.spawn(sink.clone(), id, crate::pty::PaneSpec {
+                terminals.spawn_network(sink.clone(), id, crate::pty::PaneSpec {
                     cwd: cwd.to_str().context("home directory is not UTF-8")?, cols: 80, rows: 20,
                     command: Some(&command), env: &[],
                 })?;
@@ -165,6 +165,18 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     if method == "running" { return Ok(serde_json::to_value(manager.running_tabs())?); }
     if method == "permissions" { return Ok(serde_json::to_value(manager.pending_permissions())?); }
     match method {
+        "workspace" | "pipeline" => {
+            // A desktop that queued this before activation cannot grant fresh
+            // authority in the owner. Local facts are still useful. A true or
+            // absent flag never grants permission beyond the owner's ticket.
+            let ticket = if params["networkAllowed"] == false { crate::data_privacy::Ticket::denied() }
+                else { crate::github_process::ticket() };
+            return crate::github_process::with_ticket(ticket, || {
+                let operation = string(&params, "operation")?;
+                if method == "pipeline" { manager.pipeline(operation, params["params"].clone()) }
+                else { manager.workspace(operation, params["params"].clone()) }
+            });
+        }
         "create" => {
             manager.accepting_work()?;
             return Ok(serde_json::to_value(crate::session_ops::create_session_blocking(manager.sink().as_ref(), serde_json::from_value(params["req"].clone())?).map_err(anyhow::Error::msg)?)?);
@@ -182,8 +194,6 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
             manager.sink().emit("session_updated", &session);
             return Ok(Value::Null);
         }
-        "pipeline" => return manager.pipeline(string(&params, "operation")?, params["params"].clone()),
-        "workspace" => return manager.workspace(string(&params, "operation")?, params["params"].clone()),
         "orchestration" => return manager.orchestration(string(&params, "operation")?, params["params"].clone()),
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
         "automations" => return Ok(serde_json::to_value(crate::store::automations::list()?)?),

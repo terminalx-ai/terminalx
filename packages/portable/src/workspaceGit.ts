@@ -135,9 +135,15 @@ export type PrConversationAction =
   | { kind: "edit"; title: string; body: string; expectedTitle: string; expectedBody: string }
   | { kind: "request" | "remove"; login: string; team: boolean }
   | { kind: "approve"; viewer: string };
+/** Readback belongs to the same native request as the completed mutation. */
+export interface PrConversationUpdate {
+  conversation: PrConversation | null;
+  error: string | null;
+}
 export interface PrConversationAccess {
   read(): Promise<PrConversation>;
-  act(action: PrConversationAction): Promise<void>;
+  /** Older runtimes return no readback. Never renew authority from that reply. */
+  act(action: PrConversationAction): Promise<PrConversationUpdate | void>;
   search(query: string): Promise<string[]>;
 }
 
@@ -277,7 +283,7 @@ export class RemoteGit {
   prConversation(url: string): PrConversationAccess {
     return {
       read: () => this.read("git.prConversation", { url }),
-      act: (action) => this.write("git.prConversationAction", { url, action }),
+      act: (action) => this.write<PrConversationUpdate | null>("git.prConversationAction", { url, action }).then((update) => update && ("conversation" in update || "error" in update) ? update : undefined),
       search: (query) => this.read("git.prReviewerSearch", { url, query }),
     };
   }

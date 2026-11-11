@@ -304,6 +304,7 @@ impl CloudRemote {
     }
 
     fn supervisor(&self, connection_id: &str) -> Result<Supervisor, String> {
+        crate::data_privacy::require_network().map_err(|error| error.to_string())?;
         // Read before the connections are locked: one lock at a time.
         let scope = self.scope();
         let connections = self.connections.lock().unwrap();
@@ -407,6 +408,7 @@ pub async fn cloud_remote_attach(
     target: CloudTarget,
     activation: Activation,
 ) -> Result<String, String> {
+    crate::data_privacy::require_network().map_err(|error| error.to_string())?;
     let scope = remote.scope().ok_or("account_signed_out")?;
     // The target's Organization is checked against the membership list (on a
     // server that authorizes by membership) or the active one, never assumed.
@@ -434,6 +436,7 @@ pub async fn cloud_remote_attach_dev(
     pairing_code: String,
     ticket: Option<crate::remote::client::AttachTicket>,
 ) -> Result<String, String> {
+    crate::data_privacy::require_network().map_err(|error| error.to_string())?;
     if !cfg!(debug_assertions) {
         return Err("cloud_remote_dev_attach_unavailable".into());
     }

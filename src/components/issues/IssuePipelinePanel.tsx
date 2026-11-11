@@ -329,7 +329,8 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
                   title={failedRuns.length === 0 ? "Only a GitHub Actions run can be re-run from here." : undefined}
                   onClick={() =>
                     void run("rerun", async () => {
-                      for (const check of failedRuns) await gh.rerunCheck(authorCwd!, pipeline.pr!.url, check.url!, true);
+                      const authority = await gh.checkAuthority();
+                      for (const check of failedRuns) await gh.rerunCheck(authorCwd!, pipeline.pr!.url, check.url!, true, authority);
                       return `Re-run requested for ${countOf(failedRuns.length, "Actions run")}. The pipeline waits on ${failedRuns.length === 1 ? "it" : "them"} once GitHub starts ${failedRuns.length === 1 ? "it" : "them"}.`;
                     })
                   }

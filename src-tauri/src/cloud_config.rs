@@ -583,6 +583,7 @@ impl ConfigStore {
     /// The configuration for a new agent session of `harness`, recorded under
     /// `launch` for restart tracking. Empty before the first fetch.
     pub fn launch_config(&self, harness: &str, launch: &str, now: Instant) -> LaunchConfig {
+        if crate::data_privacy::enabled() { return LaunchConfig::default(); }
         let mut state = self.state();
         let Some(config) = state.config.clone() else {
             state.launches.remove(launch);

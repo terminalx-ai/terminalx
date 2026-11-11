@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { cloneElement, isValidElement, memo, useMemo, type AnchorHTMLAttributes, type ReactElement, type ReactNode } from "react";
 import { defaultRemarkPlugins, Streamdown, type ExtraProps } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
@@ -78,7 +79,7 @@ function ViewableImage({ src, alt }: { src: string; alt?: string }) {
     openImageViewer([{ src, name: alt || "Image" }]);
   };
   return (
-    <img
+    <PrivacyImage
       src={src}
       alt={alt ?? ""}
       role="button"

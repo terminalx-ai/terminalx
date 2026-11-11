@@ -38,7 +38,7 @@ const extra = `(() => {
     if (action.kind === "edit") { pr.title = data.title = action.title; pr.body = data.body = action.body; }
     if (action.kind === "remove") data.reviewers = data.reviewers.filter((r) => r.login !== action.login);
     if (action.kind === "request") data.reviewers = [...data.reviewers.filter((r) => r.login !== action.login), { login: action.login, kind: "user", state: "PENDING", requested: true }];
-    return null;
+    return { conversation: structuredClone(data), error: null };
   };
 })();`;
 let page;

@@ -57,6 +57,7 @@ fn short(commit: &str) -> &str {
 /// pressed Merge. `repository` is the cloud project's own (`owner/name`): a
 /// pull request anywhere else is refused, whatever the workspace reports.
 pub fn merge(github: &dyn Github, pipeline: &Pipeline, repository: &str, settings: &IssuePipelineSettings) -> Result<CloudMerge> {
+    let _request = crate::github_process::scope();
     let issue = pipeline.label();
     if !pipeline.cloud {
         bail!("{issue} is not carried by a cloud workspace.");
@@ -124,6 +125,9 @@ pub fn merge(github: &dyn Github, pipeline: &Pipeline, repository: &str, setting
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    mod privacy { include!("cloud_merge_privacy_tests.rs"); }
+
     use std::sync::Mutex;
 
     use super::*;

@@ -182,7 +182,7 @@ impl PrCache {
         let owner = self.clone();
         let running = Running(owner.clone());
         drop(cache);
-        let spawned = std::thread::Builder::new().name("session-row-status".into()).spawn(move || {
+        let spawned = std::thread::Builder::new().name("session-row-status".into()).spawn(crate::github_process::queued(move || {
             let _running = running;
             let background = source.background();
             {
@@ -214,7 +214,7 @@ impl PrCache {
                 }
                 owner.0.lock().unwrap_or_else(|e| e.into_inner()).projects.insert(path, project);
             }
-        });
+        }));
         if let Err(error) = spawned { log::warn!("start session row status poll: {error}"); }
     }
 }
