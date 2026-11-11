@@ -782,6 +782,10 @@ impl ControlService {
         let host = ManagerHost::new(self.sink.clone(), self.manager.clone());
         // The session the command runs in, when it runs in one the app knows.
         let caller = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok());
+        // A run's worker leads no run and steers none, its own lead's included: it may read them.
+        if matches!(command, "runs.create" | "runs.start" | "runs.stop") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
+            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start or stop a run. Report what is ready; the lead decides what happens next.", None::<String>));
+        }
         if command == "runs.create" {
             let lead = match optional_string(&params, "lead") {
                 Some(selector) => resolve_session(&selector)?,
