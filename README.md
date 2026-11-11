@@ -1,0 +1,1 @@
+Screenshots for PRO-274 (orchestration runs). The built webview (`pnpm build`) rendered in WebKit by `scripts/webkit/orchestration.mjs`, with a synthetic run behind the Tauri bridge: no session, project or person shown is real. Linked from the pull request; not part of the app.
