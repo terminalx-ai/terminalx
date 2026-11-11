@@ -133,6 +133,11 @@ describe("chatPreview", () => {
     expect(chatPreview(chat, undefined, { name: "web", branch: null })).toEqual({ text: "web", tone: "place" });
     expect(chatPreview(chat, undefined, null)).toEqual({ text: "New chat", tone: "place" });
   });
+
+  it("says what a helper tab is doing while one works, then goes back to the place (PRO-331)", () => {
+    expect(chatPreview(chat, undefined, { name: "web", branch: "main" }, "Review 2 of 3 running")).toEqual({ text: "Review 2 of 3 running", tone: "helper" });
+    expect(chatPreview(chat, undefined, { name: "web", branch: "main" }, null)).toEqual({ text: "web · main", tone: "place" });
+  });
 });
 
 describe("a project's mark", () => {

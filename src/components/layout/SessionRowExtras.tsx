@@ -63,7 +63,7 @@ export function readableBranchName(branch?: string | null): string | null {
 export function sidebarConversationTitle(session: SessionEntry, branch?: string | null, sessions: readonly SessionEntry[] = []): string {
   const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
   const shared = !session.worktreeName || sessions.some((peer) => peer.id !== session.id && peer.cwd.replace(/\/+$/, "") === session.cwd.replace(/\/+$/, "") && !peer.archived && !peer.worktreeRemoved);
-  if (tab?.titlePinned || session.worktreeRemoved || shared) return conversationTitle(session);
+  if (tab?.titlePinned || session.tabs.length > 1 || session.worktreeRemoved || shared) return conversationTitle(session);
   return readableBranchName(branch) || conversationTitle(session);
 }
 
