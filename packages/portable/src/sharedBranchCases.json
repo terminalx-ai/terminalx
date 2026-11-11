@@ -1,0 +1,8 @@
+[
+  {"name": "alone on its branch carries it", "members": [{"id": "a", "project": "/r", "branch": "feature", "activeAt": "2026-11-10T10:00:00Z"}], "shared": []},
+  {"name": "the most recently active session carries the branch", "members": [{"id": "old", "project": "/r", "branch": "feature", "activeAt": "2026-11-10T10:00:00Z"}, {"id": "new", "project": "/r", "branch": "feature", "activeAt": "2026-11-11T09:00:00.000Z"}, {"id": "mid", "project": "/r", "branch": "feature", "activeAt": "2026-11-10T12:00:00+01:00"}], "shared": ["mid", "old"]},
+  {"name": "the same branch name in two projects is not shared", "members": [{"id": "a", "project": "/r", "branch": "feature", "activeAt": "2026-11-10T10:00:00Z"}, {"id": "b", "project": "/s", "branch": "feature", "activeAt": "2026-11-11T10:00:00Z"}], "shared": []},
+  {"name": "sessions with no branch share nothing", "members": [{"id": "a", "project": "/r", "branch": null, "activeAt": "2026-11-10T10:00:00Z"}, {"id": "b", "project": "/r", "branch": null, "activeAt": "2026-11-11T10:00:00Z"}], "shared": []},
+  {"name": "a tie goes to the smaller id", "members": [{"id": "b", "project": "/r", "branch": "feature", "activeAt": "2026-11-10T10:00:00Z"}, {"id": "a", "project": "/r", "branch": "feature", "activeAt": "2026-11-10T10:00:00Z"}], "shared": ["b"]},
+  {"name": "an unreadable time loses to any readable one", "members": [{"id": "a", "project": "/r", "branch": "feature", "activeAt": "not a time"}, {"id": "b", "project": "/r", "branch": "feature", "activeAt": "2020-01-01T00:00:00Z"}], "shared": ["a"]}
+]

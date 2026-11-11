@@ -15,6 +15,8 @@ pub(crate) struct PrCache(Mutex<Cache>);
 struct Cache {
     projects: HashMap<String, ProjectStatus>,
     wanted: BTreeMap<String, BTreeMap<String, (String, Instant)>>,
+    /// Project -> workspace folders whose work state is wanted, and when last asked for.
+    wanted_work: BTreeMap<String, BTreeMap<String, Instant>>,
     background: HashSet<String>,
     background_at: Option<Instant>,
     busy: bool,
@@ -31,6 +33,8 @@ struct ProjectStatus {
     local_at: Instant,
     associations: HashMap<String, Vec<String>>,
     prs: Option<HashMap<String, RowPr>>,
+    /// Workspace folder -> "uncommitted", "committed" or "none", read with `local`.
+    work: HashMap<String, &'static str>,
 }
 #[derive(Clone, Default)]
 struct LocalRefs { heads: HashMap<String, String>, default: Option<String> }
@@ -43,6 +47,8 @@ trait Source: Send + 'static {
     fn refs(&self, path: &Path) -> anyhow::Result<LocalRefs>;
     fn associations(&self, session: &str) -> anyhow::Result<Vec<String>>;
     fn poll(&self, path: &Path, urls: &[String]) -> Poll;
+    /// What a workspace holds: uncommitted changes, commits `default` lacks, or neither. None when unreadable.
+    fn work(&self, cwd: &Path, default: Option<&str>) -> Option<&'static str>;
 }
 struct LiveSource(SessionManager);
 impl Source for LiveSource {
@@ -73,6 +79,19 @@ impl Source for LiveSource {
         Ok(crate::pr_associations::for_session(session, vec![])?.into_iter().map(|a| a.url).collect())
     }
     fn poll(&self, path: &Path, urls: &[String]) -> Poll { crate::github::rows::poll(path, urls) }
+    fn work(&self, cwd: &Path, default: Option<&str>) -> Option<&'static str> { workspace_work(cwd, default) }
+}
+
+/// Bounded like the branch-tip read; it runs on the status thread, never on a request.
+fn workspace_work(cwd: &Path, default: Option<&str>) -> Option<&'static str> {
+    let bound = Duration::from_secs(10);
+    let status = crate::git::run_bounded(cwd, &["status", "--porcelain", "--untracked-files=normal"], bound).ok()?;
+    if !status.trim().is_empty() { return Some("uncommitted"); }
+    let Some(default) = default else { return Some("none") };
+    // Against what the remote has merged when it is known, else the local default branch.
+    let ahead = [format!("refs/remotes/origin/{default}"), format!("refs/heads/{default}")].into_iter()
+        .find_map(|base| crate::git::run_bounded(cwd, &["rev-list", "--count", &format!("{base}..HEAD")], bound).ok())?;
+    Some(if ahead.trim().parse::<u64>().unwrap_or(0) > 0 { "committed" } else { "none" })
 }
 
 fn parse_refs(text: &str) -> LocalRefs {
@@ -96,18 +115,30 @@ fn background_jobs(jobs: Vec<(String, Option<u32>, bool)>, scan: impl FnOnce() -
 
 impl SessionManager {
     /// Only authorized session IDs enter here. Project paths come from the index.
+    /// Other sessions on the same branches are read too, never returned: which
+    /// of them carries the branch's PR decides what the requested ones show.
     pub(crate) fn row_statuses(&self, sessions: &[index::SessionEntry]) -> BTreeMap<String, Value> {
-        let mut projects: BTreeMap<String, Rows> = BTreeMap::new();
-        let paths: HashMap<_, _> = sessions.iter().map(|s| s.project_path.clone()).collect::<BTreeSet<_>>().into_iter().map(|path| {
-            let key = project_key(&path);
-            (path, key)
-        }).collect();
+        let requested: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        let stored = index::load().unwrap_or_default();
         let excluded: BTreeSet<_> = store::projects::list().map(|(projects, _)| projects.into_iter().filter(|p| p.archived || p.kind == store::projects::ProjectKind::Folder).map(|p| project_key(&p.path)).collect()).unwrap_or_default();
-        for session in sessions.iter().filter(|s| !s.is_quick() && !s.worktree_removed && !excluded.contains(&paths[&s.project_path])) {
-            if let Some(branch) = &session.branch { projects.entry(paths[&session.project_path].clone()).or_default().insert(session.id.clone(), branch.clone()); }
+        let mut keys: HashMap<String, String> = HashMap::new();
+        let mut key = |path: &str| keys.entry(path.to_string()).or_insert_with(|| project_key(path)).clone();
+        // A session whose branch facts mean anything: in a Git project, its workspace still there.
+        let eligible = |s: &index::SessionEntry, key: &str| !s.is_quick() && !s.worktree_removed && !excluded.contains(key);
+        let mine: Vec<(&index::SessionEntry, String)> = sessions.iter().map(|s| (s, key(&s.project_path))).collect();
+        let branches: HashSet<(String, String)> = mine.iter().filter(|(s, k)| eligible(s, k)).filter_map(|(s, k)| s.branch.clone().map(|b| (k.clone(), b))).collect();
+        let peers: Vec<(&index::SessionEntry, String)> = stored.iter().filter(|s| !s.archived && !requested.contains(s.id.as_str())).map(|s| (s, key(&s.project_path)))
+            .filter(|(s, k)| eligible(s, k) && s.branch.as_ref().is_some_and(|b| branches.contains(&(k.clone(), b.clone())))).collect();
+        let members: Vec<_> = mine.iter().chain(&peers).filter(|(s, k)| eligible(s, k)).map(|(s, k)| (s, k, active_at(s))).collect();
+        let shared = shared_branch_sessions(members.iter().map(|(s, k, at)| (s.id.as_str(), k.as_str(), s.branch.as_deref(), at.as_str())));
+        let mut projects: BTreeMap<String, Rows> = BTreeMap::new();
+        let mut folders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (session, key) in mine.iter().chain(&peers).filter(|(s, k)| eligible(s, k)) {
+            if let Some(branch) = &session.branch { projects.entry(key.clone()).or_default().insert(session.id.clone(), branch.clone()); }
+            if !shared.contains(&session.id) { folders.entry(key.clone()).or_default().insert(session.cwd.clone()); }
         }
-        self.row_prs.refresh_with(projects, LiveSource(self.clone()));
-        sessions.iter().map(|session| {
+        self.row_prs.refresh_with(projects, folders, LiveSource(self.clone()));
+        mine.iter().map(|(session, key)| {
             let tabs: Vec<_> = session.tabs.iter().map(|tab| {
                 let key = key_of(&session.id, &tab.id);
                 let runtime = self.tabs.lock().unwrap().get(&key).cloned();
@@ -118,10 +149,12 @@ impl SessionManager {
                 let activity = activity.or_else(|| (!matches!(status, TabStatus::InProgress | TabStatus::Waiting) && self.row_prs.background(&key)).then_some("background"));
                 json!({"status":status,"activity":activity})
             }).collect();
-            let branch_status = if session.is_quick() || session.worktree_removed || excluded.contains(&paths[&session.project_path]) { Value::Null } else {
-                session.branch.as_ref().map(|branch| self.row_prs.read(&paths[&session.project_path], &session.id, branch)).unwrap_or(Value::Null)
+            let started = session.unknown.get("hasMessages").is_some_and(|v| v == true) || tabs.iter().any(|tab| tab["status"] != json!(TabStatus::Idle));
+            let sharing = shared.contains(&session.id);
+            let (branch_status, work) = if !eligible(session, key) || sharing { (Value::Null, Value::Null) } else {
+                (session.branch.as_ref().map(|branch| self.row_prs.read(key, &session.id, branch)).unwrap_or(Value::Null), self.row_prs.read_work(key, &session.cwd))
             };
-            (session.id.clone(), json!({"tabs":tabs,"branch":session.branch,"branchStatus":branch_status}))
+            (session.id.clone(), json!({"tabs":tabs,"branch":session.branch,"branchStatus":branch_status,"work":work,"started":started,"sharedBranch":sharing}))
         }).collect()
     }
 
@@ -158,25 +191,40 @@ impl PrCache {
         let cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let Some(p) = cache.projects.get(project).filter(|p| p.local_at.elapsed() < LOCAL_FRESH && p.observed.get(session).is_some_and(|b| b == branch)) else { return Value::Null; };
         let Some(local) = p.local.as_ref().filter(|local| local.eligible(branch)) else { return Value::Null; };
-        let Some(urls) = p.associations.get(session) else { return Value::Null; };
+        // The branch's PR, whichever session on it found the association: the
+        // carrier rule in `row_statuses` decides which one session shows it.
+        let found: Vec<_> = p.observed.iter().filter(|(_, b)| *b == branch).filter_map(|(id, _)| p.associations.get(id)).collect();
+        if found.is_empty() { return Value::Null; }
+        let urls: Vec<&String> = found.into_iter().flatten().collect::<BTreeSet<_>>().into_iter().collect();
         if !p.checked_at.is_some_and(|at| at.elapsed() < FRESH_FOR) { return Value::Null; }
         // A missing association response is unknown, never evidence of no PR.
-        let Some(prs) = p.prs.as_ref().filter(|prs| urls.iter().all(|url| prs.contains_key(url))) else { return Value::Null; };
-        let pr = urls.iter().filter_map(|url| prs.get(url)).filter(|row| row.branch == branch)
+        let Some(prs) = p.prs.as_ref().filter(|prs| urls.iter().all(|url| prs.contains_key(*url))) else { return Value::Null; };
+        let pr = urls.iter().filter_map(|url| prs.get(*url)).filter(|row| row.branch == branch)
             .max_by_key(|row| (row.pr.state == "OPEN", row.pr.number)).map(|row| &row.pr);
         json!({"branch":branch,"checked":true,"headMatches":pr.map(|pr| local.heads.get(branch) == Some(&pr.head)),"pr":pr})
     }
 
-    fn refresh_with(self: &Arc<Self>, projects: BTreeMap<String, Rows>, source: impl Source) {
+    fn read_work(&self, project: &str, cwd: &str) -> Value {
+        let cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        cache.projects.get(project).filter(|p| p.local_at.elapsed() < LOCAL_FRESH).and_then(|p| p.work.get(cwd)).map_or(Value::Null, |work| json!(work))
+    }
+
+    fn refresh_with(self: &Arc<Self>, projects: BTreeMap<String, Rows>, folders: BTreeMap<String, BTreeSet<String>>, source: impl Source) {
         let now = Instant::now();
         let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
         for (project, rows) in projects {
             let wanted = cache.wanted.entry(project).or_default();
             for (id, branch) in rows { wanted.insert(id, (branch, now)); }
         }
+        for (project, cwds) in folders {
+            let wanted = cache.wanted_work.entry(project).or_default();
+            for cwd in cwds { wanted.insert(cwd, now); }
+        }
         cache.wanted.retain(|_, rows| { rows.retain(|_, (_, seen)| now.duration_since(*seen) < Duration::from_secs(60)); !rows.is_empty() });
+        cache.wanted_work.retain(|_, cwds| { cwds.retain(|_, seen| now.duration_since(*seen) < Duration::from_secs(60)); !cwds.is_empty() });
         if cache.busy || cache.next.is_some_and(|next| next > now) { return; }
-        let wanted: Vec<_> = cache.wanted.iter().map(|(path, rows)| (path.clone(), rows.iter().map(|(id, (branch, _))| (id.clone(), branch.clone())).collect::<Rows>())).collect();
+        let mut wanted: BTreeMap<String, (Rows, Vec<String>)> = cache.wanted.iter().map(|(path, rows)| (path.clone(), (rows.iter().map(|(id, (branch, _))| (id.clone(), branch.clone())).collect::<Rows>(), Vec::new()))).collect();
+        for (path, cwds) in &cache.wanted_work { wanted.entry(path.clone()).or_default().1 = cwds.keys().cloned().collect(); }
         cache.busy = true;
         cache.next = Some(now + LOCAL_INTERVAL);
         let owner = self.clone();
@@ -190,14 +238,16 @@ impl PrCache {
                 cache.background = background;
                 cache.background_at = Some(Instant::now());
             }
-            for (path, rows) in wanted {
+            for (path, (rows, cwds)) in wanted {
                 let now = Instant::now();
                 let (previous, paused) = {
                     let cache = owner.0.lock().unwrap_or_else(|e| e.into_inner());
                     (cache.projects.get(&path).cloned(), cache.paused.is_some_and(|until| until > now))
                 };
-                let mut project = previous.unwrap_or_else(|| ProjectStatus { failures:0, due:now, checked_at:None, observed:Rows::new(), local:None, local_at:now, associations:HashMap::new(), prs:None });
+                let mut project = previous.unwrap_or_else(|| ProjectStatus { failures:0, due:now, checked_at:None, observed:Rows::new(), local:None, local_at:now, associations:HashMap::new(), prs:None, work:HashMap::new() });
                 project.local = source.refs(Path::new(&path)).ok();
+                let default = project.local.as_ref().and_then(|local| local.default.clone());
+                project.work = cwds.into_iter().filter_map(|cwd| source.work(Path::new(&cwd), default.as_deref()).map(|work| (cwd, work))).collect();
                 project.local_at = Instant::now();
                 project.observed = rows;
                 if !paused && project.due <= now {
@@ -259,8 +309,35 @@ pub(crate) fn select(input: &Value) -> Value {
         found.iter().any(|value| condition["values"].as_array().unwrap().iter().any(|pattern| matches(value, pattern)))
     }))).expect("fallback status");
     let mut description = rule.clone();
-    description.as_object_mut().unwrap().remove("when");
+    let fields = description.as_object_mut().unwrap();
+    fields.remove("when");
+    let shows_pr = fields.remove("showsPr").is_some_and(|value| value == true);
+    let pr = if shows_pr { input["branchStatus"]["pr"]["number"].clone() } else { Value::Null };
+    fields.insert("pr".into(), if pr.is_u64() { pr } else { Value::Null });
     description
+}
+
+/// Sessions on one branch share its PR and workspace: the most recently active
+/// one carries them, the others show only their agent state. The same rule as
+/// `sharedBranchSessions` in the portable status module, checked against the
+/// same cases. Members are (id, project, branch, active at); returns the ids
+/// that do not carry their branch.
+pub(crate) fn shared_branch_sessions<'a>(members: impl IntoIterator<Item = (&'a str, &'a str, Option<&'a str>, &'a str)>) -> HashSet<String> {
+    let at = |time: &str| chrono::DateTime::parse_from_rfc3339(time).map(|time| time.timestamp_millis()).unwrap_or(0);
+    let members: Vec<_> = members.into_iter().filter_map(|(id, project, branch, time)| branch.filter(|b| !b.is_empty()).map(|branch| (id, project, branch, at(time)))).collect();
+    let mut carriers: HashMap<(&str, &str), (&str, i64)> = HashMap::new();
+    for &(id, project, branch, time) in &members {
+        let held = carriers.entry((project, branch)).or_insert((id, time));
+        if time > held.1 || (time == held.1 && id < held.0) { *held = (id, time); }
+    }
+    let carrying: HashSet<&str> = carriers.values().map(|(id, _)| *id).collect();
+    members.into_iter().filter(|(id, ..)| !carrying.contains(id)).map(|(id, ..)| id.to_string()).collect()
+}
+
+fn active_at(session: &index::SessionEntry) -> String {
+    crate::store::message_activity::last_message_at(session)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| session.created.clone())
 }
 
 fn matches(value: &Value, pattern: &Value) -> bool {
@@ -298,6 +375,10 @@ mod tests {
             Ok(LocalRefs { default:Some("main".into()), heads:(0..100).map(|n| (format!("branch-{n}"), self.head.into())).chain([("main".into(), self.head.into())]).collect() })
         }
         fn associations(&self, id: &str) -> anyhow::Result<Vec<String>> { Ok(id.parse::<usize>().ok().map(url).into_iter().collect()) }
+        fn work(&self, cwd: &Path, default: Option<&str>) -> Option<&'static str> {
+            assert_eq!(default, Some("main"));
+            match cwd.file_name()?.to_str()? { "dirty" => Some("uncommitted"), "ahead" => Some("committed"), "gone" => None, _ => Some("none") }
+        }
         fn poll(&self, _: &Path, urls: &[String]) -> Poll {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if let Some(gate) = &self.gate { gate.wait(); }
@@ -307,6 +388,9 @@ mod tests {
                 (url.clone(), RowPr { branch:format!("branch-{}", number - 1), pr:crate::github::BranchPr { number, url:url.clone(), head:"head".into(), state:self.state.into(), mergeable:"MERGEABLE".into(), merge_state_status:"CLEAN".into(), checks:Some("SUCCESS".into()), ..Default::default() } })
             }).collect()) }, retry_after:POLL_INTERVAL, limited:self.limited }
         }
+    }
+    impl PrCache {
+        fn refresh_rows(self: &Arc<Self>, projects: BTreeMap<String, Rows>, source: impl Source) { self.refresh_with(projects, BTreeMap::new(), source) }
     }
     fn rows(ids: &[&str]) -> BTreeMap<String, Rows> {
         [("repo".into(), ids.iter().map(|id| (id.to_string(), format!("branch-{id}"))).collect())].into()
@@ -338,9 +422,9 @@ mod tests {
         let gate = Arc::new(std::sync::Barrier::new(2));
         let fake = Fake { gate:Some(gate.clone()), ..Default::default() };
         let projects = [("repo".into(), (0..100).map(|n| (n.to_string(), format!("branch-{n}"))).collect())].into();
-        cache.refresh_with(projects, fake.clone());
+        cache.refresh_rows(projects, fake.clone());
         for _ in 0..50 {
-            cache.refresh_with(rows(&["0"]), fake.clone());
+            cache.refresh_rows(rows(&["0"]), fake.clone());
             assert_eq!(cache.read("repo", "0", "branch-0"), Value::Null);
         }
         gate.wait(); await_poll(&cache);
@@ -348,7 +432,7 @@ mod tests {
         assert_eq!(fake.scans.load(Ordering::SeqCst), 1);
         assert_eq!(selected(&cache, "0"), "ready_to_merge");
         assert_eq!(selected(&cache, "99"), "ready_to_merge");
-        cache.refresh_with(rows(&["0"]), Fake { gate:None, ..fake.clone() });
+        cache.refresh_rows(rows(&["0"]), Fake { gate:None, ..fake.clone() });
         await_poll(&cache);
         assert_eq!(fake.scans.load(Ordering::SeqCst), 1);
     }
@@ -357,10 +441,10 @@ mod tests {
         let cache = Arc::new(PrCache::default());
         let gate = Arc::new(std::sync::Barrier::new(2));
         let fake = Fake { gate:Some(gate.clone()), ..Default::default() };
-        cache.refresh_with(rows(&["0"]), fake.clone());
+        cache.refresh_rows(rows(&["0"]), fake.clone());
         cache.0.lock().unwrap().next = Some(Instant::now() - LOCAL_INTERVAL);
         gate.wait(); await_poll(&cache);
-        cache.refresh_with(rows(&["0"]), Fake { gate:None, ..fake.clone() }); await_poll(&cache);
+        cache.refresh_rows(rows(&["0"]), Fake { gate:None, ..fake.clone() }); await_poll(&cache);
         assert_eq!(fake.scans.load(Ordering::SeqCst), 2);
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
     }
@@ -378,57 +462,92 @@ mod tests {
         assert_eq!(background_jobs(vec![("watch".into(), None, true)], || panic!("no live process needs scanning")), ["watch".into()].into());
     }
     #[test]
-    fn local_changes_update_before_remote_poll_and_shared_branch_does_not_imply_ownership() {
+    fn local_changes_update_before_remote_poll_and_a_shared_branch_reads_one_pr() {
         let cache = Arc::new(PrCache::default()); let fake = Fake::default();
         let projects = [("repo".into(), [("0".into(), "branch-0".into()), ("unowned".into(), "branch-0".into()), ("default".into(), "main".into()), ("detached".into(), "HEAD".into())].into())].into();
-        cache.refresh_with(projects, fake.clone()); await_poll(&cache);
+        cache.refresh_rows(projects, fake.clone()); await_poll(&cache);
         assert_eq!(selected(&cache, "0"), "ready_to_merge");
-        assert_eq!(cache.read("repo", "unowned", "branch-0")["pr"], Value::Null);
-        assert_eq!(cache.read("repo", "unowned", "branch-0")["checked"], true);
+        // The branch's PR, whoever found it: `row_statuses` shows it on one carrier only.
+        assert_eq!(cache.read("repo", "unowned", "branch-0")["pr"]["number"], 1);
         assert_eq!(cache.read("repo", "default", "main"), Value::Null);
         assert_eq!(cache.read("repo", "detached", "HEAD"), Value::Null);
         assert_eq!(cache.read("repo", "0", "branch-1"), Value::Null);
         due(&cache, false);
-        cache.refresh_with(rows(&["0"]), Fake { head:"unpushed", ..fake.clone() }); await_poll(&cache);
+        cache.refresh_rows(rows(&["0"]), Fake { head:"unpushed", ..fake.clone() }); await_poll(&cache);
         assert_eq!(selected(&cache, "0"), "open_pr");
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         due(&cache, true);
-        cache.refresh_with(rows(&["0"]), Fake { head:"unpushed", state:"MERGED", ..fake.clone() }); await_poll(&cache);
+        cache.refresh_rows(rows(&["0"]), Fake { head:"unpushed", state:"MERGED", ..fake.clone() }); await_poll(&cache);
         assert_eq!(selected(&cache, "0"), "local_only");
         assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
     }
     #[test]
     fn new_views_join_next_batch_stale_facts_expire_and_limits_pause_only_remote_work() {
         let cache = Arc::new(PrCache::default()); let fake = Fake::default();
-        cache.refresh_with(rows(&["0"]), fake.clone()); await_poll(&cache);
-        cache.refresh_with(rows(&["1"]), fake.clone());
+        cache.refresh_rows(rows(&["0"]), fake.clone()); await_poll(&cache);
+        cache.refresh_rows(rows(&["1"]), fake.clone());
         due(&cache, true);
-        cache.refresh_with(rows(&["0"]), fake.clone()); await_poll(&cache);
+        cache.refresh_rows(rows(&["0"]), fake.clone()); await_poll(&cache);
         assert_eq!(selected(&cache, "1"), "ready_to_merge");
         cache.0.lock().unwrap().projects.get_mut("repo").unwrap().local_at = Instant::now() - LOCAL_FRESH;
-        assert_eq!(selected(&cache, "0"), "idle");
+        assert_eq!(selected(&cache, "0"), "no_changes");
         cache.0.lock().unwrap().projects.get_mut("repo").unwrap().local_at = Instant::now();
         cache.0.lock().unwrap().projects.get_mut("repo").unwrap().checked_at = Some(Instant::now() - FRESH_FOR);
-        assert_eq!(selected(&cache, "0"), "idle");
+        assert_eq!(selected(&cache, "0"), "no_changes");
         due(&cache, true);
-        cache.refresh_with(rows(&["0"]), Fake { limited:true, ..fake.clone() }); await_poll(&cache);
+        cache.refresh_rows(rows(&["0"]), Fake { limited:true, ..fake.clone() }); await_poll(&cache);
         let calls = fake.calls.load(Ordering::SeqCst);
         due(&cache, true);
-        cache.refresh_with([("other".into(), [("2".into(), "branch-2".into())].into())].into(), fake.clone()); await_poll(&cache);
+        cache.refresh_rows([("other".into(), [("2".into(), "branch-2".into())].into())].into(), fake.clone()); await_poll(&cache);
         assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
         assert_eq!(fake.scans.load(Ordering::SeqCst), 4);
-        assert_eq!(selected(&cache, "0"), "idle");
+        assert_eq!(selected(&cache, "0"), "no_changes");
+    }
+    #[test]
+    fn native_cli_agrees_with_every_shared_branch_case() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!("../../packages/portable/src/sharedBranchCases.json")).unwrap();
+        for case in cases {
+            let members: Vec<_> = case["members"].as_array().unwrap().iter().map(|m| (m["id"].as_str().unwrap(), m["project"].as_str().unwrap(), m["branch"].as_str(), m["activeAt"].as_str().unwrap())).collect();
+            let mut shared: Vec<_> = shared_branch_sessions(members).into_iter().collect();
+            shared.sort();
+            assert_eq!(json!(shared), case["shared"], "{}", case["name"]);
+        }
+    }
+    #[test]
+    fn workspace_work_is_read_off_path_and_expires_with_local_facts() {
+        let cache = Arc::new(PrCache::default());
+        let folders = [("repo".into(), ["/w/dirty".into(), "/w/ahead".into(), "/w/clean".into(), "/w/gone".into()].into())].into();
+        cache.refresh_with(rows(&["0"]), folders, Fake::default());
+        await_poll(&cache);
+        assert_eq!(cache.read_work("repo", "/w/dirty"), "uncommitted");
+        assert_eq!(cache.read_work("repo", "/w/ahead"), "committed");
+        assert_eq!(cache.read_work("repo", "/w/clean"), "none");
+        // Unreadable is unknown, never "no changes".
+        assert_eq!(cache.read_work("repo", "/w/gone"), Value::Null);
+        assert_eq!(cache.read_work("other", "/w/dirty"), Value::Null);
+        assert_eq!(select(&json!({"tabs":[],"work":cache.read_work("repo", "/w/ahead")}))["id"], "local_only");
+        cache.0.lock().unwrap().projects.get_mut("repo").unwrap().local_at = Instant::now() - LOCAL_FRESH;
+        assert_eq!(cache.read_work("repo", "/w/dirty"), Value::Null);
+    }
+    #[test]
+    fn the_cli_description_carries_the_open_pr_number_only() {
+        let pr = |state: &str| json!({"tabs":[],"branch":"f","branchStatus":{"branch":"f","checked":true,"headMatches":true,"pr":{"number":781,"state":state,"draft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","checks":"FAILURE","inMergeQueue":false}}});
+        let failing = select(&pr("OPEN"));
+        assert_eq!((failing["label"].as_str(), failing["pr"].as_u64()), (Some("Checks failing"), Some(781)));
+        assert!(failing.get("showsPr").is_none() && failing.get("when").is_none());
+        assert_eq!(select(&pr("MERGED"))["pr"], Value::Null);
+        assert_eq!(select(&json!({"tabs":[{"status":"waiting","activity":"needs_answer"}]}))["label"], "Needs approval");
     }
     #[test]
     fn a_panicked_worker_restarts_and_a_poisoned_cache_does_not_disable_it() {
         let cache = Arc::new(PrCache::default());
-        cache.refresh_with(rows(&["0"]), Fake { panic:true, ..Default::default() }); await_poll(&cache);
-        cache.refresh_with(rows(&["0"]), Fake::default()); await_poll(&cache);
+        cache.refresh_rows(rows(&["0"]), Fake { panic:true, ..Default::default() }); await_poll(&cache);
+        cache.refresh_rows(rows(&["0"]), Fake::default()); await_poll(&cache);
         assert_eq!(selected(&cache, "0"), "ready_to_merge");
         let other = cache.clone();
         assert!(std::thread::spawn(move || { let _held = other.0.lock().unwrap(); panic!("poison"); }).join().is_err());
         due(&cache, true);
-        cache.refresh_with(rows(&["0"]), Fake { state:"MERGED", ..Default::default() }); await_poll(&cache);
+        cache.refresh_rows(rows(&["0"]), Fake { state:"MERGED", ..Default::default() }); await_poll(&cache);
         assert_eq!(selected(&cache, "0"), "merged");
     }
 }

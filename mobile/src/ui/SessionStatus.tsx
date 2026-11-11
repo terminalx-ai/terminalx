@@ -1,18 +1,24 @@
 import { Text, View } from "react-native";
-import { Check, Circle, CircleAlert, Clock, FileText, GitBranch, GitMerge, GitPullRequest, GitPullRequestDraft, ListOrdered, Loader, MessageCircleQuestion, ShieldQuestion, Square, TriangleAlert } from "lucide-react-native";
-import { sessionStatus, type SessionStatusInput } from "@terminalx/portable/sessionStatus";
+import { Circle, CircleAlert, CircleDashed, CircleDot, CircleX, GitMerge, GitPullRequest, GitPullRequestDraft, LoaderCircle, ShieldAlert } from "lucide-react-native";
+import { sessionStatus, statusText, statusTooltip, type SessionStatusInput } from "@terminalx/portable/sessionStatus";
 import { useTheme } from "./theme";
 
-const icons: Record<string, typeof Circle> = { shield: ShieldQuestion, question: MessageCircleQuestion, plan: FileText, error: CircleAlert, attention: TriangleAlert, stop: Square, loader: Loader, working: Loader, clock: Clock, merged: GitMerge, conflict: TriangleAlert, draft: GitPullRequestDraft, queue: ListOrdered, check: Check, pr: GitPullRequest, branch: GitBranch, circle: Circle };
+// The same marks as the Mac (17.07): one glyph and colour per row label.
+const icons: Record<string, typeof Circle> = {
+  approval: ShieldAlert, attention: CircleAlert, working: LoaderCircle, pr: GitPullRequest, failing: CircleX,
+  ready: GitMerge, draft: GitPullRequestDraft, merged: GitMerge, none: Circle, uncommitted: CircleDot, not_started: CircleDashed,
+};
+const MERGED = "#a371f7";
 
 export function SessionStatus({ input }: { input: SessionStatusInput }) {
   const { palette } = useTheme();
   const status = sessionStatus(input);
-  const colors: Record<string, string> = { warning: palette.warning, destructive: palette.danger, info: palette.accent, success: palette.success, merged: palette.success, muted: palette.muted };
-  const color = colors[status.color];
+  const colors: Record<string, string> = { accent: palette.accent, info: palette.info, del: palette.danger, add: palette.success, soft: palette.muted, merged: MERGED, faint: palette.faint };
+  const color = colors[status.color] ?? palette.muted;
   const Icon = icons[status.icon] ?? Circle;
-  return <View accessible accessibilityLabel={status.label} accessibilityHint={status.tooltip} style={{ flexDirection: "row", alignItems: "center", gap: 5, marginTop: 5 }}>
+  // The full label, as the Mac's overview shows it ('Checks failing · PR #781'); the hint names the state behind it.
+  return <View accessible accessibilityLabel={statusText(status)} accessibilityHint={statusTooltip(status)} style={{ flexDirection: "row", alignItems: "center", gap: 5, marginTop: 5 }}>
     <Icon size={13} color={color} />
-    <Text style={{ color, fontSize: 13 }}>{status.label}</Text>
+    <Text style={{ color: palette.muted, fontSize: 13 }}>{statusText(status)}</Text>
   </View>;
 }
