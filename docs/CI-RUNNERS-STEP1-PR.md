@@ -46,6 +46,12 @@ on Linux; its assertions and the production cache are unchanged.
 
 ## Validation and measurements
 
+Passed locally: desktop/mobile type checks, 5,392 Vitest tests, frontend build,
+Clippy on Linux/macOS, the full Linux suite (3,371 unit + 14 integration tests),
+Swift (123) and icon checks (18), actionlint and 23 CI policy/helper tests.
+The merged macOS baseline passed its full suite (3,426 + 14); all changed
+security/cache fixtures passed again on macOS after the fixes. Hosted AMD64 CI
+and independent review are still required. No new tests are ignored or removed.
 See [dated validation and reproducible observations](CI-RUNNERS-MEASUREMENTS.md).
 The historical ten-run unsplit baseline is 59.0 minutes median / 74.1 p90.
 Today's #882 baseline has only **6/10** successful first attempts using the exact current workflow: 52.2 median /

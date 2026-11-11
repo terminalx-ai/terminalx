@@ -129,7 +129,7 @@ jobs:
       - name: Install npm dependencies and build the frontend
         run: pnpm install --frozen-lockfile && pnpm build
       - name: Show the Rust toolchain
-        run: rustup show && cargo --version && cargo clippy --version && command -v rg zsh
+        run: rustup show && cargo --version && cargo clippy --version && command -v rg && command -v zsh
       - name: Restore the cargo cache
         id: cargo-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -213,7 +213,7 @@ jobs:
 
       # rust-toolchain.toml decides the channel and pulls in clippy.
       - name: Show the Rust toolchain
-        run: rustup show && cargo --version && cargo clippy --version && command -v rg zsh
+        run: rustup show && cargo --version && cargo clippy --version && command -v rg && command -v zsh
 
       - name: Restore the cargo cache
         id: cargo-cache

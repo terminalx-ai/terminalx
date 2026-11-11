@@ -95,19 +95,51 @@ of this one PR establishes the intended ten-run comparison.
 ## Validation after merging current main (2026-11-11)
 
 - Passed: desktop/mobile TypeScript; all 5,392 Vitest tests in 456 files;
-  frontend build.
-- Passed: macOS helper build, all 123 Swift tests, all 18 icon tests, and
-  all-target Clippy with warnings denied.
-- Passed in TerminalX Local VM (Linux ARM64): frontend build and full-default-
-  feature, all-target Clippy with warnings denied.
-- Passed: actionlint 1.7.12; all 21 CI helper/policy tests, including rejection
-  fixtures for mutable actions, unguarded runners, write tokens, privileged
-  triggers, cross-scope cache fallbacks and missing aggregate dependencies.
-- The first merged Linux run exposed four security-test failures: an empty
-  loader-tracing flag caused false success without executing the guarded
-  command. The wrapper fix and added regression are under validation. Full
-  macOS/Linux results will be recorded before opening the PR. Previous November 6
-  passes below are historical and are not presented as passes for this merge.
+  frontend build. No frontend code changed after these checks.
+- Passed: macOS helper build, all 123 Swift tests and all 18 icon tests.
+- Passed on both macOS and Linux: `cargo clippy --locked --all-targets -- -D
+  warnings`, including the final loader and timestamp-fixture changes.
+- Passed in TerminalX Local VM (Debian 12, ARM64): full default-feature
+  `cargo test --locked`, with **3,371 unit tests and 14 integration tests**;
+  zero failures and the same 17 pre-existing ignored tests. No test filter or
+  feature reduction. The VM had ripgrep and zsh installed, two Cargo build
+  jobs, two Rust test threads and two Tokio worker threads. Unit tests took
+  237.44 seconds; this is not a CI performance observation.
+- Passed on macOS: the merged baseline's full Rust suite, with **3,426 unit
+  tests and 14 integration tests**, the same 24 existing ignored tests, and
+  one Rust test thread. After the Linux-discovered fixes, all 16 approval-wrapper
+  tests, the session-grant directory regression and the cache-rewrite fixture
+  passed again on macOS. The updated full macOS suite is also selected for this
+  PR in CI; a second complete local macOS run is not claimed.
+- Passed: actionlint 1.7.12 and **23** CI policy/selector/measurement tests.
+  Negative fixtures reject unguarded custom runners, mutable actions, token
+  escalation, workflow-wide secret expressions, privileged triggers, cross-scope
+  cache fallbacks, missing aggregate dependencies and missing security tools.
+  The aggregate accepts success and rejects failure, cancellation and skips.
+- Passed: diff whitespace checks and an added-line scan for credential/key/IP
+  patterns. Baseline JSON contains only public run metadata and durations.
+
+The first merged Linux run found four security-test failures: setting an empty
+loader-tracing flag returned success before executing either the command or its
+directory guard. The fix unsets it before launching an executable and fails
+closed if it is readonly. Mac testing also caught zsh's different `command`
+builtin lookup; the regression now exercises sh, bash and zsh directly. CI
+requires both ripgrep and zsh so existing executable security fixtures cannot
+skip because of a missing tool.
+
+A later Linux run exposed an intermittent same-size cache rewrite whose mtime
+had not changed. A temporary deterministic same-timestamp reproduction failed
+with 34 instead of 68 tokens before the fixture fix, then passed afterwards.
+The fixture now explicitly advances mtime; production caching and all cost,
+rewrite-retention and deletion assertions remain unchanged. No new Rust ignore,
+macOS-only test gate, relaxed assertion or extended deadline was introduced.
+The final Linux run includes all these corrections; the changed Rust source
+hashes were checked against the worktree. Temporary diagnostic instrumentation
+and the transfer server were removed/stopped after validation.
+
+These checks establish local correctness, including a real Linux pass. Hosted
+AMD64 CI and independent review remain publication gates; no local timing is
+substituted for the incomplete ten-run comparisons or live Hetzner acceptance.
 
 ## Observed baseline
 

@@ -19,6 +19,8 @@ CACHE_SCOPE = "${{ github.event_name == 'pull_request' && format('pr-{0}', githu
 
 def validate(workflow):
     assert workflow["permissions"] == {"contents": "read"}, "workflow token must be read-only"
+    for expression in re.findall(r"\$\{\{.*?\}\}", str(workflow), re.DOTALL):
+        assert not re.search(r"\bsecrets\b", expression, re.IGNORECASE), "secret expression anywhere in workflow"
     assert set(workflow["on"]) == {"pull_request", "push", "schedule", "workflow_dispatch"}, "unexpected trigger"
     assert workflow["on"]["push"]["branches"] == ["main"], "push scope"
     assert workflow["env"]["CI_CACHE_SCOPE"] == CACHE_SCOPE, "cache trust scope"
@@ -65,7 +67,7 @@ def validate(workflow):
     assert "ripgrep" in install["run"] and "zsh" in install["run"], "security fixture dependencies"
     native = jobs["macos-native"]
     for steps in [rust, native["steps"]]:
-        assert any("command -v rg zsh" in s.get("run", "") for s in steps), "security fixtures must not skip missing tools"
+        assert any("command -v rg && command -v zsh" in s.get("run", "") for s in steps), "security fixtures must not skip missing tools"
     assert native["needs"] == "macos-rust-changes", "macOS coverage selection dependency"
     assert any(s.get("run") == "cargo test --locked" and s.get("if") == "needs.macos-rust-changes.outputs.required == 'true'" for s in native["steps"]), "macOS full suite"
 
@@ -95,6 +97,9 @@ class WorkflowSecurity(unittest.TestCase):
     def test_token_escalation_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["frontend"].update(permissions={"contents": "write"}))
 
+    def test_global_secret_environment_is_rejected(self):
+        self.rejects(lambda w: w["env"].update(PRIVATE_TOKEN="${{ secrets['DEPLOY_TOKEN'] }}"))
+
     def test_mutable_action_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["frontend"]["steps"][0].update(uses="actions/checkout@v4"))
 
@@ -106,6 +111,12 @@ class WorkflowSecurity(unittest.TestCase):
 
     def test_missing_gate_dependency_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("linux-rust"))
+
+    def test_missing_macos_tool_check_is_rejected(self):
+        def change(w):
+            show = next(s for s in w["jobs"]["macos-native"]["steps"] if s.get("name") == "Show the Rust toolchain")
+            show["run"] = show["run"].replace(" && command -v rg", "")
+        self.rejects(change)
 
     def test_missing_security_fixture_dependency_is_rejected(self):
         def change(w):
