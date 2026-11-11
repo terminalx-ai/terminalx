@@ -69,6 +69,12 @@ their missing-tool fallback. The [glibc implementation treats the
 flag as enabled by presence](https://sourceware.org/pipermail/glibc-cvs/2022q1/076642.html).
 No test is suppressed to accommodate this behavior.
 
+A cache-reconciliation fixture also assumed that immediate same-size writes
+always receive different filesystem timestamps. A forced same-timestamp replay
+reproduced its intermittent Linux failure. The fixture now explicitly advances
+the rewritten file's mtime; the production cache and all cost/retention
+assertions are unchanged.
+
 ## macOS Rust coverage
 
 The full macOS suite runs on pushes to `main`, nightly at 02:23 UTC, manual

@@ -379,11 +379,21 @@ fn upgraded_cache_reparses_existing_files_and_retains_deleted_projections() {
     let upgraded = scan_snapshot_with(dir.path(), sources, inputs).unwrap();
     assert!((upgraded.estimated_cost_usd.unwrap() - 0.00027125).abs() < 1e-12);
     // Retain a request even if a provider rewrites the file to a suffix.
+    // The cache keys on size/mtime. Make this same-size rewrite observable even
+    // when the filesystem gives back-to-back writes the same timestamp.
+    let rewritten_mtime = fs::metadata(&path).unwrap().modified().unwrap()
+        + std::time::Duration::from_secs(1);
     write_rows(
         &path,
         &[claude_row(&cwd, &Local::now().to_rfc3339(), "two", 9)],
         false,
     );
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(rewritten_mtime)
+        .unwrap();
     let rewritten = scan_snapshot_with(dir.path(), sources, inputs).unwrap();
     assert_eq!(rewritten.total_tokens, 68);
     fs::remove_file(path).unwrap();

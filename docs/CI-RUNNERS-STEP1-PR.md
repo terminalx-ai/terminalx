@@ -1,6 +1,6 @@
 # Prepared PR publication text
 
-Title: `ci: run portable Rust checks on Linux with a guarded runner rollout (PRO-267)`
+Title: `ci: move Rust checks to Linux and gate private runners (PRO-267 Step 1)`
 
 ## Description
 
@@ -20,7 +20,9 @@ lifetime and PTY deadline fixes are retained through the merge. Linux testing
 also caught a false-success bug in main's approval wrapper: an empty loader
 tracing flag prevented both command and directory guard execution. It is now
 unset before any executable starts, with fail-closed regression coverage.
-Approval-wrapper changes always select the macOS suite as well.
+Approval-wrapper changes always select the macOS suite as well. A cache fixture
+also sets its rewrite timestamp explicitly so same-size writes remain observable
+on Linux; its assertions and the production cache are unchanged.
 
 ## Security
 
@@ -40,15 +42,26 @@ Approval-wrapper changes always select the macOS suite as well.
   material, token rotation and incident shutdown. These infrastructure controls
   are prerequisites, not claims about an existing deployment.
 
-[Runbook and owner steps](docs/CI-RUNNERS.md).
+[Runbook and owner steps](CI-RUNNERS.md).
 
 ## Validation and measurements
 
-See [dated validation and reproducible observations](docs/CI-RUNNERS-MEASUREMENTS.md).
+See [dated validation and reproducible observations](CI-RUNNERS-MEASUREMENTS.md).
 The historical ten-run unsplit baseline is 59.0 minutes median / 74.1 p90.
 Today's #882 baseline has only **6/10** successful first attempts using the exact current workflow: 52.2 median /
 62.3 p90. PRO-267 post-change and Hetzner samples are **0/10** at preparation.
 No ten-run improvement or 20-minute result is claimed.
+
+| Phase | Successful first attempts | Whole-run median | Whole-run p90 |
+| --- | ---: | ---: | ---: |
+| Historical unsplit PR baseline (November 6) | 10 | 59.0 min | 74.1 min |
+| Current main's exact three-job workflow | 6/10, incomplete | 52.2 min | 62.3 min |
+| PRO-267 Linux Rust split | 0/10, pending | — | — |
+| Hetzner main-only pilot | 0/10, not activated | — | — |
+
+These are separate cohorts. The measurements document contains per-job tables,
+public run links and sanitized input; the current-main and after samples are
+still insufficient for the required comparison.
 
 ## Still required from the owner
 
@@ -61,4 +74,4 @@ credentials, servers or registrations is changed by this PR. Main-only Hetzner
 acceleration cannot be reported as PR acceleration. Both ten-run comparisons
 remain open; keep PRO-267 open for these acceptance criteria.
 
-Related: PRO-267.
+Related: [PRO-267](https://linear.app/procyonlabs/issue/PRO-267/run-cis-linux-tests-on-our-own-hetzner-runners-securely).
