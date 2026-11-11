@@ -286,9 +286,6 @@ pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
     }
 }
 
-/// The reply a `PermissionRequest` hook prints. Its shape differs from
-/// `PreToolUse`'s `permissionDecision`: this event carries a decision object,
-/// and it ignores exit code 2, so a denial has to be said in JSON.
 /// The reply for a read-only command TerminalX ran itself (PRO-330). Only a
 /// denial lets a hook answer for the command without Claude Code running it
 /// in the user's shell. Claude gives the model the message as the call's
@@ -297,6 +294,9 @@ pub fn permission_ran(report: &str) -> Value {
     json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": { "behavior": "deny", "message": report } } })
 }
 
+/// The reply a `PermissionRequest` hook prints. Its shape differs from
+/// `PreToolUse`'s `permissionDecision`: this event carries a decision object,
+/// and it ignores exit code 2, so a denial has to be said in JSON.
 pub fn permission_decision(allow: bool, updated_input: Option<Value>, updated_permissions: Vec<Value>) -> Value {
     let decision = if allow {
         let mut d = json!({ "behavior": "allow" });

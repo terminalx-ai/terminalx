@@ -798,6 +798,64 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
     }
 }
 
+/// Codex records no item for a call its hook answered, so TerminalX shows
+/// the command it ran as a row of its own, with the command's own result.
+/// Claude's transcript carries the call and its result already.
+#[test]
+#[cfg(unix)]
+fn a_command_terminalx_ran_for_codex_gets_its_own_row() {
+    for kind in [CliKind::Codex, CliKind::Claude] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        let app = std::fs::canonicalize(rig._dir.path()).unwrap();
+        std::fs::write(app.join("file"), "hello\n").unwrap();
+        let mut frame = command_frame(&rig, gate, "grep hello file", app.to_str().unwrap());
+        frame.payload["tool_use_id"] = json!("call_ran");
+        assert_eq!(ran_by_terminalx(&rig.manager.on_hook(frame), kind), Some((0, "hello\n".into())));
+        let events = rig.events();
+        let started = events.iter().find_map(|e| match &e.payload {
+            Payload::ToolCallStarted { call_id, input, .. } if call_id == "terminalx-ran-call_ran" => Some(input.clone()),
+            _ => None,
+        });
+        let completed = events.iter().find_map(|e| match &e.payload {
+            Payload::ToolCallCompleted { call_id, result } if call_id == "terminalx-ran-call_ran" => Some(result.clone()),
+            _ => None,
+        });
+        if kind == CliKind::Codex {
+            assert_eq!(started, Some(json!({"command":"grep hello file", "cwd": app.to_str().unwrap()})));
+            let completed = completed.expect("the row completes");
+            assert_eq!((completed.text.as_str(), completed.is_error, completed.exit_code), ("hello\n", false, Some(0)));
+        } else {
+            assert!(started.is_none() && completed.is_none(), "Claude's transcript shows the call");
+        }
+    }
+}
+
+/// TerminalX runs discovery outside the provider's sandbox, so a sandbox
+/// that could narrow reads keeps every command on the card (PRO-330
+/// review); the CLI then runs an allowed one inside its sandbox.
+#[test]
+#[cfg(unix)]
+fn a_provider_sandbox_that_could_narrow_reads_keeps_discovery_on_the_card() {
+    for (kind, file, text) in [
+        (CliKind::Claude, ".claude/settings.local.json", r#"{"sandbox":{"enabled":true,"filesystem":{"denyRead":["~/.ssh"]}}}"#),
+        (CliKind::Codex, ".codex/config.toml", "[permissions.filesystem]\ndeny_read = [\"~/.ssh\"]\n"),
+    ] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        let project = rig._dir.path().join("project");
+        std::fs::create_dir_all(project.join(file).parent().unwrap()).unwrap();
+        std::fs::write(project.join(file), text).unwrap();
+        // answer_command fails unless the command waits on a card.
+        let reply = answer_command(&rig, command_frame(&rig, gate, "pwd", project.to_str().unwrap()), "allow", true);
+        let output = reply.output.unwrap();
+        match kind {
+            CliKind::Claude => assert_eq!(output["hookSpecificOutput"]["decision"], json!({"behavior":"allow"}), "the CLI runs it, in its sandbox"),
+            CliKind::Codex => assert_eq!(output, json!({}), "the CLI runs it, in its sandbox"),
+        }
+    }
+}
+
 #[test]
 fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");

@@ -87,12 +87,19 @@ pub fn reported_scope<'a>(input: &Value, reported: Option<&'a str>) -> Option<&'
 /// are essential: an unchanged allow would also run in an unreported workdir.
 ///
 /// The person approved this command for their own shell, so it still runs
-/// there with their startup setup (PRO-330). Only the directory check must
-/// not depend on that setup. A shell resolves a function before any path,
-/// quoted or not, so the check and the rejection are spelled with a
-/// per-approval random absolute path that no startup file can predefine,
-/// every word is quoted (no alias, global alias or keyword applies), and
-/// the rejection runs in a fresh `/bin/sh -c`, which reads no startup file.
+/// there with their startup setup (PRO-330), and so does its directory
+/// check. That check guards against the command running in a workdir the
+/// hook never saw; it cannot guard against the shell itself. Within that
+/// limit it avoids what startup files set up in advance: a shell resolves a
+/// function before any path, quoted or not, so the check and the rejection
+/// use a per-approval random spelling of an absolute path, every word is
+/// quoted (no alias, global alias or keyword applies), and the rejection
+/// runs in a fresh `/bin/sh -c`, which reads no startup file. Startup code
+/// that runs before each command (a DEBUG trap, which can read the command
+/// it precedes and define a function by that name) still defeats it, as it
+/// could any check typed into the shell. Such code already runs with the
+/// person's rights in every shell they open, and the command is one they
+/// approved, so what it gains is only the directory scope.
 pub fn session_input(tool: &str, input: &Value, key: &str) -> Option<Value> {
     let scope: Value = serde_json::from_str(key).ok()?;
     let cwd = scope.get(2)?.as_str()?;

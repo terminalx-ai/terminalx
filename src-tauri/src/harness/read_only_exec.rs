@@ -56,6 +56,15 @@ pub struct Approved {
     notes: Vec<String>,
 }
 
+/// How a pipeline ended.
+#[cfg(unix)]
+enum Stop {
+    Exited(i32),
+    Deadline,
+    /// Nobody wants the result any more.
+    Abandoned,
+}
+
 /// What a run produced, and what the model is told about it.
 #[derive(Debug)]
 pub struct Ran {
@@ -99,7 +108,21 @@ impl Approved {
         self
     }
 
+    /// The directory the command runs in, as approved.
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// A run nothing abandons. TerminalX itself always uses `run_while`.
+    #[cfg(test)]
     pub fn run(&self) -> Ran {
+        self.run_while(&|| true).expect("a run nothing abandons finishes")
+    }
+
+    /// Run while `wanted` holds: the hook that asked is still connected and
+    /// its CLI is still the tab's. Once it is not, nobody will read the
+    /// result, so the programs are stopped and the run returns None.
+    pub fn run_while(&self, wanted: &dyn Fn() -> bool) -> Option<Ran> {
         let ran = |status, output: String, notes: Vec<String>| Ran {
             status,
             output,
@@ -107,14 +130,15 @@ impl Approved {
             notes,
         };
         if !same_directory(&self.directory, &self.handle) {
-            return ran(
+            return Some(ran(
                 NOT_IN_DIRECTORY,
                 String::new(),
                 vec!["TerminalX did not run it: its directory is no longer the one TerminalX checked. Request a separate approval.".into()],
-            );
+            ));
         }
-        match self.execute() {
-            Ok((status, capture, timed_out)) => {
+        Some(match self.execute(wanted) {
+            Ok(None) => return None,
+            Ok(Some((status, capture, timed_out))) => {
                 let mut notes = self.notes.clone();
                 if timed_out {
                     notes.push(format!(
@@ -136,11 +160,13 @@ impl Approved {
                 String::new(),
                 vec![format!("TerminalX could not run it: {error}.")],
             ),
-        }
+        })
     }
 
+    /// The status, output and whether the deadline stopped it; None when
+    /// the run was abandoned.
     #[cfg(unix)]
-    fn execute(&self) -> std::io::Result<(i32, Capture, bool)> {
+    fn execute(&self, wanted: &dyn Fn() -> bool) -> std::io::Result<Option<(i32, Capture, bool)>> {
         let deadline = Instant::now() + self.timeout;
         let (mut reader, writer) = std::io::pipe()?;
         let capture = Arc::new(Mutex::new(Capture::new(self.limit)));
@@ -166,13 +192,14 @@ impl Approved {
                 Join::Or if status == 0 => continue,
                 _ => {}
             }
-            match self.pipeline(pipeline, &writer, deadline)? {
-                Some(code) => status = code,
-                None => {
+            match self.pipeline(pipeline, &writer, deadline, wanted)? {
+                Stop::Exited(code) => status = code,
+                Stop::Deadline => {
                     status = TIMED_OUT;
                     timed_out = true;
                     break;
                 }
+                Stop::Abandoned => return Ok(None),
             }
         }
         // EOF arrives once every program holding the pipe has exited. A
@@ -180,23 +207,24 @@ impl Approved {
         drop(writer);
         let _ = done_rx.recv_timeout(Duration::from_secs(1));
         let capture = std::mem::replace(&mut *capture.lock().unwrap(), Capture::new(0));
-        Ok((status, capture, timed_out))
+        Ok(Some((status, capture, timed_out)))
     }
 
     #[cfg(not(unix))]
-    fn execute(&self) -> std::io::Result<(i32, Capture, bool)> {
+    fn execute(&self, _: &dyn Fn() -> bool) -> std::io::Result<Option<(i32, Capture, bool)>> {
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "only Unix runs approved commands"))
     }
 
-    /// Run one pipeline and return its status: the last program's, as in
-    /// a shell without `pipefail`. None when the deadline stopped it.
+    /// Run one pipeline to its status: the last program's, as in a shell
+    /// without `pipefail`.
     #[cfg(unix)]
     fn pipeline(
         &self,
         pipeline: &[Vec<OsString>],
         sink: &std::io::PipeWriter,
         deadline: Instant,
-    ) -> std::io::Result<Option<i32>> {
+        wanted: &dyn Fn() -> bool,
+    ) -> std::io::Result<Stop> {
         use std::os::unix::process::{CommandExt, ExitStatusExt};
         use std::process::{Command, Stdio};
 
@@ -250,7 +278,8 @@ impl Approved {
             if statuses.iter().all(Option::is_some) {
                 break;
             }
-            if Instant::now() >= deadline {
+            let abandoned = !wanted();
+            if abandoned || Instant::now() >= deadline {
                 for (child, status) in children.iter_mut().zip(&statuses) {
                     if status.is_none() {
                         // SAFETY: killpg only sends a signal to the group the
@@ -259,16 +288,16 @@ impl Approved {
                         let _ = child.wait();
                     }
                 }
-                return Ok(None);
+                return Ok(if abandoned { Stop::Abandoned } else { Stop::Deadline });
             }
             std::thread::sleep(pause.min(deadline.saturating_duration_since(Instant::now())));
             pause = (pause * 2).min(Duration::from_millis(25));
         }
         if let Some(status) = last_failed {
-            return Ok(Some(status));
+            return Ok(Stop::Exited(status));
         }
         let status = statuses.last().copied().flatten();
-        Ok(Some(status.map_or(127, |status| {
+        Ok(Stop::Exited(status.map_or(127, |status| {
             status
                 .code()
                 .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))

@@ -457,11 +457,9 @@ fn startup_launched_terminalx_runs_approved_commands_without_a_shell() {
     let Some(marker) = std::env::var_os(STARTUP_PROBE).map(PathBuf::from) else { return };
     let root = PathBuf::from(std::env::var_os(STARTUP_PROBE_ROOT).unwrap());
     let me = std::process::id();
-    // TerminalX reads the login shell's PATH once, when it starts, for every
-    // program it launches; the shell that started this process ran startup
-    // too. Both are the user starting their own environment, before any
-    // command is approved. What follows must run no startup code at all.
-    crate::binpath::login_path();
+    // The shell that started this process ran its startup: that is the user
+    // starting their own environment. Approving and running commands must
+    // run no startup code at all, including any login-shell lookup.
     let _ = std::fs::remove_file(&marker);
     let execution = isolated_execution(&PathBuf::from(std::env::var_os("HOME").unwrap()));
     let approved = |command: &str| {
@@ -694,6 +692,19 @@ fn approved_programs_get_no_stdin_a_deadline_and_bounded_output() {
     std::thread::sleep(std::time::Duration::from_millis(100));
     // SAFETY: signal 0 only checks whether the process still exists.
     assert_eq!(unsafe { libc::kill(background, 0) }, -1, "the background sleep must be stopped");
+    // Nobody left to read the result: the programs stop and nothing is said.
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let plan = Approved::for_test(dir.path(), vec![(Join::Then, vec![vec!["/bin/sh", "-c", "echo $$; exec /bin/sleep 30"]])], serde_json::json!({}));
+    let started = std::time::Instant::now();
+    let ran = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        plan.run_while(&|| !stop.load(std::sync::atomic::Ordering::SeqCst))
+    });
+    assert!(ran.is_none());
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
     std::fs::write(dir.path().join("big"), "x".repeat(100_000)).unwrap();
     let ran = run(vec!["/bin/cat", "big"], serde_json::json!({"max_output_tokens": 256}));
     assert_eq!(ran.status, 0);

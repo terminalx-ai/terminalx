@@ -136,16 +136,21 @@ pub fn resolve(name: &str) -> Option<PathBuf> {
     resolve_at(name, Instant::now())
 }
 
-/// Like [`resolve`], but never asks a shell: only a cached hit or the
-/// directories of [`login_path`], which is read once per process. For a
-/// program TerminalX runs on a command's behalf, whose lookup must not run
-/// the user's startup files (PRO-330). A name a shell alone knows is None.
+/// A program TerminalX runs on a command's behalf, from a fixed list of
+/// directories only: [`known_dirs`] then the system ones (PRO-330). Unlike
+/// [`resolve`] it trusts nothing a shell said: not its `command -v`, not a
+/// hit cached from one, and not the login shell's `PATH`, which the user's
+/// startup files set. A name only those know is None, and the command asks.
 #[cfg(unix)]
 pub fn find(name: &str) -> Option<PathBuf> {
-    if let Some(Lookup::Found(path)) = cache().lock().unwrap().get(name).cloned() {
-        return Some(path);
+    if name.contains('/') {
+        return None;
     }
-    scan(name)
+    known_dirs()
+        .into_iter()
+        .chain(["/usr/sbin", "/sbin"].map(PathBuf::from))
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_absolute() && is_executable(path))
 }
 
 #[cfg(windows)]
@@ -222,6 +227,19 @@ fn scan(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PRO-330: what TerminalX runs for an approved command comes from fixed
+    /// directories, never a path or a shell's answer.
+    #[cfg(unix)]
+    #[test]
+    fn find_uses_fixed_directories_only() {
+        let sh = find("sh").expect("sh is in a system directory");
+        assert!(sh.is_absolute());
+        let fixed: Vec<PathBuf> = known_dirs().into_iter().chain(["/usr/sbin", "/sbin"].map(PathBuf::from)).collect();
+        assert!(fixed.iter().any(|dir| sh.parent() == Some(dir.as_path())), "{sh:?}");
+        assert_eq!(find("/bin/sh"), None, "a path is not a program name");
+        assert_eq!(find("terminalx-no-such-program"), None);
+    }
 
     #[test]
     fn resolves_git_and_misses_nonsense() {
