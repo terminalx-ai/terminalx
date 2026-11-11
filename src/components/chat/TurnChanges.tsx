@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { FileTypeIcon } from "@/components/files/FileTypeIcon";
 import { openChatLink, type ChatLinkContext } from "@/lib/chatLinks";
+import { openDiff, reviewPath } from "@/lib/editors";
+import type { ChangeRange } from "@/lib/changes";
 import { fileName, shortPath } from "@/lib/paths";
 import type { TurnFileChange } from "@/lib/turnChanges";
 import { File } from "@/icons";
@@ -15,9 +17,10 @@ const SHOWN = 2;
 /**
  * What a finished turn changed, under its answer: a chip per file with its
  * lines added and removed, the rest folded into one "+N more" chip that
- * shows them. A file's chip opens it. A setting turns the row off.
+ * shows them. A file's chip opens its turn diff in a centre tab, deleted files
+ * included; without the turn's snapshots it opens the file. A setting turns the row off.
  */
-export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint }: { changes: TurnFileChange[]; cwd?: string; linkContext?: ChatLinkContext; checkpoint?: { sessionId: string; tabId: string; seq: number } }) {
+export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, range = null }: { changes: TurnFileChange[]; cwd?: string; linkContext?: ChatLinkContext; checkpoint?: { sessionId: string; tabId: string; seq: number }; range?: ChangeRange | null }) {
   const [saved, setSaved] = useState<TurnCheckpoint | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +64,8 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint }:
   return (
     <div className="mb-3 flex flex-wrap items-center gap-1.5" data-testid="turn-changes" aria-label="Files changed in this turn">
       {shown.map((change) => {
+        const rel = linkContext ? reviewPath(linkContext.cwd, change.path) : null;
+        const diffable = !!rel && !!range;
         const label = `${shortPath(change.path, cwd)}${change.kind === "create" ? " (new)" : change.kind === "delete" ? " (deleted)" : ""}`;
         return (
           <Chip
@@ -71,7 +76,13 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint }:
             added={change.added}
             removed={change.removed}
             deleted={change.kind === "delete"}
-            onClick={linkContext && change.kind !== "delete" ? () => void openChatLink({ kind: "local", href: change.path, path: change.path }, linkContext).catch(() => {}) : undefined}
+            onClick={linkContext && (diffable || change.kind !== "delete") ? () => {
+              setError(null);
+              try {
+                if (rel && range) openDiff(linkContext.sessionId, linkContext.cwd, rel, { scope: "turn", range, turnLabel: "Turn" });
+                else void openChatLink({ kind: "local", href: change.path, path: change.path }, linkContext).catch((e) => setError(errorMessage(e)));
+              } catch (e) { setError(errorMessage(e)); }
+            } : undefined}
           />
         );
       })}

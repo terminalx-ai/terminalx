@@ -1,3 +1,4 @@
+import { dropEditors, isReviewEditor, pruneReviewTabs } from "@/lib/editors";
 import { forgetClosedTabViews } from "@/lib/tabViews";
 import { keepMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
@@ -244,6 +245,7 @@ async function resyncSessions() {
 
 export async function refreshSessions() {
   const incoming = await api.listSessions();
+  pruneReviewTabs(incoming);
   const before = state.sessions;
   const sessions = incoming.map((session) => keepMessageTime(session, before.find((old) => old.id === session.id)));
   set({ sessions });
@@ -263,6 +265,7 @@ export async function refreshSessions() {
 }
 
 export function upsertSession(s: SessionEntry) {
+  if (s.worktreeRemoved) dropEditors((e) => e.sessionId === s.id && isReviewEditor(e));
   const i = state.sessions.findIndex((x) => x.id === s.id);
   s = keepMessageTime(s, state.sessions[i]);
   // Its checkout was just removed: a shell left running there has no directory.
@@ -291,6 +294,7 @@ export function upsertSession(s: SessionEntry) {
 
 /** Forget sessions the backend has deleted, dropping the selection if it was one of them. */
 export function removeSessions(ids: string[]) {
+  dropEditors((e) => ids.includes(e.sessionId));
   dropSessionTerminals(ids);
   const gone = new Set(ids);
   const selectedGone = !!state.selectedSessionId && gone.has(state.selectedSessionId);
