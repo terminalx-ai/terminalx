@@ -1,0 +1,26 @@
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Secrets and local settings
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+
+# Dependencies and build output
+node_modules/
+dist/
+build/
+target/
+__pycache__/
+*.py[cod]
+.venv/
+coverage/
+
+# Logs
+*.log
