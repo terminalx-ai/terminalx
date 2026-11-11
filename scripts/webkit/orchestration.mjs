@@ -156,7 +156,7 @@ function setup({ mode, scene, enabled }) {
   const announce = () => window.__PW_STUB__.emit("orchestration_run", shown(state.run));
   Object.assign(answers, {
     experimental_settings: () => state.experimental,
-    set_experimental_orchestrator_runs: ({ on }) => (state.experimental = { ...state.experimental, orchestratorRuns: on }),
+    set_experimental_settings: ({ orchestratorRuns }) => (state.experimental = { ...state.experimental, ...(orchestratorRuns === undefined ? {} : { orchestratorRuns }) }),
     orchestration_run_for_session: () => (state.run ? shown(state.run) : null),
     orchestration_approve: (args) => {
       called("approve", args);

@@ -893,7 +893,6 @@ pub fn run() {
             store::settings::file::update_user_preferences,
             store::settings::file::create_settings_file,
             commands::set_experimental_settings,
-            commands::set_experimental_orchestrator_runs,
             commands::orchestrator_settings,
             commands::set_orchestrator_settings,
             commands::orchestrator_tier_models,

@@ -1,4 +1,4 @@
-import { useExperimental } from "@/lib/experimental";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { SettingsFileError } from "./SettingsFile";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Bot, Building2, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Mic, Network, Palette, Plug, Search, Settings2, Smartphone, UserRound, X } from "@/icons";
@@ -60,7 +60,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const [selected, setSelected] = useState(0);
   const [selectionRequest, setSelectionRequest] = useState(0);
   // A section behind a switch in Settings → Experimental is listed, and found, only while the switch is on.
-  const { orchestratorRuns } = useExperimental();
+  const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
   const offered = useCallback((key: string) => key !== "orchestrator" || orchestratorRuns, [orchestratorRuns]);
   const results = useMemo(() => searchSettingsSections(query).filter((match) => offered(match.item.tab)), [query, offered]);
   const searching = !!query.trim();
