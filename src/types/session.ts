@@ -44,6 +44,8 @@ export interface TabEntry {
   hasMessages?: boolean;
   contextUsed?: number | null;
   contextMax?: number | null;
+  /** Tokens and estimated cost of every conversation the tab holds or held, by model, as of its last turn end (PRO-273). */
+  usage?: TabUsage | null;
   /** A cloud tab whose conversation has not been read yet: the chat says it is loading, not that it is empty. */
   loadingHistory?: boolean;
   /**
@@ -66,6 +68,43 @@ export interface TabEntry {
 }
 
 export type TabFront = "agent" | "by_hand" | "terminal";
+
+/** One model's tokens in a tab or session. `costUsd` is the API list price; `null` when the model has no price, never zero. */
+export interface ModelUsage {
+  model: string;
+  /** Uncached input; cache reads and writes are their own counts. */
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number | null;
+}
+
+export interface TabUsage {
+  models: ModelUsage[];
+  /** When the totals were read from the agent's transcripts. */
+  updated: string;
+}
+
+/** Several models summed: the priced ones' cost, and the models that have none. */
+export interface UsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number | null;
+  unpricedModels: string[];
+}
+
+/** `terminalx sessions usage <session> --json`, which the header's popover reads too. */
+export interface SessionUsageReport {
+  sessionId: string;
+  title: string;
+  tabs: { tabId: string; title?: string | null; agent: string; models: ModelUsage[]; total: UsageTotals; updated: string }[];
+  models: ModelUsage[];
+  total: UsageTotals;
+  estimate: true;
+}
 
 /** A conversation a tab held before the one it holds now. Its events are in the tab's log, under `id`. */
 export interface PastConversation {
