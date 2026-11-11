@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { Stack, useRouter } from "expo-router";
 import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
+import { useColorScheme } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { CloudProvider } from "@mobile/cloud/CloudProvider";
 import { AppProvider } from "@mobile/state/AppProvider";
@@ -13,7 +14,9 @@ export default function RootLayout() {
 }
 
 function Navigation() {
-  const { palette } = useTheme();
+  const { palette, name } = useTheme();
+  // Light text on a dark page: Ember is dark in both appearances.
+  const lightText = useColorScheme() !== "light" || name === "Ember";
   const router = useRouter();
   const response = Notifications.useLastNotificationResponse();
   useEffect(() => {
@@ -21,5 +24,5 @@ function Navigation() {
     const tabId = response?.notification.request.content.data?.tabId;
     if (typeof sessionId === "string" && sessionId && typeof tabId === "string" && tabId) router.push({ pathname: "/session/[sessionId]", params: { sessionId, tabId } });
   }, [response, router]);
-  return <><StatusBar style="auto" /><Stack screenOptions={{ headerLargeTitle: true, headerTransparent: false, headerStyle: { backgroundColor: palette.page }, headerTintColor: palette.ink, headerShadowVisible: false, contentStyle: { backgroundColor: palette.page } }}><Stack.Screen name="(tabs)" options={{ headerShown: false }} /><Stack.Screen name="session/[sessionId]" options={{ title: "Session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="session/new" options={{ title: "New session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="cloud/[workspaceId]" options={{ title: "Workspace", headerLargeTitle: false, headerBackTitle: "Cloud" }} /><Stack.Screen name="cloud/shares" options={{ title: "Sharing", headerLargeTitle: false }} /></Stack></>;
+  return <><StatusBar style={lightText ? "light" : "dark"} /><Stack screenOptions={{ headerLargeTitle: true, headerTransparent: false, headerStyle: { backgroundColor: palette.page }, headerTintColor: palette.ink, headerShadowVisible: false, contentStyle: { backgroundColor: palette.page } }}><Stack.Screen name="(tabs)" options={{ headerShown: false }} /><Stack.Screen name="session/[sessionId]" options={{ title: "Session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="session/new" options={{ title: "New session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="cloud/[workspaceId]" options={{ title: "Workspace", headerLargeTitle: false, headerBackTitle: "Cloud" }} /><Stack.Screen name="cloud/shares" options={{ title: "Sharing", headerLargeTitle: false }} /></Stack></>;
 }

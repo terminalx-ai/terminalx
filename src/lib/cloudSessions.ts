@@ -6,7 +6,7 @@ import { applyLiveTabs, getCloudAgents, loadCloudAgents, markCloudAgentsOffline,
 import { cacheCloudSessions, dropCachedCloudSessions, getCloudCatalog, useCloudCatalog, type CachedWorkspaceSessions } from "@/lib/cloudCatalog";
 import { onWorkspaceAccess } from "@/lib/cloudCollab";
 import { cloudTabTitle } from "@/lib/cloudRowState";
-import { onCloudConnected, retainCloudConnection, waitCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
+import { onCloudConnected, retainCloudConnection, useCloudConnection, waitCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
 import { getSessionStore, openWelcome } from "@/lib/sessions";
 import { clearSessionTabsUnder } from "@/lib/terminal";
@@ -42,6 +42,8 @@ export interface CloudSessionTab {
 }
 
 export interface CloudSessionRow {
+  manualStatus?: import("@/types/session").ManualStatus;
+  automation?: { id: string } | null;
   key: CloudKey;
   orgId: string;
   workspaceId: string;
@@ -220,6 +222,7 @@ export function buildCloudSessions(input: {
   live?: RuntimeSession[] | null;
   agentTabs?: readonly CloudAgentTab[];
   showArchived?: boolean;
+  includeArchived?: boolean;
   selectedKey?: string | null;
 }): CloudSessionRow[] {
   const { item } = input;
@@ -287,7 +290,9 @@ export function buildCloudSessions(input: {
       lastMessageAt: newestMessageTime(session.lastMessageAt, ...session.tabs.flatMap((tab) => [agentTabs.get(tab.id)?.info.lastMessageAt, agentTabs.get(tab.id)?.info.sessionLastMessageAt])),
       hasMessages: session.hasMessages || session.tabs.some((tab) => tab.hasMessages || agentTabs.get(tab.id)?.info.hasMessages || agentTabs.get(tab.id)?.info.sessionHasMessages),
       pinned: session.pinned,
+      manualStatus: session.manualStatus,
       archived: session.archived,
+      automation: session.automation,
       tabs: session.tabs.map((tab, index) => tabOf(tab.id, { harness: tab.harness, title: tab.title, status: tab.status }, { title: session.title, first: index === 0 })),
       activeTab: session.activeTab ?? null,
       source,
@@ -347,7 +352,7 @@ export function buildCloudSessions(input: {
   }
 
   return [...rows.values()]
-    .filter((row) => row.archived === !!input.showArchived || row.key === input.selectedKey)
+    .filter((row) => input.includeArchived || row.archived === !!input.showArchived || row.key === input.selectedKey)
     .sort((a, b) => compareMessageActivity(a, b, a.sessionId, b.sessionId));
 }
 
@@ -437,6 +442,20 @@ export function useCloudWorkspaceSessions(node: CloudWorkspaceNode, options: { l
 }
 
 const NO_ITEM = { workspace: { orgId: "", id: "" } } as CloudWorkspaceListItem;
+
+/** Resolve a status command from known session rows and access, without loading or connecting. */
+export function useCloudSessionForStatus(key: string | null): CloudSessionRow | null {
+  const target = parseCloudWorkspaceKey(key ?? "");
+  const catalog = useCloudCatalog();
+  const item = target && catalog.orgs[target.orgId]?.workspaces.find((item) => item.workspace.id === target.workspaceId);
+  const node = useMemo(() => ({ key: cloudWorkspaceKey(item?.workspace.orgId ?? "", item?.workspace.id ?? ""), item: item ?? NO_ITEM, placedBy: null }), [item]);
+  const { sessions, capabilities, manage } = useCloudWorkspaceSessions(node, { load: false, showArchived: false, selectedKey: key });
+  const connection = useCloudConnection(node.key);
+  const authority = connection.authority ?? item?.workspace.authority ?? null;
+  const granted = connection.capabilities ?? capabilities;
+  if (!item || !target?.sessionId || !manage || (authority !== null && authority !== "manage") || !granted?.includes("session/2") || !granted.includes("session-status/1")) return null;
+  return sessions.find((session) => session.key === key) ?? null;
+}
 
 /** `cloudAgentRan`, following the sessions as they change: a failed first task is then history (#499). */
 export function useCloudAgentRan(item: CloudWorkspaceListItem | null): boolean {

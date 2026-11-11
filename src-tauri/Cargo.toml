@@ -1,6 +1,6 @@
 [package]
 name = "raccoon"
-version = "0.2.25"
+version = "0.2.30"
 description = "TerminalX — a desktop workbench for coding agents"
 authors = ["Paresh Dudhat"]
 edition = "2021"
@@ -103,6 +103,7 @@ regex = "1"
 vt100 = "0.18"
 salsa20 = "0.10"
 ignore = "0.4"
+globset = "0.4"
 nucleo-matcher = "0.3"
 tauri-plugin-notification = { version = "2.4.0", optional = true }
 ureq = { version = "2", features = ["json"] }

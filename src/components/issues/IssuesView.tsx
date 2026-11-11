@@ -23,7 +23,7 @@ import { IssueWorkPanel, TakenIssueDialog } from "@/components/issues/IssueWork"
 import { issueKey as writeKey, useIssueWrites } from "@/components/issues/issueWrites";
 import { IssueDescription, IssueLabels, IssuePriority, IssueTitle, editableIssue, useIssueEdits } from "@/components/issues/IssueFields";
 import { AgentMenu } from "@/components/session/AgentMenu";
-import { ConnectLinear } from "@/components/session/IssuePicker";
+import { ConnectLinear } from "@/components/session/ConnectLinear";
 import { SessionOptions } from "@/components/session/SessionOptions";
 import { AgentLoginsLink } from "@/components/cloud/AgentLoginsLink";
 import { cloudStartError, useCloudProjectChoices } from "@/components/session/CloudNewSession";

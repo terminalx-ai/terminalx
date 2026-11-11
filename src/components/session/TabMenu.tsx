@@ -35,17 +35,18 @@ import { AgentMark } from "@/components/AgentMark";
 import { ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, MenuShortcut } from "@/components/ui/menu";
 import { isCompactWindow } from "@/lib/appWindow";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
-import { openCloseTabs, openRenameTab } from "@/lib/dialogs";
+import { openAgentHandoff, openCloseTabs, openRenameTab } from "@/lib/dialogs";
+import { otherAgent } from "@/lib/agentHandoff";
 import { showFloatingWindow } from "@/lib/floating";
 import { isMac, useShortcutKeycaps } from "@/lib/hotkeys";
 import { openSessionShare } from "@/lib/localSharing";
 import { getPrefs } from "@/lib/prefs";
 import { isQuickChat } from "@/lib/quickChats";
 import { archiveSession, forkSession, openSkills, useSessionStore } from "@/lib/sessions";
-import { closePeer, hasOwnTitle, isShellPeer, peerAgent, peerIsLive, peerLabel, peerShell, peerStatus, type PeerTab, type TabRow } from "@/lib/sessionTabs";
-import { BULK_CLOSE_LABEL, canMoveTab, canReopenTab, canRestartAgent, duplicateTab, moveTabBy, newTab, planBulkClose, renamePeer, reopenClosedTab, restartTab, setTabMuted, setTabPinned, type BulkClose, type NewTabKind, type TabMove } from "@/lib/tabActions";
+import { useTabRow, closePeer, hasOwnTitle, isShellPeer, peerAgent, peerIsLive, peerLabel, peerShell, peerStatus, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { BULK_CLOSE_LABEL, canMoveTab, canReopenTab, canRestartAgent, duplicateTab, moveTabBy, newTab, moveTabToPane, otherPane, planBulkClose, renamePeer, reopenClosedTab, restartTab, setTabMuted, setTabPinned, type BulkClose, type NewTabKind, type TabMove } from "@/lib/tabActions";
 import { tabViewIn } from "@/lib/tabFront";
-import { useTabState } from "@/lib/tabLayouts";
+import { panesOf, useTabState } from "@/lib/tabLayouts";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import type { SelectedSessionTab } from "@/lib/terminal";
 import { IssueLinkContextItems } from "@/components/session/IssueLinkMenuItems";
@@ -92,10 +93,13 @@ export function TabMenuItems({
   const shown = tab.kind === selected?.kind && tab.id === selected.id;
   const off = !!readOnlyReason;
   const floating = isCompactWindow();
+  const wholeRow = useTabRow(row.session);
+  const panes = panesOf(wholeRow.layout, wholeRow.tabs.map((peer) => peer.key));
   const muted = row.layout.muted.includes(tab.key);
   const inTerminalView = tab.kind === "agent" && tabViewIn(tabViews.views, tab.tab) === "terminal";
   // What is in the tab now: an agent with a conversation, or a terminal.
   const agentTab = tab.kind === "agent" && !isShellPeer(tab) ? tab.tab : null;
+  const counterpart = agentTab && otherAgent(agentTab.harness, store.harnesses);
   const drawnAs = peerAgent(tab);
   const bulk = BULK.map((action) => ({ action, plan: planBulkClose(action, row.tabs, tab) })).filter(({ plan }) => plan.targets.length + plan.pinned.length > 0);
   const open = (what: NewTabKind) => void newTab(row, what, tab).catch(failed("opening a tab"));
@@ -128,12 +132,17 @@ export function TabMenuItems({
           {inTerminalView ? <MessageSquare /> : <Terminal />} {inTerminalView ? "Switch to chat view" : "Switch to terminal view"}
         </ContextMenuItem>
       ) : null}
-      <ContextMenuItem disabled={off} onSelect={() => void duplicateTab(row, tab).catch(failed("duplicating the tab"))}>
+      {tab.kind !== "review" && <ContextMenuItem disabled={off} onSelect={() => void duplicateTab(row, tab).catch(failed("duplicating the tab"))}>
         <CopyPlus /> Duplicate tab
-      </ContextMenuItem>
+      </ContextMenuItem>}
       {agentTab ? (
         <ContextMenuItem disabled={off} onSelect={() => void forkSession(session.id, tab.id).catch(failed("forking the conversation"))}>
           <GitFork /> Fork conversation
+        </ContextMenuItem>
+      ) : null}
+      {agentTab && counterpart ? (
+        <ContextMenuItem disabled={off} onSelect={() => openAgentHandoff(session, agentTab, counterpart.id)}>
+          <AgentMark id={counterpart.id} decorative /> Hand off to {counterpart.name}
         </ContextMenuItem>
       ) : null}
       {tab.kind === "agent" && !floating ? (
@@ -208,6 +217,13 @@ export function TabMenuItems({
           </ContextMenuSubContent>
         </ContextMenuSub>
       ) : null}
+      {!floating && <ContextMenuItem disabled={off || (panes.length === 1 && wholeRow.tabs.length < 2) || (panes.length === 2 && panes[1].tabs.includes(tab.key))} onSelect={() => moveTabToPane(row, tab, "right", selected)}>
+        <MoveHorizontal /> Split right
+      </ContextMenuItem>}
+      {!floating && row.layout.panes && <ContextMenuItem disabled={off} onSelect={() => moveTabToPane(row, tab, otherPane(wholeRow, tab), selected)}>
+        <MoveHorizontal /> Move tab to other pane
+        <MenuShortcut keys={keys("session.moveTabToOtherPane")} />
+      </ContextMenuItem>}
       <ContextMenuSub>
         <ContextMenuSubTrigger>
           <MoveHorizontal /> Move tab

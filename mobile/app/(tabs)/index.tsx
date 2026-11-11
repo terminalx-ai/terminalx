@@ -31,10 +31,10 @@ export default function MachinesScreen() {
     if (await app.connectHost(host)) router.navigate("/(tabs)/sessions");
   };
 
-  if (!app.ready) return <Screen><EmptyState title="Loading" detail="Reading this installation's device-only credentials." busy /></Screen>;
+  if (!app.ready) return <Screen title="Machines"><EmptyState title="Loading" detail="Reading this installation's device-only credentials." busy /></Screen>;
   if (!app.session) {
     return <>
-      <Screen contentContainerStyle={app.hosts.length ? undefined : styles.signedOut}>
+      <Screen title="Machines" contentContainerStyle={app.hosts.length ? undefined : styles.signedOut}>
         <View style={[styles.mark, { backgroundColor: palette.accent }]}><Text style={[styles.markText, { color: palette.accentInk }]}>TX</Text></View>
         <Text style={[styles.heroTitle, { color: palette.ink }]}>Your work, away from your desk</Text>
         <Text style={[styles.heroDetail, { color: palette.muted }]}>Sign in with the same TerminalX account as your Mac, or use an explicit QR pairing. Sessions stay on the Mac and travel over an end-to-end encrypted connection.</Text>
@@ -49,7 +49,7 @@ export default function MachinesScreen() {
   }
 
   return <>
-    <Screen refreshControl={<RefreshControl refreshing={app.loadingMachines} onRefresh={() => void app.refreshMachines()} tintColor={palette.accent} />}>
+    <Screen title="Machines" refreshControl={<RefreshControl refreshing={app.loadingMachines} onRefresh={() => void app.refreshMachines()} tintColor={palette.accent} />}>
       {app.error ? <Card style={[styles.errorPanel, { borderColor: `${palette.danger}66` }]}><Text style={[styles.errorTitle, { color: palette.ink }]}>Couldn’t finish that</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.error}</Text><View style={styles.actions}><Button label="Retry" kind="secondary" style={styles.flex} onPress={() => void app.refreshMachines()} /><Button label="Use QR code" kind="secondary" style={styles.flex} onPress={openPairing} /></View></Card> : null}
       <View style={styles.heading}><View><Text style={[styles.account, { color: palette.ink }]}>{app.session.user.displayName ?? app.session.user.email}</Text><Text style={[styles.detail, { color: palette.muted }]}>One active Mac at a time</Text></View><Button label="Pair" kind="secondary" onPress={openPairing} /></View>
 

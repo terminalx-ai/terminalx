@@ -303,6 +303,8 @@ describe("a crowded strip", () => {
 });
 
 describe("dragging a tab", () => {
+  // These are mouse drags. An unspecified pointer type starts Radix's touch
+  // long-press timer, which can open a context menu during a slow test run.
   it("works out where a tab lands from where the pointer is", () => {
     const rects = [0, 100, 200, 300].map((left) => ({ left, width: 100 }));
     // Dragged left over the first tab's first half: it becomes the first.
@@ -319,7 +321,7 @@ describe("dragging a tab", () => {
   it("shows where it will land, moves it there on release, saves the order, and the sidebar follows", async () => {
     layOut();
     render(<TabsHarness />);
-    fireEvent.pointerDown(tab("Review").parentElement!, { button: 0, clientX: 250 });
+    fireEvent.pointerDown(tab("Review").parentElement!, { pointerType: "mouse", button: 0, clientX: 250 });
     // A small movement is still a click.
     fireEvent.pointerMove(window, { clientX: 248 });
     expect(screen.queryByTestId("tab-drop-indicator")).toBeNull();
@@ -344,7 +346,7 @@ describe("dragging a tab", () => {
   it("moves a tab next to another session's without changing whose it is", async () => {
     layOut();
     render(<TabsHarness />);
-    fireEvent.pointerDown(tab("Docs").parentElement!, { button: 0, clientX: 350 });
+    fireEvent.pointerDown(tab("Docs").parentElement!, { pointerType: "mouse", button: 0, clientX: 350 });
     fireEvent.pointerMove(window, { clientX: 110 });
     fireEvent.pointerUp(window);
     await flush();
@@ -356,7 +358,7 @@ describe("dragging a tab", () => {
   it("is put back by Escape, and Escape does nothing else while a tab is held", async () => {
     layOut();
     render(<TabsHarness />);
-    fireEvent.pointerDown(tab("Terminal 1").parentElement!, { button: 0, clientX: 550 });
+    fireEvent.pointerDown(tab("Terminal 1").parentElement!, { pointerType: "mouse", button: 0, clientX: 550 });
     fireEvent.pointerMove(window, { clientX: 30 });
     expect(screen.getByTestId("tab-drop-indicator")).toBeTruthy();
     const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
@@ -372,11 +374,11 @@ describe("dragging a tab", () => {
   it("does not start from the close button, nor with another mouse button", () => {
     layOut();
     render(<TabsHarness />);
-    fireEvent.pointerDown(strip().querySelector("[data-tab-close]")!, { button: 0, clientX: 80 });
+    fireEvent.pointerDown(strip().querySelector("[data-tab-close]")!, { pointerType: "mouse", button: 0, clientX: 80 });
     fireEvent.pointerMove(window, { clientX: 500 });
     expect(screen.queryByTestId("tab-drop-indicator")).toBeNull();
     fireEvent.pointerUp(window);
-    fireEvent.pointerDown(tab("Review").parentElement!, { button: 2, clientX: 250 });
+    fireEvent.pointerDown(tab("Review").parentElement!, { pointerType: "mouse", button: 2, clientX: 250 });
     fireEvent.pointerMove(window, { clientX: 20 });
     expect(screen.queryByTestId("tab-drop-indicator")).toBeNull();
   });

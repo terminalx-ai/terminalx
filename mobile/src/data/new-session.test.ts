@@ -6,7 +6,7 @@ import { agentDefaults, blocked, chooseModel, initialChoices, request } from "./
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client-id" }));
 
 const options: NewSessionOptions = {
-  projects: [{ id: "p-notes", name: "notes", git: false, lastUsed: false }, { id: "p-repo", name: "terminalx", git: true, lastUsed: true }],
+  projects: [{ id: "p-notes", name: "notes", git: false, lastUsed: false }, { id: "p-repo", name: "terminalx", git: true, lastUsed: true, repositorySettings: { filesToCopy: [".env*"] } }],
   agents: [
     { id: "opencode", name: "OpenCode", available: false, installHint: "brew install opencode", effort: false, permissionModes: false, models: [] },
     { id: "codex", name: "Codex", available: true, installHint: "", effort: true, permissionModes: true, models: [
@@ -49,6 +49,20 @@ describe("the phone's new-session form", () => {
 describe("the Mac's side of a new session", () => {
   const api = (request: ReturnType<typeof vi.fn>) => new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
 
+  it("notifies an open settings view when the Mac's file changes and removes listeners on close", () => {
+    let event!: (value: { method: string }) => void;
+    const host = new HostApi({ onEvent: (listener: typeof event) => { event = listener; return () => {}; } } as unknown as HostConnection);
+    const changed = vi.fn();
+    const stop = host.onSettingsChanged(changed);
+    event({ method: "settings.changed" });
+    expect(changed).toHaveBeenCalledTimes(1);
+    event({ method: "sessions.changed" });
+    expect(changed).toHaveBeenCalledTimes(1);
+    stop();
+    event({ method: "settings.changed" });
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
   it("asks only a Mac that says it can start sessions for a phone", async () => {
     const old = vi.fn(async (method: string) => method === "sync.capabilities" ? { ok: true, value: { sendIds: 1 } } : { ok: false, refusal: { message: "unknown method" } });
     const host = api(old);
@@ -90,4 +104,15 @@ describe("the Mac's side of a new session", () => {
     await expect(api(host).setNativeCodex(true)).resolves.toEqual({ nativeCodex: true });
     await expect(api(host).setNativeCodex(false)).rejects.toThrow("read-only");
   });
+});
+
+it("reads source and lock metadata only from a runtime advertising layered configuration", async () => {
+  const value = { values: { branchPrefix: { value: "team/", source: "managed", locked: true, redacted: false } }, registry: [], warnings: [], trust: null };
+  const request = vi.fn(async (method: string) => ({ ok: true, value: method === "sync.capabilities" ? { layeredConfiguration: 1 } : value }));
+  const host = new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
+  await expect(host.configuration("opaque-project")).resolves.toEqual(value);
+  expect(request).toHaveBeenCalledWith("configuration.resolve", { projectId: "opaque-project" });
+  const old = vi.fn(async () => ({ ok: true, value: {} }));
+  await expect(new HostApi({ request: old, onEvent: () => () => {} } as unknown as HostConnection).configuration()).resolves.toBeNull();
+  expect(old).toHaveBeenCalledTimes(1);
 });

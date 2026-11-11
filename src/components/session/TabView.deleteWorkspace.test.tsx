@@ -7,7 +7,7 @@ import type { ProjectForge } from "@/lib/api";
 import type { AgentEvent, Payload } from "@/types/events";
 
 // #411: once the worktree's pull request has merged, the chat offers Delete workspace next to Commit, Create PR and Run it.
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), forge: undefined as ProjectForge | undefined, changed: { files: [] as unknown[] }, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {} } }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), forge: undefined as ProjectForge | undefined, changed: { files: [] as unknown[] }, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
 vi.mock("@/lib/projectForge", () => ({ useProjectForge: () => mocks.forge }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));

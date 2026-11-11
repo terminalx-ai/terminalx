@@ -67,6 +67,9 @@ beforeEach(() => {
       case "rename_session":
         stored = { ...stored, title: args.title as string };
         return null;
+      case "rename_tab":
+        stored = { ...stored, tabs: stored.tabs.map((tab) => tab.id === args.tabId ? { ...tab, title: args.title as string, titlePinned: true } : tab) };
+        return null;
       case "move_quick_chat_to_project": {
         if (refusal) throw refusal;
         const path = args.projectPath as string;
@@ -155,5 +158,7 @@ describe("rename a session", () => {
     await waitFor(() => expect(called("rename_session")).toEqual([{ sessionId: "chat-1", title: "Monads, explained" }]));
     await waitFor(() => expect(screen.queryByLabelText("Session title")).toBeNull());
     expect(sessions.getSessionStore().sessions[0].title).toBe("Monads, explained");
+    expect(called("rename_tab")).toEqual([{ sessionId: "chat-1", tabId: "t1", title: "Monads, explained" }]);
+    expect(stored.tabs[0]).toMatchObject({ title: "Monads, explained", titlePinned: true });
   });
 });

@@ -194,6 +194,9 @@ pub struct AccountIdentity {
     organization: Option<String>,
     /// The active (default) organization's id, so the webview need not match by name.
     organization_id: Option<String>,
+    /// The person's picture from the sign-in service, when it sends one: an
+    /// `https:` image URL, shown in place of their initial.
+    picture: Option<String>,
 }
 
 #[derive(Clone)]
@@ -281,6 +284,9 @@ struct CloudIdentity {
     active_org_id: Option<String>,
     #[serde(default)]
     active_org_name: Option<String>,
+    /// The person's picture, as the sign-in service names it.
+    #[serde(default, alias = "image", alias = "avatarUrl", alias = "picture", skip_serializing_if = "Option::is_none")]
+    image_url: Option<String>,
     linked_at: i64,
 }
 
@@ -447,6 +453,7 @@ impl AccountManager {
                 display_name: Some(context.display_name),
                 active_org_id: Some(context.organization_id),
                 active_org_name: Some("Test Organization".into()),
+                image_url: None,
                 linked_at: 1,
             },
             organizations: vec![],
@@ -996,6 +1003,31 @@ impl AccountManager {
             return false;
         }
         let action = self.claim_callback(url);
+        self.act_on_callback(app, action, links);
+        true
+    }
+
+    /// A sign-in link the reader pasted, for when the browser's button could
+    /// not reach this app: a development build run as a bare binary has no
+    /// URL scheme registered with macOS, so `terminalx-dev://` opens nothing.
+    /// It is held to exactly what a delivered link is: this app's own
+    /// callback, for the sign-in under way, within its time.
+    pub fn paste_callback(self: &Arc<Self>, app: &AppHandle, link: &str) -> Result<()> {
+        let url = Url::parse(link.trim()).map_err(|_| anyhow!("That isn't a link. Copy the whole link from the browser's Open button."))?;
+        let links = DesktopLinks::for_identifier(&app.config().identifier);
+        if !links.is_auth_callback(&url) {
+            return Err(anyhow!("That isn't a sign-in link for this app. Copy the link from the Open {} button.", app.package_info().name));
+        }
+        match self.claim_callback(&url) {
+            CallbackAction::Ignore => Err(anyhow!("That link belongs to another sign-in. Start signing in again, then paste the new link.")),
+            action => {
+                self.act_on_callback(app, action, links);
+                Ok(())
+            }
+        }
+    }
+
+    fn act_on_callback(self: &Arc<Self>, app: &AppHandle, action: CallbackAction, links: DesktopLinks) {
         match action {
             CallbackAction::Ignore => {}
             CallbackAction::Failed => self.emit(app),
@@ -1008,7 +1040,6 @@ impl AccountManager {
                 });
             }
         }
-        true
     }
 
     fn claim_callback(&self, url: &Url) -> CallbackAction {
@@ -1349,6 +1380,12 @@ pub fn focus_main_window(app: &AppHandle) {
     }
 }
 
+/// A picture URL the webview may load: `https:` only, so a session never
+/// points it at a local address or another scheme.
+fn picture_url(url: &str) -> Option<String> {
+    Url::parse(url.trim()).ok().filter(|url| url.scheme() == "https" && url.host_str().is_some()).map(String::from)
+}
+
 fn snapshot(inner: &Inner) -> AccountStatus {
     let (state, identity, expires_at) = if let Some(session) = inner.session.as_ref() {
         (
@@ -1358,6 +1395,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
                 email: session.cloud.email.clone(),
                 organization: session.cloud.active_org_name.clone(),
                 organization_id: session.cloud.active_org_id.clone(),
+                picture: session.cloud.image_url.as_deref().and_then(picture_url),
             }),
             Some(session.expires_at),
         )
@@ -1649,6 +1687,23 @@ fn should_refresh(expires_at: i64, now: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// The sign-in service's picture reaches the identity under any of its
+    /// names, and only as an https: URL.
+    #[test]
+    fn a_session_picture_is_read_under_its_names_and_only_over_https() {
+        for name in ["imageUrl", "image", "avatarUrl", "picture"] {
+            let cloud: CloudIdentity = serde_json::from_value(serde_json::json!({
+                "cloudProfileId": "p", "userId": "u", "email": "a@b.c", "linkedAt": 1, name: "https://img.example/a.png"
+            })).unwrap();
+            assert_eq!(cloud.image_url.as_deref(), Some("https://img.example/a.png"), "{name}");
+        }
+        assert_eq!(picture_url(" https://img.example/a.png ").as_deref(), Some("https://img.example/a.png"));
+        assert_eq!(picture_url("http://img.example/a.png"), None);
+        assert_eq!(picture_url("file:///etc/passwd"), None);
+        assert_eq!(picture_url("javascript:alert(1)"), None);
+    }
+
     use super::*;
 
     #[test]
