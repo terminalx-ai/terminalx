@@ -39,6 +39,12 @@ impl Terminals {
         self.0.quick("runtime.pty.agentSetupRunning", json!({"harness":harness}))
     }
 
+    /// The tabs whose `harness` agent is running, each saying whether it
+    /// started with the login new tabs get now.
+    pub fn agent_login_tabs(&self, harness: &str) -> Result<serde_json::Value> {
+        self.0.quick("runtime.pty.agentLoginTabs", json!({"harness":harness}))
+    }
+
     pub fn write(&self, id: &str, bytes: &[u8]) -> Result<()> {
         self.0.quick("runtime.pty.write", json!({"id":id,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}))
     }

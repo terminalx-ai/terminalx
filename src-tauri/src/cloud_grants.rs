@@ -1891,6 +1891,24 @@ pub struct LaunchGrant {
     launched: Option<Launched>,
 }
 
+impl LaunchGrant {
+    /// A grant from this Mac's own agent login settings (`agent_keys`), not
+    /// a cloud workspace's: nothing to record for refusals or restarts here.
+    pub(crate) fn local(env: Vec<(String, Option<String>)>, route: Option<RouteLaunch>) -> Self {
+        Self { env, route, codex_auth: None, launched: None }
+    }
+}
+
+/// Claude Code's endpoint pinned at `base` in a launch's `--settings`, with
+/// its cloud provider switches off: that level is above a checkout's
+/// `.claude/settings.json`, whose `env` could otherwise send a helper's
+/// credential to another address.
+pub(crate) fn claude_endpoint_pin(base: &str) -> Vec<(String, String)> {
+    let mut env = vec![(CLAUDE_BASE_URL_ENV.to_string(), base.to_string())];
+    env.extend(CLAUDE_PROVIDER_SWITCHES.iter().map(|name| (name.to_string(), "0".to_string())));
+    env
+}
+
 fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
@@ -2452,6 +2470,7 @@ pub fn launch_worked(launch: &str) {
 /// A session launched under `launch` has ended.
 pub fn forget_launch(launch: &str) {
     crate::cloud_config::forget_launch(launch);
+    crate::agent_keys::forget_launch(launch);
     if let Some(store) = installed() {
         store.forget_launch(launch);
     }

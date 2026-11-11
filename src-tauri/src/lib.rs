@@ -8,6 +8,9 @@
 #[cfg(feature = "desktop")]
 mod account;
 mod agent_data;
+mod agent_keys;
+#[cfg(feature = "desktop")]
+mod agent_login_commands;
 pub mod data_privacy;
 #[cfg(feature = "desktop")]
 mod updater;
@@ -444,6 +447,16 @@ pub fn run() {
             configuration_watch::configuration_watch,
             configuration_commands::configuration_write,
             configuration_commands::configuration_review,
+            agent_login_commands::agent_login_status,
+            agent_login_commands::agent_login_save_key,
+            agent_login_commands::agent_login_remove_key,
+            agent_login_commands::agent_login_set_mode,
+            agent_login_commands::agent_login_set_base_url,
+            agent_login_commands::agent_login_verify,
+            agent_login_commands::agent_login_shell_offer,
+            agent_login_commands::agent_login_import_shell,
+            agent_login_commands::agent_login_dismiss_shell,
+            agent_login_commands::agent_login_tabs,
             environment_commands::environment_list,
             environment_commands::environment_reveal,
             environment_commands::environment_copy,
