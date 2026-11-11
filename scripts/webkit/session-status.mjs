@@ -31,7 +31,7 @@ try {
   await page.getByRole("menuitem", { name: "Set status", exact: true }).hover();
   await page.getByRole("menuitemradio", { name: "In review", exact: true }).click();
   await page.getByRole("menu").waitFor({ state: "hidden" });
-  assert.equal(await rail.getByRole("button", { name: "Chat 0", exact: true }).evaluate((row) => document.getElementById(row.getAttribute("aria-describedby"))?.textContent), "Status: In review");
+  assert.equal(await rail.getByRole("button", { name: "Chat 0", exact: true }).evaluate((row) => document.getElementById(row.getAttribute("aria-describedby"))?.textContent?.split(". ").pop()), "Status: In review");
   await rail.getByRole("button", { name: "In review 2", exact: true }).waitFor();
   await rail.getByRole("button", { name: "Backlog 1", exact: true }).waitFor();
 
