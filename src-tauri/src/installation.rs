@@ -223,10 +223,10 @@ mod tests {
         install_skills_at(home.path()).unwrap();
         let status = skill_status_at(home.path());
         assert!(status.installed);
-        assert_eq!(status.targets.len(), 6);
+        assert_eq!(status.targets.len(), 8);
         for (path, stub) in skill_targets(home.path()) {
             let text = path.to_string_lossy();
-            assert!(["/terminalx-cli/SKILL.md", "/computer-use/SKILL.md", "/local-vm/SKILL.md"].iter().any(|name| text.contains(name)));
+            assert!(["/terminalx-cli/SKILL.md", "/computer-use/SKILL.md", "/local-vm/SKILL.md", "/terminalx-orchestrator/SKILL.md"].iter().any(|name| text.contains(name)));
             assert_eq!(std::fs::read_to_string(path).unwrap(), stub);
         }
         assert_eq!(
@@ -234,6 +234,10 @@ mod tests {
             crate::cli::COMPUTER_SKILL_STUB
         );
         assert_eq!(std::fs::read_to_string(home.path().join(".agents/skills/local-vm/SKILL.md")).unwrap(), crate::cli::VM_SKILL_STUB);
+        for skill_home in [".claude", ".agents"] {
+            let stub = home.path().join(format!("{skill_home}/skills/terminalx-orchestrator/SKILL.md"));
+            assert_eq!(std::fs::read_to_string(stub).unwrap(), crate::cli::ORCHESTRATOR_SKILL_STUB);
+        }
     }
 
     #[test]
