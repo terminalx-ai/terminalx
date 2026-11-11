@@ -687,9 +687,9 @@ mod tests {
     /// runtime. It is still tried, slowly, and clears once one attaches.
     #[test]
     fn a_runtime_that_fails_as_it_starts_is_reported_with_how_it_failed() {
-        let now = Instant::now();
         let mut inner = Inner::default();
-        inner.lose(Target::Events, 0, LOST_EVENTS, now, 0.5);
+        inner.lose(Target::Events, 0, LOST_EVENTS, Instant::now(), 0.5);
+        let now = inner.pending[&Target::Events].due;
         let error = anyhow::Error::new(start_failed());
         let failure = Failure::attaching(&error, "connect");
         assert!(failure.blocked, "the next attempt waits the longest");
@@ -713,9 +713,9 @@ mod tests {
     /// followed by another kind of failure no longer says it failed to start.
     #[test]
     fn only_a_failed_start_is_reported_as_one() {
-        let now = Instant::now();
         let mut inner = Inner { generation: 1, ..Default::default() };
-        inner.lose(Target::Events, 1, LOST_EVENTS, now, 0.5);
+        inner.lose(Target::Events, 1, LOST_EVENTS, Instant::now(), 0.5);
+        let now = inner.pending[&Target::Events].due;
         attempt(&mut inner, now, Err(Failure::attaching(&anyhow::anyhow!("connection refused"), "reconnect")));
         assert!(matches!(inner.status("main", attached(1), "", now), ConnectionState::Connecting { .. }));
         let mut due = inner.pending[&Target::Events].due;

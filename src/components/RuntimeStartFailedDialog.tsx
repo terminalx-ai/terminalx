@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { Copy, Cpu, MessageSquareWarning, RotateCw, ScrollText } from "@/icons";
@@ -66,6 +66,7 @@ export function RuntimeStartFailedDialog({ failed }: { failed: LocalRuntimeStart
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState<"restart" | "quit" | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const restart = useRef<HTMLButtonElement>(null);
   const act = async (what: () => Promise<unknown>) => {
     setProblem(null);
     try { await what(); } catch (error) { setProblem(errorMessage(error)); }
@@ -84,7 +85,11 @@ export function RuntimeStartFailedDialog({ failed }: { failed: LocalRuntimeStart
       <DialogContent
         width="max-w-[600px]"
         showClose={false}
-        className="p-6"
+        // Opaque even under glass (where --card is a veil), over a darker
+        // backdrop: nothing behind it can be used until this is answered.
+        className="bg-(--surface-card) p-6"
+        overlayClassName="bg-black/65"
+        onOpenAutoFocus={(event) => { event.preventDefault(); restart.current?.focus(); }}
         onEscapeKeyDown={(event) => event.preventDefault()}
         onInteractOutside={(event) => event.preventDefault()}
       >
@@ -113,16 +118,17 @@ export function RuntimeStartFailedDialog({ failed }: { failed: LocalRuntimeStart
             <Button variant="outline" className="shrink-0 whitespace-nowrap text-[12.5px] text-muted-foreground [&_svg]:size-3.5" onClick={() => void act(() => openUrl(reportUrl(failed)))}>
               <MessageSquareWarning />Report…
             </Button>
-            <Button className="shrink-0 whitespace-nowrap text-[12.5px] font-medium [&_svg]:size-3.5" disabled={busy !== null} onClick={() => void leave("restart")}>
+            <Button ref={restart} className="shrink-0 whitespace-nowrap text-[12.5px] font-medium [&_svg]:size-3.5" disabled={busy !== null} onClick={() => void leave("restart")}>
               <RotateCw />{busy === "restart" ? "Restarting…" : "Restart TerminalX"}
             </Button>
           </div>
         </div>
         {failed.log && (
-          <div className="mt-5 flex items-center gap-1.5 border-t border-hairline pt-3 text-[11.5px] text-faint">
+          <div className="mt-5 flex flex-wrap items-center gap-x-1.5 border-t border-hairline pt-3 text-[11.5px] text-faint">
             <ScrollText className="size-3 shrink-0" aria-hidden />
-            <span className="truncate font-mono" title={failed.log}>{shortPath(failed.log)}</span>
-            <span className="shrink-0">· logs can include file paths and branch names</span>
+            {/* The dot goes with the path, so a narrow window breaks the line after it. */}
+            <span className="min-w-0 [overflow-wrap:anywhere]"><span className="font-mono select-text">{shortPath(failed.log)}</span> ·</span>
+            <span>logs can include file paths and branch names</span>
           </div>
         )}
       </DialogContent>
