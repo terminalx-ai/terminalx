@@ -1,3 +1,4 @@
+import type { PrCheck } from "@/lib/api";
 import type { IssueRef } from "@/types/session";
 
 /** Work, review, conflict resolution, and merge stages for a Git branch session. */
@@ -91,12 +92,31 @@ export interface IssuePipeline {
   localCheck?: { head: string; command: string } | null;
   checkingLocally?: boolean;
   securityAreas: string[];
+  /** When its current wait on GitHub began. */
+  waitingSince?: string | null;
+  /** The checks the merge waits on or stopped on, as last read; absent when it is neither or they could not be read (#881). */
+  checks?: PipelineChecks | null;
   merged?: { commit: string; at: string; by: "pipeline" | "person" | "elsewhere" } | null;
   /** Conversations told the pipeline ended while in a turn; each one's agent is stopped when that turn ends. */
   releasing?: PipelineSessionRef[];
   events: PipelineEvent[];
   created: string;
   modified: string;
+}
+
+/** The checks on a pull request's head while its merge waits on them, or after one failed or they ran out of time. */
+export interface PipelineChecks {
+  /** The commit they ran on. */
+  commit: string;
+  /** Every check GitHub reported on it; a required one not reported yet is `expected`. */
+  checks: PrCheck[];
+  /** The names the merge waits on. The rest are optional and never hold it. */
+  required: string[];
+  /** When the wait on them began, and when it ended: absent while it goes on. */
+  since?: string | null;
+  until?: string | null;
+  /** How long it waits before stopping for a person. */
+  limitMinutes: number;
 }
 
 /**
