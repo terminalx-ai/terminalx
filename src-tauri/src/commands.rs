@@ -2973,6 +2973,74 @@ pub async fn read_image_file(path: String) -> CmdResult<Option<ImageFile>> {
 
 // ------------------------------------------------------------------ git actions & PRs
 
+fn branch_neighbors(session: &index::SessionEntry) -> anyhow::Result<Vec<index::SessionEntry>> {
+    let cwd = std::fs::canonicalize(&session.cwd)?;
+    Ok(index::load()?.into_iter().filter(|neighbor| std::fs::canonicalize(&neighbor.cwd).ok().as_ref() == Some(&cwd)).collect())
+}
+
+fn neighbors_working(sessions: &crate::local_runtime::sessions::Sessions, neighbors: &[index::SessionEntry]) -> anyhow::Result<bool> {
+    // Several conversations may share one checkout. Use live runtime status,
+    // reusing the index/canonical paths during a refresh's two status checks.
+    for neighbor in neighbors {
+        for tab in &neighbor.tabs {
+            if matches!(sessions.status_of(&neighbor.id, &tab.id)?, index::TabStatus::InProgress | index::TabStatus::Waiting) { return Ok(true); }
+        }
+    }
+    Ok(false)
+}
+
+fn branch_agent_working(sessions: &crate::local_runtime::sessions::Sessions, session: &index::SessionEntry) -> anyhow::Result<bool> {
+    neighbors_working(sessions, &branch_neighbors(session)?)
+}
+
+#[tauri::command]
+pub async fn branch_step_refresh(app: AppHandle, state: State<'_, AppState>, session_id: String, mode: crate::branch_step::Refresh) -> CmdResult<crate::branch_step::Snapshot> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        let neighbors = branch_neighbors(&session).map_err(err)?;
+        let working = neighbors_working(&sessions, &neighbors).map_err(err)?;
+        let mut snapshot = crate::branch_step::preview(&session, working, mode).map_err(err)?;
+        if snapshot.state != crate::branch_step::Step::Hidden && neighbors_working(&sessions, &neighbors).map_err(err)? {
+            snapshot.state = crate::branch_step::Step::AgentWorking;
+            snapshot.actions.clear();
+        }
+        let _ = app.emit(crate::branch_step::EVENT, &snapshot);
+        Ok(snapshot)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn branch_step_account(session_id: String, action: crate::branch_step::Action) -> CmdResult<crate::branch_step::Account> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::branch_step::account(&session, action).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn branch_step_action(state: State<'_, AppState>, session_id: String, request: crate::branch_step::Request) -> CmdResult<String> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        let _guard = crate::branch_step::RunGuard::acquire(&session.cwd).map_err(err)?;
+        let working = branch_agent_working(&sessions, &session).map_err(err)?;
+        let now = crate::branch_step::read(&session, working, request.action).map_err(err)?;
+        if branch_agent_working(&sessions, &session).map_err(err)? { return Err("Wait for the agent to finish before running a Git action.".into()); }
+        match crate::branch_step::act(&session, &now, &request, || {
+            anyhow::ensure!(!branch_agent_working(&sessions, &session)?, "Wait for the agent to finish before running a Git action.");
+            Ok(())
+        }).map_err(err)? {
+            crate::branch_step::Outcome::Done(message) => Ok(message),
+            crate::branch_step::Outcome::Prompt(prompt) => {
+                let tab = request.tab_id.as_deref().and_then(|id| session.tab(id)).ok_or_else(|| "Select an agent tab first.".to_string())?;
+                sessions.send_confirmed(&session.id, &tab.id, prompt).map_err(err)?;
+                Ok("Sent to the agent. Progress and results appear in this conversation.".into())
+            }
+        }
+    }).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn git_commit(cwd: String, message: String, paths: Option<Vec<String>>) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || git::commit_all(Path::new(&cwd), &message, paths.as_deref()).map_err(err)).await.map_err(err)?
@@ -3184,6 +3252,12 @@ pub fn gh_available() -> bool {
 pub async fn pty_spawn(state: State<'_, AppState>, id: String, cwd: String, cols: u16, rows: u16, command: Option<String>, title: Option<String>) -> CmdResult<()> {
     let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
     tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.spawn(&id, &cwd, cols, rows, command.as_deref(), title.as_deref())).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn pty_local_links(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.local_links(&id)).await.map_err(err)?.map_err(err)
 }
 
 

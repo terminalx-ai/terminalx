@@ -33,6 +33,29 @@ beforeEach(() => {
   });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+for (const mode of ["unified", "split", "entire"] as const) {
+  it(`shows a reviewer agent's shared-store record on its ${mode} lines and adds it with user notes to chat`, async () => {
+    const after = "first\nsecond\nthird";
+    const s = source(`local:/reviewer-${mode}`);
+    s.fileContentsAt = vi.fn(async () => ({ before: "first\nold", after }));
+    comments = [
+      { id: "agent", revision: 1, base, path: "foo.ts", side: "after", startLine: 2, endLine: 3, lineText: "second\nthird", note: "Validate this range.", sent: false, outdated: false,
+        author: { kind: "agent", role: "reviewer", name: "Reviewer", sessionId: "session", tabId: "reviewer-tab" } },
+      { id: "user", revision: 1, base, path: "foo.ts", side: "after", startLine: 1, endLine: 1, lineText: "first", note: "User note", sent: false, outdated: false },
+    ];
+    render(<ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="foo.ts" before={"first\nold"} after={after} mode={mode} /></ReviewCommentsProvider>);
+    const inline = await waitFor(() => {
+      const el = document.querySelector('.diff-pane article[aria-label="Comment on foo.ts:2-3"]');
+      expect(el).not.toBeNull(); return el as HTMLElement;
+    });
+    expect(within(inline).getByText("Reviewer")).toBeTruthy();
+    expect(within(inline).getByText("Validate this range.")).toBeTruthy();
+    expect(inline.parentElement?.previousElementSibling?.textContent).toContain("third");
+    fireEvent.click(screen.getByRole("button", { name: "Add all to chat (2)" }));
+    expect(getDraft("review-tab")).toBe("foo.ts:1 (after)\n> first\n\nUser note\n\nfoo.ts:2-3 (after)\nReviewer agent: Reviewer\n> second\n> third\n\nValidate this range.");
+    expect(comments.every((comment) => !comment.sent)).toBe(true);
+  });
+}
 for (const mode of ["unified", "split"] as const) {
   it(`saves a ${mode} deleted range inline, edits it, appends a draft and deletes it`, async () => {
     const s = source(`range-${mode}`);

@@ -204,9 +204,11 @@ export function BranchPanel({
   const actions =
     step?.kind === "pull" ? (
       <>
-        {doButton("pull", "Pull")}
+        {!overview.dirty && doButton("pull", "Pull")}
         {askButton("pull", `Pull the latest commits on ${here} from ${overview.upstream ?? "its upstream"}, and resolve anything that conflicts with my work.`)}
       </>
+    ) : step?.kind === "reconcile" ? (
+      askButton("reconcile", `Reconcile ${here} with ${overview.upstream ?? "its upstream"}, preserving both sides and all uncommitted work. Do not force push.`, "Reconcile")
     ) : step?.kind === "conflicts" ? (
       askButton("conflicts", `Merge the latest ${overview.base ?? baseName} into ${here}, and resolve the conflicts.`, "Resolve")
     ) : step?.kind === "commit" ? (

@@ -88,6 +88,28 @@ pub struct BranchOverview {
     /// push to and no pull request, and the work ends by merging it here.
     pub has_remote: bool,
     pub merge: MergeCheck,
+    pub next_step: Option<LocalStep>,
+}
+
+/// The local next step, shared by the Branch tab and session header. Incoming
+/// commits precede a commit-and-push; an unfinished operation precedes either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalStep { Pull, Reconcile, Detached, Conflicts, Commit, Empty, Local, Push }
+
+pub fn next_step(work: &git::WorkStatus, base_conflicts: bool, ahead: u32, has_remote: bool) -> Option<LocalStep> {
+    use LocalStep::*;
+    if !work.conflicted.is_empty() || work.operation.is_some() { return Some(Conflicts); }
+    if work.ahead > 0 && work.behind > 0 { return Some(Reconcile); }
+    if work.behind > 0 { return Some(Pull); }
+    if work.branch.is_some() && work.branch == work.default_branch { return None; }
+    if work.branch.is_none() { return Some(Detached); }
+    if base_conflicts { return Some(Conflicts); }
+    if work.dirty { return Some(Commit); }
+    if ahead == 0 && work.ahead == 0 { return Some(Empty); }
+    if !has_remote { return Some(Local); }
+    if work.ahead > 0 || work.upstream.is_none() { return Some(Push); }
+    None
 }
 
 /// `recorded` is the ref the worktree was made from, when the app made it:
@@ -123,12 +145,13 @@ pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchO
     let current_root = git::run(cwd, &["rev-parse", "--show-toplevel"]).ok().and_then(|path| std::fs::canonicalize(path.strip_suffix('\n').unwrap_or(&path)).ok());
     // An unverified path must not permit switching the agent's own checkout.
     let in_main_checkout = main_root.zip(current_root).is_none_or(|(main, current)| main == current);
+    let comparison_ref = git::comparison_ref(cwd);
     let mut out = BranchOverview {
         branch: status.branch.clone(),
         main_checkout,
         in_main_checkout,
         on_base,
-        upstream: status.upstream.clone(),
+        upstream: comparison_ref.as_deref().map(|r| r.strip_prefix("refs/remotes/").or_else(|| r.strip_prefix("refs/heads/")).unwrap_or(r).to_string()),
         unpushed: status.ahead,
         unpulled: status.behind,
         dirty: status.dirty,
@@ -138,8 +161,9 @@ pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchO
         ..Default::default()
     };
     if out.unpulled > 0 {
-        out.incoming = git::log_commits(cwd, Some("HEAD..@{upstream}"), LISTED).unwrap_or_default();
+        out.incoming = git::log_commits(cwd, Some(&format!("HEAD..{}", comparison_ref.as_deref().unwrap_or("@{upstream}"))), LISTED).unwrap_or_default();
     }
+    out.next_step = next_step(&status, false, status.ahead_of_base.unwrap_or(0), out.has_remote && !local_only);
     let Some(base) = base else { return out };
     let base_ref = if local_only { format!("refs/heads/{base}") } else { base.clone() };
     let fork = git::run(cwd, &["merge-base", &base_ref, "HEAD"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
@@ -153,6 +177,9 @@ pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchO
     out.base_contributors = contributors(cwd, &theirs);
     out.fork_point = fork.as_deref().and_then(|sha| git::log_commits(cwd, Some(sha), 1).ok()).and_then(|mut v| v.pop());
     out.merge = if out.ahead == 0 && (!local_only || git::run(cwd, &["merge-base", "--is-ancestor", "HEAD", &base_ref]).is_ok()) { MergeCheck { state: "merged".into(), conflicted: vec![] } } else { merge_check(cwd, &base_ref) };
+    // A remote ref without tracking configuration is already published.
+    let comparison = git::WorkStatus { upstream: out.upstream.clone(), ..status };
+    out.next_step = next_step(&comparison, out.merge.state == "conflicts", out.ahead, out.has_remote && !local_only);
     out.base = Some(base);
     out
 }
@@ -369,6 +396,26 @@ mod tests {
         assert_eq!(main_checkout_in("worktree \"/repo/line\\nname\"\nHEAD abc\n", false).as_deref(), Some("/repo/line\nname"));
         assert_eq!(main_checkout_in("worktree /repo/line\nname\0HEAD abc\0", true).as_deref(), Some("/repo/line\nname"));
         assert_eq!(main_checkout_in("worktree \"/repo/unsupported\\a\"\n", false), None);
+    }
+
+    #[test]
+    fn shared_next_step_prioritizes_incoming_work_before_committing_or_pushing() {
+        use LocalStep::*;
+        let clean = git::WorkStatus { branch: Some("feature".into()), default_branch: Some("main".into()), upstream: Some("origin/feature".into()), ..Default::default() };
+        assert_eq!(next_step(&clean, false, 1, true), None);
+        for dirty in [false, true] {
+            let behind = git::WorkStatus { behind: 1, dirty, ..clean.clone() };
+            assert_eq!(next_step(&behind, true, 1, true), Some(Pull));
+            assert_eq!(next_step(&git::WorkStatus { ahead: 1, ..behind }, false, 1, true), Some(Reconcile));
+        }
+        assert_eq!(next_step(&git::WorkStatus { dirty: true, ..clean.clone() }, false, 1, true), Some(Commit));
+        assert_eq!(next_step(&git::WorkStatus { ahead: 1, ..clean.clone() }, false, 1, true), Some(Push));
+        assert_eq!(next_step(&git::WorkStatus { conflicted: vec!["file".into()], behind: 1, ..clean.clone() }, false, 1, true), Some(Conflicts));
+        assert_eq!(next_step(&git::WorkStatus { operation: Some("rebase".into()), ..clean.clone() }, false, 1, true), Some(Conflicts));
+        assert_eq!(next_step(&clean, false, 0, true), Some(Empty));
+        assert_eq!(next_step(&clean, false, 1, false), Some(Local));
+        assert_eq!(next_step(&git::WorkStatus { branch: None, ..clean.clone() }, false, 1, true), Some(Detached));
+        assert_eq!(next_step(&git::WorkStatus { branch: Some("main".into()), ..clean }, false, 0, true), None);
     }
 
     #[test]

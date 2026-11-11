@@ -1813,6 +1813,16 @@ impl SessionManager {
         &self.sink
     }
 
+    /// Bind an agent control call to the same launch credential as its hooks.
+    /// Session/tab ids alone are selectors, never proof of the caller's identity.
+    pub(crate) fn authenticates_cli(&self, session_id: &str, tab_id: &str, token: &str) -> bool {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        runtime.is_some_and(|runtime| {
+            let rt = runtime.lock().unwrap();
+            matches!(&rt.engine, Engine::Cli(cli) if crate::hooks::token_matches(&cli.origin.token, token))
+        })
+    }
+
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
         let key = key_of(session_id, tab_id);
         one_per_key(&self.tabs, &key, || {
@@ -2530,7 +2540,9 @@ impl SessionManager {
         // (`cloud_config`) first, so a grant always wins.
         env.extend(crate::cloud_config::launch_config(&harness, &rt.key()).env);
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
-        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &[] }, sink)?;
+        env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
+        env.extend(index::workspace_ports::environment(cwd)?);
+        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &["TERMINALX_PORT".into(), "TERMINALX_PORTS".into()] }, sink)?;
         rt.environment = environment.stamp;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
@@ -4444,6 +4456,8 @@ impl SessionManager {
         // from where it stands now: what a CLI before this one left running
         // went with it.
         rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
+        env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
+        env.extend(index::workspace_ports::environment(&entry.cwd)?);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
         self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -7091,3 +7105,7 @@ mod tests {
         assert_eq!(pty_first("opencode"), None);
     }
 }
+
+#[cfg(test)]
+#[path = "session_review_tests.rs"]
+mod review_tests;

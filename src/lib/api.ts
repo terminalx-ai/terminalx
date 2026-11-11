@@ -2117,6 +2117,8 @@ export type ProjectForge = "github" | "githubUnavailable" | "localOnly";
 
 /** A checkout's branch against the branch it merges into, read from refs already here. */
 export interface BranchOverview {
+  /** Resolved by the same native function as the session header. */
+  nextStep: "pull" | "reconcile" | "detached" | "conflicts" | "commit" | "empty" | "local" | "push" | null;
   branch: string | null;
   /** `origin/main`, else the local default branch; null outside a repository or without one. */
   base: string | null;
@@ -2356,6 +2358,7 @@ export const agentSetup = {
 
 // ---- terminals
 export const pty = {
+  localLinks: (id: string) => invoke<{ sessionId: string; cwd: string; urls: string[] } | null>("pty_local_links", { id }),
   /** `title` names a shell tab for every window that lists it. */
   spawn: (id: string, cwd: string, cols: number, rows: number, command?: string, title?: string) =>
     invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null, title: title ?? null }),
