@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { SessionEntry } from "@/types/session";
 import type { LocalSection, LocalSectionState } from "@/lib/localSections";
+import type { SidebarOrder } from "@/lib/sidebarOrder";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), copyText: vi.fn(), listeners: new Map<string, (event: { payload: unknown }) => void>() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, convertFileSrc: (path: string) => path }));
@@ -21,18 +22,26 @@ const local = await import("@/lib/localSections");
 const store = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
 const filter = await import("@/lib/sidebarFilter");
+const sidebarOrder = await import("@/lib/sidebarOrder");
 
 const session = (id: string, projectPath: string, extra: Partial<SessionEntry> = {}): SessionEntry => ({ id, projectPath, cwd: projectPath, title: `Session ${id}`, created: "2026-11-01T00:00:00Z", modified: "2026-11-01T00:00:00Z", archived: false, pinned: false, worktreeRemoved: false, activeTab: `${id}-tab`, tabs: [{ id: `${id}-tab`, harness: "claude", model: "", permissionMode: "manual", status: "idle", created: "", modified: "" }], ...extra });
 let saved: LocalSectionState;
 let nextSections: LocalSection[];
 let entries: SessionEntry[];
+let savedOrder: SidebarOrder;
 const section = (id: string, sessions: string[] = [], name = id): LocalSection => ({ id, name, sessions });
 
 beforeEach(async () => {
   entries = [session("one", "/web"), session("two", "/api"), session("old", "/web", { archived: true })];
   saved = { revision: local.getLocalSections().revision + 1, sections: [] };
   nextSections = [];
-  mocks.invoke.mockReset().mockImplementation(async (command: string) => {
+  savedOrder = { custom: false, sessions: ["one", "two", "old"], projects: [], revision: sidebarOrder.getSidebarOrder().revision + 1 };
+  mocks.invoke.mockReset().mockImplementation(async (command: string, args) => {
+    if (command === "sidebar_order") return savedOrder;
+    if (command === "set_sidebar_order") {
+      savedOrder = { ...savedOrder, ...args.patch, sessions: args.patch.sessions ? sidebarOrder.mergeSidebarOrder(savedOrder.sessions, args.patch.sessions) : savedOrder.sessions, revision: savedOrder.revision + 1 };
+      return savedOrder;
+    }
     if (command === "local_sections") return saved;
     if (command === "edit_local_section") { saved = { revision: saved.revision + 1, sections: nextSections }; return saved; }
     if (command === "list_projects") return { projects: [{ path: "/web", name: "Web", kind: "git" }, { path: "/api", name: "API", kind: "git" }], lastSelected: null };
@@ -45,9 +54,9 @@ beforeEach(async () => {
   filter.setSidebarFilter("all");
   Element.prototype.scrollIntoView = vi.fn();
   Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo;
-  await act(async () => { await store.bootSessions(); await store.refreshEverything(); await local.bootLocalSections(); await local.refreshLocalSections(); local.closeSectionDialog(); store.setShowArchived(false); store.openHome(); });
+  await act(async () => { await store.bootSessions(); await store.refreshEverything(); await local.bootLocalSections(); await local.refreshLocalSections(); await sidebarOrder.bootSidebarOrder(); mocks.listeners.get("sidebar_order_changed")?.({ payload: savedOrder }); local.closeSectionDialog(); store.setShowArchived(false); store.openHome(); });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /><LocalSectionDialogs /></TooltipProvider>);
 async function seed(sections: LocalSection[]) { saved = { revision: saved.revision + 1, sections }; await act(() => local.refreshLocalSections()); }
@@ -55,6 +64,46 @@ async function menu(name: string, action: string) { fireEvent.click(screen.getBy
 async function submit(name: string) { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name })); await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull()); }
 
 describe("personal local sections", () => {
+  it.each(["simple", "list", "status"] as const)("keeps custom order and keyboard dragging inside sections in %s layout", async (sidebarLayout) => {
+    prefs.setPrefs({ sidebarLayout, animations: false });
+    await seed([section("Release", ["one", "two"])]);
+    mount();
+    const region = () => screen.getByRole("region", { name: "Release section" });
+    const rows = () => [...region().querySelectorAll("[data-row-sessions]")].map((row) => row.getAttribute("data-row-sessions"));
+    const recency = rows();
+    expect(within(region()).queryByRole("button", { name: /Reorder/ })).toBeNull();
+    await act(() => sidebarOrder.saveSidebarOrder({ custom: true, sessions: ["two", "one", "old"] }));
+    expect(rows()).toEqual(["two", "one"]);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const id = this.querySelector("[data-row-sessions]")?.getAttribute("data-row-sessions");
+      const top = Math.max(0, rows().indexOf(id ?? "")) * 40;
+      return { x: 0, y: top, top, bottom: top + 32, left: 0, right: 200, width: 200, height: 32, toJSON() {} } as DOMRect;
+    });
+    const key = (target: Element | Document, code: string) => act(async () => { fireEvent.keyDown(target, { code, key: code === "Space" ? " " : code }); });
+    const announced = () => [...document.querySelectorAll('[role="status"]')].map((node) => node.textContent).join(" ");
+    const handle = within(region()).getByRole("button", { name: "Reorder Session two" });
+    handle.focus();
+    await key(handle, "Space");
+    await waitFor(() => expect(announced()).toContain("Picked up Session two. Position 1 of 2."));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await key(document, "ArrowDown");
+    await waitFor(() => expect(announced()).toContain("Moved Session two. Position 2 of 2."));
+    await key(document, "Space");
+    await waitFor(() => expect(rows()).toEqual(["one", "two"]));
+    expect(mocks.invoke).toHaveBeenCalledWith("set_sidebar_order", { patch: { sessions: ["one", "two"] } });
+    expect(savedOrder.sessions).toEqual(["one", "two", "old"]);
+    expect(local.getLocalSections().sections[0]!.sessions).toEqual(["one", "two"]);
+    await act(() => sidebarOrder.saveSidebarOrder({ sessions: ["two", "one"], custom: false }));
+    expect(rows()).toEqual(recency);
+    await act(() => sidebarOrder.saveSidebarOrder({ custom: true }));
+    expect(rows()).toEqual(["two", "one"]);
+    entries = [...entries, session("new", "/web", { created: "2026-11-02T00:00:00Z" })];
+    await act(() => store.refreshEverything());
+    await seed([section("Release", ["one", "two", "new"])]);
+    expect(rows()).toEqual(["new", "two", "one"]);
+    expect(document.querySelectorAll('[data-row-sessions="one"]')).toHaveLength(1);
+  });
+
   it.each(["simple", "list"] as const)("creates, renames, changes emoji and deletes without changing sessions in %s layout", async (sidebarLayout) => {
     prefs.setPrefs({ sidebarLayout }); mount();
     // The sidebar has no standing New section row; a section is made from the command palette or a chat's menu.

@@ -1,5 +1,7 @@
 import { SettingsFileRow } from "./SettingsFile";
 import { useSettingsFile } from "@/lib/settingsFile";
+import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
+import { SidebarOrderError } from "@/components/layout/SidebarSort";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "@/icons";
@@ -135,6 +137,7 @@ export function GeneralTab() {
 }
 
 export function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
+  const order = useSidebarOrder();
   const { theme, mode, resolvedMode } = useTheme();
   const prefs = usePrefs();
   const light = hasLightMode(theme);
@@ -227,6 +230,10 @@ export function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
           />
         }
       />
+      <RegisteredSetting setting="appearance.customOrder"
+        control={<Switch aria-label="Custom order" checked={order.custom} disabled={!order.loaded || order.pending} onCheckedChange={(custom) => void saveSidebarOrder({ custom })} />}
+      />
+      <SidebarOrderError />
       <RegisteredSetting setting="appearance.tabBar"
         control={<Switch aria-label="Tab bar" checked={prefs.tabStrip} onCheckedChange={(v) => setPrefs({ tabStrip: v })} />}
       />
@@ -361,6 +368,7 @@ function BrowserRuntimeRow() {
 
 /** What is installed, where, and how to get the rest. Nothing is installed by the app. */
 export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
+  const prefs = usePrefs();
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
   const [checkRun, setCheckRun] = useState(0);
@@ -432,6 +440,12 @@ export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
         ))}
         {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
       </ul></RegisteredSetting>
+      <RegisteredSetting setting="agents.followUps" control={
+        <select aria-label="Follow-ups while the agent works" value={prefs.followUps} onChange={e => setPrefs({ followUps: e.target.value as "now" | "hold" })} className="rounded-md border border-hairline bg-background px-2 py-1 text-xs">
+          <option value="now">Send to the agent now</option>
+          <option value="hold">Hold until the turn ends</option>
+        </select>
+      } />
       <AgentIdleSettings />
       <CommandApprovalSettings />
       <ArchiveIdleSettings />

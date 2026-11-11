@@ -38,7 +38,7 @@ vi.mock("@/lib/terminal", async (original) => ({
   // and the switch's refusal/retry path are covered in createInstance.test.ts.
   ensureTerminalAttached: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn() }));
+vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn(), subscribePrefs: () => () => {} }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set<string>() }));
 vi.mock("@/lib/models", async (original) => ({

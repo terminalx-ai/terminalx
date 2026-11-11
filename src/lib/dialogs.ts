@@ -24,6 +24,7 @@ export interface WorkspaceRemoveRequest {
 }
 
 interface State {
+  workspaceRestore: string | null;
   workspaceRemove: WorkspaceRemoveRequest | null;
   bypass: { harness: string; confirm: () => void } | null;
   /** The session being renamed. */
@@ -47,7 +48,7 @@ export interface TabRequest {
   tab: string | null;
 }
 
-let state: State = { workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, linkIssue: null, worktreeCleanup: false, renameTab: null, closeTabs: null };
+let state: State = { workspaceRestore: null, workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, linkIssue: null, worktreeCleanup: false, renameTab: null, closeTabs: null };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -157,4 +158,12 @@ export function openWorktreeCleanup() {
 
 export function closeWorktreeCleanup() {
   set({ worktreeCleanup: false });
+}
+
+export function openWorkspaceRestore(sessionId: string) {
+  set({ workspaceRestore: sessionId });
+}
+
+export function closeWorkspaceRestore() {
+  set({ workspaceRestore: null });
 }

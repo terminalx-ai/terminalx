@@ -68,6 +68,20 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     status_bar_settings: { visible: false },
     // How the workspaces' tabs are arranged: nothing saved, and what a page saves is kept and announced as the backend does.
     tab_state: { workspaces: {}, closed: [] },
+    sidebar_order: { custom: false, sessions: [], projects: [], revision: 0 },
+    set_sidebar_order: ({ patch }) => {
+      const merge = (saved, requested) => {
+        if (!requested) return saved;
+        const ids = [...new Set(requested)];
+        const slots = [...ids.filter((id) => !saved.includes(id)), ...saved];
+        let at = 0;
+        return slots.map((id) => ids.includes(id) ? ids[at++] : id);
+      };
+      const saved = answers.sidebar_order;
+      answers.sidebar_order = { ...saved, ...patch, sessions: merge(saved.sessions, patch.sessions), projects: merge(saved.projects, patch.projects), revision: saved.revision + 1 };
+      setTimeout(() => window.__PW_STUB__.emit("sidebar_order_changed", answers.sidebar_order), 0);
+      return answers.sidebar_order;
+    },
     set_tab_layout: ({ workspace, layout }) => {
       answers.tab_state = { ...answers.tab_state, workspaces: { ...answers.tab_state.workspaces, [workspace]: layout } };
       setTimeout(() => window.__PW_STUB__.emit("tab_state_changed", answers.tab_state), 0);

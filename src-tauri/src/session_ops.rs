@@ -943,6 +943,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
         let listed: Vec<String> = strays.iter().map(|stray| format!("{} {} ({})", stray.pid, stray.program, if stray.stopped { "stopped" } else { "left running" })).collect();
         log::info!("removing workspace {}: processes still working in it: {}", target.display(), listed.join("; "));
     }
+    let removed_workspace = on_disk.then(|| crate::workspace_restore::removal_record(&project, &target));
     let removal = if on_disk {
         let verified_head = if after.safe { after.head.as_deref() } else { None };
         let options = crate::workspaces::DeleteOptions { delete_branch: request.delete_branch, direct: request.direct, verified_head };
@@ -961,7 +962,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
             affected
         }
         SessionsFate::Keep => {
-            let moved = mark_workspace_sessions_removed(&project, &affected)?;
+            let moved = mark_workspace_sessions_removed(&project, &affected, removed_workspace.as_ref())?;
             notify_workspace_settled(sink, request.project_path, &moved);
             moved
         }
@@ -971,7 +972,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
 
 /// Record that the workspace these sessions ran in is gone: they keep their
 /// conversations and work from the project root from now on.
-pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[SessionEntry]) -> Result<Vec<SessionEntry>> {
+pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[SessionEntry], removed: Option<&index::RemovedWorkspace>) -> Result<Vec<SessionEntry>> {
     for session in affected { crate::checkpoints::prune(session).map_err(err)?; }
     let affected_ids: std::collections::HashSet<_> = affected.iter().map(|session| session.id.clone()).collect();
     let branch = git::current_branch(project);
@@ -980,6 +981,7 @@ pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[Sessio
         for session in sessions {
             if affected_ids.contains(&session.id) {
                 index::mark_workspace_removed(session, branch.clone());
+                if let Some(removed) = removed { session.removed_workspace = Some(removed.clone()); }
                 session.modified = index::now();
                 moved.push(session.clone());
             }
