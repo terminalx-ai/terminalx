@@ -3,7 +3,7 @@ import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { PanelPresence } from "@/components/layout/PanelPresence";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
+import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, FolderSync, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import type { GithubIdentity } from "@/lib/api";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
@@ -66,7 +66,7 @@ import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
 import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
 import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { copyText } from "@/lib/clipboard";
-import { RepoMirrorControl } from "./RepoMirrorControl";
+import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
 import { BranchGitButton } from "./BranchGitButton";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
@@ -990,9 +990,14 @@ export function SessionView({
 
 /** The workspace's details, out of the title bar: the folder it lives in, the commit it started from, and a way to it. */
 function WorkspaceMenu({ session, branch, folder, base, onContinue }: { session: SessionEntry; branch: string | null | undefined; folder: string | null; base: string | null; onContinue: (() => void) | null }) {
+  // The crumb has no room for another control beside the issue, automation
+  // and pipeline chips: starting a mirror is a workspace action in this menu,
+  // and a running one shows in the title bar, where it can be stopped.
+  const mirror = useRepoMirror(session);
   return (
     <>
-      <RepoMirrorControl key={session.id} session={session} />
+      {mirror.on && <RepoMirrorButton mirror={mirror} />}
+      {mirror.dialog}
       <DropdownMenu>
         <WithTooltip label="Workspace">
           <DropdownMenuTrigger asChild>
@@ -1019,6 +1024,11 @@ function WorkspaceMenu({ session, branch, folder, base, onContinue }: { session:
           <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd)}>
             <FolderOpen /> Reveal in Finder
           </DropdownMenuItem>
+          {mirror.eligible && !mirror.on && (
+            <DropdownMenuItem onSelect={mirror.show}>
+              <FolderSync /> {mirror.label}…
+            </DropdownMenuItem>
+          )}
           {onContinue && (
             <>
               <DropdownMenuSeparator />
