@@ -20,7 +20,7 @@ import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
 import { isUnread } from "@/lib/dashboard";
 import { usePrefs } from "@/lib/prefs";
-import { addProject, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
+import { addProject, conversationTitle, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
 import { useSessionSummaries, type Summaries } from "@/lib/summaries";
 import { openRenameSession } from "@/lib/dialogs";
 import { relativeTime } from "@/lib/time";

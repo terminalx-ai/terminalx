@@ -1,3 +1,4 @@
+import { captureReviewSend, markReviewsSent, restoreReviewSend } from "@/lib/reviewComments";
 import { ContextPopover } from "./UsagePopovers";
 import type { Turn } from "@/lib/transcript";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -418,6 +419,7 @@ export function Composer({
     [token, draft, caret, onDraftChange],
   );
 
+  const [reviewReceiptError, setReviewReceiptError] = useState<{ message: string; retry: () => Promise<void> } | null>(null);
   const send = useCallback(async (alternate = false) => {
     const text = draft.trim();
     if ((!text && !attachments.length) || disabled || prMention.attaching) return;
@@ -427,6 +429,7 @@ export function Composer({
     // The message goes to the chat at once, drawn as sending, and the composer
     // is free for the next one (#727): what was set aside to send a recalled
     // message comes back, or nothing. Failing, the message comes back here.
+    const reviewSend = captureReviewSend(tab.id, text);
     const completeHistory = recall.captureSend();
     // Bind this send's learnable correction before the draft is cleared.
     const learnOnSuccess = dictation.prepareSend(text);
@@ -442,12 +445,16 @@ export function Composer({
         const back = withReturned(latestDraft.current, text);
         if (back !== latestDraft.current) onDraftChange(back);
       } else returnToDraft(tab.id, text);
+      restoreReviewSend(tab.id, text, reviewSend);
       images.settle(false);
       // Keep terminal failure with the same owner so a remounted tab sees it.
       finishComposerSend(sendScope, operation, error);
       return;
     }
     images.settle(true);
+    void markReviewsSent(reviewSend).catch((error) => {
+      if (mounted.current) setReviewReceiptError({ retry: () => markReviewsSent(reviewSend), message: String(error) });
+    });
     // Learning belongs to this accepted send even if a newer draft is visible.
     learnOnSuccess();
     finishComposerSend(sendScope, operation);
@@ -523,6 +530,7 @@ export function Composer({
     <div className="mx-auto w-full max-w-3xl px-6 pb-4 pt-2">
       {disabledReason && <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>}
       <DictationStatus dictation={dictation} />
+      {reviewReceiptError && <div role="alert" className="mb-2 text-xs text-warning">Message accepted, but review comments could not be marked Sent: {reviewReceiptError.message} <button type="button" onClick={() => void reviewReceiptError.retry().then(() => setReviewReceiptError(null), (error) => setReviewReceiptError({ ...reviewReceiptError, message: String(error) }))}>Retry marking Sent</button></div>}
       <div
         className={cn(
           "relative rounded-2xl bg-composer glass p-2.5 shadow-surface hairline focus-within:ring-1 focus-within:ring-ring/40",

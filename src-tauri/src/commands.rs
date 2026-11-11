@@ -5219,6 +5219,13 @@ pub async fn cloud_mirror_claim_owner(account: String, legacy_email: Option<Stri
 }
 
 #[tauri::command]
+pub async fn review_comments(workspace: String, action: crate::store::review_comments::Action) -> CmdResult<Vec<crate::store::review_comments::Comment>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::store::review_comments::apply(&crate::store::root().map_err(err)?, &workspace, action).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn turn_checkpoint(session_id: String, tab_id: String, seq: u64) -> CmdResult<Option<crate::checkpoints::Checkpoint>> {
     tauri::async_runtime::spawn_blocking(move || crate::checkpoints::get(&session_id, &tab_id, seq).map_err(err)).await.map_err(err)?
 }

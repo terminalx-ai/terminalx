@@ -1,3 +1,4 @@
+import { useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, TriangleAlert } from "@/icons";
@@ -50,6 +51,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const review = useReviewComments();
+  useEffect(() => { review?.refresh(); }, [files, head, review?.refresh]);
   const current = files.find((file) => file.path === selected);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -218,6 +221,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[35%] border-b border-hairline" : "flex-1")}>
             <ReviewFileList
               workspace={source.key}
+              base={head ?? undefined}
               files={files}
               selected={selected}
               onSelect={(p) => {
@@ -259,6 +263,8 @@ function CommitRow({ source, commit, open, onToggle, onReview }: { source: GitSo
   const [selected, setSelected] = useState<string | null>(null);
   const [base, setBase] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const review = useReviewComments();
+  useEffect(() => { review?.refresh(); }, [files, base, review?.refresh]);
   const current = files.find((file) => file.path === selected);
   useEffect(() => {
     if (!open) return;
@@ -296,7 +302,7 @@ function CommitRow({ source, commit, open, onToggle, onReview }: { source: GitSo
         <div className="ml-3 border-l border-hairline">
           {commit.body && <div className="px-3 py-1 text-xs text-muted-foreground whitespace-pre-wrap select-text">{commit.body}</div>}
           {onReview && <Button size="xs" variant="ghost" onClick={() => onReview(commit.sha)}>Review this commit</Button>}
-          <ReviewFileList workspace={source.key} files={files} selected={selected} onSelect={setSelected} empty="No files." />
+          <ReviewFileList workspace={source.key} base={base ?? undefined} files={files} selected={selected} onSelect={setSelected} empty="No files." />
           {error && <p role="alert" className="p-2 text-xs text-destructive">{error}</p>}
           {current && base && <div className="h-96 border-t border-hairline">
             <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={base} head={commit.tree} />
