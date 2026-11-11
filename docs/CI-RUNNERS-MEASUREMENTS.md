@@ -138,7 +138,7 @@ hashes were checked against the worktree. Temporary diagnostic instrumentation
 and the transfer server were removed/stopped after validation.
 
 These checks establish local correctness, including a real Linux pass. Hosted
-AMD64 CI and independent review remain publication gates; no local timing is
+AMD64 CI and independent review remain merge gates; no local timing is
 substituted for the incomplete ten-run comparisons or live Hetzner acceptance.
 
 ## Observed baseline
