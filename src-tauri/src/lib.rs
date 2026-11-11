@@ -87,6 +87,8 @@ mod branch_overview;
 #[cfg(feature = "desktop")]
 mod branch_step;
 mod git;
+#[cfg(feature = "desktop")]
+mod repo_mirror;
 mod checkpoints;
 mod worktree_files;
 mod git_media;
@@ -804,6 +806,9 @@ pub fn run() {
             commands::update_project,
             commands::set_project_logo,
             commands::list_workspaces,
+            commands::repo_mirror_status,
+            commands::repo_mirror_start,
+            commands::repo_mirror_stop,
             commands::preview_workspace_name,
             commands::rename_workspace,
             commands::rename_branch,

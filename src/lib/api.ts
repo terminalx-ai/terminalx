@@ -321,6 +321,14 @@ export interface TabState {
   closed: ClosedTab[];
 }
 
+/** One local repository's mirror; source stays set when cleanup is needed. */
+export interface RepoMirrorStatus {
+  root: string;
+  source: string | null;
+  active: boolean;
+  error: string | null;
+}
+
 /** How a workspace is removed. */
 export interface WorkspaceRemoveOptions {
   /** Receipt for the failed archive run the person explicitly chose to bypass. */
@@ -561,6 +569,9 @@ export const api = {
   updateProject: (path: string, patch: ProjectPatch) => invoke<Project>("update_project", { path, patch }),
   setProjectLogo: (path: string, source: string | null) => invoke<Project>("set_project_logo", { path, source }),
   listWorkspaces: (projectPath: string) => invoke<Workspace[]>("list_workspaces", { projectPath }),
+  repoMirrorStatus: (sessionId: string) => invoke<RepoMirrorStatus>("repo_mirror_status", { sessionId }),
+  repoMirrorStart: (sessionId: string, confirmed: boolean) => invoke<RepoMirrorStatus>("repo_mirror_start", { sessionId, confirmed }),
+  repoMirrorStop: (sessionId: string) => invoke<RepoMirrorStatus>("repo_mirror_stop", { sessionId }),
   previewWorkspaceName: (projectPath: string, requested?: string | null) =>
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
