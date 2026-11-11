@@ -11,7 +11,7 @@ import { useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
 import { getPrefs } from "@/lib/prefs";
 import { openBrowserTab } from "@/lib/browser";
-import { closePeer, useTabRow } from "@/lib/sessionTabs";
+import { closePeer, paneRow, useTabRow } from "@/lib/sessionTabs";
 import { addTab, useSessionStore } from "@/lib/sessions";
 import type { ShortcutId } from "@/lib/shortcuts";
 import { moveTabBy, openTabAt, reopenClosedTab, stepTab } from "@/lib/tabActions";
@@ -68,8 +68,8 @@ function TabPositionShortcut({ action, open }: { action: ShortcutId; open: () =>
 }
 
 function LocalTabActions({ session, selected }: { session: SessionEntry; selected: SelectedSessionTab | null }) {
-  // The whole workspace's row: the shortcuts count and step through the tabs the strip shows, in its order.
-  const row = useTabRow(session);
+  // Tab shortcuts act within the pane that contains this window's selected tab.
+  const row = paneRow(useTabRow(session), selected ? `${selected.kind}:${selected.id}` : null);
   const editors = useEditors();
   const hasEditors = editors.editors.some((editor) => editor.sessionId === session.id && !isReviewEditor(editor));
   const activeEditor = editors.editors.find((e) => e.id === editors.active[session.id] && !isReviewEditor(e))?.id ?? null;
