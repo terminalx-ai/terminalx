@@ -1856,8 +1856,8 @@ export type LocalRuntimeState =
   | { state: "connected"; epoch: string; generation: number; view: number; outdated?: LocalRuntimeOutdated }
   /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
   | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
-  /** Retrying cannot help until something outside this window changes. */
-  | { state: "unavailable"; message: string }
+  /** Retrying cannot help until something outside this window changes. `startFailed`: the runtime the desktop started exited before it attached (PRO-287). */
+  | { state: "unavailable"; message: string; startFailed?: LocalRuntimeStartFailed }
   /** There, but not answering: reconnecting reaches the same wedged runtime (#661). `keeps`: restarting it hands what it runs to a fresh runtime first (#765). */
   | { state: "unresponsive"; message: string; epoch: string | null; keeps: boolean }
   /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. `keeping`: it is handed over, and its agents and terminals keep running (#765). */
@@ -1883,6 +1883,28 @@ export interface LocalRuntimeOutdated {
   keeps: boolean;
   /** When it `keeps`: what `work` names, as the runtime names it. Restart now sends it back, so that only what was shown stops. */
   unkept: LocalRuntimeWorkItem[];
+}
+
+/** A runtime the desktop started that exited, or never ran, before it attached (PRO-287, `launch.rs`). */
+export interface LocalRuntimeStartFailed {
+  /** The executable that was started: "terminalx-serve". */
+  process: string;
+  /** Its exit code, when it exited. */
+  code: number | null;
+  /** The signal that ended it, when one did. With no code either, it never ran. */
+  signal: number | null;
+  /** How long it ran. */
+  ranMs: number;
+  /** The last error it logged while starting, or why it could not be started. */
+  error: string | null;
+  /** Where its log is, when it has one. */
+  log: string | null;
+  /** When it failed, in milliseconds since the Unix epoch. */
+  at: number;
+  /** This app's version. */
+  app: string;
+  /** "macOS 26.1 (25B78)", when it could be read. */
+  os: string | null;
 }
 
 /** One thing a runtime runs, as it names it (`session::retire::Work`). Sent back as it came, never built here. */
@@ -1921,6 +1943,8 @@ export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
 export const localRuntime = {
   status: () => invoke<LocalRuntimeState>("local_runtime_status"),
   reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
+  /** The end of the runtime's log, as it wrote it, for Copy logs (PRO-287). */
+  log: () => invoke<string>("local_runtime_log"),
   /** Restart a runtime that stopped answering; the desktop attaches a fresh one. One that can be handed over keeps what it runs unless `how` says otherwise (#765); a refusal is a `LocalRuntimeRestartRefused`, with nothing stopped. */
   restart: (epoch: string | null, how: LocalRuntimeRestart = "keeping", stop: LocalRuntimeWorkItem[] = []) =>
     invoke<LocalRuntimeState>("local_runtime_restart", { epoch, how, stop }),

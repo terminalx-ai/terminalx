@@ -21,6 +21,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::client::Blocked;
+use super::launch::StartFailed;
 use super::desktop::{Desktop, Lost, Watch};
 use crate::remote::{host::jitter, protocol::{backoff, BACKOFF_CEILING}};
 use crate::AppState;
@@ -47,8 +48,14 @@ pub enum ConnectionState {
     /// down; otherwise every window's live updates are.
     Connecting { terminal: bool, attempt: u32, retry_in_ms: u64, down_ms: u64, message: String },
     /// Retrying cannot help until something outside this window changes. It
-    /// still goes on, at the slowest pace.
-    Unavailable { message: String },
+    /// still goes on, at the slowest pace. `start_failed`: the runtime this
+    /// desktop started exited before it could attach (PRO-287); trying again
+    /// starts the same runtime, so the window says what failed instead.
+    Unavailable {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        start_failed: Option<StartFailed>,
+    },
     /// The runtime is there but does not answer, as the watchdog or an
     /// attempt to attach found (`ui.rs`). Reconnecting reaches the same wedged
     /// process; only restarting it recovers (#661). `epoch` names the attached
@@ -96,6 +103,28 @@ struct Retry {
     loss: u64,
     message: String,
     blocked: bool,
+    /// The runtime started for the last attempt exited before attaching.
+    start_failed: Option<StartFailed>,
+}
+
+/// Why an attempt failed. `blocked`: trying again cannot help until
+/// something outside the app changes, so it goes on at the slowest pace.
+#[derive(Debug)]
+struct Failure { message: String, blocked: bool, start_failed: Option<StartFailed> }
+
+impl Failure {
+    fn new(message: impl Into<String>, blocked: bool) -> Self { Self { message: message.into(), blocked, start_failed: None } }
+
+    /// An attempt to attach, as `error` ended it, said with `doing`: "connect", "reconnect".
+    fn attaching(error: &anyhow::Error, doing: &str) -> Self {
+        if let Some(blocked) = error.downcast_ref::<Blocked>() { return Self::new(blocked.0.clone(), true); }
+        let message = format!("Could not {doing} to the background runtime: {error:#}");
+        // A runtime that fails as it starts fails the same way on the next attempt.
+        match error.downcast_ref::<StartFailed>() {
+            Some(failed) => Self { message, blocked: true, start_failed: Some(failed.clone()) },
+            None => Self::new(message, false),
+        }
+    }
 }
 
 /// The window's attachment as it stands, read before the supervisor's lock.
@@ -139,7 +168,7 @@ impl Inner {
             .filter(|(at, _)| now.saturating_duration_since(*at) < STABLE)
             .map_or(0, |(_, attempt)| attempt.saturating_add(1));
         self.pending.insert(target, Retry { attempt, tries: 0, since: now, due: now + backoff(attempt, jitter),
-            loss, message: message.into(), blocked: false });
+            loss, message: message.into(), blocked: false, start_failed: None });
         true
     }
 
@@ -156,7 +185,7 @@ impl Inner {
         }
     }
 
-    fn settle(&mut self, target: &Target, loss: u64, outcome: Result<u64, (String, bool)>, now: Instant, jitter: f64) -> Option<Report> {
+    fn settle(&mut self, target: &Target, loss: u64, outcome: Result<u64, Failure>, now: Instant, jitter: f64) -> Option<Report> {
         if let (Target::Events, Ok(generation)) = (target, &outcome) {
             self.generation = self.generation.max(*generation);
             self.pending.retain(|target, _| *target == Target::Events);
@@ -178,13 +207,14 @@ impl Inner {
                 retry.due = now + backoff(retry.attempt, jitter);
                 None
             }
-            Err((message, blocked)) => {
+            Err(Failure { message, blocked, start_failed }) => {
                 retry.attempt = retry.attempt.saturating_add(1);
                 let retry_in = if blocked { BACKOFF_CEILING } else { backoff(retry.attempt, jitter) };
                 retry.due = now + retry_in;
                 let changed = message != retry.message;
                 retry.message = message;
                 retry.blocked = blocked;
+                retry.start_failed = start_failed;
                 (changed || tries.is_power_of_two())
                     .then(|| Report::Failed { tries, down, message: retry.message.clone(), retry_in })
             }
@@ -193,17 +223,17 @@ impl Inner {
 
     fn status(&self, window: &str, attached: Option<Snapshot>, unattached: &str, now: Instant) -> ConnectionState {
         if self.halted {
-            return ConnectionState::Unavailable { message: "TerminalX is stopping its background runtime.".into() };
+            return ConnectionState::Unavailable { message: "TerminalX is stopping its background runtime.".into(), start_failed: None };
         }
         let retrying = |retry: &Retry, terminal: bool| if retry.blocked {
-            ConnectionState::Unavailable { message: retry.message.clone() }
+            ConnectionState::Unavailable { message: retry.message.clone(), start_failed: retry.start_failed.clone() }
         } else {
             ConnectionState::Connecting { terminal, attempt: retry.attempt.saturating_add(1),
                 retry_in_ms: ms(retry.due.saturating_duration_since(now)),
                 down_ms: ms(now.saturating_duration_since(retry.since)), message: retry.message.clone() }
         };
         if let Some(retry) = self.pending.get(&Target::Events) { return retrying(retry, false); }
-        let Some(attached) = attached else { return ConnectionState::Unavailable { message: unattached.into() } };
+        let Some(attached) = attached else { return ConnectionState::Unavailable { message: unattached.into(), start_failed: None } };
         let Some(epoch) = attached.epoch else {
             // Closed a moment ago; its loss is on the way.
             return ConnectionState::Connecting { terminal: false, attempt: 1, retry_in_ms: 0, down_ms: 0, message: LOST_EVENTS.into() };
@@ -236,16 +266,13 @@ impl Supervisor {
                         // not reached by trying again: say so (#661).
                         state.runtime_health.attach_failed(&error);
                         state.runtime_replacement.attach_failed();
-                        match error.downcast_ref::<Blocked>() {
-                            Some(blocked) => (blocked.0.clone(), true),
-                            None => (format!("Could not reconnect to the background runtime: {error:#}"), false),
-                        }
+                        Failure::attaching(&error, "reconnect")
                     }),
                     Target::View(window) => reopen(&app, window)
-                        .map_err(|error| (format!("Could not reconnect this window's terminal output: {error:#}"), false)),
+                        .map_err(|error| Failure::new(format!("Could not reconnect this window's terminal output: {error:#}"), false)),
                 };
-                if let (Target::Events, Err((message, _))) = (&target, &outcome) {
-                    *state.runtime_error.lock().unwrap() = message.clone();
+                if let (Target::Events, Err(failure)) = (&target, &outcome) {
+                    *state.runtime_error.lock().unwrap() = failure.message.clone();
                 }
                 let reattached = match (&target, &outcome) { (Target::Events, Ok(generation)) => Some(*generation), _ => None };
                 if reattached.is_some() { state.runtime_health.clear(); }
@@ -311,12 +338,8 @@ impl Supervisor {
         let mut inner = self.inner.lock().unwrap();
         if !inner.lose(Target::Events, 0, LOST_EVENTS, now, jitter()) { return; }
         let loss = inner.losses;
-        let failure = match error.downcast_ref::<Blocked>() {
-            Some(blocked) => (blocked.0.clone(), true),
-            None => (format!("Could not connect to the background runtime: {error:#}"), false),
-        };
         // Logged as the launch's own failure to attach.
-        let _ = inner.settle(&Target::Events, loss, Err(failure), now, jitter());
+        let _ = inner.settle(&Target::Events, loss, Err(Failure::attaching(error, "connect")), now, jitter());
         drop(inner);
         self.wake.notify_all();
         self.emit();
@@ -415,6 +438,11 @@ pub(crate) fn bundled(app: &AppHandle, home: &std::path::Path) -> anyhow::Result
     Ok(binary)
 }
 
+/// Where a runtime started by this desktop keeps its log: beside the app's (#661).
+pub(crate) fn runtime_log(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_log_dir().ok().map(|dir| dir.join("runtime.log"))
+}
+
 /// Discovery, then a new attachment published in place of the old one.
 pub(crate) fn attach(app: &AppHandle) -> anyhow::Result<u64> {
     let state = app.state::<AppState>();
@@ -425,7 +453,7 @@ pub(crate) fn attach(app: &AppHandle) -> anyhow::Result<u64> {
     // attachment, or a new one if it exited. A live owner is never replaced
     // here: one older than this app is, once attached (`replace.rs`).
     // A runtime started here keeps its log beside the app's (#661).
-    let log = app.path().app_log_dir().ok().map(|dir| dir.join("runtime.log"));
+    let log = runtime_log(app);
     // What was decided about the runtime before an update, if the app that
     // installed it left a plan for this one (#766).
     let plan = super::update_plan::load(&home);
@@ -489,11 +517,11 @@ mod tests {
     fn connected(status: &ConnectionState) -> bool { matches!(status, ConnectionState::Connected { .. }) }
 
     /// Run the attempt that is due at `now`, if any, with `outcome`.
-    fn attempt(inner: &mut Inner, now: Instant, outcome: Result<u64, (String, bool)>) -> Target {
+    fn attempt(inner: &mut Inner, now: Instant, outcome: Result<u64, Failure>) -> Target {
         attempt_reported(inner, now, outcome).0
     }
 
-    fn attempt_reported(inner: &mut Inner, now: Instant, outcome: Result<u64, (String, bool)>) -> (Target, Option<Report>) {
+    fn attempt_reported(inner: &mut Inner, now: Instant, outcome: Result<u64, Failure>) -> (Target, Option<Report>) {
         let (target, loss) = inner.due(now).expect("an attempt is due");
         let report = inner.settle(&target, loss, outcome, now, 0.5);
         (target, report)
@@ -512,7 +540,7 @@ mod tests {
         for attempt in 1..=9 {
             now += 10 * SECOND;
             let message = if attempt == 6 { "refused for a new reason" } else { "refused" };
-            let (_, report) = attempt_reported(&mut inner, now, Err((message.into(), false)));
+            let (_, report) = attempt_reported(&mut inner, now, Err(Failure::new(message, false)));
             if let Some(Report::Failed { tries, .. }) = report { reported.push(tries); }
         }
         assert_eq!(reported, [1, 2, 4, 6, 7, 8], "first, doubling, and each change of reason (into the new one and back)");
@@ -551,7 +579,7 @@ mod tests {
             let Err(Some(wait)) = inner.due(now) else { panic!("the next attempt is scheduled") };
             delays.push(wait);
             now += wait;
-            attempt(&mut inner, now, Err(("refused".into(), false)));
+            attempt(&mut inner, now, Err(Failure::new("refused", false)));
         }
         assert!(delays.iter().all(|delay| *delay >= Duration::from_millis(250) && *delay <= 10 * SECOND), "{delays:?}");
         assert!(delays.windows(2).all(|pair| pair[0] <= pair[1]), "backoff never shortens: {delays:?}");
@@ -624,7 +652,7 @@ mod tests {
         inner.lose(Target::Events, 1, LOST_EVENTS, now, 0.5);
         for _ in 0..3 {
             let at = due(&inner);
-            attempt(&mut inner, at, Err(("refused".into(), false)));
+            attempt(&mut inner, at, Err(Failure::new("refused", false)));
         }
         let recovered = due(&inner);
         attempt(&mut inner, recovered, Ok(2));
@@ -641,11 +669,64 @@ mod tests {
         let now = Instant::now();
         let mut inner = Inner { generation: 1, ..Default::default() };
         inner.lose(Target::Events, 1, LOST_EVENTS, now, 0.5);
-        attempt(&mut inner, now + SECOND, Err(("Another TerminalX window is connected.".into(), true)));
-        assert_eq!(inner.status("main", attached(1), "", now + SECOND), ConnectionState::Unavailable { message: "Another TerminalX window is connected.".into() });
+        attempt(&mut inner, now + SECOND, Err(Failure::new("Another TerminalX window is connected.", true)));
+        assert_eq!(inner.status("main", attached(1), "", now + SECOND), ConnectionState::Unavailable { message: "Another TerminalX window is connected.".into(), start_failed: None });
         assert_eq!(inner.due(now + SECOND), Err(Some(BACKOFF_CEILING)));
         attempt(&mut inner, now + SECOND + BACKOFF_CEILING, Ok(2));
         assert!(connected(&inner.status("main", attached(2), "", now + 12 * SECOND)), "it clears by itself once it can attach");
+    }
+
+    fn start_failed() -> StartFailed {
+        StartFailed { process: "terminalx-serve".into(), code: Some(78), signal: None, ran_ms: 400,
+            error: Some("terminalx-serve: open the state directory: Permission denied".into()), log: Some("/logs/runtime.log".into()),
+            at: 1_762_854_072_000, app: "0.2.30".into(), os: Some("macOS 26.1 (25B78)".into()) }
+    }
+
+    /// PRO-287: a runtime that exits as it starts is said to have failed,
+    /// with how, in place of reconnecting: trying again starts the same
+    /// runtime. It is still tried, slowly, and clears once one attaches.
+    #[test]
+    fn a_runtime_that_fails_as_it_starts_is_reported_with_how_it_failed() {
+        let now = Instant::now();
+        let mut inner = Inner::default();
+        inner.lose(Target::Events, 0, LOST_EVENTS, now, 0.5);
+        let error = anyhow::Error::new(start_failed());
+        let failure = Failure::attaching(&error, "connect");
+        assert!(failure.blocked, "the next attempt waits the longest");
+        assert!(failure.message.starts_with("Could not connect to the background runtime: local runtime failed before attachment: terminalx-serve exited with code 78"), "{}", failure.message);
+        attempt(&mut inner, now, Err(failure));
+        let status = inner.status("main", None, "", now);
+        let ConnectionState::Unavailable { start_failed: Some(failed), .. } = &status else { panic!("unavailable, with the failure: {status:?}") };
+        assert_eq!(failed, &start_failed());
+        assert_eq!(inner.due(now), Err(Some(BACKOFF_CEILING)));
+        assert_eq!(serde_json::to_value(&status).unwrap()["startFailed"], serde_json::json!({
+            "process": "terminalx-serve", "code": 78, "signal": null, "ranMs": 400,
+            "error": "terminalx-serve: open the state directory: Permission denied", "log": "/logs/runtime.log",
+            "at": 1_762_854_072_000_i64, "app": "0.2.30", "os": "macOS 26.1 (25B78)" }), "fields, not a message to parse");
+        // Attaching later clears it.
+        attempt(&mut inner, now + BACKOFF_CEILING, Ok(1));
+        assert!(connected(&inner.status("main", attached(1), "", now + BACKOFF_CEILING)));
+    }
+
+    /// PRO-287: only a failed start carries one. A lost connection that
+    /// cannot be re-established yet stays a reconnect, and a failed start
+    /// followed by another kind of failure no longer says it failed to start.
+    #[test]
+    fn only_a_failed_start_is_reported_as_one() {
+        let now = Instant::now();
+        let mut inner = Inner { generation: 1, ..Default::default() };
+        inner.lose(Target::Events, 1, LOST_EVENTS, now, 0.5);
+        attempt(&mut inner, now, Err(Failure::attaching(&anyhow::anyhow!("connection refused"), "reconnect")));
+        assert!(matches!(inner.status("main", attached(1), "", now), ConnectionState::Connecting { .. }));
+        let mut due = inner.pending[&Target::Events].due;
+        attempt(&mut inner, due, Err(Failure::attaching(&anyhow::Error::new(start_failed()), "reconnect")));
+        assert!(matches!(inner.status("main", attached(1), "", due), ConnectionState::Unavailable { start_failed: Some(_), .. }));
+        due = inner.pending[&Target::Events].due;
+        attempt(&mut inner, due, Err(Failure::attaching(&anyhow::anyhow!("connection refused"), "reconnect")));
+        assert!(matches!(inner.status("main", attached(1), "", due), ConnectionState::Connecting { .. }));
+        // Serialized without the field when there is none.
+        let blocked = ConnectionState::Unavailable { message: "Another TerminalX window is connected.".into(), start_failed: None };
+        assert_eq!(serde_json::to_value(&blocked).unwrap(), serde_json::json!({ "state": "unavailable", "message": "Another TerminalX window is connected." }));
     }
 
     #[test]
@@ -663,6 +744,6 @@ mod tests {
         let inner = Inner { generation: 1, ..Default::default() };
         let closed = Some(Snapshot { generation: 1, epoch: None, view: 0 });
         assert!(matches!(inner.status("main", closed, "", now), ConnectionState::Connecting { terminal: false, .. }));
-        assert_eq!(inner.status("main", None, "not attached", now), ConnectionState::Unavailable { message: "not attached".into() });
+        assert_eq!(inner.status("main", None, "not attached", now), ConnectionState::Unavailable { message: "not attached".into(), start_failed: None });
     }
 }
