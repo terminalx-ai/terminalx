@@ -95,6 +95,7 @@ function forgetOnceDelivered(launched: Launched, revision: number) {
 export async function launchContinuation(
   context: ContinuationContext, settings: LaunchSettings, prompt: string,
   onCreated: (launched: Launched) => void, existing?: Launched, onDelivering?: () => void,
+  purpose: "continue" | "review" = "continue",
 ): Promise<ContinuationResult> {
   let launched = existing;
   try {
@@ -105,7 +106,8 @@ export async function launchContinuation(
       seedDraft(launched, prompt);
       onCreated(launched);
     }
-    prompt = await preparePipelineContinuation(launched.sessionId, launched.tab.id, prompt, settings.pipeline);
+    // A second opinion is independent of the source's issue automation.
+    if (purpose === "continue") prompt = await preparePipelineContinuation(launched.sessionId, launched.tab.id, prompt, settings.pipeline);
     await agent.ensureStarted(launched.sessionId, launched.tab.id);
   } catch (e) {
     return { stage: "launch", launched, error: `Could not start the new session: ${errorMessage(e)}` };
