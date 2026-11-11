@@ -26,13 +26,15 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { openTerminal, useTerminals } from "@/lib/terminal";
 import { cn } from "@/lib/cn";
-import { clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
+import { cancelTerminalView, clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
 import { useSessionStore } from "@/lib/sessions";
-import { BUSY_NOTICE, classifyRecovery, CONTINUE_PROMPT, isBusyRefusal, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
+import { classifyRecovery, CONTINUE_PROMPT, requestRefusalNotice, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
 import { actionReports, inputOf, RecoveryReports, reporterFor, useExposure, type RecoveryAction, type Surface } from "@/lib/recoveryReports";
 import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
+import { useNoticeDeferral } from "@/lib/noticeDeferral";
+import { ResetChatDialog } from "./ResetChatDialog";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { useModels } from "@/lib/models";
 import { openWorkspaceDelete } from "@/lib/dialogs";
@@ -44,9 +46,8 @@ import { interruptUnanswered } from "@/types/events";
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
 /**
- * Why a cloud tab's terminal view did not open (#644): the runtime's own
- * words for its refusal (mid-turn, someone else driving, no right to type),
- * never the recovery text a local tab's failure is mapped to.
+ * A view-change refusal describes that request, not an agent failure.
+ * Local PTY/native tabs and cloud tabs retain their usable chat (#644/#816).
  */
 export function terminalViewRefusal(message: string): string {
   const said = message.trim();
@@ -120,7 +121,7 @@ export function TabView({
 }) {
   const backend = given ?? localSessionBackend(session.id);
   const local = backend.caps.local;
-  const isGit = useSessionIsGit(session);
+  const isGit = useSessionIsGit(session, local);
   const log = useTabLog(backend.logSessionId, tab.id);
   const draft = useDraft(tab.id);
   const safeError = (e: unknown) => RECOVERY_MESSAGES[classifyRecovery(String(e))];
@@ -134,8 +135,10 @@ export function TabView({
   const sendState = useComposerSend(sendScope);
   // Native Codex still on its turn refused a send (#815): a refusal of the request, not a failure of the turn.
   // The composer says so with the message back in it; nothing is raised and the tab is left as it is.
-  const sendBusy = local && sendState.error != null && isBusyRefusal(sendState.error);
-  const [busyRefused, setBusyRefused] = useState(false);
+  const sendNotice = local && sendState.error != null ? requestRefusalNotice(sendState.error) : null;
+  const sendBusy = sendNotice !== null;
+  const [busyRefused, setBusyRefused] = useState<string | null>(null);
+  const [resetTarget, setResetTarget] = useState<{ endSeq: number | null } | null>(null);
   const [localError, setError] = useState<string | null>(null);
   const error = localError ?? (sendState.error != null && !sendBusy ? (local ? safeError(sendState.error) : commandError(sendState.error)) : null);
   const views = useTabViews();
@@ -145,7 +148,7 @@ export function TabView({
   const terminalMode = tabViewIn(views.views, tab) === "terminal" && (local || !!remoteTerminal);
   const viewError = views.errors[tab.id] ?? null;
   // Over the tab, whatever the composer already says (a lease, view only): the switch is in the header.
-  const remoteViewRefusal = !local && viewError ? terminalViewRefusal(viewError) : null;
+  const viewRefusal = viewError && (!local || isPtyFirst(tab.harness)) ? terminalViewRefusal(viewError) : null;
   const terms = useTerminals();
   const ptyFirst = local && isPtyFirst(tab.harness);
   const paneId = tabPaneId(tab);
@@ -200,7 +203,7 @@ export function TabView({
   const [notesOpen, setNotesOpen] = useState(false);
   // The retry and resume flows restart a local agent process; a cloud tab's runtime recovers itself.
   // A tab that is a terminal has no agent to recover: what went wrong there is said as it is.
-  const recovery = !backend.caps.recovery || readOnly ? null : eventRecovery ?? (error || viewError ? classifyRecovery(error ?? viewError!) : null);
+  const recovery = !backend.caps.recovery || readOnly ? null : eventRecovery ?? (error || (viewError && !viewRefusal) ? classifyRecovery(error ?? viewError!) : null);
 
 
   const backendRef = useRef(backend);
@@ -255,16 +258,21 @@ export function TabView({
   }, [active, tab.status, backend.key, tab.id]);
 
   // Nothing is running in a conversation that is only being read.
+  const canReset = local && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation
+    && (tab.harness === "claude" || tab.harness === "codex") && !session.worktreeRemoved;
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
   // Only while the turn it met runs: once that has ended, the message in the composer is simply unsent.
-  const busyNotice = (sendBusy || busyRefused) && live ? BUSY_NOTICE : null;
+  const busyNotice = live ? sendNotice ?? busyRefused : null;
   useEffect(() => {
-    if (!live) setBusyRefused(false);
+    if (!live) setBusyRefused(null);
   }, [live]);
   const projected = view.transcript(live);
   const transcript = useMemo(() => log.permissionResponses?.size
     ? { ...projected, pendingAsks: projected.pendingAsks.filter(ask => log.permissionResponses?.get(ask.requestId) !== "answered") }
     : projected, [projected, log.permissionResponses]);
+  // The live terminal can need an answer even while the chat's selection is
+  // historical. Hidden tabs and history shown in the chat do not hold notices.
+  useNoticeDeferral(active && (terminalMode || !readOnly) && (!!recovery || tab.status === "waiting"));
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
   const range = useMemo(() => changeRange(events, session.baseRef), [events, session.baseRef]);
@@ -309,7 +317,7 @@ export function TabView({
       // A viewer, or someone else holds this tab's lease (PRO-30): nothing is queued.
       if (blockedRef.current) throw new Error(blockedRef.current);
       setError(null);
-      setBusyRefused(false);
+      setBusyRefused(null);
       setStopped(false);
       // Each local send is timed, by this window's clock: Send pressed, the
       // message first on screen as sending, the runtime's answer here, and the
@@ -329,7 +337,7 @@ export function TabView({
         }
       } catch (e) {
         // The composer keeps the message and says why (`busyNotice`); the running turn is not touched.
-        if (local && isBusyRefusal(e)) throw e;
+        if (local && requestRefusalNotice(e)) throw e;
         setError(local ? safeError(e) : commandError(e));
         backend.setTabStatus(tab.id, "waiting");
         throw e;
@@ -442,12 +450,12 @@ export function TabView({
   // A failed send or recovery's error, said as a warning; native Codex still on its turn
   // refused the request instead (#815), which the composer says without raising anything.
   function refused(e: unknown) {
-    if (local && isBusyRefusal(e)) setBusyRefused(true);
+    if (local && requestRefusalNotice(e)) setBusyRefused(requestRefusalNotice(e));
     else setError(safeError(e));
   }
   // What a failed action's result says of its error: the warning it would be, never its words.
   function failure(e: unknown): { errorKind?: RecoveryKind } {
-    return local && isBusyRefusal(e) ? {} : { errorKind: classifyRecovery(String(e)) };
+    return local && requestRefusalNotice(e) ? {} : { errorKind: classifyRecovery(String(e)) };
   }
 
   // One recovery at a time. It sends through the backend, not the composer's
@@ -647,6 +655,7 @@ export function TabView({
     <RecoveryReports.Provider value={reporter}>
     <Chat
       sessionId={backend.logSessionId}
+      checkpointTabId={local && !readOnly ? tab.id : undefined}
       transcript={{ ...transcript, pendingAsks: [] }}
       stream={log.stream}
       cwd={local ? session.cwd : undefined}
@@ -659,6 +668,7 @@ export function TabView({
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       sending={sending}
+      onReset={canReset ? (endSeq) => setResetTarget({ endSeq }) : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       footer={
         readOnly ? (
@@ -743,7 +753,7 @@ export function TabView({
           settingsNote={settingsNotice === "ignored" ? SETTINGS_IGNORED_REASON : settingsNotice === "pending" ? SETTINGS_WITH_NEXT_MESSAGE : byHandNote}
           settingsNoteWarning={settingsNotice === "ignored"}
           canStop={!gate || gate.mayStop}
-          disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local ? safeError(viewError) : null) ?? backend.readOnlyReason}
+          disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? backend.readOnlyReason}
           autoFocus={active && focused}
         />
         </>
@@ -753,35 +763,12 @@ export function TabView({
     </RecoveryReports.Provider>
   );
 
-  const info = views.info[tab.id];
   const terminal = (
-    <div className="flex h-full min-h-0 flex-1 flex-col">
-      <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
-        <span className="shrink-0 text-foreground" data-testid="terminal-view-title">{terminalTab ? "Terminal" : `Terminal view · ${TAB_STATUS_LABEL[tab.status]}`}</span>
-        {live && !recovery && <Button size="xs" variant="outline" disabled={recovering} onClick={(e) => { actions.pressedWith(inputOf(e)); stop("chat"); }}>Stop session</Button>}
-        {!terminalTab && (
-          <span className="min-w-0 truncate font-mono text-[11px] text-faint" title={info?.command}>
-            {info?.command}
-          </span>
-        )}
-        <span className="ml-auto min-w-0 text-faint">
-          {terminalTab
-            ? "No agent is running in this tab. Start one here and the tab becomes its tab."
-            : byHand
-              ? `${agentLabel} was started in this terminal. The chat is the same conversation.`
-              : ptyFirst
-                ? "The chat is the same conversation."
-                : "The chat resumes when you switch back."}
-          {tab.harness === "claude" && !terminalTab && (
-            <> Claude Code may show its own diff sidebar. Type <code>/diff</code> in the terminal to hide or show it.</>
-          )}
-        </span>
-        {terminalTab && held && !pane?.exited && (
-          <Button size="xs" variant="outline" disabled={resuming} onClick={() => resume(held)} data-testid="terminal-resume">
-            <Play /> Resume {agentLabel}
-          </Button>
-        )}
-      </div>
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-terminal">
+      {/* No bar over a terminal that is working: what it would say (its state, its command line, how the chat
+          relates to it) the tab already shows or nobody needs. Its few controls sit in the terminal's corner
+          toolbar, shown on hover; only a problem below, such as an exit or an error, takes a row. */}
+      <span className="sr-only" data-testid="terminal-view-title">{terminalTab ? "Terminal" : `Terminal view · ${TAB_STATUS_LABEL[tab.status]}`}</span>
       {terminalTab && error && (
         <div role="alert" className="shrink-0 bg-warning/10 px-3 py-1.5 text-xs text-foreground">{error}</div>
       )}
@@ -800,19 +787,34 @@ export function TabView({
         </div>
       )}
       <div className="relative min-h-0 flex-1">
-        <TerminalView id={paneId} visible={active && terminalMode} focused={focused} />
+        <TerminalView
+          id={paneId}
+          visible={active && terminalMode}
+          focused={focused}
+          pinned={terminalTab && !!held && !pane?.exited}
+          actions={
+            <>
+              {terminalTab && held && !pane?.exited && (
+                <Button size="xs" variant="ghost" disabled={resuming} onClick={() => resume(held)} data-testid="terminal-resume">
+                  <Play /> Resume {agentLabel}
+                </Button>
+              )}
+              {live && !recovery && <Button size="xs" variant="ghost" disabled={recovering} onClick={(e) => { actions.pressedWith(inputOf(e)); stop("chat"); }}>Stop session</Button>}
+            </>
+          }
+        />
       </div>
     </div>
   );
 
   // The same header as a local tab's terminal view; what it attaches to is on the VM.
   const cloudTerminal = remoteTerminal && (
-    <div className="flex h-full min-h-0 flex-1 flex-col">
-      <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-terminal">
+      {/* Like the local view: a row only when there is something wrong to say. */}
+      <div className={remoteTerminal.client ? "sr-only" : "flex min-h-8 shrink-0 items-center border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground"}>
         <span className="shrink-0 text-foreground" data-testid="cloud-terminal-view-title">
           Terminal view · {remoteTerminal.client ? TAB_STATUS_LABEL[tab.status] : remoteTerminal.asleep ? "Stopped" : "Not connected"}
         </span>
-        <span className="ml-auto min-w-0 text-faint">The chat is the same conversation.</span>
       </div>
       <CloudAgentTerminal
         target={remoteTerminal}
@@ -844,9 +846,15 @@ export function TabView({
         unreadNotes={collab.unreadNotes[tab.id] ?? 0}
       />
     )}
-    {remoteViewRefusal && (
+    {views.waiting[tab.id] && (
+      <div role="status" className="flex shrink-0 items-center gap-2 bg-veil px-3 py-1.5 text-xs" data-testid="terminal-view-pending">
+        <span className="min-w-0 flex-1">Terminal view will open when Codex finishes this turn. You can interrupt the turn to open it sooner.</span>
+        <Button variant="ghost" size="xs" onClick={() => cancelTerminalView(tab.id)}>Stay in chat</Button>
+      </div>
+    )}
+    {viewRefusal && (
       <div role="alert" className="flex shrink-0 items-center gap-2 bg-warning/10 px-3 py-1.5 text-xs text-foreground" data-testid="terminal-view-refused">
-        <span className="min-w-0 flex-1">{remoteViewRefusal}</span>
+        <span className="min-w-0 flex-1">{viewRefusal}</span>
         <Button variant="ghost" size="icon-xs" aria-label="Dismiss" onClick={() => clearTabViewError(tab.id)}>
           <X />
         </Button>
@@ -898,6 +906,10 @@ export function TabView({
     </div>}
     {permissionNotice && <p role="status" className="shrink-0 border-b border-hairline px-4 py-2 text-xs text-muted-foreground">{permissionNotice}</p>}
     {terminalMode && banner("top")}
+    {canReset && tab.resetBackupId && !live && <div className="border-b border-hairline px-4 py-2 text-xs">
+      <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo last chat reset</Button>
+    </div>}
+    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}
       onDelivered={(to) => {
         dialogShown.end("submitted");

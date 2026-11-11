@@ -1,3 +1,4 @@
+import { useSettingsFile } from "@/lib/settingsFile";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -8,6 +9,7 @@ export { NATIVE_CODEX_DESCRIPTION } from "./settingsRegistry";
 
 /** Features that are on only when the reader turns them on. */
 export function ExperimentalTab() {
+  const { revision } = useSettingsFile();
   const [nativeCodex, setNativeCodex] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,7 +26,7 @@ export function ExperimentalTab() {
     return () => {
       live = false;
     };
-  }, []);
+  }, [revision]);
 
   // A paired phone can change it too (Settings → This Mac on the phone).
   useEffect(() => {

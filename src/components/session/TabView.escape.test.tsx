@@ -7,7 +7,7 @@ import type { SessionEntry } from "@/types/session";
 // and the agent's process stays; in the terminal view it is typed into the
 // agent's own screen. Only the explicit stop ends the process, and only that
 // shows the "Session closed" banner.
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {} } }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
@@ -19,8 +19,9 @@ vi.mock("@/lib/tabViews", () => ({
 }));
 // The agent's own screen: an xterm with the textarea it reads keys from.
 vi.mock("@/components/terminal/TerminalView", () => ({
-  TerminalView: () => (
+  TerminalView: ({ actions }: { actions?: React.ReactNode }) => (
     <div className="terminal-host">
+      {actions}
       <div className="xterm">
         <textarea aria-label="Terminal input" />
       </div>

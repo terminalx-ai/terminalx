@@ -155,6 +155,7 @@ fn parse(args: &[String]) -> Result<Command> {
 
 /// The binary's whole `main`. Returns the process exit code.
 pub fn main() -> i32 {
+    if crate::startup::probe_cli() { return 0; }
     // A hook process is short lived and answers before anything else starts.
     if crate::hooks::run_statusline_cli() || crate::hooks::run_hook_cli() {
         return 0;
@@ -217,6 +218,7 @@ pub fn main() -> i32 {
 
 /// Everything a running runtime owns; dropped in `shutdown`.
 struct Runtime {
+    _settings_watcher: crate::store::settings::file::Watcher,
     lifetime: Option<Arc<crate::local_runtime::Lifetime>>,
     sink: Arc<BroadcastSink>,
     host: Arc<crate::harness::host::Host>,
@@ -537,6 +539,7 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     // local history before hooks can publish live activity.
     crate::store::activity::claim();
     let sink = Arc::new(BroadcastSink::new(1024));
+    let settings_watcher = crate::store::settings::file::Watcher::start(sink.clone())?;
     let host = Arc::new(crate::harness::host::Host::new());
     let terminals = Arc::new(crate::pty::Terminals::new());
     #[cfg(unix)]
@@ -564,6 +567,9 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
         Arc::new(crate::status::StatusState::default()),
         control_endpoint.clone(),
     );
+    if cfg!(target_os = "macos") && options.runtime_kind == RuntimeKind::Local && !options.self_test {
+        if let Err(error) = crate::startup::start(manager.clone(), sink.clone(), handed_over) { log::error!("start local startup monitor: {error:#}"); }
+    }
     manager.follow_pane_exits();
     // Terminals first, then the tabs whose CLIs run in them; the hooks those
     // CLIs fire are answered only once their tabs are there to hear them.
@@ -676,7 +682,7 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     if adopted.is_some() {
         bridge.thaw();
     }
-    Ok(Runtime { lifetime, sink, host, terminals, manager, socket, bridge, project_root, interrupted, pipelines })
+    Ok(Runtime { _settings_watcher: settings_watcher, lifetime, sink, host, terminals, manager, socket, bridge, project_root, interrupted, pipelines })
 }
 
 /// The hook sockets a handover brought, the cards its hooks wait on, and

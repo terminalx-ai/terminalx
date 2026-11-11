@@ -7,7 +7,7 @@ vi.mock("@/lib/api", () => ({ pty: {} }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 import { TerminalView } from "./TerminalView";
-import { disposeInstance, getInstance, IDLE_TERMINAL_LIMIT, peekInstance, terminalCounters, type TerminalInstance } from "@/lib/terminal";
+import { disposeInstance, ensureTerminalAttached, getInstance, IDLE_TERMINAL_LIMIT, peekInstance, terminalCounters, type TerminalInstance } from "@/lib/terminal";
 
 function instance(): TerminalInstance {
   const term = { options: {}, refresh: vi.fn(), focus: vi.fn(), dispose: vi.fn(), cols: 80, rows: 24, buffer: { normal: { length: 0 }, alternate: { length: 0 } } };
@@ -20,6 +20,20 @@ beforeEach(() => {
 });
 
 describe("a terminal view", () => {
+  it("can attach an evicted hidden terminal before switching away from Chat", async () => {
+    const ensureAttached = vi.fn().mockResolvedValue(undefined);
+    const create = vi.fn(() => ({ ...instance(), ensureAttached }));
+    const view = render(<TerminalView id="p1" visible={false} create={create} />);
+    disposeInstance("p1");
+    await ensureTerminalAttached("p1");
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(ensureAttached).toHaveBeenCalledOnce();
+    expect(peekInstance("p1")?.el.isConnected).toBe(false);
+    view.unmount();
+    disposeInstance("p1");
+    await expect(ensureTerminalAttached("p1")).rejects.toThrow("not ready to attach");
+  });
+
   it("restores a retired parser when the window returns without changing tabs", () => {
     const descriptor = Object.getOwnPropertyDescriptor(document, "hidden");
     const create = vi.fn(instance);

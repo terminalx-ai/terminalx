@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook } from "@testing-library/react";
+import type { SessionEntry, TabEntry } from "@/types/session";
 
 const pty = vi.hoisted(() => ({
   attachSized: vi.fn().mockResolvedValue(undefined),
@@ -8,7 +10,8 @@ const pty = vi.hoisted(() => ({
   write: vi.fn().mockResolvedValue(undefined),
   resize: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("@/lib/api", () => ({ pty }));
+const agent = vi.hoisted(() => ({ ensureStarted: vi.fn(), tabPane: vi.fn(), reportTerminalView: vi.fn() }));
+vi.mock("@/lib/api", () => ({ pty, agent, errorMessage: (error: unknown) => error instanceof Error ? error.message : String(error) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock("@/lib/terminalWebgl", () => ({ showWebgl: vi.fn(), hideWebgl: vi.fn() }));
 
@@ -26,6 +29,50 @@ afterEach(() => vi.restoreAllMocks());
 const settled = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe("a local terminal's attachment", () => {
+  it("keeps Chat until real PTY attachment succeeds, reports a refusal, and retries without another owner", async () => {
+    pty.detachAll.mockResolvedValue(undefined);
+    let attached!: () => void;
+    let refused!: (error: Error) => void;
+    pty.attachSized.mockImplementation(() => new Promise<void>((resolve, reject) => { attached = resolve; refused = reject; }));
+    agent.ensureStarted.mockResolvedValue(undefined);
+    agent.tabPane.mockResolvedValue({ paneId: "tab:t1", command: "codex resume", harness: "codex" });
+    agent.reportTerminalView.mockResolvedValue(undefined);
+    const { createInstance } = await import("./TerminalView");
+    const { getInstance, disposeInstance } = await import("@/lib/terminal");
+    const views = await import("@/lib/tabViews");
+    const tab: TabEntry = { id: "t1", harness: "codex", model: "", permissionMode: "auto", status: "idle", created: "", modified: "" };
+    const session: SessionEntry = { id: "s1", projectPath: "/work", cwd: "/work", worktreeRemoved: false, title: "Fixture", created: "", modified: "", archived: false, pinned: false, tabs: [tab], activeTab: tab.id };
+    const inst = getInstance("tab:t1", () => createInstance("tab:t1", "dark"));
+    const hook = renderHook(views.useTabViews);
+    try {
+      await settled();
+      let switching!: Promise<void>;
+      await act(async () => { switching = views.enterTerminalView(session, tab); await settled(); });
+      expect(hook.result.current.views.t1).toBeUndefined();
+      expect(hook.result.current.switching.t1).toBe(true);
+      expect(agent.reportTerminalView.mock.calls.some(([, , report]) => report.stage === "opened")).toBe(false);
+      await act(async () => { refused(new Error("PTY output stream unavailable")); await switching; });
+      expect(views.tabViewOf(tab)).toBe("chat");
+      expect(hook.result.current.errors.t1).toBe("PTY output stream unavailable");
+      expect(agent.reportTerminalView).toHaveBeenCalledWith("s1", "t1", expect.objectContaining({ stage: "failed", errorCategory: "attach" }));
+
+      await act(async () => { switching = views.enterTerminalView(session, tab); await settled(); });
+      await vi.waitFor(() => expect(pty.attachSized).toHaveBeenCalledTimes(2));
+      expect(views.tabViewOf(tab)).toBe("chat");
+      await act(async () => { attached(); await switching; });
+      expect(views.tabViewOf(tab)).toBe("terminal");
+      expect(hook.result.current.errors.t1).toBeNull();
+      expect(agent.reportTerminalView.mock.calls.filter(([, , report]) => report.stage === "opened")).toHaveLength(1);
+      await act(async () => { await views.leaveTerminalView(session, tab); await views.enterTerminalView(session, tab); });
+      expect(pty.attachSized).toHaveBeenCalledTimes(2); // Reuse the established stream.
+      expect(inst.attachedAs?.(pty.attachSized.mock.calls[1][1])).toBe(true);
+    } finally {
+      hook.unmount();
+      disposeInstance("tab:t1");
+      pty.attachSized.mockResolvedValue(undefined);
+    }
+  });
+
   it("parses late sized output through the real feed without resizing the PTY backwards", async () => {
     pty.detachAll.mockResolvedValue(undefined);
     const { createInstance } = await import("./TerminalView");

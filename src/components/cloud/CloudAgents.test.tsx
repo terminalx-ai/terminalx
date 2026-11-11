@@ -44,6 +44,8 @@ import { BypassDialog } from "@/components/session/BypassDialog";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { refreshHarnesses } from "@/lib/sessions";
 import type { HarnessInfo } from "@/types/session";
+import { noticesDeferred } from "@/lib/noticeDeferral";
+import { applyEvent } from "@/lib/agentEvents";
 
 const scope = { organizationId: "org-1", workspaceId: "ws-1" };
 
@@ -174,11 +176,11 @@ function makeClient() {
 }
 let client: ReturnType<typeof makeClient>;
 
-function view(state: WorkspaceConnectionState, workspaceState: string | null = "ready", wake = vi.fn()) {
+function view(state: WorkspaceConnectionState, workspaceState: string | null = "ready", wake = vi.fn(), active = true) {
   client.connection = state;
   return (
     <TooltipProvider>
-      <CloudAgentsView scope={scope} client={client as unknown as WorkspaceRpcClient} state={state} workspaceState={workspaceState} wakeWorkspace={wake} />
+      <CloudAgentsView scope={scope} client={client as unknown as WorkspaceRpcClient} state={state} workspaceState={workspaceState} wakeWorkspace={wake} active={active} />
     </TooltipProvider>
   );
 }
@@ -309,7 +311,7 @@ describe("cloud agent tabs", () => {
     fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
     const form = await screen.findByTestId("cloud-agent-new");
     // The workspace's own CLI says what its alias runs.
-    await waitFor(() => expect(within(form).getByTitle("Model").textContent).toBe("Opus (latest · Opus 4.6)"));
+    await waitFor(() => expect(within(form).getByTitle("Model").textContent).toBe("Opus 4.6"));
     await choose("Model", "Opus 4.6");
     fireEvent.submit(form);
     await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledWith(expect.objectContaining({ agent: "claude", model: "claude-opus-4-6" })));
@@ -373,8 +375,13 @@ describe("cloud agent tabs", () => {
         ],
       }),
     ];
-    render(view(connected()));
+    const mounted = render(view(connected()));
     const allow = await screen.findByRole("button", { name: /^Allow/ });
+    expect(noticesDeferred()).toBe(true);
+    mounted.rerender(view(connected(), "ready", undefined, false));
+    expect(noticesDeferred()).toBe(false);
+    mounted.rerender(view(connected()));
+    expect(noticesDeferred()).toBe(true);
     fireEvent.click(allow);
     fireEvent.click(allow);
     await waitFor(() => expect(enqueued).toHaveLength(1));
@@ -383,6 +390,11 @@ describe("cloud agent tabs", () => {
     fireEvent.click(screen.getByRole("button", { name: /Deny/ }));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(enqueued).toHaveLength(1);
+    // A queued answer is still pending until the runtime confirms the decision.
+    expect(noticesDeferred()).toBe(true);
+    act(() => applyEvent(ev(3, { type: "permission_decided", requestId: "req-9", allowed: true, label: "Allowed", automatic: false })));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull());
+    expect(noticesDeferred()).toBe(false);
   });
 
   it("shows follow-ups the runtime holds until the turn ends, and steers or stops the running turn", async () => {
@@ -841,7 +853,7 @@ describe("a new agent tab's launch settings (#554)", () => {
   it("switches agent to that agent's saved model and effort, from the workspace's own list", async () => {
     setPrefs({ lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "high" } });
     await openForm();
-    await waitFor(() => expect(pill("Model")).toBe("Opus (latest · Opus 4.6)"));
+    await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
     await choose("Agent", "Codex", "menuitem");
     expect([pill("Model"), pill("Effort")]).toEqual(["GPT-5.6 Sol", "high"]);
     fireEvent.click(screen.getByTitle("Model"));
@@ -854,7 +866,7 @@ describe("a new agent tab's launch settings (#554)", () => {
 
   it("never sends an effort the chosen model does not take", async () => {
     await openForm();
-    await waitFor(() => expect(pill("Model")).toBe("Opus (latest · Opus 4.6)"));
+    await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
     await choose("Effort", "max");
     // Sonnet has no max: its own default goes, not the one picked for Opus.
     await choose("Model", /^Sonnet/);
@@ -868,7 +880,7 @@ describe("a new agent tab's launch settings (#554)", () => {
 
   it("drops the effort for a model without one", async () => {
     await openForm();
-    await waitFor(() => expect(pill("Model")).toBe("Opus (latest · Opus 4.6)"));
+    await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
     await choose("Effort", "max");
     await choose("Model", /^Haiku/);
     expect(screen.queryByTitle("Effort")).toBeNull();

@@ -50,6 +50,20 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
             Ok((cols, rows))
         };
         match method {
+            "githubLogin" => {
+                let _admission = crate::issue_pipeline::admission::lock();
+                manager.accepting_work()?;
+                // The sole sessionless setup command. Neither a caller-supplied
+                // shell command nor an agent pane id can enter through it.
+                crate::github::validate_login_pane(id)?;
+                let command = crate::github::login_command(string(&params, "hostname")?)?;
+                let cwd = dirs::home_dir().context("home directory is unavailable")?;
+                terminals.spawn(sink.clone(), id, crate::pty::PaneSpec {
+                    cwd: cwd.to_str().context("home directory is not UTF-8")?, cols: 80, rows: 20,
+                    command: Some(&command), env: &[],
+                })?;
+                Ok(Value::Null)
+            }
             "spawn" => {
                 let _admission = crate::issue_pipeline::admission::lock();
                 manager.accepting_work()?;
@@ -123,6 +137,12 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     if method == "running" { return Ok(serde_json::to_value(manager.running_tabs())?); }
     if method == "permissions" { return Ok(serde_json::to_value(manager.pending_permissions())?); }
     match method {
+        "manualStatus" => {
+            let patch = crate::session_ops::SessionPatch { manual_status: Some(serde_json::from_value(params["status"].clone())?), ..Default::default() };
+            let session = crate::session_ops::update_session_meta(string(&params, "sessionId")?, &patch).map_err(anyhow::Error::msg)?;
+            manager.sink().emit("session_updated", &session);
+            return Ok(Value::Null);
+        }
         "pipeline" => return manager.pipeline(string(&params, "operation")?, params["params"].clone()),
         "workspace" => return manager.workspace(string(&params, "operation")?, params["params"].clone()),
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
@@ -146,6 +166,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     let session = string(&params, "sessionId")?;
     let tab = string(&params, "tabId")?;
     let value = match method {
+        "resetChat" => serde_json::to_value(manager.reset_chat(session, tab, serde_json::from_value(params.get("endSeq").context("endSeq is required (null for Undo)")?.clone())?, params["resetFiles"].as_bool().context("resetFiles is required")?)?)?,
         "resumeConversation" => { manager.resume_conversation(session, tab, string(&params, "harness")?, string(&params, "providerSessionId")?)?; Value::Null }
         // `opened`: only shown, which does not start an agent nobody is about to use.
         "ensureStarted" if params["opened"].as_bool() == Some(true) => { manager.start_on_open(session, tab)?; Value::Null }
@@ -164,6 +185,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
         "send" => serde_json::to_value(manager.send_pressed(session, tab, string(&params, "text")?.into(),
             serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64())?)?,
+        "terminalViewReport" => { manager.note_terminal_view(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "incidentUi" => { manager.note_incident_ui(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "sendShown" => { manager.note_shown(session, tab, params["seq"].as_u64().context("seq is required")?, &serde_json::from_value(params["timings"].clone())?)?; Value::Null }
         "interrupt" => json!(manager.interrupt(session, tab)?),
@@ -178,7 +200,15 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "effort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }
         "markRead" => { manager.mark_read(session, tab)?; Value::Null }
         "handoff" => serde_json::to_value(manager.handoff(session, tab)?)?,
-        "toTerminal" => { manager.codex_stdio_to_terminal(session, tab)?; Value::Null }
+        "toTerminal" => {
+            let ready = manager.codex_stdio_to_terminal_reported(session, tab, serde_json::from_value(params["transitionId"].clone())?)?;
+            if params["deferUntilIdle"] == true { json!(ready) } else {
+                // Protocol 1 callers decode success as (). Only callers that
+                // explicitly opt in understand a deferred boolean response.
+                anyhow::ensure!(ready, "Codex is still working. Wait or interrupt before opening Terminal view.");
+                Value::Null
+            }
+        }
         _ => bail!("unsupported local session operation"),
     };
     Ok(value)

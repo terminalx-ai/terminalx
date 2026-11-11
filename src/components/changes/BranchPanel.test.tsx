@@ -113,6 +113,23 @@ describe("the Branch tab", () => {
     expect(graphRows(overview({ onBase: true }), "main").map((r) => [r.kind, r.kind === "commit" ? r.lane : null])).toEqual([["base", null], ["commit", "base"]]);
   });
 
+  it("opens your own commits onto the branch's line from the You row, and folds them away", async () => {
+    answer(overview());
+    render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
+    const you = await screen.findByTestId("branch-you-toggle", {}, WAIT);
+    expect(you.textContent).toContain("You · 2 commits");
+    const subjects = () => screen.queryAllByTestId("branch-commit").filter((row) => row.getAttribute("data-lane") === "branch").map((row) => row.textContent);
+    // Closed, only what others pushed sits on the branch's line.
+    expect(subjects()).toEqual([expect.stringContaining("Fix header")]);
+    fireEvent.click(you);
+    expect(you.getAttribute("aria-expanded")).toBe("true");
+    // Oldest first, as the line reads down, then what others pushed since.
+    expect(subjects()).toEqual([expect.stringContaining("Wire API"), expect.stringContaining("Add form"), expect.stringContaining("Fix header")]);
+    fireEvent.click(you);
+    expect(subjects()).toEqual([expect.stringContaining("Fix header")]);
+    expect(graphRows(overview(), "main", true).slice(0, 4).map((r) => (r.kind === "commit" ? r.commit.subject : r.kind))).toEqual(["base", "you", "Wire API", "Add form"]);
+  });
+
   it("pulls what others pushed, or writes the agent a message asking it to", async () => {
     answer(overview());
     render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
