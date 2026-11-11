@@ -688,10 +688,11 @@ export const api = {
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
   /** `base`: the ref the session's worktree was made from, read against instead of the default branch. */
-  branchOverview: (cwd: string, base?: string | null) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null }),
+  branchOverview: (cwd: string, base?: string | null, localOnly = false) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null, localOnly }),
+  projectForge: (cwd: string) => invoke<ProjectForge>("project_forge", { cwd }),
   /** Brings the remote's branches up to date; false when it could not (offline, no remote). */
   branchFetch: (cwd: string) => invoke<boolean>("branch_fetch", { cwd }),
-  /** Merges the checked-out branch into the local branch `into`; says what it did. */
+  /** Retained for command clients; the Branch panel sends an agent prompt instead. */
   branchMergeInto: (cwd: string, into: string) => invoke<string>("branch_merge_into", { cwd, into }),
   // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
   // None of these takes a local path: the native side derives the mirror's
@@ -2113,6 +2114,8 @@ export interface BranchContributor {
   last: string;
 }
 
+export type ProjectForge = "github" | "githubUnavailable" | "localOnly";
+
 /** A checkout's branch against the branch it merges into, read from refs already here. */
 export interface BranchOverview {
   /** Resolved by the same native function as the session header. */
@@ -2121,6 +2124,10 @@ export interface BranchOverview {
   /** `origin/main`, else the local default branch; null outside a repository or without one. */
   base: string | null;
   onBase: boolean;
+  /** Main checkout path reported by Git. */
+  mainCheckout: string | null;
+  /** Compared using canonical checkout roots, including sessions reached through symlinks. */
+  inMainCheckout: boolean;
   forkPoint: CommitInfo | null;
   /** Commits only on the branch, and on the base since the fork. */
   ahead: number;

@@ -3,9 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry, TabStatus, WorkspaceDisposition } from "@/types/session";
 import type { SessionBackend } from "@/lib/sessionBackend";
 import type { Transcript } from "@/lib/transcript";
+import type { ProjectForge } from "@/lib/api";
+import type { AgentEvent, Payload } from "@/types/events";
 
 // #411: once the worktree's pull request has merged, the chat offers Delete workspace next to Commit, Create PR and Run it.
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), changed: { files: [] as unknown[] }, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), forge: undefined as ProjectForge | undefined, changed: { files: [] as unknown[] }, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
+vi.mock("@/lib/projectForge", () => ({ useProjectForge: () => mocks.forge }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => () => {}) }) }));
@@ -84,6 +87,7 @@ const deleteButton = () => screen.queryByRole("button", { name: "Delete workspac
 const settle = () => act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
 beforeEach(() => {
+  mocks.forge = "github";
   mocks.changed = { files: [] };
   mocks.invoke.mockReset();
   mocks.invoke.mockImplementation(async (command: string) => {
@@ -100,6 +104,22 @@ afterEach(() => {
 });
 
 describe("the chat's Delete workspace action", () => {
+  it.each([undefined, "githubUnavailable", "localOnly"] as const)("preserves the Create PR handoff unless the forge is confirmed local-only (%s)", async (forge) => {
+    mocks.forge = forge;
+    mocks.changed = { files: [{ path: "changed.txt" }] };
+    const session = sessionAt(worktree);
+    const payloads = Array.from({ length: 5 }, (): Payload[] => [{ type: "user_message", text: "Make a change", queued: false }, { type: "turn_completed", status: "ok", authFailed: false }]).flat();
+    const events: AgentEvent[] = payloads.map((payload, index) => ({
+      id: `${session.tabs[0].id}-${index}`, seq: index + 1, sessionId: session.id, tabId: session.tabs[0].id,
+      harness: "claude", ts: "2026-10-12T10:00:00.000Z", payload,
+    }));
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: unknown) => command === "load_tab_events" ? events : answer(command, args));
+    show(session);
+    expect(await screen.findByRole("button", { name: "Commit" })).toBeTruthy();
+    expect(!!screen.queryByRole("button", { name: "Create PR" })).toBe(forge !== "localOnly");
+  });
+
   it("shows for a local worktree whose pull request has merged, without a turn, and only opens the removal dialog", async () => {
     const session = sessionAt(worktree);
     show(session, localRemovableWorkspace(session));
@@ -117,6 +137,7 @@ describe("the chat's Delete workspace action", () => {
   it("sits alongside Commit, Create PR and Run it after a turn that changed files", () => {
     const done = { turns: Array.from({ length: 5 }, () => ({ completed: { status: "ok" } })) } as unknown as Transcript;
     const run = vi.fn();
+    expect(handoffsFor(done, true, undefined, false)?.map((step) => step.label)).toEqual(["Commit", "Run it"]);
     expect(handoffsFor(done, true)?.map((step) => step.label)).toEqual(["Commit", "Create PR", "Run it"]);
     expect(handoffsFor(done, true, run)?.map((step) => step.label)).toEqual(["Commit", "Create PR", "Run it", "Delete workspace"]);
     // The others are prompts for the composer; this one is the app's action.

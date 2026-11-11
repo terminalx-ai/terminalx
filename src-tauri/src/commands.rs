@@ -2289,8 +2289,14 @@ pub async fn skill_detail(dir_path: String) -> CmdResult<crate::skills::SkillDet
 
 /// The branch against its base, for the side panel's Branch tab.
 #[tauri::command]
-pub async fn branch_overview(cwd: String, base: Option<String>) -> CmdResult<crate::branch_overview::BranchOverview> {
-    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::overview(Path::new(&cwd), base.as_deref())).await.map_err(err)
+pub async fn branch_overview(cwd: String, base: Option<String>, local_only: Option<bool>) -> CmdResult<crate::branch_overview::BranchOverview> {
+    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::overview(Path::new(&cwd), base.as_deref(), local_only.unwrap_or(false))).await.map_err(err)
+}
+
+/// Whether this project can use GitHub pull requests.
+#[tauri::command]
+pub async fn project_forge(cwd: String) -> CmdResult<crate::github::ProjectForge> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::project_forge(Path::new(&cwd))).await.map_err(err)
 }
 
 /// Merges the checked-out branch into a local branch, for a project with no remote.
