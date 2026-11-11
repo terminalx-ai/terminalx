@@ -5,12 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
   setNativeCodex: vi.fn(),
+  setSessionCost: vi.fn(),
   setOrchestratorRuns: vi.fn(),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@/lib/api", () => ({
-  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setOrchestratorRuns: mocks.setOrchestratorRuns },
+  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
 
@@ -26,11 +27,28 @@ const { ExperimentalTab } = await import("./ExperimentalSettings");
 beforeEach(() => {
   mocks.settings.mockReset().mockResolvedValue({ nativeCodex: false });
   mocks.setNativeCodex.mockReset();
+  mocks.setSessionCost.mockReset();
   mocks.setOrchestratorRuns.mockReset();
 });
 afterEach(cleanup);
 
 const toggle = () => screen.getByRole("switch", { name: "Native Codex" });
+
+describe("Settings → Experimental: session cost (PRO-273)", () => {
+  const cost = () => screen.getByRole("switch", { name: "Session cost" });
+
+  it("is off by default, says the figure is not a bill, and saves only its own switch", async () => {
+    mocks.setSessionCost.mockResolvedValue({ nativeCodex: false, sessionCost: true });
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(cost().hasAttribute("disabled")).toBe(false));
+    expect(cost().getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByTestId("experimental-settings").textContent).toContain("not what you are billed");
+    fireEvent.click(cost());
+    await waitFor(() => expect(mocks.setSessionCost).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(cost().getAttribute("aria-checked")).toBe("true"));
+    expect(mocks.setNativeCodex).not.toHaveBeenCalled();
+  });
+});
 
 describe("Settings → Experimental (#644)", () => {
   it("offers Native Codex off by default and says what it changes in plain words", async () => {
@@ -89,9 +107,9 @@ describe("Settings → Experimental: orchestration runs (PRO-274)", () => {
   it("saves through its own command, leaves Native Codex as it is, and shows the feature at once", async () => {
     mocks.settings.mockResolvedValue({ nativeCodex: true, orchestratorRuns: false });
     mocks.setOrchestratorRuns.mockResolvedValue({ nativeCodex: true, orchestratorRuns: true });
-    const { useExperimental, resetExperimentalForTests } = await import("@/lib/experimental");
-    resetExperimentalForTests();
-    const Shown = () => <output data-testid="runs-shown">{String(useExperimental().orchestratorRuns)}</output>;
+    const { useExperimentalSettings, resetExperimentalSettingsForTests } = await import("@/lib/experimentalSettings");
+    resetExperimentalSettingsForTests();
+    const Shown = () => <output data-testid="runs-shown">{String(useExperimentalSettings()?.orchestratorRuns === true)}</output>;
     render(<><ExperimentalTab /><Shown /></>);
     await waitFor(() => expect(runs().hasAttribute("disabled")).toBe(false));
     expect(screen.getByTestId("runs-shown").textContent).toBe("false");
@@ -102,7 +120,7 @@ describe("Settings → Experimental: orchestration runs (PRO-274)", () => {
     expect(toggle().getAttribute("aria-checked")).toBe("true");
     // The rest of the app reads the saved answer without waiting for the settings file to be watched.
     await waitFor(() => expect(screen.getByTestId("runs-shown").textContent).toBe("true"));
-    resetExperimentalForTests();
+    resetExperimentalSettingsForTests();
   });
 
   it("puts the switch back and says why when saving fails", async () => {

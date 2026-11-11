@@ -4958,20 +4958,20 @@ pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
     store::settings::load().experimental
 }
 
+/// Each switch is optional: the one the reader flipped is changed and the
+/// others are left as they are.
 #[tauri::command]
-pub fn set_experimental_settings(native_codex: bool) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Option<bool>, orchestrator_runs: Option<bool>) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
-    settings.experimental.native_codex = native_codex;
-    store::settings::save(&settings).map_err(err)?;
-    Ok(settings.experimental)
-}
-
-/// Its own command: `set_experimental_settings` takes Native Codex alone, as
-/// a paired phone sends it, and a phone has no Run view to switch on.
-#[tauri::command]
-pub fn set_experimental_orchestrator_runs(on: bool) -> CmdResult<crate::store::settings::ExperimentalSettings> {
-    let mut settings = store::settings::load();
-    settings.experimental.orchestrator_runs = on;
+    if let Some(on) = native_codex {
+        settings.experimental.native_codex = on;
+    }
+    if let Some(on) = session_cost {
+        settings.experimental.session_cost = on;
+    }
+    if let Some(on) = orchestrator_runs {
+        settings.experimental.orchestrator_runs = on;
+    }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.experimental)
 }
@@ -5086,6 +5086,19 @@ pub async fn orchestration_stop(app: AppHandle, id: String) -> CmdResult<serde_j
 pub async fn orchestration_update_plan(app: AppHandle, id: String, plan: serde_json::Value) -> CmdResult<serde_json::Value> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.orchestration("updatePlan", serde_json::json!({"id": id, "plan": plan})).map_err(err)).await.map_err(err)?
+}
+
+/// The header's usage popover (PRO-273): the session's tokens and estimated
+/// cost, read again from its agents' transcripts, and the session as it is
+/// now for the window to take.
+#[tauri::command]
+pub async fn session_usage(session_id: String) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (session, _) = crate::session_usage::refresh_session(&session_id).map_err(err)?;
+        Ok(serde_json::json!({"usage": crate::session_usage::session_json(&session), "session": session}))
+    })
+    .await
+    .map_err(err)?
 }
 
 type OrgWorkStatusResult = Result<crate::work_claims::client::OrganizationWorkStatus, crate::work_claims::client::WorkClaimsError>;
