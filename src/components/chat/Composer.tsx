@@ -1,3 +1,5 @@
+import { ContextPopover } from "./UsagePopovers";
+import type { Turn } from "@/lib/transcript";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, AtSign, ChevronDown, FileText, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -120,6 +122,8 @@ export function Composer({
   modelsAreLocal = true,
   modelClient,
   contextMax,
+  turns = NO_TURNS,
+  compacting = false,
   handoffs,
   disabledReason,
   disabled = false,
@@ -163,6 +167,8 @@ export function Composer({
   /** The workspace that supplies cloud model choices, while connected. */
   modelClient?: WorkspaceRpcClient | null;
   contextMax?: number;
+  turns?: readonly Turn[];
+  compacting?: boolean;
   /** One-click next steps above the input: a prompt put in the composer for the reader to send, or (`run`) something the app does itself. */
   handoffs?: Handoff[];
   disabledReason?: string | null;
@@ -505,7 +511,6 @@ export function Composer({
   const modeLock = settingsLockedReason ?? modeLockedReason;
   // The picker's own id for the tab's mode; none when the agent reported one the picker does not offer (#417).
   const pickedMode = pickerMode(tab.permissionMode)?.id;
-  const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
   return (
     <div className="mx-auto w-full max-w-3xl px-6 pb-4 pt-2">
@@ -652,25 +657,9 @@ export function Composer({
                 onChoose: (mode) => chooseMode(tab.harness, mode, onSetMode),
               }}
             />
-            {pct != null && (
-              <WithTooltip label={`Context ${pct}% used (${Math.round((contextUsed ?? 0) / 1000)}k of ${Math.round((contextMax ?? 0) / 1000)}k)`}>
-                <div className="relative size-4" aria-label={`Context ${pct}%`}>
-                  <svg viewBox="0 0 16 16" className="size-4 -rotate-90">
-                    <circle cx="8" cy="8" r="6" fill="none" stroke="var(--hairline-strong)" strokeWidth="2" />
-                    <circle
-                      cx="8"
-                      cy="8"
-                      r="6"
-                      fill="none"
-                      stroke={pct > 85 ? "var(--destructive)" : pct > 65 ? "var(--warning)" : "var(--ink-muted)"}
-                      strokeWidth="2"
-                      strokeDasharray={`${(pct / 100) * 37.7} 37.7`}
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                </div>
-              </WithTooltip>
-            )}
+            <ContextPopover tab={tab} used={contextUsed} max={contextMax} reportedModel={reportedModel} local={modelsAreLocal && !remote}
+              turns={turns} compacting={compacting} compactDisabled={disabled || busy || sending}
+              onCompact={() => onSend("/compact", [])} />
             {/* One button: Stop while the agent works and nothing is typed, Send (a queued message while it works) once something is. Stop's shortcut works either way. */}
             {/* What is on its way is drawn in the chat, as sending (#727); the button waits for it. */}
             {!sending && busy && canStop && !draft.trim() && !attachments.length ? (
@@ -814,3 +803,5 @@ function PermissionSubmenu({ permissions: p }: { permissions: PermissionChoice }
     </DropdownMenuSub>
   );
 }
+
+const NO_TURNS: readonly Turn[] = [];

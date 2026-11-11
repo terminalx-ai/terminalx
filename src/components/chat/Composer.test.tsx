@@ -1215,3 +1215,17 @@ it("retains an image added while an earlier image is being sent", async () => {
   expect(screen.getByAltText("next.png")).toBeTruthy();
   expect(onSend).toHaveBeenCalledExactlyOnceWith("", [{ name: "first.png", mediaType: "image/png", data: "AQID" }]);
 });
+
+it("compacts from the ring through the CLI send path while keeping the draft", async () => {
+  const send = vi.fn();
+  const change = vi.fn();
+  const props = { tab, busy: false, draft: "keep this draft", onDraftChange: change, onSend: send, onStop: vi.fn(), onSetModel: vi.fn(), onSetEffort: vi.fn(), onSetMode: vi.fn(), contextUsed: 90000, contextMax: 100000 };
+  const view = render(<Composer {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "Context 90% used" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Compact now" }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith("/compact", []));
+  expect(change).not.toHaveBeenCalled();
+  view.rerender(<Composer {...props} busy />);
+  fireEvent.click(screen.getByRole("button", { name: "Context 90% used" }));
+  expect((await screen.findByRole("button", { name: "Compact now" }) as HTMLButtonElement).disabled).toBe(true);
+});
