@@ -32,7 +32,7 @@ const MASKED = `sk-ant-api03-${"•".repeat(24)}4f2a`;
 const ready = (id: string, more: Partial<AgentReadiness> = {}): AgentReadiness => ({
   state: "ready", checkedAt: "2026-11-11T10:00:00Z", version: id === "claude" ? "2.3.41" : "0.166.0",
   loginMethod: id === "claude" ? "Claude account" : "ChatGPT account", plan: id === "claude" ? "max" : "pro",
-  account: "ada@example.com", organization: id === "claude" ? "Procyon Labs" : null, ...more,
+  account: "ada@example.com", organization: id === "claude" ? "Acme" : null, ...more,
 });
 const signedOut = (id: string): AgentReadiness => ({ state: "signed_out", checkedAt: "2026-11-11T10:00:00Z", version: id === "claude" ? "2.3.41" : "0.166.0" });
 
@@ -133,7 +133,7 @@ describe("Agents · API key (PRO-306)", () => {
     expect(screen.getByRole("radio", { name: /API key\s*ANTHROPIC_API_KEY/, checked: false })).toBeTruthy();
     expect(row("Version")).toBe("2.3.41");
     expect(row("Login")).toBe("Claude Max · ada@example.com");
-    expect(row("Organization")).toBe("Procyon Labs");
+    expect(row("Organization")).toBe("Acme");
     expect(row("Executable")).toBe("~/.local/bin/claude");
 
     fireEvent.click(screen.getByRole("tab", { name: /Codex/ }));

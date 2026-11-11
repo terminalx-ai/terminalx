@@ -157,9 +157,9 @@ mod tests {
 
     #[test]
     fn the_account_and_organization_are_kept_only_as_display_strings_of_a_login_in_use() {
-        let claude = json!({"loggedIn":true,"authMethod":"claude.ai","email":"ada@example.com","orgName":"Procyon Labs","orgId":"secret-org-id","accessToken":"secret"});
-        assert_eq!(account_identity("claude", &claude), (Some("ada@example.com".into()), Some("Procyon Labs".into())));
-        assert_eq!(account_identity("claude", &json!({"loggedIn":false,"email":"ada@example.com","orgName":"Procyon Labs"})), (None, None));
+        let claude = json!({"loggedIn":true,"authMethod":"claude.ai","email":"ada@example.com","orgName":"Acme","orgId":"secret-org-id","accessToken":"secret"});
+        assert_eq!(account_identity("claude", &claude), (Some("ada@example.com".into()), Some("Acme".into())));
+        assert_eq!(account_identity("claude", &json!({"loggedIn":false,"email":"ada@example.com","orgName":"Acme"})), (None, None));
         assert_eq!(account_identity("claude", &json!({"loggedIn":true,"email":"not an address","orgName":"Two\nlines"})), (None, None));
         let codex = json!({"requiresOpenaiAuth":true,"account":{"type":"chatgpt","email":"ada@example.com","planType":"pro"}});
         assert_eq!(account_identity("codex", &codex), (Some("ada@example.com".into()), None));

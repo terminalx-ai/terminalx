@@ -18,7 +18,7 @@ const harnesses = [
 const backend = `(() => {
   const answers = window.__PW_STUB__.answers;
   const now = () => new Date().toISOString();
-  const ready = (id) => ({ state: "ready", checkedAt: now(), version: id === "claude" ? "2.3.41" : "0.166.0", loginMethod: id === "claude" ? "Claude account" : "ChatGPT account", plan: id === "claude" ? "max" : "pro", account: "ada@example.com", organization: id === "claude" ? "Procyon Labs" : null });
+  const ready = (id) => ({ state: "ready", checkedAt: now(), version: id === "claude" ? "2.3.41" : "0.166.0", loginMethod: id === "claude" ? "Claude account" : "ChatGPT account", plan: id === "claude" ? "max" : "pro", account: "ada@example.com", organization: id === "claude" ? "Acme" : null });
   const state = window.__AGENT_LOGINS__ = {
     calls: [],
     verify: { ok: true },
@@ -94,7 +94,7 @@ try {
   await shoot("subscription");
   await check("Claude Code signed in", ({ text }) => ({
     "the sign-in choice names the variable": /Claude subscriptionclaude \/loginAPI keyANTHROPIC_API_KEY/.test(text),
-    "the Login row says which login": text.includes("LoginClaude Max · ada@example.com") && text.includes("OrganizationProcyon Labs"),
+    "the Login row says which login": text.includes("LoginClaude Max · ada@example.com") && text.includes("OrganizationAcme"),
   }));
 
   // 10.19: a key saved, verified, and the running tabs counted.
