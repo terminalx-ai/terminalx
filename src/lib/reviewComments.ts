@@ -7,7 +7,7 @@ export interface CommentAuthor { kind: "user" | "agent" | "github"; sessionId?: 
 export interface ReviewComment extends ReviewAnchor { author?: CommentAuthor; createdAt?: string; textHash?: string; anchorHash?: string; id: string; revision: number; note: string; sent: boolean; outdated: boolean }
 export interface ReviewRevision { id: string; revision: number }
 export type ReviewAction = { type: "list" }
-  | { type: "save"; anchor: ReviewAnchor; note: string; expected: ReviewRevision | null; author?: CommentAuthor }
+  | { type: "save"; anchor: ReviewAnchor; note: string; expected: ReviewRevision | null }
   | { type: "delete"; expected: ReviewRevision }
   | { type: "sent"; comments: ReviewRevision[] }
   | { type: "reconcile"; path: string; base: string; before: string | null; after: string | null; comments: ReviewRevision[] };
@@ -34,7 +34,8 @@ export function quotedReviewText(text: string): string {
     + (lines.length > 20 || preview.length > 4000 ? `\n> … (${omitted} omitted)` : "");
 }
 export function reviewEntry(c: ReviewComment): string {
-  return `${reviewLocation(c)} (${reviewVersion(c)}${c.outdated ? ", outdated" : ""})\n${quotedReviewText(c.lineText)}\n\n${c.note}`;
+  const author = c.author?.kind === "agent" && c.author.role === "reviewer" ? `Reviewer agent: ${c.author.name ?? "Reviewer"}\n` : "";
+  return `${reviewLocation(c)} (${reviewVersion(c)}${c.outdated ? ", outdated" : ""})\n${author}${quotedReviewText(c.lineText)}\n\n${c.note}`;
 }
 export function orderedComments(comments: ReviewComment[]): ReviewComment[] {
   return [...comments].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)

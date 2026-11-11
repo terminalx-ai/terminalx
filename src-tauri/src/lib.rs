@@ -76,6 +76,7 @@ mod drag_text;
 mod transcription;
 mod events;
 mod files;
+mod workspace_file;
 mod foreground;
 #[cfg(feature = "desktop")]
 mod floating;

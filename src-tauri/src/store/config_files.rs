@@ -27,7 +27,7 @@ impl Directory {
                 use std::os::fd::AsRawFd;
                 use std::os::unix::ffi::OsStrExt;
                 let parent = path.parent().context("Configuration directory needs a parent.")?;
-                let parent = super::environment::open_env_relative(File::open("/")?, parent.strip_prefix("/")?)?;
+                let parent = crate::workspace_file::open_relative(File::open("/")?, parent.strip_prefix("/")?)?;
                 let name = std::ffi::CString::new(path.file_name().context("Configuration directory needs a name.")?.as_bytes())?;
                 // SAFETY: the directory fd is held and name is a single component.
                 if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
@@ -49,7 +49,7 @@ impl Directory {
             // supplies a canonical repository/home root, but a concurrent rename
             // must not redirect a read or write after discovery.
             let absolute = path.strip_prefix("/").context("Configuration directory must be absolute.")?;
-            let opened = super::environment::open_env_relative(File::open("/")?, absolute);
+            let opened = crate::workspace_file::open_relative(File::open("/")?, absolute);
             match opened {
                 Ok(file) => { ensure!(file.metadata()?.is_dir(), "Configuration directory is not a directory."); Ok(Some(Self { file })) }
                 Err(e) if !create && e.kind() == std::io::ErrorKind::NotFound => Ok(None),

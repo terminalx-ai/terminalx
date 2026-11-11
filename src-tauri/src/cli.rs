@@ -113,6 +113,8 @@ Usage:
   terminalx issues create --project PROJECT [--provider github|linear] --title TEXT
       [--body TEXT|--body-file PATH] [--team TEAM] [--assignee USER...] [--label LABEL...]
       [--state STATE] [--priority none|urgent|high|medium|low] [--json]
+  terminalx review comment --file PATH --line N[-M] --body TEXT [--json]
+  terminalx review comments [--json]
   terminalx pipelines start SESSION-OR-TAB [--adopt-pr] [--auto-merge|--no-auto-merge]
       [--resolve-conflicts|--no-resolve-conflicts] [--json]
   terminalx pipelines list [--project PROJECT] [--json]
@@ -519,6 +521,7 @@ fn parse_with_stdin(
         "permissions" => parse_permissions(&mut tokens),
         "worktrees" => parse_worktrees(&mut tokens),
         "issues" => parse_issues(&mut tokens, stdin),
+        "review" => parse_review(&mut tokens),
         "pipelines" => parse_pipelines(&mut tokens),
         "computer" => crate::computer::cli::parse(&mut tokens, stdin),
         "vm" => {
@@ -1119,6 +1122,27 @@ pub(crate) fn issue_caller() -> Value {
     })
 }
 
+fn parse_review(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    let command = tokens.required_front("review command")?;
+    let mut params = json!({"caller": issue_caller()});
+    match command.as_str() {
+        "comment" => {
+            let file = tokens.required_option("--file")?;
+            if file.trim().is_empty() { return Err(invalid("--file cannot be empty.")); }
+            let line = tokens.required_option("--line")?;
+            crate::control::review::line_range(&line).map_err(|error| invalid(error.to_string()))?;
+            let body = tokens.required_option("--body")?;
+            crate::control::review::validate_body(&body).map_err(|error| invalid(error.to_string()))?;
+            params["file"] = json!(file);
+            params["line"] = json!(line);
+            params["body"] = json!(body);
+        }
+        "comments" => {}
+        _ => return Err(invalid(format!("Unknown review command {command}. Use comment or comments."))),
+    }
+    rpc(&format!("review.{command}"), params, tokens)
+}
+
 /// `--body TEXT` or `--body-file PATH` (`-` for standard input).
 fn issue_body(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, ControlError>, required: bool) -> Result<Option<String>, ControlError> {
     let body = match (tokens.option("--body")?, tokens.option("--body-file")?) {
@@ -1445,6 +1469,29 @@ mod tests {
         assert_eq!(rpc_of(&["vm", "screenshot", "--out", "/tmp/s.png"]).1, json!({"out": "/tmp/s.png"}));
         assert_eq!(rpc_of(&["vm", "tools"]).1, json!({"tool": null}));
         assert!(parse(&args(&["vm", "install"])).is_err());
+    }
+
+    #[test]
+    fn review_comments_parse_ranges_and_reject_incomplete_or_ambiguous_arguments() {
+        for line in ["1", "40-43"] {
+            let (command, params, _) = rpc_of(&["review", "comment", "--file", "src/foo.ts", "--line", line, "--body", "High: a defect.", "--json"]);
+            assert_eq!(command, "review.comment");
+            assert_eq!(params["file"], "src/foo.ts");
+            assert_eq!(params["line"], line);
+            assert_eq!(params["body"], "High: a defect.");
+            assert!(params["caller"].is_object());
+        }
+        assert_eq!(rpc_of(&["review", "comments"]).0, "review.comments");
+        for arguments in [
+            vec!["review"], vec!["review", "unknown"], vec!["review", "comment"],
+            vec!["review", "comments", "--file", "foo.ts"],
+            vec!["review", "comment", "--file", "foo.ts", "--line", "0", "--body", "note"],
+            vec!["review", "comment", "--file", "foo.ts", "--line", "2-1", "--body", "note"],
+            vec!["review", "comment", "--file", "foo.ts", "--line", "1", "--body", " "],
+            vec!["review", "comment", "--file", "foo.ts", "--file", "bar.ts", "--line", "1", "--body", "note"],
+        ] {
+            assert!(parse(&args(&arguments)).is_err(), "{arguments:?}");
+        }
     }
 
     #[test]
