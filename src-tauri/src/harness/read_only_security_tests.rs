@@ -353,7 +353,9 @@ fn startup_functions_cannot_run_during_environment_cleanup() {
     // suppresses aliases but still resolves these functions in bash and zsh.
     let mut startup =
         String::from("if [ -n \"$BASH_VERSION\" ]; then shopt -s expand_aliases; fi\n");
-    for name in ["unset", "builtin", "command", "false", "exit"] {
+    for name in [
+        "unset", "builtin", "command", "false", "exit", "true", ":", "trap",
+    ] {
         startup.push_str(&format!(
             "{name}() {{ printf invoked > {}; }}\n",
             quote(marker.to_str().unwrap())
@@ -370,11 +372,36 @@ fn startup_functions_cannot_run_during_environment_cleanup() {
             quote(marker.to_str().unwrap())
         ))
     ));
-    std::fs::write(repo.home.join(".zshenv"), startup).unwrap();
+    // Neither a command-less redirection nor an empty expansion is a safe
+    // status helper: zsh can dispatch NULLCMD or a global alias respectively.
+    startup.push_str("NULLCMD=unset\nREADNULLCMD=unset\nif [ -n \"$ZSH_VERSION\" ]; then alias -g '${?+}=unset'; fi\n");
     let updated = repo.approved("cat file").unwrap();
     let command = updated["command"].as_str().unwrap();
     for shell in ["/bin/bash", "/bin/zsh"] {
         let shell = Path::new(shell);
+        let mut shell_startup = startup.clone();
+        if shell == Path::new("/bin/bash") {
+            let supports_nameref = Command::new(shell)
+                .env_clear()
+                .args(["-c", "declare -n ref=target"])
+                .output()
+                .unwrap()
+                .status
+                .success();
+            // Linux CI's bash supports namerefs; macOS's system bash 3.2 does
+            // not. Keep the Linux regression mandatory instead of skipping it.
+            assert!(supports_nameref || !cfg!(target_os = "linux"));
+            if supports_nameref {
+                shell_startup.push_str(&format!(
+                    "declare -a locale_target\ndeclare -n LC_ALL={}\n",
+                    quote(&format!(
+                        "locale_target[$(printf invoked > {}; printf 0)]",
+                        quote(marker.to_str().unwrap())
+                    ))
+                ));
+            }
+        }
+        std::fs::write(repo.home.join(".zshenv"), shell_startup).unwrap();
         // Prove that this shell actually loaded the malicious startup function.
         let control = startup_shell_command(&repo, shell, "'unset' LD_TRACE_LOADED_OBJECTS");
         assert!(control.status.success(), "{control:?}");
@@ -411,6 +438,82 @@ fn startup_functions_cannot_run_during_environment_cleanup() {
 }
 
 #[test]
+fn startup_error_traps_cannot_turn_rejection_into_success() {
+    let repo = Repository::new();
+    std::fs::write(repo.root.join("file"), "hello\n").unwrap();
+    let marker = repo.home.join("error-trap-write");
+    let handler = format!(
+        "printf invoked > {}; exit 0",
+        quote(marker.to_str().unwrap())
+    );
+    // zsh function traps survive subshell entry, unlike its list-style traps.
+    // Test both spellings and bash's ERR inheritance, including strict modes.
+    for (shell, trap) in [
+        ("/bin/zsh", format!("TRAPZERR() {{ {handler}; }}")),
+        ("/bin/zsh", format!("TRAPERR() {{ {handler}; }}")),
+        ("/bin/zsh", format!("trap {} ZERR", quote(&handler))),
+        ("/bin/bash", format!("set -E; trap {} ERR", quote(&handler))),
+    ] {
+        for strict in ["", "set -eu"] {
+            for loader in [
+                "",
+                "export LD_TRACE_LOADED_OBJECTS=''",
+                "export LD_TRACE_LOADED_OBJECTS=1",
+                "readonly LD_TRACE_LOADED_OBJECTS=1; export LD_TRACE_LOADED_OBJECTS",
+            ] {
+                std::fs::write(
+                    repo.home.join(".zshenv"),
+                    format!("{loader}\n{trap}\n{strict}\n"),
+                )
+                .unwrap();
+                let shell = Path::new(shell);
+                // Prove the fixture can write and forge success on an unguarded
+                // redirection error, before any executable loads.
+                let control = startup_shell_command(
+                    &repo,
+                    shell,
+                    "'/usr/bin/env' '-i' 9<'/dev/null/refused'",
+                );
+                assert!(control.status.success(), "{control:?}");
+                assert!(marker.exists(), "the error hook must be active: {shell:?}");
+                std::fs::remove_file(&marker).unwrap();
+
+                for (requested, cwd, status, stdout) in [
+                    ("cat file", &repo.root, 0, "hello\n"),
+                    ("grep absent file", &repo.root, 1, ""),
+                    ("cat file", &repo.home, 125, ""),
+                ] {
+                    let updated = repo.approved(requested).unwrap();
+                    let output = startup_shell_command_in(
+                        &repo,
+                        shell,
+                        updated["command"].as_str().unwrap(),
+                        cwd,
+                    );
+                    assert!(
+                        !marker.exists(),
+                        "error hook ran: {shell:?}, {strict:?}, {loader:?}, {requested:?}, {output:?}"
+                    );
+                    if loader.is_empty() {
+                        assert_eq!(output.status.code(), Some(status), "{output:?}");
+                        assert_eq!(output.stdout, stdout.as_bytes(), "{output:?}");
+                    } else {
+                        assert!(
+                            !output.status.success(),
+                            "rejection must not succeed: {output:?}"
+                        );
+                        assert!(
+                            output.stdout.is_empty(),
+                            "no command should run: {output:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn sanitized_execution_preserves_pipes_conditionals_and_literal_arguments() {
     let repo = Repository::new();
     std::fs::write(repo.root.join("a'b;file"), "hello\n").unwrap();
@@ -437,17 +540,19 @@ fn sanitized_execution_preserves_pipes_conditionals_and_literal_arguments() {
     }
     // The loader guard may use a temporary descriptor, but must preserve stdin.
     let updated = repo.approved("cat").unwrap();
-    let mut child = Command::new("/bin/sh")
-        .current_dir(&repo.root)
-        .args(["-c", updated["command"].as_str().unwrap()])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child.stdin.take().unwrap().write_all(b"input\n").unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"input\n");
+    for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+        let mut child = Command::new(shell)
+            .current_dir(&repo.root)
+            .args(["-c", updated["command"].as_str().unwrap()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"input\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"input\n");
+    }
 }
 
 #[test]

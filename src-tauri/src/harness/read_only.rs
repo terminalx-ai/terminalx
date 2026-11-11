@@ -212,7 +212,7 @@ fn approved_input_in(
     // With no flag, opening /dev/null then closing the temporary fd succeeds.
     // This also rejects empty, unexported and readonly flags without evaluating
     // their contents, changing stdin or calling any cleanup command.
-    let mut wrapper = String::from("(");
+    let mut reset_env = String::new();
     for key in [
         "LD_PRELOAD",
         "LD_AUDIT",
@@ -228,10 +228,11 @@ fn approved_input_in(
         "DYLD_IMAGE_SUFFIX",
         "DYLD_PRINT_TO_FILE",
     ] {
-        wrapper.push_str(key);
-        wrapper.push_str("='' ");
+        reset_env.push_str(key);
+        reset_env.push_str("='' ");
     }
-    wrapper.push_str("LD_LIBRARY_PATH='/usr/lib:/lib' DYLD_LIBRARY_PATH='/usr/lib' GCONV_PATH='/usr/lib/gconv' LC_ALL='C' '/usr/bin/env' '-i'");
+    reset_env.push_str("LD_LIBRARY_PATH='/usr/lib:/lib' DYLD_LIBRARY_PATH='/usr/lib' GCONV_PATH='/usr/lib/gconv' LC_ALL='C' '/usr/bin/env' '-i'");
+    let mut wrapper = format!("({reset_env}");
     for (key, value) in &execution.env {
         wrapper.push(' ');
         wrapper.push_str(&quote(&format!("{key}={value}")));
@@ -241,6 +242,17 @@ fn approved_input_in(
     wrapper.push_str(
         " 9<\"/dev/null${LD_TRACE_LOADED_OBJECTS+/LD_TRACE_LOADED_OBJECTS-is-not-allowed}\" 9<&-)",
     );
+    // zsh inherits function-style TRAPZERR handlers into subshells. Keep the
+    // entire guarded execution on the conditional side of && so neither a
+    // rejection nor the requested command's failure invokes an outer error
+    // hook. Preserve its status: the right side runs only on success.
+    // Reuse the same masked env launcher with no payload: env -i prints an
+    // empty environment and returns zero. No new command name is resolved.
+    // A shell noop is unsafe here: true/: can be functions, a zero-word
+    // expansion can be a zsh global alias, a bare redirection uses NULLCMD,
+    // and an assignment can follow a startup-defined nameref. Do not wrap
+    // the whole && list in a subshell: its failure would trigger the hook.
+    wrapper.push_str(&format!(" && ({reset_env})"));
     let mut updated = input.clone();
     let field = if input.get("command").is_some() {
         "command"

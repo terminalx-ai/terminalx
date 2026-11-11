@@ -20,7 +20,9 @@ lifetime and PTY deadline fixes are retained through the merge. Linux testing
 also caught a false-success bug in main's approval wrapper: an empty loader
 tracing flag prevented both command and directory guard execution. It is now
 rejected before any executable starts, without resolving cleanup functions or
-aliases from shell startup files, with fail-closed regression coverage.
+aliases from shell startup files. Conditional execution also prevents inherited
+zsh error traps from turning rejection into an unapproved write and success;
+regressions cover function/list traps, strict modes and retained exit statuses.
 Approval-wrapper changes always select the macOS suite as well. A cache fixture
 also sets its rewrite timestamp explicitly so same-size writes remain observable
 on Linux; its assertions and the production cache are unchanged.
@@ -50,12 +52,11 @@ on Linux; its assertions and the production cache are unchanged.
 
 Passed locally: desktop/mobile type checks, frontend build, Swift (123) and icon
 checks (18). After review corrections: Clippy on Linux/macOS, the full Linux
-suite (3,372 unit + 14 integration tests), 17 macOS approval-wrapper tests plus
+suite (3,373 unit + 14 integration tests), 18 macOS approval-wrapper tests plus
 the session-directory regression, actionlint and 28 CI policy/helper tests.
 The merged macOS baseline passed its full suite (3,426 + 14); no second full
-macOS pass is claimed. Desktop TypeScript passed again. The review-time Vitest
-run had 5,385 passes and seven timeouts under heavy host load; all 63 tests in
-the five affected files passed with one worker and unchanged assertions/deadlines.
+macOS pass is claimed. Desktop TypeScript and all 5,392 Vitest tests passed
+again in a single run with two workers and unchanged assertions/deadlines.
 Hosted AMD64 CI and the next independent review remain required. No new tests
 are ignored or removed.
 See [dated validation and reproducible observations](CI-RUNNERS-MEASUREMENTS.md).

@@ -183,6 +183,50 @@ Validation of these corrections:
 - Passed: Rust formatting, diff whitespace and added-line credential/key/address
   pattern checks. No runner, repository-setting or activation changes were made.
 
+## Review 2 correction (2026-11-11)
+
+The reviewer reproduced an inherited zsh `TRAPZERR` function writing a marker
+and exiting zero when loader rejection failed its redirection. The guarded
+execution now occupies the conditional side of `&&`, suppressing inherited error
+hooks while retaining a failing exit status. Only on success, the existing
+loader-masked `/usr/bin/env -i` launcher runs again without a payload to return
+zero silently. It resolves no new shell helper and performs no ordinary shell
+assignment; normal output, stdin and exit statuses are preserved.
+
+The new executable fixture installs `TRAPZERR`, `TRAPERR`, list-style zsh traps
+and bash `ERR` traps through shell startup files. Its unguarded control must
+write the marker and forge success. The approved wrapper must then preserve
+success, command failure and directory rejection, or fail closed for empty,
+set and readonly loader flags, with no marker. The matrix also covers strict
+shell modes. Existing startup-function coverage now poisons status/cleanup
+helpers, zsh null commands and a global alias for an empty status expansion.
+On Linux, it also requires bash nameref support and poisons `LC_ALL` with an
+array-index command substitution. This catches attempts to use an ordinary
+assignment as a status helper. macOS's system bash 3.2 lacks namerefs; all other
+cases run there. All existing checks remain enabled; runner activation remains
+owner-only.
+
+Validation of the final revision:
+
+- An initial candidate failed the startup-alias regression. The final revision
+  keeps that regression and uses the existing masked launcher instead of a
+  shell status helper. A Linux probe also demonstrated why an ordinary shell
+  assignment is unsafe with a nameref; the fixture now enforces that case.
+- Passed: desktop TypeScript and all **5,392 Vitest tests in 456 files** in one
+  run with two workers, without changing assertions or test deadlines.
+- Passed: `cargo clippy --locked --all-targets -- -D warnings` on macOS and Linux.
+- Passed on macOS: all **18 approval-wrapper tests** plus the session-directory
+  regression, **19 total**, in a single test invocation. No full macOS rerun is
+  claimed; that suite remains selected for this PR in CI.
+- Passed in TerminalX Local VM (Debian 12 ARM64): full default-feature
+  `cargo test --locked`, **3,373 unit tests and 14 integration tests**, zero
+  failures and the same 17 pre-existing ignores. Both changed Rust files had
+  identical hashes in the VM and worktree. Unit tests took 269.08 seconds;
+  this is local correctness evidence, not a CI measurement.
+- Passed: Rust formatting, diff whitespace and added-line credential/key/address
+  pattern checks. The incomplete ten-run samples and owner-only Hetzner
+  prerequisites remain open.
+
 ## Observed baseline
 
 Before split: PR baseline: 10 successful first attempts; durations in minutes.

@@ -67,7 +67,19 @@ not a cleanup command: startup-defined functions can replace even quoted
 `unset`, `builtin` or `command`, and aliases can replace shell keywords. With
 the flag absent, a temporary descriptor opens `/dev/null` and closes before
 execution; stdin is unchanged. Regression coverage exercises sh, bash and zsh,
-poisoned startup functions/aliases, normal execution and a mismatched directory. CI explicitly
+poisoned startup functions/aliases, normal execution and a mismatched directory.
+The guarded execution is the left side of `&&`, which suppresses inherited
+error traps (including zsh's function-style `TRAPZERR`) and preserves its
+failure status. Only on success, the same loader-masked `/usr/bin/env -i`
+launcher runs once more without a payload: its empty environment produces no
+output and returns zero. This reuses the existing launcher boundary; it adds no
+shell helper name or ordinary variable assignment. Shell noops are unsuitable:
+functions can replace `true`/`:`, global aliases can replace an empty expansion,
+zsh can dispatch `NULLCMD`, and an assignment can follow a hostile nameref.
+An outer subshell around the whole list would re-expose failure to error hooks.
+Tests install real startup traps that write a marker and exit zero, then require
+no marker and correct rejection, normal-command and directory-guard statuses.
+See [zsh trap semantics](https://zsh.sourceforge.io/Doc/Release/Functions.html). CI explicitly
 installs/requires ripgrep and zsh so executable security fixtures cannot take
 their missing-tool fallback. The [glibc implementation treats the
 flag as enabled by presence](https://sourceware.org/pipermail/glibc-cvs/2022q1/076642.html).
