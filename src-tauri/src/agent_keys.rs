@@ -453,10 +453,17 @@ fn base_url_of(agent: Agent, entry: &Entry) -> String {
     entry.base_url.clone().filter(|_| agent == Agent::Codex).unwrap_or_else(|| agent.default_base_url().to_string())
 }
 
-fn verify_with(store: &Store<'_>, agent: Agent, probe: impl Fn(&crate::agent_route_check::Probe<'_>) -> crate::agent_route_check::Checked) -> Result<Verified> {
+/// Checks the saved key against the provider. In data privacy mode TerminalX
+/// itself sends nothing: the check is skipped, says so, and leaves the last
+/// result in place. The agent's own requests are outside that mode.
+fn verify_with(store: &Store<'_>, agent: Agent, private: bool, probe: impl Fn(&crate::agent_route_check::Probe<'_>) -> crate::agent_route_check::Checked) -> Result<Verified> {
     let entry = store.entry(agent)?;
     let Some((revision, key)) = store.read(agent)? else { bail!("Save a key first.") };
     let base_url = base_url_of(agent, &entry);
+    if private {
+        let reason = format!("data privacy mode is on, so TerminalX did not check it with {}; the agent still uses it", host_of(&base_url));
+        return Ok(Verified { ok: false, reason: Some(reason), checked_at: chrono::Utc::now().to_rfc3339(), revision, base_url });
+    }
     let checked = probe(&crate::agent_route_check::Probe { list: agent.model_list(), base_url: &base_url, credential: &key, header: agent.header(), model: None });
     let result = Verified { ok: checked.passed(), reason: reason(&checked, &base_url), checked_at: chrono::Utc::now().to_rfc3339(), revision, base_url };
     verified().lock().unwrap().insert(agent, result.clone());
@@ -669,7 +676,7 @@ pub fn set_base_url(harness: &str, base_url: Option<String>) -> Result<Status> {
 }
 
 pub fn verify(harness: &str) -> Result<Verified> {
-    verify_with(&store()?, agent_of(harness)?, crate::agent_route_check::probe)
+    verify_with(&store()?, agent_of(harness)?, crate::data_privacy::enabled(), crate::agent_route_check::probe)
 }
 
 /// The login shell's key, while it may still be offered: no key saved here
@@ -1352,7 +1359,7 @@ mod tests {
         let store = store(dir.path(), &secrets);
         store.save_key(Agent::Claude, KEY, None).unwrap();
         let sent = Mutex::new(Vec::new());
-        let refused = verify_with(&store, Agent::Claude, |probe| {
+        let refused = verify_with(&store, Agent::Claude, false, |probe| {
             sent.lock().unwrap().push((probe.base_url.to_string(), probe.credential.to_string(), probe.list, probe.header));
             Checked { outcome: "failed", code: Some("unauthorized"), http_status: Some(401), models: Vec::new() }
         }).unwrap();
@@ -1362,7 +1369,7 @@ mod tests {
         let shown = serde_json::to_string(&status_of(&store, Agent::Claude).unwrap()).unwrap();
         assert!(shown.contains("refused this key") && !shown.contains(KEY) && !shown.contains(&KEY[13..40]), "{shown}");
 
-        let ok = verify_with(&store, Agent::Claude, |_| Checked { outcome: "ok", code: None, http_status: Some(200), models: vec!["claude-x".into()] }).unwrap();
+        let ok = verify_with(&store, Agent::Claude, false, |_| Checked { outcome: "ok", code: None, http_status: Some(200), models: vec!["claude-x".into()] }).unwrap();
         assert!(ok.ok && ok.reason.is_none());
         // A new key has not been checked yet.
         store.save_key(Agent::Claude, "sk-ant-api03-another-key-000000000000000000000000", None).unwrap();
@@ -1371,6 +1378,24 @@ mod tests {
             let checked = Checked { outcome: if code == "models-unlisted" { "unverified" } else { "failed" }, code: Some(code), http_status: None, models: Vec::new() };
             assert!(reason(&checked, "https://api.anthropic.com").unwrap().contains(words), "{code}");
         }
+    }
+
+    #[test]
+    fn data_privacy_mode_keeps_the_key_check_from_sending_anything() {
+        use crate::agent_route_check::Checked;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = MemorySecrets::default();
+        let store = store(dir.path(), &secrets);
+        store.save_key(Agent::Codex, OTHER, None).unwrap();
+        store.set_base_url(Agent::Codex, Some("https://llm.example.com/v1")).unwrap();
+        let ok = verify_with(&store, Agent::Codex, false, |_| Checked { outcome: "ok", code: None, http_status: Some(200), models: vec!["gpt-x".into()] }).unwrap();
+        assert!(ok.ok);
+        let skipped = verify_with(&store, Agent::Codex, true, |_| panic!("data privacy mode sent the key")).unwrap();
+        assert!(!skipped.ok);
+        assert_eq!(skipped.reason.as_deref(), Some("data privacy mode is on, so TerminalX did not check it with llm.example.com; the agent still uses it"));
+        let shown = serde_json::to_string(&status_of(&store, Agent::Codex).unwrap()).unwrap();
+        assert!(shown.contains(r#""ok":true"#), "the last real check stands: {shown}");
+        assert!(!serde_json::to_string(&skipped).unwrap().contains(OTHER) && !shown.contains(OTHER));
     }
 
     #[cfg(unix)]
@@ -1394,7 +1419,7 @@ mod tests {
         store.save_key(Agent::Codex, OTHER, None).unwrap();
         store.set_base_url(Agent::Codex, Some(&address)).unwrap();
         crate::test_log::capture();
-        let checked = verify_with(&store, Agent::Codex, crate::agent_route_check::probe).unwrap();
+        let checked = verify_with(&store, Agent::Codex, false, crate::agent_route_check::probe).unwrap();
         let request = server.join().unwrap();
         assert!(request.starts_with("GET /v1/models "), "{request}");
         assert!(request.to_ascii_lowercase().contains(&format!("authorization: bearer {}", OTHER.to_ascii_lowercase())));
