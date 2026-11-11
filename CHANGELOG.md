@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Sidebar rows show change counts, command/server activity and the current
+  window's unsent prompt previews. Mark rows read or unread from their menu
+  (R), archive on hover, and cycle waiting sessions with ⌘⌥L. Unread reminders
+  persist per tab and clear when opened on desktop or phone. Renaming a
+  conversation also pins its active tab's title, including a previously
+  untitled tab, so automatic branch/title changes keep the explicit name.
+  (PRO-179, #851)
 - Connect GitHub from the PR tab or Settings → Integrations in an embedded
   sign-in terminal. Pushing a repository without a remote now offers a URL
   field, or creation of a GitHub repository when signed in. Git failures show

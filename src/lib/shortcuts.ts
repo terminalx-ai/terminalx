@@ -57,6 +57,7 @@ const ACTIONS = [
   { id: "app.zoomReset", label: "Actual size", group: "App", keys: ["mod+0"], menu: { section: "view", order: 6, label: "Actual Size", target: "focused" } },
   { id: "app.fullscreen", label: "Toggle full screen", group: "App", keys: ["f11"], macKeys: ["mod+ctrl+f"], menu: { section: "view", order: 7, label: "Toggle Full Screen", separator: true, target: "focused" } },
   { id: "app.nextSession", label: "Next session", group: "App", keys: ["mod+alt+down"], menu: { section: "go", order: 3, label: "Next Session", separator: true } },
+  { id: "app.nextAttention", label: "Go to next session needing attention", group: "App", keys: ["mod+alt+l"], menu: { section: "go", order: 5, label: "Next Session Needing Attention" } },
   { id: "app.previousSession", label: "Previous session", group: "App", keys: ["mod+alt+up"], menu: { section: "go", order: 4, label: "Previous Session" } },
   { id: "app.docs", label: "Documentation", group: "App", keys: [], menu: { section: "help", order: 0, label: "Documentation" } },
   { id: "app.shortcuts", label: "Keyboard shortcuts", group: "App", keys: [], menu: { section: "help", order: 1, label: "Keyboard Shortcuts" } },
@@ -76,6 +77,7 @@ const ACTIONS = [
   { id: "app.togglePanel", label: "Toggle right panel", group: "App", keys: ["mod+e"], menu: { section: "view", order: 1, label: "Toggle Right Panel" } },
   // No keys inside the window by default: the floating window has a system-wide shortcut of its own (Settings → Shortcuts).
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
+  { id: "session.archive", label: "Archive session", group: "Session", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
   { id: "session.fixErrors", label: "Fix failing CI checks", group: "Session", keys: ["mod+shift+x"] },
   { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"], menu: { section: "file", order: 4, label: "Close Tab", target: "focused", separator: true } },

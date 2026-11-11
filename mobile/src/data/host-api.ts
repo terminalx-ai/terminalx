@@ -24,7 +24,7 @@ export interface SessionSummary {
   lastPrompt?: string;
   lastReply?: string;
   issueRef?: string;
-  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus }[];
+  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus; markedUnread?: boolean }[];
 }
 
 /** A note promoted to a tab's agent: the `seq` of the user message it became (#541). */
@@ -209,6 +209,11 @@ export class HostApi {
       throw new Error("The Mac returned an invalid transcript page. Try loading it again.");
     }
     return { events: value.events, hasMore: value.hasMore };
+  }
+
+  async markRead(sessionId: string, tabId: string): Promise<void> {
+    const result = await this.connection.request("session.markRead", { sessionId, tabId });
+    if (!result.ok) throw new Error(result.refusal.message);
   }
 
   subscribeSession(tabId: string, listener: (event: AgentEvent) => void, ready?: () => void): () => void {

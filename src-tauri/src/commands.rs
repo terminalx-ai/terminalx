@@ -2769,6 +2769,12 @@ pub async fn set_tab_effort(state: State<'_, AppState>, session_id: String, tab_
 }
 
 #[tauri::command]
+pub async fn set_tab_unread(state: State<'_, AppState>, session_id: String, tab_id: String, unread: bool) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.set_tab_unread(&session_id, &tab_id, unread).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn mark_tab_read(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.mark_read(&session_id, &tab_id).map_err(err)).await.map_err(err)?
@@ -3170,6 +3176,11 @@ pub async fn pty_spawn(state: State<'_, AppState>, id: String, cwd: String, cols
     tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.spawn(&id, &cwd, cols, rows, command.as_deref(), title.as_deref())).await.map_err(err)?.map_err(err)
 }
 
+
+#[tauri::command]
+pub async fn listening_sessions(sessions: Vec<crate::sidebar_activity::SessionDirectory>) -> CmdResult<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || crate::sidebar_activity::listening_sessions(sessions)).await.map_err(err)
+}
 
 /// Which of these shell tabs are running a command now, for a close that would end it.
 #[tauri::command]

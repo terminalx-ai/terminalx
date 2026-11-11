@@ -1,7 +1,9 @@
+import { ArchiveRowButton, DraftPreview, SessionRowExtras, readableBranchName, sidebarConversationTitle, useSessionDraft } from "./SessionRowExtras";
+import { isUnread } from "@/lib/dashboard";
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
-import { createContext, useId, useMemo, useState, type ReactNode } from "react";
+import { createContext, useId, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -39,7 +41,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { branchMerged, conversationBranch } from "@/lib/checkout";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
-import { addProject, archiveSession, archiveSessions, conversationTitle, openProjectOverview, pinSession, removeProject, selectSession, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
+import { addProject, archiveSession, archiveSessions, conversationTitle, openProjectOverview, pinSession, removeProject, selectSession, setSessionUnread, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
 import { ROW_ATTRIBUTE, isPicked, pickOnClick, togglePicked, usePickedSessions } from "@/lib/rowSelection";
 import { SidebarBulkBar } from "./SidebarBulkBar";
 import { copyText } from "@/lib/clipboard";
@@ -993,10 +995,13 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
   const IssueItems = contextMenu ? IssueLinkContextItems : IssueLinkMenuItems;
   const copy = (text: string) => void copyText(text).catch(() => {});
   const picked = isPicked(ids, usePickedSessions());
+  const store = useSessionStore();
+  const unread = store.sessions.filter((entry) => ids.includes(entry.id)).some(isUnread);
+  const [error, setError] = useState<string | null>(null);
   return (
     <>
       {rename && (
-        <Item onSelect={rename}>
+        <Item data-row-key="n" aria-keyshortcuts="N" onSelect={rename}>
           <Pencil /> Rename…
         </Item>
       )}
@@ -1043,7 +1048,15 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
       )}
       <ManualStatusMenu sessionId={session.id} status={session.manualStatus} contextMenu={contextMenu} />
       <MoveToLocalSectionItems sessionIds={ids} contextMenu={contextMenu} />
-      <Item onSelect={() => void pinSession(session.id, !session.pinned)}>
+      {session.tabs.length > 0 && <Item data-row-key="r" aria-keyshortcuts="R" onSelect={(event) => {
+        event.preventDefault();
+        setError(null);
+        void setSessionUnread(ids, !unread).catch((cause) => setError(errorMessage(cause)));
+      }}>
+        <CheckSquare /> {unread ? "Mark as read" : "Mark as unread"}<span className="ml-auto text-xs text-faint" aria-hidden>R</span>
+      </Item>}
+      {error && <span role="alert" className="block px-2 text-xs text-destructive">{error}</span>}
+      <Item data-row-key="p" aria-keyshortcuts="P" onSelect={() => void pinSession(session.id, !session.pinned)}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
       </Item>
       <Separator />
@@ -1062,10 +1075,10 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
         <Link /> Copy link
       </Item>
       <Separator />
-      <Item onSelect={() => togglePicked(ids)}>
+      <Item data-row-key="s" aria-keyshortcuts="S" onSelect={() => togglePicked(ids)}>
         <CheckSquare /> {picked ? "Deselect" : "Select"}
       </Item>
-      <Item onSelect={() => void archiveSession(session.id, !session.archived)}>
+      <Item data-row-key="a" aria-keyshortcuts="A" onSelect={() => void archiveSession(session.id, !session.archived)}>
         <Archive /> {session.archived ? "Unarchive" : "Archive"}
       </Item>
       <IssueItems session={session} />
@@ -1087,8 +1100,20 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
   );
 }
 
+/** Activate a row action only in this menu, never while typing in a submenu. */
+export function rowMenuKeys(event: KeyboardEvent<HTMLDivElement>) {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !/^[a-z]$/i.test(event.key)) return;
+  const target = event.target as HTMLElement;
+  if (target.closest("input,textarea,[contenteditable=true]") || target.closest('[role="menu"]') !== event.currentTarget) return;
+  const item = event.currentTarget.querySelector<HTMLElement>(`[data-row-key="${event.key.toLowerCase()}"]`);
+  if (!item || item.hasAttribute("data-disabled")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  item.click();
+}
+
 export function RowContextMenu(props: ConversationMenuProps) {
-  return <ContextMenuContent className="w-56" onCloseAutoFocus={keepFocusForNameField}><ConversationMenuItems {...props} contextMenu /></ContextMenuContent>;
+  return <ContextMenuContent className="w-56" onKeyDown={rowMenuKeys} onCloseAutoFocus={keepFocusForNameField}><ConversationMenuItems {...props} contextMenu /></ContextMenuContent>;
 }
 
 /** The state that matters most among several: a question waiting, then work in progress, then work done. */
@@ -1137,8 +1162,11 @@ function ConversationRow({
   inArchive?: boolean;
 }) {
   const sort = useSidebarSortable(sortId);
+  const { sessions } = useSessionStore();
   const statusDescriptionId = useId();
-  const title = named === "branch" && peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session);
+  const title = named === "branch" ? (peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session)) : sidebarConversationTitle(session, branch, sessions);
+  const draft = useSessionDraft(peers);
+  const unread = peers.some(isUnread);
   // The sessions the row stands for, picked as one for the bulk bar (#718).
   const ids = peers.map((peer) => peer.id);
   const pickedNow = usePickedSessions();
@@ -1150,6 +1178,7 @@ function ConversationRow({
   const status = pressingStatus(peers.map(sessionStatus));
   // A row is its name and its age: which agent runs it is in the chat, not repeated on every row.
   const branchName = locationLabel ?? label ?? branch;
+  const branchLabel = locationLabel ?? label ?? readableBranchName(branch) ?? branch;
   // Rename is of what the row shows: its branch's label, or its conversation's title.
   const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
   return (
@@ -1161,7 +1190,7 @@ function ConversationRow({
           className={cn(
             actionRow,
             // Edge to edge: the row reaches past the list's 8px gutter, and its content keeps to it.
-            "relative -mx-2 flex h-9 items-center gap-2 pl-[calc(1rem+var(--indent,0px))] pr-3",
+            "relative -mx-2 flex min-h-9 items-center gap-2 py-1 pl-[calc(1rem+var(--indent,0px))] pr-3",
             selected ? "bg-selected text-foreground" : "text-foreground/90 hover:bg-selected/50",
             picked && "bg-info/12 ring-1 ring-inset ring-info/45",
           )}
@@ -1180,37 +1209,42 @@ function ConversationRow({
             aria-pressed={picking ? picked : undefined}
             aria-describedby={statusDescriptionId}
             aria-label={named === "branch" ? `${branchName ?? "No branch"}${removed ? " (workspace removed)" : merged ? " (merged)" : ""}, ${title}` : undefined}
-            className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="flex min-w-0 flex-1 flex-col items-start rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
-            <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(session.manualStatus)}</span></span>
-            {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
-            {named === "branch" ? (
-              <>
-                <BranchGlyph merged={merged} cleanup={cleanup} />
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchName ?? "No branch"}</span>
-                {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
-                {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                {/* The row's state sits where the time does, at the end, so the row's own icon keeps its place; while working, the sign stands in for the time. */}
-                <StatusMark status={status} />
-                {status !== "in_progress" && <RowTime at={conversationTime(session)} />}
-              </>
-            ) : (
-              <>
-                <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
-                {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                <StatusMark status={status} />
-              </>
-            )}
-            {named === "branch" || status === "in_progress" ? null : locationLabel || branch ? (
-              <span className={cn("flex max-w-[45%] shrink-0 items-center gap-1 font-mono text-[10px] text-faint", yieldsToRowActions)}>
-                {branch ? <GitBranch className="size-3 shrink-0" /> : <Folder className="size-3 shrink-0" />}
-                <span className="truncate">{locationLabel ?? branch}</span>
-              </span>
-            ) : (
-              <RowTime at={conversationTime(session)} />
-            )}
+            <span className="flex w-full min-w-0 items-center gap-2">
+              <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(session.manualStatus)}</span></span>
+              {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
+              {named === "branch" ? (
+                <>
+                  <BranchGlyph merged={merged} cleanup={cleanup} />
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchLabel ?? "No branch"}</span>
+                  {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
+                  {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
+                  {/* The row's state sits where the time does, at the end, so the row's own icon keeps its place; while working, the sign stands in for the time. */}
+                  <StatusMark status={status} unread={unread} />
+                  {status !== "in_progress" && <RowTime at={conversationTime(session)} />}
+                </>
+              ) : (
+                <>
+                  <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
+                  {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
+                  <StatusMark status={status} unread={unread} />
+                </>
+              )}
+              {named === "branch" || status === "in_progress" ? null : locationLabel || branch ? (
+                <span className={cn("flex max-w-[45%] shrink-0 items-center gap-1 font-mono text-[10px] text-faint", yieldsToRowActions)}>
+                  {branch ? <GitBranch className="size-3 shrink-0" /> : <Folder className="size-3 shrink-0" />}
+                  <span className="truncate">{locationLabel ?? branch}</span>
+                </span>
+              ) : (
+                <RowTime at={conversationTime(session)} />
+              )}
+              <SessionRowExtras sessions={peers} selected={selected} />
+            </span>
+            <DraftPreview text={draft} />
           </button>
           <RowActions>
+            <ArchiveRowButton session={session} title={title} />
             {session.archived && <UnarchiveButton session={session} title={title} />}
             {onNewSession && <NewSessionButton action={onNewSession} />}
             <DropdownMenuTrigger asChild>
@@ -1223,7 +1257,7 @@ function ConversationRow({
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </AsyncContextMenu>
-        <DropdownMenuContent align="end" className="w-56" onCloseAutoFocus={keepFocusForNameField}>
+        <DropdownMenuContent align="end" className="w-56" onKeyDown={rowMenuKeys} onCloseAutoFocus={keepFocusForNameField}>
           <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </DropdownMenuContent>
       </AsyncDropdownMenu>

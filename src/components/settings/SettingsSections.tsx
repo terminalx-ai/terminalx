@@ -249,6 +249,9 @@ export function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
           />
         }
       />
+      <RegisteredSetting setting="appearance.colourLineCounts"
+        control={<Switch aria-label="Colour line counts on every row" checked={prefs.colourLineCounts} onCheckedChange={(colourLineCounts) => setPrefs({ colourLineCounts })} />}
+      />
       {onOpenUsage && (
         <RegisteredSetting setting="appearance.openUsage"
           control={

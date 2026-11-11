@@ -199,6 +199,7 @@ fn requested_worktree_name(project: &Path, requested: &str, excluding: Option<&s
 
 pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
     TabEntry {
+        marked_unread: false,
         id: uuid::Uuid::now_v7().to_string(),
         harness: t.harness.clone(),
         transport: t.transport,
