@@ -1,3 +1,4 @@
+import { bootDataPrivacy } from "@/lib/dataPrivacy";
 import { bootSelfUi } from "@/lib/selfUi";
 import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
 import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
@@ -122,7 +123,7 @@ export function AppShell() {
   useEffect(() => setSettingsOpen(false), [store.navigationVersion]);
 
   // An update is looked for in the background, so it is seen without going to Settings for it.
-  useEffect(() => startUpdateChecks(), []);
+  useEffect(() => { void bootDataPrivacy().then(() => startUpdateChecks()); }, []);
   useEffect(() => {
     void subscribeAgentEvents();
     void subscribeTabPty();
@@ -135,8 +136,10 @@ export function AppShell() {
     void loadModels();
     startNotifications();
     void bootStatus();
-    void bootAccount();
-    bootCloudCatalog();
+    void bootDataPrivacy().then(() => {
+      void bootAccount();
+      bootCloudCatalog();
+    });
     bootCloudSelection();
     // Live session lists and local mirrors (PRO-25) follow the connections other surfaces open,
     // from launch and whatever is on screen: hidden sidebar or Settings included (#498).

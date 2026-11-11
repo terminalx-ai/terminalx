@@ -41,6 +41,7 @@ struct Removal {
 }
 
 pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &str, params: Value) -> Result<Value> {
+    let _github_request = crate::github_process::scope();
     if method == "archiveSupport" { return Ok(json!(true)); }
     // Cancellation must not wait behind the operation it is cancelling.
     if method == "cancelSizes" {

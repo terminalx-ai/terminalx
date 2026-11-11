@@ -1760,7 +1760,7 @@ impl Client {
         if let Some((key, value)) = query {
             url.query_pairs_mut().append_pair(key, value);
         }
-        let agent = ureq::AgentBuilder::new()
+        let agent = crate::data_privacy::http_agent()
             .timeout(self.timeout)
             .redirects(0)
             .build();
@@ -1803,7 +1803,7 @@ impl Client {
         url.path_segments_mut()
             .map_err(|_| CloudWorkspaceClientError::local("cloud_workspace_client_invalid", false))?
             .extend(["v1", "desktop", "cloud-catalog"]);
-        let agent = ureq::AgentBuilder::new().timeout(self.timeout).redirects(0).build();
+        let agent = crate::data_privacy::http_agent().timeout(self.timeout).redirects(0).build();
         let mut request = agent
             .request("GET", url.as_str())
             .set("authorization", &format!("Bearer {}", context.access_token))

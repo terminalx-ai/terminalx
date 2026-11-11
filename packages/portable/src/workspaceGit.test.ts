@@ -119,7 +119,8 @@ describe("workspace git", () => {
     const pending = access.act(action);
     runtime.setState({ state: "reconnecting", attempt: 1 });
     runtime.setState(connected);
-    await pending;
+    expect(await pending).toBeUndefined(); // Legacy runtime: no automatic readback.
+    expect(runtime.calls("git.prConversation")).toHaveLength(1);
     expect(runtime.calls("git.prConversation")[0]).toEqual({ repo: "libs/core", url });
     expect(runtime.calls("git.prReviewerSearch")[0]).toEqual({ repo: "libs/core", url, query: "ada" });
     const calls = runtime.calls("git.prConversationAction");
@@ -127,6 +128,15 @@ describe("workspace git", () => {
     expect(calls[0]).toMatchObject({ repo: "libs/core", url, action });
     expect(typeof calls[0].clientRequestId).toBe("string");
     expect(calls[1].clientRequestId).toBe(calls[0].clientRequestId);
+  });
+
+  it("delivers native conversation readback without starting a separate request", async () => {
+    const update = { conversation: { title: "Edited title" }, error: null };
+    const { runtime, client } = connect({ "git.prConversationAction": () => update });
+    const access = new RemoteGit(client, "libs/core").prConversation("https://github.com/acme/repo/pull/2");
+    expect(await access.act({ kind: "request", login: "ada", team: false })).toEqual(update);
+    expect(runtime.calls("git.prConversationAction")).toHaveLength(1);
+    expect(runtime.calls("git.prConversation")).toHaveLength(0);
   });
 
   it("resends a push whose answer was lost with the same request id, so the runtime answers it once", async () => {

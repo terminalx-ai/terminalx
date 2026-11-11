@@ -313,6 +313,7 @@ fn enabled_at(path: &std::path::Path) -> bool {
 
 /// Whether the person lets the command line use cloud workspaces. Off unless the file says on.
 pub fn enabled() -> bool {
+    if crate::data_privacy::enabled() { return false; }
     setting_path().is_some_and(|path| enabled_at(&path))
 }
 

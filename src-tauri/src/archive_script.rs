@@ -189,6 +189,8 @@ pub(crate) fn environment(project: &Path, path: &Path, session: Option<&SessionE
 /// Shared lifecycle-script execution. The private file stays alive until the
 /// process group has stopped; script text is never an argument to a login shell.
 pub(crate) struct ScriptRun<'a> {
+    privacy: crate::data_privacy::Ticket,
+    _privacy_lease: crate::data_privacy::RemoteWrite,
     runner: Runner<'a>,
     id: String,
     _file: tempfile::NamedTempFile,
@@ -213,6 +215,8 @@ impl<'a> ScriptRun<'a> {
     /// Keep the caller's launch/admission lock only around this step, never
     /// around `wait`: agents must be able to start while setup is running.
     pub(crate) fn spawn(runner: Runner<'a>, id: &str, path: &Path, script: &str, env: &[(String, String)], started: &dyn Fn()) -> Result<Self> {
+        let privacy = crate::github_process::ticket();
+        let privacy_lease = privacy.enter()?;
         let mut file = tempfile::Builder::new().prefix("terminalx-script-").suffix(".sh").tempfile()?;
         use std::io::Write;
         file.write_all(script.as_bytes())?;
@@ -224,7 +228,7 @@ impl<'a> ScriptRun<'a> {
                 if exit.id == watched { let _ = send.send(exit.code); }
             }
         }));
-        let run = Self { runner, id: id.into(), _file: file, listener, exits };
+        let run = Self { privacy, _privacy_lease: privacy_lease, runner, id: id.into(), _file: file, listener, exits };
         runner.terminals.spawn_program(runner.sink.clone(), id,
             PaneSpec { cwd: &path.to_string_lossy(), cols: 100, rows: 24, command: None, env },
             std::ffi::OsStr::new("/bin/sh"), &[run._file.path().as_os_str()], started)?;
@@ -235,7 +239,7 @@ impl<'a> ScriptRun<'a> {
         use std::sync::{atomic::Ordering, mpsc::RecvTimeoutError};
         let deadline = Instant::now() + timeout;
         let (code, timed_out, stopped) = loop {
-            if cancelled.load(Ordering::Acquire) { break (Some(130), false, true) }
+            if !self.privacy.valid() || cancelled.load(Ordering::Acquire) { break (Some(130), false, true) }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() { break (Some(124), true, false) }
             match self.exits.recv_timeout(left.min(Duration::from_millis(100))) {

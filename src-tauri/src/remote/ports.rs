@@ -138,10 +138,16 @@ fn stream_id(params: &Value) -> Result<&str, RpcError> {
 }
 
 impl Ports {
+    #[cfg(test)]
     pub async fn handle(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, allowed: Allowed<'_>) -> Result<Value, RpcError> {
+        self.handle_admitted(peer, method, params, allowed, crate::github_process::ticket()).await
+    }
+
+    pub async fn handle_admitted(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, allowed: Allowed<'_>, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        let _privacy = ticket.enter().map_err(|error| RpcError::forbidden(error.to_string()))?;
         match method {
             "ports.list" => Ok(self.list(peer)),
-            "ports.open" => self.open(peer, &params, allowed).await,
+            "ports.open" => self.open(peer, &params, allowed, ticket).await,
             "ports.write" => self.write(peer, &params),
             "ports.ack" => self.ack(peer, &params),
             "ports.close" => {
@@ -180,7 +186,7 @@ impl Ports {
         }
     }
 
-    async fn open(self: &Arc<Self>, peer: &Arc<Peer>, params: &Value, allowed: Allowed<'_>) -> Result<Value, RpcError> {
+    async fn open(self: &Arc<Self>, peer: &Arc<Peer>, params: &Value, allowed: Allowed<'_>, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
         let port = params
             .get("port")
             .and_then(Value::as_u64)
@@ -207,6 +213,8 @@ impl Ports {
         }
         let socket = socket.ok_or_else(|| unreachable_port(port))?;
         let _ = socket.set_nodelay(true);
+        let read_lease = ticket.enter().map_err(|error| RpcError::forbidden(error.to_string()))?;
+        let write_lease = ticket.enter().map_err(|error| RpcError::forbidden(error.to_string()))?;
         let (input, pending) = mpsc::unbounded_channel();
         let stream = {
             // Checked again under the lock: opens race each other, and the
@@ -241,8 +249,23 @@ impl Ports {
             stream
         };
         let (reader, writer) = socket.into_split();
-        tokio::spawn(self.clone().read(stream.clone(), peer.clone(), reader));
-        tokio::spawn(self.clone().feed(stream.clone(), peer.clone(), writer, pending));
+        // Keep both socket halves owned until cancellation has dropped their
+        // futures and I/O. Queued writes must never outlive their open request.
+        let read = self.clone().read(stream.clone(), peer.clone(), reader);
+        let feed = self.clone().feed(stream.clone(), peer.clone(), writer, pending);
+        for (lease, work) in [
+            (read_lease, Box::pin(read) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>),
+            (write_lease, Box::pin(feed)),
+        ] {
+            let ticket = ticket.clone();
+            let ports = self.clone();
+            let stream = stream.clone();
+            tokio::spawn(async move {
+                let _lease = lease;
+                tokio::select! { _ = ticket.cancelled() => {}, _ = work => {} }
+                ports.end(&stream, None);
+            });
+        }
         // Who opened what, never what was carried.
         log::info!("port stream {}: {} opened port {port}", stream.id, peer.user_id.as_deref().unwrap_or("an attachment with no person"));
         Ok(json!({ "streamId": stream.id, "port": port, "window": STREAM_WINDOW, "maxWriteBytes": MAX_WRITE_BYTES }))

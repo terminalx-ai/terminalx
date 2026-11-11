@@ -404,6 +404,7 @@ impl ControlService {
     }
 
     pub fn handle(&self, request: ControlRequest) -> ControlResponse {
+        let _github_request = crate::github_process::scope();
         let id = request.id.clone();
         let _request = match self.local_lifetime.as_ref().map(|lifetime| lifetime.enter_command(request.command == "runtime.stopAll")).transpose() {
             Ok(guard) => guard,
@@ -428,11 +429,23 @@ impl ControlService {
         }
         if command.starts_with("runtime.") {
             if let Some(lifetime) = &self.local_lifetime {
+                if command == "runtime.dataPrivacy.refresh" {
+                    return serde_json::to_value(crate::data_privacy::owner_status(lifetime.epoch())).map_err(ControlError::internal);
+                }
                 if let Some(method) = command.strip_prefix("runtime.mobile.") {
                     return crate::local_runtime::mobile::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
                 }
                 if let Some(method) = command.strip_prefix("runtime.sharing.") {
                     return crate::local_sharing::owner::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
+                }
+                if matches!(command, "runtime.session.workspace" | "runtime.session.pipeline" | "runtime.session.create" | "runtime.session.rowStatuses" | "runtime.session.workspaceSetup" | "runtime.pty.githubLogin") {
+                    // Missing/expired origin stamps still permit local facts,
+                    // but never acquire today's authority after socket queues
+                    // or a listener handover. Authentication preceded this.
+                    let ticket = serde_json::from_value::<crate::data_privacy::Forwarding>(params["networkAuthority"].clone())
+                        .ok().map(|authority| authority.admit(lifetime.epoch())).unwrap_or_else(crate::data_privacy::Ticket::denied);
+                    return crate::github_process::with_ticket(ticket, ||
+                        crate::local_runtime::calls::execute(&self.manager, &self.sink, command, params).map_err(ControlError::internal));
                 }
                 if command.starts_with("runtime.session.") || command.starts_with("runtime.pty.") {
                     return crate::local_runtime::calls::execute(&self.manager, &self.sink, command, params).map_err(ControlError::internal);

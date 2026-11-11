@@ -35,6 +35,7 @@ pub(crate) fn fixture() -> Share {
 pub(crate) fn guest(id: &str, user: &str) -> Guest {
     let (cancel, _) = tokio::sync::mpsc::unbounded_channel();
     Guest {
+        privacy: Default::default(),
         connection_id: id.into(),
         link_id: "link".into(),
         person: Person {
@@ -96,6 +97,7 @@ fn editing_live_access_releases_leases_and_drops_queue_and_outsiders() {
     share.join(guest("two", "bob"), 1000).unwrap();
     share.admit("one", Some("tab"), true, false, 2000).unwrap();
     share.queue.push_back(QueuedInput {
+        privacy: Default::default(),
         connection_id: "one".into(),
         tab_id: "tab".into(),
         text: "follow up".into(),
@@ -144,6 +146,7 @@ fn removal_and_revocation_close_connections_invalidate_access_and_drop_inputs() 
     let active = one.active.clone();
     share.join(one, 1000).unwrap();
     share.queue.push_back(QueuedInput {
+        privacy: Default::default(),
         connection_id: "one".into(),
         tab_id: "tab".into(),
         text: "follow up".into(),

@@ -1,3 +1,12 @@
+vi.mock("@/lib/dataPrivacy", () => ({
+  getDataPrivacy: () => ({ enabled: false, managed: false, ready: true }),
+  PRIVACY_MESSAGE: "Turned off by data privacy mode",
+  bootDataPrivacy: () => Promise.resolve(),
+  privacyEnabled: () => false,
+  privacyBlocksCommand: () => false,
+  subscribeDataPrivacy: () => () => {},
+  useDataPrivacy: () => ({ enabled: false, managed: false, ready: true }),
+}));
 import "@testing-library/dom";
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";

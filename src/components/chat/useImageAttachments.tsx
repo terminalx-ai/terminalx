@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type HTMLAttributes, type RefObject } from "react";
 import { Paperclip, X } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -306,7 +307,7 @@ export function AttachmentThumbs({ attach }: { attach: ImageAttachments }) {
     <div className="mb-2 flex flex-wrap gap-2 px-1">
       {attach.attachments.map((a) => (
         <div key={a.id} className="group relative size-14 overflow-hidden rounded-md hairline">
-          <img src={a.previewUrl} alt={a.name} className="size-full object-cover" />
+          <PrivacyImage src={a.previewUrl} alt={a.name} className="size-full object-cover" />
           <button
             type="button"
             aria-label={`Remove ${a.name}`}

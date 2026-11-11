@@ -394,6 +394,7 @@ pub(super) fn dispatch(
     request: &Value,
     device: &DeviceEntry,
 ) -> Option<Result<Value>> {
+    if let Err(error) = crate::data_privacy::require_network() { return Some(Err(error)); }
     if let Err(error) = connection.check(manager) { return Some(Err(error)); }
     let method = request.get("method")?.as_str()?;
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));

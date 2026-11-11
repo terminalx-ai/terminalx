@@ -36,7 +36,7 @@ impl RuntimeObserver {
         if !store::takes_part(session_id, tab_id) {
             return;
         }
-        let _ = std::thread::Builder::new().name("issue-pipeline".into()).spawn(move || work(&host));
+        let _ = std::thread::Builder::new().name("issue-pipeline".into()).spawn(crate::github_process::queued(move || work(&host)));
     }
 }
 

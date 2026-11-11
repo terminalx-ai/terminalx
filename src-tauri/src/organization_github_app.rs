@@ -238,7 +238,7 @@ struct Client {
 
 impl Client {
     fn new(base: Url, timeout: Duration) -> Self {
-        Self { base, agent: ureq::AgentBuilder::new().timeout(timeout).redirects(0).build() }
+        Self { base, agent: crate::data_privacy::http_agent().timeout(timeout).redirects(0).build() }
     }
 
     fn request<T: DeserializeOwned>(

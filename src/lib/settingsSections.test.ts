@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { searchSettingsSections } from "./settingsSections";
 
 describe("settings section search", () => {
+  it("finds the privacy control in General", () => {
+    expect(searchSettingsSections("data privacy")[0].item.tab).toBe("general");
+  });
   it("lists each section once when independent settings features are combined", () => {
     const sections = searchSettingsSections("").map((match) => match.item.tab);
     expect(new Set(sections).size).toBe(sections.length);

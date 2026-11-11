@@ -195,7 +195,7 @@ pub struct HttpTokenApi {
 
 impl HttpTokenApi {
     pub fn new(origin: &str, state_dir: &Path) -> Self {
-        let agent = ureq::AgentBuilder::new()
+        let agent = crate::data_privacy::http_agent()
             .timeout(REQUEST_TIMEOUT)
             .redirects(0)
             .user_agent(&format!("terminalx-serve/{}", crate::cloud_bootstrap::VERSION))
@@ -484,6 +484,9 @@ const USAGE: &str = "Usage: terminalx-serve github-auth --dir <dir> credential <
 
 /// `terminalx-serve github-auth ...`. Returns the exit code.
 pub fn run_cli(args: &[String]) -> i32 {
+    // This short-lived entry point runs before serve::run, so it must load
+    // the personal and managed policy before constructing a broker client.
+    crate::data_privacy::initialize();
     let mut args = args.iter().map(String::as_str);
     let dir = match (args.next(), args.next()) {
         (Some("--dir"), Some(dir)) if !dir.is_empty() => PathBuf::from(dir),
@@ -1110,6 +1113,32 @@ mod tests {
         });
         fs::write(state.path().join("runtime.json"), identity.to_string()).unwrap();
         state
+    }
+
+    #[test]
+    fn credential_helper_initializes_privacy_before_contacting_the_broker() {
+        for managed in [false, true] {
+            let state = state_with_credential();
+            crate::store::write_json(&state.path().join("data-privacy.json"), &serde_json::json!({"enabled":!managed})).unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let config = BrokerConfig { v: 1, origin: format!("http://{}", listener.local_addr().unwrap()), state_dir: state.path().into(), cache_dir: None };
+            crate::store::write_json(&state.path().join(CONFIG_FILE), &config).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "cloud_github::tests::privacy_helper_child", "--nocapture"])
+                .env("TERMINALX_TEST_GITHUB_HELPER_PRIVACY", "1").env("TERMINALX_HOME", state.path());
+            if managed { child.env("TERMINALX_TEST_MANAGED_PRIVACY", "1"); }
+            let output = child.output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock), "no connection reaches the real broker socket");
+        }
+    }
+
+    #[test]
+    fn privacy_helper_child() {
+        if std::env::var_os("TERMINALX_TEST_GITHUB_HELPER_PRIVACY").is_none() { return; }
+        assert_eq!(run_cli(&["--dir".into(), crate::store::root().unwrap().to_string_lossy().into_owned(), "token".into(), "--repository".into(), "acme/api".into()]), 1);
+        assert!(crate::data_privacy::enabled());
     }
 
     #[test]

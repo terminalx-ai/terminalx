@@ -1,3 +1,4 @@
+import { gh } from "@/lib/api";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, GitBranch, Loader2 } from "@/icons";
@@ -90,7 +91,7 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
       if (!isAgent || agentRun.current) setNotice(result);
     }
     catch (reason) { agentRun.current = null; setAgentPending(false); setError(branchError(reason)); }
-    finally { lock.current = false; setRunning(null); refresh(); }
+    finally { lock.current = false; setRunning(null); refresh(false); }
   };
   const prepare = async (action: BranchAction) => {
     if (lock.current || pending || !snapshot || !enabled(action)) return;
@@ -99,9 +100,11 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
     setNotice(null);
     const request: BranchRequest = { action, expected: snapshot, tabId };
     try {
+      request.authority = await gh.checkAuthority();
+      if (!alive.current) return;
       if (BRANCH_ACTIONS[action].publishes) {
         setRunning("Checking GitHub account…");
-        const account = await branchStep.account(session.id, action);
+        const account = await branchStep.account(session.id, action, request.authority);
         if (!alive.current) return;
         request.confirmedAccount = account;
       }
@@ -159,7 +162,7 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
             ))}
             <DropdownMenuSeparator />
             {snapshot?.pr && <DropdownMenuItem onSelect={() => void openUrl(snapshot.pr!.url).catch((reason) => setError(branchError(reason)))}>Open pull request</DropdownMenuItem>}
-            <DropdownMenuItem disabled={refreshing} onSelect={refresh}>Refresh Git status</DropdownMenuItem>
+            <DropdownMenuItem disabled={refreshing} onSelect={() => refresh()}>Refresh Git status</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

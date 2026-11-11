@@ -1,7 +1,8 @@
 import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { PrCheck } from "@/lib/api";
+import type { CheckAuthority, PrCheck } from "@/lib/api";
+import { PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import type { IssuePipeline, IssuePipelineSettings } from "@/types/issuePipeline";
 import type { Project } from "@/types/session";
 
@@ -272,6 +273,7 @@ describe("the checks a merge waits on (#881)", () => {
     });
     failed.checks!.until = "2026-11-11T10:41:00.000Z";
     invoke.mockImplementation(async (command: string) => {
+      if (command === "pr_check_authority") return { owner: "native", epoch: 0 };
       if (command === "pr_check_fix_attachment") return { path: "/tmp/logs/check.log", truncated: false };
       if (command === "send_message") return { queued: false, events: [] };
       if (command === "pr_check_rerun") return undefined;
@@ -291,14 +293,56 @@ describe("the checks a merge waits on (#881)", () => {
 
     fireEvent.click(panel.getByRole("button", { name: "Send the failure to the author" }));
     await waitFor(() => expect(panel.getByText("Sent the failure to the author session.")).toBeTruthy());
-    expect(invoke).toHaveBeenCalledWith("pr_check_fix_attachment", { sessionId: "author", tabId: "t1", prUrl: "https://github.com/acme/widgets/pull/7" });
+    expect(invoke).toHaveBeenCalledWith("pr_check_fix_attachment", { sessionId: "author", tabId: "t1", prUrl: "https://github.com/acme/widgets/pull/7", authority: { owner: "native", epoch: 0 } });
     const sent = invoke.mock.calls.find(([command]) => command === "send_message")![1] as { sessionId: string; tabId: string; text: string };
     expect([sent.sessionId, sent.tabId]).toEqual(["author", "t1"]);
     expect(sent.text).toContain("/tmp/logs/check.log");
 
     fireEvent.click(panel.getByRole("button", { name: "Re-run check" }));
     await waitFor(() => expect(panel.getByText(/Re-run requested for 1 Actions run\./)).toBeTruthy());
-    expect(invoke).toHaveBeenCalledWith("pr_check_rerun", { cwd: "/repo/.worktrees/433", prUrl: "https://github.com/acme/widgets/pull/7", checkUrl: RUN(5), failed: true });
+    expect(invoke).toHaveBeenCalledWith("pr_check_rerun", { cwd: "/repo/.worktrees/433", prUrl: "https://github.com/acme/widgets/pull/7", checkUrl: RUN(5), failed: true, authority: { owner: "native", epoch: 0 } });
+  });
+
+  it("keeps one privacy authority for a rerun batch across a delayed completed reply", async () => {
+    const urls = [RUN(5), "https://github.com/acme/widgets/actions/runs/91/job/6"];
+    const failed = waiting([
+      check("check", "failure", { url: urls[0], actions: { runId: 90, jobId: 5 } }),
+      check("lint", "failure", { url: urls[1], actions: { runId: 91, jobId: 6 } }),
+    ], ["check", "lint"], { state: "needsYou", reason: { kind: "checksFailed", names: ["check", "lint"] } });
+    let epoch = 0;
+    let release!: () => void;
+    const writes: string[] = [];
+    invoke.mockImplementation(async (command: string, args: { authority?: CheckAuthority; checkUrl?: string }) => {
+      if (command === "pr_check_authority") return { owner: "native", epoch };
+      if (command === "pr_check_rerun") {
+        if (args.authority?.owner !== "native" || args.authority.epoch !== epoch) throw new Error(PRIVACY_MESSAGE);
+        writes.push(args.checkUrl!);
+        if (writes.length === 1) await new Promise<void>((resolve) => { release = resolve; });
+        return undefined;
+      }
+      return failed;
+    });
+    render(<IssuePipelinePanel pipeline={failed} />);
+    const rerun = screen.getByRole("button", { name: "Re-run check" });
+    expect(rerun.hasAttribute("disabled")).toBe(false);
+    await act(async () => { fireEvent.click(rerun); });
+    await waitFor(() => expect(release).toBeTypeOf("function"));
+    expect(writes).toEqual([urls[0]]);
+    // The first mutation completed; only its reply is held across an off/on cycle.
+    epoch++;
+    await act(async () => { release(); });
+    expect(await screen.findByText(PRIVACY_MESSAGE)).toBeTruthy();
+    expect(writes).toEqual([urls[0]]);
+    expect(invoke.mock.calls.filter(([command]) => command === "pr_check_authority")).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([command]) => command === "pr_check_rerun").map(([, args]) => args.authority)).toEqual([
+      { owner: "native", epoch: 0 }, { owner: "native", epoch: 0 },
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Re-run check" }));
+    await screen.findByText(/Re-run requested for 2 Actions runs\./);
+    expect(writes).toEqual([urls[0], ...urls]);
+    expect(invoke.mock.calls.filter(([command]) => command === "pr_check_rerun").slice(-2).map(([, args]) => args.authority)).toEqual([
+      { owner: "native", epoch: 1 }, { owner: "native", epoch: 1 },
+    ]);
   });
 
   it("offers only the run where the author session is not here, or the failure is not an Actions run", () => {

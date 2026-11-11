@@ -531,6 +531,7 @@ impl Launcher {
     }
 
     fn attempt(&self) -> Result<(Pass, bool), CallError> {
+        let _request = crate::github_process::scope();
         let claimed = self.api.claim(&self.incarnation)?;
         let mut retry = false;
         // Sent only when there is no prompt to deliver; a launch being
@@ -569,6 +570,7 @@ impl Launcher {
     /// then cut the workspace's work branch. One that fails is logged and
     /// left for the next boot; the others are still done.
     fn ensure_checkout(&self, plan: &CheckoutPlan) -> Vec<CheckoutResult> {
+        let _request = crate::github_process::scope();
         let known = self.store.set_up();
         let pending: Vec<&Repository> = plan.repositories.iter().filter(|repository| repository.clone.is_some() && !known.contains(&repository.path)).collect();
         if pending.is_empty() {
@@ -886,6 +888,7 @@ fn is_empty_dir(path: &Path) -> bool {
 
 impl Checkout for GitCheckout {
     fn clone_missing(&self, repository: &Repository, within: Duration, canceled: &dyn Fn() -> bool) -> std::result::Result<(), CloneError> {
+        let _request = crate::github_process::scope();
         let path = Path::new(&repository.path);
         let url = self.clone_url(repository);
         if path.join(".git").exists() {
@@ -936,6 +939,7 @@ impl Checkout for GitCheckout {
     }
 
     fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch> {
+        let _request = crate::github_process::scope();
         let path = Path::new(&repository.path);
         if !crate::git::is_repo(path) {
             bail!("{} is not a git checkout", repository.path);

@@ -187,6 +187,7 @@ fn hidden(session: &SessionEntry, revision: u64) -> Snapshot {
 /// hosted read is shared per checkout/branch/remote, survives view remounts and
 /// backs off (10, 20, 40, 80 minutes) after errors. Manual refresh bypasses it.
 pub fn preview(session: &SessionEntry, working: bool, mode: Refresh) -> Result<Snapshot> {
+    let _request = crate::github_process::scope();
     let revision = REVISION.fetch_add(1, Ordering::Relaxed);
     let cwd = checkout(session)?;
     let work = read_work(cwd)?;
@@ -221,6 +222,7 @@ pub fn preview(session: &SessionEntry, working: bool, mode: Refresh) -> Result<S
 /// An action re-reads the remote immediately. Only Merge needs the expensive
 /// pinned workflow/suite validation; the polling path never runs it.
 pub fn read(session: &SessionEntry, working: bool, action: Action) -> Result<Snapshot> {
+    let _request = crate::github_process::scope();
     let revision = REVISION.fetch_add(1, Ordering::Relaxed);
     let cwd = checkout(session)?;
     let work = read_work(cwd)?;
@@ -318,6 +320,7 @@ fn ssh_greeting_matches_remote(remote: &str) -> bool {
 }
 
 pub fn account(session: &SessionEntry, action: Action) -> Result<Account> {
+    let _request = crate::github_process::scope();
     let cwd = checkout(session)?;
     let branch = git::current_branch(cwd).context("Check out a branch first.")?;
     let origin = git::remote_url(cwd).context("No origin remote.")?;
@@ -436,6 +439,7 @@ fn check_publish_target(cwd: &Path, branch: &str) -> Result<()> {
 }
 
 pub fn act(session: &SessionEntry, now: &Snapshot, request: &Request, ensure_idle: impl FnOnce() -> Result<()>) -> Result<Outcome> {
+    let _request = crate::github_process::scope();
     unchanged(&request.expected, now)?;
     if !now.actions.contains(&request.action) { bail!("This action is not available in the branch's current state. Refresh and try again."); }
     let cwd = checkout(session)?;

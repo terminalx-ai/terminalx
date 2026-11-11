@@ -5,7 +5,7 @@ import { setPrefs } from "./prefs";
 import { fixErrorsPrompt, useFixCheckErrors } from "./fixCheckErrors";
 
 const mocks = vi.hoisted(() => ({ shortcut: vi.fn(), merge: vi.fn(), workStatus: vi.fn(), sessionPrs: vi.fn() }));
-vi.mock("./api", () => ({ agent: { send: vi.fn() }, gh: { fixAttachment: vi.fn() }, errorMessage: (e: unknown) => String(e) }));
+vi.mock("./api", () => ({ agent: { send: vi.fn() }, gh: { checkAuthority: vi.fn(), fixAttachment: vi.fn() }, errorMessage: (e: unknown) => String(e) }));
 vi.mock("./agentEvents", () => ({ mergeTabEvents: mocks.merge }));
 vi.mock("./hotkeys", () => ({ useShortcut: mocks.shortcut }));
 vi.mock("./gitSource", () => ({ localGitSource: () => ({ workStatus: mocks.workStatus }) }));
@@ -16,6 +16,7 @@ const input = { sessionId: "s", tabId: "active-agent", cwd: "/repo", branch: "fe
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(gh.checkAuthority).mockResolvedValue({ owner: "test-policy", epoch: 0 });
   vi.mocked(gh.fixAttachment).mockResolvedValue({ path: "/attachments/s/check-failures.log", truncated: true });
   vi.mocked(agent.send).mockResolvedValue({ events: [], queued: true });
   mocks.workStatus.mockResolvedValue({ branch: "feature", defaultBranch: "main" });
@@ -27,7 +28,7 @@ afterEach(cleanup);
 it("collects one attachment and sends exactly one prompt to the selected tab, with extra instructions", async () => {
   const hook = renderHook(() => useFixCheckErrors(input));
   await act(async () => { await Promise.all([hook.result.current.fix(pr), hook.result.current.fix(pr)]); });
-  expect(gh.fixAttachment).toHaveBeenCalledExactlyOnceWith("s", "active-agent", pr.url);
+  expect(gh.fixAttachment).toHaveBeenCalledExactlyOnceWith("s", "active-agent", pr.url, { owner: "test-policy", epoch: 0 });
   expect(agent.send).toHaveBeenCalledExactlyOnceWith("s", "active-agent", expect.stringContaining("@/attachments/s/check-failures.log"));
   expect(vi.mocked(agent.send).mock.calls[0][2]).toContain("Additional instructions:\nRun the affected tests.");
   expect(mocks.merge).toHaveBeenCalledExactlyOnceWith("s", "active-agent", []);
@@ -40,7 +41,7 @@ it("cancels delivery when the selected tab changes during log collection", async
   vi.mocked(gh.fixAttachment).mockImplementation(() => new Promise((done) => { resolve = done; }));
   const hook = renderHook((props) => useFixCheckErrors(props), { initialProps: input });
   let pending!: Promise<void>;
-  act(() => { pending = hook.result.current.fix(pr); });
+  await act(async () => { pending = hook.result.current.fix(pr); });
   hook.rerender({ ...input, tabId: "another-agent" });
   vi.mocked(gh.fixAttachment).mockResolvedValueOnce({ path: "/new.log", truncated: false });
   await act(async () => { await hook.result.current.fix(pr); });
@@ -58,7 +59,7 @@ it("cancels on unmount and reports collection failures without sending a partial
   let resolve!: (value: { path: string; truncated: boolean }) => void;
   vi.mocked(gh.fixAttachment).mockImplementation(() => new Promise((done) => { resolve = done; }));
   let pending!: Promise<void>;
-  act(() => { pending = hook.result.current.fix(pr); });
+  await act(async () => { pending = hook.result.current.fix(pr); });
   hook.unmount();
   resolve({ path: "/gone.log", truncated: false });
   await pending;
