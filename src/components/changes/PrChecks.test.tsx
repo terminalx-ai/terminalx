@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { copyText } from "@/lib/clipboard";
@@ -7,6 +8,8 @@ import type { PrConversation, PrConversationAction } from "@terminalx/portable/w
 import { localGitSource } from "@/lib/gitSource";
 import { runSignature, withPendingChecks } from "@/lib/checks";
 import { mergeReadiness, PrPanel } from "./PrPanel";
+
+const render = (ui: Parameters<typeof rtlRender>[0]) => rtlRender(ui, { wrapper: TooltipProvider });
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));

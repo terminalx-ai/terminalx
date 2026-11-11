@@ -416,6 +416,8 @@ it("opens a PR from its header and refreshes the same identity after the checkou
   let checks = "pending";
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "work_status") return { isRepo: true, dirty: false, branch: "new-branch", defaultBranch: "main", ahead: 0, behind: 0, aheadOfBase: 1 };
     if (command === "pr_list" || command === "pr_details") {
       const pr = { ...mergedPr, title, state: "OPEN", checks: [{ name: "CI", state: checks }] };
