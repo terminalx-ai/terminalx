@@ -5005,6 +5005,19 @@ pub struct OrchestratorPatch {
     piece_limit: Option<Option<u32>>,
     #[serde(default, deserialize_with = "given")]
     worker_mode: Option<Option<String>>,
+    // PRO-280. The worker limits and the stall time are app-wide only.
+    #[serde(default)]
+    workers_per_run: Option<u32>,
+    #[serde(default)]
+    workers_at_once: Option<u32>,
+    #[serde(default)]
+    stall_minutes: Option<u32>,
+    #[serde(default, deserialize_with = "given")]
+    budget_dollars: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "given")]
+    budget_points: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "given")]
+    window_ceiling: Option<Option<f64>>,
 }
 
 /// A field that is present, even as `null`, is `Some`: absent is "leave it".
@@ -5014,7 +5027,24 @@ fn given<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserializer: D)
 
 #[tauri::command]
 pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
-    use crate::store::settings::{MAX_PIECE_LIMIT, WORKER_MODES};
+    use crate::store::settings::{valid_dollars, valid_percent, valid_stall_minutes, valid_workers, MAX_BUDGET_DOLLARS, MAX_PIECE_LIMIT, MAX_STALL_MINUTES, MAX_WORKERS, WORKER_MODES};
+    for workers in [patch.workers_per_run, patch.workers_at_once].into_iter().flatten() {
+        if !valid_workers(workers) {
+            return Err(format!("From 1 to {MAX_WORKERS} workers at once, not {workers}."));
+        }
+    }
+    if let Some(minutes) = patch.stall_minutes.filter(|minutes| !valid_stall_minutes(*minutes)) {
+        return Err(format!("A worker is marked stalled after 1 to {MAX_STALL_MINUTES} minutes, not {minutes}."));
+    }
+    if patch.budget_dollars.flatten().is_some_and(|dollars| !valid_dollars(dollars)) {
+        return Err(format!("A dollar budget is more than $0 and at most ${MAX_BUDGET_DOLLARS:.0}."));
+    }
+    if patch.budget_points.flatten().is_some_and(|points| !valid_percent(points)) {
+        return Err("A points budget is more than 0 and at most 100 points of a window.".into());
+    }
+    if patch.window_ceiling.flatten().is_some_and(|level| !valid_percent(level)) {
+        return Err("A window level is more than 0% and at most 100%.".into());
+    }
     if let Some(Some(limit)) = patch.piece_limit {
         if !(1..=MAX_PIECE_LIMIT).contains(&limit) {
             return Err(format!("A plan may have from 1 to {MAX_PIECE_LIMIT} pieces, not {limit}."));
@@ -5033,6 +5063,12 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             if let Some(value) = patch.require_approval { project.require_approval = value; }
             if let Some(value) = patch.piece_limit { project.piece_limit = value; }
             if let Some(value) = patch.worker_mode { project.worker_mode = value; }
+            if let Some(value) = patch.budget_dollars { project.budget_dollars = value; }
+            if let Some(value) = patch.budget_points { project.budget_points = value; }
+            if let Some(value) = patch.window_ceiling { project.window_ceiling = value; }
+            if patch.workers_per_run.is_some() || patch.workers_at_once.is_some() || patch.stall_minutes.is_some() {
+                return Err("Worker limits and the stall time are set for the whole app, not for one project.".into());
+            }
             // A project that follows the app in everything has no entry of its own.
             if project.is_empty() { orchestrator.projects.remove(&path); }
         }
@@ -5041,6 +5077,12 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             if let Some(value) = patch.require_approval { orchestrator.require_approval = value.ok_or("Say whether a run asks first.")?; }
             if let Some(value) = patch.piece_limit { orchestrator.piece_limit = value.ok_or("Say how many pieces a plan may have.")?; }
             if let Some(value) = patch.worker_mode { orchestrator.worker_mode = value.ok_or("Say which mode workers run in.")?; }
+            if let Some(value) = patch.workers_per_run { orchestrator.workers_per_run = value; }
+            if let Some(value) = patch.workers_at_once { orchestrator.workers_at_once = value; }
+            if let Some(value) = patch.stall_minutes { orchestrator.stall_minutes = value; }
+            if let Some(value) = patch.budget_dollars { orchestrator.budget_dollars = value.ok_or("Say what a run may spend.")?; }
+            if let Some(value) = patch.budget_points { orchestrator.budget_points = value.ok_or("Say how many points a run may use.")?; }
+            if let Some(value) = patch.window_ceiling { orchestrator.window_ceiling = value.ok_or("Say how full a window may get.")?; }
         }
     }
     store::settings::save(&settings).map_err(err)?;
@@ -5093,6 +5135,20 @@ pub async fn orchestration_stop(app: AppHandle, id: String) -> CmdResult<serde_j
 pub async fn orchestration_update_plan(app: AppHandle, id: String, plan: serde_json::Value) -> CmdResult<serde_json::Value> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.orchestration("updatePlan", serde_json::json!({"id": id, "plan": plan})).map_err(err)).await.map_err(err)?
+}
+
+/// A person's worker limit and budget for one run (PRO-280).
+#[tauri::command]
+pub async fn orchestration_set_limits(app: AppHandle, id: String, limits: serde_json::Value) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("setLimits", serde_json::json!({"id": id, "limits": limits})).map_err(err)).await.map_err(err)?
+}
+
+/// A person lets a run that reached its budget go on, now or once its window resets.
+#[tauri::command]
+pub async fn orchestration_resume(app: AppHandle, id: String, after_reset: bool) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("resume", serde_json::json!({"id": id, "afterReset": after_reset})).map_err(err)).await.map_err(err)?
 }
 
 /// The header's usage popover (PRO-273): the session's tokens and estimated

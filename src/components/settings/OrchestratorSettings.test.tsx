@@ -20,7 +20,7 @@ const { OrchestratorTab, RepositoryOrchestratorSettings } = await import("./Orch
 
 let stored: OrchestratorSettings;
 beforeEach(() => {
-  stored = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", projects: {} };
+  stored = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, projects: {} };
   mocks.projects = [{ path: "/repo", name: "terminalx" }, { path: "/notes", name: "notes", kind: "folder" }];
   mocks.settings.mockReset().mockImplementation(async () => stored);
   // The native side's own rule: a project's `null` follows the app again, and an empty answer is no entry.
@@ -132,5 +132,57 @@ describe("a repository's own orchestrator settings (PRO-274)", () => {
   it("is not offered for a folder that is not a git repository, or a project that is gone", () => {
     const { container } = render(<><RepositoryOrchestratorSettings projectPath="/notes" /><RepositoryOrchestratorSettings projectPath="/removed" /></>);
     expect(container.textContent).toBe("");
+  });
+});
+
+describe("Settings → Orchestrator, limits and budget (PRO-280)", () => {
+  it("shows the worker limits, the budget and the stall time as stored", async () => {
+    render(<OrchestratorTab />);
+    await waitFor(() => expect(limit("Workers at once, per run").hasAttribute("disabled")).toBe(false));
+    expect(limit("Workers at once, per run").value).toBe("4");
+    expect(limit("Workers at once, whole app").value).toBe("8");
+    expect(limit("Budget per run, API key").value).toBe("15");
+    expect(limit("Budget per run, subscription").value).toBe("25");
+    expect(limit("Pause when a window passes").value).toBe("85");
+    expect(limit("Mark a worker stalled after").value).toBe("10");
+    const text = screen.getByTestId("orchestrator-settings").textContent ?? "";
+    for (const said of ["Budget and stalls", "Sessions you start by hand are never counted or queued.", "A long build is not a stall."]) expect(text).toContain(said);
+  });
+
+  it("saves a changed points budget and window level, and refuses a value out of range", async () => {
+    render(<OrchestratorTab />);
+    await waitFor(() => expect(limit("Budget per run, subscription").hasAttribute("disabled")).toBe(false));
+    fireEvent.change(limit("Budget per run, subscription"), { target: { value: "40" } });
+    fireEvent.blur(limit("Budget per run, subscription"));
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledWith({ budgetPoints: 40 }));
+    fireEvent.change(limit("Pause when a window passes"), { target: { value: "90" } });
+    fireEvent.keyDown(limit("Pause when a window passes"), { key: "Enter" });
+    fireEvent.blur(limit("Pause when a window passes"));
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledWith({ windowCeiling: 90 }));
+    fireEvent.change(limit("Budget per run, API key"), { target: { value: "7.5" } });
+    fireEvent.blur(limit("Budget per run, API key"));
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledWith({ budgetDollars: 7.5 }));
+    mocks.setSettings.mockClear();
+    fireEvent.change(limit("Workers at once, per run"), { target: { value: "0" } });
+    fireEvent.blur(limit("Workers at once, per run"));
+    fireEvent.change(limit("Pause when a window passes"), { target: { value: "120" } });
+    fireEvent.blur(limit("Pause when a window passes"));
+    expect(mocks.setSettings).not.toHaveBeenCalled();
+    expect(limit("Workers at once, per run").value).toBe("4");
+  });
+
+  it("lets a repository set its own budget, and follow the default again when emptied", async () => {
+    render(<RepositoryOrchestratorSettings projectPath="/repo" />);
+    const points = await screen.findByRole("spinbutton", { name: "Budget per run, subscription in terminalx" });
+    await waitFor(() => expect(points.hasAttribute("disabled")).toBe(false));
+    expect((points as HTMLInputElement).placeholder).toBe("25");
+    fireEvent.change(points, { target: { value: "10" } });
+    fireEvent.blur(points);
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledWith({ project: "/repo", budgetPoints: 10 }));
+    await waitFor(() => expect((points as HTMLInputElement).value).toBe("10"));
+    fireEvent.change(points, { target: { value: "" } });
+    fireEvent.blur(points);
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledWith({ project: "/repo", budgetPoints: null }));
+    await waitFor(() => expect(stored.projects["/repo"]).toBeUndefined());
   });
 });

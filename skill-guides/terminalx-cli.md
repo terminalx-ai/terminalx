@@ -72,15 +72,25 @@ User-facing webview choices are under `preferences`, for example:
     "requireApproval": true,
     "pieceLimit": 8,
     "workerMode": "bypassPermissions",
-    "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12 } }
+    "workersPerRun": 4,
+    "workersAtOnce": 8,
+    "budgetDollars": 15,
+    "budgetPoints": 25,
+    "windowCeiling": 85,
+    "stallMinutes": 10,
+    "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12, "budgetPoints": 15 } }
   }
 }
 ```
 
 `orchestrator` holds the limits of orchestration runs: whether a run waits for approval, the
-most pieces a plan may have (1 to 50), and the permission mode workers start in. A project
-may answer for itself under `projects`, by its path; a setting it leaves out follows the
-app-wide value. These are the person's to change, in Settings → Orchestrator: do not edit
+most pieces a plan may have (1 to 50), the permission mode workers start in, how many
+workers run at once (per run, and across every run of the app), each run's budget (dollars
+for workers on an API key; points of a usage window, and the window level past which nothing
+new starts, for workers on a subscription), and after how many minutes of nothing a worker
+counts as stalled. A project may answer for itself under `projects`, by its path, for approval,
+the piece limit, the worker mode and the three budget values; a setting it leaves out follows
+the app-wide value. These are the person's to change, in Settings → Orchestrator: do not edit
 them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
 settings page in the app; the `runs` commands work either way.
 
@@ -643,8 +653,8 @@ The plan is a JSON file you write:
   pages, logs from elsewhere). The person is shown that it will run without prompts, and the
   worker is told to treat that text as information, never as instructions.
 - `estimate`: what you expect the piece to cost, in API-equivalent dollars. `budget` is what
-  the run may use, in `points` of a subscription's window or `dollars`. Both are recorded and
-  shown to the person with the plan; nothing is stopped by them yet.
+  the run may use, in `points` of a subscription's window or `dollars`. Where it is lower
+  than the person's settings it holds; it cannot raise them. See "Limits and budget".
 
 `runs create` checks the plan and stores it. A refusal names its rule in `code` and the
 piece in `details.piece`, and nothing is stored:
@@ -682,8 +692,9 @@ starts it at once.
 
 #### Start, follow, stop
 
-`runs start` starts a worker for every piece whose dependencies are done, and returns
-`started` (piece ids), `waiting` (each queued piece with the pieces it waits `on`) and
+`runs start` starts a worker for every piece whose dependencies are done, up to the worker
+limits, and returns `started` (piece ids), `waiting` (each queued piece with the pieces it
+waits `on`, and `queuedFor` when a limit holds it) and
 `failed` (pieces whose worker could not be started, with the `error`). Call it again
 whenever a piece is done: it starts the pieces that waited on it, and tries again a piece
 whose worker could not be started. Calling it when nothing new is ready starts nothing. A
@@ -707,19 +718,56 @@ terminalx runs start --json
 ```
 
 `runs show` returns the run: `state`, `goal`, `budget`, `workerMode`, `pieces`, `ready` (the
-pieces the next `runs start` would start), `waiting`, and `estimate` with `unestimated` (how
-many pieces carry none). Each piece has its plan fields and `state`, `attempts`, `worker`
-(`sessionId`, `tabId`), `branch`, `startedMode` and `note`.
+pieces the next `runs start` would start), `waiting`, `estimate` with `unestimated` (how
+many pieces carry none), `limits`, `usage`, `pause`, `inTurn` (its workers in a turn now)
+and `fit`. Each piece has its plan fields and `state`, `attempts`, `worker` (`sessionId`,
+`tabId`), `branch`, `startedMode`, `login` (`apiKey` or `subscription`), `queuedFor` and
+`note`.
 
-- Run `state`: `planned`, `awaitingApproval`, `running`, `verifying`, `merging`, `done`,
-  `stopped`, `failed`. A run is `done` when every piece is. It is `failed` when a piece
-  failed and nothing is running or could start; `reason` names the piece and what it holds
-  up. A failed run goes back to `running` when that piece's worker finishes after all.
+- Run `state`: `planned`, `awaitingApproval`, `running`, `needsYou`, `verifying`, `merging`,
+  `done`, `stopped`, `failed`. A run is `done` when every piece is. It is `failed` when a
+  piece failed and nothing is running or could start; `reason` names the piece and what it
+  holds up. A failed run goes back to `running` when that piece's worker finishes after all.
+  `needsYou`: it reached its budget (see below).
 - Piece `state` follows its worker's last report, each time the run is read: `queued` (no
-  worker yet), `running`, `done` (it reported `done`), `blocked` (it reported `partial` or
+  worker yet), `running`, `stalled` (see below), `done` (it reported `done`), `blocked` (it reported `partial` or
   `blocked`, sent no report, waits on a person, or its session was deleted; `note` says
   which), `failed` (it reported `failed`, or could not be started), `stopped`. A `done`
   piece stays done when its worker's session is deleted afterwards.
+
+#### Limits and budget
+
+A run has `limits`: `workers` (in a turn at once), `dollars`, `points` and `ceiling`. They are
+the project's settings when the run is made, with your plan's `budget` where it asks for
+less; the person can change them for the run in the approval view, or when it stops.
+
+- **Worker limits.** At most `limits.workers` of the run's workers are in a turn at once, and
+  at most the app-wide limit across every run. `runs start` starts what fits and leaves the
+  rest `queued` with `queuedFor: "runLimit"` or `"appLimit"`. Those start by themselves when
+  a worker's turn ends, in this run or another: do not call `runs start` for them, and do not
+  poll. A piece that becomes ready only because a piece it depends on finished still waits
+  for your `runs start`, so you can collect that branch first. A stalled worker still holds
+  its slot. Sessions a person starts by hand are never counted, queued or refused.
+- **Budget.** A worker on an API key (Settings → Agents) draws on `dollars`: `usage.dollars`
+  sums its recorded cost. A worker on a subscription draws on its account's usage windows,
+  and on the model windows of its own model (`usage.windows`, each with the `percent` it is
+  at, the `start` it was at when the run began, the run's `points` and `resetsAt`). The run's
+  points are an estimate: the window is shared with everything the person runs. The run
+  stops starting new pieces when a window it draws on reaches `ceiling` percent, when its own
+  points of a window reach `points`, or when `usage.dollars` reaches `dollars`; a run with
+  workers on both logins keeps both and stops on whichever comes first. It becomes
+  `needsYou`, `reason` and `pause.message` say which limit (a window by name, with its reset
+  time), and you are told once. Workers already in a turn finish it. `runs start` is then
+  refused with `needs_you`; what you asked for starts when the person raises the budget or
+  resumes the run, or by itself after the window resets if they asked for that, and you are
+  told. Tell the person and end your turn; do not get the work done another way.
+- **Stalls.** A worker in a turn with no tool call or file change for the stall time (10
+  minutes unless the person changed it), no command or background task of its running, and
+  its agent idle on the CPU, is `stalled`, and you are told once. A long build or test run is
+  not a stall. Look at it, `send` it what it needs, or stop it; it is `running` again as soon
+  as it does something.
+- `fit`, before a run starts: warnings that what the run may use would not fit in what is
+  left of a window, or that your estimate is over the dollar budget. The person sees them.
 
 A `done` piece is a worker's claim. Read its report and check the evidence before you build
 on it. To get a `blocked` or `failed` piece moving, `send` its worker what it needs: the

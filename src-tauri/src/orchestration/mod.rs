@@ -20,6 +20,7 @@
 //! the same code in the app and under test.
 
 pub mod brief;
+pub mod budget;
 pub mod engine;
 #[cfg(test)]
 mod engine_tests;
@@ -42,6 +43,9 @@ pub enum RunState {
     AwaitingApproval,
     /// Approved or started: workers are running, or pieces wait on others.
     Running,
+    /// It reached its budget (`pause` says which): no new piece starts until
+    /// a person raises it or resumes the run. Workers already in a turn finish it.
+    NeedsYou,
     /// Every piece is done and results are being checked.
     Verifying,
     /// Checked results are being merged into the lead's branch.
@@ -68,6 +72,10 @@ pub enum PieceState {
     Queued,
     /// Its worker is in a turn, or is about to be reminded of its report.
     Running,
+    /// Its worker is in a turn but has made no tool call or file change for
+    /// the stall time while its agent sits idle and runs no command. The lead
+    /// was told. It counts against the worker limits as a running one does.
+    Stalled,
     /// Its worker reported `done`.
     Done,
     /// Its worker stopped without finishing: a `partial` or `blocked` report,
@@ -183,6 +191,13 @@ pub struct Piece {
     /// The mode its worker was started in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_mode: Option<String>,
+    /// How its worker's agent was signed in when it started: which budget it draws on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<budget::Login>,
+    /// The lead (or an approval) asked for it to start, but a limit held it:
+    /// it starts by itself when a worker stops and the limit allows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_for: Option<Hold>,
     pub state: PieceState,
     /// One line on the state: the worker's result, or why it is not done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,6 +209,18 @@ impl Piece {
     pub fn mode<'a>(&'a self, project_default: &'a str) -> &'a str {
         self.permission_mode.as_deref().unwrap_or(project_default)
     }
+}
+
+/// What keeps a piece the lead asked for from starting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Hold {
+    /// The run has as many workers in a turn as it may.
+    RunLimit,
+    /// The app has as many run workers in a turn as it may, across runs.
+    AppLimit,
+    /// The run reached its budget and waits for a person.
+    Budget,
 }
 
 /// Who approved a run, and when.
@@ -225,9 +252,18 @@ pub struct Run {
     /// project that asks for no approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
-    /// Why it failed or was stopped.
+    /// Why it failed, was stopped, or needs the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Its worker limit and budget (PRO-280).
+    #[serde(default)]
+    pub limits: budget::RunLimits,
+    /// What it has used, as of its last refresh.
+    #[serde(default)]
+    pub usage: budget::RunUsage,
+    /// Why it is `needsYou`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<budget::Pause>,
     pub created: String,
     pub modified: String,
 }
@@ -235,6 +271,11 @@ pub struct Run {
 impl Run {
     pub fn piece(&self, id: &str) -> Option<&Piece> {
         self.pieces.iter().find(|piece| piece.id == id)
+    }
+
+    /// Its workers in a turn now: what the worker limits count.
+    pub fn in_turn(&self) -> usize {
+        self.pieces.iter().filter(|piece| piece.worker.is_some() && matches!(piece.state, PieceState::Running | PieceState::Stalled)).count()
     }
 
     /// Pieces with no worker yet whose dependencies are all done, in plan

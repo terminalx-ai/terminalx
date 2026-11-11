@@ -303,6 +303,60 @@ fn a_run_goes_from_plan_to_approved_workers_in_their_own_worktrees() {
     run_child("orchestration_run_child");
 }
 
+#[test]
+fn a_hand_started_session_starts_while_the_worker_limits_are_reached() {
+    run_child("worker_limit_child");
+}
+
+/// PRO-280: the worker limits queue a run's pieces, and only those. A session
+/// a person starts is neither counted, queued nor refused.
+#[test]
+fn worker_limit_child() {
+    if std::env::var(CHILD).as_deref() != Ok("1") { return; }
+    let _home = crate::store::temp_home();
+    let bin = crate::store::root().unwrap().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // An agent that waits for its prompt and never ends a turn.
+    std::fs::write(bin.join("claude"), "#!/bin/sh\ncase \"$*\" in *--settings*) stty -icanon; exec cat ;; esac\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let repo = super::tests::git_repo();
+    let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+    let mut settings = crate::store::settings::load();
+    settings.orchestrator.workers_per_run = 1;
+    settings.orchestrator.workers_at_once = 1;
+    settings.orchestrator.projects.entry(project.path.clone()).or_default().require_approval = Some(false);
+    crate::store::settings::save(&settings).unwrap();
+    let (service, _sink) = super::tests::headless_service();
+    let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(Duration::from_secs(60)));
+
+    let lead = service.execute("sessions.create", json!({"project": project.path, "agent": "claude", "prompt": "plan it", "useWorktree": true, "noPipeline": true}), "lead").unwrap();
+    let caller = json!({"session": lead["sessionId"], "tab": lead["tabId"]});
+    let plan = json!({"goal": "Two small pieces", "pieces": [
+        {"id": "one", "title": "First", "doneCheck": "exit 0", "owns": ["a/"]},
+        {"id": "two", "title": "Second", "doneCheck": "exit 0", "owns": ["b/"]},
+    ]});
+    let created = service.execute("runs.create", json!({"plan": plan, "caller": caller}), "create").unwrap();
+    assert_eq!(created["run"]["limits"]["workers"], 1);
+    let started = service.execute("runs.start", json!({"caller": caller}), "start").unwrap();
+    assert_eq!(started["started"], json!(["one"]));
+    assert_eq!(started["waiting"], json!([{"piece": "two", "on": [], "queuedFor": "runLimit"}]));
+
+    // The limits are reached; a person starts a session by hand, and it starts.
+    let by_hand = service.execute("sessions.create", json!({"project": project.path, "agent": "claude", "prompt": "something else", "useWorktree": true, "noPipeline": true}), "by-hand").unwrap();
+    let entry = index::get(by_hand["sessionId"].as_str().unwrap()).unwrap();
+    assert!(!entry.run_worker() && !crate::orchestration::guard::limited(&entry));
+    let until = Instant::now() + Duration::from_secs(20);
+    while !service.manager.is_running(&entry.id, by_hand["tabId"].as_str().unwrap()) {
+        assert!(Instant::now() < until, "the session started by hand did not start its agent");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // It took no slot from the run, and the run's queued piece is still queued.
+    let shown = service.execute("runs.show", json!({"caller": caller}), "show").unwrap();
+    assert_eq!((&shown["inTurn"], &shown["pieces"][1]["state"], &shown["pieces"][1]["queuedFor"]), (&json!(1), &json!("queued"), &json!("runLimit")));
+    service.execute("runs.stop", json!({"caller": caller}), "stop").unwrap();
+}
+
 /// A run through the control service, as `terminalx runs` and the window's
 /// Approve drive it, against a real repository and a stand-in `claude`.
 #[test]

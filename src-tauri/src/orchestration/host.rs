@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 
-use super::engine::{EngineError, Host, Lead, Started, WorkerNow};
+use super::budget::Login;
+use super::engine::{self, Activity, EngineError, Host, Lead, Started, WorkerNow};
 use super::{guard, Piece, Run, SessionRef, RUN_EVENT};
 use crate::session::SessionManager;
 use crate::session_ops::{NewSession, NewTab};
@@ -28,6 +29,48 @@ impl ManagerHost {
     pub fn new(sink: Arc<dyn EventSink>, manager: SessionManager) -> Self {
         Self { sink, manager }
     }
+}
+
+/// How often the watcher looks for stalled workers and runs due to resume.
+/// A stall is measured in minutes, so a minute is fine enough.
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// Above this, a worker's agent is working, whatever its transcript says.
+const BUSY_CPU_PERCENT: f32 = 5.0;
+
+/// Whether the watcher thread runs, and how often it was asked for: a run
+/// that starts while the thread decides to end is not left unwatched.
+static WATCHER: std::sync::Mutex<(bool, u64)> = std::sync::Mutex::new((false, 0));
+
+fn millis(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts).ok().map(|at| at.timestamp_millis())
+}
+
+/// What a worker did in its open turn, from its transcript's events.
+pub(crate) fn activity_of(events: &[crate::events::AgentEvent]) -> Activity {
+    use crate::events::Payload;
+    let from = events.iter().rposition(|event| matches!(event.payload, Payload::TurnStarted { .. })).unwrap_or(0);
+    let mut activity = Activity::default();
+    let mut open = std::collections::HashSet::new();
+    let mut background = false;
+    for event in &events[from..] {
+        let at = || millis(&event.ts);
+        match &event.payload {
+            Payload::TurnStarted { .. } => activity.last_ms = at(),
+            Payload::ToolCallStarted { call_id, .. } => {
+                open.insert(call_id.clone());
+                activity.last_ms = at().or(activity.last_ms);
+            }
+            Payload::ToolCallCompleted { call_id, .. } => {
+                open.remove(call_id);
+                activity.last_ms = at().or(activity.last_ms);
+            }
+            Payload::FileEdits { .. } => activity.last_ms = at().or(activity.last_ms),
+            Payload::BackgroundTasksChanged { tasks } => background = !tasks.is_empty(),
+            _ => {}
+        }
+    }
+    activity.command_running = !open.is_empty() || background;
+    activity
 }
 
 /// The commit a worker's branch is cut from: the lead's branch, or the commit
@@ -166,5 +209,60 @@ impl Host for ManagerHost {
 
     fn changed(&self, run: &Run) {
         self.sink.emit(RUN_EVENT, &super::engine::shown(run));
+    }
+
+    fn login(&self, agent: &str) -> Login {
+        if crate::agent_keys::uses_saved_key(agent) { Login::ApiKey } else { Login::Subscription }
+    }
+
+    fn windows(&self) -> Vec<crate::status::usage::UsageWindow> {
+        self.manager.usage_windows()
+    }
+
+    fn cost(&self, worker: &SessionRef) -> Option<f64> {
+        crate::session_usage::estimated_cost(&index::get(&worker.session_id).ok()?).0
+    }
+
+    fn activity(&self, worker: &SessionRef) -> Activity {
+        let Some(tab) = worker.tab_id.as_deref() else { return Activity::default() };
+        let mut activity = match self.manager.load_events(&worker.session_id, tab) {
+            Ok(events) => activity_of(&events),
+            // Unread is not idle: no stall is called on no evidence.
+            Err(_) => return Activity { command_running: true, ..Activity::default() },
+        };
+        activity.busy = match self.manager.resource_sample() {
+            Ok(sample) => sample.processes.iter().any(|process| process.session_id.as_deref() == Some(worker.session_id.as_str()) && process.tab_id.as_deref() == Some(tab) && process.cpu_percent.is_some_and(|cpu| cpu >= BUSY_CPU_PERCENT)),
+            Err(_) => true,
+        };
+        activity
+    }
+
+    fn fill_later(&self) {
+        let host = self.clone();
+        std::thread::spawn(move || engine::fill_slots(&host));
+    }
+
+    fn watch(&self) {
+        let mut watcher = WATCHER.lock().unwrap_or_else(|error| error.into_inner());
+        watcher.1 += 1;
+        if watcher.0 {
+            return;
+        }
+        watcher.0 = true;
+        let host = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(WATCH_EVERY);
+            let asked = WATCHER.lock().unwrap_or_else(|error| error.into_inner()).1;
+            let more = engine::watch(&host);
+            let mut watcher = WATCHER.lock().unwrap_or_else(|error| error.into_inner());
+            if !more && watcher.1 == asked {
+                watcher.0 = false;
+                return;
+            }
+        });
+    }
+
+    fn now_ms(&self) -> i64 {
+        chrono::Utc::now().timestamp_millis()
     }
 }

@@ -903,6 +903,8 @@ pub fn run() {
             commands::orchestration_approve,
             commands::orchestration_stop,
             commands::orchestration_update_plan,
+            commands::orchestration_set_limits,
+            commands::orchestration_resume,
             commands::session_usage,
             commands::organization_work_status,
             commands::set_organization_work_status,

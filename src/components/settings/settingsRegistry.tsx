@@ -295,6 +295,18 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.requireApproval" },
   }),
   defineSetting({
+    id: "orchestrator.workersPerRun", section: "orchestrator", title: "Workers at once, per run",
+    description: "The rest wait in a queue and start by themselves as workers finish. From 1 to 50.",
+    searchTerms: ["orchestrator", "workers", "limit", "queue", "concurrent", "parallel", "at once", "run"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.workersPerRun" },
+  }),
+  defineSetting({
+    id: "orchestrator.workersAtOnce", section: "orchestrator", title: "Workers at once, whole app",
+    description: "Across every run. Sessions you start by hand are never counted or queued.",
+    searchTerms: ["orchestrator", "workers", "limit", "queue", "concurrent", "app", "machine", "at once"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.workersAtOnce" },
+  }),
+  defineSetting({
     id: "orchestrator.pieceLimit", section: "orchestrator", title: "Pieces per run, at most",
     description: "A larger plan is refused, and the lead is told the limit. From 1 to 50.",
     searchTerms: ["orchestrator", "pieces", "limit", "plan", "workers", "most"], scope: "user",
@@ -305,6 +317,30 @@ export const SETTINGS_ROWS = [
     description: "The permission mode a worker starts in unless its piece names another. Push, merge and deploy stay blocked by deny rules in every mode.",
     searchTerms: ["orchestrator", "workers", "permissions", "mode", "bypass", "deny", "rules"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.workerMode" },
+  }),
+  defineSetting({
+    id: "orchestrator.budgetDollars", section: "orchestrator", title: "Budget per run, API key",
+    description: "Dollars its workers on an API key may spend; then the run starts nothing new and asks you.",
+    searchTerms: ["orchestrator", "budget", "dollars", "cost", "spend", "api key", "money"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.budgetDollars" },
+  }),
+  defineSetting({
+    id: "orchestrator.budgetPoints", section: "orchestrator", title: "Budget per run, subscription",
+    description: "Points of a usage window one run may use: the change in the window while it runs, which counts everything else you run too.",
+    searchTerms: ["orchestrator", "budget", "points", "subscription", "usage", "window", "plan", "limit"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.budgetPoints" },
+  }),
+  defineSetting({
+    id: "orchestrator.windowCeiling", section: "orchestrator", title: "Pause when a window passes",
+    description: "Whoever used it; the run can go on after the reset.",
+    searchTerms: ["orchestrator", "window", "usage", "ceiling", "pause", "percent", "subscription", "reset"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.windowCeiling" },
+  }),
+  defineSetting({
+    id: "orchestrator.stallMinutes", section: "orchestrator", title: "Mark a worker stalled after",
+    description: "No tool call or file change, no command running, and its agent idle. A long build is not a stall.",
+    searchTerms: ["orchestrator", "stall", "stalled", "idle", "stuck", "worker", "minutes", "timeout"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.stallMinutes" },
   }),
   defineSetting({
     id: "experimental.sessionCost", section: "experimental", title: "Session cost",
@@ -566,8 +602,8 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "repositories.orchestrator", section: "repositories", title: "Orchestrator",
-    description: "Override for this repository whether a run asks first, how many pieces it may have, and the mode its workers run in.",
-    searchTerms: ["repositories", "orchestrator", "runs", "approval", "pieces", "workers", "permissions"], scope: "repository",
+    description: "Override for this repository whether a run asks first, how many pieces it may have, the mode its workers run in, and its budget.",
+    searchTerms: ["repositories", "orchestrator", "runs", "approval", "pieces", "workers", "permissions", "budget", "points", "dollars", "window"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.projects" }, layout: "content",
   }),
   defineSetting({

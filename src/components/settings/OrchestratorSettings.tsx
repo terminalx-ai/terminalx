@@ -44,8 +44,11 @@ function useOrchestratorSettings() {
   return { settings, error, save };
 }
 
-/** A count of pieces typed into a field: saved when the field is left or Enter is pressed, and only when it is one. */
-function PieceLimitField({ value, placeholder, disabled, label, onSave }: { value: number | undefined; placeholder?: string; disabled: boolean; label: string; onSave: (limit: number | null) => void }) {
+/** A number typed into a field: saved when the field is left or Enter is pressed, and only when it is in range.
+ * Empty is "no value of its own", which only a repository has (`placeholder` is then the app's value). */
+function NumberField({ value, placeholder, disabled, label, min, max, step = 1, prefix, suffix, onSave }: {
+  value: number | undefined; placeholder?: string; disabled: boolean; label: string; min: number; max: number; step?: number; prefix?: string; suffix?: string; onSave: (value: number | null) => void;
+}) {
   const [draft, setDraft] = useState<string | null>(null);
   const shown = draft ?? (value === undefined ? "" : String(value));
   const commit = () => {
@@ -53,21 +56,22 @@ function PieceLimitField({ value, placeholder, disabled, label, onSave }: { valu
     const text = draft.trim();
     setDraft(null);
     if (text === "") {
-      // An empty field is "no value of its own": only a repository has that.
       if (placeholder !== undefined && value !== undefined) onSave(null);
       return;
     }
-    const limit = Number(text);
-    if (Number.isInteger(limit) && limit >= 1 && limit <= MAX_PIECES && limit !== value) onSave(limit);
+    const next = Number(text);
+    const whole = step >= 1 ? Number.isInteger(next) : true;
+    if (Number.isFinite(next) && whole && next >= min && next <= max && next !== value) onSave(next);
   };
-  return (
+  const input = (
     <input
       type="number"
-      inputMode="numeric"
-      min={1}
-      max={MAX_PIECES}
+      inputMode={step >= 1 ? "numeric" : "decimal"}
+      min={min}
+      max={max}
+      step={step}
       aria-label={label}
-      className={numberClass}
+      className={prefix || suffix ? "w-14 bg-transparent text-right text-xs tabular-nums outline-none disabled:opacity-60" : numberClass}
       value={shown}
       placeholder={placeholder}
       disabled={disabled}
@@ -78,7 +82,20 @@ function PieceLimitField({ value, placeholder, disabled, label, onSave }: { valu
       }}
     />
   );
+  if (!prefix && !suffix) return input;
+  return (
+    <span className="inline-flex h-7 items-center gap-1 rounded-md border border-hairline bg-background px-2 text-xs focus-within:ring-2 focus-within:ring-ring/40">
+      {prefix && <span className="text-faint">{prefix}</span>}
+      {input}
+      {suffix && <span className="text-faint">{suffix}</span>}
+    </span>
+  );
 }
+
+/** The most pieces or workers the settings take (`MAX_PIECE_LIMIT`, `MAX_WORKERS` in store/settings.rs). */
+const MAX_WORKERS = 50;
+const MAX_DOLLARS = 10000;
+const MAX_STALL_MINUTES = 240;
 
 /** Settings → Orchestrator: what a lead's run of workers may do without asking, for every project. */
 export function OrchestratorTab() {
@@ -86,13 +103,19 @@ export function OrchestratorTab() {
   const ready = settings !== null;
   return (
     <div className="flex flex-col" data-testid="orchestrator-settings">
-      <p className="pb-3 text-[13px] text-muted-foreground">How a lead session splits work across worker sessions: whether it asks first, how far it may split, and the permissions its workers run with. A repository can answer for itself in its own settings.</p>
+      <p className="pb-3 text-[13px] text-muted-foreground">How a lead session splits work across worker sessions: whether it asks first, how far it may split, the permissions its workers run with, and the limits a run stays inside. A repository can answer for itself in its own settings.</p>
       <div className="mb-1 mt-2 text-xs font-medium uppercase tracking-wide text-faint">Runs</div>
       <RegisteredSetting setting="orchestrator.requireApproval"
         control={<Switch aria-label="Ask before a run starts" checked={settings?.requireApproval ?? true} disabled={!ready} onCheckedChange={(on) => void save({ requireApproval: on })} />}
       />
+      <RegisteredSetting setting="orchestrator.workersPerRun"
+        control={<NumberField label="Workers at once, per run" value={settings?.workersPerRun} min={1} max={MAX_WORKERS} disabled={!ready} onSave={(value) => value !== null && void save({ workersPerRun: value })} />}
+      />
+      <RegisteredSetting setting="orchestrator.workersAtOnce"
+        control={<NumberField label="Workers at once, whole app" value={settings?.workersAtOnce} min={1} max={MAX_WORKERS} disabled={!ready} onSave={(value) => value !== null && void save({ workersAtOnce: value })} />}
+      />
       <RegisteredSetting setting="orchestrator.pieceLimit"
-        control={<PieceLimitField label="Pieces per run, at most" value={settings?.pieceLimit} disabled={!ready} onSave={(limit) => void save({ pieceLimit: limit })} />}
+        control={<NumberField label="Pieces per run, at most" value={settings?.pieceLimit} min={1} max={MAX_PIECES} disabled={!ready} onSave={(limit) => void save({ pieceLimit: limit })} />}
       />
       <RegisteredSetting setting="orchestrator.workerMode"
         control={
@@ -100,6 +123,19 @@ export function OrchestratorTab() {
             {WORKER_MODES.map((mode) => <option key={mode} value={mode}>{modeName(mode)}</option>)}
           </select>
         }
+      />
+      <div className="mb-1 mt-4 text-xs font-medium uppercase tracking-wide text-faint">Budget and stalls</div>
+      <RegisteredSetting setting="orchestrator.budgetDollars"
+        control={<NumberField label="Budget per run, API key" value={settings?.budgetDollars} min={0.01} max={MAX_DOLLARS} step={0.01} prefix="$" disabled={!ready} onSave={(value) => value !== null && void save({ budgetDollars: value })} />}
+      />
+      <RegisteredSetting setting="orchestrator.budgetPoints"
+        control={<NumberField label="Budget per run, subscription" value={settings?.budgetPoints} min={1} max={100} suffix="pts" disabled={!ready} onSave={(value) => value !== null && void save({ budgetPoints: value })} />}
+      />
+      <RegisteredSetting setting="orchestrator.windowCeiling"
+        control={<NumberField label="Pause when a window passes" value={settings?.windowCeiling} min={1} max={100} suffix="%" disabled={!ready} onSave={(value) => value !== null && void save({ windowCeiling: value })} />}
+      />
+      <RegisteredSetting setting="orchestrator.stallMinutes"
+        control={<NumberField label="Mark a worker stalled after" value={settings?.stallMinutes} min={1} max={MAX_STALL_MINUTES} suffix="min" disabled={!ready} onSave={(value) => value !== null && void save({ stallMinutes: value })} />}
       />
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>
@@ -143,7 +179,7 @@ export function RepositoryOrchestratorSettings({ projectPath }: { projectPath: s
             <div className="text-[13px] font-medium">Pieces per run, at most</div>
             <div className="text-xs leading-relaxed text-muted-foreground">Leave empty to follow the default.</div>
           </div>
-          <PieceLimitField label={`Pieces per run in ${project.name}, at most`} value={own.pieceLimit} placeholder={settings ? String(settings.pieceLimit) : ""} disabled={!ready} onSave={(limit) => void save({ project: projectPath, pieceLimit: limit })} />
+          <NumberField label={`Pieces per run in ${project.name}, at most`} value={own.pieceLimit} placeholder={settings ? String(settings.pieceLimit) : ""} min={1} max={MAX_PIECES} disabled={!ready} onSave={(limit) => void save({ project: projectPath, pieceLimit: limit })} />
         </div>
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2">
           <div className="min-w-0">
@@ -155,6 +191,19 @@ export function RepositoryOrchestratorSettings({ projectPath }: { projectPath: s
             {WORKER_MODES.map((mode) => <option key={mode} value={mode}>{modeName(mode)}</option>)}
           </select>
         </div>
+        {([
+          ["budgetDollars", "Budget per run, API key", "Dollars its workers on an API key may spend.", { min: 0.01, max: MAX_DOLLARS, step: 0.01, prefix: "$" }],
+          ["budgetPoints", "Budget per run, subscription", "Points of a usage window one run may use.", { min: 1, max: 100, suffix: "pts" }],
+          ["windowCeiling", "Pause when a window passes", "Whoever used it.", { min: 1, max: 100, suffix: "%" }],
+        ] as const).map(([key, title, hint, bounds]) => (
+          <div key={key} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2">
+            <div className="min-w-0">
+              <div className="text-[13px] font-medium">{title}</div>
+              <div className="text-xs leading-relaxed text-muted-foreground">{hint} Leave empty to follow the default.</div>
+            </div>
+            <NumberField label={`${title} in ${project.name}`} value={own[key]} placeholder={settings ? String(settings[key]) : ""} disabled={!ready} {...bounds} onSave={(value) => void save({ project: projectPath, [key]: value })} />
+          </div>
+        ))}
         <p className="text-xs text-muted-foreground">The defaults are in Settings → Orchestrator.</p>
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
       </section>

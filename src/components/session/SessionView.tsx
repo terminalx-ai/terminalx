@@ -827,7 +827,7 @@ export function SessionView({
             {chrome?.trailing}
           </div>
         </header>
-        {runOffered && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} onChange={(shown) => showRunView(session.id, shown)} />}
+        {runOffered && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} paused={run?.state === "needsYou"} onChange={(shown) => showRunView(session.id, shown)} />}
         {runShown && <RunView session={session} onShowChat={() => showRunView(session.id, false)} />}
         {/* The row of tabs, ended by the "+" that opens one (keyed by session, as above). The floating window leaves out a row that would only repeat its one tab, and keeps its + in the title bar. */}
         {stripRow && compact && (

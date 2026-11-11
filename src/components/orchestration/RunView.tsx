@@ -2,19 +2,19 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import {
-  Check, CircleAlert, CircleCheck, CircleDashed, CircleX, FileJson, FolderOpen, Gauge, Info, Layers, LoaderCircle, Network, Pencil, Play,
-  Settings, ShieldAlert, ShieldOff, Sparkles, Square, SquareArrowOutUpRight, Terminal, Trash2, UserRoundCheck, X,
+  Check, CircleAlert, CircleCheck, CircleDashed, CircleX, Clock, FileJson, FolderOpen, Gauge, Hourglass, Info, Layers, LoaderCircle, Network, Pause, Pencil, Play,
+  Settings, ShieldAlert, ShieldOff, Sparkles, Square, SquareArrowOutUpRight, Terminal, Trash2, TriangleAlert, UserRoundCheck, X,
 } from "@/icons";
 import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { EFFORT_LABEL, effortChoices, modeLabel, modelForTab, modelLabel, modelOptionText, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
-  budgetText, estimateText, noteRun, PIECE_STATE_LABEL, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf, requestOrchestratorSettings,
-  RUN_STATE_LABEL, useRun, withoutPiece,
+  budgetText, estimateText, holdText, mainWindow, noteRun, PIECE_STATE_LABEL, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf,
+  requestOrchestratorSettings, resetClock, RUN_STATE_LABEL, useRun, windowLine, windowName, withoutPiece,
 } from "@/lib/orchestration";
 import { selectSession } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
-import type { PieceState, Run, RunPiece, RunPlan, RunPlanPiece } from "@/types/orchestration";
+import type { PieceState, Run, RunLimits, RunPiece, RunPlan, RunPlanPiece } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
 /** What the lead is asked when a person presses Plan a run. The lead decides whether splitting helps at all. */
@@ -102,7 +102,7 @@ function RunBoard({ run }: { run: Run }) {
               </Button>
             </>}
             {run.state === "planned" && <Button variant="outline" disabled={!!busy} aria-pressed={editingPlan} onClick={() => setEditingPlan((on) => !on)}><Pencil />Edit plan</Button>}
-            {(run.state === "running" || run.state === "planned" || run.state === "failed" || run.state === "verifying" || run.state === "merging") && (
+            {(run.state === "running" || run.state === "planned" || run.state === "needsYou" || run.state === "failed" || run.state === "verifying" || run.state === "merging") && (
               <Button variant="outline" disabled={!!busy} onClick={() => void act("stop", async () => (await orchestration.stop(run.id)).run)}><Square />Stop run</Button>
             )}
           </div>
@@ -114,11 +114,12 @@ function RunBoard({ run }: { run: Run }) {
             <Button size="xs" variant="ghost" onClick={clear}>Dismiss</Button>
           </div>
         )}
+        {run.state === "needsYou" && <PausedNotice run={run} busy={!!busy} act={act} />}
         {run.reason && (run.state === "failed" || run.state === "stopped") && (
           <p role="status" className={cn("mx-6 mb-3 rounded-lg bg-well px-3 py-2 text-xs", run.state === "failed" ? "text-destructive" : "text-muted-foreground")}>{run.reason}</p>
         )}
         {editingPlan && editable && <PlanForm run={run} busy={!!busy} onCancel={() => setEditingPlan(false)} onSave={async (plan) => { if (await save(plan)) setEditingPlan(false); }} />}
-        {editable ? <PlanSummary run={run} /> : <RunSummary run={run} />}
+        {editable ? <PlanSummary run={run} busy={!!busy} act={act} /> : <RunSummary run={run} />}
         <PieceTable run={run} numbers={numbers} selected={selected} editable={editable} busy={!!busy} refused={error?.piece} onSelect={select} onChange={change} />
         <p className="flex items-start gap-2 px-6 py-4 text-xs text-faint">
           <Info aria-hidden className="mt-0.5 size-3.5 shrink-0" />
@@ -160,13 +161,123 @@ function subtitle(run: Run): string {
 function footnote(run: Run): string {
   const bypass = run.pieces.some((piece) => pieceMode(run, piece) === "bypassPermissions");
   const limits = "Push, merge and deploy stay blocked by deny rules.";
-  return bypass ? `In bypass, workers are not asked before edits or commands. ${limits}` : `${limits} Each worker has its own worktree and branch, cut from the lead's.`;
+  const dollars = run.usage?.subscription && !run.usage.apiKey ? " Dollar figures are API-equivalent, not billed." : "";
+  return (bypass ? `In bypass, workers are not asked before edits or commands. ${limits}` : `${limits} Each worker has its own worktree and branch, cut from the lead's.`) + dollars;
+}
+
+/** The defaults of a run stored by a runtime older than PRO-280, which sends no limits. */
+const DEFAULT_LIMITS: RunLimits = { workers: 4, dollars: 15, points: 25, ceiling: 85 };
+const limitsOf = (run: Run): RunLimits => run.limits ?? DEFAULT_LIMITS;
+
+type Act = (name: string, work: () => Promise<Run | null>) => Promise<boolean>;
+
+/** The budget a run holds to, in the forms its workers' logins draw on. `null` when its runtime sends no limits. */
+function heldBudget(run: Run): string | null {
+  if (!run.limits || !run.usage) return null;
+  const parts = [
+    run.usage.subscription ? `${run.limits.points} points` : null,
+    run.usage.apiKey ? `$${run.limits.dollars.toFixed(2)}` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+/** A number typed into a field: saved when the field is left or Enter is pressed, only when it is in range. */
+function LimitField({ label, value, min, max, step = 1, prefix, suffix, disabled, onSave }: {
+  label: string; value: number; min: number; max: number; step?: number; prefix?: string; suffix?: string; disabled: boolean; onSave: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = () => {
+    if (draft === null) return;
+    const next = Number(draft.trim());
+    setDraft(null);
+    if (draft.trim() !== "" && Number.isFinite(next) && next >= min && next <= max && next !== value) onSave(next);
+  };
+  return (
+    <label className="inline-flex h-7 items-center gap-1 rounded-md border border-hairline px-2 font-mono text-xs focus-within:ring-2 focus-within:ring-ring/40">
+      {prefix && <span className="text-faint">{prefix}</span>}
+      <input
+        type="number" inputMode="decimal" aria-label={label} min={min} max={max} step={step} disabled={disabled}
+        className="w-12 bg-transparent text-right tabular-nums outline-none disabled:opacity-60"
+        value={draft ?? String(value)}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+      />
+      {suffix && <span className="text-faint">{suffix}</span>}
+    </label>
+  );
+}
+
+/** This run's own worker limit and budget: the project's settings until the person changes them here. */
+function LimitsEditor({ run, busy, act }: { run: Run; busy: boolean; act: Act }) {
+  const limits = limitsOf(run);
+  const save = (patch: Partial<RunLimits>) => void act("limits", () => orchestration.setLimits(run.id, { ...limits, ...patch }));
+  const usage = run.usage;
+  // Before any login is known (an old runtime), both forms are offered.
+  const subscription = usage ? !!usage.subscription || !usage.apiKey : true;
+  const apiKey = usage ? !!usage.apiKey || !usage.subscription : true;
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2" aria-label="Limits for this run" role="group">
+      <span className="flex items-center gap-2 text-[13px]">
+        <span className="text-muted-foreground">Workers at once</span>
+        <LimitField label="Workers at once in this run" value={limits.workers} min={1} max={50} disabled={busy} onSave={(workers) => save({ workers })} />
+      </span>
+      {subscription && <>
+        <span className="flex items-center gap-2 text-[13px]">
+          <span className="text-muted-foreground">Subscription</span>
+          <LimitField label="Points of a window this run may use" value={limits.points} min={1} max={100} suffix="pts" disabled={busy} onSave={(points) => save({ points })} />
+        </span>
+        <span className="flex items-center gap-2 text-[13px]">
+          <span className="text-muted-foreground">Pause past</span>
+          <LimitField label="Pause when a window passes" value={limits.ceiling} min={1} max={100} suffix="%" disabled={busy} onSave={(ceiling) => save({ ceiling })} />
+        </span>
+      </>}
+      {apiKey && (
+        <span className="flex items-center gap-2 text-[13px]">
+          <span className="text-muted-foreground">API key</span>
+          <LimitField label="Dollars this run may spend" value={limits.dollars} min={0.01} max={10000} step={0.01} prefix="$" disabled={busy} onSave={(dollars) => save({ dollars })} />
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** A run that reached its budget: why, and what the person can do. */
+function PausedNotice({ run, busy, act }: { run: Run; busy: boolean; act: Act }) {
+  const [raising, setRaising] = useState(false);
+  const pause = run.pause;
+  const resetsAt = pause?.window?.resetsAt;
+  const resumeAt = pause?.resumeAt;
+  return (
+    <section role="status" aria-label="Run paused" className="mx-6 mb-3 flex flex-col gap-2.5 rounded-lg bg-warning/10 px-3.5 py-3 hairline" data-testid="run-paused">
+      <div className="flex items-start gap-2 text-[13px]">
+        <Pause aria-hidden className="mt-0.5 size-4 shrink-0 text-warning" />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium">{pause?.window ? `Paused: the ${windowName(pause.window)} window` : pause?.kind === "dollars" ? "Paused: the dollar budget" : "Paused"}</div>
+          <p className="mt-0.5 text-muted-foreground">{pause?.message ?? run.reason}</p>
+          <p className="mt-1 text-xs text-faint">Workers already in a turn finish it; no new piece starts until you let the run go on.</p>
+        </div>
+      </div>
+      {resumeAt ? (
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="run-resumes-at"><Clock aria-hidden className="size-3.5" />Goes on by itself at {resetClock(resumeAt)}, when the window resets.</p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          {resetsAt && <Button size="sm" variant="accent" disabled={busy} onClick={() => void act("resume", async () => (await orchestration.resume(run.id, true)).run)}><Clock />Resume after the reset, {resetClock(resetsAt)}</Button>}
+          <Button size="sm" variant="outline" disabled={busy} aria-pressed={raising} onClick={() => setRaising((on) => !on)}>Raise the budget</Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("resume", async () => (await orchestration.resume(run.id, false)).run)}><Play />Resume now</Button>
+        </div>
+      )}
+      {raising && <LimitsEditor run={run} busy={busy} act={act} />}
+    </section>
+  );
 }
 
 /** Before a run starts: what it is expected to use, and what it runs with. */
-function PlanSummary({ run }: { run: Run }) {
+function PlanSummary({ run, busy, act }: { run: Run; busy: boolean; act: Act }) {
   const estimate = estimateText(run.estimate);
-  const budget = budgetText(run);
+  const budget = heldBudget(run) ?? budgetText(run);
+  const fit = run.fit ?? [];
+  const windows = run.usage?.windows ?? [];
   const without = run.unestimated;
   return (
     <section aria-label="Plan summary" className="mx-6 rounded-lg bg-well hairline">
@@ -186,6 +297,15 @@ function PlanSummary({ run }: { run: Run }) {
         </span>
         <span className="ml-auto flex items-center gap-1.5 text-xs text-add"><CircleCheck aria-hidden className="size-3.5" />No shared files</span>
       </div>
+      <div className="flex flex-col gap-2 border-t border-hairline px-3.5 py-2.5">
+        <LimitsEditor run={run} busy={busy} act={act} />
+        {windows.length > 0 && (
+          <p className="text-xs text-faint" data-testid="run-windows">{windows.map((window) => `${windowName(window)} at ${Math.round(window.percent)}%${window.resetsAt ? `, resets ${resetClock(window.resetsAt)}` : ""}`).join(" · ")}. A run's points are the change in the window while it runs; the window is shared with everything else you run.</p>
+        )}
+        {fit.map((warning) => (
+          <p key={warning} role="alert" className="flex items-start gap-1.5 text-xs text-warning"><TriangleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />{warning}</p>
+        ))}
+      </div>
     </section>
   );
 }
@@ -193,35 +313,61 @@ function PlanSummary({ run }: { run: Run }) {
 /** Once a run has started: how far it is, and what it runs with. */
 function RunSummary({ run }: { run: Run }) {
   const done = run.pieces.filter((piece) => piece.state === "done").length;
-  const budget = budgetText(run);
   const estimate = estimateText(run.estimate);
+  const limits = limitsOf(run);
   return (
     <section aria-label="Run summary" className="mx-6 grid grid-cols-1 gap-3 @[640px]/run:grid-cols-3">
       <div className="rounded-lg bg-well px-3.5 py-3 hairline">
         <div className="text-[11px] text-faint">Pieces</div>
         <div className="mt-1 text-[13px] text-muted-foreground"><span className="text-xl font-semibold text-foreground" data-testid="run-done">{done}</span> of {run.pieces.length} done</div>
         <div className="mt-2 flex gap-1" aria-hidden>
-          {run.pieces.map((piece) => <span key={piece.id} className={cn("h-1 flex-1 rounded-full", piece.state === "done" ? "bg-add" : piece.state === "running" ? "bg-accent" : piece.state === "failed" ? "bg-destructive" : "bg-veil-strong")} />)}
+          {run.pieces.map((piece) => <span key={piece.id} className={cn("h-1 flex-1 rounded-full", piece.state === "done" ? "bg-add" : piece.state === "running" ? "bg-accent" : piece.state === "stalled" ? "bg-warning" : piece.state === "failed" ? "bg-destructive" : "bg-veil-strong")} />)}
         </div>
         <div className="mt-2 text-[11px] text-faint">{run.pieces.length - done} left</div>
       </div>
-      <div className="rounded-lg bg-well px-3.5 py-3 hairline">
-        <div className="text-[11px] text-faint">Budget</div>
-        <div className="mt-1 text-[13px]">{budget ? <span className="font-mono">{budget}</span> : <span className="text-muted-foreground">None set by the plan</span>}</div>
-        <div className="mt-2 text-[11px] text-faint">{estimate ? `Estimated ${estimate} API-equivalent` : "The plan carries no estimate"}</div>
-      </div>
+      <BudgetCard run={run} estimate={estimate} />
       <div className="rounded-lg bg-well px-3.5 py-3 hairline">
         <div className="text-[11px] text-faint">Workers</div>
-        <div className="mt-1 flex items-center gap-1.5 text-[13px]"><ShieldOff aria-hidden className="size-3.5 text-accent" />{modeLabel(run.workerMode)}</div>
+        <div className="mt-1 flex items-center gap-1.5 text-[13px]" data-testid="run-workers">
+          <span className="text-xl font-semibold">{run.inTurn ?? run.pieces.filter((piece) => piece.state === "running").length}</span>
+          <span className="text-muted-foreground">running · {limits.workers} at a time ·</span>
+          <ShieldOff aria-hidden className="size-3.5 text-accent" />{modeLabel(run.workerMode)}
+        </div>
         <div className="mt-2 flex items-center gap-1.5 text-[11px] text-faint">{run.approval ? <><UserRoundCheck aria-hidden className="size-3" />Plan approved</> : "No approval asked"} · push, merge, deploy denied</div>
       </div>
     </section>
   );
 }
 
+/** What the run has used of its budget: points of the window it draws on most, dollars on an API key, or both. */
+function BudgetCard({ run, estimate }: { run: Run; estimate: string | null }) {
+  const limits = limitsOf(run);
+  const window = run.usage ? mainWindow(run) : null;
+  const subscription = !!run.usage?.subscription;
+  const apiKey = !!run.usage?.apiKey;
+  const kind = subscription && apiKey ? "subscription and API key" : subscription ? "subscription" : apiKey ? "API key" : null;
+  const plan = budgetText(run);
+  return (
+    <div className="rounded-lg bg-well px-3.5 py-3 hairline" data-testid="run-budget">
+      <div className="text-[11px] text-faint">Budget{kind ? ` · ${kind}` : ""}</div>
+      {subscription && (
+        <div className="mt-1 text-[13px] text-muted-foreground">
+          <span className="text-xl font-semibold text-foreground">{Math.round(window?.points ?? 0)}</span> of {limits.points} points
+        </div>
+      )}
+      {apiKey && <div className={cn("text-[13px] text-muted-foreground", !subscription && "mt-1")}><span className={cn("font-semibold text-foreground", !subscription && "text-xl")}>${(run.usage?.dollars ?? 0).toFixed(2)}</span> of ${limits.dollars.toFixed(2)}</div>}
+      {!kind && <div className="mt-1 text-[13px]">{plan ? <span className="font-mono">{plan}</span> : <span className="text-muted-foreground">None set by the plan</span>}</div>}
+      <div className="mt-2 text-[11px] text-faint">
+        {window ? `${windowLine(window)} · pauses past ${limits.ceiling}%` : estimate ? `Estimated ${estimate} API-equivalent` : "The plan carries no estimate"}
+      </div>
+    </div>
+  );
+}
+
 const STATE_STYLE: Record<PieceState, { icon: typeof CircleCheck; className: string }> = {
   queued: { icon: CircleDashed, className: "text-faint" },
   running: { icon: LoaderCircle, className: "text-accent" },
+  stalled: { icon: Hourglass, className: "text-warning" },
   done: { icon: CircleCheck, className: "text-add" },
   blocked: { icon: CircleAlert, className: "text-warning" },
   failed: { icon: CircleX, className: "text-destructive" },
@@ -299,7 +445,7 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, onSelect,
             </> : <>
               <div role="cell"><PieceStateMark state={piece.state} /></div>
               <div role="cell" className={cn("font-mono text-xs text-muted-foreground", wide)}>{piece.attempts || "–"}</div>
-              <div role="cell" className={cn("min-w-0 truncate text-xs text-muted-foreground", wide)}>{piece.note ?? (piece.state === "queued" && after ? `Waits for ${after}` : "")}</div>
+              <div role="cell" className={cn("min-w-0 truncate text-xs text-muted-foreground", wide)}>{piece.note ?? (piece.state === "queued" && piece.queuedFor ? holdText({ limits: limitsOf(run) }, piece.queuedFor) : piece.state === "queued" && after ? `Waits for ${after}` : "")}</div>
             </>}
           </div>
         );
@@ -415,7 +561,7 @@ function PieceDetail({ run, piece, number, editable, busy, onClose, onSave, onRe
           </div>
           {!editable && (
             <Section title={piece.state === "done" ? "Result" : "Where it stands"}>
-              {piece.note ?? (piece.state === "queued" ? (piece.dependsOn.length ? `Waits for ${piece.dependsOn.join(", ")}.` : "Not started yet.") : piece.state === "running" ? "Its worker is working." : "No report.")}
+              {piece.note ?? (piece.state === "queued" ? (piece.queuedFor ? `${holdText({ limits: limitsOf(run) }, piece.queuedFor)}.` : piece.dependsOn.length ? `Waits for ${piece.dependsOn.join(", ")}.` : "Not started yet.") : piece.state === "running" ? "Its worker is working." : "No report.")}
               {piece.branch && <div className="mt-1.5 break-all font-mono text-[11.5px] text-faint">{piece.branch}</div>}
             </Section>
           )}

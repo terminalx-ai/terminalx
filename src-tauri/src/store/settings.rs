@@ -73,9 +73,11 @@ pub struct Settings {
     pub orchestrator: OrchestratorSettings,
 }
 
-/// What a lead's run of workers may do without asking (PRO-274). Each has an
-/// app-wide value and may have one of a project's own, by the project's path.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// What a lead's run of workers may do without asking (PRO-274), and how much
+/// of the machine and the person's usage it may take (PRO-280). Each has an
+/// app-wide value; the ones a project can answer for itself are in
+/// [`ProjectOrchestratorSettings`], by the project's path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct OrchestratorSettings {
     /// A new run waits for a person to approve its plan before any worker starts.
@@ -86,12 +88,33 @@ pub struct OrchestratorSettings {
     /// The permission mode of a worker whose piece names none.
     #[serde(deserialize_with = "worker_mode")]
     pub worker_mode: String,
+    /// Workers of one run in a turn at once; the rest of its ready pieces queue.
+    #[serde(deserialize_with = "workers_per_run")]
+    pub workers_per_run: u32,
+    /// Workers in a turn at once across every run of this app. Sessions a
+    /// person starts by hand are never counted, queued or refused.
+    #[serde(deserialize_with = "workers_at_once")]
+    pub workers_at_once: u32,
+    /// What a run of workers on an API key may spend, in dollars, before it
+    /// starts nothing new and asks the person.
+    #[serde(deserialize_with = "budget_dollars")]
+    pub budget_dollars: f64,
+    /// Percentage points of a subscription usage window one run may use.
+    #[serde(deserialize_with = "budget_points")]
+    pub budget_points: f64,
+    /// A run starts nothing new once a window it draws on is this full, whoever filled it.
+    #[serde(deserialize_with = "window_ceiling")]
+    pub window_ceiling: f64,
+    /// A worker in a turn with no tool call or file change for this long,
+    /// while its agent sits idle and no command of its is running, is stalled.
+    #[serde(deserialize_with = "stall_minutes")]
+    pub stall_minutes: u32,
     /// One project's own answers, by its path. A project without one, or
     /// without a value for a setting, follows the app-wide value.
     pub projects: std::collections::BTreeMap<String, ProjectOrchestratorSettings>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProjectOrchestratorSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,6 +123,12 @@ pub struct ProjectOrchestratorSettings {
     pub piece_limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_worker_mode")]
     pub worker_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_budget_dollars")]
+    pub budget_dollars: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_budget_points")]
+    pub budget_points: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_window_ceiling")]
+    pub window_ceiling: Option<f64>,
 }
 
 impl ProjectOrchestratorSettings {
@@ -109,12 +138,18 @@ impl ProjectOrchestratorSettings {
 }
 
 /// The settings in force for one project.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorLimits {
     pub require_approval: bool,
     pub piece_limit: u32,
     pub worker_mode: String,
+    pub workers_per_run: u32,
+    pub workers_at_once: u32,
+    pub budget_dollars: f64,
+    pub budget_points: f64,
+    pub window_ceiling: f64,
+    pub stall_minutes: u32,
 }
 
 /// Eight: a lead can still read eight reports and hold eight briefs apart;
@@ -128,6 +163,66 @@ pub const WORKER_MODES: [&str; 5] = ["plan", "manual", "auto", "acceptEdits", "b
 /// Bypass: a run is not held up by permission cards. What a card would have
 /// caught is refused by deny rules instead (`orchestration::guard`).
 pub const DEFAULT_WORKER_MODE: &str = "bypassPermissions";
+
+/// Four workers of one run, eight across the app: each has a worktree, an
+/// agent and often a build, and past that every one of them slows down.
+pub const DEFAULT_WORKERS_PER_RUN: u32 = 4;
+pub const DEFAULT_WORKERS_AT_ONCE: u32 = 8;
+/// The most either worker limit takes; a mistyped value must not mean "no limit".
+pub const MAX_WORKERS: u32 = 50;
+/// Three to five times what a typical run costs at API prices; tightened from real numbers later.
+pub const DEFAULT_BUDGET_DOLLARS: f64 = 15.0;
+pub const MAX_BUDGET_DOLLARS: f64 = 10_000.0;
+/// Decided for PRO-280: a quarter of a window per run, and no new work past 85%.
+pub const DEFAULT_BUDGET_POINTS: f64 = 25.0;
+pub const DEFAULT_WINDOW_CEILING: f64 = 85.0;
+pub const DEFAULT_STALL_MINUTES: u32 = 10;
+pub const MAX_STALL_MINUTES: u32 = 240;
+
+/// A limit typed in Settings or a hand-edited file, when it is one.
+pub fn valid_workers(value: u32) -> bool {
+    (1..=MAX_WORKERS).contains(&value)
+}
+pub fn valid_dollars(value: f64) -> bool {
+    value.is_finite() && value > 0.0 && value <= MAX_BUDGET_DOLLARS
+}
+/// Points and a window level are percentages of a window.
+pub fn valid_percent(value: f64) -> bool {
+    value.is_finite() && value > 0.0 && value <= 100.0
+}
+pub fn valid_stall_minutes(value: u32) -> bool {
+    (1..=MAX_STALL_MINUTES).contains(&value)
+}
+
+fn read_u32(value: &serde_json::Value, valid: fn(u32) -> bool) -> Option<u32> {
+    value.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| valid(*n))
+}
+fn read_f64(value: &serde_json::Value, valid: fn(f64) -> bool) -> Option<f64> {
+    value.as_f64().filter(|n| valid(*n))
+}
+
+/// A damaged app-wide value is the default; a project's damaged value is no value.
+macro_rules! bounded {
+    ($name:ident, $ty:ty, $read:ident, $valid:ident, $default:expr) => {
+        fn $name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<$ty, D::Error> {
+            Ok($read(&serde_json::Value::deserialize(deserializer)?, $valid).unwrap_or($default))
+        }
+    };
+    ($name:ident, $ty:ty, $read:ident, $valid:ident) => {
+        fn $name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<$ty>, D::Error> {
+            Ok($read(&serde_json::Value::deserialize(deserializer)?, $valid))
+        }
+    };
+}
+bounded!(workers_per_run, u32, read_u32, valid_workers, DEFAULT_WORKERS_PER_RUN);
+bounded!(workers_at_once, u32, read_u32, valid_workers, DEFAULT_WORKERS_AT_ONCE);
+bounded!(budget_dollars, f64, read_f64, valid_dollars, DEFAULT_BUDGET_DOLLARS);
+bounded!(budget_points, f64, read_f64, valid_percent, DEFAULT_BUDGET_POINTS);
+bounded!(window_ceiling, f64, read_f64, valid_percent, DEFAULT_WINDOW_CEILING);
+bounded!(stall_minutes, u32, read_u32, valid_stall_minutes, DEFAULT_STALL_MINUTES);
+bounded!(project_budget_dollars, f64, read_f64, valid_dollars);
+bounded!(project_budget_points, f64, read_f64, valid_percent);
+bounded!(project_window_ceiling, f64, read_f64, valid_percent);
 
 fn valid_piece_limit(value: &serde_json::Value) -> Option<u32> {
     value.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| (1..=MAX_PIECE_LIMIT).contains(n))
@@ -158,7 +253,18 @@ fn project_worker_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std
 
 impl Default for OrchestratorSettings {
     fn default() -> Self {
-        Self { require_approval: true, piece_limit: DEFAULT_PIECE_LIMIT, worker_mode: DEFAULT_WORKER_MODE.into(), projects: Default::default() }
+        Self {
+            require_approval: true,
+            piece_limit: DEFAULT_PIECE_LIMIT,
+            worker_mode: DEFAULT_WORKER_MODE.into(),
+            workers_per_run: DEFAULT_WORKERS_PER_RUN,
+            workers_at_once: DEFAULT_WORKERS_AT_ONCE,
+            budget_dollars: DEFAULT_BUDGET_DOLLARS,
+            budget_points: DEFAULT_BUDGET_POINTS,
+            window_ceiling: DEFAULT_WINDOW_CEILING,
+            stall_minutes: DEFAULT_STALL_MINUTES,
+            projects: Default::default(),
+        }
     }
 }
 
@@ -170,6 +276,12 @@ impl OrchestratorSettings {
             require_approval: project.and_then(|p| p.require_approval).unwrap_or(self.require_approval),
             piece_limit: project.and_then(|p| p.piece_limit).unwrap_or(self.piece_limit),
             worker_mode: project.and_then(|p| p.worker_mode.clone()).unwrap_or_else(|| self.worker_mode.clone()),
+            workers_per_run: self.workers_per_run,
+            workers_at_once: self.workers_at_once,
+            budget_dollars: project.and_then(|p| p.budget_dollars).unwrap_or(self.budget_dollars),
+            budget_points: project.and_then(|p| p.budget_points).unwrap_or(self.budget_points),
+            window_ceiling: project.and_then(|p| p.window_ceiling).unwrap_or(self.window_ceiling),
+            stall_minutes: self.stall_minutes,
         }
     }
 }
@@ -514,6 +626,37 @@ mod tests {
         assert!(!legacy.experimental.session_cost);
         let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
         assert!(cost.experimental.session_cost && !cost.experimental.native_codex && !cost.experimental.orchestrator_runs);
+    }
+
+    #[test]
+    fn a_run_takes_four_workers_eight_in_the_app_and_its_budget_unless_a_project_says_otherwise() {
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        let limits = legacy.orchestrator.for_project("/repo");
+        assert_eq!((limits.workers_per_run, limits.workers_at_once, limits.stall_minutes), (4, 8, 10));
+        assert_eq!((limits.budget_dollars, limits.budget_points, limits.window_ceiling), (15.0, 25.0, 85.0));
+
+        // A project answers for its budget; the worker limits and the stall time are the app's.
+        let set: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {
+            "workersPerRun": 2, "workersAtOnce": 5, "budgetPoints": 30, "windowCeiling": 90.5, "stallMinutes": 20,
+            "projects": {"/repo": {"budgetDollars": 4.5, "windowCeiling": 70}},
+        }})).unwrap();
+        let repo = set.orchestrator.for_project("/repo");
+        assert_eq!((repo.workers_per_run, repo.workers_at_once, repo.stall_minutes), (2, 5, 20));
+        assert_eq!((repo.budget_dollars, repo.budget_points, repo.window_ceiling), (4.5, 30.0, 70.0));
+        let other = set.orchestrator.for_project("/other");
+        assert_eq!((other.budget_dollars, other.window_ceiling), (15.0, 90.5));
+        let written = serde_json::to_value(&set).unwrap();
+        assert_eq!(written["orchestrator"]["projects"]["/repo"], serde_json::json!({"budgetDollars": 4.5, "windowCeiling": 70.0}));
+
+        // A value nobody could have meant is the default, never "no limit".
+        let damaged: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {
+            "workersPerRun": 0, "workersAtOnce": 5000, "budgetDollars": -1, "budgetPoints": 150, "windowCeiling": "high", "stallMinutes": 0,
+            "projects": {"/repo": {"budgetPoints": 0}},
+        }})).unwrap();
+        let limits = damaged.orchestrator.for_project("/repo");
+        assert_eq!((limits.workers_per_run, limits.workers_at_once, limits.stall_minutes), (4, 8, 10));
+        assert_eq!((limits.budget_dollars, limits.budget_points, limits.window_ceiling), (15.0, 25.0, 85.0));
+        assert!(damaged.orchestrator.projects["/repo"].is_empty());
     }
 
     #[test]

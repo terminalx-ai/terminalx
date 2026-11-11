@@ -1009,6 +1009,18 @@ impl UsageStore {
         self.snapshot_at(running_agents, now_ms())
     }
 
+    /// The windows as a snapshot would give them, without counting a
+    /// snapshot: what an orchestration run's budget reads (PRO-280). A
+    /// window past its reset, or not heard from lately, is `stale`.
+    pub fn windows(&self) -> Vec<UsageWindow> {
+        let now = now_ms();
+        self.inner.lock().unwrap().windows.values().map(|window| {
+            let mut window = window.clone();
+            window.stale = now.saturating_sub(window.updated_at) >= STALE_MS || expired(&window, now);
+            window
+        }).collect()
+    }
+
     fn snapshot_at(&self, running_agents: &HashSet<String>, now: i64) -> UsageSnapshot {
         let mut inner = self.inner.lock().unwrap();
         inner.windows.retain(|_, window| window.agent == "claude" || now.saturating_sub(window.updated_at) < STALE_MS || running_agents.contains(&window.agent));
