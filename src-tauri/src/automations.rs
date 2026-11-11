@@ -846,6 +846,7 @@ fn start_run(
         let entry = crate::session_ops::create_session_blocking(
             app.sink().as_ref(),
             crate::session_ops::NewSession {
+                parent: None,
                 section_id: None,
                 project_path: automation.project_path.clone(),
                 title: Some(title),

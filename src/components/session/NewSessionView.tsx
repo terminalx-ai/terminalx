@@ -22,7 +22,7 @@ import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput, type Issue, type PullRequest } from "@/lib/api";
 import { issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import { worktreeNameFromPrompt } from "@/lib/worktreeNames";
-import { clearNewSessionPreset, createQuickChat, linkSessionIssue, refreshHarnesses, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { clearNewSessionPreset, createChat, createQuickChat, linkSessionIssue, refreshHarnesses, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { readinessBlock, useAgentReadinessList } from "@/lib/agentReadiness";
@@ -78,7 +78,9 @@ export function NewSessionView({
   modal?: boolean;
 }) {
   const store = useSessionStore();
-  const quick = quickOverride ?? store.newSessionQuick ?? false;
+  const quick = quickOverride ?? false;
+  const projectless = quick || (quickOverride === undefined && store.newSessionChat);
+  const defaultFolder = quick ? "Scratch folder" : "Chats folder";
   const prefs = usePrefs();
   // In the dialog, an unsent prompt outlives a stray Escape or click outside: it is there again when the dialog reopens.
   const [text, setText] = useState(() => (modal ? dialogDraft : ""));
@@ -97,10 +99,10 @@ export function NewSessionView({
   const ref = useRef<HTMLTextAreaElement>(null);
   const textProps = usePromptTextProps();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
-  // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud. A quick chat is local.
+  // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud. A projectless chat is local.
   const cloudDraft = useCloudDraft();
-  const cloud = quick ? null : cloudDraft;
-  /** A folder the quick chat runs in instead of its scratch folder; it does not become a project. */
+  const cloud = projectless ? null : cloudDraft;
+  /** A folder the chat runs in instead of its default directory; it does not become a project. */
   const [quickCwd, setQuickCwd] = useState<string | null>(null);
   const folderMenu = useRowMenu();
   const cloudChoices = useCloudProjectChoices();
@@ -121,9 +123,9 @@ export function NewSessionView({
   // The rail is what the reader last pointed at, so it beats the project they
   // happened to start a session in some other day; a preset beats both.
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject;
-  const project = quick ? null : (store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null);
-  // A quick chat cuts no worktree, whatever the folder it is pointed at.
-  const isGit = quick ? false : cloud ? true : project?.kind !== "folder";
+  const project = projectless ? null : (store.projects.find((p) => p.path === wanted) ?? (preset ? null : store.projects[0]) ?? null);
+  // A projectless chat cuts no worktree, whatever the folder it is pointed at.
+  const isGit = projectless ? false : cloud ? true : project?.kind !== "folder";
   const useWorktree = isGit && (!!pullRequest || !!preset?.fromBranch || (controlledUseWorktree ?? localUseWorktree));
   const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
@@ -138,7 +140,7 @@ export function NewSessionView({
   const { harness, modelId, effort, mode } = agentSelection;
   const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
     cloud?.project ? cloudPipelineSettings(cloud.project.key) : pipelineSettings(project),
-    quick ? "Attach a Git project to automate this session." : !isGit || (!useWorktree && !preset?.cwd) ? "Start on a worktree branch to automate this session." : cloudPlan?.kind === "create" ? "The first cloud session starts on the base branch. Automate a worktree session after the workspace starts." : undefined,
+    projectless ? "Attach a Git project to automate this session." : !isGit || (!useWorktree && !preset?.cwd) ? "Start on a worktree branch to automate this session." : cloudPlan?.kind === "create" ? "The first cloud session starts on the base branch. Automate a worktree session after the workspace starts." : undefined,
     cloud ? "Cloud workspaces require a person to merge." : undefined,
     // A picked issue makes this a session started from an issue: switches nobody touched follow it.
     issue ? "issue" : "session");
@@ -193,7 +195,7 @@ export function NewSessionView({
     setIssue(null);
     setCheckoutBranch(null);
     setPullRequest(null);
-  }, [project?.path, !!cloud, quick]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [project?.path, !!cloud, projectless]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const branchTarget: BranchTarget = preset?.cwd
     ? { kind: "open", cwd: preset.cwd }
@@ -207,7 +209,7 @@ export function NewSessionView({
     setPullRequest(null);
     setCheckoutBranch(next.kind === "existing" ? next.branch : null);
     if (next.kind === "open" && next.cwd !== project.path) return startSessionIn(project.path, next.cwd);
-    clearNewSessionPreset();
+    startSessionIn(project.path, null, next.kind === "new" ? preset?.fromBranch : undefined);
     setUseWorktree(next.kind !== "open");
   };
 
@@ -218,7 +220,7 @@ export function NewSessionView({
     setUseWorktree(true);
     setPullRequest(pr);
   };
-  const prMention = usePrMention(!cloud && !quick && isGit && !busy ? project?.path ?? null : null, text, caret, setText, ref, setCaret, { inline: true });
+  const prMention = usePrMention(!cloud && !projectless && isGit && !busy ? project?.path ?? null : null, text, caret, setText, ref, setCaret, { inline: true });
 
   const pickProject = async () => {
     try {
@@ -241,10 +243,10 @@ export function NewSessionView({
     () =>
       cloud
         ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && !confirm && cloud.project.selected && cloud.mayStart === true
-        : quick
+        : projectless
           ? !!harness && available && (text.trim().length > 0 || hasImages) && !busy
           : !!project && !!harness && available && (text.trim().length > 0 || hasImages || !!issue || !!pullRequest) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy && !prMention.attaching,
-    [cloud, quick, project, harness, available, text, hasImages, issue, pullRequest, useWorktree, preset?.cwd, workspaceName, busy, prMention.attaching, confirm],
+    [cloud, projectless, project, harness, available, text, hasImages, issue, pullRequest, useWorktree, preset?.cwd, workspaceName, busy, prMention.attaching, confirm],
   );
 
   const cloudRequest = (): CloudSessionRequest => ({
@@ -325,8 +327,8 @@ export function NewSessionView({
     }
   };
 
-  /** Start a quick chat: no project, no worktree; the first prompt is sent as for any session. */
-  const createQuick = async () => {
+  /** Share the composer without changing ordinary chats into disposable quick chats. */
+  const createProjectless = async () => {
     if (!harness || !canSend) return;
     if (dictation.dictating) await stopDictation();
     setBusy(true);
@@ -337,7 +339,7 @@ export function NewSessionView({
       if (blocked) { setError(blocked); return; }
       const title = text.trim().split("\n")[0].slice(0, 60);
       const images = attach.images;
-      const s = await createQuickChat({ title, cwd: quickCwd, ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}), tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
+      const s = await (quick ? createQuickChat : createChat)({ title, cwd: quickCwd, ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}), tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
       setText("");
       attach.clear();
       setQuickCwd(null);
@@ -351,7 +353,7 @@ export function NewSessionView({
   };
 
   const create = async () => {
-    if (quick) return createQuick();
+    if (projectless) return createProjectless();
     if (cloud) return createCloud();
     if (!project || !harness || !canSend) return;
     if (dictation.dictating) await stopDictation();
@@ -404,8 +406,8 @@ export function NewSessionView({
   };
 
   const projectButton = "flex h-8 min-w-0 items-center gap-1.5 rounded-md px-2 text-[14px] font-medium text-foreground transition-colors hover:bg-veil-raised";
-  const localGit = !quick && !cloud && isGit && !!project;
-  const branchInfo = quick ? null : cloud ? (
+  const localGit = !projectless && !cloud && isGit && !!project;
+  const branchInfo = projectless ? null : cloud ? (
     <span className="flex min-w-0 items-center gap-1 truncate text-xs text-muted-foreground" data-testid="cloud-runs-in" title="The agent, its terminals and its files run on a cloud workspace of the organization, not on this computer.">
       <Cloud className="size-3.5 shrink-0" /> {cloud.orgName} cloud
     </span>
@@ -437,6 +439,7 @@ export function NewSessionView({
           {/* The scene needs room a small window does not have. */}
           {!compact && !modal && <RaccoonScene className="mb-1" />}
           <DictationStatus dictation={dictation} />
+          {!cloud && !projectless && preset && !project && <p role="alert" className="mb-3 text-sm text-destructive">The requested project is no longer attached. Add it again or choose a project before sending.</p>}
           {!cloud && (
             <div className="mb-3 space-y-2">
               {!harness && <p role="status" className="px-1 text-xs text-muted-foreground">{readiness.checking ? "Checking agents…" : "Sign in to an agent to start a chat. Your draft is kept."}</p>}
@@ -460,12 +463,12 @@ export function NewSessionView({
             <DropHint dragging={attach.dragging} />
 
             <div className="flex h-12 items-center gap-1 border-b border-hairline px-2">
-              {quick ? (
+              {projectless ? (
                 <DropdownMenu {...folderMenu.root}>
                   <DropdownMenuTrigger asChild {...folderMenu.trigger}>
-                    <button type="button" className={projectButton} title={quickCwd ?? "A scratch folder made for this chat"} aria-label="Working directory">
+                    <button type="button" className={projectButton} title={quickCwd ?? (quick ? "A scratch folder made for this chat" : "The shared folder for ordinary chats")} aria-label="Working directory">
                       {quickCwd ? <FolderOpen className="size-4 text-muted-foreground" /> : <MessageCircle className="size-4 text-muted-foreground" />}
-                      <span className="truncate">{quickCwd ? (quickCwd.replace(/\/+$/, "").split("/").pop() || quickCwd) : "Scratch folder"}</span>
+                      <span className="truncate">{quickCwd ? (quickCwd.replace(/\/+$/, "").split("/").pop() || quickCwd) : defaultFolder}</span>
                       <ChevronDown className="size-3.5 text-faint" />
                     </button>
                   </DropdownMenuTrigger>
@@ -473,7 +476,7 @@ export function NewSessionView({
                     <DropdownMenuLabel>Runs in</DropdownMenuLabel>
                     <DropdownMenuItem onSelect={() => setQuickCwd(null)}>
                       <MessageCircle />
-                      <span>Scratch folder</span>
+                      <span>{defaultFolder}</span>
                       <span className="ml-auto pl-3 text-[11px] text-faint">default</span>
                     </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => void pickQuickFolder()}>
@@ -549,7 +552,7 @@ export function NewSessionView({
               ) : (
                 branchInfo
               )}
-              {!quick && isGit && !preset?.cwd && (
+              {!projectless && isGit && !preset?.cwd && (
                 <SessionOptions
                   useWorktree={useWorktree}
                   onUseWorktreeChange={cloud ? setUseWorktree : undefined}
@@ -559,7 +562,7 @@ export function NewSessionView({
                   pipeline={pipelineLaunch}
                 />
               )}
-              {!quick && isGit && preset?.cwd && <SessionOptions pipeline={pipelineLaunch} />}
+              {!projectless && isGit && preset?.cwd && <SessionOptions pipeline={pipelineLaunch} />}
             </div>
 
             <div className="relative px-4 pt-3">
@@ -603,7 +606,7 @@ export function NewSessionView({
                 }}
                 rows={compact ? 3 : 5}
                 placeholder={
-                  quick
+                  projectless
                     ? "Ask anything"
                     : !project && !cloud
                       ? "Add a project to get started"
@@ -625,16 +628,16 @@ export function NewSessionView({
               <div className="ml-auto flex items-center gap-0.5">
                 <MicButton dictation={dictation} />
                 {!cloud && <AttachButton attach={attach} />}
-                <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={create} aria-label={quick ? "Ask" : "Create"} title={sendKeys ? `Create (${keycaps(sendKeys).join("")})` : "Create"}>
+                <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={create} aria-label={projectless ? "Ask" : "Create"} title={sendKeys ? `Create (${keycaps(sendKeys).join("")})` : "Create"}>
                   {busy ? <Loader2 className="animate-spin" /> : null}
-                  {quick ? "Ask" : "Create"}
+                  {projectless ? "Ask" : "Create"}
                   {sendKeys && !busy && <span className="font-sans opacity-70">{keycaps(sendKeys).join("")}</span>}
                 </Button>
               </div>
             </div>
           </div>
 
-          {!cloud && <p className="mt-2 px-1 text-xs text-faint">Nothing starts until you press {quick ? "Ask" : "Create"}.</p>}
+          {!cloud && <p className="mt-2 px-1 text-xs text-faint">Nothing starts until you press {projectless ? "Ask" : "Create"}.</p>}
           {!cloud && harness && !available && (
             <p className="mt-2 px-1 text-xs text-muted-foreground">
               {harness.installable ? <>Install it with <span className="font-medium text-foreground">Install and sign in</span> above, or run </> : "Install it with "}

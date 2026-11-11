@@ -15,6 +15,14 @@ impl Admission {
     pub(super) fn is_idle(&self) -> bool {
         self.owners.is_empty() && !self.degraded
     }
+
+    /// Exit alone leaves buffered observations admissible. Once this exact
+    /// launch's readers have joined, no callback can use its bindings again.
+    /// Keep any uncertainty latch: draining cannot repair a failed append.
+    pub(super) fn stdio_drained(&mut self, launch: &Arc<()>, epoch: u64) {
+        self.owners.retain(|_, owner| !matches!(&owner.identity,
+            Identity::Stdio { launch: owned, epoch: owned_epoch } if Arc::ptr_eq(owned, launch) && *owned_epoch == epoch));
+    }
 }
 #[derive(Clone)]
 pub(super) enum Identity {

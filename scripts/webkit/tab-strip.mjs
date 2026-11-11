@@ -174,6 +174,7 @@ const measure = (page) =>
     const emptyAt = document.elementFromPoint(actionsBox.left - 12, (headerBox.top + headerBox.bottom) / 2);
     return {
       window: innerWidth,
+      sidebarVisible: visible(document.querySelector('[data-testid="sidebar-rail"]')),
       header: rect(header),
       headerOverflows: header.scrollWidth > header.clientWidth + 1,
       row: rect(strip),
@@ -229,7 +230,10 @@ function fits(layout, { sidebarHidden = false } = {}) {
     "every action is inside the header": layout.actionButtons.length >= 2 && layout.actionButtons.every((button) => button.left >= layout.header.left - SLACK && button.right <= layout.header.right + SLACK),
     "the tabs are in one row, under the title bar": layout.tabs.every((tab) => tab.top === layout.tabs[0].top && tab.top >= layout.header.bottom - SLACK && tab.bottom <= layout.row.bottom + SLACK),
     "the + follows the row of tabs": layout.plus.left >= layout.list.left - SLACK && (!lastTab || layout.plus.left >= Math.min(lastTab.right, layout.list.right) - SLACK),
-    ...(sidebarHidden ? { "the window controls' inset is left clear": layout.first.left >= 78 - SLACK } : {}),
+    ...(sidebarHidden ? {
+      "the hidden sidebar has released its layout space": !layout.sidebarVisible,
+      "the window controls' inset is left clear": layout.first.left >= 78 - SLACK,
+    } : {}),
     // The chips give way to their icons, and a title bar under 360 px leaves them out, as it does the cloud header's chips.
     ...(layout.header.width >= 360
       ? {
@@ -446,9 +450,11 @@ for (const [name, viewport, prefs, tabs] of [
   const page = await app({ tabs, prefs }, viewport);
   for (const sidebarHidden of [false, true]) {
     if (sidebarHidden) {
-      await page.getByRole("button", { name: /^(Hide|Toggle) sidebar/ }).first().click().catch(() => undefined);
+      await page.getByRole("button", { name: /^(Hide|Toggle) sidebar/ }).first().click();
       await page.locator('main header [aria-label="Show sidebar"]').waitFor();
-      await page.waitForTimeout(200);
+      // The toggle changes before the closing animation releases the sidebar's
+      // width. Measure the hidden layout only once that space is actually gone.
+      await page.locator('[data-testid="panel-presence"][data-side="left"]').waitFor({ state: "detached" });
     }
     const layout = await measure(page);
     await snap(page, `${name.replaceAll(" ", "-").replaceAll(",", "")}${sidebarHidden ? "-no-sidebar" : ""}`);

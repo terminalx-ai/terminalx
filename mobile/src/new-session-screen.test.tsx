@@ -15,8 +15,6 @@ vi.mock("expo-crypto", () => ({ randomUUID: () => `draft-${++mocks.uuids}` }));
 vi.mock("@mobile/notifications/local", () => ({ localNotificationsEnabled: async () => false, enableLocalNotifications: vi.fn(), disableLocalNotifications: vi.fn() }));
 vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => true }));
 vi.mock("@terminalx/portable/dashboard", () => ({}));
-vi.mock("@mobile/data/conversations", () => ({ conversationRows: () => [], statusLabel: () => "" }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["Check", "ChevronDown", "ChevronUp", "ChevronRight", "Plus", "Search", "Trash2", "MoreVertical", "Keyboard", "QrCode", "X"].map((name) => [name, () => null])));
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
@@ -70,6 +68,7 @@ beforeEach(() => {
       onFeaturesChanged: () => () => {},
       newSessionOptions: vi.fn(async () => options),
       createSession: vi.fn(async () => ({ created: true, sessionId: "s-1", tabId: "t-1", title: "Fix the login redirect", native: false, queued: false })),
+      onSettingsChanged: vi.fn((_listener: () => void) => () => {}),
       macSettings: vi.fn(async () => ({ nativeCodex: false })),
       setNativeCodex: vi.fn(async (on: boolean) => ({ nativeCodex: on })),
     },
@@ -144,19 +143,20 @@ describe("starting a session from the phone", () => {
     expect(container.textContent).toContain("Update TerminalX on this Mac");
   });
 
-  it("is offered on the sessions screen by a Mac that can start sessions", async () => {
-    await render(<SessionsScreen />);
-    await click("New session");
-    expect(mocks.push).toHaveBeenCalledWith("/session/new");
-    mocks.app.api.features.mockResolvedValue({});
-    await render(<SessionsScreen />);
-    mocks.app = { ...mocks.app, activeHost: { ...mocks.app.activeHost, id: "mac-2" } };
+  it("no longer puts New session on the sessions screen: it is the tab bar's", async () => {
     await render(<SessionsScreen />);
     expect(button("New session")).toBeUndefined();
   });
 });
 
 describe("this Mac's settings on the phone", () => {
+  it("reloads the open switch when the Mac's settings file changes", async () => {
+    await render(<SettingsScreen />);
+    mocks.app.api.macSettings.mockResolvedValue({ nativeCodex: true });
+    await act(async () => mocks.app.api.onSettingsChanged.mock.calls[0][0]());
+    expect((container.querySelector("input[aria-label='Native Codex']") as HTMLInputElement).checked).toBe(true);
+  });
+
   it("turns Native Codex on for the Mac's next Codex sessions", async () => {
     await render(<SettingsScreen />);
     expect(container.textContent).toContain("This Mac · Studio");

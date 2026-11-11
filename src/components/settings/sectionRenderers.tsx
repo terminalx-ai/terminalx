@@ -1,11 +1,12 @@
 import type { ReactNode } from "react";
-import type { SettingsSection } from "./settingsRegistry";
+import type { SettingId, SettingsSection } from "./settingsRegistry";
 import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
 import { OrganizationsTab } from "./OrganizationsTab";
 import { GeneralTab, AppearanceTab, AgentsTab, IntegrationsTab, AboutTab } from "./SettingsSections";
 import { TranscriptionTab } from "./TranscriptionTab";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
+import { RepositoriesTab } from "./RepositoriesTab";
 import { StorageTab } from "./StorageTab";
 import { RecoveryIncidentSettings } from "./RecoveryIncidentSettings";
 import { ShortcutsTab } from "./ShortcutsTab";
@@ -18,6 +19,7 @@ interface SectionContext {
   projectPath?: string;
   row?: string | null;
   openRequest?: number;
+  onSelectRow?: (row: SettingId) => void;
 }
 /** The state adapters mount only for the selected section. Their stores and lifetimes are unchanged. */
 export const settingsSectionRenderers: Record<SettingsSection, (context: SectionContext) => ReactNode> = {
@@ -30,7 +32,7 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   environment: () => <EnvironmentSettings />,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
-  repositories: ({ projectPath }) => projectPath ? <MergedCleanupSettings projectPath={projectPath} /> : <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>,
+  repositories: ({ projectPath, row, onSelectRow }) => <RepositoriesTab projectPath={projectPath} row={row} onSelectRow={onSelectRow} />,
   storage: () => <><MergedCleanupSettings /><div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div><StorageTab /><RecoveryIncidentSettings /></>,
   shortcuts: () => <ShortcutsTab />,
   experimental: () => <ExperimentalTab />,

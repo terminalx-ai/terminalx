@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useVisibleSessionTab } from "@/lib/visibleTab";
+import { registerSelfUiFold } from "@/lib/selfUi";
+import { useLayoutEffect, useState } from "react";
 import { ChevronRight } from "@/icons";
 import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
 import { SessionPipelineControls } from "@/components/session/SessionPipelineControls";
@@ -22,7 +24,10 @@ export function BranchAutopilot({ sessionId, offer }: { sessionId?: string; offe
   const store = useSessionStore();
   const session = store.sessions.find((candidate) => candidate.id === sessionId);
   const role = pipelineForSession(useIssuePipelines(), sessionId ?? "");
+  const shown = useVisibleSessionTab(sessionId ?? "");
+  const authorTab = shown?.kind === "agent" ? shown.id : !shown ? session?.activeTab ?? undefined : undefined;
   const [open, setOpen] = useState<boolean | null>(null);
+  useLayoutEffect(() => sessionId ? registerSelfUiFold(sessionId, () => setOpen(true)) : undefined, [sessionId]);
   if (!session || (!role && !offer)) return null;
   const expanded = open ?? !!role;
   const project = store.projects.find((candidate) => candidate.path === session.projectPath);
@@ -57,7 +62,7 @@ export function BranchAutopilot({ sessionId, offer }: { sessionId?: string; offe
       >
         <div className="min-h-0 overflow-hidden">
           <div className="flex flex-col gap-2.5 px-3 pb-3 pt-0.5">
-            <SessionPipelineControls session={session} project={project} tabId={session.activeTab ?? undefined} pipeline={role?.pipeline} plain />
+            <SessionPipelineControls session={session} project={project} tabId={authorTab} pipeline={role?.pipeline} plain />
           </div>
         </div>
       </div>

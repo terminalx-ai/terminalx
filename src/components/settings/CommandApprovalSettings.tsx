@@ -1,9 +1,11 @@
+import { useSettingsFile } from "@/lib/settingsFile";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
 import { Switch } from "@/components/ui/controls";
 import { agentSettings, errorMessage } from "@/lib/api";
 
 export function CommandApprovalSettings() {
+  const { revision } = useSettingsFile();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -14,7 +16,7 @@ export function CommandApprovalSettings() {
       .then((settings) => live && setEnabled(settings.readOnlyCommands))
       .catch((e) => live && setError(errorMessage(e)));
     return () => { live = false; };
-  }, []);
+  }, [revision]);
 
   const change = async (next: boolean) => {
     setSaving(true);

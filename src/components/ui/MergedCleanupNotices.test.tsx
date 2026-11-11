@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { closeWorkspaceRemove } from "@/lib/dialogs";
 import type { MergedRemoval, MergedStatus } from "@terminalx/portable/workspace";
 
 // #432: a workspace about to be removed after its pull request merged is
@@ -64,6 +65,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   cleanup();
+  closeWorkspaceRemove();
   resetMergedCleanupForTest();
 });
 
@@ -83,13 +85,9 @@ describe("merged workspace notices", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("merged_cleanup_hold", { path, held: true });
   });
 
-  it("says why a newly merged workspace was kept, and opens the clean-up to review it (#476)", async () => {
+  it("does not pop up a workspace clean-up kept: its Branch tab says it (#476)", async () => {
     render(<MergedCleanupNotices />);
-    await pass([status({ phase: "kept", fresh: true, reason: "ignored local files: .env", detail: "1 ignored file or folder may be local data: .env." })]);
-    const notice = screen.getByTestId("merged-notice");
-    expect(notice.textContent).toContain("Kept workspace quiet-amber-fox");
-    expect(notice.textContent).toContain("Its pull request #62 was merged, but it was not deleted: ignored local files: .env. 1 ignored file or folder may be local data: .env.");
-    fireEvent.click(within(notice).getByRole("button", { name: "Review in clean-up" }));
+    await pass([status({ phase: "kept", fresh: true, reason: "2 uncommitted files", detail: "It has 2 untracked files." })]);
     expect(screen.queryByTestId("merged-notice")).toBeNull();
   });
 

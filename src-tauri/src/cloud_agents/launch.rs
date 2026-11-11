@@ -1037,6 +1037,7 @@ impl Starter for ManagerStarter {
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
+                parent: None,
                 section_id: None,
                 project_path: self.root.clone(),
                 title: Some(title.to_string()),

@@ -1010,6 +1010,9 @@ fn owner_hook_process_fails_closed_when_its_socket_disappears() {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
             Err(error) => panic!("hook fixture accept: {error}"),
         });
+        // macOS inherits the listener's nonblocking mode on accepted sockets.
+        // Frame reads need the timeout, even if the writer has not sent yet.
+        connection.set_nonblocking(false).unwrap();
         connection.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut reader = BufReader::new(connection);
         let mut frame = String::new();
@@ -1290,6 +1293,7 @@ fn window_services_follow_only_the_registered_live_owner_attachment() {
         loop {
             match listener.accept() {
                 Ok((mut socket,_)) => {
+                    socket.set_nonblocking(false).unwrap();
                     socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                     let mut line = String::new();
                     BufReader::new(socket.try_clone().unwrap()).read_line(&mut line).unwrap();
@@ -1361,6 +1365,7 @@ fn window_publication_process_fixture() {
         while calls < 2 {
             match listener.accept() {
                 Ok((mut socket,_)) => {
+                    socket.set_nonblocking(false).unwrap();
                     socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                     let mut line = String::new();
                     BufReader::new(socket.try_clone().unwrap()).read_line(&mut line).unwrap();

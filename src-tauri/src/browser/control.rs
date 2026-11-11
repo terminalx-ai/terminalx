@@ -272,9 +272,11 @@ mod tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: Vec::new(),
             active_tab: None,
             link: None,
+            parent: None,
             unknown: Default::default(),
         };
         crate::store::index::update(|sessions| {
