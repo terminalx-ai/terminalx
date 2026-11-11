@@ -874,7 +874,7 @@ fn privacy_review3_clone_uses_destination_configuration() {
 }
 
 #[test]
-fn privacy_native3_reference_transaction() {
+fn privacy_review3_verification_cancellation_cleans_reference_locks() {
     native3_git_case("reference-lock");
 }
 

@@ -41,7 +41,7 @@ pub(super) fn clone_context(root: &Path, managed: bool) {
 
 }
 
-pub(super) fn run(root: &Path, managed: bool) {
+pub(super) fn verification_cancellation(root: &Path, managed: bool) {
     let _environment = Environment::new(root);
     policy(false, managed);
     let f = Fixture::new(root, "native3-reference-lock");
