@@ -350,7 +350,10 @@ pub(super) fn native_review_ssh(root: &Path, managed: bool) {
 
 #[path = "git_native3_privacy_tests.rs"]
 mod native3;
-pub(super) fn native3_regressions(root: &Path, managed: bool) {
-    openssh::strict_wrapper(root, managed);
-    native3::run(root, managed);
+pub(super) fn native3_regressions(root: &Path, managed: bool, case: &str) {
+    match case {
+        "strict-wrapper" => openssh::strict_wrapper(root, managed),
+        "clone-and-locks" => native3::run(root, managed),
+        _ => panic!("unknown native review regression {case}"),
+    }
 }

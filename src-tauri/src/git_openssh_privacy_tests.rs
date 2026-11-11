@@ -393,9 +393,10 @@ exec /usr/bin/ssh -F {config} "$@"
         while ssh.socket.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
         let connections = ssh.connections();
         let refused = || {
-            assert!(f.workspace("git.fetch").unwrap_err().contains("Cannot verify configured SSH transport containment"));
-            assert_eq!(ssh.connections(), connections);
-            assert!(!ssh.socket.exists());
+            let result = f.workspace("git.fetch");
+            assert!(!ssh.socket.exists(), "an unverified strict wrapper left a persistent SSH master after app process cleanup");
+            assert_eq!(ssh.connections(), connections, "refusal must precede the physical connection");
+            assert!(result.unwrap_err().contains("Cannot verify configured SSH transport containment"));
         };
         refused();
         policy(true, managed); denied(f.workspace("git.fetch"));

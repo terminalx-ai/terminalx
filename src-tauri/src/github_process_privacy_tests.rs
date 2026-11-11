@@ -864,21 +864,32 @@ fn privacy_native_ssh_child() {
 }
 
 #[test]
-fn privacy_native3_ssh_clone_and_reference_transaction() {
+fn privacy_review3_high_strict_wrappers_cannot_leave_connections() {
+    native3_git_case("strict-wrapper");
+}
+
+#[test]
+fn privacy_native3_clone_and_reference_transaction() {
+    native3_git_case("clone-and-locks");
+}
+
+fn native3_git_case(case: &str) {
     for managed in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "github_process::tests::privacy_native3_git_child", "--nocapture"])
             .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
+            .env("TERMINALX_TEST_NATIVE3_GIT", case)
             .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
-        assert!(output.status.success(), "policy={managed}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{case}/policy={managed}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }
 }
 #[test]
 fn privacy_native3_git_child() {
     let Ok(kind) = std::env::var("TERMINALX_TEST_GITHUB_ENTRIES") else { return };
     let root = store::root().unwrap(); fixture(&root);
-    pull::native3_regressions(&root, kind == "managed");
+    let case = std::env::var("TERMINALX_TEST_NATIVE3_GIT").unwrap_or_else(|_| "clone-and-locks".into());
+    pull::native3_regressions(&root, kind == "managed", &case);
 }
 
 #[path = "github_checks_privacy_tests.rs"]
