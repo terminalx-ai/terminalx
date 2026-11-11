@@ -393,7 +393,7 @@ function useHome(): string | null {
   return home;
 }
 
-function TemplateCard({ template, selected, disabled, onSelect }: { template: ProjectTemplate; selected: boolean; disabled: boolean; onSelect: () => void }) {
+function TemplateCard({ template, selected, disabled, home, onSelect }: { template: ProjectTemplate; selected: boolean; disabled: boolean; home: string | null; onSelect: () => void }) {
   const Icon = TEMPLATE_ICONS[template.id] ?? Folder;
   const unusable = Boolean(template.problem);
   return (
@@ -425,8 +425,8 @@ function TemplateCard({ template, selected, disabled, onSelect }: { template: Pr
       </span>
       <span className="mt-auto min-w-0">
         <span className="block truncate text-[12.5px] font-medium">{template.name}</span>
-        <span id={`start-template-${template.id}-description`} className={cn("mt-0.5 line-clamp-2 block text-[11.5px] leading-[15px] text-muted-foreground", !template.builtIn && "break-all font-mono")}>
-          {template.problem ?? template.description}
+        <span id={`start-template-${template.id}-description`} className={cn("mt-0.5 block text-[11.5px] leading-[15px] text-muted-foreground", template.builtIn || template.problem ? "line-clamp-2" : "truncate font-mono")}>
+          {template.problem ?? (template.builtIn ? template.description : homeShort(template.description, home))}
         </span>
       </span>
     </button>
@@ -575,7 +575,7 @@ function QuickStartDialog() {
             {templates ? (
               <div role="radiogroup" aria-labelledby="start-quick-template-label" className="grid grid-cols-3 gap-2.5">
                 {templates.map((candidate) => (
-                  <TemplateCard key={candidate.id} template={candidate} selected={candidate.id === template} disabled={busy} onSelect={() => setTemplate(candidate.id)} />
+                  <TemplateCard key={candidate.id} template={candidate} selected={candidate.id === template} disabled={busy} home={home} onSelect={() => setTemplate(candidate.id)} />
                 ))}
               </div>
             ) : templatesFailure ? (
