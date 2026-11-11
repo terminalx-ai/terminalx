@@ -14,6 +14,10 @@ pub struct Settings {
     pub preferences: std::collections::BTreeMap<String, serde_json::Value>,
     /// The first window copied the legacy localStorage choices successfully.
     pub preferences_migrated: bool,
+    // Keep layered keys written/reset by another window while an unrelated
+    // settings control holds a previously loaded snapshot. Not persisted.
+    #[serde(skip)]
+    pub(crate) loaded_configuration: Option<(String, String)>,
     /// Where new worktrees go, relative to the project root.
     pub worktree_dir: String,
     /// Branch prefix for session worktrees.
@@ -325,6 +329,7 @@ impl Default for Settings {
         Self {
             preferences: Default::default(),
             preferences_migrated: false,
+            loaded_configuration: None,
             worktree_dir: ".raccoon/worktrees".into(),
             branch_prefix: "raccoon/".into(),
             extra_bin_dirs: Vec::new(),
@@ -353,7 +358,9 @@ pub(super) fn file_path() -> Result<PathBuf> {
 }
 
 pub fn load() -> Settings {
-    file::load()
+    let mut settings = file::load();
+    settings.loaded_configuration = Some((settings.branch_prefix.clone(), settings.worktree_dir.clone()));
+    settings
 }
 
 pub fn save(s: &Settings) -> Result<()> {

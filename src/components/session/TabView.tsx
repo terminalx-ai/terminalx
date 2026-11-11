@@ -1,3 +1,4 @@
+import { useTabRead } from "@/lib/useTabRead";
 import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQueue";
 import { usePrefs } from "@/lib/prefs";
@@ -39,8 +40,9 @@ import { RecoveryBanner } from "./RecoveryBanner";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
 import { ContinuationDialog } from "./ContinuationDialog";
+import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
 import { useModels } from "@/lib/models";
-import { openWorkspaceDelete } from "@/lib/dialogs";
+import { openAgentHandoff, openWorkspaceDelete } from "@/lib/dialogs";
 import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
@@ -103,6 +105,7 @@ export function TabView({
   session,
   tab,
   active,
+  focused = active,
   continuationOpen = false,
   backend: given,
   gitSource,
@@ -111,6 +114,8 @@ export function TabView({
   session: SessionEntry;
   tab: TabEntry;
   active: boolean;
+  /** Both split panes are active; only the focused one owns keyboard shortcuts. */
+  focused?: boolean;
   continuationOpen?: boolean;
   /** Where the tab runs; the local Tauri commands when absent. */
   backend?: SessionBackend;
@@ -200,6 +205,8 @@ export function TabView({
   const now = useNowUntil(lease?.expiresAt);
   const tabLive = tab.status === "in_progress" || tab.status === "waiting";
   const gate = shared ? tabGate(shared.you, lease, now, tabLive, nameOf) : null;
+  const counterpart = local && !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure)
+    ? otherAgent(tab.harness, harnesses) : undefined;
   const [notesOpen, setNotesOpen] = useState(false);
   // The retry and resume flows restart a local agent process; a cloud tab's runtime recovers itself.
   // A tab that is a terminal has no agent to recover: what went wrong there is said as it is.
@@ -249,13 +256,7 @@ export function TabView({
     [session.id, tab.id],
   );
 
-  // Viewing a finished tab marks it read.
-  useEffect(() => {
-    if (active && tab.status === "completed") {
-      void backendRef.current.markRead(tab.id);
-      backendRef.current.patchTab(tab.id, { status: "idle" });
-    }
-  }, [active, tab.status, backend.key, tab.id]);
+  useTabRead(active, backend.key, tab, backend.markRead);
 
   // Nothing is running in a conversation that is only being read.
   const canReset = local && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation
@@ -540,11 +541,11 @@ export function TabView({
   // The chat's Escape is the agent's Escape. In the terminal view (local or cloud) the action is not bound at all:
   // there the key is typed into the agent's own screen, like every other key.
   useShortcut("session.interrupt", () => (takesKey() ? (actions.pressedWith("shortcut"), interrupt(), true) : false), {
-    enabled: active && !continuationOpen && !terminalMode && interrupts,
+    enabled: focused && active && !continuationOpen && !terminalMode && interrupts,
   });
   // The hard stop has no keys unless the reader gives it some. A cloud tab's terminal view passes those through too.
   useShortcut("session.stop", () => (takesKey() ? (actions.pressedWith("shortcut"), stop("chat"), true) : false), {
-    enabled: active && !continuationOpen && !(remoteTerminal && terminalMode),
+    enabled: focused && active && !continuationOpen && !(remoteTerminal && terminalMode),
   });
 
   const answerPermission = useCallback(
@@ -682,6 +683,7 @@ export function TabView({
       sending={sending}
       onReset={canReset ? (endSeq) => setResetTarget({ endSeq }) : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
+      onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
       footer={
         readOnly ? (
           // A conversation that is not running is read, and resumed from here: there is nobody to send to.
@@ -735,6 +737,8 @@ export function TabView({
           onSend={send}
           sentAfter={sentAfter}
           history={history}
+          hasConversation={transcript.turns.length > 0}
+          agentHandoff={counterpart ? { id: counterpart.id, name: counterpart.name, run: () => openAgentHandoff(session, tab, counterpart.id) } : undefined}
           // Stop is Escape first; once that went unanswered, the same control ends the process.
           onStop={interrupts && !unanswered ? () => interrupt() : () => stop("chat")}
           stopMode={!interrupts ? "stop" : unanswered ? "force" : "interrupt"}
@@ -770,7 +774,7 @@ export function TabView({
           settingsNoteWarning={settingsNotice === "ignored"}
           canStop={!gate || gate.mayStop}
           disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? backend.readOnlyReason}
-          autoFocus={active}
+          autoFocus={active && focused}
         />
         </>
         )
@@ -806,6 +810,7 @@ export function TabView({
         <TerminalView
           id={paneId}
           visible={active && terminalMode}
+          focused={focused}
           pinned={terminalTab && !!held && !pane?.exited}
           actions={
             <>

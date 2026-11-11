@@ -108,6 +108,10 @@ mod keychain;
 #[cfg(feature = "desktop")]
 mod environment_commands;
 #[cfg(feature = "desktop")]
+mod configuration_commands;
+#[cfg(feature = "desktop")]
+mod configuration_watch;
+#[cfg(feature = "desktop")]
 mod secret_clipboard;
 mod landed;
 mod local_sharing;
@@ -130,6 +134,7 @@ mod chat_windows;
 mod relay_e2ee;
 pub mod remote;
 mod session;
+mod sidebar_activity;
 mod session_archive;
 mod session_ops;
 mod stray_processes;
@@ -413,6 +418,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            configuration_commands::configuration_resolve,
+            configuration_watch::configuration_watch,
+            configuration_commands::configuration_write,
+            configuration_commands::configuration_review,
             environment_commands::environment_list,
             environment_commands::environment_reveal,
             environment_commands::environment_copy,
@@ -673,6 +682,7 @@ pub fn run() {
             commands::set_tab_permission_mode,
             commands::set_tab_effort,
             commands::mark_tab_read,
+            commands::set_tab_unread,
             commands::tab_status,
             commands::list_models,
             commands::frontend_log,
@@ -713,6 +723,8 @@ pub fn run() {
             commands::git_checkout,
             commands::working_changes,
             commands::pr_list,
+            commands::pr_search,
+            commands::pr_attach,
             commands::pr_associations,
             commands::pr_associations_batch,
             commands::pr_details,
@@ -738,7 +750,10 @@ pub fn run() {
             commands::pty_spawn,
             commands::pty_shells,
             commands::pty_rename,
+            commands::pty_set_docked,
+            commands::save_terminal_selection,
             commands::pty_busy,
+            commands::listening_sessions,
             commands::pty_write,
             commands::pty_attach,
             commands::pty_attach_sized,

@@ -68,6 +68,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json" },
   }),
   defineSetting({
+    id: "general.layeredConfiguration", section: "general", title: "Layered configuration",
+    description: "Resolve user, shared, local and managed settings; review repository trust and locked values.",
+    searchTerms: ["configuration", "repository", "trust", "managed", "locked", "branch prefix"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json, system managed policy and .terminalx/settings*.json" }, layout: "content",
+  }),
+  defineSetting({
     id: "about.updates", section: "about", title: "Updates",
     description: "Beta gets builds earlier. Either way nothing installs without your say-so.",
     searchTerms: ["about", "updates"], scope: "user",
@@ -204,6 +210,12 @@ export const SETTINGS_ROWS = [
     description: "Several sessions on one branch: as tabs beside each other in the tab bar, with one row for the branch in the sidebar; or listed under the branch in the sidebar, with the tab bar holding only the open session's tabs. Without the tab bar they are in the sidebar.",
     searchTerms: ["appearance", "sessions", "on", "a", "branch"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.branchSessions" },
+  }),
+  defineSetting({
+    id: "appearance.colourLineCounts", section: "appearance", title: "Colour line counts on every row",
+    description: "Use green and red for added and removed lines even when the sidebar row is not selected.",
+    searchTerms: ["sidebar", "diff", "lines", "color", "colour"], scope: "user",
+    storage: { kind: "localStorage", location: "raccoon.prefs#colourLineCounts" },
   }),
   defineSetting({
     id: "appearance.openUsage", section: "appearance", title: "Usage",

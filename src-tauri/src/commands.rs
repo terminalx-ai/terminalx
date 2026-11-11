@@ -1896,6 +1896,10 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// deletable.
 #[tauri::command]
 pub async fn create_session(app: AppHandle, mut req: NewSession) -> CmdResult<SessionEntry> {
+    if !req.project_path.starts_with("cloud:") && crate::git::is_repo(std::path::Path::new(&req.project_path))
+        && !crate::configuration_commands::review(&app, &req.project_path).await? {
+        return Err("Repository configuration was not trusted. No workspace was created.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         crate::session_ops::prefer_native_codex_session(&mut req);
         create_session_blocking(&app, req)
@@ -2769,6 +2773,12 @@ pub async fn set_tab_effort(state: State<'_, AppState>, session_id: String, tab_
 }
 
 #[tauri::command]
+pub async fn set_tab_unread(state: State<'_, AppState>, session_id: String, tab_id: String, unread: bool) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.set_tab_unread(&session_id, &tab_id, unread).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn mark_tab_read(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.mark_read(&session_id, &tab_id).map_err(err)).await.map_err(err)?
@@ -3053,6 +3063,16 @@ pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_assoc
 }
 
 #[tauri::command]
+pub async fn pr_search(cwd: String, query: String) -> CmdResult<Vec<crate::github::PullRequest>> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::search_prs(Path::new(&cwd), &query).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_attach(cwd: String, number: u64) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::attach_pr(Path::new(&cwd), number).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn pr_associations_batch(session_keys: Vec<String>) -> CmdResult<std::collections::BTreeMap<String, Vec<crate::pr_associations::Association>>> {
     tauri::async_runtime::spawn_blocking(move || crate::pr_associations::for_sessions(&session_keys).map_err(err)).await.map_err(err)?
 }
@@ -3161,6 +3181,11 @@ pub async fn pty_spawn(state: State<'_, AppState>, id: String, cwd: String, cols
 }
 
 
+#[tauri::command]
+pub async fn listening_sessions(sessions: Vec<crate::sidebar_activity::SessionDirectory>) -> CmdResult<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || crate::sidebar_activity::listening_sessions(sessions)).await.map_err(err)
+}
+
 /// Which of these shell tabs are running a command now, for a close that would end it.
 #[tauri::command]
 pub async fn pty_busy(state: State<'_, AppState>, ids: Vec<String>) -> CmdResult<Vec<String>> {
@@ -3196,6 +3221,20 @@ pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id:
 pub async fn pty_rename(state: State<'_, AppState>, id: String, title: String) -> CmdResult<()> {
     let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
     tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.rename(&id, &title)).await.map_err(err)?.map_err(err)
+}
+
+/// Move an existing shell between the dock and tabs in every window.
+#[tauri::command]
+pub async fn pty_set_docked(state: State<'_, AppState>, id: String, docked: bool) -> CmdResult<crate::pty::ShellPane> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.set_docked(&id, docked)).await.map_err(err)?.map_err(err)
+}
+
+/// Save selected terminal output privately alongside this session's attachments.
+#[tauri::command]
+pub async fn save_terminal_selection(state: State<'_, AppState>, session_id: String, tab_id: String, text: String) -> CmdResult<String> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.save_terminal_selection(&session_id, &tab_id, &text)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
@@ -3343,6 +3382,12 @@ pub async fn cloud_control_confirm(app: tauri::AppHandle, what: String, ok_label
 ///
 /// [`QUESTION_TTL`]: crate::cloud_control::QUESTION_TTL
 pub(crate) async fn cloud_control_question(app: tauri::AppHandle, title: String, message: String, ok_label: String) -> crate::cloud_control::Answer {
+    cloud_control_question_with_details(app, title, message, None, ok_label).await
+}
+
+/// Optional reveal stays inside the native consent boundary. It never grants
+/// consent or extends the deadline; only the explicit agreement button does.
+pub(crate) async fn cloud_control_question_with_details(app: tauri::AppHandle, title: String, message: String, revealed: Option<String>, ok_label: String) -> crate::cloud_control::Answer {
     use crate::cloud_control::{question_answered, question_begin, question_closed, question_expired, Confirming, QUESTION_TTL};
     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     // Kept short and on one line: the label comes from this app, but never trust its length.
@@ -3351,17 +3396,28 @@ pub(crate) async fn cloud_control_question(app: tauri::AppHandle, title: String,
         return answer;
     }
     let message = format!("{message}\n\nIf this is not answered within {} seconds the request is dropped, and answering later does nothing.", QUESTION_TTL.as_secs());
+    let revealed = revealed.map(|text| format!("{text}\n\nThis request expires after {} seconds, including time spent reviewing values.", QUESTION_TTL.as_secs()));
+    let deadline = std::time::Instant::now() + QUESTION_TTL;
     let agree = ok_label.clone();
     let mut dialog = tauri::async_runtime::spawn_blocking(move || {
         let _open = Confirming::begin();
-        let pressed = app
-            .dialog()
-            .message(message)
-            .title(title)
-            .kind(MessageDialogKind::Warning)
-            .buttons(cloud_control_buttons(&ok_label))
-            .blocking_show_with_result();
-        cloud_control_agreed(&pressed, &agree)
+        let mut show_values = false;
+        loop {
+            if std::time::Instant::now() >= deadline { return false; }
+            let toggle = if show_values { "Hide values" } else { "Reveal values" };
+            let buttons = if revealed.is_some() {
+                cloud_control_review_buttons(toggle, &ok_label)
+            } else { cloud_control_buttons(&ok_label) };
+            let pressed = app.dialog()
+                .message(if show_values { revealed.as_ref().unwrap_or(&message) } else { &message })
+                .title(&title).kind(MessageDialogKind::Warning).buttons(buttons)
+                .blocking_show_with_result();
+            if revealed.is_some() && matches!(&pressed, tauri_plugin_dialog::MessageDialogResult::Custom(label) if label == toggle) {
+                show_values = !show_values;
+                continue;
+            }
+            return cloud_control_agreed(&pressed, &agree);
+        }
     });
     match tokio::time::timeout(QUESTION_TTL, &mut dialog).await {
         Ok(pressed) => question_answered(pressed.unwrap_or(false), std::time::Instant::now()),
@@ -3393,6 +3449,12 @@ const CLOUD_CONTROL_CLOSE: &str = "Close";
 /// every dismissal would come back as agreement.
 fn cloud_control_buttons(agree: &str) -> tauri_plugin_dialog::MessageDialogButtons {
     tauri_plugin_dialog::MessageDialogButtons::YesNoCancelCustom(CLOUD_CONTROL_REFUSE.to_string(), agree.to_string(), CLOUD_CONTROL_CLOSE.to_string())
+}
+
+/// The review uses the default slot to toggle visibility, with the same
+/// explicit agreement and dismissal slots as ordinary native questions.
+fn cloud_control_review_buttons(toggle: &str, agree: &str) -> tauri_plugin_dialog::MessageDialogButtons {
+    tauri_plugin_dialog::MessageDialogButtons::YesNoCancelCustom(toggle.into(), agree.into(), CLOUD_CONTROL_CLOSE.into())
 }
 
 /// Whether the dialog's result is the explicit agree button, and nothing else.
@@ -3821,6 +3883,25 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    #[test]
+    fn revealing_configuration_never_grants_consent() {
+        use tauri_plugin_dialog::MessageDialogResult;
+        for toggle in ["Reveal values", "Hide values"] {
+            let buttons = super::cloud_control_review_buttons(toggle, "Trust settings");
+            let agreed = |native| super::cloud_control_agreed(&as_the_dialog_layer_reports(native, &buttons), "Trust settings");
+            assert!(!agreed(Native::Yes), "Return toggles visibility, never approves");
+            assert!(!agreed(Native::Cancel), "Dismissal cannot approve");
+            assert!(agreed(Native::No), "Only explicit Trust settings approves");
+        }
+        for label in ["Reveal values", "Hide values", "Close", "Refuse"] {
+            assert!(!super::cloud_control_agreed(&MessageDialogResult::Custom(label.into()), "Trust settings"));
+        }
+        for result in [MessageDialogResult::Yes, MessageDialogResult::No, MessageDialogResult::Cancel, MessageDialogResult::Ok] {
+            assert!(!super::cloud_control_agreed(&result, "Trust settings"));
+        }
+        assert!(super::cloud_control_agreed(&MessageDialogResult::Custom("Trust settings".into()), "Trust settings"));
+    }
+
     /// The idle sweep spares what a reader can see (#718): not what a closed
     /// window last showed, nor the floating window's session while it is put away.
     #[test]
@@ -4095,6 +4176,7 @@ mod command_tests {
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4135,6 +4217,7 @@ mod command_tests {
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: Some("old-workspace".into()),
             issue: None,
@@ -4156,6 +4239,7 @@ mod command_tests {
             use_worktree: false,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4205,6 +4289,7 @@ mod command_tests {
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: Some("calm-ember".into()),
             issue: None,
@@ -4257,6 +4342,7 @@ mod command_tests {
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4284,6 +4370,7 @@ mod command_tests {
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4300,6 +4387,7 @@ mod command_tests {
             use_worktree: false,
             on_main: true,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,

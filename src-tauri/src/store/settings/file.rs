@@ -1,5 +1,5 @@
-//! The existing user layer only. Registry-generated schemas and the layered
-//! PRO-136 resolver remain follow-up work; do not invent a second resolver here.
+//! The user layer only. Layering (managed, repository and user) is resolved by
+//! `store::configuration`; do not invent a second resolver here.
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, LazyLock, Mutex};
@@ -241,8 +241,15 @@ pub(super) fn load() -> Settings {
 }
 
 fn write(path: &Path, state: &mut FileState, settings: &Settings) -> Result<()> {
+    write_without(path, state, settings, &[])
+}
+
+/// `absent` top-level keys are left out of the file so they inherit from the
+/// layers below the user layer (defaults) rather than pinning today's value.
+fn write_without(path: &Path, state: &mut FileState, settings: &Settings, absent: &[&str]) -> Result<()> {
     if let Some(error) = &state.error { bail!("Fix settings.json before saving: {error}"); }
     let mut next = serde_json::to_value(settings)?;
+    if let Some(object) = next.as_object_mut() { for key in absent { object.remove(*key); } }
     let good = parse_input(&serde_json::to_string(&next)?, false)?;
     if let Some(source) = &state.source { preserve_unknown(&mut next, source, &TEMPLATE, ""); }
     let bytes = serde_json::to_vec_pretty(&next)?;
@@ -270,7 +277,20 @@ pub(super) fn save(settings: &Settings) -> Result<()> {
         let mut next = settings.clone();
         next.preferences = state.good.preferences.clone();
         next.preferences_migrated = state.good.preferences_migrated;
-        write(&path, state, &next)
+        // Layered keys this snapshot did not change keep what is on disk now:
+        // another window may have written or reset them through the layered
+        // configuration writer since this snapshot was loaded.
+        let mut absent = Vec::new();
+        if let Some((prefix, directory)) = &settings.loaded_configuration {
+            let on_disk = |key: &str| state.source.as_ref().and_then(|source| source.get(key)).is_some();
+            if prefix == &settings.branch_prefix {
+                if on_disk("branchPrefix") { next.branch_prefix = state.good.branch_prefix.clone(); } else { absent.push("branchPrefix"); }
+            }
+            if directory == &settings.worktree_dir {
+                if on_disk("worktreeDir") { next.worktree_dir = state.good.worktree_dir.clone(); } else { absent.push("worktreeDir"); }
+            }
+        }
+        write_without(&path, state, &next, &absent)
     })
 }
 

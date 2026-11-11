@@ -109,8 +109,8 @@ impl Fixture {
         self.base.join("alpha")
     }
 
-    fn branch(name: &str) -> String {
-        git::worktree_branch(name)
+    fn branch(&self, name: &str) -> String {
+        git::worktree_branch_for(&self.alpha(), name).unwrap()
     }
 
     /// A worktree TerminalX made, with a commit of its own pushed to its branch.
@@ -124,7 +124,7 @@ impl Fixture {
     /// GitHub's answer for the worktree's branch: a pull request in `state`
     /// whose head is where the branch is now.
     fn pr(&self, name: &str, number: u64, state: &str) {
-        let branch = Self::branch(name);
+        let branch = self.branch(name);
         let head = sh(&self.alpha(), &["rev-parse", &format!("refs/heads/{branch}")]);
         let pr = BranchPr { number, title: format!("Pull request for {name}"), url: format!("https://github.com/o/r/pull/{number}"), state: state.into(), head, base: "main".into() };
         self.prs.lock().unwrap().as_mut().unwrap().insert(branch, pr);
@@ -133,14 +133,14 @@ impl Fixture {
     /// Merge the worktree's branch into `main` on the remote, as GitHub's
     /// "Create a merge commit" does, and say its pull request merged.
     fn merge(&self, name: &str, number: u64) {
-        sh(&self.alpha(), &["merge", "-q", "--no-ff", "-m", &format!("Merge {name}"), &Self::branch(name)]);
+        sh(&self.alpha(), &["merge", "-q", "--no-ff", "-m", &format!("Merge {name}"), &self.branch(name)]);
         sh(&self.alpha(), &["push", "-q", "origin", "main"]);
         self.pr(name, number, "MERGED");
     }
 
     /// "Squash and merge": the branch's whole change as one new commit.
     fn squash(&self, name: &str, number: u64) {
-        sh(&self.alpha(), &["merge", "-q", "--squash", &Self::branch(name)]);
+        sh(&self.alpha(), &["merge", "-q", "--squash", &self.branch(name)]);
         sh(&self.alpha(), &["commit", "-q", "-m", &format!("{name} (#{number})")]);
         sh(&self.alpha(), &["push", "-q", "origin", "main"]);
         self.pr(name, number, "MERGED");
@@ -150,13 +150,13 @@ impl Fixture {
     /// has moved on, so none of the branch's own commits is in it.
     fn rebase(&self, name: &str, number: u64) {
         commit(&self.alpha(), &format!("moved-on-before-{name}.txt"));
-        sh(&self.alpha(), &["cherry-pick", &format!("main..{}", Self::branch(name))]);
+        sh(&self.alpha(), &["cherry-pick", &format!("main..{}", self.branch(name))]);
         sh(&self.alpha(), &["push", "-q", "origin", "main"]);
         self.pr(name, number, "MERGED");
     }
 
     fn session(&self, cwd: &Path, status: TabStatus) -> SessionEntry {
-        let tab = TabEntry { transport: Default::default(),
+        let tab = TabEntry { marked_unread: false, transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: "claude".into(),
             title: None,
@@ -260,11 +260,11 @@ impl Fixture {
     }
 
     fn local_branch(&self, name: &str) -> Option<String> {
-        git::run(&self.alpha(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", Self::branch(name))]).ok().map(|sha| sha.trim().to_string())
+        git::run(&self.alpha(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", self.branch(name))]).ok().map(|sha| sha.trim().to_string())
     }
 
     fn remote_branch(&self, name: &str) -> Option<String> {
-        remote_tip(&self.alpha(), &Self::branch(name)).unwrap()
+        remote_tip(&self.alpha(), &self.branch(name)).unwrap()
     }
 }
 
@@ -379,7 +379,7 @@ fn squash_and_rebase_merges_are_recognised_and_their_branches_go_too() {
     f.rebase("rebased-one", 71);
     // Neither branch's own commits are in main.
     for name in ["squashed-one", "rebased-one"] {
-        assert_ne!(sh(&f.alpha(), &["rev-list", "--count", &format!("origin/main..{}", Fixture::branch(name))]), "0");
+        assert_ne!(sh(&f.alpha(), &["rev-list", "--count", &format!("origin/main..{}", f.branch(name))]), "0");
     }
 
     assert!(f.sweep(1).iter().all(|status| status.phase == Phase::Scheduled));

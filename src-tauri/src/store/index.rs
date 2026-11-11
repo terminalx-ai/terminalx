@@ -212,6 +212,9 @@ pub struct TabEntry {
     pub provider_session_id: Option<String>,
     #[serde(default)]
     pub status: TabStatus,
+    /// A reminder set by the reader, independent of the agent's live status.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub marked_unread: bool,
     pub created: String,
     #[serde(default)]
     pub modified: String,
@@ -1037,6 +1040,17 @@ pub fn set_parked(session_id: &str, tab_id: &str, parked: bool) -> Result<()> {
     })
 }
 
+/// Read state is not conversation activity: preserve its dashboard position.
+pub fn set_tab_unread(session_id: &str, tab_id: &str, unread: bool) -> Result<()> {
+    update(|sessions| {
+        let session = sessions.iter_mut().find(|s| s.id == session_id).ok_or_else(|| anyhow!("session {session_id} not found"))?;
+        let tab = session.tab_mut(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+        tab.marked_unread = unread;
+        if !unread && tab.status == TabStatus::Completed { tab.status = TabStatus::Idle; }
+        Ok(())
+    })
+}
+
 pub fn update_tab<R>(session_id: &str, tab_id: &str, f: impl FnOnce(&mut TabEntry) -> Result<R>) -> Result<R> {
     update_session(session_id, |s| {
         let t = s.tab_mut(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
@@ -1823,7 +1837,7 @@ mod tests {
         session.worktree_name = Some("feature-one".into());
         session.branch = Some("raccoon/feature-one".into());
         session.base_ref = Some("base-sha".into());
-        session.tabs.push(TabEntry { transport: Default::default(),
+        session.tabs.push(TabEntry { marked_unread: false, transport: Default::default(),
             id: "tab-one".into(),
             harness: "codex".into(),
             title: None,
@@ -1883,4 +1897,34 @@ mod tests {
             })
         );
     }
+    #[test]
+    fn unread_reminders_round_trip_per_tab_without_changing_activity_or_live_status() {
+        let _home = crate::store::temp_home();
+        let mut session = entry("s");
+        session.modified = "2026-10-01T00:00:00Z".into();
+        let mut working = tab("working");
+        working.status = TabStatus::InProgress;
+        let mut done = tab("done");
+        done.status = TabStatus::Completed;
+        session.tabs = vec![working, done];
+        save(&[session.clone()]).unwrap();
+        assert!(!get("s").unwrap().tabs[0].marked_unread, "old entries default to read");
+        set_tab_unread("s", "working", true).unwrap();
+        let stored: IndexFile = serde_json::from_str(&std::fs::read_to_string(file_path().unwrap()).unwrap()).unwrap();
+        let saved = &stored.sessions[0];
+        assert!(saved.tabs[0].marked_unread);
+        assert!(!saved.tabs[1].marked_unread);
+        assert_eq!(saved.tabs[0].status, TabStatus::InProgress);
+        assert_eq!(saved.modified, session.modified);
+        assert_eq!(saved.tabs[0].modified, session.tabs[0].modified);
+        set_tab_unread("s", "working", false).unwrap();
+        set_tab_unread("s", "done", false).unwrap();
+        let saved = get("s").unwrap();
+        assert!(!saved.tabs[0].marked_unread);
+        assert_eq!(saved.tabs[0].status, TabStatus::InProgress);
+        assert_eq!(saved.tabs[1].status, TabStatus::Idle);
+        assert!(set_tab_unread("s", "missing", true).is_err());
+        assert!(!get("s").unwrap().tabs.iter().any(|tab| tab.marked_unread));
+    }
+
 }

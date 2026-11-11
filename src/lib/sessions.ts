@@ -4,7 +4,7 @@ import { keepMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { api, workStatus, type WorkspaceRemoveOptions } from "@/lib/api";
+import { api, agent, workStatus, type WorkspaceRemoveOptions } from "@/lib/api";
 import { forgetSidebarWindow, getPrefs, pruneSidebarWindows, setPrefs, sidebarChatWindowLabels } from "@/lib/prefs";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
@@ -64,6 +64,8 @@ interface State {
   newSessionPreset: { projectPath: string; cwd: string | null; fromBranch?: string } | null;
   /** An ordinary chat in the shared Chats directory, composed before its first send. */
   newSessionChat: boolean;
+  /** A keyboard request to show Start from in the new-session form. */
+  startFromRequest: number;
   /** Personal local section chosen from its header; cleared on leaving the composer. */
   newSessionSectionId: string | null;
   /**
@@ -100,6 +102,7 @@ let state: State = {
   newSessionReturn: null,
   newSessionPreset: null,
   newSessionChat: false,
+  startFromRequest: 0,
   newSessionSectionId: null,
   cloudSessionPreset: null,
   selectedCloudProject: null,
@@ -127,7 +130,10 @@ function set(patch: Partial<State>) {
   if (next.view !== "new" || next.selectedSessionId || patch.cloudSessionPreset) next.newSessionSectionId = null;
   // Opened from a session, the form remembers it; any other way out forgets it.
   // Only an explicit "New session" (`openNewSession`, a project's or branch's +) records where to go back to; any way out forgets it.
-  if (next.view !== "new" || next.selectedSessionId) next.newSessionReturn = null;
+  if (next.view !== "new" || next.selectedSessionId) {
+    next.newSessionReturn = null;
+    next.startFromRequest = 0;
+  }
   // A cloud draft goes the same way, and gives way to any local one.
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId || ("newSessionPreset" in patch && !("cloudSessionPreset" in patch))) next.cloudSessionPreset = null;
   if ("selectedProject" in patch && !("selectedCloudProject" in patch)) next.selectedCloudProject = null;
@@ -499,10 +505,10 @@ function returnHere(): State["newSessionReturn"] {
 }
 
 /** "New session" (⌘N, the + buttons): the form, as a dialog over what is shown now. */
-export function openNewSession() {
+export function openNewSession(startFrom = false) {
   const back = returnHere();
   selectSession(null);
-  set({ newSessionReturn: back });
+  set({ newSessionReturn: back, startFromRequest: startFrom ? state.startFromRequest + 1 : 0 });
 }
 
 /** Close the new-session dialog: back to the session or view it was opened over. */
@@ -719,6 +725,18 @@ export async function renameSession(id: string, title: string) {
   patchSession(id, { title });
 }
 
+/** Mark every tab represented by a row read, or leave a reminder on its active tab. */
+export async function setSessionUnread(ids: string[], unread: boolean) {
+  for (const id of ids) {
+    const session = state.sessions.find((entry) => entry.id === id);
+    if (!session) continue;
+    const tabs = unread ? [session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0]].filter((tab): tab is TabEntry => !!tab) : session.tabs;
+    for (const tab of tabs) await agent.setUnread(id, tab.id, unread);
+  }
+  // The runtime also broadcasts to every window; reread for callers without a live subscription.
+  await refreshSessions();
+}
+
 /** A conversation's name: its agent's title for it once there is one. */
 export function conversationTitle(session: SessionEntry): string {
   const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
@@ -729,7 +747,7 @@ export function conversationTitle(session: SessionEntry): string {
 export async function renameConversation(session: SessionEntry, title: string) {
   await renameSession(session.id, title);
   const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
-  if (tab?.title?.trim()) await api.renameTab(session.id, tab.id, title);
+  if (tab) await api.renameTab(session.id, tab.id, title);
 }
 
 /** Rename a branch in git where it is checked out; its sessions and its label go with it. */

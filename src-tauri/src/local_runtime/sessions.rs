@@ -70,6 +70,10 @@ impl Sessions {
         self.0.call_within("runtime.session.workspace", json!({"operation":operation,"params":params}), std::time::Duration::from_secs(seconds))
     }
 
+    pub fn save_terminal_selection(&self, session: &str, tab: &str, text: &str) -> Result<String> {
+        self.tab("saveTerminalSelection", session, tab, json!({"text":text}))
+    }
+
     pub fn delete_session(&self, session: &str) -> Result<()> {
         self.call("runtime.session.deleteSession", json!({"sessionId":session}))
     }
@@ -287,6 +291,10 @@ impl Sessions {
 
     pub fn set_effort(&self, session: &str, tab: &str, effort: Option<&str>) -> Result<()> {
         self.tab("effort", session, tab, json!({"effort":effort}))
+    }
+
+    pub fn set_tab_unread(&self, session: &str, tab: &str, unread: bool) -> Result<()> {
+        self.quick_tab("setUnread", session, tab, json!({"unread": unread}))
     }
 
     pub fn mark_read(&self, session: &str, tab: &str) -> Result<()> {

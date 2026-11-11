@@ -21,11 +21,14 @@ import { openAutomations, renameWorkspace, selectSession, useSessionStore } from
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
+import { followedLayout, layoutOf, tabKey, useTabState, workspaceKey } from "@/lib/tabLayouts";
 import { TabView } from "./TabView";
+import { WorkspacePanes } from "./WorkspacePanes";
 import { EmptySession } from "./EmptySession";
 import { TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
 import { activateLatestTerminal, selectSessionTab, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
+import { TerminalChatProvider } from "@/components/terminal/TerminalChat";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { BrowserView } from "@/components/browser/BrowserView";
 import { bootBrowser, pagesFor, useBrowser } from "@/lib/browser";
@@ -208,6 +211,8 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
  *    (`HEADER_TIGHT_BUTTONS`), so the full-height buttons do not take the
  *    title's first characters either.
  *
+ * At that narrow width, breadcrumb padding, gaps and chip margins tighten
+ * to keep the title readable beside the full-height 40px action buttons.
  * The connection and role chips never shrink. The shrink factors do the
  * ordering: a larger one takes (nearly) all the squeeze until it is at its
  * minimum.
@@ -441,7 +446,16 @@ export function SessionView({
   useEffect(() => {
     if (local) void bootBrowser();
   }, [local]);
-  const requested = followedSelection(session, terminals.selected[session.id]);
+  const savedTabs = useTabState();
+  const savedLayout = followedLayout(layoutOf(savedTabs, workspaceKey(session, store.chatsPath)), [session]);
+  const candidates: SelectedSessionTab[] = [
+    ...session.tabs.map((tab) => ({ kind: "agent" as const, id: tab.id })),
+    ...shellPanes.map((pane) => ({ kind: "terminal" as const, id: pane.id })),
+    ...browserPages.map((page) => ({ kind: "browser" as const, id: page.id })),
+  ];
+  const savedPanes = [...(savedLayout.panes ?? [])].sort((a, b) => Number(b.id === savedLayout.focusedPane) - Number(a.id === savedLayout.focusedPane));
+  const restored = !cloud && !compact ? savedPanes.flatMap((pane) => candidates.filter((tab) => tabKey(tab.kind, tab.id) === pane.active))[0] : undefined;
+  const requested = followedSelection(session, terminals.selected[session.id] ?? restored);
   const terminalIds = local ? shellPanes.map((pane) => pane.id) : cloudTerminals.map((terminal) => terminal.id);
   // A cloud session's active tab is the runtime's, shared by everyone in it: it moves to a new tab
   // when anyone adds one. It decides what this view opens on, once: from then the view stays on
@@ -487,6 +501,8 @@ export function SessionView({
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const baseNote = session.worktreeBase && !session.worktreeBase.warning ? `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}` : null;
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
+  // Sibling sessions share mounted pane bodies. Session-specific dialogs still reset.
+  useEffect(() => { setContinuationSource(null); }, [session.id]);
   // The title-bar button and workspace menu carry the open tab into the same continuation dialog.
   const continueTab = activeTab && local ? () => setContinuationSource(activeTab) : null;
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -543,6 +559,7 @@ export function SessionView({
     else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
   return (
+    <TerminalChatProvider session={local && !cloud ? session : undefined}>
     <div className="flex h-full min-h-0 min-w-0 flex-1">
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header
@@ -787,7 +804,7 @@ export function SessionView({
           </div>
         </header>
         {/* The row of tabs, ended by the "+" that opens one (keyed by session, as above). The floating window leaves out a row that would only repeat its one tab, and keeps its + in the title bar. */}
-        {stripRow && (
+        {stripRow && compact && (
           <WorkspaceTabStrip
             session={session}
             selected={selected}
@@ -810,6 +827,7 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
+              {!cloud && !compact ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} selectionRequested={!!terminals.selected[session.id]} continuationOpen={!!continuationSource} /> : <>
               {session.tabs.map((t) => (
                 <div
                   key={t.id}
@@ -840,7 +858,7 @@ export function SessionView({
                   aria-hidden={selected?.kind !== "terminal" || pane.id !== selected.id}
                   className={cn("absolute inset-0", (selected?.kind !== "terminal" || pane.id !== selected.id) && "invisible")}
                 >
-                  <TerminalView id={pane.id} visible={pane.id === activeShell?.id} />
+                  <TerminalView id={pane.id} visible={pane.id === activeShell?.id} moveToDock={!compact} />
                   {pane.exited && (
                     <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">
                       Process exited{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.
@@ -915,8 +933,9 @@ export function SessionView({
                   )}
                 </div>
               )}
+              </>}
             </div>
-            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} />}
+            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} reviewsInPanes={!cloud && !compact} />}
           </div>
         </section>
       </div>
@@ -959,6 +978,7 @@ export function SessionView({
         </>
       )}
     </div>
+    </TerminalChatProvider>
   );
 }
 

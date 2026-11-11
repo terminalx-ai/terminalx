@@ -37,11 +37,15 @@ import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/sessi
  * does take it, even after the dialog said it could not confirm it, the
  * dialog closes as it would have on success (#662).
  */
-export function ContinuationDialog({ session, source, into, onClose, onLateError, onDelivered }: {
+export function ContinuationDialog({ session, source, into, initialHarness, reviewPrompt, onClose, onLateError, onDelivered }: {
   session: SessionEntry; source: TabEntry; onClose: () => void;
   /** The new session took the handoff, just before the dialog closes: where it went (#815). */
   onDelivered?: (to: { sessionId: string; tabId: string }) => void;
   into?: { project: Project; worktree: boolean };
+  /** The installed counterpart selected by a handoff entry point. */
+  initialHarness?: string;
+  /** A finished turn's review starts immediately, without taking over its pipeline. */
+  reviewPrompt?: string;
   onLateError?: (error: string) => void;
 }) {
   const [context, setContext] = useState<ContinuationContext | null>(null);
@@ -62,13 +66,17 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   const [inInput, setInInput] = useState<{ seq: number; pressed: boolean } | null>(null);
   const [pressing, setPressing] = useState(false);
   const startingRef = useRef(false);
+  const autoStarted = useRef(false);
   const preparedPrompt = useRef<string | undefined>(undefined);
   const active = useRef(true);
   const [chosen, setChosen] = useState<LaunchSettings | null>(null);
   const models = useModels();
   const prefs = usePrefs();
   // Until the reader changes something, the source conversation's own settings, as valid as they can be made.
-  const value = chosen ?? (loading ? null : handoffStart(launchSettingsOf(source), providers, models, prefs));
+  const value = chosen ?? (loading ? null : handoffStart(
+    { ...launchSettingsOf(source), ...(reviewPrompt ? { permissionMode: "plan" } : {}) },
+    initialHarness ? providers.filter((provider) => provider.id === initialHarness) : providers, models, prefs,
+  ));
   const selection = useSessionAgent(providers, true, null, value ? { value, onChange: setChosen } : undefined);
   const store = useSessionStore();
   const project = into?.project ?? store.projects.find((project) => project.path === session.projectPath);
@@ -82,7 +90,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   const carried = held?.role === "author" && held.pipeline.state !== "merged" ? { autoMerge: held.pipeline.autoMerge, resolveConflicts: held.pipeline.resolveConflicts ?? false } : "session";
   const pipelineLaunch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !project || (into && !worktree) ? "Choose a worktree branch to automate this session." : undefined, undefined, carried);
   const settings = value && selection.harness
-    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(!into || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts ? { pipeline: pipelineLaunch.value } : {}) }
+    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(!reviewPrompt && (!into || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts) ? { pipeline: pipelineLaunch.value } : {}) }
     : null;
 
   useEffect(() => {
@@ -127,7 +135,14 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
     setContext(null);
     setProviders([]);
     // The model list too, so the source's model is checked against it before anything can start.
-    Promise.allSettled([agent.prepareContinuation(session.id, source.id), api.listHarnesses(), loadModels()]).then(([prepared, detected]) => {
+    // A turn review needs only that turn's saved content; no full-history export.
+    const prepare = reviewPrompt ? Promise.resolve<ContinuationContext>({
+      sessionId: session.id, tabId: source.id, title: source.title || session.title,
+      cwd: session.cwd, provider: source.harness, providerSessionId: source.providerSessionId ?? null,
+      sourceActive: false, transcriptPath: null, fullUnavailableReason: null,
+      lastPrompt: null, lastUpdate: null, partialCapture: null,
+    }) : agent.prepareContinuation(session.id, source.id);
+    Promise.allSettled([prepare, api.listHarnesses(), loadModels()]).then(([prepared, detected]) => {
       if (canceled) return;
       const errors: string[] = [];
       if (prepared.status === "fulfilled") setContext(prepared.value);
@@ -135,12 +150,13 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
       if (detected.status === "fulfilled") {
         setProviders(detected.value);
         if (!detected.value.some((p) => p.available)) errors.push("No installed, available providers were found. Install Claude Code or Codex, then retry.");
+        else if (initialHarness && !detected.value.some((p) => p.id === initialHarness && p.available)) errors.push("The other agent is no longer installed or available. Retry after installing it.");
       } else errors.push(`Could not detect providers: ${errorMessage(detected.reason)}`);
       setError(errors.join(" ") || null);
       setLoading(false);
     });
     return () => { canceled = true; };
-  }, [session.id, source.id, attempt]);
+  }, [session.id, source.id, attempt, initialHarness, reviewPrompt]);
 
   const start = async () => {
     if (startingRef.current || !context || !settings || sent) return;
@@ -150,7 +166,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
     setProgress(null);
     setError(null);
     try {
-      const prompt = preparedPrompt.current ?? continuationPrompt(context, mode, into?.project.path);
+      const prompt = preparedPrompt.current ?? reviewPrompt ?? continuationPrompt(context, mode, into?.project.path);
       preparedPrompt.current = prompt;
       const created = (made: Launched) => {
         launched.current = made;
@@ -159,7 +175,9 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
       const confirming = () => { if (active.current) setDelivering(true); };
       const result = into
         ? await moveChatToProject({ id: session.id, title: source.title?.trim() || session.title }, { projectPath: into.project.path, worktree }, settings, prompt, created, destination, confirming)
-        : await launchContinuation(context, settings, prompt, created, destination, confirming);
+        : reviewPrompt
+          ? await launchContinuation(context, settings, prompt, created, destination, confirming, "review")
+          : await launchContinuation(context, settings, prompt, created, destination, confirming);
       if (!active.current) {
         if (result.stage !== "delivered") onLateError?.(result.error);
         return;
@@ -181,6 +199,14 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
       if (active.current) setStarting(false);
     }
   };
+  const readyReview = !!reviewPrompt && !loading && !error && !!settings;
+  useEffect(() => {
+    if (!active.current || !readyReview || autoStarted.current) return;
+    autoStarted.current = true;
+    void start();
+    // Only the transition to a prepared review schedules a launch. Later
+    // settings/delivery renders must not schedule another; retries are explicit.
+  }, [readyReview]); // eslint-disable-line react-hooks/exhaustive-deps
   const pressEnter = async () => {
     if (!destination || !inInput || pressing) return;
     setPressing(true);
@@ -218,13 +244,16 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
             once, in the line under the title. */}
         <HandoffScene className="mb-8 mt-6" />
         <DialogHeader>
-          <DialogTitle className="text-base font-semibold">{into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
+          <DialogTitle className="text-base font-semibold">{reviewPrompt ? "Second opinion" : into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
           <DialogDescription className="text-[13px] text-muted-foreground">
-            {into
+            {reviewPrompt ? `Share the selected turn's prompt, answer and recorded file diffs with ${agentName} for review in a new tab in this workspace.` : into
               ? `Opens a new session in ${into.project.name} that carries over this chat's context. This chat is archived once it starts.`
               : "Opens a new conversation that carries over this chat's context, so the agent picks up where it left off. This chat stays open."}
           </DialogDescription>
         </DialogHeader>
+        {reviewPrompt && !loading && settings && <p role="status" className="mt-4 text-xs text-muted-foreground" data-testid="review-settings">
+          {agentName} · {selection.model?.label ?? (settings.model || "Agent default")} · Plan (read-only)
+        </p>}
         {into && (isGit ? (
           <label className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
             <Switch size="sm" checked={worktree} onCheckedChange={setWorktree} disabled={locked} aria-label="Start on a new branch in a worktree" />
@@ -233,7 +262,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
         ) : <p className="mt-4 text-xs text-muted-foreground">In the folder · no Git</p>)}
         {/* While it reads the context, the same rows with placeholders where the pills will be: the dialog opens at
             its final height and nothing moves when they arrive. */}
-        {loading ? <div className="mt-5 flex flex-col gap-2" data-testid="continuation-loading">
+        {loading && reviewPrompt ? <p role="status" className="mt-5 flex items-center gap-2 text-xs text-faint"><LoaderCircle className="size-3 animate-spin" />Preparing the review…</p> : loading ? <div className="mt-5 flex flex-col gap-2" data-testid="continuation-loading">
           <span className="flex items-center gap-2 text-xs font-medium text-foreground">Agent<span role="status" className="flex items-center gap-1.5 font-normal text-faint"><LoaderCircle className="size-3 animate-spin" />Preparing context…</span></span>
           <div className="flex gap-1.5" aria-hidden>
             {/* In proportion to the pills they stand for (agent, model, effort, permissions), not fixed widths. */}
@@ -243,7 +272,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
           <div className="h-8 animate-pulse-soft rounded-md bg-veil-raised" aria-hidden />
           <p className="text-xs text-faint" aria-hidden>&nbsp;</p>
           <span className="mt-3 h-0" aria-hidden />
-        </div> : <>
+        </div> : !reviewPrompt && <>
           {/* Two rows of the same make: a label, then controls across the full width at one height, so the
               pills and the context switch line up edge to edge. */}
           <div role="group" aria-label="New session settings" className="mt-5 flex flex-col gap-2">

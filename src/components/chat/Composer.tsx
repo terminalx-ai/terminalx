@@ -37,6 +37,7 @@ import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
 import { beginComposerSend, finishComposerSend, returnToDraft, useComposerSend, withReturned } from "@/lib/composerSends";
 import { useComposerHistory } from "./useComposerHistory";
+import { usePrMention } from "./usePrMention";
 import { tokenAtCaret } from "@/lib/pickers";
 import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
 
@@ -118,6 +119,8 @@ export function Composer({
   onSetModel,
   onSetEffort,
   onSetMode,
+  agentHandoff,
+  hasConversation = false,
   contextUsed,
   reportedModel,
   modelsAreLocal = true,
@@ -160,6 +163,8 @@ export function Composer({
   onSetModel: (id: string) => void;
   onSetEffort: (e: string | null) => void;
   onSetMode: (m: string) => void;
+  agentHandoff?: { name: string; id: string; run: () => void };
+  hasConversation?: boolean;
   contextUsed?: number;
   /** The full model id the session last said it ran (an alias like `opus` resolved). */
   reportedModel?: string | null;
@@ -347,7 +352,8 @@ export function Composer({
       setDismissedToken(recalled ? `${recalled.kind}:${recalled.start}` : null);
     },
   });
-  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
+  const prMention = usePrMention(!remote && !disabled && dismissedToken !== tokenKey ? cwd ?? null : null, draft, caret, onDraftChange, ref, setCaret);
+  const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
   useEffect(() => {
@@ -416,7 +422,7 @@ export function Composer({
   const [reviewReceiptError, setReviewReceiptError] = useState<{ message: string; retry: () => Promise<void> } | null>(null);
   const send = useCallback(async (alternate = false) => {
     const text = draft.trim();
-    if ((!text && !attachments.length) || disabled) return;
+    if ((!text && !attachments.length) || disabled || prMention.attaching) return;
     const previews = attachments.map((a) => ({ url: a.previewUrl, name: a.name }));
     const operation = beginComposerSend(sendScope, { text, images: previews, pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
     if (!operation) return;
@@ -452,9 +458,11 @@ export function Composer({
     // Learning belongs to this accepted send even if a newer draft is visible.
     learnOnSuccess();
     finishComposerSend(sendScope, operation);
-  }, [draft, attachments, attach, disabled, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
+  }, [draft, attachments, attach, disabled, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing) return;
+    if (prMention.onKeyDown(e)) return;
     if (pickerOpen && items.length) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -478,8 +486,7 @@ export function Composer({
       }
     }
     // An open menu owns the arrows (the pickers above, the model and permission menus); dictation owns the draft.
-    if (!pickerOpen && !modelMenu.open && !optionsOpen && !dictation.dictating && recall.onKeyDown(e)) return;
-    if (e.nativeEvent.isComposing) return;
+    if (!pickerOpen && !prMention.open && !modelMenu.open && !optionsOpen && !dictation.dictating && recall.onKeyDown(e)) return;
     if (matchesShortcut(e.nativeEvent, "composer.send")) {
       e.preventDefault();
       void send();
@@ -544,6 +551,7 @@ export function Composer({
             note={token?.kind === "slash" ? commandList.note : null}
           />
         )}
+        {prMention.menu}
         <DropHint dragging={attach.dragging} mentionFiles={mentionDropped} />
         {!busy && !draft && handoffs && handoffs.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="Next steps">
@@ -602,6 +610,11 @@ export function Composer({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="min-w-[14rem]">
+              {(hasConversation || history.length > 0 || busy) && (
+                <p className="max-w-72 px-2 py-1.5 text-xs text-muted-foreground" role="note">
+                  Changing model or effort can rebuild the prompt cache. The next response may take longer and use more tokens.
+                </p>
+              )}
               <DropdownMenuLabel>Model</DropdownMenuLabel>
               <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={onSetModel}>
                 {modelGroups(models).map((group) => (
@@ -634,6 +647,15 @@ export function Composer({
                   </DropdownMenuRadioGroup>
                 </>
               ) : null}
+              {agentHandoff && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={agentHandoff.run}>
+                    <AgentMark id={agentHandoff.id} decorative />
+                    <span>Hand off to {agentHandoff.name}<span className="block text-xs text-faint">Opens in a new tab</span></span>
+                  </DropdownMenuItem>
+                </>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
 
@@ -690,7 +712,7 @@ export function Composer({
                   variant={draft.trim() || attachments.length ? "accent" : "secondary"}
                   aria-label={sending ? "Sending" : "Send"}
                   aria-busy={sending}
-                  disabled={disabled || sending || (!draft.trim() && !attachments.length)}
+                  disabled={disabled || sending || prMention.attaching || (!draft.trim() && !attachments.length)}
                   onClick={() => void send()}
                 >
                   <ArrowUp />

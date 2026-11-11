@@ -420,6 +420,7 @@ pub(super) fn dispatch(
         }
         // Session controls (`sessionControls`): the desktop's own operations,
         // which the runtime checks against this device's grant again.
+        "session.markRead" => parse_params(params).and_then(|params: TabControlParams| connection.call("markRead", params.into_call())),
         "session.tab" => parse_params(params).and_then(|params: TabControlParams| connection.call("tab", params.into_call())),
         "models.list" => parse_params(params).and_then(|params: ModelsParams| connection.call("models", json!({"refresh": params.refresh}))),
         "session.prepareContinuation" => parse_params(params).and_then(|params: TabControlParams| connection.call("prepareContinuation", params.into_call())),
@@ -449,6 +450,12 @@ pub(super) fn dispatch(
         "sessions.options" => no_params(&params).and_then(|_| new_session_options(manager)),
         "sessions.create" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| create_session(manager, connection, params)))
+        }
+        "configuration.resolve" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Params { #[serde(default)] project_id: Option<String> }
+            parse_params(params).and_then(|p: Params| connection.call("configuration", json!({"projectId": p.project_id})))
         }
         "mac.settings" => no_params(&params).and_then(|_| connection.call("settings", json!({}))),
         "mac.setSettings" => {
@@ -482,7 +489,7 @@ fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
     // `terminal`: `terminal.open`, and terminal observations that carry the
     // pane's size, so the phone can emulate the screen and drive it.
     // `closeTab`: `session.closeTab` closes a tab as the desktop's tab strip does.
-    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1)] {
+    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1), ("layeredConfiguration", 1)] {
         if runtime.mobile.get(feature).and_then(Value::as_u64).is_some_and(|served| served >= level) {
             named[feature] = json!(level);
         }
@@ -691,6 +698,7 @@ fn session_summaries() -> Result<Value> {
                 "title": tab.title,
                 "harness": tab.harness,
                 "status": tab.status,
+                "markedUnread": tab.marked_unread,
             })).collect::<Vec<_>>(),
         }));
     }
@@ -2467,8 +2475,9 @@ mod tests {
         let released = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
         let mut every = released.clone();
         every["closeTab"] = json!(1);
+        every["layeredConfiguration"] = json!(1);
         assert_eq!(capabilities(&current_runtime()), every);
-        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab came later");
+        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab and layered configuration came later");
         let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1 });
         assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,
             "no terminal, session controls, new sessions, Mac settings or send ids from a 0.2.21 runtime");
