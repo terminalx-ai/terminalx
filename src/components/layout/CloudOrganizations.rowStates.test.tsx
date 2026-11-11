@@ -163,7 +163,7 @@ describe("row states from the server's list", () => {
   it("and Needs you while the list says it waits on an approval", async () => {
     await load([item("second", { repositories: [acmeApi], ...online(0, 1) })], { second: { sessions: [session("s1", "Echo hello")], capabilities: ["session/1"] } });
     mount();
-    await waitFor(() => expect(within(sessionRow(`cloud:${ORG}:second:s1`)).getByRole("img", { name: "Needs you" })).toBeTruthy());
+    await waitFor(() => expect(within(sessionRow(`cloud:${ORG}:second:s1`)).getByText("Needs attention")).toBeTruthy());
   });
 
   it("a cached working tab is not believed without a live connection or the list's word", async () => {

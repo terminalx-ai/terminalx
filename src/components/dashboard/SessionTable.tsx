@@ -5,8 +5,11 @@ import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import { TABLE_COLUMNS, type DashboardSort, type DashboardTableRow, type TableColumnId } from "@/lib/dashboard";
 import type { PrAssociation } from "@/lib/api";
+import { SessionStatus } from "@/components/ui/SessionStatus";
+import type { StatusSession } from "@/lib/sessionRowStatus";
 
 export interface SessionTableRow extends DashboardTableRow {
+  session?: StatusSession;
   prs: readonly PrAssociation[];
   additions: number | null;
   deletions: number | null;
@@ -116,6 +119,12 @@ export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns,
 }
 
 function cell(row: SessionTableRow, column: TableColumnId, tabbable: boolean): ReactNode {
+  // The workflow column keeps its grouping/sort meaning. The automatic badge
+  // mounts only for visible rows, sharing the sidebar's cached status polling.
+  if (column === "name") return <span className="flex min-w-0 items-center gap-2">
+    <span data-session-title className="min-w-0 flex-1 truncate">{row.name}</span>
+    {row.session && <SessionStatus session={row.session} className="max-w-[55%] shrink font-normal" />}
+  </span>;
   if (column === "pr") return row.prs.length ? row.prs.map((pr, index) => (
     <button key={pr.url} type="button" tabIndex={tabbable ? 0 : -1} className="mr-2 text-foreground hover:underline" aria-label={`Open PR #${pr.number}`} title={pr.url}
       onClick={(event) => {

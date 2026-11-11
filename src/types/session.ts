@@ -137,6 +137,8 @@ export interface SessionParent {
 }
 
 export interface SessionEntry {
+  /** Live presentation facts supplied by the owning runtime. */
+  rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
   /** The person’s workflow status; older entries default to Backlog. */
   manualStatus?: ManualStatus;
   id: string;

@@ -26,6 +26,45 @@ const SESSION: &str = "watched-session";
 const TAB: &str = "watched-tab";
 const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.jsonl");
 
+#[test]
+fn row_status_distinguishes_live_permission_question_and_plan_and_clears_after_answer() {
+    let rig = Rig::new();
+    for (tool, expected) in [("Bash", "needs_permission"), ("AskUserQuestion", "needs_answer"), ("ExitPlanMode", "review_plan")] {
+        let mut rt = rig.rt.lock().unwrap();
+        rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            request_id: tool.into(), tool_use_id: tool.into(), tool_name: tool.into(), input: json!({}),
+            title: None, description: None, reason: None, cwd: None, options: vec![],
+        }, None);
+        assert_eq!(rt.status, TabStatus::Waiting);
+        assert_eq!(row_status::activity(&rt), Some(expected));
+        rig.manager.apply(&mut rt, Payload::PermissionDecided { request_id: tool.into(), tool_use_id: Some(tool.into()), allowed: true, label: "Allowed".into(), automatic: true }, None);
+        assert!(rt.pending.is_empty());
+        assert_ne!(row_status::activity(&rt), Some(expected));
+    }
+    let mut rt = rig.rt.lock().unwrap();
+    rt.stopping = true;
+    assert_eq!(row_status::activity(&rt), Some("stopping"));
+    rt.stopping = false;
+    rt.setup_failed = true;
+    assert_eq!(row_status::activity(&rt), Some("setup_failed"));
+}
+
+#[test]
+fn row_status_keeps_a_failed_launch_through_completion_and_idle_until_work_restarts() {
+    let rig = Rig::new();
+    let mut rt = rig.rt.lock().unwrap();
+    rt.engine = Engine::None;
+    rt.turn_open = true;
+    rig.manager.fail_open_turn(&mut rt, &recovery::EarlyExit::said("Agent exited before starting"));
+    assert!(!rt.turn_open);
+    assert_eq!(rt.status, TabStatus::Waiting);
+    assert_eq!(row_status::activity(&rt), Some("setup_failed"));
+    rig.manager.set_status(&mut rt, TabStatus::Idle);
+    assert_eq!(row_status::activity(&rt), Some("setup_failed"));
+    rig.manager.set_status(&mut rt, TabStatus::InProgress);
+    assert_eq!(row_status::activity(&rt), None);
+}
+
 #[derive(Default)]
 struct Observer {
     rt: Mutex<std::sync::Weak<Mutex<TabRuntime>>>,
@@ -246,7 +285,7 @@ impl Rig {
             seq: 0,
             source_timestamp: None,
             message_times: HashMap::new(),
-            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(), stdio_retiring: None,
+            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(), stdio_retiring: None,
             status: TabStatus::Idle,
             child: None,
             child_pid: None,

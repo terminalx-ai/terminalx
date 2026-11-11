@@ -1,7 +1,7 @@
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
-import { useMemo, useState } from "react";
-import { Platform, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from "react-native";
-import { useRouter } from "expo-router";
+import { useCallback, useMemo, useState } from "react";
+import { AppState, Platform, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from "react-native";
+import { useFocusEffect, useRouter } from "expo-router";
 import { ChevronDown, ChevronRight, Laptop } from "lucide-react-native";
 import { branchChats, chatRows, projectGroups, shortTime, type ChatRow } from "@mobile/data/session-list";
 import { useApp } from "@mobile/state/AppProvider";
@@ -31,6 +31,13 @@ export default function SessionsScreen() {
   const insets = useSafeAreaInsets();
   const bar = useTabBarInset();
   const [headerHeight, setHeaderHeight] = useState(insets.top + 56);
+  // Row status facts are cached on the Mac; a silent refresh keeps them current while this list is in view.
+  useFocusEffect(useCallback(() => {
+    const timer = setInterval(() => {
+      if (AppState.currentState === "active" && app.connectionStage === "connected") void app.refreshSessions(true);
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [app.connectionStage, app.refreshSessions]));
   // Removing the computer from here goes back to the device list.
   const menu = useDeviceMenu({ onRemoved: () => router.navigate("/(tabs)") });
   const rows = useMemo(() => chatRows(app.sessions), [app.sessions]);

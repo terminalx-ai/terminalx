@@ -602,6 +602,7 @@ export const api = {
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
+  sessionRowStatuses: (ids: string[]) => invoke<Record<string, import("@terminalx/portable/sessionStatus").SessionStatusInput>>("session_row_statuses", { ids }),
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
   statsUsageSnapshot: () => invoke<StatsUsageState>("stats_usage_snapshot"),

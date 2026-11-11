@@ -45,6 +45,8 @@ use crate::{git, pty, store};
 
 #[path = "session_follow.rs"]
 pub mod follow;
+#[path = "session_row_status.rs"]
+pub(crate) mod row_status;
 #[path = "session_held.rs"]
 pub mod held;
 #[path = "session_reset.rs"]
@@ -869,6 +871,7 @@ pub struct TabRuntime {
     compaction: compaction::Admission,
     stdio_compaction: Option<compaction::Token>,
     stdio_starting: bool,
+    setup_failed: bool,
     /// Each frame with the phone or share a prompt came from, if any.
     stdio_writer: Option<std::sync::mpsc::SyncSender<(codex::stdio::Outbound, Option<codex_stdio::Authority>)>>,
     /// The phone or share the prompt just sent came from, until its frame is
@@ -1100,6 +1103,7 @@ pub fn idle_orphaned_tabs_except(tabs: &std::collections::HashSet<(String, Strin
 
 #[derive(Clone)]
 pub struct SessionManager {
+    row_prs: Arc<row_status::PrCache>,
     pub(crate) history_downloads: Arc<crate::local_runtime::history::Downloads>,
     /// Desktop typing waiting for its programs to read it (#661).
     pub(crate) typing: Arc<crate::local_runtime::typing::Typing>,
@@ -1507,6 +1511,7 @@ impl SessionManager {
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
         let manager = Self {
+            row_prs: Arc::default(),
             mobile: Arc::new(crate::local_runtime::mobile::Registry::default()),
             sharing: Arc::new(Mutex::new(crate::local_sharing::Sharing::default())),
             sink,
@@ -1849,7 +1854,7 @@ impl SessionManager {
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(),
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(),
                 stdio_retiring: None,
                 turn_started_at: None,
                 turn_usage: Default::default(),
@@ -2055,6 +2060,9 @@ impl SessionManager {
     }
 
     fn set_status(&self, rt: &mut TabRuntime, status: TabStatus) {
+        // A failed launch also completes a turn and settles to idle. Keep its
+        // reason until work actually starts again.
+        if status == TabStatus::InProgress { rt.setup_failed = false; }
         if status != TabStatus::Waiting {
             rt.stalled_at = None;
             if rt.recovery.take().is_some() {
@@ -4348,6 +4356,12 @@ impl SessionManager {
     /// same breath knows to wait for the TUI to finish drawing. `prompting`
     /// is whether the caller is about to send one.
     fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, prompting: bool) -> Result<bool> {
+        let result = self.start_cli_inner(rt, rt_arc, entry, tab, prompting);
+        if !rt.stopping && rt.restart_claim.is_none() { rt.setup_failed = result.is_err(); }
+        result
+    }
+
+    fn start_cli_inner(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, prompting: bool) -> Result<bool> {
         self.accepting_work()?;
         if rt.stopping { bail!("Stop has not confirmed local process exit. Retry Stop before resuming."); }
         if rt.restart_claim.is_some() { bail!("The agent is restarting to apply its settings. Try again shortly."); }
@@ -5261,6 +5275,7 @@ impl SessionManager {
     /// refused sign-in when that line says so. The latch as for
     /// [`Self::close_open_turn`].
     fn fail_open_turn(&self, rt: &mut TabRuntime, exit: &recovery::EarlyExit) {
+        rt.setup_failed = true;
         if !rt.turn_open {
             return;
         }

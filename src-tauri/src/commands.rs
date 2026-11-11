@@ -1780,6 +1780,12 @@ pub fn list_sessions(app: tauri::AppHandle) -> CmdResult<Vec<SessionEntry>> {
     store::conversation_titles::backfill().map_err(err)
 }
 
+#[tauri::command]
+pub async fn session_row_statuses(state: State<'_, AppState>, ids: Vec<String>) -> CmdResult<serde_json::Value> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.row_statuses(ids).map_err(err)).await.map_err(err)?
+}
+
 /// Personal local section metadata, read independently of agent processes.
 #[tauri::command]
 pub async fn local_sections() -> CmdResult<index::local_sections::SectionState> {
