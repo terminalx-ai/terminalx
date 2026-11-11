@@ -107,8 +107,10 @@ export function planOf(run: Run): RunPlan {
       reviewOnlyReason: piece.reviewOnlyReason,
       kind: piece.kind,
       agent: piece.agent,
-      model: piece.model,
-      effort: piece.effort,
+      // What its kind chose is not the plan's to name: left out, the routing table chooses again,
+      // and a piece whose tier has no installed model keeps saying so.
+      model: piece.modelByKind ? "" : piece.model,
+      effort: piece.effortByKind ? undefined : piece.effort,
       permissionMode: piece.permissionMode,
       readsUntrusted: piece.readsUntrusted,
       estimate: piece.estimate,

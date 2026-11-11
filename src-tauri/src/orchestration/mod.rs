@@ -288,6 +288,13 @@ pub struct Piece {
     /// Why its model is not the routing table's: the tier has no installed model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_note: Option<String>,
+    /// The plan named no model: the one here is its kind's. A plan made from this run
+    /// (`Edit` in the Run view) leaves the model out again, so the kind still decides.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_by_kind: bool,
+    /// The plan named no effort: the one here is its kind's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub effort_by_kind: bool,
     /// The plan's own choice; the project's setting when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,

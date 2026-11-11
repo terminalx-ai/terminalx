@@ -392,21 +392,24 @@ function ModelAndEffort({ piece, disabled, onChange }: { piece: RunPiece; disabl
   const current = modelForTab(models, piece.model);
   const listed = models.some((model) => model.id === piece.model);
   const efforts = effortChoices(current, piece.effort);
+  // The empty choice is "not named by the plan": the piece's kind decides, and it shows what that came to.
+  const byKind = piece.kind ? `by kind: ${piece.kind}` : "by kind";
+  const kindModel = piece.model ? modelLabel(piece.agent, piece.model) : `${piece.agent === "codex" ? "Codex" : "Claude"} default`;
   return (
     <span className="flex min-w-0 items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
-      <select aria-label={`Model of ${piece.title}`} className={cn(cellSelect, "flex-1")} value={piece.model} disabled={disabled}
+      <select aria-label={`Model of ${piece.title}`} className={cn(cellSelect, "flex-1")} value={piece.modelByKind ? "" : piece.model} disabled={disabled} title={piece.modelByKind ? `From the routing table, ${byKind}` : undefined}
         onChange={(event) => {
           const next = modelForTab(models, event.target.value);
-          // An effort the new model does not have goes back to that model's default.
-          onChange({ model: event.target.value, effort: piece.effort && next?.efforts.includes(piece.effort) ? piece.effort : undefined });
+          // An effort the new model does not have goes back to that model's default; one the kind chose stays the kind's.
+          onChange({ model: event.target.value, effort: !piece.effortByKind && piece.effort && next?.efforts.includes(piece.effort) ? piece.effort : undefined });
         }}>
         {/* No model named: the plan is stored again with the routing table's model for the piece's kind. */}
-        <option value="">By kind{piece.kind ? ` (${piece.kind})` : ""}</option>
+        <option value="">{piece.modelByKind ? `${kindModel} (${byKind})` : `By kind${piece.kind ? ` (${piece.kind})` : ""}`}</option>
         {piece.model && !listed && <option value={piece.model}>{modelLabel(piece.agent, piece.model)}</option>}
         {models.map((model) => <option key={model.id} value={model.id} title={modelOptionText(model, models)}>{model.label}</option>)}
       </select>
-      <select aria-label={`Effort of ${piece.title}`} className={cn(cellSelect, "w-[5.25rem] shrink-0")} value={piece.effort ?? ""} disabled={disabled} onChange={(event) => onChange({ effort: event.target.value || undefined })}>
-        <option value="">Default</option>
+      <select aria-label={`Effort of ${piece.title}`} className={cn(cellSelect, "w-[5.25rem] shrink-0")} value={piece.effortByKind ? "" : piece.effort ?? ""} disabled={disabled} title={piece.effortByKind ? `From the routing table, ${byKind}` : undefined} onChange={(event) => onChange({ effort: event.target.value || undefined })}>
+        <option value="">{piece.effortByKind && piece.effort ? EFFORT_LABEL[piece.effort] ?? piece.effort : "Default"}</option>
         {efforts.map((effort) => <option key={effort} value={effort}>{EFFORT_LABEL[effort] ?? effort}</option>)}
       </select>
     </span>

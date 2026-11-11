@@ -68,6 +68,17 @@ impl Host for ManagerHost {
         }
     }
 
+    fn retry_waits(&self, run_id: &str) {
+        // The next try is a new session in a new worktree: made off the thread that read the
+        // run, which may be a turn ending or a command waiting for its answer.
+        let (host, run) = (self.clone(), run_id.to_string());
+        std::thread::spawn(move || {
+            if let Err(error) = super::engine::start_retries(&host, &run) {
+                log::warn!("start the next try in run {run}: {error}");
+            }
+        });
+    }
+
     fn limits(&self, project_path: &str) -> OrchestratorLimits {
         crate::store::settings::load().orchestrator.for_project(project_path)
     }

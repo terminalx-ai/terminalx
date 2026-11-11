@@ -808,7 +808,8 @@ report `done`, and a run's worker cannot call it (`not_the_lead`).
 pieces the next `runs start` would start), `waiting`, and `estimate` with `unestimated` (how
 many pieces carry none), `maxTries`, and `costUsd` (what its workers used so far, at API
 list prices, as `sessions usage` counts it; `null` before any was read). Each piece has its
-plan fields and `state`, `tier`, `modelNote`, `attempts`, `worker` (`sessionId`, `tabId`),
+plan fields and `state`, `tier`, `modelNote`, `modelByKind` and `effortByKind` (true when the
+plan left that one to the piece's kind), `attempts`, `worker` (`sessionId`, `tabId`),
 `branch`, `startedMode`, `note`, `costUsd` and `tries`. `model`, `effort`, `worker` and
 `branch` are those of its current try.
 

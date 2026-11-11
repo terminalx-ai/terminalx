@@ -350,6 +350,8 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
             effort: chosen.effort,
             tier: chosen.tier,
             model_note: chosen.note,
+            model_by_kind: chosen.model_by_kind,
+            effort_by_kind: chosen.effort_by_kind,
             permission_mode: piece.permission_mode.clone(),
             reads_untrusted: piece.reads_untrusted,
             estimate: piece.estimate,
@@ -629,12 +631,15 @@ mod tests {
             ("study", "gpt-6-astra", Some("medium"), Some(Tier::Top)),
         ]);
         assert!(pieces.iter().all(|piece| piece.model_note.is_none() && piece.tries.is_empty()));
+        // Each says its model and effort are its kind's, not the plan's.
+        assert!(pieces.iter().all(|piece| piece.model_by_kind && piece.effort_by_kind));
         // A plan may override per piece: the model, the effort, or both.
         let named = PlanPiece { model: "sonnet".into(), effort: Some("high".into()), ..of("a", "search", "claude") };
         let effort_only = PlanPiece { effort: Some("low".into()), ..of("b", "code", "claude") };
         let pieces = check(&plan(vec![named, effort_only]), 8).unwrap();
         assert_eq!((pieces[0].model.as_str(), pieces[0].effort.as_deref(), pieces[0].tier), ("sonnet", Some("high"), Some(Tier::Mid)));
         assert_eq!((pieces[1].model.as_str(), pieces[1].effort.as_deref()), ("opus", Some("low")));
+        assert_eq!((pieces[0].model_by_kind, pieces[0].effort_by_kind, pieces[1].model_by_kind, pieces[1].effort_by_kind), (false, false, true, false));
         // A worker runs on the lead's agent unless the plan names another, and uses that agent's column.
         let mut on_codex = plan(vec![piece("a")]);
         on_codex.agent = Some("codex".into());

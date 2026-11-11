@@ -105,6 +105,10 @@ export interface RunPiece {
   tier?: Tier;
   /** Why its model is not the routing table's: the tier has no installed model. */
   modelNote?: string;
+  /** The plan named no model: the one here is its kind's. */
+  modelByKind?: boolean;
+  /** The plan named no effort: the one here is its kind's. */
+  effortByKind?: boolean;
   /** The plan's own choice; the run's `workerMode` when absent. */
   permissionMode?: string;
   readsUntrusted: boolean;

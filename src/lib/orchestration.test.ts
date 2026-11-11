@@ -130,6 +130,21 @@ describe("the routing table and a piece's tries (PRO-275)", () => {
     expect(pieceCost(piece("map", { tries: [{ step: "first", model: "haiku" }] })).cost).toBeNull();
   });
 
+  it("leaves out of an edited plan what a piece's kind chose, so the routing table chooses again", () => {
+    const note = "No top model of Codex is installed (astra): this piece runs on the lead's model, gpt-5.6-sol.";
+    const stored = run([
+      // Both from the kind, on a fallback: the tier has no installed model.
+      piece("study", { kind: "research", agent: "codex", model: "gpt-5.6-sol", effort: "medium", tier: "large", modelNote: note, modelByKind: true, effortByKind: true }),
+      // The plan named the model; the effort is the kind's.
+      piece("fix", { kind: "scoped-code", model: "opus", effort: "medium", effortByKind: true }),
+      // The plan named both.
+      piece("map", { kind: "search", model: "sonnet", effort: "high" }),
+    ]);
+    const sent = planOf(stored).pieces.map(({ id, model, effort }) => [id, model, effort]);
+    // Named again as the lead's model, `study` would be pinned to it and lose its note.
+    expect(sent).toEqual([["study", "", undefined], ["fix", "opus", undefined], ["map", "sonnet", "high"]]);
+  });
+
   it("tells a piece the ladder gave up on from one that only waits on its lead", () => {
     const tries = (outcome: "failed" | "partial" | "checkFailed" | "blocked" | "done") => [{ step: "first" as const, model: "sonnet", outcome }];
     for (const outcome of ["failed", "partial", "checkFailed"] as const) {

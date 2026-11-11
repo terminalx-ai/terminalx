@@ -44,6 +44,8 @@ struct World {
     /// What each worker's session has used so far, in dollars, and how often it was read.
     costs: BTreeMap<String, f64>,
     cost_reads: BTreeMap<String, usize>,
+    /// The runs the engine asked to have their waiting retries started, one entry an ask.
+    retries: Vec<String>,
 }
 
 struct Fake {
@@ -98,6 +100,10 @@ impl Host for Fake {
         let mut world = self.world();
         *world.cost_reads.entry(worker.session_id.clone()).or_default() += 1;
         Cost { usd: world.costs.get(&worker.session_id).copied(), unpriced_models: Vec::new() }
+    }
+
+    fn retry_waits(&self, run_id: &str) {
+        self.world().retries.push(run_id.to_string());
     }
 
     fn limits(&self, project_path: &str) -> OrchestratorLimits {
@@ -607,6 +613,41 @@ fn a_failing_piece_follows_the_ladder_and_is_blocked_after_three_tries() {
     let back = engine::start(&host, id).unwrap();
     assert_eq!((back.run.state, back.run.reason.clone(), back.started), (RunState::Running, None, vec!["docs".to_string()]));
     assert_eq!(back.run.piece("cli").unwrap().tries[2].outcome, Some(Outcome::Done));
+}
+
+#[test]
+fn the_next_try_is_asked_for_by_whichever_read_takes_the_ladders_step_and_only_once() {
+    let _home = crate::store::temp_home();
+    let (host, id) = one_piece();
+    let id = id.as_str();
+    // The worker's turn ends with `failed`, and the Run view reads the run before the turn-end hook does.
+    host.reports("cli", Status::Failed, "2 tests fail.");
+    let shown = engine::refreshed(&host, id).unwrap();
+    assert!(shown.piece("cli").unwrap().retry_waits());
+    assert_eq!(host.world().retries, vec![id.to_string()], "the read that climbed asks for the retry");
+    // The hook comes second: the piece's worker is no longer its worker, and nothing more is asked.
+    assert_eq!(engine::worker_turn_ended(&host, "w1-cli"), None);
+    engine::refreshed(&host, id).unwrap();
+    assert_eq!(host.world().retries.len(), 1, "nobody is asked twice for the same step");
+    // What the host does with the ask: a fresh worker, without the lead.
+    assert_eq!(engine::start_retries(&host, id).unwrap().started, vec!["cli"]);
+    assert_eq!(host.world().made.last().map(|made| (made.session.clone(), made.effort.clone())), Some(("w2-cli".to_string(), Some("high".to_string()))));
+
+    // The other order: the hook is the read that climbs, and it asks.
+    host.reports("cli", Status::Partial, "1 test fails.");
+    assert_eq!(engine::worker_turn_ended(&host, "w2-cli").as_deref(), Some(id));
+    assert_eq!(host.world().retries.len(), 2);
+    engine::start_retries(&host, id).unwrap();
+    // The last try falls short: the piece is blocked, and there is no retry to ask for.
+    host.reports("cli", Status::Failed, "The same test fails.");
+    engine::refreshed(&host, id).unwrap();
+    assert_eq!(host.world().retries.len(), 2);
+    // A failed done-check starts its retry itself, under the lock it already holds: nothing is left for anyone to start.
+    let (other, other_id) = one_piece_for("other-lead");
+    other.reports("cli", Status::Done, "Done.");
+    engine::worker_turn_ended(&other, "w1-cli");
+    assert!(engine::check_failed(&other, &other_id, "cli", "exit 101").unwrap().retried);
+    assert!(engine::start_retries(&other, &other_id).unwrap().started.is_empty());
 }
 
 #[test]

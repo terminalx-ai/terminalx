@@ -227,6 +227,10 @@ pub struct Choice {
     /// Said in the run when the model is not the table's: the tier has no
     /// installed model.
     pub note: Option<String>,
+    /// The plan named no model: this one is its kind's.
+    pub model_by_kind: bool,
+    /// The plan named no effort: this one is its kind's.
+    pub effort_by_kind: bool,
 }
 
 /// Who leads: a tier nobody installed falls back to its model.
@@ -243,15 +247,16 @@ pub fn choose(kind: &str, agent: &str, plan_model: &str, plan_effort: Option<&st
     let fits = |effort: Option<&str>, model: &str| effort.filter(|effort| listed(agent, model, models).is_some_and(|model| model.efforts.iter().any(|offered| offered == effort))).map(str::to_owned);
     let table_effort = |model: &str| fits(route.and_then(|route| route.effort.as_deref()), model);
     let effort = |model: &str| plan_effort.map(str::to_owned).or_else(|| table_effort(model));
+    let (model_by_kind, effort_by_kind) = (plan_model.is_empty(), plan_effort.is_none());
     if !plan_model.is_empty() {
-        return Choice { model: plan_model.to_string(), effort: effort(plan_model), tier: tier_of(agent, plan_model), note: None };
+        return Choice { model: plan_model.to_string(), effort: effort(plan_model), tier: tier_of(agent, plan_model), note: None, model_by_kind, effort_by_kind };
     }
     let Some(route) = route else {
         // An agent the table has no column for runs its own default.
-        return Choice { model: String::new(), effort: plan_effort.map(str::to_owned), tier: None, note: None };
+        return Choice { model: String::new(), effort: plan_effort.map(str::to_owned), tier: None, note: None, model_by_kind, effort_by_kind };
     };
     if let Some(model) = model_for(agent, route.tier, models) {
-        return Choice { model: model.id.clone(), effort: effort(&model.id), tier: Some(route.tier), note: None };
+        return Choice { model: model.id.clone(), effort: effort(&model.id), tier: Some(route.tier), note: None, model_by_kind, effort_by_kind };
     }
     let family = route.tier.family(agent).unwrap_or_default();
     let missing = format!("No {} model of {} is installed ({family})", route.tier.name(), agent_name(agent));
@@ -260,7 +265,7 @@ pub fn choose(kind: &str, agent: &str, plan_model: &str, plan_effort: Option<&st
         true => (lead.model.to_string(), format!("the lead's model, {}", lead.model)),
         false => (String::new(), format!("{}'s default model", agent_name(agent))),
     };
-    Choice { effort: effort(&model), tier: tier_of(agent, &model), note: Some(format!("{missing}: this piece runs on {runs_on}.")), model }
+    Choice { effort: effort(&model), tier: tier_of(agent, &model), note: Some(format!("{missing}: this piece runs on {runs_on}.")), model, model_by_kind, effort_by_kind }
 }
 
 #[cfg(test)]
@@ -335,9 +340,9 @@ pub(crate) mod tests {
         }
         let table = Table::default();
         let code = choose("code", "claude", "", None, &table, &models, &LEAD);
-        assert_eq!(code, Choice { model: "opus".into(), effort: Some("medium".into()), tier: Some(Tier::Large), note: None });
+        assert_eq!(code, Choice { model: "opus".into(), effort: Some("medium".into()), tier: Some(Tier::Large), note: None, model_by_kind: true, effort_by_kind: true });
         // Haiku offers no effort levels: `search` runs on its own default.
-        assert_eq!(choose("search", "claude", "", None, &table, &models, &LEAD), Choice { model: "haiku".into(), effort: None, tier: Some(Tier::Small), note: None });
+        assert_eq!(choose("search", "claude", "", None, &table, &models, &LEAD), Choice { model: "haiku".into(), effort: None, tier: Some(Tier::Small), note: None, model_by_kind: true, effort_by_kind: true });
         assert_eq!(choose("research", "claude", "", None, &table, &models, &LEAD).model, "fable");
     }
 
@@ -351,8 +356,8 @@ pub(crate) mod tests {
         assert_eq!(model_for("codex", Tier::Top, &models).unwrap().id, "gpt-6-astra");
         let table = Table::default();
         // Codex ships Terra at low; the table starts it at medium.
-        assert_eq!(choose("review", "codex", "", None, &table, &models, &LEAD), Choice { model: "gpt-6.1-terra".into(), effort: Some("medium".into()), tier: Some(Tier::Mid), note: None });
-        assert_eq!(choose("logs", "codex", "", None, &table, &models, &LEAD), Choice { model: "gpt-6-luna".into(), effort: None, tier: Some(Tier::Small), note: None });
+        assert_eq!(choose("review", "codex", "", None, &table, &models, &LEAD), Choice { model: "gpt-6.1-terra".into(), effort: Some("medium".into()), tier: Some(Tier::Mid), note: None, model_by_kind: true, effort_by_kind: true });
+        assert_eq!(choose("logs", "codex", "", None, &table, &models, &LEAD), Choice { model: "gpt-6-luna".into(), effort: None, tier: Some(Tier::Small), note: None, model_by_kind: true, effort_by_kind: true });
         // A family name is a word of the id, not a run of letters inside one.
         let lookalike = [model("codex", "gpt-6-solar", &[], None), model("codex", "gpt-6-SOL", &[], None)];
         assert_eq!(model_for("codex", Tier::Large, &lookalike).unwrap().id, "gpt-6-SOL");
@@ -396,12 +401,15 @@ pub(crate) mod tests {
         let models = installed();
         let table = Table::default();
         // Both named: the table is not asked.
-        assert_eq!(choose("search", "claude", "opus", Some("high"), &table, &models, &LEAD), Choice { model: "opus".into(), effort: Some("high".into()), tier: Some(Tier::Large), note: None });
+        assert_eq!(choose("search", "claude", "opus", Some("high"), &table, &models, &LEAD), Choice { model: "opus".into(), effort: Some("high".into()), tier: Some(Tier::Large), note: None, model_by_kind: false, effort_by_kind: false });
         // The model named: the kind's effort where that model offers it.
         assert_eq!(choose("code", "claude", "sonnet", None, &table, &models, &LEAD).effort.as_deref(), Some("medium"));
         assert_eq!(choose("code", "claude", "haiku", None, &table, &models, &LEAD).effort, None);
         // The effort named: the kind's model.
-        assert_eq!(choose("code", "claude", "", Some("low"), &table, &models, &LEAD), Choice { model: "opus".into(), effort: Some("low".into()), tier: Some(Tier::Large), note: None });
+        assert_eq!(choose("code", "claude", "", Some("low"), &table, &models, &LEAD), Choice { model: "opus".into(), effort: Some("low".into()), tier: Some(Tier::Large), note: None, model_by_kind: true, effort_by_kind: false });
+        // The model named and the effort left to the kind says which is whose.
+        let named = choose("code", "claude", "sonnet", None, &table, &models, &LEAD);
+        assert_eq!((named.model_by_kind, named.effort_by_kind), (false, true));
         // A pinned version still knows its tier; a model of no family has none.
         assert_eq!(choose("code", "claude", "claude-sonnet-5-5", None, &table, &models, &LEAD).tier, Some(Tier::Mid));
         assert_eq!(choose("code", "codex", "gpt-5.5", None, &table, &models, &LEAD).tier, None);

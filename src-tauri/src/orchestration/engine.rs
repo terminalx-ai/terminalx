@@ -83,6 +83,10 @@ pub trait Host: Send + Sync {
     fn models(&self) -> Vec<Model>;
     /// What a worker's session has used so far (`session_usage`).
     fn worker_cost(&self, worker: &SessionRef) -> Cost;
+    /// A piece of `run_id` fell short and its next try waits for a worker: start it
+    /// ([`start_retries`]), off the caller's thread. Whoever read the run first is told, a
+    /// worker's turn ending or a command that shows it, and nobody is told twice.
+    fn retry_waits(&self, run_id: &str);
     fn limits(&self, project_path: &str) -> OrchestratorLimits;
     /// Make the piece's worker: a session of the lead, in a worktree of its
     /// own on a branch cut from the lead's, with the piece's agent, model and
@@ -290,8 +294,9 @@ enum Launch {
     Retries,
 }
 
-/// Start the next try of every piece whose last one fell short. Called when
-/// a worker's turn ended ([`worker_turn_ended`]), off that turn's thread.
+/// Start the next try of every piece whose last one fell short. Called by
+/// the host when a read of the run took the ladder's step
+/// ([`Host::retry_waits`]), off that read's thread.
 pub fn start_retries(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     let run = stored(id)?;
@@ -520,6 +525,11 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     .map_err(EngineError::internal)?;
     if after != run {
         host.changed(&after);
+    }
+    // This read is the one that took the ladder's step: the next try is started from here,
+    // whichever read it was. A later read finds the piece already waiting and says nothing.
+    if after.pieces.iter().any(|piece| piece.retry_waits() && !run.piece(&piece.id).is_some_and(Piece::retry_waits)) {
+        host.retry_waits(&after.id);
     }
     Ok(after)
 }
@@ -778,8 +788,10 @@ pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
 }
 
 /// A turn ended in `session_id`: if it is a run's worker, its piece follows.
-/// Returns the run when a piece of it now waits for its next try: the caller
-/// starts that with [`start_retries`], off the thread the turn ended on.
+/// Returns the run when a piece of it now waits for its next try. Starting
+/// that try is not the caller's: the read that took the ladder's step asked
+/// the host for it ([`Host::retry_waits`]), and that read may have been
+/// another one (`runs show`, the Run view) that got there first.
 pub fn worker_turn_ended(host: &dyn Host, session_id: &str) -> Option<String> {
     match store::for_worker(session_id) {
         Ok(Some((run, _))) => match refreshed(host, &run.id) {

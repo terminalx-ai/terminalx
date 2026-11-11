@@ -377,11 +377,24 @@ describe("a piece's tries and what they cost (PRO-275)", () => {
   it("says in the piece when its tier has no installed model and what it runs on instead", async () => {
     const run = waiting();
     const note = "No top model of Codex is installed (astra): this piece runs on the lead's model, gpt-5.6-sol.";
-    await open({ ...run, pieces: [{ ...run.pieces[0], kind: "research", agent: "codex", model: "gpt-5.6-sol", effort: "medium", tier: "large", modelNote: note }, ...run.pieces.slice(1)] });
+    const study = { ...run.pieces[0], kind: "research", agent: "codex", model: "gpt-5.6-sol", effort: "medium", tier: "large" as const, modelNote: note, modelByKind: true, effortByKind: true };
+    answers.orchestration_update_plan = ({ plan }: { plan: RunPlan }) => ({ ...run, planEdited: true, pieces: [study, { ...run.pieces[1], model: plan.pieces[1].model }, run.pieces[2]] });
+    await open({ ...run, pieces: [study, ...run.pieces.slice(1)] });
     expect(within(detail()).getByRole("note").textContent).toBe(note);
-    // A plan's model select offers the routing table's choice for the piece's kind.
+    // Its model and effort are its kind's: the selects say so, and name what the kind came to.
     const model = within(row("map")).getByRole("combobox", { name: "Model of Map every settings read" }) as HTMLSelectElement;
-    expect(model.options[0].textContent).toBe("By kind (research)");
+    const effort = within(row("map")).getByRole("combobox", { name: "Effort of Map every settings read" }) as HTMLSelectElement;
+    expect([model.value, model.selectedOptions[0].textContent, effort.value, effort.selectedOptions[0].textContent]).toEqual(["", "GPT-5.6 Sol (by kind: research)", "", "Medium"]);
+    // A piece whose plan named its model offers the kind's choice as a choice.
+    const store = within(row("store")).getByRole("combobox", { name: "Model of Typed store module" }) as HTMLSelectElement;
+    await waitFor(() => expect(store.value).toBe("sonnet"));
+    expect(store.options[0].textContent).toBe("By kind");
+    // Another piece is edited: the plan saved leaves this one's model and effort to its kind, so it keeps its note.
+    fireEvent.change(store, { target: { value: "opus" } });
+    await waitFor(() => expect(calls("orchestration_update_plan")).toHaveLength(1));
+    const saved = (calls("orchestration_update_plan")[0] as { plan: RunPlan }).plan.pieces;
+    expect([saved[0].model, saved[0].effort, saved[1].model, saved[1].effort]).toEqual(["", undefined, "opus", "medium"]);
+    expect(within(detail()).getByRole("note").textContent).toBe(note);
   });
 });
 
