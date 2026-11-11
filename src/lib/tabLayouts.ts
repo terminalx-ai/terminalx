@@ -1,3 +1,4 @@
+import type { ReviewEditorEntry } from "@/lib/editors";
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, type ClosedTab, type TabLayout, type TabPane, type TabState } from "@/lib/api";
@@ -14,7 +15,7 @@ import type { SessionEntry, Workspace } from "@/types/session";
  * The backend is the source of truth. A change made here is shown at once
  * and sent; every window then hears the saved state back.
  */
-export type TabKind = "agent" | "terminal" | "browser";
+export type TabKind = "agent" | "terminal" | "browser" | "review";
 
 /** What a layout names a tab by. */
 export function tabKey(kind: TabKind, id: string): string {
@@ -107,6 +108,7 @@ export interface ClosedHere {
   title?: string;
   /** A browser page's address; a page belongs to its workspace, not to a session. */
   page?: { url: string; cwd: string };
+  review?: ReviewEditorEntry;
 }
 
 /** The saved state, and what this window closed in this run of the app. */

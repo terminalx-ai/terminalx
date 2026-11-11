@@ -130,9 +130,9 @@ export function TabMenuItems({
           {inTerminalView ? <MessageSquare /> : <Terminal />} {inTerminalView ? "Switch to chat view" : "Switch to terminal view"}
         </ContextMenuItem>
       ) : null}
-      <ContextMenuItem disabled={off} onSelect={() => void duplicateTab(row, tab).catch(failed("duplicating the tab"))}>
+      {tab.kind !== "review" && <ContextMenuItem disabled={off} onSelect={() => void duplicateTab(row, tab).catch(failed("duplicating the tab"))}>
         <CopyPlus /> Duplicate tab
-      </ContextMenuItem>
+      </ContextMenuItem>}
       {agentTab ? (
         <ContextMenuItem disabled={off} onSelect={() => void forkSession(session.id, tab.id).catch(failed("forking the conversation"))}>
           <GitFork /> Fork conversation

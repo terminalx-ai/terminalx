@@ -10,6 +10,7 @@ import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { SelectedSessionTab } from "@/lib/terminal";
 import type { SessionEntry } from "@/types/session";
 import { BrowserView } from "@/components/browser/BrowserView";
+import { ReviewTab } from "@/components/editor/EditorSplit";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { EmptySession } from "./EmptySession";
@@ -129,7 +130,8 @@ export function WorkspacePanes({ session, selected, strip, selectionRequested, c
           </> : tab.kind === "terminal" ? <>
             <TerminalView id={tab.id} visible={active} focused={active && pane.id === focused.id} />
             {tab.pane.exited && <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">Process exited{tab.pane.exitCode != null ? ` (${tab.pane.exitCode})` : ""}.</div>}
-          </> : <BrowserView session={session} page={tab.page} active={active} />}
+          </> : tab.kind === "review" ? <ReviewTab entry={tab.editor} visible={active} focused={active && pane.id === focused.id} embedded />
+          : <BrowserView session={session} page={tab.page} active={active} />}
         </div>;
       })}
       {!selected && !split && <div className="flex min-h-0 flex-col" style={{ gridColumn: 1, gridRow: showStrip ? 2 : 1 }}><EmptySession session={session} /></div>}
