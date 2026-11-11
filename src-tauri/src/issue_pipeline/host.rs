@@ -298,6 +298,21 @@ fn push_resolution(cwd: &Path, resolution: &super::Resolution, branch: &str, hea
         .map_err(|error| anyhow!("Pushing the verified resolution failed: {error:?}"))
 }
 
+impl LocalHost {
+    /// A conversation of its own in the author's session, named `title`: no fork, and none
+    /// of the author's transcript. On `chosen`'s model and effort, else the author's.
+    fn open_tab(&self, author: &SessionEntry, tab: &index::TabEntry, title: &str, chosen: Option<(String, Option<String>)>) -> Result<SessionRef> {
+        let (model, effort) = chosen.unwrap_or_else(|| (tab.model.clone(), tab.effort.clone()));
+        let opened = self.manager.add_tab(&author.id, &NewTab { transport: Default::default(), harness: tab.harness.clone(), model, effort, permission_mode: Some(tab.permission_mode.clone()) })?;
+        crate::session_ops::rename_tab_entry(&author.id, &opened.id, Some(title.into())).map_err(anyhow::Error::msg)?;
+        self.sink.emit("session_updated", &index::get(&author.id)?);
+        if let Place::CloudWorkspace { tab_added } = &self.place {
+            tab_added(&opened.id);
+        }
+        Ok(SessionRef { session_id: author.id.clone(), tab_id: opened.id })
+    }
+}
+
 impl Host for LocalHost {
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
@@ -352,15 +367,17 @@ impl Host for LocalHost {
     /// reused by the engine, including legacy separate sessions.
     fn open_reviewer(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let tab = author.tab(&pipeline.author.tab_id).context("the author's conversation is gone")?;
-        let reviewer = self.manager.add_tab(&author.id, &NewTab { transport: Default::default(),
-            harness: tab.harness.clone(), model: tab.model.clone(), effort: tab.effort.clone(), permission_mode: Some(tab.permission_mode.clone()),
-        })?;
-        crate::session_ops::rename_tab_entry(&author.id, &reviewer.id, Some("Reviewer".into())).map_err(anyhow::Error::msg)?;
-        self.sink.emit("session_updated", &index::get(&author.id)?);
-        if let Place::CloudWorkspace { tab_added } = &self.place {
-            tab_added(&reviewer.id);
-        }
-        Ok(SessionRef { session_id: author.id.clone(), tab_id: reviewer.id })
+        // The project's reviewer model and effort, when it set them: a review need not run on
+        // what the author ran on. The agent's list is read only for a project that chose.
+        let chosen = crate::store::projects::issue_pipeline_settings(&author.project_path).ok().filter(|settings| settings.reviewer_model.is_some() || settings.reviewer_effort.is_some()).map(|settings| {
+            let models = match tab.harness.as_str() {
+                "claude" => crate::harness::claude::models::get(false),
+                "codex" => self.manager.codex_models().get(false),
+                _ => crate::models::catalog(),
+            };
+            settings.reviewer_choice(&tab.harness, &tab.model, tab.effort.as_deref(), &models)
+        });
+        self.open_tab(author, tab, "Reviewer", chosen)
     }
 
     fn workspace_idle(&self, _pipeline: &Pipeline, cwd: &Path) -> Result<bool> {
@@ -380,10 +397,9 @@ impl Host for LocalHost {
     }
 
     fn open_resolver(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
-        let resolver = self.open_reviewer(pipeline, author)?;
-        crate::session_ops::rename_tab_entry(&author.id, &resolver.tab_id, Some("Conflict resolver".into())).map_err(anyhow::Error::msg)?;
-        self.sink.emit("session_updated", &index::get(&author.id)?);
-        Ok(resolver)
+        // A resolver writes the merge the author would have: it runs on the author's model.
+        let tab = author.tab(&pipeline.author.tab_id).context("the author's conversation is gone")?;
+        self.open_tab(author, tab, "Conflict resolver", None)
     }
 
     fn verify_resolution(&self, cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
@@ -559,6 +575,55 @@ mod tests {
         assert!(author.tab(&reviewer.tab_id).is_some());
         assert!(author.tab("t1").is_some());
         assert!(host.merge(Path::new("/unused"), 1, "merge", "head").unwrap_err().to_string().contains("does not merge"));
+    }
+
+    #[test]
+    fn a_pipeline_with_a_reviewer_model_set_opens_its_reviewer_on_that_model() {
+        let _home = crate::store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let project = crate::store::projects::add(repo.path().to_str().unwrap()).unwrap();
+        let author: SessionEntry = serde_json::from_value(serde_json::json!({
+            "id": "author", "projectPath": project.path, "cwd": project.path, "title": "Issue",
+            "created": "2026-11-11T00:00:00Z", "modified": "2026-11-11T00:00:00Z",
+            "tabs": [{"id": "t1", "harness": "claude", "model": "opus", "effort": "xhigh", "permissionMode": "bypassPermissions", "created": "2026-11-11T00:00:00Z"}]
+        })).unwrap();
+        index::save(std::slice::from_ref(&author)).unwrap();
+        let pipeline: Pipeline = serde_json::from_str(include_str!("../fixtures/issue_pipeline.json")).unwrap();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        let manager = SessionManager::new(
+            sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+            Arc::new(crate::pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()),
+            crate::hooks::prepare_control().unwrap(),
+        );
+        let host = LocalHost::new(sink, manager);
+        let set = |model: Option<&str>, effort: Option<&str>| {
+            let settings = IssuePipelineSettings { reviewer_model: model.map(str::to_owned), reviewer_effort: effort.map(str::to_owned), ..Default::default() };
+            crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch { issue_pipeline: Some(settings), ..Default::default() }).unwrap();
+        };
+        let opened = |who: SessionRef| {
+            let tab = index::get("author").unwrap().tab(&who.tab_id).cloned().unwrap();
+            (tab.title.clone().unwrap_or_default(), tab.harness.clone(), tab.model.clone(), tab.effort.clone(), tab.permission_mode.clone())
+        };
+        let on = |title: &str, model: &str, effort: Option<&str>| (title.to_string(), "claude".to_string(), model.to_string(), effort.map(str::to_owned), "bypassPermissions".to_string());
+        // No choice made: the author's model and effort, as before.
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "opus", Some("xhigh")));
+        // The project's reviewer model and effort: the reviewer runs on them, the author's mode kept.
+        set(Some("sonnet"), Some("medium"));
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "sonnet", Some("medium")));
+        // A model with no effort named runs at its own default, not at the author's xhigh.
+        set(Some("sonnet"), None);
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "sonnet", None));
+        // Only an effort: the author's model at that effort.
+        set(None, Some("low"));
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "opus", Some("low")));
+        // A model the author's agent does not offer cannot be launched: the author's stands.
+        set(Some("gpt-6.1-terra"), Some("medium"));
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "opus", Some("medium")));
+        // A conflict resolver writes code: it stays on the author's model whatever the reviewer's is.
+        set(Some("sonnet"), Some("medium"));
+        assert_eq!(opened(host.open_resolver(&pipeline, &author).unwrap()), on("Conflict resolver", "opus", Some("xhigh")));
+        // The author's own tab is untouched by any of it.
+        assert_eq!(index::get("author").unwrap().tabs[0], author.tabs[0]);
     }
 
     fn git(cwd: &Path, args: &[&str]) -> String {

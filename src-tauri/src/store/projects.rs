@@ -147,6 +147,20 @@ pub struct IssuePipelineSettings {
     pub allow_no_ci: bool,
     pub local_check_command: Option<String>,
     pub local_checks_only: bool,
+    /// The model the reviewer runs on (PRO-278). Absent: the author's own,
+    /// as it always was. A review reads a diff; it need not cost what
+    /// writing the change did. Used when the author's agent offers it.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "blank_is_none")]
+    pub reviewer_model: Option<String>,
+    /// The reviewer's effort. Absent: the author's with the author's model,
+    /// the model's own default with a reviewer model.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "blank_is_none")]
+    pub reviewer_effort: Option<String>,
+}
+
+/// A choice saved as an empty string is no choice.
+fn blank_is_none<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.map(|text| text.trim().to_string()).filter(|text| !text.is_empty()))
 }
 
 pub const DEFAULT_REVIEW_ROUNDS: u32 = 3;
@@ -178,6 +192,8 @@ impl Default for IssuePipelineSettings {
             allow_no_ci: false,
             local_check_command: None,
             local_checks_only: false,
+            reviewer_model: None,
+            reviewer_effort: None,
         }
     }
 }
@@ -194,6 +210,21 @@ impl IssuePipelineSettings {
     /// What "Resolve conflicts automatically" starts at, as `auto_merge_at_start`.
     pub fn resolve_conflicts_at_start(&self, from_issue: bool) -> bool {
         self.resolve_conflicts.unwrap_or(from_issue)
+    }
+
+    /// The model and effort a reviewer of this project runs on, for an
+    /// author on `harness` running `model` at `effort`. The project's
+    /// reviewer model when that agent offers it (`models` is what its CLI
+    /// lists), else the author's. An effort the chosen model does not offer
+    /// is not sent to it.
+    pub fn reviewer_choice(&self, harness: &str, model: &str, effort: Option<&str>, models: &[crate::models::Model]) -> (String, Option<String>) {
+        let listed = |id: &str| models.iter().find(|candidate| candidate.harness == harness && candidate.id == id);
+        let offers = |id: &str, effort: &str| listed(id).is_some_and(|model| model.efforts.iter().any(|offered| offered == effort));
+        match self.reviewer_model.as_deref().filter(|id| listed(id).is_some()) {
+            // Its own effort when it offers it; otherwise the model's default, never the author's.
+            Some(chosen) => (chosen.to_string(), self.reviewer_effort.clone().filter(|effort| offers(chosen, effort))),
+            None => (model.to_string(), self.reviewer_effort.clone().filter(|effort| offers(model, effort)).or_else(|| effort.map(str::to_owned))),
+        }
     }
 
     /// Before #700 every save wrote both switches, `false` unless turned on,
