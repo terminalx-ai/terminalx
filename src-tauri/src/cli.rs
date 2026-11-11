@@ -122,6 +122,9 @@ Usage:
   terminalx pipelines auto-merge PIPELINE on|off [--project PROJECT] [--json]
   terminalx pipelines resolve-conflicts PIPELINE on|off [--project PROJECT] [--json]
   terminalx pipelines stop|resume|advance|review|merge|refresh PIPELINE [--project PROJECT] [--json]
+  terminalx runs create --from PLAN.json|- [--lead SESSION] [--json]
+  terminalx runs start|show|stop [RUN] [--json]
+  terminalx runs list [--lead SESSION] [--all] [--json]
   terminalx vm status|start|stop [--json]
   terminalx vm tools [TOOL] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--json]
@@ -523,6 +526,7 @@ fn parse_with_stdin(
         "issues" => parse_issues(&mut tokens, stdin),
         "review" => parse_review(&mut tokens),
         "pipelines" => parse_pipelines(&mut tokens),
+        "runs" => parse_runs(&mut tokens, stdin),
         "computer" => crate::computer::cli::parse(&mut tokens, stdin),
         "vm" => {
             let action = tokens.required_front("vm action (status, start, stop, tools, call or screenshot)")?;
@@ -1222,6 +1226,47 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
         other => Err(invalid(format!("Unknown pipelines command {other}."))),
     }
 }
+
+/// Orchestration runs: a lead's plan of pieces, and the workers started for
+/// them. Approving a run is not here: a person does that in the app.
+fn parse_runs(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, ControlError>) -> Result<Action, ControlError> {
+    let command = tokens.required_front("runs command (create, start, show, list or stop)")?;
+    // Where the command runs: the lead of a new run, and the run meant when none is named.
+    let caller = calling_session();
+    match command.as_str() {
+        "create" => {
+            let from = tokens.option("--from")?.ok_or_else(|| invalid("Missing --from PLAN: the plan's JSON file, or - for standard input."))?;
+            let lead = tokens.option("--lead")?;
+            if lead.as_deref().is_some_and(|lead| lead.trim().is_empty()) {
+                return Err(invalid("--lead needs a session."));
+            }
+            if lead.as_deref().is_some_and(is_cloud_key) {
+                return Err(invalid("--lead names a session on this computer; a run's workers are local sessions."));
+            }
+            tokens.finish()?;
+            let text = if from == "-" { stdin()? } else { std::fs::read_to_string(&from).map_err(|error| invalid(format!("Could not read --from {from}: {error}")))? };
+            // Refused here with the file's own line: the app would only see what was parsed.
+            let plan: Value = serde_json::from_str(&text).map_err(|error| ControlError::new("plan_invalid", format!("The plan in {from} is not JSON: {error}."), Some("A plan is a JSON object with `goal` and `pieces`. See `terminalx skills get terminalx-cli`.".into())))?;
+            Ok(Action::Rpc { command: "runs.create".into(), params: json!({"plan": plan, "lead": lead, "caller": caller}), timeout: Duration::from_secs(30) })
+        }
+        "list" => {
+            let lead = tokens.option("--lead")?;
+            let all = tokens.flag("--all")?;
+            rpc("runs.list", json!({"lead": lead, "all": all}), tokens)
+        }
+        "show" | "start" | "stop" => {
+            let run = tokens.take_front();
+            tokens.finish()?;
+            // A start makes a worktree and a session for every ready piece before it answers.
+            let timeout = if command == "start" { RUN_START_TIMEOUT } else { Duration::from_secs(60) };
+            Ok(Action::Rpc { command: format!("runs.{command}"), params: json!({"run": run, "caller": caller}), timeout })
+        }
+        other => Err(invalid(format!("Unknown runs command {other}. Use create, start, show, list or stop."))),
+    }
+}
+
+/// Starting a run creates a worktree and a session for each ready piece.
+const RUN_START_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A pipeline step pushes, opens a pull request or asks GitHub to merge
 /// before it answers.

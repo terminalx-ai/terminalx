@@ -62,6 +62,8 @@ impl LocalHost {
     pub(crate) fn worker_turn_completed(&self, session_id: &str, tab_id: &str, final_message: Option<&str>) {
         let to = SessionRef { session_id: session_id.into(), tab_id: tab_id.into() };
         crate::worker_report::turn_completed(final_message, || self.manager.load_events(session_id, tab_id), |prompt| Host::send(self, &to, prompt));
+        // A run's worker: its piece follows what it just reported.
+        crate::orchestration::engine::worker_turn_ended(&crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone()), session_id);
     }
 
     /// The host of a cloud workspace's runtime.

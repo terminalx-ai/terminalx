@@ -56,6 +56,11 @@ impl Sessions {
         self.call("runtime.session.pipeline",json!({"operation":operation,"params":params}))
     }
 
+    /// Orchestration runs (`orchestration`): the runtime owns the workers.
+    pub fn orchestration<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
+        self.call("runtime.session.orchestration", json!({"operation": operation, "params": params}))
+    }
+
     /// An older owner ignores unknown project fields; it must not silently
     /// remove a workspace whose new desktop saved an archive script.
     pub fn require_archive_support(&self) -> Result<()> {

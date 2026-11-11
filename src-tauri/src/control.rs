@@ -43,6 +43,10 @@ pub struct ControlError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<String>,
+    /// The refusal's particulars for a caller that branches on them: the
+    /// piece a plan rule names, the limit it broke. Most errors have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
 impl ControlError {
@@ -55,7 +59,14 @@ impl ControlError {
             code: code.into(),
             message: message.into(),
             recovery: recovery.into(),
+            details: None,
         }
+    }
+
+    /// An orchestration refusal, with its own code and particulars.
+    fn of_run(error: crate::orchestration::engine::EngineError) -> Self {
+        let details = (!error.details.is_null()).then_some(error.details);
+        Self { code: error.code.into(), message: error.message, recovery: error.recovery, details }
     }
 
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
@@ -735,9 +746,71 @@ impl ControlService {
                 None::<String>,
             )),
             "pipelines.start" | "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" => self.runs(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
+        }
+    }
+
+    /// Orchestration runs (`orchestration`): a lead's plan of pieces, and the
+    /// workers started for them. There is no command to approve a run: the
+    /// lead runs this CLI, and a person approves its plan in the app.
+    fn runs(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        use crate::orchestration::{engine, host::ManagerHost, plan::Plan, store};
+        let host = ManagerHost::new(self.sink.clone(), self.manager.clone());
+        // The session the command runs in, when it runs in one the app knows.
+        let caller = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok());
+        if command == "runs.create" {
+            let lead = match optional_string(&params, "lead") {
+                Some(selector) => resolve_session(&selector)?,
+                None => caller.clone().ok_or_else(|| ControlError::new("lead_required", "A run needs a lead session, and this command did not run inside one.", Some("Run it in the lead's session, or name the lead with --lead SESSION.".into())))?,
+            };
+            // The tab is the caller's own: `--lead` naming another session says nothing of which of its tabs leads.
+            let tab = caller.filter(|caller| caller.id == lead.id).and_then(|_| params["caller"]["tab"].as_str()).filter(|tab| lead.tab(tab).is_some()).map(str::to_owned);
+            let plan: Plan = serde_json::from_value(params["plan"].clone()).map_err(|error| {
+                ControlError::new("plan_invalid", format!("The plan cannot be read: {error}."), Some("A plan is a JSON object with `goal` and `pieces`; each piece has `id`, `title` and `doneCheck`. See `terminalx skills get terminalx-cli`.".into()))
+            })?;
+            let run = engine::create(&host, &plan, &lead.id, tab).map_err(ControlError::of_run)?;
+            return Ok(json!({"run": engine::shown(&run), "approvalRequired": run.state == crate::orchestration::RunState::AwaitingApproval}));
+        }
+        if command == "runs.list" {
+            let lead = optional_string(&params, "lead").map(|selector| resolve_session(&selector)).transpose()?;
+            let all = params["all"].as_bool().unwrap_or(false);
+            let runs: Vec<Value> = store::list()
+                .map_err(ControlError::internal)?
+                .into_iter()
+                .filter(|run| lead.as_ref().is_none_or(|lead| run.lead.session_id == lead.id))
+                .filter(|run| all || !run.state.ended())
+                // Each as it is now: a piece follows its worker.
+                .map(|run| engine::refreshed(&host, &run.id).map(|run| engine::shown(&run)).map_err(ControlError::of_run))
+                .collect::<Result<_, _>>()?;
+            return Ok(json!({"runs": runs}));
+        }
+        let run = match optional_string(&params, "run") {
+            Some(selector) => {
+                let mut matching = store::matching(&selector).map_err(ControlError::internal)?;
+                match matching.len() {
+                    0 => return Err(ControlError::not_found(format!("No run matches {selector}."))),
+                    1 => matching.remove(0),
+                    _ => return Err(ControlError::ambiguous(format!("More than one run matches {selector}."))),
+                }
+            }
+            // Inside the lead's session the run need not be named: it leads one at a time.
+            None => caller.and_then(|caller| store::for_lead(&caller.id).ok().flatten()).ok_or_else(|| ControlError::invalid("Name the run: this command did not run inside a session that leads one. `terminalx runs list --all --json` lists them."))?,
+        };
+        match command {
+            "runs.show" => Ok(engine::shown(&engine::refreshed(&host, &run.id).map_err(ControlError::of_run)?)),
+            "runs.start" => {
+                self.manager.accepting_work().map_err(ControlError::internal)?;
+                let start = engine::start(&host, &run.id).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&start.run), "started": start.started, "waiting": start.waiting, "failed": start.failed}))
+            }
+            "runs.stop" => {
+                let stop = engine::stop(&host, &run.id, engine::By::Cli).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&stop.run), "stopped": stop.stopped, "failed": stop.failed}))
+            }
+            other => Err(ControlError::invalid(format!("Unknown control command {other}."))),
         }
     }
 
@@ -1961,7 +2034,7 @@ fn wait_end(view: &WaitView) -> Option<WaitEnd> {
 /// The turn a tab is in, for `sessions report`: a report an earlier turn
 /// ended with is not the answer of one still open. A tab that only sits idle
 /// with its agent running is in none.
-fn open_turn(view: &WaitView) -> Option<crate::worker_report::OpenTurn> {
+pub(crate) fn open_turn(view: &WaitView) -> Option<crate::worker_report::OpenTurn> {
     use crate::worker_report::OpenTurn;
     if view.asks || view.status == TabStatus::Waiting {
         return Some(OpenTurn::Waiting);

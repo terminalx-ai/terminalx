@@ -68,6 +68,110 @@ pub struct Settings {
     /// What the runtime keeps about the warnings tabs raise (#815,
     /// `recovery_log.rs`). The runtime writes it, so it reads this itself.
     pub diagnostics: DiagnosticsSettings,
+    /// The limits of an orchestration run (`orchestration`): the runtime that
+    /// starts the workers reads them when a plan is stored and started.
+    pub orchestrator: OrchestratorSettings,
+}
+
+/// What a lead's run of workers may do without asking (PRO-274). Each has an
+/// app-wide value and may have one of a project's own, by the project's path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OrchestratorSettings {
+    /// A new run waits for a person to approve its plan before any worker starts.
+    pub require_approval: bool,
+    /// The most pieces a plan may have; a larger one is refused.
+    #[serde(deserialize_with = "piece_limit")]
+    pub piece_limit: u32,
+    /// The permission mode of a worker whose piece names none.
+    #[serde(deserialize_with = "worker_mode")]
+    pub worker_mode: String,
+    /// One project's own answers, by its path. A project without one, or
+    /// without a value for a setting, follows the app-wide value.
+    pub projects: std::collections::BTreeMap<String, ProjectOrchestratorSettings>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProjectOrchestratorSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_approval: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_piece_limit")]
+    pub piece_limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_worker_mode")]
+    pub worker_mode: Option<String>,
+}
+
+impl ProjectOrchestratorSettings {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The settings in force for one project.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorLimits {
+    pub require_approval: bool,
+    pub piece_limit: u32,
+    pub worker_mode: String,
+}
+
+/// Eight: a lead can still read eight reports and hold eight briefs apart;
+/// past that a plan is usually a small task cut too fine.
+pub const DEFAULT_PIECE_LIMIT: u32 = 8;
+/// The most the setting accepts. A plan this size is already beyond what one
+/// lead can check; the bound keeps a mistyped value from meaning "no limit".
+pub const MAX_PIECE_LIMIT: u32 = 50;
+/// The modes a worker may start in: the ones a new session may.
+pub const WORKER_MODES: [&str; 5] = ["plan", "manual", "auto", "acceptEdits", "bypassPermissions"];
+/// Bypass: a run is not held up by permission cards. What a card would have
+/// caught is refused by deny rules instead (`orchestration::guard`).
+pub const DEFAULT_WORKER_MODE: &str = "bypassPermissions";
+
+fn valid_piece_limit(value: &serde_json::Value) -> Option<u32> {
+    value.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| (1..=MAX_PIECE_LIMIT).contains(n))
+}
+
+fn valid_worker_mode(value: &serde_json::Value) -> Option<String> {
+    value.as_str().filter(|mode| WORKER_MODES.contains(mode)).map(str::to_owned)
+}
+
+/// A hand-edited or damaged value falls back to the default rather than
+/// letting through a plan of a size nobody chose.
+fn piece_limit<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<u32, D::Error> {
+    Ok(valid_piece_limit(&serde_json::Value::deserialize(deserializer)?).unwrap_or(DEFAULT_PIECE_LIMIT))
+}
+
+fn worker_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<String, D::Error> {
+    Ok(valid_worker_mode(&serde_json::Value::deserialize(deserializer)?).unwrap_or_else(|| DEFAULT_WORKER_MODE.into()))
+}
+
+/// A project's damaged value is no value: the project follows the app-wide one.
+fn project_piece_limit<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<u32>, D::Error> {
+    Ok(valid_piece_limit(&serde_json::Value::deserialize(deserializer)?))
+}
+
+fn project_worker_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<String>, D::Error> {
+    Ok(valid_worker_mode(&serde_json::Value::deserialize(deserializer)?))
+}
+
+impl Default for OrchestratorSettings {
+    fn default() -> Self {
+        Self { require_approval: true, piece_limit: DEFAULT_PIECE_LIMIT, worker_mode: DEFAULT_WORKER_MODE.into(), projects: Default::default() }
+    }
+}
+
+impl OrchestratorSettings {
+    /// What holds for the project at `path`: its own answer where it gave one.
+    pub fn for_project(&self, path: &str) -> OrchestratorLimits {
+        let project = self.projects.get(path);
+        OrchestratorLimits {
+            require_approval: project.and_then(|p| p.require_approval).unwrap_or(self.require_approval),
+            piece_limit: project.and_then(|p| p.piece_limit).unwrap_or(self.piece_limit),
+            worker_mode: project.and_then(|p| p.worker_mode.clone()).unwrap_or_else(|| self.worker_mode.clone()),
+        }
+    }
 }
 
 /// Private evidence kept on this Mac only, for reports the reader makes.
@@ -170,6 +274,10 @@ pub struct ExperimentalSettings {
     /// New Codex conversations a person starts go through Codex's app server
     /// (#644) where it can serve them (`session_ops::prefer_native_codex`).
     pub native_codex: bool,
+    /// Show orchestration runs in the app (PRO-274): a session's Run view,
+    /// with the plan to approve, and Settings → Orchestrator. The `terminalx
+    /// runs` commands work either way.
+    pub orchestrator_runs: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -349,6 +457,7 @@ impl Default for Settings {
             conversations: ConversationSettings::default(),
             experimental: ExperimentalSettings::default(),
             diagnostics: DiagnosticsSettings::default(),
+            orchestrator: OrchestratorSettings::default(),
         }
     }
 }
@@ -394,7 +503,41 @@ mod tests {
         assert!(!legacy.experimental.native_codex);
         let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
         assert!(on.experimental.native_codex);
-        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true}));
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"orchestratorRuns":false}));
+        assert!(!legacy.experimental.orchestrator_runs);
+        let runs: Settings = serde_json::from_value(serde_json::json!({"experimental":{"orchestratorRuns":true}})).unwrap();
+        assert!(runs.experimental.orchestrator_runs && !runs.experimental.native_codex);
+    }
+
+    #[test]
+    fn a_run_asks_first_takes_eight_pieces_and_runs_workers_in_bypass_unless_a_project_says_otherwise() {
+        // A settings file written before the settings existed.
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert_eq!(legacy.orchestrator, OrchestratorSettings::default());
+        let limits = legacy.orchestrator.for_project("/repo");
+        assert_eq!((limits.require_approval, limits.piece_limit, limits.worker_mode.as_str()), (true, 8, "bypassPermissions"));
+
+        // A project answers for itself, one setting at a time; the rest follow the app.
+        let set: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {
+            "pieceLimit": 12, "workerMode": "acceptEdits",
+            "projects": {"/repo": {"requireApproval": false, "pieceLimit": 3}, "/other": {"workerMode": "manual"}},
+        }})).unwrap();
+        let repo = set.orchestrator.for_project("/repo");
+        assert_eq!((repo.require_approval, repo.piece_limit, repo.worker_mode.as_str()), (false, 3, "acceptEdits"));
+        let other = set.orchestrator.for_project("/other");
+        assert_eq!((other.require_approval, other.piece_limit, other.worker_mode.as_str()), (true, 12, "manual"));
+        let unnamed = set.orchestrator.for_project("/elsewhere");
+        assert_eq!((unnamed.require_approval, unnamed.piece_limit, unnamed.worker_mode.as_str()), (true, 12, "acceptEdits"));
+        let written = serde_json::to_value(&set).unwrap();
+        assert_eq!(written["orchestrator"]["projects"]["/repo"], serde_json::json!({"requireApproval": false, "pieceLimit": 3}));
+        assert_eq!(serde_json::from_value::<Settings>(written).unwrap().orchestrator, set.orchestrator);
+
+        // A damaged value is the default, and a project's damaged value is no value.
+        let damaged: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {
+            "pieceLimit": 0, "workerMode": "yolo", "projects": {"/repo": {"pieceLimit": 900, "workerMode": 7}},
+        }})).unwrap();
+        assert_eq!((damaged.orchestrator.piece_limit, damaged.orchestrator.worker_mode.as_str()), (8, "bypassPermissions"));
+        assert!(damaged.orchestrator.projects["/repo"].is_empty());
     }
 
     #[test]

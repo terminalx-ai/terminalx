@@ -184,6 +184,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         }
         "pipeline" => return manager.pipeline(string(&params, "operation")?, params["params"].clone()),
         "workspace" => return manager.workspace(string(&params, "operation")?, params["params"].clone()),
+        "orchestration" => return manager.orchestration(string(&params, "operation")?, params["params"].clone()),
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
         "automations" => return Ok(serde_json::to_value(crate::store::automations::list()?)?),
         "automationRuns" => return Ok(serde_json::to_value(crate::store::automations::list_runs(string(&params, "id")?)?)?),

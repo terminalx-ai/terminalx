@@ -1,0 +1,566 @@
+//! The limits every worker of a run has, enforced outside its own judgment.
+//!
+//! A worker starts in bypass mode unless told otherwise, so no prompt stands
+//! between it and a push. Three things do instead:
+//!
+//! 1. **Deny rules handed to the agent at launch.** Claude Code takes them in
+//!    its `--settings` ([`claude_settings`]); Codex reads them from a rules
+//!    file in the worker's own checkout ([`write_codex_rules`]). Both agents
+//!    apply them in their bypass mode: checked on 2026-11-11 with Claude Code
+//!    2.1.322 (`--dangerously-skip-permissions`) and Codex 0.166.0
+//!    (`--dangerously-bypass-approvals-and-sandbox`), each asked to push to a
+//!    scratch remote, each refused before git ran.
+//! 2. **The app's own gate on every tool call** ([`refusal`]), which reads the
+//!    command as a shell would, so `git -C elsewhere push` and
+//!    `sh -c 'git push'` are refused where a prefix rule would let them by.
+//! 3. **A branch with no upstream** ([`no_upstream`]): a bare `git push` has
+//!    nowhere to go even if something else let it run.
+//!
+//! One table, [`RULES`], feeds all of them, and the brief states the same
+//! limits ([`super::brief`]).
+
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Mutex;
+
+use serde_json::{json, Value};
+
+use crate::store::index::SessionEntry;
+
+/// What a rule keeps a worker from doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    Push,
+    Merge,
+    Deploy,
+}
+
+impl Limit {
+    fn says(self) -> &'static str {
+        match self {
+            Limit::Push => "pushing",
+            Limit::Merge => "merging",
+            Limit::Deploy => "deploying or publishing",
+        }
+    }
+}
+
+/// A command a worker may not run: one of `programs`, with `words` as its
+/// first arguments.
+#[derive(Debug)]
+pub struct Rule {
+    pub programs: &'static [&'static str],
+    pub words: &'static [&'static str],
+    pub limit: Limit,
+}
+
+const fn rule(programs: &'static [&'static str], words: &'static [&'static str], limit: Limit) -> Rule {
+    Rule { programs, words, limit }
+}
+
+pub const RULES: &[Rule] = &[
+    rule(&["git"], &["push"], Limit::Push),
+    rule(&["git"], &["send-pack"], Limit::Push),
+    // It pushes the branch before it opens the pull request.
+    rule(&["gh"], &["pr", "create"], Limit::Push),
+    rule(&["gh"], &["repo", "sync"], Limit::Push),
+    rule(&["git"], &["merge"], Limit::Merge),
+    rule(&["gh"], &["pr", "merge"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["pipelines", "merge"], Limit::Merge),
+    rule(&["gh"], &["workflow", "run"], Limit::Deploy),
+    rule(&["gh"], &["release", "create"], Limit::Deploy),
+    rule(&["npm", "pnpm", "yarn", "bun"], &["publish"], Limit::Deploy),
+    rule(&["cargo"], &["publish"], Limit::Deploy),
+    rule(&["gem"], &["push"], Limit::Deploy),
+    rule(&["twine"], &["upload"], Limit::Deploy),
+    rule(&["docker", "podman"], &["push"], Limit::Deploy),
+    rule(&["vercel"], &["deploy"], Limit::Deploy),
+    rule(&["vercel"], &["--prod"], Limit::Deploy),
+    rule(&["netlify"], &["deploy"], Limit::Deploy),
+    rule(&["fly", "flyctl"], &["deploy"], Limit::Deploy),
+    rule(&["firebase"], &["deploy"], Limit::Deploy),
+    rule(&["wrangler"], &["deploy"], Limit::Deploy),
+    rule(&["wrangler"], &["publish"], Limit::Deploy),
+    rule(&["serverless", "sls"], &["deploy"], Limit::Deploy),
+    rule(&["kubectl"], &["apply"], Limit::Deploy),
+    rule(&["terraform", "tofu"], &["apply"], Limit::Deploy),
+    rule(&["helm"], &["install"], Limit::Deploy),
+    rule(&["helm"], &["upgrade"], Limit::Deploy),
+];
+
+/// Tools of a connected server that push or merge without a shell, by the
+/// end of their name (`mcp__github__merge_pull_request`).
+const TOOL_SUFFIXES: &[(&str, Limit)] = &[("__merge_pull_request", Limit::Merge), ("__push_files", Limit::Push), ("__create_or_update_file", Limit::Push)];
+
+/// The limits as a brief states them.
+pub const STATED: &[&str] = &[
+    "Work only in this worktree, on this branch. Commit here; do not switch branches.",
+    "Do not push. The branch has no upstream, and the lead collects it from this repository.",
+    "Do not merge: not into this branch, not into the lead's, not a pull request.",
+    "Do not deploy, publish or release anything, and do not open a pull request.",
+];
+
+/// Leads whose `runs start` is creating workers right now. A worker's agent
+/// may launch before its piece is written to the store; until then it is
+/// known by who started it.
+static STARTING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// Held while a lead's workers are being created.
+pub struct Starting(String);
+
+pub fn starting(lead_session: &str) -> Starting {
+    STARTING.lock().unwrap_or_else(|error| error.into_inner()).get_or_insert_with(HashSet::new).insert(lead_session.to_string());
+    Starting(lead_session.to_string())
+}
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        if let Some(leads) = STARTING.lock().unwrap_or_else(|error| error.into_inner()).as_mut() {
+            leads.remove(&self.0);
+        }
+    }
+}
+
+/// Whether a session is a run's worker, and so has the limits. Once a
+/// worker, always one: stopping the run does not lift them from a session
+/// someone resumes.
+pub fn limited(session: &SessionEntry) -> bool {
+    let being_started = session.parent.as_ref().is_some_and(|parent| STARTING.lock().unwrap_or_else(|error| error.into_inner()).as_ref().is_some_and(|leads| leads.contains(&parent.session_id)));
+    being_started || super::store::for_worker(&session.id).is_ok_and(|found| found.is_some())
+}
+
+/// The rules as Claude Code's `permissions.deny` takes them.
+pub fn claude_deny() -> Vec<String> {
+    RULES.iter().flat_map(|rule| rule.programs.iter().map(|program| format!("Bash({program} {}:*)", rule.words.join(" ")))).collect()
+}
+
+/// Add the deny rules to a Claude launch's `--settings`, keeping any already there.
+pub fn claude_settings(settings: &mut Value) {
+    let mut deny: Vec<Value> = settings["permissions"]["deny"].as_array().cloned().unwrap_or_default();
+    deny.extend(claude_deny().into_iter().map(Value::String).filter(|rule| !deny.contains(rule)).collect::<Vec<_>>());
+    if !settings["permissions"].is_object() {
+        settings["permissions"] = json!({});
+    }
+    settings["permissions"]["deny"] = Value::Array(deny);
+}
+
+/// The rules as a Codex rules file.
+pub fn codex_rules() -> String {
+    let mut out = String::from("# Written by TerminalX at each launch of this run worker. A worker of a run never\n# pushes, merges or deploys: the lead collects its branch from this repository.\n");
+    for rule in RULES {
+        for program in rule.programs {
+            let pattern: Vec<String> = std::iter::once(*program).chain(rule.words.iter().copied()).map(|word| format!("{word:?}")).collect();
+            out.push_str(&format!("prefix_rule(pattern=[{}], decision=\"forbidden\", justification=\"A worker of a TerminalX run does no {}. Report what is ready instead.\")\n", pattern.join(", "), rule.limit.says()));
+        }
+    }
+    out
+}
+
+/// Where the rules file sits in a worker's checkout.
+pub const CODEX_RULES_FILE: &str = ".codex/rules/terminalx-run.rules";
+
+/// Write the rules where Codex reads a checkout's own, before it starts. The
+/// file is the worker's launch configuration, not its work, so git is told to
+/// leave it out of what the worker commits. Written again at every launch: a
+/// worker that removed it has it back the next time its agent starts.
+pub fn write_codex_rules(cwd: &Path) -> anyhow::Result<()> {
+    let path = cwd.join(CODEX_RULES_FILE);
+    std::fs::create_dir_all(path.parent().expect("the rules file has a directory"))?;
+    crate::store::write_atomic(&path, codex_rules().as_bytes())?;
+    let common = crate::git::run(cwd, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    let info = Path::new(common.trim()).join("info");
+    let exclude = info.join("exclude");
+    let line = format!("/{CODEX_RULES_FILE}");
+    let mut existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if !existing.lines().any(|known| known.trim() == line) {
+        std::fs::create_dir_all(&info)?;
+        if !existing.is_empty() && !existing.ends_with('\n') {
+            existing.push('\n');
+        }
+        existing.push_str(&line);
+        existing.push('\n');
+        std::fs::write(&exclude, existing)?;
+    }
+    Ok(())
+}
+
+/// Make sure a worker's branch pushes nowhere by itself. The worktree is
+/// made with `--no-track`; this removes an upstream that configuration
+/// (`branch.autoSetupMerge=always`) gave it all the same.
+pub fn no_upstream(cwd: &Path, branch: &str) -> anyhow::Result<()> {
+    for key in ["remote", "merge", "pushRemote"] {
+        let name = format!("branch.{branch}.{key}");
+        if crate::git::run(cwd, &["config", "--get", &name]).is_ok() {
+            crate::git::run(cwd, &["config", "--unset-all", &name])?;
+        }
+    }
+    Ok(())
+}
+
+/// Why a worker's tool call is refused, or `None` when it may go ahead.
+/// `payload` is the agent's `PreToolUse` hook input.
+pub fn refusal(payload: &Value) -> Option<String> {
+    let tool = payload["tool_name"].as_str().unwrap_or_default();
+    if let Some((_, limit)) = TOOL_SUFFIXES.iter().find(|(suffix, _)| tool.starts_with("mcp__") && tool.ends_with(suffix)) {
+        return Some(said(*limit, tool));
+    }
+    let command = payload["tool_input"]["command"].as_str()?;
+    let (rule, found) = refused(command)?;
+    Some(said(rule.limit, &found))
+}
+
+fn said(limit: Limit, what: &str) -> String {
+    format!("TerminalX refused `{what}`: a worker of a run does no {}. This is a fixed limit of the run, not a question to answer or work around. Commit your work on this branch and say in your report what is ready; the lead collects it.", limit.says())
+}
+
+/// What the agent's hook prints for a refused call. Claude Code and Codex
+/// read the same shape from a `PreToolUse` hook.
+pub fn refusal_output(reason: &str) -> Value {
+    json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason } })
+}
+
+/// The first rule a shell command breaks, with the command that breaks it.
+pub fn refused(command: &str) -> Option<(&'static Rule, String)> {
+    refused_at(command, 0)
+}
+
+/// Shells whose `-c` argument is a command of its own.
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+/// Words that run the command that follows them.
+const WRAPPERS: &[&str] = &["env", "command", "exec", "sudo", "nohup", "time", "nice", "builtin", "noglob", "xargs", "timeout", "caffeinate"];
+/// git's options that take a value of their own, before the subcommand.
+const GIT_VALUE_OPTIONS: &[&str] = &["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"];
+
+fn refused_at(command: &str, depth: usize) -> Option<(&'static Rule, String)> {
+    // A command nested this deep is not one a person or an agent writes.
+    if depth > 4 {
+        return None;
+    }
+    for simple in simple_commands(command) {
+        let mut words: &[String] = &simple;
+        // `A=b git push`, `env A=b git push`, `sudo -n git push`.
+        loop {
+            match words.first() {
+                Some(word) if is_assignment(word) => words = &words[1..],
+                Some(word) if WRAPPERS.contains(&base(word)) => {
+                    words = &words[1..];
+                    while words.first().is_some_and(|word| word.starts_with('-') || is_assignment(word) || word.parse::<f64>().is_ok()) {
+                        words = &words[1..];
+                    }
+                }
+                _ => break,
+            }
+        }
+        let Some((program, args)) = words.split_first() else { continue };
+        let program = base(program);
+        if SHELLS.contains(&program) || program == "eval" {
+            // `sh -c 'git push'`, `bash -lc "…"`, `eval "git push"`.
+            let script = if program == "eval" { Some(args.join(" ")) } else { args.iter().position(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')).and_then(|at| args.get(at + 1)).cloned() };
+            if let Some(found) = script.and_then(|script| refused_at(&script, depth + 1)) {
+                return Some(found);
+            }
+            continue;
+        }
+        let args: Vec<&str> = if program == "git" { git_arguments(args) } else { args.iter().map(String::as_str).collect() };
+        let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
+        for rule in RULES.iter().filter(|rule| rule.programs.contains(&program)) {
+            if args.starts_with(rule.words) || plain.starts_with(rule.words) {
+                return Some((rule, format!("{program} {}", rule.words.join(" "))));
+            }
+        }
+    }
+    None
+}
+
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !name.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// `/usr/bin/git` is `git`.
+fn base(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+/// git's arguments from its subcommand on: `-C dir -c a=b push` is `push`.
+fn git_arguments(args: &[String]) -> Vec<&str> {
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        if GIT_VALUE_OPTIONS.contains(&arg.as_str()) {
+            at += 2;
+        } else if arg.starts_with('-') {
+            at += 1;
+        } else {
+            break;
+        }
+    }
+    args.get(at..).unwrap_or_default().iter().map(String::as_str).collect()
+}
+
+/// A command line as the simple commands a shell would run from it, each as
+/// its words with quotes removed. Text inside quotes stays one word, so a
+/// commit message that mentions `git push` is not a push; a command
+/// substitution inside double quotes or backticks is a command of its own.
+fn simple_commands(command: &str) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = command.chars().peekable();
+    let end_word = |word: &mut Option<String>, words: &mut Vec<String>| {
+        if let Some(done) = word.take() {
+            words.push(done);
+        }
+    };
+    let end_command = |word: &mut Option<String>, words: &mut Vec<String>, commands: &mut Vec<Vec<String>>| {
+        if let Some(done) = word.take() {
+            words.push(done);
+        }
+        if !words.is_empty() {
+            commands.push(std::mem::take(words));
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(next) = chars.next().filter(|next| *next != '\n') {
+                    word.get_or_insert_with(String::new).push(next);
+                }
+            }
+            '\'' => {
+                let quoted = word.get_or_insert_with(String::new);
+                for inner in chars.by_ref() {
+                    if inner == '\'' {
+                        break;
+                    }
+                    quoted.push(inner);
+                }
+            }
+            '"' => {
+                let mut text = String::new();
+                while let Some(inner) = chars.next() {
+                    match inner {
+                        '"' => break,
+                        '\\' => text.extend(chars.next()),
+                        inner => text.push(inner),
+                    }
+                }
+                // `"$(git push)"` runs it: what is substituted is read as commands too.
+                commands.extend(substitutions(&text).iter().flat_map(|inner| simple_commands(inner)));
+                word.get_or_insert_with(String::new).push_str(&text);
+            }
+            '`' => {
+                let inner: String = chars.by_ref().take_while(|inner| *inner != '`').collect();
+                commands.extend(simple_commands(&inner));
+                word.get_or_insert_with(String::new);
+            }
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                end_command(&mut word, &mut words, &mut commands);
+            }
+            ';' | '\n' | '|' | '&' | '(' | ')' | '{' | '}' => end_command(&mut word, &mut words, &mut commands),
+            '#' if word.is_none() => {
+                // A comment runs to the end of its line.
+                while chars.peek().is_some_and(|next| *next != '\n') {
+                    chars.next();
+                }
+            }
+            c if c.is_whitespace() => end_word(&mut word, &mut words),
+            c => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    end_command(&mut word, &mut words, &mut commands);
+    // `if`, `then`, `do` and the like introduce a command; they are not one.
+    for words in &mut commands {
+        while words.first().is_some_and(|first| matches!(first.as_str(), "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!")) {
+            words.remove(0);
+        }
+    }
+    commands.retain(|words| !words.is_empty());
+    commands
+}
+
+/// The bodies of the `$(…)` and backtick substitutions in a double-quoted text.
+fn substitutions(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("$(") {
+        let body = &rest[at + 2..];
+        let (mut depth, mut end) = (1, body.len());
+        for (index, c) in body.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                end = index;
+                break;
+            }
+        }
+        found.push(body[..end].to_string());
+        rest = &body[end..];
+    }
+    let mut parts = text.split('`');
+    parts.next();
+    while let (Some(body), Some(_)) = (parts.next(), parts.next()) {
+        found.push(body.to_string());
+    }
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limit_of(command: &str) -> Option<Limit> {
+        refused(command).map(|(rule, _)| rule.limit)
+    }
+
+    #[test]
+    fn a_push_a_merge_and_a_deploy_are_refused_however_they_are_written() {
+        for command in [
+            "git push",
+            "git push origin HEAD:refs/heads/main",
+            "git push --force-with-lease",
+            "git -C ../main push",
+            "git -c credential.helper= --git-dir=/repo/.git push origin main",
+            "/usr/bin/git push",
+            "GIT_SSH_COMMAND=ssh git push",
+            "env GIT_TRACE=1 git push -u origin work",
+            "sudo -n git push",
+            "cd ../lead && git push",
+            "cargo test; git push",
+            "cargo test || git push",
+            "true | git push",
+            "(git push)",
+            "sh -c 'git push origin main'",
+            "bash -lc \"cd /repo && git push\"",
+            "eval \"git push\"",
+            "echo \"$(git push 2>&1)\"",
+            "echo `git push`",
+            "if cargo test; then git push; fi",
+            "timeout 30 git push",
+            "git send-pack origin main",
+            "gh pr create --fill",
+            "gh repo sync",
+        ] {
+            assert_eq!(limit_of(command), Some(Limit::Push), "{command}");
+        }
+        for command in ["git merge main", "git merge --no-ff origin/main", "gh pr merge 12 --squash", "gh pr merge --auto 12","terminalx pipelines merge abc", "tnx pipelines merge abc"] {
+            assert_eq!(limit_of(command), Some(Limit::Merge), "{command}");
+        }
+        for command in ["npm publish", "pnpm publish --access public", "cargo publish", "vercel deploy", "vercel --prod", "vercel deploy --prod", "gh workflow run release.yml", "gh release create v1", "docker push org/image", "kubectl apply -f k8s/", "terraform apply -auto-approve", "fly deploy", "helm upgrade app ./chart"] {
+            assert_eq!(limit_of(command), Some(Limit::Deploy), "{command}");
+        }
+    }
+
+    #[test]
+    fn work_in_the_worktree_is_not_refused() {
+        for command in [
+            "git status",
+            "git commit -m 'explain why git push is refused'",
+            "git commit -m \"merge the two parsers; do not git push\"",
+            "git log --oneline --merges",
+            "git fetch origin",
+            "git diff main...HEAD",
+            "git stash push -m wip",
+            "git rebase main",
+            "git merge-base main HEAD",
+            "git config push.default current",
+            "echo git push",
+            "echo 'run: git push' >> NOTES.md",
+            "grep -rn \"git push\" docs/",
+            "# git push\ncargo test",
+            "cargo test push",
+            "npm run publish:check",
+            "npm install",
+            "gh pr view 12",
+            "gh pr list",
+            "gh run list --workflow release.yml",
+            "docker build -t image .",
+            "kubectl get pods",
+            "terraform plan",
+            "vercel env ls",
+            "helm template ./chart",
+            "terminalx sessions report abc --json",
+            "",
+        ] {
+            assert_eq!(limit_of(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_tool_call_is_refused_with_a_reason_the_worker_can_act_on() {
+        let reason = refusal(&json!({"tool_name": "Bash", "tool_input": {"command": "cd /repo && git push origin main"}})).unwrap();
+        assert!(reason.contains("refused `git push`") && reason.contains("no pushing") && reason.contains("fixed limit"), "{reason}");
+        // Codex names its shell tool differently; the command is in the same place.
+        assert!(refusal(&json!({"tool_name": "exec_command", "tool_input": {"command": "gh pr merge 4"}})).unwrap().contains("no merging"));
+        assert!(refusal(&json!({"tool_name": "mcp__github__merge_pull_request", "tool_input": {"pullNumber": 4}})).unwrap().contains("mcp__github__merge_pull_request"));
+        assert!(refusal(&json!({"tool_name": "mcp__github__push_files", "tool_input": {}})).is_some());
+        assert_eq!(refusal(&json!({"tool_name": "Bash", "tool_input": {"command": "cargo test"}})), None);
+        assert_eq!(refusal(&json!({"tool_name": "Edit", "tool_input": {"file_path": "src/push.rs"}})), None);
+        assert_eq!(refusal(&json!({"tool_name": "mcp__github__get_pull_request", "tool_input": {}})), None);
+        let output = refusal_output(&reason);
+        assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(output["hookSpecificOutput"]["permissionDecisionReason"], reason.as_str());
+    }
+
+    #[test]
+    fn each_agent_is_handed_the_same_rules_in_its_own_form() {
+        let deny = claude_deny();
+        for rule in ["Bash(git push:*)", "Bash(git merge:*)", "Bash(gh pr merge:*)", "Bash(npm publish:*)", "Bash(tnx pipelines merge:*)"] {
+            assert!(deny.iter().any(|known| known == rule), "{rule}");
+        }
+        assert_eq!(deny.len(), RULES.iter().map(|rule| rule.programs.len()).sum::<usize>());
+        // The deny rules join a launch's settings; what is there stays, and nothing is added twice.
+        let mut settings = json!({"hooks": {"Stop": []}, "permissions": {"deny": ["Read(./.env)"], "allow": ["Bash(ls:*)"]}});
+        claude_settings(&mut settings);
+        claude_settings(&mut settings);
+        let listed = settings["permissions"]["deny"].as_array().unwrap();
+        assert_eq!(listed.len(), deny.len() + 1);
+        assert_eq!(listed[0], "Read(./.env)");
+        assert_eq!(settings["permissions"]["allow"], json!(["Bash(ls:*)"]));
+        assert!(settings["hooks"]["Stop"].is_array());
+        let mut bare = json!({"hooks": {}});
+        claude_settings(&mut bare);
+        assert_eq!(bare["permissions"]["deny"].as_array().unwrap().len(), deny.len());
+
+        let rules = codex_rules();
+        assert!(rules.contains("prefix_rule(pattern=[\"git\", \"push\"], decision=\"forbidden\""), "{rules}");
+        assert!(rules.contains("prefix_rule(pattern=[\"gh\", \"pr\", \"merge\"], decision=\"forbidden\""), "{rules}");
+        assert_eq!(rules.lines().filter(|line| line.starts_with("prefix_rule(")).count(), deny.len());
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git").current_dir(dir).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn a_workers_checkout_gets_the_rules_file_out_of_its_commits_and_a_branch_with_no_upstream() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init"]);
+        let worker = dir.path().join("worker");
+        git(&repo, &["worktree", "add", "-q", "-b", "piece", worker.to_str().unwrap(), "main"]);
+
+        write_codex_rules(&worker).unwrap();
+        write_codex_rules(&worker).unwrap();
+        assert_eq!(std::fs::read_to_string(worker.join(CODEX_RULES_FILE)).unwrap(), codex_rules());
+        // Out of `git add -A`, and listed once however often the worker launches.
+        assert_eq!(git(&worker, &["status", "--porcelain"]), "");
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude.lines().filter(|line| *line == "/.codex/rules/terminalx-run.rules").count(), 1);
+
+        // An upstream that configuration gave the branch is taken away again.
+        git(&repo, &["remote", "add", "origin", repo.to_str().unwrap()]);
+        git(&worker, &["config", "branch.piece.remote", "origin"]);
+        git(&worker, &["config", "branch.piece.merge", "refs/heads/main"]);
+        no_upstream(&worker, "piece").unwrap();
+        assert!(std::process::Command::new("git").current_dir(&worker).args(["rev-parse", "--abbrev-ref", "piece@{upstream}"]).output().unwrap().status.code() != Some(0));
+        no_upstream(&worker, "piece").unwrap();
+    }
+}
