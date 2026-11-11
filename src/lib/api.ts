@@ -2114,6 +2114,8 @@ export interface BranchContributor {
 
 /** A checkout's branch against the branch it merges into, read from refs already here. */
 export interface BranchOverview {
+  /** Resolved by the same native function as the session header. */
+  nextStep: "pull" | "reconcile" | "detached" | "conflicts" | "commit" | "empty" | "local" | "push" | null;
   branch: string | null;
   /** `origin/main`, else the local default branch; null outside a repository or without one. */
   base: string | null;

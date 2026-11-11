@@ -35,7 +35,8 @@ const rows = (session: string) => within(within(screen.getByRole("tree", { name:
 const rowNames = (session: string) => rows(session).map((row) => row.getAttribute("aria-label"));
 const savedOrder = () => (backend.callsOf("set_tab_layout").at(-1)?.layout as { order: string[] } | undefined)?.order;
 
-/** jsdom lays nothing out: give each tab a 100 px box in a row, in the order they are in. */
+/** jsdom lays nothing out: give each tab a 100 px box in a row, in the order they are in.
+ * Pointer downs below name the mouse so Radix does not start its touch long-press timer. */
 function layOut() {
   return vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     const index = this.dataset.tabKey ? [...this.parentElement!.querySelectorAll("[data-tab-key]")].indexOf(this) : 0;
@@ -259,7 +260,7 @@ describe("the tab strip", () => {
     render(<TabsHarness readOnlyReason="View only: this session is shared with you to watch." />);
     expect(names()).toHaveLength(6);
     expect(strip().querySelector("[data-tab-close]")).toBeNull();
-    fireEvent.pointerDown(tab("Terminal 1").parentElement!, { button: 0, clientX: 550 });
+    fireEvent.pointerDown(tab("Terminal 1").parentElement!, { pointerType: "mouse", button: 0, clientX: 550 });
     fireEvent.pointerMove(window, { clientX: 20 });
     fireEvent.pointerUp(window);
     expect(backend.callsOf("set_tab_layout")).toEqual([]);
