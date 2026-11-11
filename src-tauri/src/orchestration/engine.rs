@@ -139,6 +139,9 @@ pub trait Host: Send + Sync {
     fn create_verifier(&self, run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef>;
     fn brief_verifier(&self, verifier: &SessionRef, prompt: &str) -> anyhow::Result<()>;
     fn verifier(&self, verifier: &SessionRef) -> VerifierNow;
+    /// A worker went back to work after its result was checked: what the
+    /// checks noted of its worktree ([`checks::forget_clean`]) no longer holds.
+    fn check_reset(&self, worker: &SessionRef);
     /// The commit a worker's worktree is at now. A result is accepted as the
     /// commit its gates ran on; `None` when the worktree cannot be read.
     fn result_commit(&self, worker: &SessionRef) -> Option<String>;
@@ -537,6 +540,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         .collect();
     // The ladder needs the installed models only when a try fell short.
     let models = if seen.iter().any(|(_, _, now, _)| fell_short(now)) || reading.iter().any(|(_, _, _, now, _)| *now != VerifierNow::Working) { host.models() } else { Vec::new() };
+    let mut back_at_work: Vec<SessionRef> = Vec::new();
     let (after, ()) = store::update(id, |run| {
         if !matches!(run.state, RunState::Running | RunState::Failed) {
             return Ok(());
@@ -585,7 +589,12 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             if let Some(attempt) = piece.tries.last_mut() {
                 match outcome {
                     // Back at work: the try is open again, and what was checked is not what it will report.
-                    None => (attempt.outcome, attempt.ended, attempt.verification) = (None, None, None),
+                    None => {
+                        if attempt.verification.is_some() {
+                            back_at_work.push(worker.clone());
+                        }
+                        (attempt.outcome, attempt.ended, attempt.verification) = (None, None, None);
+                    }
                     Some(outcome) => {
                         let at = crate::store::index::now();
                         if attempt.outcome != Some(outcome) || attempt.ended.is_none() {
@@ -643,6 +652,9 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     .map_err(EngineError::internal)?;
     if after != run {
         host.changed(&after);
+    }
+    for worker in &back_at_work {
+        host.check_reset(worker);
     }
     // This read is the one that took the ladder's step: the next try is started from here,
     // whichever read it was. A later read finds the piece already waiting and says nothing.

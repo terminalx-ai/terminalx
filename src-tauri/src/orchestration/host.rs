@@ -243,6 +243,12 @@ impl Host for ManagerHost {
         }
     }
 
+    fn check_reset(&self, worker: &SessionRef) {
+        if let (Ok(session), Ok(root)) = (index::get(&worker.session_id), crate::store::root()) {
+            verify::forget_clean(&root.join("run-checks"), Path::new(&session.cwd));
+        }
+    }
+
     fn result_commit(&self, worker: &SessionRef) -> Option<String> {
         let session = index::get(&worker.session_id).ok()?;
         crate::git::head_commit(Path::new(&session.cwd))

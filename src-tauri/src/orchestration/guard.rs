@@ -332,6 +332,11 @@ pub fn verifier_call(payload: &Value) -> VerifierCall {
     if edits {
         return VerifierCall::Refuse(format!("TerminalX refused `{tool}`: a verifier of a run changes no file. You are here to judge the result as it is. If something is wrong, say where in your verdict block (`file:line`); the piece goes back to a worker."));
     }
+    // A tool of a connected server may be a shell, an editor or anything else by another name:
+    // none can be told from its name to only read, and a verifier needs none. It was given the diff.
+    if tool.starts_with("mcp__") {
+        return VerifierCall::Refuse(format!("TerminalX refused `{tool}`: a verifier of a run uses no tool of a connected server, since none can be known to only read. Judge the result from the diff and the files in this worktree."));
+    }
     if !SHELL_TOOLS.contains(&tool) {
         return VerifierCall::Leave;
     }
@@ -596,7 +601,7 @@ mod tests {
             assert_eq!(super::refusal_output(&reason)["hookSpecificOutput"]["permissionDecision"], "deny");
         }
         // Reading is its work.
-        for tool in ["Read", "Grep", "Glob", "mcp__filesystem__read_file"] {
+        for tool in ["Read", "Grep", "Glob"] {
             assert_eq!(super::verifier_call(&serde_json::json!({"tool_name": tool, "tool_input": {"file_path": "src/cli.rs"}})), VerifierCall::Leave, "{tool}");
         }
         // A shell command is held to reading too, in whatever mode the tab is in: one that reads goes ahead.
@@ -622,6 +627,11 @@ mod tests {
                 let reason = shell(tool, writes).unwrap_or_else(|| panic!("{tool}: {writes} is refused"));
                 assert!(reason.starts_with("TerminalX refused this command: a verifier of a run runs only commands that read"), "{reason}");
             }
+        }
+        // A connected server's tool may be a shell or an editor by any name: a verifier uses none.
+        for tool in ["mcp__shell__run_command", "mcp__desktop-commander__execute_command", "mcp__filesystem__read_file", "mcp__github__get_file_contents"] {
+            let reason = refusal(serde_json::json!({"tool_name": tool, "tool_input": {"command": "sed -i '' s/a/b/ src/cli.rs"}})).unwrap_or_else(|| panic!("{tool} is refused"));
+            assert!(reason.contains("uses no tool of a connected server"), "{reason}");
         }
         // A shell call with no directory to check it in is not one that is known to read.
         assert!(refusal(serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "cat src/cli.rs"}})).is_some());
