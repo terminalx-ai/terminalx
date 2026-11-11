@@ -6,9 +6,11 @@ use std::sync::Mutex;
 
 use serde_json::json;
 
-use super::engine::{self, By, EngineError, Host, Lead, Started, WorkerNow};
+use super::engine::{self, By, Cost, EngineError, Host, Lead, Started, WorkerNow};
 use super::plan::Plan;
-use super::{store, Piece, PieceState, Run, RunState, SessionRef};
+use super::ladder::Step;
+use super::routing::Tier;
+use super::{store, Outcome, Piece, PieceState, Run, RunState, SessionRef};
 use crate::store::settings::{OrchestratorLimits, OrchestratorSettings};
 use crate::worker_report::Status;
 
@@ -39,6 +41,9 @@ struct World {
     /// Pieces whose new session cannot be made safe to brief, and how often that was tried.
     no_secure: BTreeSet<String>,
     secured: Vec<String>,
+    /// What each worker's session has used so far, in dollars, and how often it was read.
+    costs: BTreeMap<String, f64>,
+    cost_reads: BTreeMap<String, usize>,
 }
 
 struct Fake {
@@ -78,11 +83,21 @@ impl Host for Fake {
         if session_id == "nobody" {
             return Err(EngineError::new("lead_not_found", "No session nobody to lead the run.", None));
         }
-        Ok(Lead { project_path: "/repo".into(), agent: "claude".into(), repository: self.repository })
+        Ok(Lead { project_path: "/repo".into(), agent: "claude".into(), model: "fable".into(), repository: self.repository })
     }
 
     fn worker_agents(&self) -> Vec<String> {
         vec!["claude".into(), "codex".into()]
+    }
+
+    fn models(&self) -> Vec<crate::models::Model> {
+        super::routing::tests::installed()
+    }
+
+    fn worker_cost(&self, worker: &SessionRef) -> Cost {
+        let mut world = self.world();
+        *world.cost_reads.entry(worker.session_id.clone()).or_default() += 1;
+        Cost { usd: world.costs.get(&worker.session_id).copied(), unpriced_models: Vec::new() }
     }
 
     fn limits(&self, project_path: &str) -> OrchestratorLimits {
@@ -152,11 +167,11 @@ fn plan() -> Plan {
         "budget": {"points": 25},
         "pieces": [
             {"id": "map", "title": "Map every settings read", "doneCheck": "the list covers every call", "model": "haiku", "kind": "search", "estimate": {"low": 0.05, "high": 0.05}},
-            {"id": "store", "title": "Typed store module", "doneCheck": "cargo t store::settings", "owns": ["src/store/settings/"], "dependsOn": ["map"], "model": "opus", "effort": "medium", "estimate": {"low": 1.6, "high": 2.4}},
-            {"id": "session", "title": "Move session code", "doneCheck": "cargo t session", "owns": ["src/session*.rs"], "dependsOn": ["store"], "model": "sonnet", "effort": "medium"},
-            {"id": "pipeline", "title": "Move pipeline code", "doneCheck": "cargo t issue_pipeline", "owns": ["src/issue_pipeline/"], "dependsOn": ["store"], "model": "sonnet", "permissionMode": "acceptEdits"},
-            {"id": "cli", "title": "Move CLI code", "doneCheck": "cargo t control", "owns": ["src/cli.rs", "src/control.rs"], "dependsOn": ["store"], "agent": "codex", "model": "gpt-terra", "effort": "high"},
-            {"id": "docs", "title": "Update the docs", "doneCheck": "every documented key exists", "owns": ["docs/"], "dependsOn": ["session", "pipeline", "cli"], "readsUntrusted": true},
+            {"id": "store", "title": "Typed store module", "doneCheck": "cargo t store::settings", "kind": "code", "owns": ["src/store/settings/"], "dependsOn": ["map"], "model": "opus", "effort": "medium", "estimate": {"low": 1.6, "high": 2.4}},
+            {"id": "session", "title": "Move session code", "doneCheck": "cargo t session", "kind": "scoped-code", "owns": ["src/session*.rs"], "dependsOn": ["store"], "model": "sonnet", "effort": "medium"},
+            {"id": "pipeline", "title": "Move pipeline code", "doneCheck": "cargo t issue_pipeline", "kind": "scoped-code", "owns": ["src/issue_pipeline/"], "dependsOn": ["store"], "model": "sonnet", "permissionMode": "acceptEdits"},
+            {"id": "cli", "title": "Move CLI code", "doneCheck": "cargo t control", "kind": "code", "owns": ["src/cli.rs", "src/control.rs"], "dependsOn": ["store"], "agent": "codex", "model": "gpt-terra", "effort": "high"},
+            {"id": "docs", "title": "Update the docs", "doneCheck": "every documented key exists", "kind": "scoped-code", "owns": ["docs/"], "dependsOn": ["session", "pipeline", "cli"], "readsUntrusted": true},
         ],
     }))
     .unwrap()
@@ -368,8 +383,8 @@ fn the_projects_mode_is_the_default_of_its_workers_and_a_piece_may_choose_within
     }
     let two = |mode: &str| -> Plan {
         serde_json::from_value(json!({"goal": "Two", "pieces": [
-            {"id": "a", "title": "A", "doneCheck": "x"},
-            {"id": "b", "title": "B", "doneCheck": "x", "permissionMode": mode},
+            {"id": "a", "title": "A", "doneCheck": "x", "kind": "code"},
+            {"id": "b", "title": "B", "doneCheck": "x", "kind": "code", "permissionMode": mode},
         ]}))
         .unwrap()
     };
@@ -400,10 +415,10 @@ fn a_run_survives_a_restart_with_its_piece_states_intact() {
     engine::start(&host, &id).unwrap();
     host.reports("map", Status::Done, "41 call sites in 9 files.");
     engine::start(&host, &id).unwrap();
-    host.reports("store", Status::Partial, "The migration is written; two tests fail.");
+    host.reports("store", Status::Blocked, "The migration needs a decision on the old keys.");
     let before = engine::refreshed(&host, &id).unwrap();
     assert_eq!(states(&before)[..3], [("map", PieceState::Done), ("store", PieceState::Blocked), ("session", PieceState::Queued)]);
-    assert_eq!(before.piece("store").unwrap().note.as_deref(), Some("Reported partial: The migration is written; two tests fail."));
+    assert_eq!(before.piece("store").unwrap().note.as_deref(), Some("Reported blocked: The migration needs a decision on the old keys."));
 
     // The file is all there is: what a new process reads is what the old one wrote.
     let on_disk = std::fs::read_to_string(crate::store::root().unwrap().join("orchestration-runs.json")).unwrap();
@@ -422,7 +437,7 @@ fn a_run_survives_a_restart_with_its_piece_states_intact() {
     {
         let mut world = restarted.world();
         world.now.insert("w1-map".into(), WorkerNow::Reported { status: Status::Done, result: "41 call sites in 9 files.".into() });
-        world.now.insert("w2-store".into(), WorkerNow::Reported { status: Status::Partial, result: "The migration is written; two tests fail.".into() });
+        world.now.insert("w2-store".into(), WorkerNow::Reported { status: Status::Blocked, result: "The migration needs a decision on the old keys.".into() });
     }
     assert_eq!(store::list().unwrap(), vec![before.clone()]);
     assert_eq!(engine::refreshed(&restarted, &id).unwrap(), before);
@@ -459,15 +474,279 @@ fn a_piece_follows_what_its_worker_reports() {
     host.world().now.remove("w1-map");
     assert_eq!((engine::refreshed(&host, id).unwrap().piece("map").unwrap().state, map().note.as_deref()), (PieceState::Blocked, Some("Its worker session was deleted.")));
 
-    // A `failed` report with nothing else able to run fails the run, and says what it holds up.
+    // A `failed` report is not the end of a piece: its next try waits for a fresh worker.
     host.reports("map", Status::Failed, "The search tool crashed.");
-    let failed = engine::refreshed(&host, id).unwrap();
-    assert_eq!((failed.state, failed.piece("map").unwrap().state), (RunState::Failed, PieceState::Failed));
-    assert_eq!(failed.reason.as_deref(), Some("map failed. store cannot start without it."));
-    // The same worker made to finish brings the run back.
-    host.reports("map", Status::Done, "41 call sites in 9 files.");
+    let after = engine::refreshed(&host, id).unwrap();
+    assert_eq!((after.state, after.piece("map").unwrap().state, after.piece("map").unwrap().worker.clone()), (RunState::Running, PieceState::Queued, None));
+}
+
+/// A run of one `scoped-code` piece on the table's model, started, and a second piece that waits on it.
+fn one_piece() -> (Fake, String) {
+    let host = Fake::new();
+    host.settings.lock().unwrap().require_approval = false;
+    let plan: Plan = serde_json::from_value(json!({"goal": "Move CLI reads", "pieces": [
+        {"id": "cli", "title": "Move CLI code", "kind": "scoped-code", "doneCheck": "cargo t control", "owns": ["src/cli.rs"]},
+        {"id": "docs", "title": "Update the docs", "kind": "scoped-code", "doneCheck": "every key is documented", "owns": ["docs/"], "dependsOn": ["cli"]},
+    ]}))
+    .unwrap();
+    let run = engine::create(&host, &plan, "lead", Some("lead-tab".into())).unwrap();
+    engine::start(&host, &run.id).unwrap();
+    (host, run.id)
+}
+
+fn one_piece_for(lead: &str) -> (Fake, String) {
+    let host = Fake::new();
+    host.settings.lock().unwrap().require_approval = false;
+    let plan: Plan = serde_json::from_value(json!({"goal": "Move CLI reads", "pieces": [{"id": "cli", "title": "Move CLI code", "kind": "scoped-code", "doneCheck": "cargo t control", "owns": ["src/cli.rs"]}]})).unwrap();
+    let run = engine::create(&host, &plan, lead, None).unwrap();
+    engine::start(&host, &run.id).unwrap();
+    (host, run.id)
+}
+
+/// What each try of a piece ran on and came to.
+fn tried(run: &Run, piece: &str) -> Vec<(Step, String, Option<String>, Option<Outcome>)> {
+    run.piece(piece).unwrap().tries.iter().map(|attempt| (attempt.step, attempt.model.clone(), attempt.effort.clone(), attempt.outcome)).collect()
+}
+
+#[test]
+fn a_plan_with_kinds_and_no_models_starts_each_worker_on_the_tables_model_and_effort() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    host.settings.lock().unwrap().require_approval = false;
+    let plan: Plan = serde_json::from_value(json!({"goal": "Kinds only", "pieces": [
+        {"id": "map", "title": "Map", "kind": "search", "doneCheck": "x"},
+        {"id": "build", "title": "Build", "kind": "code", "doneCheck": "x", "owns": ["src/"]},
+        {"id": "port", "title": "Port", "kind": "code", "agent": "codex", "doneCheck": "x", "owns": ["lib/"]},
+        {"id": "study", "title": "Study", "kind": "research", "agent": "codex", "doneCheck": "x"},
+    ]}))
+    .unwrap();
+    let run = engine::create(&host, &plan, "lead", None).unwrap();
+    assert_eq!(
+        run.pieces.iter().map(|piece| (piece.id.as_str(), piece.model.as_str(), piece.effort.as_deref(), piece.tier)).collect::<Vec<_>>(),
+        vec![("map", "haiku", None, Some(Tier::Small)), ("build", "opus", Some("medium"), Some(Tier::Large)), ("port", "gpt-6.1-sol", Some("medium"), Some(Tier::Large)), ("study", "gpt-6-astra", Some("medium"), Some(Tier::Top))]
+    );
+    engine::start(&host, &run.id).unwrap();
+    let made: Vec<(String, String, String, Option<String>)> = host.world().made.iter().map(|made| (made.piece.clone(), made.agent.clone(), made.model.clone(), made.effort.clone())).collect();
+    assert_eq!(made, vec![
+        ("map".to_string(), "claude".to_string(), "haiku".to_string(), None),
+        ("build".into(), "claude".into(), "opus".into(), Some("medium".into())),
+        ("port".into(), "codex".into(), "gpt-6.1-sol".into(), Some("medium".into())),
+        ("study".into(), "codex".into(), "gpt-6-astra".into(), Some("medium".into())),
+    ]);
+    // The project's own row decides for its runs.
+    host.settings.lock().unwrap().projects.entry("/repo".into()).or_default().routing = serde_json::from_value(json!({"code": {"claude": {"tier": "mid", "effort": "high"}}})).unwrap();
+    let again = engine::create(&host, &plan, "another-lead", None).unwrap();
+    assert_eq!((again.piece("build").unwrap().model.as_str(), again.piece("build").unwrap().effort.as_deref()), ("sonnet", Some("high")));
+    assert_eq!(again.piece("port").unwrap().model, "gpt-6.1-sol", "the Codex column is its own");
+}
+
+#[test]
+fn a_failing_piece_follows_the_ladder_and_is_blocked_after_three_tries() {
+    let _home = crate::store::temp_home();
+    let (host, id) = one_piece();
+    let id = id.as_str();
+    let cli = || store::get(id).unwrap().piece("cli").cloned().unwrap();
+    assert_eq!(tried(&store::get(id).unwrap(), "cli"), vec![(Step::First, "sonnet".to_string(), Some("medium".to_string()), None)]);
+
+    // Try 1 reports `failed`: the piece is queued again, on more effort, with no worker.
+    host.reports("cli", Status::Failed, "2 tests in control::tests fail.");
+    assert_eq!(engine::worker_turn_ended(&host, "w1-cli").as_deref(), Some(id), "a retry waits to be started");
+    let piece = cli();
+    assert_eq!((piece.state, piece.worker.clone(), piece.branch.clone(), piece.model.as_str(), piece.effort.as_deref()), (PieceState::Queued, None, None, "sonnet", Some("high")));
+    assert_eq!(piece.note.as_deref(), Some("Try 1 fell short on sonnet at medium. Try 2 runs on sonnet at high (tried again with the failure text, effort raised one level)."));
+    // The try that fell short keeps its worker, its branch and what it said.
+    assert_eq!((piece.tries[0].outcome, piece.tries[0].worker.as_ref().map(|worker| worker.session_id.as_str()), piece.tries[0].branch.as_deref()), (Some(Outcome::Failed), Some("w1-cli"), Some("raccoon/cli")));
+    assert_eq!(piece.tries[0].detail.as_deref(), Some("The worker reported failed: 2 tests in control::tests fail."));
+    assert!(piece.tries[0].ended.is_some() && piece.tries[1].started.is_none());
+
+    // The next try is a fresh worker, started without the lead, with the failure text in its brief.
+    let started = engine::start_retries(&host, id).unwrap();
+    assert_eq!(started.started, vec!["cli"]);
+    let second = host.world().made.last().cloned().unwrap();
+    assert_eq!((second.session.as_str(), second.model.as_str(), second.effort.as_deref()), ("w2-cli", "sonnet", Some("high")));
+    let brief = host.world().briefs["w2-cli"].clone();
+    assert!(brief.contains("You are try 2 of this piece") && brief.contains("> The worker reported failed: 2 tests in control::tests fail.") && brief.contains("try 1: `raccoon/cli`"), "{brief}");
+    assert_eq!((cli().state, cli().attempts), (PieceState::Running, 2));
+    // The worker that fell short is no longer the piece's: a late turn of it changes nothing.
+    assert_eq!(store::for_worker("w1-cli").unwrap().map(|(_, piece)| piece), None);
+    assert_eq!(engine::worker_turn_ended(&host, "w1-cli"), None);
+
+    // Try 2 reports `partial`: one model tier up, at one effort level lower.
+    host.reports("cli", Status::Partial, "1 test still fails.");
+    assert_eq!(engine::worker_turn_ended(&host, "w2-cli").as_deref(), Some(id));
+    assert_eq!((cli().state, cli().model.as_str(), cli().effort.as_deref(), cli().tier), (PieceState::Queued, "opus", Some("medium"), Some(Tier::Large)));
+    engine::start_retries(&host, id).unwrap();
+    let third = host.world().made.last().cloned().unwrap();
+    assert_eq!((third.session.as_str(), third.model.as_str(), third.effort.as_deref()), ("w3-cli", "opus", Some("medium")));
+    let brief = host.world().briefs["w3-cli"].clone();
+    assert!(brief.contains("You are try 3 of this piece") && brief.contains("> The worker reported partial: 1 test still fails.") && !brief.contains("2 tests in control::tests fail"), "{brief}");
+
+    // Try 3 fails: the piece is blocked and goes back to the lead with what was tried. No fourth worker.
+    host.reports("cli", Status::Failed, "The same test fails.");
+    assert_eq!(engine::worker_turn_ended(&host, "w3-cli"), None, "nothing waits to be started");
+    let run = store::get(id).unwrap();
+    assert_eq!(tried(&run, "cli"), vec![
+        (Step::First, "sonnet".to_string(), Some("medium".to_string()), Some(Outcome::Failed)),
+        (Step::Effort, "sonnet".into(), Some("high".into()), Some(Outcome::Partial)),
+        (Step::Tier, "opus".into(), Some("medium".into()), Some(Outcome::Failed)),
+    ]);
+    let piece = run.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.attempts, piece.gave_up()), (PieceState::Blocked, 3, true));
+    assert_eq!(piece.note.as_deref(), Some("Blocked after 3 tries: sonnet at medium, then sonnet at high, then opus at medium. It used all 3 tries. Last failure: The worker reported failed: The same test fails."));
+    // Nothing else can run: the run says which piece holds it up.
+    assert_eq!((run.state, run.reason.as_deref()), (RunState::Failed, Some("cli is blocked after 3 tries. docs cannot start without it.")));
+    assert!(engine::start_retries(&host, id).unwrap().started.is_empty());
+    assert_eq!(engine::start(&host, id).unwrap_err().code, "run_ended");
+    // Read again and again, it stays as it is.
+    assert_eq!(engine::refreshed(&host, id).unwrap(), run);
+    assert_eq!(host.made(), vec!["cli", "cli", "cli"]);
+    assert_eq!(engine::shown(&run)["maxTries"], 3);
+
+    // The lead may still get its last worker to finish: the piece is done, and the run goes on.
+    host.reports("cli", Status::Done, "All of control::tests pass.");
     let back = engine::start(&host, id).unwrap();
-    assert_eq!((back.run.state, back.run.reason.clone(), back.started), (RunState::Running, None, vec!["store".to_string()]));
+    assert_eq!((back.run.state, back.run.reason.clone(), back.started), (RunState::Running, None, vec!["docs".to_string()]));
+    assert_eq!(back.run.piece("cli").unwrap().tries[2].outcome, Some(Outcome::Done));
+}
+
+#[test]
+fn a_blocked_report_or_a_silent_worker_is_not_tried_again() {
+    let _home = crate::store::temp_home();
+    let (host, id) = one_piece();
+    // What a worker needs from a person, another model cannot give.
+    host.reports("cli", Status::Blocked, "Which of the two config files is the source of truth?");
+    assert_eq!(engine::worker_turn_ended(&host, "w1-cli"), None);
+    let piece = store::get(&id).unwrap().piece("cli").cloned().unwrap();
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[0].outcome, piece.gave_up()), (PieceState::Blocked, 1, Some(Outcome::Blocked), false));
+    assert!(piece.worker.is_some());
+    host.world().now.insert("w1-cli".into(), WorkerNow::Stuck("It stopped on a permission request.".into()));
+    assert_eq!(engine::worker_turn_ended(&host, "w1-cli"), None);
+    assert_eq!(store::get(&id).unwrap().piece("cli").unwrap().tries.len(), 1);
+    // The run waits on the lead; it has not failed.
+    assert_eq!(store::get(&id).unwrap().state, RunState::Running);
+}
+
+#[test]
+fn a_failed_done_check_takes_the_same_ladder_with_the_checks_output() {
+    let _home = crate::store::temp_home();
+    let (host, id) = one_piece();
+    let id = id.as_str();
+    // Only a piece whose worker said `done` has a check to fail.
+    let error = engine::check_failed(&host, id, "cli", "exit 101").unwrap_err();
+    assert_eq!((error.code, error.details["state"].as_str()), ("piece_not_done", Some("running")));
+    assert_eq!(engine::check_failed(&host, id, "docs", "exit 101").unwrap_err().code, "piece_not_done");
+    assert_eq!(engine::check_failed(&host, id, "ghost", "exit 101").unwrap_err().code, "piece_not_found");
+
+    host.reports("cli", Status::Done, "CLI reads moved.");
+    engine::worker_turn_ended(&host, "w1-cli");
+    assert_eq!(store::get(id).unwrap().piece("cli").unwrap().state, PieceState::Done);
+    let output = "test control::tests::create_reads_default_mode ... FAILED\nleft: Some(\"manual\")  right: Some(\"auto\")";
+    let failed = engine::check_failed(&host, id, "cli", output).unwrap();
+    // The next try is started at once: nobody has to ask.
+    assert_eq!((failed.retried, failed.blocked, failed.piece.as_str()), (true, false, "cli"));
+    assert_eq!(tried(&failed.run, "cli"), vec![(Step::First, "sonnet".to_string(), Some("medium".to_string()), Some(Outcome::CheckFailed)), (Step::Effort, "sonnet".into(), Some("high".into()), None)]);
+    let brief = host.world().briefs["w2-cli"].clone();
+    assert!(brief.contains("> The done-check did not hold: cargo t control") && brief.contains("> test control::tests::create_reads_default_mode ... FAILED"), "{brief}");
+
+    // Twice more, and the piece is blocked: its worker's `done` does not stand over the check.
+    host.reports("cli", Status::Done, "Fixed.");
+    engine::worker_turn_ended(&host, "w2-cli");
+    assert!(engine::check_failed(&host, id, "cli", output).unwrap().retried);
+    host.reports("cli", Status::Done, "Fixed again.");
+    engine::worker_turn_ended(&host, "w3-cli");
+    let last = engine::check_failed(&host, id, "cli", output).unwrap();
+    assert_eq!((last.retried, last.blocked), (false, true));
+    let piece = last.run.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[2].outcome), (PieceState::Blocked, 3, Some(Outcome::CheckFailed)));
+    assert!(piece.note.as_deref().unwrap().starts_with("Blocked after 3 tries: sonnet at medium, then sonnet at high, then opus at medium. It used all 3 tries. Last failure: The done-check did not hold: cargo t control"), "{:?}", piece.note);
+    let again = engine::refreshed(&host, id).unwrap();
+    assert_eq!(again.piece("cli").unwrap().state, PieceState::Blocked, "the worker still says done; the check said otherwise");
+    assert_eq!(engine::check_failed(&host, id, "cli", output).unwrap_err().code, "piece_not_done");
+    assert_eq!(host.made(), vec!["cli", "cli", "cli"]);
+
+    // A long output keeps its end: that is where a test run says what failed.
+    let (host, id) = one_piece_for("other-lead");
+    host.reports("cli", Status::Done, "Done.");
+    engine::worker_turn_ended(&host, "w1-cli");
+    let long = format!("{}\nFAILED at the very end", "noise ".repeat(4000));
+    let failed = engine::check_failed(&host, &id, "cli", &long).unwrap();
+    let detail = failed.run.piece("cli").unwrap().tries[0].detail.clone().unwrap();
+    assert!(detail.len() < 6200 && detail.ends_with("FAILED at the very end") && detail.contains("[…the start was left out]"), "{} bytes", detail.len());
+}
+
+#[test]
+fn a_piece_with_no_tier_above_it_is_blocked_after_two_tries() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    host.settings.lock().unwrap().require_approval = false;
+    let plan: Plan = serde_json::from_value(json!({"goal": "Reshape", "pieces": [{"id": "shape", "title": "Reshape the store", "kind": "refactor", "doneCheck": "cargo t"}]})).unwrap();
+    let run = engine::create(&host, &plan, "lead", None).unwrap();
+    engine::start(&host, &run.id).unwrap();
+    host.reports("shape", Status::Failed, "It does not compile.");
+    engine::worker_turn_ended(&host, "w1-shape");
+    engine::start_retries(&host, &run.id).unwrap();
+    host.reports("shape", Status::Failed, "It still does not compile.");
+    assert_eq!(engine::worker_turn_ended(&host, "w2-shape"), None);
+    let after = store::get(&run.id).unwrap();
+    assert_eq!(tried(&after, "shape"), vec![(Step::First, "fable".to_string(), Some("medium".to_string()), Some(Outcome::Failed)), (Step::Effort, "fable".into(), Some("high".into()), Some(Outcome::Failed))]);
+    assert_eq!(after.piece("shape").unwrap().note.as_deref(), Some("Blocked after 2 tries: fable at medium, then fable at high. It already ran on the top tier: there is no model above it. Last failure: The worker reported failed: It still does not compile."));
+    assert_eq!((after.state, after.reason.as_deref()), (RunState::Failed, Some("shape is blocked after 2 tries.")));
+}
+
+#[test]
+fn each_try_records_its_model_effort_cost_and_outcome() {
+    let _home = crate::store::temp_home();
+    let (host, id) = one_piece();
+    let id = id.as_str();
+    // While a try runs, its cost is what its session has used so far.
+    host.world().costs.insert("w1-cli".into(), 0.21);
+    assert_eq!(engine::refreshed(&host, id).unwrap().piece("cli").unwrap().tries[0].cost_usd, Some(0.21));
+    host.world().costs.insert("w1-cli".into(), 0.61);
+    host.reports("cli", Status::Failed, "2 tests fail.");
+    engine::worker_turn_ended(&host, "w1-cli");
+    engine::start_retries(&host, id).unwrap();
+    host.world().costs.insert("w2-cli".into(), 0.92);
+    host.reports("cli", Status::Partial, "1 test fails.");
+    engine::worker_turn_ended(&host, "w2-cli");
+    engine::start_retries(&host, id).unwrap();
+    host.world().costs.insert("w3-cli".into(), 2.18);
+    host.reports("cli", Status::Done, "All tests pass.");
+    engine::worker_turn_ended(&host, "w3-cli");
+
+    let run = store::get(id).unwrap();
+    let history: Vec<(Step, &str, Option<&str>, Option<f64>, Option<Outcome>)> = run.piece("cli").unwrap().tries.iter().map(|attempt| (attempt.step, attempt.model.as_str(), attempt.effort.as_deref(), attempt.cost_usd, attempt.outcome)).collect();
+    assert_eq!(history, vec![
+        (Step::First, "sonnet", Some("medium"), Some(0.61), Some(Outcome::Failed)),
+        (Step::Effort, "sonnet", Some("high"), Some(0.92), Some(Outcome::Partial)),
+        (Step::Tier, "opus", Some("medium"), Some(2.18), Some(Outcome::Done)),
+    ]);
+    assert!(run.piece("cli").unwrap().tries.iter().all(|attempt| attempt.started.is_some() && attempt.ended.is_some() && attempt.worker.is_some()));
+    assert_eq!(run.piece("cli").unwrap().tries[2].detail.as_deref(), Some("All tests pass."));
+    // `runs show` sums them, for the piece and for the run.
+    let shown = engine::shown(&run);
+    let near = |value: &serde_json::Value, expected: f64| (value.as_f64().unwrap() - expected).abs() < 1e-9;
+    assert!(near(&shown["pieces"][0]["costUsd"], 3.71) && near(&shown["costUsd"], 3.71), "{}", shown["costUsd"]);
+    assert_eq!((shown["pieces"][1]["costUsd"].clone(), shown["pieces"][0]["tries"][1]["step"].clone()), (json!(null), json!("effort")));
+    // A try that has ended is not read again: its cost is what it was when it ended.
+    let reads = host.world().cost_reads["w1-cli"];
+    host.world().costs.insert("w1-cli".into(), 9.99);
+    engine::refreshed(&host, id).unwrap();
+    engine::start(&host, id).unwrap();
+    assert_eq!(host.world().cost_reads["w1-cli"], reads);
+    assert_eq!(store::get(id).unwrap().piece("cli").unwrap().tries[0].cost_usd, Some(0.61));
+}
+
+#[test]
+fn stopping_a_run_ends_the_try_under_way() {
+    let _home = crate::store::temp_home();
+    let (host, id) = one_piece();
+    host.reports("cli", Status::Failed, "2 tests fail.");
+    engine::worker_turn_ended(&host, "w1-cli");
+    // The second try was planned and never started.
+    let stopped = engine::stop(&host, &id, By::Cli).unwrap();
+    assert_eq!(tried(&stopped.run, "cli").iter().map(|(_, _, _, outcome)| *outcome).collect::<Vec<_>>(), vec![Some(Outcome::Failed), Some(Outcome::Stopped)]);
+    assert!(engine::start_retries(&host, &id).unwrap().started.is_empty(), "nothing starts in a stopped run");
+    assert_eq!(host.made(), vec!["cli"]);
 }
 
 #[test]
@@ -476,9 +755,9 @@ fn a_worker_that_cannot_be_started_fails_its_piece_and_the_next_start_tries_agai
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
     let plan: Plan = serde_json::from_value(json!({"goal": "Three", "pieces": [
-        {"id": "a", "title": "A", "doneCheck": "x"},
-        {"id": "b", "title": "B", "doneCheck": "x"},
-        {"id": "c", "title": "C", "doneCheck": "x"},
+        {"id": "a", "title": "A", "doneCheck": "x", "kind": "code"},
+        {"id": "b", "title": "B", "doneCheck": "x", "kind": "code"},
+        {"id": "c", "title": "C", "doneCheck": "x", "kind": "code"},
     ]}))
     .unwrap();
     let run = engine::create(&host, &plan, "lead", None).unwrap();
@@ -508,8 +787,8 @@ fn a_session_that_cannot_be_made_safe_is_kept_and_tried_again_never_made_twice()
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
     let plan: Plan = serde_json::from_value(json!({"goal": "Two", "pieces": [
-        {"id": "a", "title": "A", "doneCheck": "x"},
-        {"id": "b", "title": "B", "doneCheck": "x"},
+        {"id": "a", "title": "A", "doneCheck": "x", "kind": "code"},
+        {"id": "b", "title": "B", "doneCheck": "x", "kind": "code"},
     ]}))
     .unwrap();
     let run = engine::create(&host, &plan, "lead", None).unwrap();

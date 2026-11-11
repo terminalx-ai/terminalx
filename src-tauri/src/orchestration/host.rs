@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 
-use super::engine::{EngineError, Host, Lead, Started, WorkerNow};
+use super::engine::{Cost, EngineError, Host, Lead, Started, WorkerNow};
 use super::{guard, Piece, Run, SessionRef, RUN_EVENT};
 use crate::session::SessionManager;
 use crate::session_ops::{NewSession, NewTab};
@@ -42,14 +42,30 @@ fn lead_base(cwd: &Path) -> anyhow::Result<String> {
 impl Host for ManagerHost {
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError> {
         let session = index::get(session_id).map_err(|_| EngineError::new("lead_not_found", format!("No session {session_id} to lead the run."), Some("Run the command inside the lead's session, or name it with --lead.")))?;
-        let agent = session.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| tab.harness.clone()).unwrap_or_default();
+        let (agent, model) = session.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| (tab.harness.clone(), tab.model.clone())).unwrap_or_default();
         let repository = session.kind == SessionKind::Project && crate::git::is_repo(Path::new(&session.cwd));
-        Ok(Lead { project_path: session.project_path, agent, repository })
+        Ok(Lead { project_path: session.project_path, agent, model, repository })
     }
 
     fn worker_agents(&self) -> Vec<String> {
         // A worker is held to a report, and only an agent in its own terminal can be reminded of one.
         crate::harness::offered().into_iter().filter(|agent| agent.available && crate::session::pty_first(&agent.id).is_some()).map(|agent| agent.id).collect()
+    }
+
+    fn models(&self) -> Vec<crate::models::Model> {
+        // As the pickers list them: each agent's CLI was asked once, and the answer is kept.
+        crate::models::list(&self.manager.codex_models(), false)
+    }
+
+    fn worker_cost(&self, worker: &SessionRef) -> Cost {
+        // Read from the worker's transcripts again, as far as they have got (`sessions usage`).
+        match crate::session_usage::refresh_session(&worker.session_id) {
+            Ok((session, _)) => {
+                let (usd, unpriced_models) = crate::session_usage::estimated_cost(&session);
+                Cost { usd, unpriced_models }
+            }
+            Err(_) => Cost::default(),
+        }
     }
 
     fn limits(&self, project_path: &str) -> OrchestratorLimits {
@@ -71,7 +87,11 @@ impl Host for ManagerHost {
                 checkout_branch: None,
                 checkout_pr: None,
                 base_ref: Some(base),
-                worktree_name: Some(format!("{}-{}", piece.id, piece.title)),
+                // Each try has a worktree and a branch of its own: the one before it keeps its.
+                worktree_name: Some(match piece.tries.len() {
+                    0 | 1 => format!("{}-{}", piece.id, piece.title),
+                    tries => format!("{}-try{tries}-{}", piece.id, piece.title),
+                }),
                 issue: None,
                 automation: None,
                 cwd: None,

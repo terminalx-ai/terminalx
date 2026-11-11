@@ -769,8 +769,8 @@ impl ControlService {
             "pipelines.start" | "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
             // A run's workers are sessions of a project on this computer, each in a worktree of its own:
             // the desktop's runtime has those. A cloud workspace's runtime has one checkout, and says so.
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -794,7 +794,9 @@ impl ControlService {
             let tab = caller.filter(|caller| caller.id == lead.id).and_then(|_| params["caller"]["tab"].as_str()).filter(|tab| lead.tab(tab).is_some()).map(str::to_owned);
             let plan: Plan = crate::orchestration::plan::parse(&params["plan"]).map_err(|error| ControlError::of_run(error.into()))?;
             let run = engine::create(&host, &plan, &lead.id, tab).map_err(ControlError::of_run)?;
-            return Ok(json!({"run": engine::shown(&run), "approvalRequired": run.state == crate::orchestration::RunState::AwaitingApproval}));
+            // Said where the lead reads it: a piece whose tier has no installed model, and what it runs on instead.
+            let notes: Vec<Value> = run.pieces.iter().filter_map(|piece| Some(json!({"piece": piece.id, "note": piece.model_note.as_deref()?}))).collect();
+            return Ok(json!({"run": engine::shown(&run), "approvalRequired": run.state == crate::orchestration::RunState::AwaitingApproval, "notes": notes}));
         }
         if command == "runs.list" {
             let lead = optional_string(&params, "lead").map(|selector| resolve_session(&selector)).transpose()?;
@@ -809,6 +811,8 @@ impl ControlService {
                 .collect::<Result<_, _>>()?;
             return Ok(json!({"runs": runs}));
         }
+        // A worker does not judge a piece, its own or another's: that is its lead's, and TerminalX's.
+        let from_worker = caller.as_ref().is_some_and(|caller| caller.run_worker());
         let run = match optional_string(&params, "run") {
             Some(selector) => {
                 let mut matching = store::matching(&selector).map_err(ControlError::internal)?;
@@ -827,6 +831,16 @@ impl ControlService {
                 self.manager.accepting_work().map_err(ControlError::internal)?;
                 let start = engine::start(&host, &run.id).map_err(ControlError::of_run)?;
                 Ok(json!({"run": engine::shown(&start.run), "started": start.started, "waiting": start.waiting, "failed": start.failed}))
+            }
+            "runs.checkFailed" => {
+                if from_worker {
+                    return Err(ControlError::new("not_the_lead", "A run's worker does not report a done-check as failed. Say what does not hold in your own report: `partial` or `failed`.", None::<String>));
+                }
+                self.manager.accepting_work().map_err(ControlError::internal)?;
+                let piece = optional_string(&params, "piece").ok_or_else(|| ControlError::invalid("Name the piece whose done-check failed."))?;
+                let output = params["output"].as_str().unwrap_or_default();
+                let failed = engine::check_failed(&host, &run.id, &piece, output).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&failed.run), "piece": failed.piece, "retried": failed.retried, "blocked": failed.blocked, "failed": failed.failed}))
             }
             "runs.stop" => {
                 let stop = engine::stop(&host, &run.id, engine::By::Cli).map_err(ControlError::of_run)?;

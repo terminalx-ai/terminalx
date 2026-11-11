@@ -333,8 +333,8 @@ fn orchestration_run_child() {
     assert_ne!(lead_head, git(repo.path().to_str().unwrap(), &["rev-parse", "main"]).unwrap());
     let caller = json!({"session": lead_id, "tab": lead["tabId"]});
     let plan = json!({"goal": "Move settings reads to the typed store", "pieces": [
-        {"id": "store", "title": "Typed store module", "doneCheck": "cargo t store", "owns": ["src/store/"], "model": "sonnet", "effort": "high", "readFirst": ["docs/SETTINGS.md"]},
-        {"id": "docs", "title": "Update the docs", "doneCheck": "every key is documented", "owns": ["docs/"], "dependsOn": ["store"], "permissionMode": "acceptEdits"},
+        {"id": "store", "title": "Typed store module", "kind": "code", "doneCheck": "cargo t store", "owns": ["src/store/"], "model": "sonnet", "effort": "high", "readFirst": ["docs/SETTINGS.md"]},
+        {"id": "docs", "title": "Update the docs", "kind": "scoped-code", "doneCheck": "every key is documented", "owns": ["docs/"], "dependsOn": ["store"], "model": "sonnet", "effort": "medium", "permissionMode": "acceptEdits"},
     ]});
 
     // Each rule refuses with its own code and the piece, and leaves nothing behind.

@@ -63,7 +63,15 @@ impl LocalHost {
         let to = SessionRef { session_id: session_id.into(), tab_id: tab_id.into() };
         crate::worker_report::turn_completed(final_message, || self.manager.load_events(session_id, tab_id), |prompt| Host::send(self, &to, prompt));
         // A run's worker: its piece follows what it just reported.
-        crate::orchestration::engine::worker_turn_ended(&crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone()), session_id);
+        let host = crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone());
+        if let Some(run) = crate::orchestration::engine::worker_turn_ended(&host, session_id) {
+            // Its try fell short: the next one is a new session in a new worktree, made off this turn's thread.
+            std::thread::spawn(move || {
+                if let Err(error) = crate::orchestration::engine::start_retries(&host, &run) {
+                    log::warn!("start the next try in run {run}: {error}");
+                }
+            });
+        }
     }
 
     /// The host of a cloud workspace's runtime.
