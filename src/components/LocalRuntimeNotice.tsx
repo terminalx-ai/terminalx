@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { RuntimeStartFailedDialog } from "@/components/RuntimeStartFailedDialog";
 import { errorMessage, type LocalRuntimeOutdated, type LocalRuntimeRestart, type LocalRuntimeRestartRefused, type LocalRuntimeWorkItem } from "@/lib/api";
 import { bootLocalRuntime, reconnectLocalRuntime, replaceLocalRuntime, restartLocalRuntime, useLocalRuntime } from "@/lib/localRuntime";
 
@@ -16,7 +17,8 @@ export const STALLED_MS = 2 * 60_000;
  * left behind silently (#766). One still waiting to be replaced, handed over
  * at once when it can be (#765) or once its agents' turns are done, is the
  * status bar's to show (`RuntimeStatus`), as an update chose before it
- * installed. */
+ * installed. A runtime that exited while starting holds the window with a
+ * dialog of its own (PRO-287). */
 export function LocalRuntimeNotice() {
   const { state, readAt } = useLocalRuntime();
   const [now, setNow] = useState(() => Date.now());
@@ -57,6 +59,9 @@ export function LocalRuntimeNotice() {
     // window may already have replaced it.
     return <UnresponsiveNotice key={state.epoch ?? ""} epoch={state.epoch} message={state.message} keeps={state.keeps} />;
   }
+  // A runtime that exited as it started fails again on every attempt: this
+  // says what failed and holds the window (PRO-287). A gap does not.
+  if (state?.state === "unavailable" && state.startFailed) return <RuntimeStartFailedDialog failed={state.startFailed} />;
   if (state?.state !== "connecting" && state?.state !== "unavailable") return null;
   if (state.state === "connecting" && down < QUIET_MS) return null;
   const retry = async () => {

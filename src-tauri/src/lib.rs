@@ -437,6 +437,7 @@ pub fn run() {
             environment_commands::environment_read_file,
             environment_commands::environment_changed,
             local_runtime::ui::local_runtime_status,
+            local_runtime::ui::local_runtime_log,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
             local_runtime::ui::local_runtime_replace,
