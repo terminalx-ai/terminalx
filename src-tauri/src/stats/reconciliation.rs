@@ -239,7 +239,7 @@ fn unknown_prices_and_nonstandard_tiers_are_not_zero_dollars() {
     fast["message"]["usage"]["service_tier"] = json!("fast");
     write_rows(&path, &[unknown, fast], true);
     let file = CachedFile {
-        events: parse_claude(&path).unwrap(),
+        events: parse_claude(&path, &HashSet::new()).unwrap(),
         path,
         provider: Provider::Claude,
         modified_nanos: 1,
@@ -423,7 +423,7 @@ fn future_records_are_outside_the_thirty_date_overview() {
         false,
     );
     let file = CachedFile {
-        events: parse_claude(&path).unwrap(),
+        events: parse_claude(&path, &HashSet::new()).unwrap(),
         path,
         provider: Provider::Claude,
         size: 1,
@@ -459,7 +459,7 @@ fn claude_copied_stream_prefix_does_not_hide_the_final_usage() {
     final_row["sessionId"] = json!("fork");
     write_rows(&paths[1], &[final_row], true);
     let files = paths.map(|path| CachedFile {
-        events: parse_claude(&path).unwrap(),
+        events: parse_claude(&path, &HashSet::new()).unwrap(),
         path,
         provider: Provider::Claude,
         size: 1,

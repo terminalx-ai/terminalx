@@ -479,7 +479,7 @@ mod tests {
             modified: index::now(),
             context_used: None,
             context_max: None,
-            fork_from: None, continuation: None, parked: false,
+            fork_from: None, continuation: None, parked: false, usage: None,
             follow: Default::default(),
             unknown: Default::default(),
         }

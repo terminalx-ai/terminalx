@@ -245,6 +245,11 @@ pub struct TabEntry {
     /// a runtime that starts again knows it too.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parked: bool,
+    /// Tokens and estimated cost of every conversation the tab holds or has
+    /// held, by model, as its agents' transcripts said at the last turn end
+    /// (PRO-273, `session_usage`). Absent until one is read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::session_usage::TabUsage>,
     #[serde(flatten, default)]
     pub follow: Follow,
     #[serde(flatten, default)]
@@ -1877,7 +1882,7 @@ mod tests {
             modified: "now".into(),
             context_used: None,
             context_max: None,
-            fork_from: None, continuation: None, parked: false,
+            fork_from: None, continuation: None, parked: false, usage: None,
             follow: Follow::default(),
             unknown: BTreeMap::new(),
         });

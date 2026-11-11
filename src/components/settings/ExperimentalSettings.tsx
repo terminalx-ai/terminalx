@@ -13,6 +13,7 @@ export function ExperimentalTab() {
   const { revision } = useSettingsFile();
   const [nativeCodex, setNativeCodex] = useState<boolean | null>(null);
   const [orchestratorRuns, setOrchestratorRuns] = useState<boolean | null>(null);
+  const [sessionCost, setSessionCost] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -23,11 +24,13 @@ export function ExperimentalTab() {
         if (!live) return;
         setNativeCodex(settings?.nativeCodex ?? false);
         setOrchestratorRuns(settings?.orchestratorRuns ?? false);
+        setSessionCost(settings?.sessionCost ?? false);
       })
       .catch((e: unknown) => {
         if (!live) return;
         setNativeCodex(false);
         setOrchestratorRuns(false);
+        setSessionCost(false);
         setError(errorMessage(e));
       });
     return () => {
@@ -38,9 +41,10 @@ export function ExperimentalTab() {
   // A paired phone can change it too (Settings → This Mac on the phone).
   useEffect(() => {
     let live = true;
-    const unlisten = listen<{ nativeCodex?: boolean; orchestratorRuns?: boolean }>("experimental_settings_changed", (event) => {
+    const unlisten = listen<{ nativeCodex?: boolean; orchestratorRuns?: boolean; sessionCost?: boolean }>("experimental_settings_changed", (event) => {
       if (live && typeof event.payload?.nativeCodex === "boolean") setNativeCodex(event.payload.nativeCodex);
       if (live && typeof event.payload?.orchestratorRuns === "boolean") setOrchestratorRuns(event.payload.orchestratorRuns);
+      if (live && typeof event.payload?.sessionCost === "boolean") setSessionCost(event.payload.sessionCost);
     }).catch(() => null);
     return () => {
       live = false;
@@ -53,7 +57,9 @@ export function ExperimentalTab() {
     setNativeCodex(on);
     setError(null);
     try {
-      setNativeCodex((await experimental.setNativeCodex(on)).nativeCodex);
+      const saved = await experimental.setNativeCodex(on);
+      setNativeCodex(saved.nativeCodex);
+      noteExperimental(saved);
     } catch (e) {
       setNativeCodex(before);
       setError(errorMessage(e));
@@ -74,6 +80,19 @@ export function ExperimentalTab() {
       setError(errorMessage(e));
     }
   };
+  const changeSessionCost = async (on: boolean) => {
+    const before = sessionCost;
+    setSessionCost(on);
+    setError(null);
+    try {
+      const saved = await experimental.setSessionCost(on);
+      setSessionCost(saved.sessionCost ?? false);
+      noteExperimental(saved);
+    } catch (e) {
+      setSessionCost(before);
+      setError(errorMessage(e));
+    }
+  };
 
   return (
     <div className="flex flex-col" data-testid="experimental-settings">
@@ -83,6 +102,9 @@ export function ExperimentalTab() {
       />
       <RegisteredSetting setting="experimental.orchestratorRuns"
         control={<Switch aria-label="Orchestration runs" checked={orchestratorRuns ?? false} disabled={orchestratorRuns === null} onCheckedChange={(on) => void changeRuns(on)} />}
+      />
+      <RegisteredSetting setting="experimental.sessionCost"
+        control={<Switch aria-label="Session cost" checked={sessionCost ?? false} disabled={sessionCost === null} onCheckedChange={(on) => void changeSessionCost(on)} />}
       />
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>

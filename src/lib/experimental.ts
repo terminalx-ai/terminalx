@@ -4,7 +4,7 @@ import { experimental, type ExperimentalSettings } from "@/lib/api";
 
 /** Settings → Experimental, for the parts of the app a switch there shows or hides.
  * Off until read: a feature behind a switch never flashes on for someone who left it off. */
-const OFF: ExperimentalSettings = { nativeCodex: false, orchestratorRuns: false };
+const OFF: ExperimentalSettings = { nativeCodex: false, orchestratorRuns: false, sessionCost: false };
 
 let state: ExperimentalSettings = OFF;
 const listeners = new Set<() => void>();
@@ -12,7 +12,7 @@ let booted = false;
 
 function set(next: Partial<ExperimentalSettings> | null | undefined) {
   const merged = { ...OFF, ...state, ...(next ?? {}) };
-  if (merged.nativeCodex === state.nativeCodex && merged.orchestratorRuns === state.orchestratorRuns) return;
+  if (merged.nativeCodex === state.nativeCodex && merged.orchestratorRuns === state.orchestratorRuns && merged.sessionCost === state.sessionCost) return;
   state = merged;
   listeners.forEach((listener) => listener());
 }
