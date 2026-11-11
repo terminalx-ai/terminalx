@@ -266,3 +266,52 @@ impl Host for ManagerHost {
         chrono::Utc::now().timestamp_millis()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::activity_of;
+    use crate::events::AgentEvent;
+    use serde_json::json;
+
+    fn event(seq: u64, ts: &str, payload: serde_json::Value) -> AgentEvent {
+        serde_json::from_value(json!({"id": format!("e{seq}"), "sessionId": "w", "tabId": "t", "harness": "claude", "seq": seq, "ts": ts, "payload": payload})).unwrap()
+    }
+
+    fn ms(ts: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(ts).unwrap().timestamp_millis()
+    }
+
+    #[test]
+    fn a_command_still_running_is_work_and_the_last_tool_call_or_edit_is_the_last_activity() {
+        let started = |seq, ts, id: &str| event(seq, ts, json!({"type": "tool_call_started", "callId": id, "name": "Bash", "toolType": "shell", "input": {"command": "cargo build"}}));
+        let done = |seq, ts, id: &str| event(seq, ts, json!({"type": "tool_call_completed", "callId": id, "result": {"text": "ok"}}));
+        // An earlier turn's open call does not count: only the open turn's.
+        let earlier = vec![
+            event(1, "2026-11-11T09:00:00Z", json!({"type": "turn_started"})),
+            started(2, "2026-11-11T09:00:01Z", "old"),
+            event(3, "2026-11-11T10:00:00Z", json!({"type": "turn_started"})),
+        ];
+        let idle = activity_of(&earlier);
+        assert_eq!((idle.last_ms, idle.command_running), (Some(ms("2026-11-11T10:00:00Z")), false));
+
+        // A ten-minute build: its call has not returned.
+        let mut building = earlier.clone();
+        building.push(started(4, "2026-11-11T10:01:00Z", "build"));
+        let activity = activity_of(&building);
+        assert!(activity.command_running);
+        assert_eq!(activity.last_ms, Some(ms("2026-11-11T10:01:00Z")));
+
+        // It returned, and a file was edited after: that edit is the last activity.
+        building.push(done(5, "2026-11-11T10:11:00Z", "build"));
+        building.push(event(6, "2026-11-11T10:12:30Z", json!({"type": "file_edits", "edits": []})));
+        let activity = activity_of(&building);
+        assert!(!activity.command_running);
+        assert_eq!(activity.last_ms, Some(ms("2026-11-11T10:12:30Z")));
+
+        // A background task of its counts as a command running.
+        building.push(event(7, "2026-11-11T10:13:00Z", json!({"type": "background_tasks_changed", "tasks": [{"id": "b1", "label": "npm test"}]})));
+        assert!(activity_of(&building).command_running);
+        building.push(event(8, "2026-11-11T10:20:00Z", json!({"type": "background_tasks_changed", "tasks": []})));
+        assert!(!activity_of(&building).command_running);
+    }
+}

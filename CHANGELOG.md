@@ -18,6 +18,21 @@
   Settings → Experimental → Orchestration runs; the limits are in Settings →
   Orchestrator and per repository. (PRO-274)
 
+- Experimental: an orchestration run no longer starts more workers than the
+  Mac can carry. At most 4 workers of one run, and 8 across every run, are in a
+  turn at once; the rest queue and start by themselves as workers finish.
+  Sessions you start by hand are never counted or queued. A run also keeps a
+  budget, by how its workers sign in: dollars on an API key, and on a
+  subscription 25 points of a usage window for the run and a level of 85% that
+  no window it draws on may pass. Reaching one starts nothing new, lets running
+  workers finish their turn, and shows why in the Run view, naming the window
+  and when it resets; you can raise the budget, resume, or have it go on after
+  the reset. The approval view warns when a run would not fit in what is left of
+  a window and changes the limits for one run. A worker with no tool call or file
+  change for 10 minutes while its agent is idle is marked stalled and reported to
+  the lead; a long build is not a stall. The limits are in Settings →
+  Orchestrator, and a repository can set its own budget. (PRO-280)
+
 - Each release also uploads its notarized DMG as `TerminalX-latest-aarch64.dmg`
   and lists it in `SHA256SUMS`, so
   [one link](https://github.com/terminalx-ai/terminalx/releases/latest/download/TerminalX-latest-aarch64.dmg)

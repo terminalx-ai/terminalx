@@ -323,7 +323,7 @@ try {
         await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 6);
         await shot(page, "settings-repository");
         calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(3));
-        checks["a repository's rows show the defaults they follow"] = defaults.includes("Default (off)") && defaults.includes("Default (Accept edits)") && (await own.getByRole("spinbutton").getAttribute("placeholder")) === "12";
+        checks["a repository's rows show the defaults they follow"] = defaults.includes("Default (off)") && defaults.includes("Default (Accept edits)") && (await own.getByRole("spinbutton", { name: "Pieces per run in local-0, at most" }).getAttribute("placeholder")) === "12";
         checks["a repository saves its own answers by its path, and null follows the app again"] = JSON.stringify(calls) === JSON.stringify([{ project: "/repos/p0", requireApproval: true }, { project: "/repos/p0", workerMode: "manual" }, { project: "/repos/p0", requireApproval: null }]);
         const layout = await layoutOf(settings.locator("section").first());
         checks["nothing scrolls sideways or overlaps"] = !layout.scrolls && !layout.overlaps;
