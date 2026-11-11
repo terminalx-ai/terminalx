@@ -1,7 +1,7 @@
 import { useExperimental } from "@/lib/experimental";
 import { SettingsFileError } from "./SettingsFile";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Bot, Building2, FlaskConical, HardDrive, Info, Keyboard, KeyRound, Mic, Palette, Plug, Search, Settings2, Smartphone, UserRound, X, Network } from "@/icons";
+import { ArrowLeft, Bot, Building2, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Mic, Network, Palette, Plug, Search, Settings2, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,7 @@ const SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   environment: KeyRound,
   transcription: Mic,
   integrations: Plug,
+  projects: FolderPlus,
   repositories: HardDrive,
   organizations: Building2,
   storage: HardDrive,
@@ -188,6 +189,12 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
           {SETTINGS_GROUPS.map((group, index) => (
             <div key={group} role="group" aria-labelledby={`settings-group-${index}`}>
               <div id={`settings-group-${index}`} className="flex h-6 items-center px-2 text-[12px] text-faint">{group}</div>
+              {group === "Repositories" && (
+                <button type="button" aria-current={section === "projects" ? "page" : undefined} onClick={() => choose("projects")} className={navClass(section === "projects")}>
+                  <FolderPlus aria-hidden className="size-4 shrink-0" />
+                  <span className="truncate">{SETTINGS_SECTIONS.projects.title}</span>
+                </button>
+              )}
               {group === "Repositories" ? (
                 // One row a repository, its badge and name, opening its settings: no expander holding a single item.
                 repositories.length ? repositories.map((repository) => {

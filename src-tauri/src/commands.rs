@@ -1765,10 +1765,29 @@ pub fn project_start_defaults(parent: Option<String>) -> crate::project_start::S
     crate::project_start::defaults(parent.as_deref())
 }
 
-/// Quick start: a new empty Git repository at `parent/name`, returned as a path to add.
+/// "Create a project": a new Git repository at `parent/name` holding `template`'s
+/// files in one first commit on `main`, returned as a path to add.
 #[tauri::command]
-pub async fn project_create(parent: String, name: String) -> StartResult<String> {
-    tauri::async_runtime::spawn_blocking(move || crate::project_start::create_project(&parent, &name)).await.map_err(start_failure)?
+pub async fn project_create(parent: String, name: String, template: String) -> StartResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::project_start::create_project(&parent, &name, &template)).await.map_err(start_failure)?
+}
+
+/// The templates a project can start from: the built-in ones, then the reader's own.
+#[tauri::command]
+pub fn project_templates() -> StartResult<Vec<crate::project_templates::TemplateInfo>> {
+    crate::project_templates::list()
+}
+
+/// Keep the folder at `path` as a template for new projects.
+#[tauri::command]
+pub async fn project_template_add(path: String) -> StartResult<crate::project_templates::TemplateInfo> {
+    tauri::async_runtime::spawn_blocking(move || crate::project_templates::add(&path)).await.map_err(start_failure)?
+}
+
+/// Forget a template the reader added; its folder is left as it is.
+#[tauri::command]
+pub fn project_template_remove(id: String) -> StartResult<()> {
+    crate::project_templates::remove(&id)
 }
 
 // ------------------------------------------------------------------ sessions

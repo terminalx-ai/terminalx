@@ -71,8 +71,9 @@ describe("settings in the command palette", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(screen.getAllByRole("group").map((group) => group.getAttribute("aria-labelledby"))).toEqual(["palette-group-settings"]);
     const results = screen.getAllByRole("option");
-    expect(results).toHaveLength(14);
+    expect(results).toHaveLength(15);
     expect(screen.getByRole("option", { name: /^Environment/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /^Projects/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /^Repositories/ })).toBeTruthy();
     fireEvent.keyDown(input, { key: "ArrowUp" });
     expect(input.getAttribute("aria-activedescendant")).toBe(results.at(-1)!.id);

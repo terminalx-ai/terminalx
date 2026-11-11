@@ -21,3 +21,13 @@ it("announces the project that every start action attaches, with its path", asyn
   expect(result.current).toMatchObject({ path: "/repos/server", name: "server" });
   expect(startSessionIn).toHaveBeenCalledWith("/repos/server", null);
 });
+
+it("adds and announces the project without opening a session when asked not to", async () => {
+  startSessionIn.mockClear();
+  addProject.mockResolvedValue({ path: "/repos/quiet", name: "quiet" });
+  const { result } = renderHook(() => useProjectAdded());
+  await act(async () => { await attachProject("/repos/quiet", { openSession: false }); });
+  expect(addProject).toHaveBeenCalledWith("/repos/quiet");
+  expect(result.current).toMatchObject({ path: "/repos/quiet", name: "quiet" });
+  expect(startSessionIn).not.toHaveBeenCalled();
+});

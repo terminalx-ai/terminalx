@@ -74,7 +74,7 @@ import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
-import { openLocalProject } from "@/lib/projectStart";
+import { onTemplateSettingsRequest, openLocalProject } from "@/lib/projectStart";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { REPO_URL, repoFile } from "@/lib/repo";
 import { workspaceKey, branchSessionsAsTabs } from "@/lib/tabLayouts";
@@ -187,6 +187,8 @@ export function AppShell() {
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }), []);
+  // "Add your own templates in Settings › Projects", from Create a project.
+  useEffect(() => onTemplateSettingsRequest(() => openSettings("projects.templates")), [openSettings]);
   const openAccountSettings = useCallback(() => {
     setSettingsTab("account");
     setSettingsOpen(true);
