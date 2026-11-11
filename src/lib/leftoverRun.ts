@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { listenForArchiveScripts } from "@/lib/archiveScript";
 import { api, errorMessage } from "@/lib/api";
 import { holdQuit } from "@/lib/quitWarning";
 import type { Leftover, LeftoverRemoval } from "@/types/session";
@@ -14,6 +15,7 @@ export interface LeftoverRunItem {
   /** What the row is called in the list. */
   label: string;
   sizeBytes: number;
+  path?: string;
 }
 
 export interface LeftoverRun {
@@ -92,13 +94,14 @@ export function leftoverTotals(current: LeftoverRun): LeftoverTotals {
 export async function startLeftoverRun(chosen: { item: Leftover; label: string }[]): Promise<LeftoverRun | null> {
   if (run?.status === "running" || !chosen.length) return null;
   const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  let mine: LeftoverRun = { status: "running", items: chosen.map(({ item, label }) => ({ id: item.id, label, sizeBytes: item.sizeBytes })), checking: true, current: null, finished: [], error: null, seen: false };
+  let mine: LeftoverRun = { status: "running", items: chosen.map(({ item, label }) => ({ id: item.id, label, sizeBytes: item.sizeBytes, path: item.kind === "worktree" ? item.paths[0] : undefined })), checking: true, current: null, finished: [], error: null, seen: false };
   const update = (patch: Partial<LeftoverRun>) => {
     mine = { ...mine, ...patch };
     set(mine);
   };
   set(mine);
   const release = holdQuit("Leftovers are still being deleted. If you quit now, the one being deleted may be left half removed, and the ones after it are not deleted.");
+  await listenForArchiveScripts();
   const unlisten = await api.onLeftoverProgress(id, (progress) => {
     if (progress.kind === "checking") update({ checking: true, current: null });
     else if (progress.kind === "started") update({ checking: false, current: progress.id });

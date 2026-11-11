@@ -27,31 +27,31 @@ try {
       const settings = page.getByRole("main", { name: "Settings", exact: true });
       const nav = settings.getByRole("navigation", { name: "Settings sections" });
       await nav.waitFor();
-      await page.waitForFunction((count) => document.querySelectorAll('nav[aria-label="Settings sections"] [aria-expanded]').length === count, projectCount);
+      // A row a repository (its badge and name, the path as its title), opening its settings directly.
+      await page.waitForFunction((count) => document.querySelectorAll('nav[aria-label="Settings sections"] button[title]').length === count, projectCount);
       const groups = await nav.getByRole("group").evaluateAll((elements) => elements.map((element) => document.getElementById(element.getAttribute("aria-labelledby"))?.textContent));
       const checks = {
         "five named groups in order": JSON.stringify(groups) === JSON.stringify(["Personal", "Agents & environment", "Repositories", "Admin", "More"]),
-        "all repositories appear": await nav.getByRole("button", { expanded: false }).count() === projectCount,
+        "all repositories appear": await nav.getByRole("group", { name: "Repositories", exact: true }).getByRole("button").count() === projectCount,
       };
       const repositories = nav.getByRole("group", { name: "Repositories", exact: true });
       const first = repositories.getByRole("button", { name: "A repository with a very long name that should be truncated", exact: true });
       await first.click();
-      await repositories.getByRole("button", { name: "Workspace cleanup", exact: true }).click();
       const cleanup = settings.getByRole("radiogroup", { name: "Delete merged workspaces of A repository with a very long name that should be truncated" });
       await cleanup.getByRole("radio", { name: "Off", exact: true }).click();
       await page.waitForFunction(() => window.__PW_MERGED__.settings.projects["/repos/p0"] === false);
       checks["repository control changes the existing per-project key"] = await page.evaluate(() => window.__PW_MERGED__.settings.enabled && window.__PW_MERGED__.settings.projects["/repos/p1"] === false);
-      checks["the opened repository is current"] = await repositories.getByRole("button", { name: "Workspace cleanup", exact: true }).getAttribute("aria-current") === "page";
+      checks["the opened repository is current"] = await first.getAttribute("aria-current") === "page";
       const layout = await settings.evaluate((root) => {
         const nav = root.querySelector("nav");
-        const column = root.querySelector(":scope > div > section");
+        const column = root.querySelector("section[aria-labelledby]");
         const n = nav.getBoundingClientRect();
         const c = column.getBoundingClientRect();
         const outside = [...nav.querySelectorAll("button")].filter((button) => {
           const b = button.getBoundingClientRect();
           return b.width && (b.left < n.left - 1 || b.right > n.right + 1);
         });
-        const longName = nav.querySelector("[aria-expanded] span");
+        const longName = nav.querySelector("button[title] span");
         return { navScrolls: nav.scrollHeight > nav.clientHeight, separateColumns: n.right <= c.left + 1,
           pageOverflow: root.scrollWidth > root.clientWidth + 1, contentOverflow: column.scrollWidth > column.clientWidth + 1,
           outside: outside.length, nameTruncates: longName.scrollWidth > longName.clientWidth,

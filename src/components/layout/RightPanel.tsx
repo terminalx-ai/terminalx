@@ -13,7 +13,7 @@ import { TerminalDock } from "@/components/terminal/TerminalDock";
 import { ComputerPanel } from "@/components/computer/ComputerPanel";
 import { BrowserPanel } from "@/components/browser/BrowserPanel";
 import { openWorkspaceDelete, openWorkspaceRemove } from "@/lib/dialogs";
-import { api } from "@/lib/api";
+import { api, type PullRequest } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { AgentEvent } from "@/types/events";
@@ -54,6 +54,8 @@ export function RightPanel({
   workingTree = false,
   sessionId,
   mentionTabId,
+  onFixErrors,
+  fixBusy,
   statusKey = "",
   rootName,
   labelMode,
@@ -83,6 +85,8 @@ export function RightPanel({
   workingTree?: boolean;
   sessionId?: string;
   mentionTabId?: string | null;
+  onFixErrors?: (pr: PullRequest) => Promise<unknown>;
+  fixBusy?: boolean;
   statusKey?: string;
   rootName?: string;
   labelMode?: "base" | "branch";
@@ -241,8 +245,9 @@ export function RightPanel({
         </WithTooltip>
       </div>
       {isGit && onBranch && (
-        // Branch's two views, drawn like the Browser's and Computer's second row and level with the chat's tabs.
-        <div role="tablist" aria-label="Branch" className="flex h-9 shrink-0 items-stretch gap-1 border-b border-hairline px-2 text-xs" data-testid="branch-views">
+        // Branch's two views, drawn like the Browser's and Computer's second row and level with the chat's tabs: those
+        // are 36px tall with a 1px rule under them, so this row is 37px with its rule inside.
+        <div role="tablist" aria-label="Branch" className="flex h-[37px] shrink-0 items-stretch gap-1 border-b border-hairline px-2 text-xs" data-testid="branch-views">
           {BRANCH_VIEWS.map((view) => (
             <WithTooltip key={view.id} label={view.label} shortcut={view.shortcut}>
               <button
@@ -300,6 +305,8 @@ export function RightPanel({
                 branch={branchPicture ? { cwd, active: tab === "branch", version, sessionId, from } : null}
                 pr={{
                   sessionId,
+                  onFixErrors,
+                  fixBusy,
                   cwd,
                   source: gitSource,
                   branch: resolvedBranch,
@@ -320,6 +327,8 @@ export function RightPanel({
             </div>
             <div className={cn("h-full", tab !== "changes" && "hidden")}>
               <ChangesPanel
+                reviewTabId={readOnlyReason ? null : mentionTabId}
+                sessionId={sessionId}
                 key={refreshTick}
                 cwd={cwd}
                 source={gitSource}

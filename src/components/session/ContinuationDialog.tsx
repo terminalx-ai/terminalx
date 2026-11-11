@@ -2,6 +2,7 @@ import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
 import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
 import { useSessionStore } from "@/lib/sessions";
 import { useEffect, useRef, useState } from "react";
+import { cn } from "@/lib/cn";
 import { GitBranch, LoaderCircle } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -12,6 +13,9 @@ import { loadModels, useModels } from "@/lib/models";
 import { usePrefs } from "@/lib/prefs";
 import { handoffStart, launchSettingsOf, useSessionAgent, type LaunchSettings } from "@/lib/useSessionAgent";
 import { SessionAgentControls } from "./SessionAgentControls";
+import { PipelineLaunchControls } from "./PipelineLaunchControls";
+import { HandoffScene } from "./HandoffScene";
+import { Fold } from "@/components/ui/Fold";
 import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/session";
 
 /**
@@ -33,11 +37,15 @@ import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/sessi
  * does take it, even after the dialog said it could not confirm it, the
  * dialog closes as it would have on success (#662).
  */
-export function ContinuationDialog({ session, source, into, onClose, onLateError, onDelivered }: {
+export function ContinuationDialog({ session, source, into, initialHarness, reviewPrompt, onClose, onLateError, onDelivered }: {
   session: SessionEntry; source: TabEntry; onClose: () => void;
   /** The new session took the handoff, just before the dialog closes: where it went (#815). */
   onDelivered?: (to: { sessionId: string; tabId: string }) => void;
   into?: { project: Project; worktree: boolean };
+  /** The installed counterpart selected by a handoff entry point. */
+  initialHarness?: string;
+  /** A finished turn's review starts immediately, without taking over its pipeline. */
+  reviewPrompt?: string;
   onLateError?: (error: string) => void;
 }) {
   const [context, setContext] = useState<ContinuationContext | null>(null);
@@ -58,13 +66,17 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   const [inInput, setInInput] = useState<{ seq: number; pressed: boolean } | null>(null);
   const [pressing, setPressing] = useState(false);
   const startingRef = useRef(false);
+  const autoStarted = useRef(false);
   const preparedPrompt = useRef<string | undefined>(undefined);
   const active = useRef(true);
   const [chosen, setChosen] = useState<LaunchSettings | null>(null);
   const models = useModels();
   const prefs = usePrefs();
   // Until the reader changes something, the source conversation's own settings, as valid as they can be made.
-  const value = chosen ?? (loading ? null : handoffStart(launchSettingsOf(source), providers, models, prefs));
+  const value = chosen ?? (loading ? null : handoffStart(
+    { ...launchSettingsOf(source), ...(reviewPrompt ? { permissionMode: "plan" } : {}) },
+    initialHarness ? providers.filter((provider) => provider.id === initialHarness) : providers, models, prefs,
+  ));
   const selection = useSessionAgent(providers, true, null, value ? { value, onChange: setChosen } : undefined);
   const store = useSessionStore();
   const project = into?.project ?? store.projects.find((project) => project.path === session.projectPath);
@@ -78,7 +90,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   const carried = held?.role === "author" && held.pipeline.state !== "merged" ? { autoMerge: held.pipeline.autoMerge, resolveConflicts: held.pipeline.resolveConflicts ?? false } : "session";
   const pipelineLaunch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !project || (into && !worktree) ? "Choose a worktree branch to automate this session." : undefined, undefined, carried);
   const settings = value && selection.harness
-    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(!into || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts ? { pipeline: pipelineLaunch.value } : {}) }
+    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(!reviewPrompt && (!into || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts) ? { pipeline: pipelineLaunch.value } : {}) }
     : null;
 
   useEffect(() => {
@@ -123,7 +135,14 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
     setContext(null);
     setProviders([]);
     // The model list too, so the source's model is checked against it before anything can start.
-    Promise.allSettled([agent.prepareContinuation(session.id, source.id), api.listHarnesses(), loadModels()]).then(([prepared, detected]) => {
+    // A turn review needs only that turn's saved content; no full-history export.
+    const prepare = reviewPrompt ? Promise.resolve<ContinuationContext>({
+      sessionId: session.id, tabId: source.id, title: source.title || session.title,
+      cwd: session.cwd, provider: source.harness, providerSessionId: source.providerSessionId ?? null,
+      sourceActive: false, transcriptPath: null, fullUnavailableReason: null,
+      lastPrompt: null, lastUpdate: null, partialCapture: null,
+    }) : agent.prepareContinuation(session.id, source.id);
+    Promise.allSettled([prepare, api.listHarnesses(), loadModels()]).then(([prepared, detected]) => {
       if (canceled) return;
       const errors: string[] = [];
       if (prepared.status === "fulfilled") setContext(prepared.value);
@@ -131,12 +150,13 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
       if (detected.status === "fulfilled") {
         setProviders(detected.value);
         if (!detected.value.some((p) => p.available)) errors.push("No installed, available providers were found. Install Claude Code or Codex, then retry.");
+        else if (initialHarness && !detected.value.some((p) => p.id === initialHarness && p.available)) errors.push("The other agent is no longer installed or available. Retry after installing it.");
       } else errors.push(`Could not detect providers: ${errorMessage(detected.reason)}`);
       setError(errors.join(" ") || null);
       setLoading(false);
     });
     return () => { canceled = true; };
-  }, [session.id, source.id, attempt]);
+  }, [session.id, source.id, attempt, initialHarness, reviewPrompt]);
 
   const start = async () => {
     if (startingRef.current || !context || !settings || sent) return;
@@ -146,7 +166,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
     setProgress(null);
     setError(null);
     try {
-      const prompt = preparedPrompt.current ?? continuationPrompt(context, mode, into?.project.path);
+      const prompt = preparedPrompt.current ?? reviewPrompt ?? continuationPrompt(context, mode, into?.project.path);
       preparedPrompt.current = prompt;
       const created = (made: Launched) => {
         launched.current = made;
@@ -155,7 +175,9 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
       const confirming = () => { if (active.current) setDelivering(true); };
       const result = into
         ? await moveChatToProject({ id: session.id, title: source.title?.trim() || session.title }, { projectPath: into.project.path, worktree }, settings, prompt, created, destination, confirming)
-        : await launchContinuation(context, settings, prompt, created, destination, confirming);
+        : reviewPrompt
+          ? await launchContinuation(context, settings, prompt, created, destination, confirming, "review")
+          : await launchContinuation(context, settings, prompt, created, destination, confirming);
       if (!active.current) {
         if (result.stage !== "delivered") onLateError?.(result.error);
         return;
@@ -177,6 +199,14 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
       if (active.current) setStarting(false);
     }
   };
+  const readyReview = !!reviewPrompt && !loading && !error && !!settings;
+  useEffect(() => {
+    if (!active.current || !readyReview || autoStarted.current) return;
+    autoStarted.current = true;
+    void start();
+    // Only the transition to a prepared review schedules a launch. Later
+    // settings/delivery renders must not schedule another; retries are explicit.
+  }, [readyReview]); // eslint-disable-line react-hooks/exhaustive-deps
   const pressEnter = async () => {
     if (!destination || !inInput || pressing) return;
     setPressing(true);
@@ -203,60 +233,83 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
     nudged: `Pressed Enter again: ${agentName} had not taken the handoff yet…`,
     stalled: `Holding off: ${agentName} is not reading its input…`,
   }[progress ?? "body_written"];
-  const sourceActive = context?.sourceActive || source.status === "in_progress" || source.status === "waiting";
   const canClose = !starting || !!destination;
   const locked = starting || !!destination;
   const isGit = into?.project.kind !== "folder";
   return (
     <Dialog open onOpenChange={(open) => { if (!open && canClose) close(); }}>
-      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto" showClose={canClose} onEscapeKeyDown={(e) => e.stopPropagation()}>
+      <DialogContent width="max-w-[34rem]" className="max-h-[calc(100vh-2rem)] overflow-y-auto p-6" showClose={canClose} onEscapeKeyDown={(e) => e.stopPropagation()}>
+        {/* Only what the reader decides here: which agent picks it up and how much context it carries, both in
+            view; Autopilot, set less often, is folded away. Where it runs and what it came from are the session they are in; the rest is said
+            once, in the line under the title. */}
+        <HandoffScene className="mb-8 mt-6" />
         <DialogHeader>
-          <DialogTitle className="text-base font-semibold">{into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
-          <DialogDescription className="text-sm text-muted-foreground">
-            {into
-              ? `Start a new session in ${into.project.name} with context from this chat. The chat is archived once the new session has started.`
-              : "Start a fresh agent conversation in this workspace with context from the current conversation."}
+          <DialogTitle className="text-base font-semibold">{reviewPrompt ? "Second opinion" : into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
+          <DialogDescription className="text-[13px] text-muted-foreground">
+            {reviewPrompt ? `Share the selected turn's prompt, answer and recorded file diffs with ${agentName} for review in a new tab in this workspace.` : into
+              ? `Opens a new session in ${into.project.name} that carries over this chat's context. This chat is archived once it starts.`
+              : "Opens a new conversation that carries over this chat's context, so the agent picks up where it left off. This chat stays open."}
           </DialogDescription>
         </DialogHeader>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-          <dt className="text-muted-foreground">Source conversation</dt><dd className="break-words">{context?.title ?? source.title ?? session.title}</dd>
-          <dt className="text-muted-foreground">Original provider</dt><dd>{providers.find((p) => p.id === source.harness)?.name ?? source.harness}</dd>
-          {into ? <>
-            <dt className="text-muted-foreground">Project</dt><dd className="break-words">{into.project.name}</dd>
-            <dt className="text-muted-foreground">Folder</dt><dd className="break-all font-mono">{into.project.path}</dd>
-          </> : <>
-            <dt className="text-muted-foreground">Working directory</dt><dd className="break-all font-mono">{context?.cwd ?? session.cwd}</dd>
-          </>}
-        </dl>
-        {into ? (
-          isGit ? (
-            <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-              <Switch size="sm" checked={worktree} onCheckedChange={setWorktree} disabled={locked} aria-label="Start on a new branch in a worktree" />
-              <span className="flex items-center gap-1"><GitBranch className="size-3.5" />{worktree ? "On a new branch (worktree)" : "In its main checkout, shared with its other conversations"}</span>
-            </label>
-          ) : <p className="mt-3 text-xs text-muted-foreground">In the folder · no Git</p>
-        ) : <p className="mt-3 text-xs text-muted-foreground">The source conversation stays open. Both conversations share the same branch, files, and uncommitted changes.</p>}
-        {sourceActive && <p role="status" className="mt-2 text-xs text-muted-foreground">Source work may still be progressing. This uses available saved context without interrupting the source turn or answering its pending permissions.</p>}
-        {loading ? <p role="status" className="mt-4 flex items-center gap-2 text-sm"><LoaderCircle className="size-4 animate-spin" />Preparing context and detecting providers…</p> : <>
-          <div role="group" aria-label="New session settings" className="mt-4 flex flex-col gap-1.5">
-            <span className="text-sm font-medium">New session</span>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <SessionAgentControls selection={selection} pipeline={project?.kind !== "folder" && project ? pipelineLaunch : undefined} disabled={locked} />
+        {reviewPrompt && !loading && settings && <p role="status" className="mt-4 text-xs text-muted-foreground" data-testid="review-settings">
+          {agentName} · {selection.model?.label ?? (settings.model || "Agent default")} · Plan (read-only)
+        </p>}
+        {into && (isGit ? (
+          <label className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+            <Switch size="sm" checked={worktree} onCheckedChange={setWorktree} disabled={locked} aria-label="Start on a new branch in a worktree" />
+            <span className="flex items-center gap-1"><GitBranch className="size-3.5" />{worktree ? "On a new branch (worktree)" : "In its main checkout, shared with its other conversations"}</span>
+          </label>
+        ) : <p className="mt-4 text-xs text-muted-foreground">In the folder · no Git</p>)}
+        {/* While it reads the context, the same rows with placeholders where the pills will be: the dialog opens at
+            its final height and nothing moves when they arrive. */}
+        {loading && reviewPrompt ? <p role="status" className="mt-5 flex items-center gap-2 text-xs text-faint"><LoaderCircle className="size-3 animate-spin" />Preparing the review…</p> : loading ? <div className="mt-5 flex flex-col gap-2" data-testid="continuation-loading">
+          <span className="flex items-center gap-2 text-xs font-medium text-foreground">Agent<span role="status" className="flex items-center gap-1.5 font-normal text-faint"><LoaderCircle className="size-3 animate-spin" />Preparing context…</span></span>
+          <div className="flex gap-1.5" aria-hidden>
+            {/* In proportion to the pills they stand for (agent, model, effort, permissions), not fixed widths. */}
+            {[8, 6, 4, 10].map((grow) => <span key={grow} className="h-8 basis-0 animate-pulse-soft rounded-md bg-secondary" style={{ flexGrow: grow }} />)}
+          </div>
+          <span className="mt-4 mb-2 text-xs font-medium text-foreground">Context</span>
+          <div className="h-8 animate-pulse-soft rounded-md bg-veil-raised" aria-hidden />
+          <p className="text-xs text-faint" aria-hidden>&nbsp;</p>
+          <span className="mt-3 h-0" aria-hidden />
+        </div> : !reviewPrompt && <>
+          {/* Two rows of the same make: a label, then controls across the full width at one height, so the
+              pills and the context switch line up edge to edge. */}
+          <div role="group" aria-label="New session settings" className="mt-5 flex flex-col gap-2">
+            <span className="text-xs font-medium text-foreground">Agent</span>
+            <div className="flex min-w-0 flex-nowrap items-center gap-1.5">
+              <SessionAgentControls selection={selection} disabled={locked} fill />
             </div>
           </div>
-          <fieldset disabled={locked} className="mt-4 space-y-3">
-            <legend className="mb-2 text-sm font-medium">Context mode</legend>
-            <label className="flex items-start gap-2 text-sm"><input type="radio" name="continuation-mode" value="focused" checked={mode === "focused"} onChange={() => setMode("focused")} className="mt-1" /><span>Focused handoff (Recommended)<span className="mt-1 block text-xs text-muted-foreground">Start with recent status and the current workspace; read older history only when needed. No extra AI summary step.</span></span></label>
-            <label className="flex items-start gap-2 text-sm"><input type="radio" name="continuation-mode" value="full" checked={mode === "full"} disabled={!context?.transcriptPath} aria-describedby="full-context-help" onChange={() => setMode("full")} className="mt-1" /><span>Full session transcript<span id="full-context-help" className="mt-1 block text-xs text-muted-foreground">{context?.transcriptPath ? "Read the complete saved history before continuing. This can take longer and consume more context, plan usage, or API credits." : context?.fullUnavailableReason ?? "Complete transcript availability could not be established."}</span></span></label>
+          <fieldset disabled={locked} className="mt-4 flex flex-col gap-2">
+            <legend className="mb-2 text-xs font-medium text-foreground">Context</legend>
+            <div className="grid h-8 grid-cols-2 gap-0.5 rounded-md bg-veil-raised p-0.5 text-xs">
+              <Choice name="continuation-mode" checked={mode === "focused"} onChange={() => setMode("focused")} label="Recent context" />
+              <Choice name="continuation-mode" checked={mode === "full"} disabled={!context?.transcriptPath} onChange={() => setMode("full")} label="Full transcript" />
+            </div>
+            <p id="full-context-help" className="text-xs text-faint">
+              {mode === "focused"
+                ? "Recent status and the workspace; older history is read only when needed."
+                : "Reads the whole saved history first: slower, and uses more context."}
+              {!context?.transcriptPath && <> <span>{context?.fullUnavailableReason ?? "The full transcript is not available."}</span></>}
+              {context?.partialCapture && " Older content is left out."}
+            </p>
           </fieldset>
-          {context?.partialCapture && <p className="mt-3 text-xs text-muted-foreground">Focused mode will use a bounded partial capture of recent saved conversation history. Older content is omitted.</p>}
+          {/* The one setting left to fold away, so the fold is named for it rather than "More settings". */}
+          {project?.kind !== "folder" && project && (
+            <Fold label="Autopilot" className="mt-3" testId="continuation-autopilot">
+              <div className="pt-2 pb-1">
+                <PipelineLaunchControls launch={pipelineLaunch} disabled={locked} plain />
+              </div>
+            </Fold>
+          )}
         </>}
         {starting && delivering && <p role="status" className="mt-4 text-sm text-muted-foreground">{progress ? delivery : `Waiting for ${agentName} to start…`} You can open it to follow progress; do not send the handoff again.</p>}
         {inInput && <p role="status" className="mt-4 text-sm">{inInput.pressed
           ? `Pressed Enter. Waiting for ${agentName} to take the handoff… If nothing happens, open the new session and check its terminal.`
           : `The handoff is in ${agentName}'s input but has not been sent yet. Press Enter to send it.`}</p>}
         {error && <p role="alert" className="mt-4 text-sm text-destructive">{error}</p>}
-        <DialogFooter>
+        <DialogFooter className="mt-6">
           <Button variant="ghost" disabled={!canClose} onClick={close}>{destination ? "Open New Session" : "Cancel"}</Button>
           {!loading && (!context || !settings) && <Button variant="secondary" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>}
           {inInput && <Button disabled={pressing} onClick={() => void pressEnter()}>{pressing ? <><LoaderCircle className="size-4 animate-spin" />Pressing Enter…</> : inInput.pressed ? "Press Enter Again" : "Press Enter"}</Button>}
@@ -264,5 +317,15 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** One side of a two-way choice drawn as a segmented control; a real radio underneath. */
+function Choice({ name, checked, disabled, onChange, label }: { name: string; checked: boolean; disabled?: boolean; onChange: () => void; label: string }) {
+  return (
+    <label className={cn("flex cursor-pointer items-center justify-center rounded-sm text-muted-foreground transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring/40", checked && "bg-card text-foreground shadow-sm", disabled && "cursor-not-allowed opacity-50")}>
+      <input type="radio" name={name} checked={checked} disabled={disabled} onChange={onChange} aria-describedby="full-context-help" className="sr-only" />
+      {label}
+    </label>
   );
 }

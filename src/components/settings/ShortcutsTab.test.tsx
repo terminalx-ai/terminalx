@@ -32,6 +32,7 @@ describe("Settings → Shortcuts", () => {
     expect(within(row("session.interrupt")).getByRole("button", { name: "Interrupt the running turn: Esc. Change" })).toBeTruthy();
     // Ending the agent's process has no keys until the reader gives it some (#427).
     expect(within(row("session.stop")).getByRole("button", { name: "Stop the session (ends the agent's process): no shortcut. Set one" })).toBeTruthy();
+    expect(within(row("composer.sendAlternate")).getByRole("button", { name: "Send the other way (hold or interrupt): Ctrl+⏎. Change" })).toBeTruthy();
     // The characters typed in the composer are shown, not offered for change.
     expect(row("composer.mention").textContent).toContain("@");
     expect(within(row("composer.mention")).queryByRole("button")).toBeNull();
@@ -187,8 +188,10 @@ describe("Settings → Shortcuts", () => {
   it("records Escape and Return for a key that lives in a context", () => {
     render(<ShortcutsTab />);
     record("composer.send", { key: "Enter", code: "Enter", ctrlKey: true });
-    fireEvent.click(within(editor()).getByRole("button", { name: "Save" }));
+    expect(within(editor()).getByRole("alert").textContent).toContain("Send the other way");
+    fireEvent.click(within(editor()).getByRole("button", { name: "Replace" }));
     expect(bindingsOf("composer.send")).toEqual(["mod+enter"]);
+    expect(bindingsOf("composer.sendAlternate")).toEqual([]);
     record("session.interrupt", { key: "Escape", code: "Escape", shiftKey: true });
     fireEvent.click(within(editor()).getByRole("button", { name: "Save" }));
     expect(bindingsOf("session.interrupt")).toEqual(["shift+escape"]);

@@ -167,15 +167,10 @@ describe("buildTranscript", () => {
     expect(bDead?.kind === "tool" && bDead.call.abandoned).toBe(true);
   });
 
-  it("groups runs of the same tool", () => {
-    const items = groupWork([
-      { kind: "tool", call: { callId: "1", name: "Read", toolType: "file_read", input: { file_path: "a" }, seq: 1 }, key: "1" },
-      { kind: "tool", call: { callId: "2", name: "Read", toolType: "file_read", input: { file_path: "b" }, seq: 2 }, key: "2" },
-      { kind: "text", text: "x", key: "t", seq: 3 },
-      { kind: "tool", call: { callId: "3", name: "Read", toolType: "file_read", input: {}, seq: 4 }, key: "3" },
-    ]);
-    expect(items[0].kind).toBe("tool_group");
-    expect(items[2].kind).toBe("tool");
+  it("groups long runs of the same tool, and keeps a row per step in a short one", () => {
+    const read = (id: string, seq: number) => ({ kind: "tool" as const, call: { callId: id, name: "Read", toolType: "file_read" as const, input: { file_path: id }, seq }, key: id });
+    const items = groupWork([read("1", 1), read("2", 2), read("3", 3), read("4", 4), { kind: "text", text: "x", key: "t", seq: 5 }, read("5", 6), read("6", 7), read("7", 8)]);
+    expect(items.map((item) => item.kind)).toEqual(["tool_group", "text", "tool", "tool", "tool"]);
   });
 
   // #775: why a card is up is the app's to say, apart from the agent's words; a call an agent's safety check held keeps a row that says so.
@@ -883,4 +878,24 @@ describe("a message that never went, or went with others", () => {
     expect(t.turns).toHaveLength(1);
     expect(t.turns[0].prompt).toMatchObject({ seq: first.seq, sent: "also lint\n\nand run the tests" });
   });
+});
+
+it("preserves completed usage and the turn's model across later model changes and replay", () => {
+  const usage = { inputTokens: 100, outputTokens: 80, cacheReadTokens: 900, cacheWriteTokens: 20, costUsd: 0.04, model: "claude-sonnet-4-6" };
+  const events = [
+    ev({ type: "user_message", text: "work", queued: false }),
+    ev({ type: "usage_update", contextUsed: 90000, contextMax: 100000, model: usage.model }),
+    ev({ type: "context_compacted", preTokens: 90000, postTokens: 12000 }),
+    ev({ type: "turn_completed", status: "ok", authFailed: false, durationMs: 2000, usage }),
+    ev({ type: "usage_update", model: "claude-opus-4-6" }),
+  ];
+  const transcript = buildTranscript(events, false);
+  expect(transcript.contextUsed).toBe(12000);
+  expect(transcript.turns[0].usage).toEqual(usage);
+  expect(transcript.turns[0].model).toBe(usage.model);
+  expect(transcript.turns[0].agent).toBe(events[0].harness);
+  const replay = buildTranscript(events.filter((event) => event.payload.type !== "usage_update"), false);
+  expect(replay.turns[0].usage).toEqual(usage);
+  expect(replay.turns[0].model).toBe(usage.model);
+  expect(replay.model).toBe(usage.model);
 });

@@ -13,3 +13,9 @@ describe("tokenAtCaret", () => {
     expect(tokenAtCaret("@", 1)).toEqual({ kind: "mention", start: 0, query: "" });
   });
 });
+
+it("recognizes PR numbers, titles and authors at the caret, without opening for embedded hashes", () => {
+  for (const query of ["", "12", "parser", "alice"]) expect(tokenAtCaret(`Review #${query}`, 8 + query.length)).toEqual({ kind: "pr", start: 7, query });
+  expect(tokenAtCaret("sha#12", 6)).toBeNull();
+  expect(tokenAtCaret("#12 rest", 3)).toEqual({ kind: "pr", start: 0, query: "12" });
+});

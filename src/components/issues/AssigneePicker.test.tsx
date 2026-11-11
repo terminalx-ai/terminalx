@@ -39,6 +39,14 @@ function Header({ start, viewer = null, onChange }: { start: IssueDetails; viewe
 
 const writes = () => issues.calls.filter((call) => call.command === "issue_set_assignees").map((call) => call.args.assignees);
 const trigger = () => screen.getByRole("button", { name: /^(Assignees:|Assign$)/ });
+// The label is optimistic. A following click must wait for the provider's
+// reply too, otherwise it can land on the disabled picker and be ignored.
+async function expectSavedAssignees(label: string) {
+  await waitFor(() => {
+    expect(trigger().getAttribute("aria-label")).toBe(label);
+    expect(trigger().querySelector(".animate-spin")).toBeNull();
+  });
+}
 async function openPicker() {
   fireEvent.click(trigger());
   return within(await screen.findByRole("listbox", { name: "Assignees" }));
@@ -55,7 +63,7 @@ describe("Linear: one assignee", () => {
     expect(list.getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual(["Sam", "Kim"]);
     expect(screen.getByRole("listbox").getAttribute("aria-multiselectable")).toBeNull();
     fireEvent.click(list.getByRole("option", { name: "Kim" }));
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: Kim"));
+    await expectSavedAssignees("Assignees: Kim");
     expect(screen.queryByRole("listbox")).toBeNull();
     expect(writes()).toEqual([["user-kim"]]);
 
@@ -63,14 +71,14 @@ describe("Linear: one assignee", () => {
     await openPicker();
     expect(screen.queryByRole("button", { name: "Assign to me" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Unassign" }));
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assign"));
+    await expectSavedAssignees("Assign");
     expect(trigger().textContent).toContain("Unassigned");
     expect(linear().assignees).toEqual([]);
 
     list = await openPicker();
     expect(screen.queryByRole("button", { name: "Unassign" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Assign to me" }));
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: Kim"));
+    await expectSavedAssignees("Assignees: Kim");
     expect(writes()).toEqual([["user-kim"], [], ["user-kim"]]);
   });
 
@@ -100,15 +108,15 @@ describe("GitHub: several assignees", () => {
     ]);
 
     fireEvent.click(list.getByRole("option", { name: "kim" }));
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: sam, alex, kim"));
+    await expectSavedAssignees("Assignees: sam, alex, kim");
     // The picker stays open for the next tick.
     fireEvent.click(list.getByRole("option", { name: "sam" }));
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: alex, kim"));
+    await expectSavedAssignees("Assignees: alex, kim");
     expect(writes()).toEqual([["sam", "alex", "kim"], ["alex", "kim"]]);
     expect(github().assignees.map((person) => person.id)).toEqual(["alex", "kim"]);
 
     fireEvent.click(screen.getByRole("button", { name: "Clear" }));
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assign"));
+    await expectSavedAssignees("Assign");
     expect(writes().at(-1)).toEqual([]);
   });
 
@@ -116,7 +124,7 @@ describe("GitHub: several assignees", () => {
     render(<Header start={structuredClone(github())} viewer={issues.viewer.github} />);
     await openPicker();
     fireEvent.click(screen.getByRole("button", { name: "Assign to me" }));
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: sam, alex, kim"));
+    await expectSavedAssignees("Assignees: sam, alex, kim");
     expect(screen.queryByRole("button", { name: "Assign to me" })).toBeNull();
   });
 
@@ -164,7 +172,7 @@ describe("GitHub: several assignees", () => {
     issues.fail("issue_set_assignees", "forbidden");
     fireEvent.click(list.getByRole("option", { name: "kim" }));
     expect((await screen.findByRole("alert")).textContent).toBe("Your account doesn't have permission to do that.");
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: sam, alex"));
+    await expectSavedAssignees("Assignees: sam, alex");
     expect(list.getByRole("option", { name: "kim" }).getAttribute("aria-selected")).toBe("false");
     // The issue was read again rather than trusted to be what was shown before.
     expect(issues.calls.at(-1)?.command).toBe("issue_details");
@@ -178,7 +186,7 @@ describe("GitHub: several assignees", () => {
     issues.issues.get("github:41")!.issue.assignees = [issues.options.github.members[0]];
     issues.fail("issue_set_assignees", "other");
     fireEvent.click(list.getByRole("option", { name: "kim" }));
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: sam"));
+    await expectSavedAssignees("Assignees: sam");
     expect(changes.at(-1)?.assignees.map((person) => person.id)).toEqual(["sam"]);
   });
 
@@ -200,10 +208,15 @@ describe("GitHub: several assignees", () => {
     fireEvent.click(list.getByRole("option", { name: "kim" }));
     expect(trigger().getAttribute("aria-label")).toBe("Assignees: sam, alex, kim");
     expect(list.getByRole("option", { name: "sam" }).getAttribute("aria-disabled")).toBe("true");
+    const clear = screen.getByRole("button", { name: "Clear" });
+    expect(clear.hasAttribute("disabled")).toBe(true);
+    // The optimistic label is already visible, but neither action may write yet.
     fireEvent.click(list.getByRole("option", { name: "sam" }));
+    fireEvent.click(clear);
     await waitFor(() => expect(answer).toBeDefined());
     await act(async () => answer());
     await waitFor(() => expect(list.getByRole("option", { name: "sam" }).getAttribute("aria-disabled")).toBeNull());
+    expect(clear.hasAttribute("disabled")).toBe(false);
     expect(writes()).toEqual([["sam", "alex", "kim"]]);
   });
 });
@@ -219,7 +232,7 @@ describe("writes from a fresh read", () => {
     issues.options.github.members.push(robin);
     github().assignees.push(robin);
     fireEvent.click(list.getByRole("option", { name: "kim" }));
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: sam, alex, robin, kim"));
+    await expectSavedAssignees("Assignees: sam, alex, robin, kim");
     expect(writes()).toEqual([["sam", "alex", "robin", "kim"]]);
 
     // Clear takes off those shown, and nobody added since.
@@ -227,7 +240,7 @@ describe("writes from a fresh read", () => {
     issues.options.github.members.push(lee);
     github().assignees.push(lee);
     fireEvent.click(screen.getByRole("button", { name: "Clear" }));
-    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: lee"));
+    await expectSavedAssignees("Assignees: lee");
     expect(writes().at(-1)).toEqual(["lee"]);
   });
 

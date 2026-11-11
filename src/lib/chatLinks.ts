@@ -181,7 +181,8 @@ function canOpenInternally(info: LocalPathInfo): boolean {
 /**
  * Sent from a link to a place in the transcript that is not drawn: a chat
  * draws only the turns near its view (#727), and the one the link is in looks
- * for the place among the rest. `detail` is the element id.
+ * for the place among the rest. `detail` is the element id, or `{ id, turnKey }`
+ * when transcript search knows which turn to mount without drawing the whole log.
  */
 export const SEEK_ANCHOR_EVENT = "terminalx:seek-anchor";
 
