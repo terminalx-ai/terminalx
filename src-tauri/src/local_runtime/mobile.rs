@@ -811,7 +811,7 @@ fn phone_send(manager: &crate::session::SessionManager, actor: &Actor, grant: &G
 /// method.
 fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Grant, method: &str, params: &Value) -> Option<Result<Value>> {
     const CHANGES: &[&str] = &["stop", "interrupt", "setModel", "setEffort", "setMode", "resendUnsent", "continue", "closeTab"];
-    const READS: &[&str] = &["tab", "models", "prepareContinuation"];
+    const READS: &[&str] = &["tab", "models", "prepareContinuation", "markRead"];
     if !CHANGES.contains(&method) && !READS.contains(&method) { return None; }
     Some((|| {
         let string = |key: &str| -> Result<&str> { params[key].as_str().with_context(|| format!("{key} must be a string")) };
@@ -831,6 +831,7 @@ fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Gra
                 "requestedPermissionMode": current.requested_permission_mode, "status": manager.status_of(session, tab),
                 "transport": current.transport,
             }),
+            "markRead" => { manager.mark_read(session, tab)?; Value::Null }
             "stop" => { manager.stop(session, tab)?; Value::Null }
             // Closing a tab as the desktop's tab strip does: its agent stops, its history stays.
             "closeTab" => { manager.close_tab(session, tab)?; Value::Null }

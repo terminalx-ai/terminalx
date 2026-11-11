@@ -420,6 +420,7 @@ pub(super) fn dispatch(
         }
         // Session controls (`sessionControls`): the desktop's own operations,
         // which the runtime checks against this device's grant again.
+        "session.markRead" => parse_params(params).and_then(|params: TabControlParams| connection.call("markRead", params.into_call())),
         "session.tab" => parse_params(params).and_then(|params: TabControlParams| connection.call("tab", params.into_call())),
         "models.list" => parse_params(params).and_then(|params: ModelsParams| connection.call("models", json!({"refresh": params.refresh}))),
         "session.prepareContinuation" => parse_params(params).and_then(|params: TabControlParams| connection.call("prepareContinuation", params.into_call())),
@@ -697,6 +698,7 @@ fn session_summaries() -> Result<Value> {
                 "title": tab.title,
                 "harness": tab.harness,
                 "status": tab.status,
+                "markedUnread": tab.marked_unread,
             })).collect::<Vec<_>>(),
         }));
     }

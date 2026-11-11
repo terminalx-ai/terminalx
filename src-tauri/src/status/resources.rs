@@ -534,7 +534,7 @@ mod tests {
     fn only_an_idle_bound_agent_can_be_stopped() {
         let pane = PaneInfo { id: "tab:t1".into(), pid: Some(400), running: true, cwd: "/work".into() };
         let rule = |status: index::TabStatus| {
-            let tab = index::TabEntry { transport: Default::default(),
+            let tab = index::TabEntry { marked_unread: false, transport: Default::default(),
                 id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
                 permission_mode: "auto".into(), provider_session_id: None, status,
                 created: String::new(), modified: String::new(), context_used: None, context_max: None,

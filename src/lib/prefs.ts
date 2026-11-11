@@ -21,6 +21,7 @@ export interface Prefs {
   shareOnboarded: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
+  colourLineCounts: boolean;
   panelOpen: boolean;
   /** A session's tabs as a row under the title bar. Off leaves them to the sidebar alone. */
   tabStrip: boolean;
@@ -152,6 +153,7 @@ const DEFAULTS: Prefs = {
   shareOnboarded: false,
   sidebarOpen: true,
   sidebarWidth: 268,
+  colourLineCounts: false,
   panelOpen: false,
   tabStrip: true,
   branchSessions: "tabs",
