@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { searchPanelOpen } from "@codemirror/search";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { closeAllEditors, getEditors, openFile } from "@/lib/editors";
+import { closeAllEditors, getEditors, openFile, type FileEditorEntry } from "@/lib/editors";
 import { setPrefs } from "@/lib/prefs";
 import { registerFileSource, type FileSource, type FileState } from "@/lib/workspaceFiles";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -76,7 +76,7 @@ afterEach(async () => {
 
 function open(rel = "src/main.rs") {
   const id = openFile(SESSION, `cloud://${KEY}`, rel, undefined, `cloud://${KEY}`, KEY);
-  return getEditors().editors.find((entry) => entry.id === id)!;
+  return getEditors().editors.find((entry): entry is FileEditorEntry => entry.id === id && entry.kind !== "diff" && entry.kind !== "pr")!;
 }
 
 function view(container: HTMLElement): EditorView {
@@ -194,7 +194,7 @@ describe("a cloud workspace file in the editor", () => {
     // Reopened, after an agent changed the file meanwhile.
     cloud.files.set("src/main.rs", { text: "fn main() { agent(); }\n", version: 5 });
     unregister = registerFileSource(cloud);
-    const again = render(<EditorPane entry={getEditors().editors.find((e) => e.id === entry.id)!} visible />);
+    const again = render(<EditorPane entry={getEditors().editors.find((e): e is FileEditorEntry => e.id === entry.id && e.kind !== "diff" && e.kind !== "pr")!} visible />);
     await ready(again.container);
     expect(view(again.container).state.doc.toString()).toBe("fn main() {}\n// unsaved\n");
     await screen.findByText("This file changed on disk while you were editing.");

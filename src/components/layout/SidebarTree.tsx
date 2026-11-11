@@ -25,6 +25,7 @@ import { RowActions } from "@/components/layout/RowActions";
 import {
   AgentTabRow,
   BrowserTabRow,
+  ReviewTabRow,
   DiffStats,
   GroupTitle,
   ItemTitle,
@@ -414,6 +415,9 @@ export function SessionNode({
                     }}
                     onClose={close(peer)}
                   />
+                ) : peer.kind === "review" ? (
+                  <ReviewTabRow nodeId={tabNodeId(peer)} panelId={tabPanelId(peer)} label={labelOf(peer)} kind={peer.editor.kind}
+                    dirty={peer.editor.dirty} pinned={peer.pinned} selected={isActive(peer)} onOpen={open(peer)} onClose={close(peer)} />
                 ) : peer.kind === "browser" ? (
                   <BrowserTabRow
                     nodeId={tabNodeId(peer)}

@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { dropEditors, getEditors } from "@/lib/editors";
 import type { GitSource } from "@/lib/gitSource";
 import type { CommitInfo } from "@/types/session";
 import type { AgentEvent } from "@/types/events";
@@ -308,24 +309,38 @@ it("shows no merge for a source that cannot tell, and a merge that cannot be rea
   expect(screen.getByText("All changes · 5 files")).toBeTruthy();
 });
 
+it("opens local Changes rows in centre tabs with the chosen range and rename path", async () => {
+  const source = fakeSource("local:/repo");
+  source.cloud = false;
+  source.changesBetween.mockResolvedValue([{ path: "new.ts", oldPath: "old.ts", status: "renamed", additions: 1, deletions: 1 }]);
+  render(<ChangesPanel source={source} cwd="/repo" sessionId="centre" events={[]} version={0} active live={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: /new.ts/ }));
+  expect(getEditors().editors.find((e) => e.sessionId === "centre")).toMatchObject({
+    kind: "diff", rel: "new.ts", name: "new.ts · All changes", diff: { range: { base: "merge-base", head: "snapshot" }, oldPath: "old.ts" },
+  });
+  expect(screen.queryByTestId("diff")).toBeNull();
+  expect(source.fileContentsAt).not.toHaveBeenCalled();
+  dropEditors((e) => e.sessionId === "centre");
+});
 
-it("opens discard from the list and diff header and confirms against the displayed base", async () => {
+// A local row opens its diff in a centre tab (PRO-218), whose header carries the same Discard (EditorSplit.test).
+it("discards from the list against the displayed base and opens the row's diff in a centre tab", async () => {
   const source = fakeSource("local:discard");
   source.cloud = false;
   source.canWrite = true;
   source.discard = vi.fn().mockResolvedValue(undefined);
-  render(<ChangesPanel source={source} events={events} version={2} active live={false} />);
+  render(<ChangesPanel source={source} sessionId="discard" events={events} version={2} active live={false} />);
   fireEvent.click(await screen.findByRole("button", { name: "Discard changes to src/turn.ts" }));
   expect(source.discard).not.toHaveBeenCalled();
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
-  fireEvent.click(screen.getByRole("button", { name: /Modified.*turn.ts/ }));
-  await screen.findByTestId("diff");
-  const discardButtons = screen.getAllByRole("button", { name: "Discard changes to src/turn.ts" });
-  expect(discardButtons).toHaveLength(2);
-  fireEvent.click(discardButtons[1]);
+  fireEvent.click(screen.getByRole("button", { name: "Discard changes to src/turn.ts" }));
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
   await waitFor(() => expect(source.discard).toHaveBeenCalledWith("src/turn.ts", "merge-base", undefined));
   expect(document.querySelector("button button")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /Modified.*turn.ts/ }));
+  expect(getEditors().editors.find((e) => e.sessionId === "discard")).toMatchObject({ kind: "diff", rel: "src/turn.ts", diff: { scope: "all" } });
+  expect(screen.queryByTestId("diff")).toBeNull();
+  dropEditors((e) => e.sessionId === "discard");
 });
 
 it("refetches file statistics with the whitespace choice in every scope", async () => {
