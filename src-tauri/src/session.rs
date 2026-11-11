@@ -4707,7 +4707,10 @@ impl SessionManager {
         // snapshot: the variables, the creator's own route for this agent
         // (PRO-18: its model, what its CLI takes on the command line) and
         // Codex's auth file. The tab is told what keeps a route from working.
-        let grant = crate::cloud_grants::launch_grant(&tab.harness, Path::new(&entry.cwd));
+        // On a Mac, the API key saved for the agent in Settings, if it uses
+        // one (`agent_keys`, PRO-306): a tab set to use a key this runtime
+        // does not have is not started on another login.
+        let grant = crate::agent_keys::launch_grant(&tab.harness, Path::new(&entry.cwd))?;
         if let Some(text) = grant.route.as_ref().and_then(|route| route.notice.clone()) {
             self.publish(rt, Payload::Status { text }, None);
         }
@@ -4726,6 +4729,7 @@ impl SessionManager {
         // The agent credentials read above; names to unset are dropped after
         // the login shell's profile has run.
         crate::cloud_grants::record_launch(&pane, &grant);
+        crate::agent_keys::record_launch(&pane, &tab.harness, &rt.session_id, &rt.tab_id);
         let mut unset = Vec::new();
         for (name, value) in grant.env {
             match value {
@@ -7194,6 +7198,10 @@ mod idle_tests;
 #[cfg(all(test, unix))]
 #[path = "session_send_tests.rs"]
 mod send_tests;
+
+#[cfg(all(test, unix))]
+#[path = "session_agent_key_tests.rs"]
+mod agent_key_tests;
 
 #[cfg(test)]
 static BEFORE_OPENCODE_HTTP: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);

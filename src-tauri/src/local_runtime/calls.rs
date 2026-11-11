@@ -37,6 +37,10 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 None => Value::Null,
             });
         }
+        // The tabs whose agent runs, and which keep a login older than new tabs get (PRO-306).
+        if method == "agentLoginTabs" {
+            return Ok(serde_json::to_value(crate::agent_keys::running(string(&params, "harness")?))?);
+        }
         if method == "busyMany" {
             let ids: Vec<String> = serde_json::from_value(params["ids"].clone())?;
             if ids.len() > 4096 || ids.iter().any(|id| id.is_empty() || id.len() > 256) { bail!("invalid pane list"); }
