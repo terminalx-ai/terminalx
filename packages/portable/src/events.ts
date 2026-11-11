@@ -119,7 +119,17 @@ export type Delta =
 
 export type RecoveryKind = "capacity" | "usage_limit" | "tool" | "timeout" | "delivery_unconfirmed" | "unsent" | "disconnected" | "permission_expired" | "signed_out" | "failed";
 
+/** Reported by Codex; tokensUsed is goal usage, not context-window occupancy. */
+export interface Goal {
+  objective: string;
+  status: "active" | "paused" | "complete" | "blocked" | "budgetLimited" | "usageLimited";
+  tokenBudget: number | null;
+  tokensUsed: number;
+}
+
 export type Payload =
+  | { type: "goal_updated"; goal: Goal }
+  | { type: "goal_cleared" }
   | { type: "recovery"; kind: RecoveryKind | null }
   | { type: "turn_checkpoint"; seq: number; base: string; head: string }
   | { type: "turn_started"; model?: string; providerSessionId?: string; promptSeq?: number; startedBy?: string; initiatingPrompt?: string }
