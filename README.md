@@ -274,13 +274,25 @@ every mode names something the CLI will accept.
 
 ## Install
 
-Download the `.dmg` from this repository's Releases page and drag TerminalX to
-Applications. You will also need `claude` and/or `codex` installed and
+[Download TerminalX for macOS](https://github.com/terminalx-ai/terminalx/releases/latest/download/TerminalX-latest-aarch64.dmg)
+(Apple silicon). The link always gets the newest release. Open the `.dmg` and
+drag TerminalX to Applications. Each release is also on this repository's
+[Releases page](https://github.com/terminalx-ai/terminalx/releases), with a
+`SHA256SUMS` file. You will also need `claude` and/or `codex` installed and
 logged in — TerminalX runs them, it does not replace them.
 
-The macOS release is signed with a Developer ID certificate but is not notarized.
-If macOS blocks the first launch, allow TerminalX under System Settings →
-Privacy & Security → Open Anyway.
+The app and the disk image are signed with a Developer ID certificate,
+notarized by Apple and stapled, so TerminalX opens like any Mac app, with no
+Gatekeeper warning. To check a download yourself:
+
+```sh
+spctl -a -vv -t open --context context:primary-signature TerminalX-latest-aarch64.dmg
+spctl -a -vv /Applications/TerminalX.app
+```
+
+Both should say `accepted` and `source=Notarized Developer ID`. Releases have
+been notarized since 0.2.27. Once you have installed a notarized version,
+updates install themselves from within the app.
 
 ## Development
 
