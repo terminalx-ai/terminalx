@@ -471,6 +471,25 @@ pub fn create_pr(cwd: &Path, title: &str, body: &str, base: Option<&str>, draft:
     create_pr_with(cwd, title, body, base, draft, run)
 }
 
+/// The account used by API writes, which may differ from the checkout's SSH key.
+#[cfg(feature = "desktop")]
+pub fn authenticated_login(cwd: &Path, destination: &str) -> Result<String> {
+    authenticated_login_with(cwd, destination, run)
+}
+
+#[cfg(feature = "desktop")]
+fn authenticated_login_with(cwd: &Path, destination: &str, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
+    let url = url::Url::parse(destination)?;
+    let host = url.host_str().context("The GitHub destination has no host.")?;
+    let host = url.port().map(|port| format!("{host}:{port}")).unwrap_or_else(|| host.to_string());
+    let login = run(cwd, &["api", "--hostname", &host, "user", "--jq", ".login"])?;
+    let login = login.trim();
+    if login.is_empty() || !login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        bail!("GitHub did not identify the signed-in account.");
+    }
+    Ok(login.to_string())
+}
+
 fn create_pr_with(cwd: &Path, title: &str, body: &str, base: Option<&str>, draft: bool, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
     let mut args = vec!["pr", "create", "--title", title, "--body", body];
     if let Some(b) = base {
@@ -554,6 +573,47 @@ pub(crate) fn parse_snapshot(v: &Value) -> PrSnapshot {
         checks_unread: false,
         validation: None,
     }
+}
+
+/// A bounded, batched GraphQL read for UI status. Full workflow/suite evidence
+/// is deliberately collected only when a Merge action is about to run.
+pub fn branch_snapshot(cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>> {
+    branch_snapshot_with(cwd, branch, false, run)
+}
+
+/// Explicit refreshes/actions preserve the PR tab's limited-checks permission
+/// fallback. Automatic polling still makes only one query and backs off.
+pub fn branch_snapshot_on_demand(cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>> {
+    branch_snapshot_with(cwd, branch, true, run)
+}
+
+fn branch_snapshot_with(cwd: &Path, branch: &str, allow_unread: bool, mut run: impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<Option<PrSnapshot>> {
+    let fields = format!("{SNAPSHOT_FIELDS},isCrossRepository,headRepository,headRepositoryOwner");
+    let mut read = |fields: &str| run(cwd, &["pr", "list", "--head", branch, "--state", "all", "--limit", "100", "--json", fields]);
+    let (out, checks_unread) = match read(&fields) {
+        Ok(out) => (out, false),
+        Err(error) if allow_unread && not_permitted(&format!("{error:#}")) => (read(&without_checks(&fields)).map_err(|_| error)?, true),
+        Err(error) => return Err(error),
+    };
+    let records: Vec<Value> = serde_json::from_str(&out)?;
+    let origin = crate::git::remote_url(cwd).as_deref().and_then(crate::issues::github_repo_from_url);
+    let mut prs: Vec<_> = records.iter().filter(|pr| {
+        pr["isCrossRepository"].as_bool() != Some(true) || origin.as_ref().is_some_and(|origin| {
+            origin.eq_ignore_ascii_case(&format!("{}/{}", pr["headRepositoryOwner"]["login"].as_str().unwrap_or_default(), pr["headRepository"]["name"].as_str().unwrap_or_default()))
+        })
+    }).map(|record| {
+        let mut pr = parse_snapshot(record);
+        pr.checks_unread = checks_unread;
+        pr
+    }).collect();
+    prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
+    // A full page cannot prove that an older open PR does not exist.
+    if records.len() == 100 && prs.first().is_none_or(|pr| pr.state != "OPEN") {
+        bail!("Pull request history is truncated; open the PR tab to inspect it.");
+    }
+    let pr = prs.into_iter().next();
+    if pr.as_ref().is_some_and(|pr| pr.head_sha.is_empty()) { bail!("GitHub omitted the pull request head."); }
+    Ok(pr)
 }
 
 /// What a `gh` call printed and how it ended, for the calls whose exit code
@@ -1704,6 +1764,74 @@ pub fn enable_head_branch_deletion(cwd: &Path) -> Result<HeadBranchSetting> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn branch_status_batches_readiness_into_one_query_without_validation_calls() {
+        let mut calls = 0;
+        let pr = branch_snapshot_with(Path::new("/missing-repo"), "feature", false, |_, args| {
+            calls += 1;
+            assert_eq!(&args[..8], &["pr", "list", "--head", "feature", "--state", "all", "--limit", "100"]);
+            for field in ["mergeStateStatus", "reviewDecision", "statusCheckRollup", "headRefOid"] { assert!(args[9].contains(field)); }
+            let mut record: Value = serde_json::from_str(include_str!("fixtures/branch_step_gh.json")).unwrap();
+            record["isCrossRepository"] = serde_json::json!(false);
+            Ok(serde_json::json!([record]).to_string())
+        }).unwrap().unwrap();
+        assert_eq!(calls, 1);
+        assert!(!pr.head_sha.is_empty());
+        assert!(pr.validation.is_none(), "polling must not collect workflow/job/suite evidence");
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn only_explicit_branch_reads_retry_without_inaccessible_checks() {
+        for explicit in [false, true] {
+            let mut calls = 0;
+            let result = branch_snapshot_with(Path::new("/missing-repo"), "feature", explicit, |_, args| {
+                calls += 1;
+                if calls == 1 {
+                    assert!(args[9].contains("statusCheckRollup"));
+                    bail!("GraphQL: Resource not accessible by integration");
+                }
+                assert!(!args[9].contains("statusCheckRollup"));
+                assert!(args[9].contains("headRefOid"));
+                let mut record: Value = serde_json::from_str(include_str!("fixtures/branch_step_gh.json")).unwrap();
+                record.as_object_mut().unwrap().remove("statusCheckRollup");
+                record["isCrossRepository"] = serde_json::json!(false);
+                Ok(serde_json::json!([record]).to_string())
+            });
+            if explicit {
+                let pr = result.unwrap().unwrap();
+                assert!(pr.checks_unread);
+                assert!(pr.checks.is_empty());
+                assert!(pr.validation.is_none());
+                assert_eq!(calls, 2);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(calls, 1, "background permission failures must back off after one query");
+            }
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn publishing_account_is_read_from_the_destination_host() {
+        for (destination, host) in [
+            ("https://github.com/example/repo.git", "github.com"),
+            ("https://github.company.example/example/repo/pull/7", "github.company.example"),
+            ("https://github.company.example:8443/example/repo.git", "github.company.example:8443"),
+        ] {
+            let login = authenticated_login_with(Path::new("/repo"), destination, |cwd, args| {
+                assert_eq!(cwd, Path::new("/repo"));
+                assert_eq!(args, ["api", "--hostname", host, "user", "--jq", ".login"]);
+                Ok("alice\n".into())
+            }).unwrap();
+            assert_eq!(login, "alice");
+        }
+        for invalid in ["", "owner/deploy-key", "alice\nother"] {
+            assert!(authenticated_login_with(Path::new("/repo"), "https://github.com/example/repo", |_, _| Ok(invalid.into())).is_err());
+        }
+    }
 
     fn panel_fixture() -> Value {
         serde_json::from_str(include_str!("fixtures/github_pr_panel.json")).unwrap()

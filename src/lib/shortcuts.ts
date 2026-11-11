@@ -79,6 +79,13 @@ const ACTIONS = [
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
   { id: "session.archive", label: "Archive session", group: "Session", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
+  { id: "git.commitPush", label: "Commit and push", group: "Session", keys: ["mod+shift+y"] },
+  { id: "git.pull", label: "Pull latest", group: "Session", keys: ["mod+shift+l"] },
+  // Main's "Fix failing CI checks" owns mod+shift+x: defaults are claimed first-listed-first,
+  // so a second default here would leave one of the two without keys.
+  { id: "git.fixChecks", label: "Fix checks", group: "Session", keys: [] },
+  { id: "git.merge", label: "Merge pull request", group: "Session", keys: ["mod+shift+m"] },
+  { id: "git.createPr", label: "Create pull request", group: "Session", keys: ["mod+shift+c"] },
   { id: "session.fixErrors", label: "Fix failing CI checks", group: "Session", keys: ["mod+shift+x"] },
   { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"], menu: { section: "file", order: 4, label: "Close Tab", target: "focused", separator: true } },
   { id: "session.nextTab", label: "Next tab", group: "Session", keys: ["mod+shift+]"] },

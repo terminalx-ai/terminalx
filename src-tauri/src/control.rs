@@ -17,6 +17,9 @@ use crate::sink::EventSink;
 use crate::store::index::{self, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 
+#[path = "review_control.rs"]
+pub(crate) mod review;
+
 const APP_UNAVAILABLE_RECOVERY: &str =
     "Open TerminalX with the same TERMINALX_HOME, then retry status once.";
 const LINEAR_INTEGRATION_RECOVERY: &str =
@@ -123,7 +126,7 @@ impl ControlResponse {
 /// here so every command has identical authentication and recovery behavior.
 pub fn call(
     command: &str,
-    params: Value,
+    mut params: Value,
     timeout: Duration,
 ) -> Result<ControlResponse, ControlError> {
     #[cfg(unix)]
@@ -149,6 +152,9 @@ pub fn call(
                 Some("Restart an app-launched tab, or let a human shell read TERMINALX_HOME/run/control.token.".into()),
             )
         })?;
+    if command == "review.comment" {
+        params["hookToken"] = json!(std::env::var(crate::hooks::TOKEN_ENV).unwrap_or_default());
+    }
     let request = ControlRequest {
         id: uuid::Uuid::now_v7().to_string(),
         token,
@@ -714,6 +720,7 @@ impl ControlService {
                 serde_json::to_value(renamed).map_err(ControlError::internal)
             }
             "worktrees.delete" => self.worktree_delete(params),
+            "review.comment" | "review.comments" => self.review_comments(command, params),
             "issues.list" => self.issues_list(params),
             // Creation uses the local owner's credentials and never needs a
             // desktop attachment. Cloud workspace capabilities stay unchanged.
