@@ -128,14 +128,21 @@ fn phone_create_child() {
             assert_eq!(tab_of(&claude).1.transport, store::index::AgentTransport::Pty);
         }
         "settings" => {
+            // A desktop-only switch the phone neither shows nor changes (PRO-273).
+            let mut desktop = store::settings::load();
+            desktop.experimental.session_cost = true;
+            store::settings::save(&desktop).unwrap();
             assert_eq!(call("tablet", "settings", json!({})).unwrap(), json!({"nativeCodex":false}));
             assert_eq!(call("phone", "setSettings", json!({"nativeCodex":true})).unwrap(), json!({"nativeCodex":true}));
             assert!(store::settings::load().experimental.native_codex);
-            // The desktop's Settings → Experimental follows it while open.
+            assert!(store::settings::load().experimental.session_cost, "the phone's change leaves the desktop's other switches as they were");
+            // The desktop's Settings → Experimental follows it while open: its
+            // every switch, of which the phone changed this one.
             let published = std::iter::from_fn(|| events.try_recv().ok()).find(|published| &*published.event == "experimental_settings_changed").unwrap();
-            // The event carries the whole section, as the settings watcher sends it: the phone's
-            // change, and the switches a phone does not have, as they are.
-            assert_eq!(&*published.payload, r#"{"nativeCodex":true,"orchestratorRuns":false}"#);
+            let published: Value = serde_json::from_str(&published.payload).unwrap();
+            assert_eq!((&published["nativeCodex"], &published["sessionCost"]), (&json!(true), &json!(true)));
+            // And the switches a phone does not have, as they are.
+            assert_eq!(published["orchestratorRuns"], json!(false));
             assert_eq!(call("tablet", "settings", json!({})).unwrap(), json!({"nativeCodex":true}));
             assert!(call("phone", "setSettings", json!({"nativeCodex":"yes"})).is_err());
         }
