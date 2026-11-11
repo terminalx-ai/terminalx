@@ -282,12 +282,17 @@ validates the stapled tickets on any DMG and on the app inside it, and runs
 Gatekeeper's assessment of both. Run it on a downloaded release to confirm
 what a new Mac will see.
 
-The scripts' tests use a fake command runner, so they run anywhere, macOS or
-not. The `check` step runs them before every release; run them after changing
-`scripts/release/`:
+The scripts need Python 3.9 or newer; the `python3` macOS ships
+(`/usr/bin/python3`) is 3.9, and an older one stops at once with a message
+naming the minimum. Their tests need the same Python and `git`, and run on
+macOS or not: git runs for real in scratch repositories, and every other
+command goes through a fake runner. The `check` step runs them before every
+release; run them after changing `scripts/release/`, with the system Python
+as well as any newer one:
 
 ```sh
 python3 -m unittest discover -s scripts/release -p 'test_*.py'
+/usr/bin/python3 -m unittest discover -s scripts/release -p 'test_*.py'
 ```
 
 ### Release assets and the stable download link
@@ -317,10 +322,33 @@ build.
 ### The secret scan
 
 The repository and its releases are public. `scan` looks through everything a
-release publishes: the diffs and messages of the commits on top of the
-`origin/main` that `prepare` recorded, the release notes, every asset, every
-file inside the extracted updater archive, and every file in the mounted DMG.
-It searches for:
+release publishes: every file version in the commits on top of the
+`origin/main` that `prepare` recorded (including one a later commit deletes,
+since the push publishes it too) and their messages, the release notes, every
+asset, every file inside the updater archive, and every file in the mounted
+DMG.
+
+Every file is searched byte for byte, binary or not. Containers the scan can
+read are opened in memory, as deep as they nest, and their members searched
+the same way: zip, tar, gzip, bzip2 and xz, PNG (compressed text chunks and
+the image stream) and icns. Nothing is extracted to disk. A file the scan
+cannot look inside is a finding: a corrupt or encrypted archive, one nested
+more than 8 deep or expanding past 2 GiB, a format it does not open (7z, RAR,
+zstd, LZ4, LZFSE, xar, WOFF2, an Apple disk image) and any other
+high-entropy data. The only formats deliberately left closed are listed, each
+with its reason, in `ALLOWED_OPAQUE` in `scripts/release/txrelease/content.py`:
+JPEG, GIF, WebP and JPEG 2000 images, whose coded data holds only pixels and
+whose metadata is stored as plain bytes. Publishing any other such file means
+adding its format there, with a reason, in a reviewed change. The release DMG
+itself is the one exception: its compressed image is searched as bytes and its
+files are read by mounting it. Compressed data inside a file that is otherwise
+not compressed is searched only as bytes: notably the frontend that Tauri
+compresses (Brotli) into the app executable, which is built from this
+repository's own `src/` and its locked dependencies.
+
+In a commit, a pattern or home-path match that the same file already holds on
+`origin/main` is already public and is not reported again; this machine's own
+secrets always are. It searches for:
 
 - this machine's own secrets, read at run time and never printed: the App
   Store Connect key body, key ID and issuer ID, the updater signing key and

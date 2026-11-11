@@ -49,6 +49,18 @@ class Runner:
     def out(self, *args: object, **kwargs) -> str:
         return self.run(args, **kwargs).output
 
+    def capture(self, args: Sequence[object], *, cwd: Path | None = None, input: bytes = b'') -> bytes:
+        """A read-only command's standard output as bytes (file contents, binary or not)."""
+        argv = [str(a) for a in args]
+        code, output, errors = self.execute_bytes(argv, cwd=cwd, input=input)
+        if code:
+            raise ReleaseError(f'{" ".join(argv[:2])} exited {code}: {errors[-2000:]}')
+        return output
+
+    def execute_bytes(self, argv: list[str], *, cwd: Path | None, input: bytes) -> tuple[int, bytes, str]:
+        completed = subprocess.run(argv, cwd=cwd, input=input, capture_output=True)
+        return completed.returncode, completed.stdout, completed.stderr.decode('utf-8', 'replace').strip()
+
 
 def now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')

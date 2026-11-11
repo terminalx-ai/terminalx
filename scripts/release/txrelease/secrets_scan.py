@@ -1,22 +1,24 @@
 """The scan step: refuse to publish if anything secret is in what goes to GitHub.
 
-The repository is public. This scans what a release publishes: the commits pushed on top of main
-(diffs and messages), the release notes, and every file inside the release assets (the updater
-archive extracted, the DMG mounted, the signature, latest.json and SHA256SUMS). It looks for this
-machine's own secrets, read at run time and never printed (credentials.local_secrets), for the
-current user's home directory path in the commits and notes, and for common credential patterns.
-It reports only where a match is and which kind it is, never the value. secret-scan.json records the
-result; publish refuses a scan that found something, did not cover the assets, or is older than them.
+The repository is public. This scans what a release publishes: every object the push adds on top
+of main (each file version in every pushed commit, binary or not, and the commit messages), the
+release notes, and every release asset (the updater archive and everything in it, the DMG and every
+file in it mounted, the signature, latest.json and SHA256SUMS). content.Inspector searches each file
+byte for byte and opens the containers it can read; a file it cannot look inside is itself a
+finding unless its format is in content.ALLOWED_OPAQUE. It looks for this machine's own secrets,
+read at run time and never printed (credentials.local_secrets), for the current user's home
+directory path in the commits and notes, and for common credential patterns. It reports only where
+a match is and which kind it is, never the value. secret-scan.json records the result; publish
+refuses a scan that found something, did not cover the assets, or is older than them.
 """
 from __future__ import annotations
 
 import re
-import shutil
-import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import ARCHIVE, Release
+from .content import Hit, Inspector
 from .proc import Runner, now, read_record, require, sha256, write_json
 
 PATTERNS = {
@@ -30,6 +32,7 @@ PATTERNS = {
     'Slack token pattern': rb'\bxox[abposr]-[0-9]{6,}-[A-Za-z0-9-]{6,}',
 }
 NOTES = ['notes.md']
+_OBJECT = re.compile(rb'^([0-9a-f]{40,64}) (\S+) (\d+)$')
 
 
 @dataclass
@@ -40,15 +43,30 @@ class Scanner:
     files: int = 0
     bytes: int = 0
 
-    def scan(self, where: str, data: bytes, extra: dict[str, bytes] | None = None) -> None:
-        self.files += 1
-        self.bytes += len(data)
-        for what, value in {**self.needles, **(extra or {})}.items():
-            if value in data:
-                self.findings.append({'where': where, 'what': what})
-        for what, pattern in self.patterns.items():
-            if re.search(pattern, data):
-                self.findings.append({'where': where, 'what': what})
+    def _inspector(self) -> Inspector:
+        return Inspector(self.needles, self.patterns)
+
+    def _keep(self, inspector: Inspector, hits: list[Hit]) -> None:
+        self.files += inspector.files
+        self.bytes += inspector.bytes
+        for hit in hits:
+            if hit.finding() not in self.findings:
+                self.findings.append(hit.finding())
+
+    def scan(self, where: str, data: bytes, extra: dict[str, bytes] | None = None, *,
+             published: bytes | None = None, open_containers: bool = True) -> None:
+        """Scan ``data``, binary or not, and everything inside it. ``published`` is the same file as it
+        already is on main: a pattern or home-path match it already holds is not new and is not
+        reported (this machine's own secrets and unreadable content always are)."""
+        inspector = self._inspector()
+        inspector.inspect(where, data, extra=extra, open_containers=open_containers)
+        hits = inspector.hits
+        if published is not None:
+            before = Inspector(self.needles, self.patterns)
+            before.inspect(where, published, extra=extra)
+            known = {(h.what, h.match) for h in before.hits if not h.always}
+            hits = [h for h in hits if h.always or (h.what, h.match) not in known]
+        self._keep(inspector, hits)
 
     def scan_tree(self, prefix: str, base: Path) -> None:
         for path in sorted(p for p in base.rglob('*') if p.is_file() and not p.is_symlink()):
@@ -62,17 +80,52 @@ def home_needles(home: Path) -> dict[str, bytes]:
     return {'home directory path': text.encode()} if len(text) > len('/Users/') else {}
 
 
+def read_objects(runner: Runner, root: Path, names: list[bytes]) -> list[tuple[str, bytes] | None]:
+    """``git cat-file --batch`` for each name (an object ID or ``<rev>:<path>``): its type and
+    content, or None when there is no such object."""
+    if not names:
+        return []
+    output = runner.capture(['git', 'cat-file', '--batch'], cwd=root, input=b''.join(n + b'\n' for n in names))
+    objects: list[tuple[str, bytes] | None] = []
+    position = 0
+    for name in names:
+        end = output.index(b'\n', position)
+        header = output[position:end]
+        match = _OBJECT.match(header)
+        if not match:
+            # "<name> missing" or "<name> ambiguous"
+            objects.append(None)
+            position = end + 1
+            continue
+        size = int(match.group(3))
+        start = end + 1
+        objects.append((match.group(2).decode(), output[start:start + size]))
+        position = start + size + 1
+    return objects
+
+
 def scan_commits(scanner: Scanner, runner: Runner, root: Path, base: str, home: Path) -> None:
+    """Every file version the pushed commits add, binary or not, including ones a later commit
+    removes again (the push publishes them all), and the commit messages."""
     extra = home_needles(home)
-    diff = runner.run(['git', 'diff', f'{base}..HEAD'], cwd=root).output.encode()
-    scanner.scan(f'git diff {base[:8]}..HEAD', diff, extra)
+    listing = runner.capture(['git', 'rev-list', '--objects', f'{base}..HEAD'], cwd=root)
+    scanner.scan(f'git object names {base[:8]}..HEAD', listing, extra)
+    entries = []
+    for line in listing.splitlines():
+        sha, _, path = line.partition(b' ')
+        entries.append((sha, path))
+    objects = read_objects(runner, root, [sha for sha, _ in entries])
+    blobs = [(sha, path, obj[1]) for (sha, path), obj in zip(entries, objects) if obj is not None and obj[0] == 'blob']
+    published = read_objects(runner, root, [base.encode() + b':' + path for _, path, _ in blobs])
+    for (sha, path, data), before in zip(blobs, published):
+        where = f'git {path.decode("utf-8", "replace")} ({sha[:8].decode()})'
+        scanner.scan(where, data, extra, published=before[1] if before and before[0] == 'blob' else None)
     messages = runner.run(['git', 'log', '--format=%B', f'{base}..HEAD'], cwd=root).output.encode()
     scanner.scan(f'git log {base[:8]}..HEAD (messages)', messages, extra)
 
 
 def scan_assets(scanner: Scanner, runner: Runner, release: Release, assets: Path) -> None:
     seen: dict[str, str] = {}
-    work = release.record('scan-extracted')
     for path in sorted(assets.iterdir()):
         digest = sha256(path)
         if digest in seen:
@@ -80,17 +133,9 @@ def scan_assets(scanner: Scanner, runner: Runner, release: Release, assets: Path
             scanner.scan(f'asset {path.name} (identical to {seen[digest]})', b'')
             continue
         seen[digest] = path.name
-        if path.name == ARCHIVE:
-            if work.exists():
-                shutil.rmtree(work)
-            work.mkdir()
-            with tarfile.open(path) as archive:
-                archive.extractall(work, filter='tar')
-            scanner.scan(f'asset {path.name} (archive)', path.read_bytes())
-            scanner.scan_tree('archive', work)
-            shutil.rmtree(work)
-        elif path.suffix == '.dmg':
-            scanner.scan(f'asset {path.name} (image)', path.read_bytes())
+        if path.suffix == '.dmg':
+            # The image itself is compressed; its bytes are searched, and its files are read mounted.
+            scanner.scan(f'asset {path.name} (image)', path.read_bytes(), open_containers=False)
             mount = release.record('scan-mounted')
             mount.mkdir(exist_ok=True)
             runner.run(['hdiutil', 'attach', '-readonly', '-nobrowse', '-mountpoint', mount, path])
@@ -99,7 +144,10 @@ def scan_assets(scanner: Scanner, runner: Runner, release: Release, assets: Path
             finally:
                 runner.run(['hdiutil', 'detach', mount])
         else:
-            scanner.scan(f'asset {path.name}', path.read_bytes())
+            # The updater archive is opened in memory (gzip, then tar, then every file in the app);
+            # nothing is extracted to disk.
+            label = f'asset {path.name}' + (' (archive)' if path.name == ARCHIVE else '')
+            scanner.scan(label, path.read_bytes())
 
 
 def scan(release: Release, runner: Runner, needles: dict[str, str], home: Path, *, base: str | None = None,

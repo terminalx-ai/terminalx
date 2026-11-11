@@ -1,25 +1,33 @@
-"""Tests for the release pipeline (scripts/release/txrelease). They run anywhere, macOS or not: every
-command goes through a fake runner, so nothing is built, notarized, pushed or uploaded.
+"""Tests for the release pipeline (scripts/release/txrelease). They need Python 3.9 or newer (the
+python3 macOS ships is 3.9) and git, and run on macOS or not: git runs for real in scratch
+repositories, and every other command goes through a fake runner, so nothing is built, notarized,
+pushed or uploaded.
 
     python3 -m unittest discover -s scripts/release -p 'test_*.py'
 """
 from __future__ import annotations
 
 import contextlib
+import gzip
 import io
 import json
+import os
 import shutil
+import struct
+import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 import unittest
+import zipfile
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import release as cli  # noqa: E402
-from txrelease import assets, config, credentials, notarize, publish, secrets_scan, source  # noqa: E402
+from txrelease import assets, config, content, credentials, notarize, publish, secrets_scan, source  # noqa: E402
 from txrelease.config import LATEST_DMG, ReleaseError  # noqa: E402
 from txrelease.proc import Result, Runner, sha256, write_json  # noqa: E402
 
@@ -466,6 +474,60 @@ class VerifyLiveTests(TempCase):
         self.assertIn(f'the live {LATEST_DMG} differs', raised.exception.code)
 
 
+GIT = ['git', '-c', 'user.name=Release Test', '-c', 'user.email=release-test@example.invalid', '-c', 'commit.gpgsign=false',
+       '-c', 'core.hooksPath=/dev/null', '-c', 'init.defaultBranch=main']
+
+
+class GitRunner(FakeRunner):
+    """Runs git for real, in a scratch repository; answers everything else from its responses."""
+
+    def execute(self, argv, *, cwd, env, log):
+        if argv[0] == 'git':
+            self.calls.append(argv)
+            return Runner.execute(self, argv, cwd=cwd, env=env, log=log)
+        return super().execute(argv, cwd=cwd, env=env, log=log)
+
+    def execute_bytes(self, argv, *, cwd, input):
+        if argv[0] != 'git':
+            raise AssertionError(f'unexpected command: {argv}')
+        self.calls.append(argv)
+        return Runner.execute_bytes(self, argv, cwd=cwd, input=input)
+
+
+def zip_bytes(members: dict[str, bytes], encrypted: bool = False) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    data = bytearray(buffer.getvalue())
+    if encrypted:
+        # Set the "encrypted" flag on the first member's local and central headers.
+        for offset in (0, data.rindex(b'PK\x01\x02')):
+            flag_at = offset + (6 if offset == 0 else 8)
+            data[flag_at] |= 1
+    return bytes(data)
+
+
+def tar_gz_bytes(members: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def png_bytes(text_chunk: bytes = b'') -> bytes:
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
+    header = struct.pack('>IIBBBBB', 1, 1, 8, 0, 0, 0, 0)
+    chunks = chunk(b'IHDR', header)
+    if text_chunk:
+        chunks += chunk(b'zTXt', b'Comment\x00\x00' + zlib.compress(text_chunk))
+    return b'\x89PNG\r\n\x1a\n' + chunks + chunk(b'IDAT', zlib.compress(b'\x00\x00')) + chunk(b'IEND', b'')
+
+
 class SecretScanTests(TempCase):
     SECRET = 'not-a-real-secret-value-0123456789'
 
@@ -473,63 +535,155 @@ class SecretScanTests(TempCase):
         super().setUp()
         self.fixture = Fixture(self.directory)
         self.release = self.fixture.release
+        self.root = self.release.root
+        self.git('init', '-q')
+        (self.root / '.gitignore').write_text('/.raccoon/\n')
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', 'Published main')
+        self.base = self.git('rev-parse', 'HEAD')
+        write_json(self.release.record('release-context.json'), {'version': VERSION, 'baseMainCommit': self.base, 'sourceCommit': self.base})
 
-    def runner(self, diff='', messages=''):
-        return FakeRunner([
-            (['git', 'diff'], Result(0, diff)),
-            (['git', 'log'], Result(0, messages)),
-            (['git', 'rev-parse', 'HEAD'], Result(0, HEAD)),
-            (['hdiutil'], Result(0, '')),
-        ])
+    def git(self, *args: str) -> str:
+        return subprocess.run([*GIT, *args], cwd=self.root, check=True, capture_output=True, text=True).stdout.strip()
 
-    def scan(self, runner, **kwargs):
-        return secrets_scan.scan(self.release, runner, {'test secret': self.SECRET}, Path('/Users/example-person'), **kwargs)
+    def commit(self, files: dict[str, bytes | None], message: str = 'Release commit') -> str:
+        for name, data in files.items():
+            path = self.root / name
+            if data is None:
+                path.unlink()
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', message)
+        return self.git('rev-parse', 'HEAD')
+
+    def blob(self, name: str, rev: str = 'HEAD') -> str:
+        return self.git('rev-parse', f'{rev}:{name}')[:8]
+
+    def runner(self):
+        return GitRunner([(['hdiutil'], Result(0, ''))])
+
+    def scan(self, runner=None, **kwargs):
+        return secrets_scan.scan(self.release, runner or self.runner(), {'test secret': self.SECRET}, Path('/Users/example-person'), **kwargs)
+
+    def assertFound(self, result, where: str, what: str):
+        self.assertIn({'where': where, 'what': what}, result['findings'])
+        self.assertFalse(result['clean'])
 
     def test_a_clean_release_passes_and_covers_every_asset(self):
-        result = self.scan(self.runner())
+        head = self.commit({'CHANGELOG.md': b'# TerminalX changelog\n\n## 9.8.7\n\n- Clean.\n', 'icon.png': png_bytes()})
+        result = self.scan()
         self.assertTrue(result['clean'], result['findings'])
         self.assertTrue(result['assetsScanned'])
-        self.assertEqual(result['base'], BASE)
-        secrets_scan.require_clean_scan(self.release, HEAD, sorted(self.release.assets.iterdir()))
+        self.assertEqual((result['base'], result['head']), (self.base, head))
+        secrets_scan.require_clean_scan(self.release, head, sorted(self.release.assets.iterdir()))
 
     def test_finds_a_local_secret_without_ever_writing_it(self):
-        result = self.scan(self.runner(diff=f'+token = "{self.SECRET}"'))
-        self.assertFalse(result['clean'])
-        self.assertIn({'where': f'git diff {BASE[:8]}..HEAD', 'what': 'test secret'}, result['findings'])
+        self.commit({'src/config.ts': f'export const token = "{self.SECRET}"\n'.encode()})
+        result = self.scan()
+        self.assertFound(result, f'git src/config.ts ({self.blob("src/config.ts")})', 'test secret')
         self.assertNotIn(self.SECRET, self.release.record('secret-scan.json').read_text())
+
+    def test_finds_a_secret_inside_a_binary_file(self):
+        blob = b'\xcf\xfa\xed\xfe' + bytes(4096) + self.SECRET.encode() + b'\x00' + bytes(range(16)) * 256
+        self.commit({'resources/model.bin': blob})
+        self.assertIn('Binary files', self.git('diff', f'{self.base}..HEAD'), 'git diff alone would not show this file')
+        self.assertFound(self.scan(), f'git resources/model.bin ({self.blob("resources/model.bin")})', 'test secret')
+
+    def test_finds_a_secret_inside_a_nested_archive(self):
+        inner = tar_gz_bytes({'bundle/settings.json': f'{{"awsKey": "{AWS_SHAPED}"}}'.encode()})
+        outer = zip_bytes({'vendor/bundle.tar.gz': inner, 'README.txt': b'nothing here'})
+        self.commit({'fixtures/vendor.zip': outer})
+        where = f'git fixtures/vendor.zip ({self.blob("fixtures/vendor.zip")})!vendor/bundle.tar.gz!gunzip!bundle/settings.json'
+        self.assertFound(self.scan(), where, 'AWS access key pattern')
+
+    def test_finds_a_secret_inside_a_png_text_chunk(self):
+        self.commit({'docs/shot.png': png_bytes(f'token={self.SECRET}'.encode())})
+        self.assertFound(self.scan(), f'git docs/shot.png ({self.blob("docs/shot.png")})!zTXt Comment', 'test secret')
+
+    def test_finds_a_secret_a_later_commit_removed_again(self):
+        self.commit({'notes/scratch.txt': f'{self.SECRET}\n'.encode()}, 'Add scratch')
+        removed = self.git('rev-parse', 'HEAD:notes/scratch.txt')[:8]
+        self.commit({'notes/scratch.txt': None}, 'Remove scratch')
+        self.assertFound(self.scan(), f'git notes/scratch.txt ({removed})', 'test secret')
+
+    def test_a_pattern_already_on_main_is_not_new_but_a_new_one_is(self):
+        self.commit({'docs/example.md': f'old: {AWS_SHAPED}\n'.encode()}, 'On main already')
+        self.base = self.git('rev-parse', 'HEAD')
+        write_json(self.release.record('release-context.json'), {'version': VERSION, 'baseMainCommit': self.base, 'sourceCommit': self.base})
+        self.commit({'docs/example.md': f'old: {AWS_SHAPED}\nunrelated edit\n'.encode()})
+        self.assertTrue(self.scan()['clean'])
+        self.commit({'docs/example.md': f'old: {AWS_SHAPED}\nnew: AKIA{"Z" * 16}\n'.encode()})
+        self.assertFound(self.scan(), f'git docs/example.md ({self.blob("docs/example.md")})', 'AWS access key pattern')
+
+    def test_a_file_the_scan_cannot_open_fails_unless_its_format_is_allowed(self):
+        self.commit({'vendor/tools.7z': b"7z\xbc\xaf'\x1c" + bytes(64)})
+        self.assertFound(self.scan(), f'git vendor/tools.7z ({self.blob("vendor/tools.7z")})',
+                         '7z archive the scan cannot open; add it to ALLOWED_OPAQUE with a reason, or do not publish it')
+        self.commit({'vendor/tools.7z': None, 'vendor/blob.dat': os.urandom(64 << 10)})
+        self.assertFound(self.scan(), f'git vendor/blob.dat ({self.blob("vendor/blob.dat")})', 'compressed or encrypted data in no format the scan can open')
+        # The earlier commits are still pushed, so their files still count; the allowed JPEG adds nothing.
+        self.commit({'vendor/blob.dat': None, 'docs/photo.jpg': b'\xff\xd8\xff\xe0' + os.urandom(64 << 10)})
+        self.assertEqual([f for f in self.scan()['findings'] if 'docs/photo.jpg' in f['where']], [])
+        self.assertIn('JPEG image', content.ALLOWED_OPAQUE)
+
+    def test_an_archive_the_scan_cannot_read_fails(self):
+        self.commit({'fixtures/locked.zip': zip_bytes({'key.txt': b'hidden'}, encrypted=True),
+                     'fixtures/cut.gz': gzip.compress(os.urandom(100000))[:200]})
+        result = self.scan()
+        self.assertTrue(any(f['where'] == f'git fixtures/locked.zip ({self.blob("fixtures/locked.zip")})'
+                            and f['what'].startswith('unreadable zip archive (key.txt is encrypted)') for f in result['findings']), result['findings'])
+        self.assertTrue(any(f['where'] == f'git fixtures/cut.gz ({self.blob("fixtures/cut.gz")})'
+                            and f['what'].startswith('unreadable gzip stream') for f in result['findings']), result['findings'])
+
+    def test_an_archive_that_expands_too_far_fails(self):
+        self.commit({'fixtures/zeros.gz': gzip.compress(bytes(1 << 20))})
+        original = content.MAX_EXPANDED
+        content.MAX_EXPANDED = 1 << 16
+        self.addCleanup(setattr, content, 'MAX_EXPANDED', original)
+        result = self.scan()
+        self.assertTrue(any('expands past' in f['what'] for f in result['findings']), result['findings'])
 
     def test_finds_secrets_inside_assets_and_notes(self):
         signature = self.release.assets / 'TerminalX.app.tar.gz.sig'
         signature.write_bytes(self.SECRET.encode())
         self.release.record('notes.md').write_text(f'Key: {AWS_SHAPED}\n')
-        result = self.scan(self.runner())
-        self.assertIn({'where': 'asset TerminalX.app.tar.gz.sig', 'what': 'test secret'}, result['findings'])
-        self.assertIn({'where': 'notes.md', 'what': 'AWS access key pattern'}, result['findings'])
+        result = self.scan()
+        self.assertFound(result, 'asset TerminalX.app.tar.gz.sig', 'test secret')
+        self.assertFound(result, 'notes.md', 'AWS access key pattern')
 
     def test_a_home_path_counts_in_commits_and_notes_but_not_inside_binaries(self):
-        result = self.scan(self.runner(diff='+cd /Users/example-person/code'))
-        self.assertIn({'where': f'git diff {BASE[:8]}..HEAD', 'what': 'home directory path'}, result['findings'])
+        self.commit({'docs/setup.md': b'cd /Users/example-person/code\n'})
+        self.assertFound(self.scan(), f'git docs/setup.md ({self.blob("docs/setup.md")})', 'home directory path')
+        self.commit({'docs/setup.md': None})
         self.release.built_dmg.write_bytes(b'/Users/example-person/.cargo/registry panic path')
         assets.copy_assets(self.release, self.release.assets, 'n', pub_date='2026-11-11T00:00:00Z')
-        self.assertTrue(self.scan(self.runner())['clean'])
+        self.assertEqual([f for f in self.scan()['findings'] if 'docs/setup.md' not in f['where']], [])
 
-    def test_finds_a_secret_inside_the_updater_archive(self):
-        make_archive(self.release.assets / 'TerminalX.app.tar.gz',
-                     {'TerminalX.app/Contents/Resources/config.json': f'{{"k": "{self.SECRET}"}}'.encode()})
-        result = self.scan(self.runner())
-        self.assertIn({'where': 'archive TerminalX.app/Contents/Resources/config.json', 'what': 'test secret'}, result['findings'])
+    def test_finds_a_secret_inside_the_updater_archive_and_archives_within_it(self):
+        resources = 'TerminalX.app/Contents/Resources/'
+        make_archive(self.release.assets / 'TerminalX.app.tar.gz', {
+            resources + 'config.json': f'{{"k": "{self.SECRET}"}}'.encode(),
+            resources + 'skills.zip': zip_bytes({'skill/notes.md': f'key {AWS_SHAPED}'.encode()}),
+        })
+        result = self.scan()
+        archive = 'asset TerminalX.app.tar.gz (archive)!gunzip!'
+        self.assertFound(result, archive + resources + 'config.json', 'test secret')
+        self.assertFound(result, archive + resources + 'skills.zip!skill/notes.md', 'AWS access key pattern')
 
     def test_the_identical_latest_dmg_is_scanned_once(self):
         runner = self.runner()
         result = self.scan(runner)
         attaches = [c for c in runner.calls if c[:2] == ['hdiutil', 'attach']]
         self.assertEqual(len(attaches), 1)
-        self.assertTrue(result['clean'])
+        self.assertTrue(result['clean'], result['findings'])
 
     def test_a_commits_only_scan_cannot_clear_a_publish(self):
-        self.scan(self.runner(), include_assets=False, base='HEAD~1')
+        head = self.commit({'README.md': b'Hello.\n'})
+        self.scan(include_assets=False, base=self.base)
         with self.assertRaises(ReleaseError):
-            secrets_scan.require_clean_scan(self.release, HEAD, [])
+            secrets_scan.require_clean_scan(self.release, head, [])
 
     def test_the_slack_prefixes_the_app_uses_on_purpose_do_not_match(self):
         scanner = secrets_scan.Scanner({})
