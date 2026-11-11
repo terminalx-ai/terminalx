@@ -21,7 +21,9 @@ import { openAutomations, renameWorkspace, selectSession, useSessionStore } from
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
+import { followedLayout, layoutOf, tabKey, useTabState, workspaceKey } from "@/lib/tabLayouts";
 import { TabView } from "./TabView";
+import { WorkspacePanes } from "./WorkspacePanes";
 import { EmptySession } from "./EmptySession";
 import { TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
@@ -442,7 +444,16 @@ export function SessionView({
   useEffect(() => {
     if (local) void bootBrowser();
   }, [local]);
-  const requested = followedSelection(session, terminals.selected[session.id]);
+  const savedTabs = useTabState();
+  const savedLayout = followedLayout(layoutOf(savedTabs, workspaceKey(session, store.chatsPath)), [session]);
+  const candidates: SelectedSessionTab[] = [
+    ...session.tabs.map((tab) => ({ kind: "agent" as const, id: tab.id })),
+    ...shellPanes.map((pane) => ({ kind: "terminal" as const, id: pane.id })),
+    ...browserPages.map((page) => ({ kind: "browser" as const, id: page.id })),
+  ];
+  const savedPanes = [...(savedLayout.panes ?? [])].sort((a, b) => Number(b.id === savedLayout.focusedPane) - Number(a.id === savedLayout.focusedPane));
+  const restored = !cloud && !compact ? savedPanes.flatMap((pane) => candidates.filter((tab) => tabKey(tab.kind, tab.id) === pane.active))[0] : undefined;
+  const requested = followedSelection(session, terminals.selected[session.id] ?? restored);
   const terminalIds = local ? shellPanes.map((pane) => pane.id) : cloudTerminals.map((terminal) => terminal.id);
   // A cloud session's active tab is the runtime's, shared by everyone in it: it moves to a new tab
   // when anyone adds one. It decides what this view opens on, once: from then the view stays on
@@ -488,6 +499,8 @@ export function SessionView({
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const baseNote = session.worktreeBase && !session.worktreeBase.warning ? `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}` : null;
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
+  // Sibling sessions share mounted pane bodies. Session-specific dialogs still reset.
+  useEffect(() => { setContinuationSource(null); }, [session.id]);
   // The title-bar button and workspace menu carry the open tab into the same continuation dialog.
   const continueTab = activeTab && local ? () => setContinuationSource(activeTab) : null;
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -789,7 +802,7 @@ export function SessionView({
           </div>
         </header>
         {/* The row of tabs, ended by the "+" that opens one (keyed by session, as above). The floating window leaves out a row that would only repeat its one tab, and keeps its + in the title bar. */}
-        {stripRow && (
+        {stripRow && compact && (
           <WorkspaceTabStrip
             session={session}
             selected={selected}
@@ -812,6 +825,7 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
+              {!cloud && !compact ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} selectionRequested={!!terminals.selected[session.id]} continuationOpen={!!continuationSource} /> : <>
               {session.tabs.map((t) => (
                 <div
                   key={t.id}
@@ -917,8 +931,9 @@ export function SessionView({
                   )}
                 </div>
               )}
+              </>}
             </div>
-            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} />}
+            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} reviewsInPanes={!cloud && !compact} />}
           </div>
         </section>
       </div>

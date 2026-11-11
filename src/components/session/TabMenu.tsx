@@ -43,10 +43,10 @@ import { openSessionShare } from "@/lib/localSharing";
 import { getPrefs } from "@/lib/prefs";
 import { isQuickChat } from "@/lib/quickChats";
 import { archiveSession, forkSession, openSkills, useSessionStore } from "@/lib/sessions";
-import { closePeer, hasOwnTitle, isShellPeer, peerAgent, peerIsLive, peerLabel, peerShell, peerStatus, type PeerTab, type TabRow } from "@/lib/sessionTabs";
-import { BULK_CLOSE_LABEL, canMoveTab, canReopenTab, canRestartAgent, duplicateTab, moveTabBy, newTab, planBulkClose, renamePeer, reopenClosedTab, restartTab, setTabMuted, setTabPinned, type BulkClose, type NewTabKind, type TabMove } from "@/lib/tabActions";
+import { useTabRow, closePeer, hasOwnTitle, isShellPeer, peerAgent, peerIsLive, peerLabel, peerShell, peerStatus, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { BULK_CLOSE_LABEL, canMoveTab, canReopenTab, canRestartAgent, duplicateTab, moveTabBy, newTab, moveTabToPane, otherPane, planBulkClose, renamePeer, reopenClosedTab, restartTab, setTabMuted, setTabPinned, type BulkClose, type NewTabKind, type TabMove } from "@/lib/tabActions";
 import { tabViewIn } from "@/lib/tabFront";
-import { useTabState } from "@/lib/tabLayouts";
+import { panesOf, useTabState } from "@/lib/tabLayouts";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import type { SelectedSessionTab } from "@/lib/terminal";
 import { IssueLinkContextItems } from "@/components/session/IssueLinkMenuItems";
@@ -93,6 +93,8 @@ export function TabMenuItems({
   const shown = tab.kind === selected?.kind && tab.id === selected.id;
   const off = !!readOnlyReason;
   const floating = isCompactWindow();
+  const wholeRow = useTabRow(row.session);
+  const panes = panesOf(wholeRow.layout, wholeRow.tabs.map((peer) => peer.key));
   const muted = row.layout.muted.includes(tab.key);
   const inTerminalView = tab.kind === "agent" && tabViewIn(tabViews.views, tab.tab) === "terminal";
   // What is in the tab now: an agent with a conversation, or a terminal.
@@ -215,6 +217,13 @@ export function TabMenuItems({
           </ContextMenuSubContent>
         </ContextMenuSub>
       ) : null}
+      {!floating && <ContextMenuItem disabled={off || (panes.length === 1 && wholeRow.tabs.length < 2) || (panes.length === 2 && panes[1].tabs.includes(tab.key))} onSelect={() => moveTabToPane(row, tab, "right", selected)}>
+        <MoveHorizontal /> Split right
+      </ContextMenuItem>}
+      {!floating && row.layout.panes && <ContextMenuItem disabled={off} onSelect={() => moveTabToPane(row, tab, otherPane(wholeRow, tab), selected)}>
+        <MoveHorizontal /> Move tab to other pane
+        <MenuShortcut keys={keys("session.moveTabToOtherPane")} />
+      </ContextMenuItem>}
       <ContextMenuSub>
         <ContextMenuSubTrigger>
           <MoveHorizontal /> Move tab

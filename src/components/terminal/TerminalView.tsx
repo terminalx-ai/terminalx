@@ -209,6 +209,7 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
 export function TerminalView({
   id,
   visible,
+  focused = visible,
   create,
   fit = true,
   dropRefusal,
@@ -219,6 +220,7 @@ export function TerminalView({
 }: {
   id: string;
   visible: boolean;
+  focused?: boolean;
   create?: (mode: "dark" | "light") => TerminalInstance;
   fit?: boolean;
   dropRefusal?: TerminalDropRefusal;
@@ -339,13 +341,13 @@ export function TerminalView({
       try {
         if (fitting.current) fitTerminal(inst.term, el);
         inst.term.refresh(0, inst.term.rows - 1);
-        inst.term.focus();
+        if (focused) inst.term.focus();
       } catch {
         /* ignore */
       }
     });
     return () => cancelAnimationFrame(frame);
-  }, [id, shown, fit]);
+  }, [id, shown, fit, focused]);
 
   return (
     <div ref={frame} className="group/terminal relative flex h-full w-full flex-col bg-terminal" data-testid="terminal-drop-target" {...drop.zoneProps}>
