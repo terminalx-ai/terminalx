@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronRight, GitBranch, Loader2, Sparkles } from "@/icons";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -15,6 +16,7 @@ import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import type { CommitInfo } from "@/types/session";
 import { localStep, NextLine } from "./NextStep";
+import { getDataPrivacy, useDataPrivacy } from "@/lib/dataPrivacy";
 import { MergedWorkspaceStep } from "./MergedWorkspaceStep";
 
 /**
@@ -57,6 +59,7 @@ export function BranchPanel({
   const [actionError, setActionError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [asked, setAsked] = useState<string | null>(null);
+  const privacy = useDataPrivacy();
   const sessions = useSessionStore().sessions;
   const session = sessions.find((s) => s.id === sessionId);
   const forge = useProjectForge(session?.projectPath || cwd);
@@ -91,20 +94,23 @@ export function BranchPanel({
 
   // What others pushed shows only once fetched: on opening, then every five minutes while shown.
   useEffect(() => {
-    if (!active) return;
+    if (!active || !privacy.ready || privacy.enabled) return;
     let cancelled = false;
-    const check = () =>
-      api
+    const check = () => {
+      const current = getDataPrivacy();
+      if (cancelled || !current.ready || current.enabled) return;
+      return api
         .branchFetch(cwd)
         .then((fetched) => fetched && !cancelled && setReread((n) => n + 1))
         .catch(() => {});
+    };
     void check();
     const id = window.setInterval(check, FETCH_EVERY);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [cwd, active]);
+  }, [cwd, active, privacy.ready, privacy.enabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -500,7 +506,7 @@ function Face({ name, label = name, email, github, size = 20 }: { name: string; 
         role="img"
         aria-label={label}
       >
-        {url ? <img src={url} alt="" className="size-full object-cover" onError={() => setFailed(true)} /> : initials}
+        {url ? <PrivacyImage src={url} alt="" className="size-full object-cover" onError={() => setFailed(true)} /> : initials}
       </span>
     </WithTooltip>
   );

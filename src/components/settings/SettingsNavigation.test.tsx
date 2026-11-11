@@ -55,6 +55,14 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("registry navigation", () => {
+  it("opens the registered privacy row through a stable row link", () => {
+    const view = render(<SettingsPage initialTab="general.dataPrivacy" onBack={vi.fn()} />);
+    const row = view.container.querySelector('[data-setting-id="general.dataPrivacy"]');
+    expect(row).toBeTruthy();
+    expect(row?.contains(screen.getByRole("switch", { name: "Data privacy mode" }))).toBe(true);
+    expect(document.activeElement).toBe(row);
+  });
+
   it("opens and saves Scripts for the chosen repository on its one page, with its cleanup controls", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
     const group = within(screen.getByRole("group", { name: "Repositories" }));

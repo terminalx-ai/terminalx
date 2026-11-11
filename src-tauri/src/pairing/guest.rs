@@ -8,7 +8,7 @@ use base64::{engine::general_purpose, Engine};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::tungstenite::Message;
 
 use super::{
     sharing::{decode_link, ShareOffer},
@@ -16,7 +16,7 @@ use super::{
 };
 use crate::relay_e2ee::{E2eeClientHandshake, E2eeSession, PayloadKind};
 
-type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type Socket = crate::data_privacy::Socket;
 
 struct Handle {
     connection_id: String,
@@ -56,6 +56,7 @@ impl PairingManager {
     }
 
     pub(crate) fn guest_send(&self, connection_id: &str, request: Value) -> Result<()> {
+        crate::data_privacy::require_network()?;
         self.guest
             .handle
             .lock()
@@ -85,6 +86,7 @@ impl PairingManager {
     }
 
     pub(crate) async fn join_guest(self: &Arc<Self>, link: String) -> Result<Value> {
+        crate::data_privacy::require_network()?;
         let offer = decode_link(&link)?;
         let context = self
             .account
@@ -229,7 +231,7 @@ async fn handshake(
     endpoint: &str,
     relay: bool,
 ) -> Result<(Socket, E2eeSession)> {
-    let (mut socket, _) = tokio_tungstenite::connect_async_with_config(
+    let (mut socket, _) = crate::data_privacy::connect(
         endpoint,
         Some(super::pairing_websocket_config()),
         false,

@@ -1,3 +1,4 @@
+import type { CheckAuthority } from "./api";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@/lib/api";
@@ -21,6 +22,7 @@ export interface BranchSnapshot {
 }
 export interface PublishAccount { login: string; destination: string; approved: boolean }
 export interface BranchRequest {
+  authority?: CheckAuthority;
   action: BranchAction;
   expected: BranchSnapshot;
   confirmedAccount?: PublishAccount;
@@ -61,8 +63,8 @@ export const BRANCH_STATES: Record<BranchState, { label: string; action: BranchA
 
 export const branchStep = {
   refresh: (sessionId: string, mode: "local" | "auto" | "remote" = "remote") => invoke<BranchSnapshot>("branch_step_refresh", { sessionId, mode }),
-  account: (sessionId: string, action: BranchAction) => invoke<PublishAccount>("branch_step_account", { sessionId, action }),
-  run: (sessionId: string, request: BranchRequest) => invoke<string>("branch_step_action", { sessionId, request }),
+  account: (sessionId: string, action: BranchAction, authority?: CheckAuthority) => invoke<PublishAccount>("branch_step_account", { sessionId, action, authority }),
+  run: (sessionId: string, request: BranchRequest) => invoke<string>("branch_step_action", { sessionId, request, authority: request.authority }),
 };
 
 export const branchError = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -74,7 +76,7 @@ export function useBranchStep(sessionId: string, statusKey: string) {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const refreshRef = useRef<(remote: boolean) => void>(() => {});
-  const refresh = useCallback(() => refreshRef.current(true), []);
+  const refresh = useCallback((remote = true) => refreshRef.current(remote), []);
   useEffect(() => {
     let disposed = false;
     const inFlight = { local: false, hosted: false };

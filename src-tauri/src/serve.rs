@@ -252,6 +252,7 @@ fn run(options: Options) -> Result<()> {
         bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
     }
     let data_dir = crate::store::root().context("open the state directory")?;
+    crate::data_privacy::initialize();
     // A runtime taking over from the one this process was (#765) holds the
     // home already: its lock, its sockets and its terminals came with it.
     #[cfg(unix)]

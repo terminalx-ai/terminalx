@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useState } from "react";
 import { fs } from "@/lib/api";
 import { fileName } from "@/lib/paths";
@@ -68,7 +69,7 @@ function MediaItem({ path, context }: { path: string; context: ChatLinkContext }
         <audio src={shown.src} controls preload="metadata" className="max-w-full" />
       ) : (
         <button type="button" onClick={() => openImageViewer([{ src: shown.src, name, path: path.startsWith("data:") ? undefined : path }])} aria-label={`View ${name}`} className="block max-w-full cursor-zoom-in rounded-lg">
-          <img src={shown.src} alt={name} className="max-h-96 max-w-full rounded-lg object-contain hairline" />
+          <PrivacyImage src={shown.src} alt={name} className="max-h-96 max-w-full rounded-lg object-contain hairline" />
         </button>
       )}
       <figcaption className="mt-1 truncate text-xs text-faint" title={path.startsWith("data:") ? undefined : path}>{name}</figcaption>

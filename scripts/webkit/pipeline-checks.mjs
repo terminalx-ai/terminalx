@@ -58,6 +58,8 @@ function setup({ mode, outcome }) {
     issue_comments: { comments: [], nextCursor: null },
     issue_pipelines_list: [window.__PIPELINE__],
     issue_pipeline_act: () => window.__PIPELINE__,
+    // Both failure actions first capture authority; unknown bridge calls stay pending.
+    pr_check_authority: { owner: "webkit-policy", epoch: 0 },
     pr_check_fix_attachment: { path: "/attachments/local-s1/check-failures.log", truncated: false },
     send_message: (args) => { window.__ACTIONS__.sent.push(args); return { events: [], queued: false }; },
     pr_check_rerun: (args) => { window.__ACTIONS__.reruns.push(args); return null; },

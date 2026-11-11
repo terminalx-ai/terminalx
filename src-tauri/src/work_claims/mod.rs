@@ -402,6 +402,7 @@ impl WorkClaims {
     /// The claims the reader may see on these issues: for GitHub, those of
     /// the project's repository; for Linear, those of the issues' workspaces.
     pub fn list(&self, project_path: &str, provider: &str, issue_urls: &[String]) -> WorkClaimsAnswer {
+        let _request = crate::github_process::scope();
         let Some(context) = self.account.context() else { return WorkClaimsAnswer::unavailable("signed_out") };
         if !self.account.has_capability(CAPABILITY) {
             return WorkClaimsAnswer::unavailable("unsupported");

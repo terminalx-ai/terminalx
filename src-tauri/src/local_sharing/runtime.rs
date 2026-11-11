@@ -30,6 +30,7 @@ pub(crate) fn guest_status(
     let sharing = sessions.sharing.lock().unwrap();
     let share = sharing.sessions.get(session).context("Sharing ended.")?;
     super::owner::authorize(share, owner)?;
+    let _privacy = share.guests.get(connection).context("Access ended.")?.privacy.scope()?;
     let guest = share.guests.get(connection).context("Access ended.")?;
     if !guest.admitted {
         return Ok(json!({ "admitted": false }));
@@ -53,6 +54,7 @@ pub(crate) fn request(
     method: &str,
     params: Value,
 ) -> Result<Value> {
+    crate::data_privacy::require_network()?;
     validate_params(method, &params, session)?;
     if method == "session.status" {
         return guest_status(sessions, owner, session, connection);
@@ -70,6 +72,7 @@ pub(crate) fn request(
         .get_mut(session)
         .context("Sharing ended.")?;
     super::owner::authorize(share, owner)?;
+    let _privacy = share.guests.get(connection).context("Access ended.")?.privacy.scope()?;
     let tab_id = params["tabId"].as_str();
     let write = matches!(
         method,
@@ -204,6 +207,7 @@ pub(crate) fn request(
                     bail!("Send slash commands after the turn finishes.");
                 }
                 let input = QueuedInput {
+                    privacy: share.guests.get(connection).unwrap().privacy.clone(),
                     connection_id: connection.into(),
                     tab_id: tab_id.into(),
                     text,
@@ -324,6 +328,7 @@ pub(crate) fn drain_queue(
         let input = share.queue.remove(at).unwrap();
         let kept = input.clone();
         let result = (|| {
+            let _privacy = input.privacy.scope()?;
             let tab = index::get(session)?
                 .tab(&input.tab_id)
                 .cloned()

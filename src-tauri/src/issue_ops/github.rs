@@ -3,9 +3,7 @@
 //! repositories that still use classic Projects.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::{LazyLock, Mutex};
 
 use serde_json::{json, Value};
@@ -23,11 +21,10 @@ pub(crate) fn gh_api(cwd: &Path, method: &str, path: &str, body: Option<&Value>)
     if body.is_some() {
         command.args(["--input", "-"]);
     }
-    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|_| IssueOpError::new(IssueOpErrorKind::Other, GITHUB))?;
-    if let (Some(body), Some(mut stdin)) = (body, child.stdin.take()) {
-        stdin.write_all(body.to_string().as_bytes()).map_err(|_| IssueOpError::new(IssueOpErrorKind::Other, GITHUB))?;
-    }
-    let out = child.wait_with_output().map_err(|_| IssueOpError::new(IssueOpErrorKind::Other, GITHUB))?;
+    let ticket = crate::github_process::ticket();
+    let out = crate::github_process::output_admitted(command, crate::github_process::TIMEOUT, body.map(|body| body.to_string().into_bytes()), ticket.clone())
+        .map_err(|_| if ticket.valid() { IssueOpError::new(IssueOpErrorKind::Other, GITHUB) }
+            else { IssueOpError::with_message(IssueOpErrorKind::Forbidden, crate::data_privacy::MESSAGE) })?;
     if !out.status.success() {
         let printed = format!("{}\n{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
         return Err(IssueOpError::new(classify(&printed), GITHUB));
@@ -144,7 +141,8 @@ pub fn parse_issue(v: &Value, repo: &str) -> Option<IssueDetails> {
 pub(crate) type Api<'a> = dyn FnMut(&str, &str, Option<&Value>) -> OpResult<Value> + 'a;
 
 fn gh(cwd: &Path) -> impl FnMut(&str, &str, Option<&Value>) -> OpResult<Value> + '_ {
-    move |method, path, body| gh_api(cwd, method, path, body)
+    let request = crate::github_process::ticket();
+    move |method, path, body| crate::github_process::with_ticket(request.clone(), || gh_api(cwd, method, path, body))
 }
 
 /// Lists ask for this many items a page.

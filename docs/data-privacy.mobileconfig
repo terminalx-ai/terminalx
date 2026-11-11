@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadVersion</key><integer>1</integer>
+  <key>PayloadIdentifier</key><string>com.terminalx.privacy-policy</string>
+  <key>PayloadUUID</key><string>567379F9-80CA-4213-A210-34D33102DFA0</string>
+  <key>PayloadDisplayName</key><string>TerminalX data privacy mode</string>
+  <key>PayloadScope</key><string>System</string>
+  <key>PayloadContent</key>
+  <array><dict>
+    <key>PayloadType</key><string>com.apple.ManagedClient.preferences</string>
+    <key>PayloadVersion</key><integer>1</integer>
+    <key>PayloadIdentifier</key><string>com.terminalx.privacy-policy.preferences</string>
+    <key>PayloadUUID</key><string>83BB5051-93ED-4E18-93C3-B4B354654B23</string>
+    <key>PayloadDisplayName</key><string>Enforce TerminalX data privacy</string>
+    <key>PayloadContent</key>
+    <dict><key>com.terminalx.next</key><dict>
+      <key>Forced</key><array><dict>
+        <key>mcx_preference_settings</key><dict>
+          <key>DataPrivacyMode</key><true/>
+        </dict>
+      </dict></array>
+    </dict></dict>
+  </dict></array>
+</dict>
+</plist>

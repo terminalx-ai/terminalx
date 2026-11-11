@@ -94,6 +94,7 @@ fn fixture() -> Fixture {
 
 impl Fixture {
     async fn assert_claude_launched(&self, created: &Value) {
+        assert!(created["startError"].is_null(), "stand-in Claude launch refused: {created}");
         let session = crate::store::index::get(created["sessionId"].as_str().unwrap()).unwrap();
         let provider_id = session.tabs[0].provider_session_id.as_deref().expect("Claude conversation id");
         let marker = self._dir.path().join("agent.ran");
@@ -106,7 +107,7 @@ impl Fixture {
                     break;
                 }
             }
-            assert!(tokio::time::Instant::now() < deadline, "stand-in Claude did not record --session-id {provider_id}");
+            assert!(tokio::time::Instant::now() < deadline, "stand-in Claude did not record --session-id {provider_id}: {:?}", std::fs::read_to_string(&marker));
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let home = PathBuf::from(crate::store::state_home_env().unwrap());

@@ -17,6 +17,8 @@ static RUN_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Setup {
+    #[serde(default)]
+    privacy: Option<crate::data_privacy::Ticket>,
     pub session_id: String,
     pub pane_id: String,
     pub command: String,
@@ -40,7 +42,7 @@ impl Status {
     fn active(self) -> bool { matches!(self, Self::Pending | Self::Running | Self::Stopping) }
 }
 
-struct Job { manager: SessionManager, session: String, pane: String, cancel: Arc<AtomicBool>, timeout: Duration }
+struct Job { privacy: crate::data_privacy::Ticket, manager: SessionManager, session: String, pane: String, cancel: Arc<AtomicBool>, timeout: Duration }
 #[derive(Clone)]
 struct Control { pane: String, cancel: Arc<AtomicBool> }
 fn controls() -> &'static parking_lot::Mutex<HashMap<String, Control>> {
@@ -94,7 +96,7 @@ fn script(entry: &SessionEntry) -> Result<Option<String>> {
     Ok((!command.trim().is_empty()).then_some(command))
 }
 fn attempt(entry: &SessionEntry, command: String) -> Setup {
-    Setup { session_id: entry.id.clone(), pane_id: format!("{}:workspace-setup-{}", entry.id, uuid::Uuid::now_v7()),
+    Setup { privacy: Some(crate::github_process::ticket()), session_id: entry.id.clone(), pane_id: format!("{}:workspace-setup-{}", entry.id, uuid::Uuid::now_v7()),
         command, status: Status::Pending, exit_code: None, error: None, log: String::new(), has_pane: false, local_script: true }
 }
 
@@ -130,11 +132,14 @@ fn schedule(manager: &SessionManager, session: &str, rerun: bool, timeout: Durat
         if manager.terminals().is_running(&previous.pane_id) { bail!("Stop the previous setup before rerunning it"); }
         if !previous.pane_id.is_empty() { manager.terminals().kill(&previous.pane_id); }
     }
+    let privacy = if rerun { crate::github_process::ticket() }
+        else { previous.as_ref().and_then(|setup| setup.privacy.clone()).unwrap_or_else(crate::data_privacy::Ticket::denied) };
     let mut setup = attempt(&entry, command);
+    setup.privacy = Some(privacy.clone());
     publish(manager, &setup)?;
     let cancel = Arc::new(AtomicBool::new(false));
     controls().lock().insert(session.into(), Control { pane: setup.pane_id.clone(), cancel: cancel.clone() });
-    if workers().send(Job { manager: manager.clone(), session: session.into(), pane: setup.pane_id.clone(), cancel, timeout }).is_err() {
+    if workers().send(Job { privacy, manager: manager.clone(), session: session.into(), pane: setup.pane_id.clone(), cancel, timeout }).is_err() {
         controls().lock().remove(session);
         setup.status = Status::Failed;
         setup.error = Some("The setup worker is unavailable".into());
@@ -145,6 +150,11 @@ fn schedule(manager: &SessionManager, session: &str, rerun: bool, timeout: Durat
 }
 
 fn execute(job: Job) {
+    let privacy = job.privacy.clone();
+    crate::github_process::with_ticket(privacy, || execute_admitted(job));
+}
+
+fn execute_admitted(job: Job) {
     let result = (|| -> Result<Option<archive_script::ScriptResult>> {
         let runner = Runner { terminals: job.manager.terminals(), sink: job.manager.sink(), unattended: false };
         let run = {
@@ -241,7 +251,7 @@ pub fn follow_creations(manager: &SessionManager) {
         let owner = owner.clone();
         // The event may be emitted under a caller's admission lock. This short
         // dispatch only queues work; the two workers own all script execution.
-        std::thread::spawn(move || start_pending(&owner, &entry.id));
+        std::thread::spawn(crate::github_process::queued(move || start_pending(&owner, &entry.id)));
     }));
 }
 

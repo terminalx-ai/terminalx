@@ -6,6 +6,7 @@ import type { AgentEvent, Payload } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
 import { page as browserPage } from "@/test/tabsBackend";
 import { refreshBrowserPages } from "@/lib/browser";
+import { refreshDataPrivacy } from "@/lib/dataPrivacy";
 import { guardedApi } from "@/test/guardedApi";
 
 // PRO-86: the chat / terminal switch on local and cloud agent tabs. The cloud
@@ -153,11 +154,12 @@ function CloudHarness() {
 }
 const wrap = (node: React.ReactNode) => <TooltipProvider>{node}</TooltipProvider>;
 
-beforeEach(() => {
+beforeEach(async () => {
   guard.reset();
   enqueued = [];
   cache = {};
   guard.handlers = {
+    data_privacy_status: () => ({ enabled: false, managed: false }),
     cloud_agent_cache_load: () => ({ tabs: cache }),
     cloud_agent_cache_save: () => undefined,
     cloud_agent_outbox: () => [],
@@ -170,6 +172,8 @@ beforeEach(() => {
     },
     organization_members: () => ({ members: [{ userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }], pendingInvites: [], viewerRole: "member", canManageMembers: false, removedOnDelete: [], runtimeFacts: { available: true }, contextRevision: "r" }),
   };
+  // App startup settles native privacy before mounting the session header.
+  await refreshDataPrivacy();
   runtime = new FakeAgentRuntime();
   runtime.events = [ev({ type: "user_message", text: "why does login loop?", queued: false })];
   client = new WorkspaceRpcClient(runtime);
@@ -691,8 +695,8 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(screen.getByTestId("session-project").textContent).toBe("project");
     expect(screen.getByTestId("session-branch").textContent).toBe("main");
     expect(screen.queryByTestId("session-title")).toBeNull();
-    // Asked about the folder the session works in, once.
-    expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: "/Users/me/shop", refresh: false }]);
+    // Asked about the folder once, refreshing native metadata for this privacy generation.
+    expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: "/Users/me/shop", refresh: true }]);
   });
 
   it.each([
@@ -731,7 +735,8 @@ describe("a quick chat in the floating window's compact chrome", () => {
     const linkedPath = "/Users/me/linked-identity-repo";
     const session: SessionEntry = { ...quick(), id: "linked-identity", kind: "project", projectPath: cwd, cwd };
     guard.handlers.work_status = () => ({ isRepo: false, dirty: false, branch: null, ahead: 0, behind: 0 });
-    guard.handlers.github_identity = ({ refresh }) => ({ login: refresh ? "refreshed-account" : "linked-account", source: "ssh", email: "me@example.com", repo: "me/linked-repo", remoteHost: "github" });
+    let login = "linked-account";
+    guard.handlers.github_identity = () => ({ login, source: "ssh", email: "me@example.com", repo: "me/linked-repo", remoteHost: "github" });
     mocks.prefs.panelOpen = true;
     const Local = () => {
       const current = useSessionStore().sessions.find((entry) => entry.id === session.id)!;
@@ -752,12 +757,15 @@ describe("a quick chat in the floating window's compact chrome", () => {
       const chip = await screen.findByRole("button", { name: "Connected to GitHub as linked-account" });
       expect(getSessionStore().sessions.find((entry) => entry.id === session.id)?.cwd).toBe(cwd);
       expect(screen.queryByRole("button", { name: "Branch" })).toBeNull();
-      expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: linkedPath, refresh: false }]);
+      // A new privacy generation requires a fresh native lookup, even before
+      // an explicit refresh. The provider identity changes independently.
+      expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: linkedPath, refresh: true }]);
 
+      login = "refreshed-account";
       fireEvent.click(chip);
       expect(await screen.findByRole("button", { name: "Connected to GitHub as refreshed-account" })).toBeTruthy();
       expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([
-        { projectPath: linkedPath, refresh: false },
+        { projectPath: linkedPath, refresh: true },
         { projectPath: linkedPath, refresh: true },
       ]);
 

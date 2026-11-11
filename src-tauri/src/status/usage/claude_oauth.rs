@@ -172,7 +172,7 @@ fn retry_deadline(raw: &str, now: i64) -> Option<i64> {
 }
 
 pub(super) fn fetch(token: &str, updated_at: i64) -> Result<Vec<UsageWindow>> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).build();
+    let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(10)).build();
     let response = agent
         .get(USAGE_URL)
         .set("Authorization", &format!("Bearer {token}"))

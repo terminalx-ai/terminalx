@@ -572,6 +572,7 @@ impl AccountManager {
 
     /// True when the server answered with the current organizations and roles.
     fn refresh_roles_with(&self, force: bool, now: Instant, fetch: impl FnOnce(&DesktopSession) -> Result<SessionBody, CloudError>) -> bool {
+        if crate::data_privacy::enabled() { return false; }
         let (fresh, generation, changed, save_failed) = {
             let mut refreshed = self.roles_refreshed.lock().unwrap();
             // A token rotation brings the same body: nothing more to ask.
@@ -876,6 +877,7 @@ impl AccountManager {
     }
 
     pub fn begin_sign_in(self: &Arc<Self>, app: &AppHandle) -> Result<AccountStatus> {
+        crate::data_privacy::require_network()?;
         self.ensure_loaded();
         {
             let inner = self.inner.lock().unwrap();
@@ -1151,6 +1153,7 @@ impl AccountManager {
 
     /// Rotate the tokens when they are about to expire; true when it asked.
     fn refresh_if_needed(&self) -> bool {
+        if crate::data_privacy::enabled() { return false; }
         let Some((generation, changed)) = self.rotate_if_needed() else { return false };
         self.settle(generation, changed, Some(REFRESH_NOT_SAVED));
         true
@@ -1505,7 +1508,7 @@ fn endpoint(path: &str) -> String {
 /// request paid for DNS, TCP and a TLS handshake every time (#671).
 pub(crate) fn cloud_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(|| ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).redirects(0).build())
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().timeout(REQUEST_TIMEOUT).redirects(0).build())
 }
 
 /// Read and drop a body no one needs. A connection returns to the pool only

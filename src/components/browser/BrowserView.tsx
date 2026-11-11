@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type PointerEvent } from "react";
 import { ArrowLeft, ArrowRight, ExternalLink, Globe, Pause, Play, RotateCw } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -289,7 +290,7 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
         className="relative flex min-h-0 flex-1 items-start justify-center overflow-hidden bg-well/60 outline-none"
         data-testid="browser-surface"
       >
-        <img
+        <PrivacyImage
           ref={imgRef}
           alt={page.title ? `Preview of ${page.title}` : "Page preview"}
           className={cn(

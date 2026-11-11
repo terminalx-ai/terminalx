@@ -8,7 +8,7 @@
 //! pid so a late exit from an old child can be told apart from the current one.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +22,7 @@ pub struct LiveChild {
     pub pid: u32,
     pub epoch: u64,
     stdin: Mutex<Option<ChildStdin>>,
+    frame: Mutex<()>,
     terminal: Arc<Mutex<Option<TerminalReceipt>>>,
 }
 
@@ -50,14 +51,39 @@ impl LiveChild {
     }
 
     pub fn write_line(&self, line: &str) -> Result<()> {
-        let mut guard = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
-        let stdin = guard.as_mut().context("child stdin closed")?;
-        stdin.write_all(line.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()?;
+        // A partial frame cannot be interleaved with a control reply. Do
+        // not wait here: callers may own the runtime the writer needs.
+        let _frame = self.frame.try_lock().map_err(|_| anyhow::anyhow!("child input frame is still being written"))?;
+        let mut bytes = line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        let mut offset = 0;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while offset < bytes.len() {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "child input pipe timed out");
+            match self.try_write_stdin(&bytes[offset..]) {
+                Ok(0) => bail!("child input pipe closed"),
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(())
     }
-    /// Experimental owned-stdio writer only. Never wait for pipe capacity
+    pub(crate) fn input_frame(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.frame.try_lock() {
+                Ok(frame) => return Ok(frame),
+                Err(std::sync::TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    anyhow::ensure!(std::time::Instant::now() < deadline, "previous child input frame did not finish");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+    /// Owned stdio writers never wait for pipe capacity
     /// while the caller holds final-admission/runtime authority. ChildStdin is
     /// unbuffered; the caller owns framing, partial writes and their deadline.
     #[cfg(unix)]
@@ -66,8 +92,8 @@ impl LiveChild {
         let guard = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
         let stdin = guard.as_ref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child stdin closed"))?;
         let fd = stdin.as_raw_fd();
-        // Only this child's dedicated writer uses stdin. Existing PTY/ACP
-        // paths keep their original blocking write_line behavior.
+        // The dedicated writer owns framing. ACP also holds input_frame,
+        // preventing synchronous control writes from interleaving chunks.
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFL);
             if flags == -1 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
@@ -171,7 +197,7 @@ impl Host {
             let stdout = child.stdout.take().context("no stdout")?;
             let stderr = child.stderr.take().context("no stderr")?;
             let stdin = child.stdin.take().context("no stdin")?;
-            let live = Arc::new(LiveChild { pid, epoch, stdin: Mutex::new(Some(stdin)), terminal: terminal.clone() });
+            let live = Arc::new(LiveChild { pid, epoch, stdin: Mutex::new(Some(stdin)), frame: Mutex::new(()), terminal: terminal.clone() });
             let out_sink = sink.clone();
             start.readers.push(start_reader(format!("stdout-{key}"), move || {
                 let end = read_stdout(stdout, |line| out_sink.stdout_line(line));

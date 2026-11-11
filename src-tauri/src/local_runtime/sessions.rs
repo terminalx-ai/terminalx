@@ -53,7 +53,7 @@ impl Sessions {
     }
 
     pub fn pipeline<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
-        self.call("runtime.session.pipeline",json!({"operation":operation,"params":params}))
+        self.0.network_call("runtime.session.pipeline", operation, params, crate::github_process::ticket())
     }
 
     /// An older owner ignores unknown project fields; it must not silently
@@ -66,6 +66,7 @@ impl Sessions {
     }
 
     pub fn workspace<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
+        let origin = crate::github_process::ticket();
         // Archive hooks may take five minutes each. Keep the caller waiting
         // for the result rather than reporting a timeout while removal runs.
         let seconds = match operation {
@@ -73,9 +74,9 @@ impl Sessions {
             "remove" => 120 + 360 * params["items"].as_array().map_or(1, |items| items.len() as u64),
             "removeLeftovers" => 120 + 360 * params["ids"].as_array().map_or(1, |items| items.len() as u64),
             "mergedSweep" => 3600 + 360 * crate::merged_cleanup::ARCHIVES_PER_PASS as u64,
-            _ => 120,
+            _ => return self.0.workspace(operation, params, origin),
         };
-        self.0.call_within("runtime.session.workspace", json!({"operation":operation,"params":params}), std::time::Duration::from_secs(seconds))
+        self.0.workspace_within(operation, params, origin, std::time::Duration::from_secs(seconds))
     }
 
     pub fn save_terminal_selection(&self, session: &str, tab: &str, text: &str) -> Result<String> {

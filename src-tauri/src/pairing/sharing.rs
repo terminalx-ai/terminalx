@@ -130,6 +130,7 @@ impl PairingManager {
         mut settings: LinkSettings,
         direct_only: bool,
     ) -> Result<Value> {
+        crate::data_privacy::require_network()?;
         settings.validate(now())?;
         shareable(&session_id)?;
         let context = self
@@ -527,7 +528,7 @@ impl PairingManager {
                                         Ok(person) => {
                                             let admission = if access_token.is_some() {
                                                 self.refresh_share_guest(&session_id, &id, person)
-                                            } else { self.join_share_guest(&session_id, Guest { connection_id: id.clone(), link_id: link_id.clone(), person, role: Role::Viewer,
+                                            } else { self.join_share_guest(&session_id, Guest { privacy:Default::default(), connection_id: id.clone(), link_id: link_id.clone(), person, role: Role::Viewer,
                                                 can_approve: false, admitted: false, verified_until: now() + IDENTITY_MS, active: active.clone(), cancel: cancel.clone(),
                                                 viewing: None, typing: false, last_write: 0, write_revision: 0 }) };
                                             match admission {
@@ -616,6 +617,7 @@ impl PairingManager {
     }
 
     pub(crate) fn share_rpc(&self, session: &str, connection: &str, method: &str, params: Value) -> Result<Value> {
+        crate::data_privacy::require_network()?;
         if let Some(result) = self.runtime_sharing("guest", json!({"sessionId":session,"connectionId":connection,"method":method,"params":params})) { return result; }
         local_sharing::runtime::request(manager(self)?, None, session, connection, method, params)
     }

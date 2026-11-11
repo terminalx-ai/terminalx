@@ -333,7 +333,7 @@ fn a_quiet_session_is_archived_only_once_its_tab_has_nothing_going_and_a_message
         let rt = rt();
         let mut rt = rt.lock().unwrap();
         rt.turn_open = false;
-        rt.queued.push(QueuedMessage { id: "held".into(), text: "and then".into(), images: Vec::new() });
+        rt.queued.push(PendingMessage { message: QueuedMessage { id: "held".into(), text: "and then".into(), images: Vec::new() }, privacy: None, seq: 0 });
     }
     assert!(sweep(&nobody).is_empty(), "a message waits to be sent");
     rt().lock().unwrap().queued.clear();

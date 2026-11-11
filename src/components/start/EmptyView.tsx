@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useState, type ReactNode } from "react";
 import { getName } from "@tauri-apps/api/app";
 import appMark from "../../../src-tauri/icons/128x128.png";
@@ -19,7 +20,7 @@ export function EmptyView({ title, guidance, children, branded = false }: {
       <div className={cn("m-auto w-full py-4", branded ? "max-w-2xl" : "max-w-sm")}>
         {branded ? (
           <>
-            <img src={appMark} alt="" className="mx-auto mb-4 size-20 rounded-2xl" />
+            <PrivacyImage src={appMark} alt="" className="mx-auto mb-4 size-20 rounded-2xl" />
             <h1 className="text-center text-3xl font-bold uppercase tracking-tight">{name}</h1>
           </>
         ) : <h2 className="text-center text-base font-semibold">{title}</h2>}
