@@ -345,6 +345,50 @@ fn startup_shell_command_in(repo: &Repository, shell: &Path, command: &str, cwd:
 }
 
 #[test]
+fn startup_global_aliases_cannot_replace_descriptor_operands() {
+    let repo = Repository::new();
+    let shell = Path::new("/bin/zsh");
+    std::fs::write(repo.root.join("file"), "hello\n").unwrap();
+    let marker = repo.home.join("descriptor-alias-write");
+    for operand in ["0", "8", "-"] {
+        std::fs::write(
+            repo.home.join(".zshenv"),
+            format!(
+                "alias -g -- {}\n",
+                quote(&format!(
+                    "{operand}={operand}; printf invoked > {}; :",
+                    quote(marker.to_str().unwrap())
+                ))
+            ),
+        )
+        .unwrap();
+        // Redirection operands are words too: a global alias can insert a
+        // command and replace a failure status before the guard is evaluated.
+        startup_shell_command(&repo, shell, "'/usr/bin/true' 8<&0 0<&8 8<&-");
+        assert!(
+            marker.exists(),
+            "the {operand} alias must execute in the control"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        for (requested, cwd, status, stdout) in [
+            ("cat file", &repo.root, 0, "hello\n"),
+            ("grep absent file", &repo.root, 1, ""),
+            ("cat file", &repo.home, 125, ""),
+        ] {
+            let updated = repo.approved(requested).unwrap();
+            let output =
+                startup_shell_command_in(&repo, shell, updated["command"].as_str().unwrap(), cwd);
+            assert!(
+                !marker.exists(),
+                "descriptor alias {operand} executed: {output:?}"
+            );
+            assert_eq!(output.status.code(), Some(status), "{output:?}");
+            assert_eq!(output.stdout, stdout.as_bytes(), "{output:?}");
+        }
+    }
+}
+
+#[test]
 fn startup_loader_namerefs_cannot_execute_before_the_directory_guard() {
     let repo = Repository::new();
     let shell = Path::new("/bin/bash");

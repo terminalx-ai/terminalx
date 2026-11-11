@@ -213,6 +213,9 @@ jobs:
           python3 scripts/test_packaged_icons.py
           python3 scripts/test_compiled_icons.py
 
+      - name: Install ripgrep for the Rust security tests
+        run: brew install ripgrep
+
       # rust-toolchain.toml decides the channel and pulls in clippy.
       - name: Show the Rust toolchain
         run: rustup show && cargo --version && cargo clippy --version && command -v rg && command -v zsh

@@ -242,7 +242,9 @@ fn approved_input_in(
     // 0 before env dispatch. Restore stdin and close every temporary descriptor.
     // $? is shell-owned status, not a named parameter that startup can turn
     // into a nameref. It is the only expansion in the outer wrapper.
-    wrapper.push_str(" 8<&0 0<&- 9<'/dev/null' 7<&\"$?\" 0<&8 7<&- 8<&- 9<&-)");
+    // Quote descriptor operands too: zsh expands global aliases on bare words
+    // such as 0, 8 and -, even when they follow a redirection operator.
+    wrapper.push_str(" 8<&'0' 0<&'-' 9<'/dev/null' 7<&\"$?\" 0<&'8' 7<&'-' 8<&'-' 9<&'-')");
     // zsh inherits function-style TRAPZERR handlers into subshells. Keep the
     // entire guarded execution on the conditional side of && so neither a
     // rejection nor the requested command's failure invokes an outer error
