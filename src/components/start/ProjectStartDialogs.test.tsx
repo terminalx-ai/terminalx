@@ -22,6 +22,9 @@ vi.mock("@/lib/prefs", () => ({ setPrefs, usePrefs: () => prefs }));
 vi.mock("@/lib/sessions", () => sessions);
 
 const { ProjectStartDialogHost } = await import("./ProjectStartDialogs");
+const { isMac } = await import("@/lib/shortcuts");
+/** The platform's Cmd+Enter (Ctrl+Enter off macOS). */
+const modEnter = { key: "Enter", ...(isMac ? { metaKey: true } : { ctrlKey: true }) };
 const { openProjectStart } = await import("@/lib/projectStart");
 
 const repositories = [
@@ -32,7 +35,13 @@ const repositories = [
 /** The clone the backend is running, for a test to finish, fail or report on. */
 let clone: { id: string; source: string; parent: string; resolve: (value: unknown) => void; reject: (cause: unknown) => void } | null = null;
 let gh: unknown = { status: "ready", repositories, truncated: false };
-let created: (args: { parent: string; name: string }) => Promise<string>;
+let created: (args: { parent: string; name: string; template: string }) => Promise<string>;
+const BUILT_IN_TEMPLATES = [
+  { id: "empty", name: "Empty", description: "A README, a .gitignore and nothing else", builtIn: true },
+  { id: "vite-react", name: "Vite + React", description: "TypeScript, Tailwind and Vitest", builtIn: true },
+  { id: "agent-starter", name: "Agent starter", description: "CLAUDE.md, AGENTS.md, setup and test scripts", builtIn: true },
+];
+let templates: unknown[] = BUILT_IN_TEMPLATES;
 const canceled: string[] = [];
 
 function progress(stage: string, percent: number | null, id = clone!.id) {
@@ -52,6 +61,7 @@ beforeEach(() => {
   gh = { status: "ready", repositories, truncated: false };
   prefs.projectsDir = null;
   created = async ({ parent, name }) => `${parent}/${name}`;
+  templates = BUILT_IN_TEMPLATES;
   listen.mockResolvedValue(unlisten);
   sessions.addProject.mockImplementation(async (path: string) => ({ path, name: path.split("/").pop() }) as Project);
   invoke.mockImplementation(async (command: string, args: Record<string, string>) => {
@@ -66,7 +76,8 @@ beforeEach(() => {
       canceled.push(args.id);
       return undefined;
     }
-    if (command === "project_create") return created(args as { parent: string; name: string });
+    if (command === "project_create") return created(args as { parent: string; name: string; template: string });
+    if (command === "project_templates") return templates;
     throw new Error(`unexpected command ${command}`);
   });
 });
@@ -288,37 +299,122 @@ describe("Open GitHub project", () => {
   });
 });
 
-describe("Quick start", () => {
+describe("Create a project (Quick start)", () => {
   const nameField = () => screen.getByLabelText("Project name") as HTMLInputElement;
-
-  it("creates a project folder under the suggested name and opens it as a project", async () => {
-    open("quick");
+  const createButton = () => screen.getByRole("button", { name: /^Create/ }) as HTMLButtonElement;
+  const templateCard = (name: string) => screen.getByRole("radio", { name: new RegExp(`^${name.replace(/[+]/g, "\\+")}`) }) as HTMLButtonElement;
+  const sessionBox = () => screen.getByRole("checkbox", { name: "Open a new session in it when it's ready" }) as HTMLInputElement;
+  const ready = async () => {
     await waitFor(() => expect(nameField().value).toBe("my-project"));
-    expect(screen.getByTestId("start-destination").textContent).toBe("/home/me/Projects/my-project");
+    await screen.findByRole("radiogroup", { name: "Template" });
+  };
 
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+  it("shows the fields, the three built-in templates, the git note and the session checkbox", async () => {
+    open("quick");
+    await ready();
+    expect(screen.getByRole("heading", { name: "Create a project" })).toBeTruthy();
+    expect(screen.getByText("A new folder with its own git repository, ready for a first session.")).toBeTruthy();
+    expect(screen.getByTestId("start-destination").textContent).toBe("/home/me/Projects/my-project");
+    expect(screen.getByTestId("start-parent").textContent).toBe("/home/me/Projects");
+    expect(screen.getByRole("button", { name: "Change…" })).toBeTruthy();
+
+    const radios = screen.getAllByRole("radio");
+    expect(radios.map((radio) => radio.getAttribute("data-template"))).toEqual(["empty", "vite-react", "agent-starter"]);
+    // Empty is chosen until the reader picks another.
+    expect(radios.map((radio) => radio.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
+    expect(templateCard("Empty").textContent).toContain("A README, a .gitignore and nothing else");
+    expect(templateCard("Vite + React").textContent).toContain("TypeScript, Tailwind and Vitest");
+    expect(templateCard("Agent starter").textContent).toContain("CLAUDE.md, AGENTS.md, setup and test scripts");
+    expect(templateCard("Agent starter").textContent).toContain("NEW");
+
+    expect(screen.getByRole("note").textContent).toBe("Creates a git repository on main with a first commit. No GitHub remote yet: TerminalX offers to create a private one the first time you push.");
+    expect(sessionBox().checked).toBe(true);
+    expect(screen.getByRole("button", { name: "Add your own templates in Settings › Projects" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Cancel/ }).textContent).toContain("esc");
+  });
+
+  it("creates the project from the chosen template and opens a new session in it", async () => {
+    open("quick");
+    await ready();
+
+    fireEvent.click(templateCard("Vite + React"));
+    expect(templateCard("Vite + React").getAttribute("aria-checked")).toBe("true");
+    expect(templateCard("Empty").getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(createButton());
 
     // A real project is attached, and the session view opens in it: never a project-less session.
     await waitFor(() => expect(sessions.startSessionIn).toHaveBeenCalledWith("/home/me/Projects/my-project", null));
-    expect(invoke).toHaveBeenCalledWith("project_create", { parent: "/home/me/Projects", name: "my-project" });
+    expect(invoke).toHaveBeenCalledWith("project_create", { parent: "/home/me/Projects", name: "my-project", template: "vite-react" });
     expect(sessions.addProject).toHaveBeenCalledWith("/home/me/Projects/my-project");
     expect(setPrefs).toHaveBeenCalledWith({ projectsDir: "/home/me/Projects" });
     expect(screen.queryByTestId("start-quick-dialog")).toBeNull();
   });
 
+  it("with the checkbox off, adds the project without opening a new-session view", async () => {
+    open("quick");
+    await ready();
+
+    fireEvent.click(sessionBox());
+    expect(sessionBox().checked).toBe(false);
+    fireEvent.click(createButton());
+
+    await waitFor(() => expect(sessions.addProject).toHaveBeenCalledWith("/home/me/Projects/my-project"));
+    expect(invoke).toHaveBeenCalledWith("project_create", { parent: "/home/me/Projects", name: "my-project", template: "empty" });
+    await waitFor(() => expect(screen.queryByTestId("start-quick-dialog")).toBeNull());
+    expect(sessions.startSessionIn).not.toHaveBeenCalled();
+  });
+
+  it("creates with Cmd+Enter from anywhere in the dialog", async () => {
+    open("quick");
+    await ready();
+    fireEvent.click(templateCard("Agent starter"));
+    fireEvent.keyDown(templateCard("Agent starter"), modEnter);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("project_create", { parent: "/home/me/Projects", name: "my-project", template: "agent-starter" }));
+  });
+
+  it("offers a template added in Settings, and a template whose folder is gone cannot be picked", async () => {
+    templates = [
+      ...BUILT_IN_TEMPLATES,
+      { id: "user:1", name: "house-style", description: "/home/me/templates/house-style", builtIn: false, path: "/home/me/templates/house-style" },
+      { id: "user:2", name: "old", description: "/home/me/old", builtIn: false, path: "/home/me/old", problem: "/home/me/old is no longer there." },
+    ];
+    open("quick");
+    await ready();
+
+    expect(templateCard("old").disabled).toBe(true);
+    expect(templateCard("old").textContent).toContain("is no longer there");
+    fireEvent.click(templateCard("house-style"));
+    fireEvent.click(createButton());
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("project_create", { parent: "/home/me/Projects", name: "my-project", template: "user:1" }));
+  });
+
+  it("opens Settings › Projects from the link and closes the dialog", async () => {
+    const { onTemplateSettingsRequest } = await import("@/lib/projectStart");
+    const opened = vi.fn();
+    const stop = onTemplateSettingsRequest(opened);
+    open("quick");
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "Add your own templates in Settings › Projects" }));
+    expect(opened).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("start-quick-dialog")).toBeNull();
+    stop();
+  });
+
   it("uses the name and the folder the reader chose", async () => {
     openDialog.mockResolvedValue("/elsewhere");
     open("quick");
-    await waitFor(() => expect(nameField().value).toBe("my-project"));
+    await ready();
 
     // Until a name is typed, the suggestion follows the folder.
-    fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Change…" }));
     await waitFor(() => expect(nameField().value).toBe("my-project-2"));
+    expect(screen.getByTestId("start-parent").textContent).toBe("/elsewhere");
 
     fireEvent.change(nameField(), { target: { value: "first-idea" } });
+    expect(screen.getByTestId("start-destination").textContent).toBe("/elsewhere/first-idea");
     fireEvent.keyDown(nameField(), { key: "Enter" });
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("project_create", { parent: "/elsewhere", name: "first-idea" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("project_create", { parent: "/elsewhere", name: "first-idea", template: "empty" }));
   });
 
   it("reports a folder that is already taken and attaches nothing", async () => {
@@ -326,9 +422,9 @@ describe("Quick start", () => {
       throw { code: "destination-exists", message: "/home/me/Projects/my-project already exists. Choose another name." };
     };
     open("quick");
-    await waitFor(() => expect(nameField().value).toBe("my-project"));
+    await ready();
 
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    fireEvent.click(createButton());
 
     const alert = await screen.findByRole("alert");
     expect(alert.getAttribute("data-failure")).toBe("destination-exists");
@@ -339,18 +435,40 @@ describe("Quick start", () => {
     // A second try with another name goes through.
     created = async ({ parent, name }) => `${parent}/${name}`;
     fireEvent.change(nameField(), { target: { value: "second-idea" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    fireEvent.click(createButton());
     await waitFor(() => expect(sessions.startSessionIn).toHaveBeenCalledWith("/home/me/Projects/second-idea", null));
+  });
+
+  it("reports a bad name", async () => {
+    created = async () => {
+      throw { code: "invalid-name", message: "Enter a folder name for the project, without slashes." };
+    };
+    open("quick");
+    await ready();
+    fireEvent.change(nameField(), { target: { value: "a/b" } });
+    fireEvent.click(createButton());
+    const alert = await screen.findByRole("alert");
+    expect(alert.getAttribute("data-failure")).toBe("invalid-name");
+    expect(alert.textContent).toBe("Enter a folder name for the project, without slashes.");
   });
 
   it("does not create a project without a name", async () => {
     open("quick");
-    await waitFor(() => expect(nameField().value).toBe("my-project"));
+    await ready();
 
     fireEvent.change(nameField(), { target: { value: "   " } });
 
-    expect((screen.getByRole("button", { name: "Create project" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(createButton().disabled).toBe(true);
     fireEvent.keyDown(nameField(), { key: "Enter" });
+    fireEvent.keyDown(nameField(), modEnter);
+    expect(invoke).not.toHaveBeenCalledWith("project_create", expect.anything());
+  });
+
+  it("cancels with Esc and creates nothing", async () => {
+    open("quick");
+    await ready();
+    fireEvent.keyDown(nameField(), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("start-quick-dialog")).toBeNull());
     expect(invoke).not.toHaveBeenCalledWith("project_create", expect.anything());
   });
 });

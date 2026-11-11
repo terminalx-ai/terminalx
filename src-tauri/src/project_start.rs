@@ -1,5 +1,6 @@
 //! The ways to a first local project that need more than a folder picker:
-//! cloning a repository to this computer, and making a new empty one.
+//! cloning a repository to this computer, and making a new one from a
+//! template (`project_templates`).
 //!
 //! Neither attaches anything. Each ends with a finished directory or with
 //! nothing at all, and the caller adds the project only after that, so a
@@ -33,11 +34,11 @@ pub struct Failure {
 }
 
 impl Failure {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self { code, message: message.into() }
     }
 
-    fn io(what: &str, error: std::io::Error) -> Self {
+    pub(crate) fn io(what: &str, error: std::io::Error) -> Self {
         Self::new(FAILED, format!("{what}: {error}"))
     }
 }
@@ -461,10 +462,18 @@ fn clone_within(id: &str, source: &str, parent: &str, within: Duration, on_progr
 
 // ------------------------------------------------------------- quick start
 
-/// Make `parent/name` a new Git repository with an empty first commit, so
-/// worktrees can be cut from it like from any other project. Returns its
-/// path. A folder that already holds something is never used.
-pub fn create_project(parent: &str, name: &str) -> Result<String, Failure> {
+/// The branch a new project starts on, whatever `init.defaultBranch` says.
+pub const FIRST_BRANCH: &str = "main";
+
+/// Make `parent/name` a new Git repository holding the files of `template`,
+/// all in one first commit on `main`, so worktrees can be cut from it like
+/// from any other project. Returns its path. A folder that already holds
+/// something is never used, and a create that fails takes away what it made.
+pub fn create_project(parent: &str, name: &str, template: &str) -> Result<String, Failure> {
+    create_from(parent, name, || crate::project_templates::prepare(template))
+}
+
+fn create_from(parent: &str, name: &str, prepare: impl FnOnce() -> Result<crate::project_templates::Prepared, Failure>) -> Result<String, Failure> {
     let name = name.trim();
     if !valid_directory_name(name) {
         return Err(Failure::new(INVALID_NAME, "Enter a folder name for the project, without slashes."));
@@ -476,20 +485,40 @@ pub fn create_project(parent: &str, name: &str) -> Result<String, Failure> {
     if existed && !is_empty_dir(&path) {
         return Err(Failure::new(DESTINATION_EXISTS, format!("{shown} already exists. Choose another name.")));
     }
+    // Read before anything is made: a template that cannot be used leaves no folder to clean up.
+    let prepared = prepare()?;
     let made = create_dirs(&path).map_err(|error| Failure::new(INVALID_DESTINATION, format!("Could not create {shown}: {error}")))?;
-    if let Err(error) = init_repository(&path) {
-        // Only what this call made is removed.
-        let _ = if existed { std::fs::remove_dir_all(path.join(".git")) } else { std::fs::remove_dir_all(&path) };
+    let filled = crate::project_templates::write(&prepared, &path, name)
+        .and_then(|()| init_repository(&path, &prepared.name).map_err(|error| Failure::new(FAILED, format!("Could not set up Git in {shown}: {error}"))));
+    if let Err(failure) = filled {
+        // Only what this call made is removed: a folder that was there stays, emptied again.
+        if existed {
+            empty_dir(&path);
+        } else {
+            let _ = std::fs::remove_dir_all(&path);
+        }
         remove_made_dirs(&parent, made.as_deref());
-        return Err(Failure::new(FAILED, format!("Could not set up Git in {shown}: {error}")));
+        return Err(failure);
     }
     Ok(shown)
 }
 
-fn init_repository(path: &Path) -> anyhow::Result<()> {
+/// Remove everything inside `dir`, which was empty before this call wrote into it.
+fn empty_dir(dir: &Path) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().filter_map(Result::ok) {
+        let path = entry.path();
+        let _ = if entry.file_type().is_ok_and(|kind| kind.is_dir()) { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+    }
+}
+
+fn init_repository(path: &Path, template: &str) -> anyhow::Result<()> {
     crate::git::run(path, &["init", "-q"])?;
-    // The first commit only anchors the branch: no hooks, no signing prompt.
-    let commit = ["-c", "commit.gpgsign=false", "commit", "--allow-empty", "--no-verify", "-q", "-m", "Start the project"];
+    // Set after `init`, so it works with every Git version, not only those with `init -b`.
+    crate::git::run(path, &["symbolic-ref", "HEAD", &format!("refs/heads/{FIRST_BRANCH}")])?;
+    crate::git::run(path, &["add", "-A"])?;
+    // No hooks, no signing prompt: the first commit is the template, as written.
+    let message = format!("Start the project from the {template} template");
+    let commit = ["-c", "commit.gpgsign=false", "commit", "--allow-empty", "--no-verify", "-q", "-m", &message];
     if crate::git::run(path, &commit).is_ok() {
         return Ok(());
     }
@@ -730,11 +759,23 @@ mod tests {
         assert_eq!(clone_failure(&source, "fatal: something else").code, FAILED);
     }
 
+    fn tree(path: &Path) -> Vec<String> {
+        crate::git::run(path, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap().lines().map(str::to_string).collect()
+    }
+
+    fn assert_one_commit_on_main(path: &Path) {
+        assert_eq!(crate::git::current_branch(path).as_deref(), Some(FIRST_BRANCH));
+        assert_eq!(crate::git::run(path, &["rev-list", "--count", "HEAD"]).unwrap().trim(), "1");
+        // Everything the template wrote is in that commit: nothing is left over.
+        assert_eq!(crate::git::run(path, &["status", "--porcelain", "--untracked-files=all"]).unwrap().trim(), "");
+        assert!(crate::git::run(path, &["remote"]).unwrap().trim().is_empty(), "no remote yet");
+    }
+
     #[test]
     fn quick_start_makes_a_repository_worktrees_can_be_cut_from() {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path().join("projects");
-        let path = create_project(&parent.to_string_lossy(), " first-idea ").unwrap();
+        let path = create_project(&parent.to_string_lossy(), " first-idea ", crate::project_templates::EMPTY).unwrap();
         let path = Path::new(&path);
         assert_eq!(path, parent.join("first-idea"));
         assert!(crate::git::is_repo(path));
@@ -744,17 +785,139 @@ mod tests {
     }
 
     #[test]
+    fn the_empty_template_is_a_readme_and_a_gitignore_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_project(&dir.path().to_string_lossy(), "Notes & Ideas", crate::project_templates::EMPTY).unwrap();
+        let path = Path::new(&path);
+        assert_eq!(tree(path), [".gitignore", "README.md"]);
+        let mut entries: Vec<String> = std::fs::read_dir(path).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        entries.sort();
+        assert_eq!(entries, [".git", ".gitignore", "README.md"]);
+        assert!(std::fs::read_to_string(path.join("README.md")).unwrap().starts_with("# Notes & Ideas\n"));
+        assert!(std::fs::read_to_string(path.join(".gitignore")).unwrap().contains("node_modules/"));
+        assert_one_commit_on_main(path);
+        assert_eq!(crate::git::run(path, &["log", "-1", "--format=%s"]).unwrap().trim(), "Start the project from the Empty template");
+    }
+
+    #[test]
+    fn the_vite_react_template_is_a_typescript_tailwind_vitest_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_project(&dir.path().to_string_lossy(), "My App", crate::project_templates::VITE_REACT).unwrap();
+        let path = Path::new(&path);
+        let mut expected = crate::project_templates::built_in_paths(crate::project_templates::VITE_REACT);
+        expected.sort();
+        assert_eq!(tree(path), expected);
+        let package: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path.join("package.json")).unwrap()).unwrap();
+        assert_eq!(package["name"], "my-app");
+        assert_eq!(package["scripts"]["test"], "vitest run");
+        for dependency in ["vite", "typescript", "tailwindcss", "@tailwindcss/vite", "vitest", "@testing-library/react"] {
+            assert!(package["devDependencies"][dependency].is_string(), "{dependency}");
+        }
+        assert!(std::fs::read_to_string(path.join("index.html")).unwrap().contains("<title>My App</title>"));
+        assert!(std::fs::read_to_string(path.join("src/App.tsx")).unwrap().contains("{\"My App\"}"));
+        assert!(std::fs::read_to_string(path.join("src/index.css")).unwrap().contains("@import \"tailwindcss\""));
+        assert!(!tree(path).iter().any(|file| file.contains("{{")), "no placeholder is left in a file name");
+        for file in tree(path) {
+            assert!(!std::fs::read_to_string(path.join(&file)).unwrap().contains("{{"), "{file} still holds a placeholder");
+        }
+        assert_one_commit_on_main(path);
+    }
+
+    #[test]
+    fn the_agent_starter_has_instructions_and_scripts_that_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_project(&dir.path().to_string_lossy(), "agents", crate::project_templates::AGENT_STARTER).unwrap();
+        let path = Path::new(&path);
+        assert_eq!(tree(path), [".gitignore", "AGENTS.md", "CLAUDE.md", "README.md", "scripts/setup.sh", "scripts/test.sh"]);
+        assert!(std::fs::read_to_string(path.join("CLAUDE.md")).unwrap().contains("@AGENTS.md"));
+        // Committed as executables, so a fresh clone runs them too.
+        let staged = crate::git::run(path, &["ls-files", "-s", "scripts"]).unwrap();
+        assert_eq!(staged.lines().filter(|line| line.starts_with("100755 ")).count(), 2, "{staged}");
+        assert_one_commit_on_main(path);
+        for script in ["scripts/setup.sh", "scripts/test.sh"] {
+            let out = std::process::Command::new(path.join(script)).current_dir(path).output().unwrap();
+            assert!(out.status.success(), "{script}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(!out.stdout.is_empty(), "{script} says what it did");
+        }
+    }
+
+    #[test]
+    fn a_user_template_makes_its_files_in_one_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("project-templates.json");
+        let folder = dir.path().join("house-style");
+        std::fs::create_dir_all(folder.join("bin")).unwrap();
+        crate::git::run(&folder, &["init", "-q"]).unwrap();
+        std::fs::write(folder.join("README.md"), "# House style\n").unwrap();
+        std::fs::write(folder.join(".gitignore"), "local.env\n").unwrap();
+        std::fs::write(folder.join("local.env"), "SECRET=1").unwrap();
+        std::fs::write(folder.join("bin/run"), "#!/bin/sh\necho ok\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(folder.join("bin/run"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let template = crate::project_templates::add_in(&store, &folder.to_string_lossy()).unwrap();
+        let parent = dir.path().join("projects");
+        let path = create_from(&parent.to_string_lossy(), "mine", || crate::project_templates::prepare_in(&store, &template.id)).unwrap();
+        let path = Path::new(&path);
+        assert_eq!(tree(path), [".gitignore", "README.md", "bin/run"]);
+        assert!(!path.join("local.env").exists(), "what the template's Git ignores is not copied");
+        assert_eq!(crate::git::run(path, &["log", "-1", "--format=%s"]).unwrap().trim(), "Start the project from the house-style template");
+        assert!(crate::git::run(path, &["ls-files", "-s", "bin/run"]).unwrap().starts_with("100755 "));
+        assert_one_commit_on_main(path);
+        // The template's own history stays its own.
+        assert!(crate::git::head_commit(&folder).is_none());
+    }
+
+    #[test]
+    fn a_failed_create_leaves_no_folder_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("project-templates.json");
+        let parent = dir.path().join("new").join("projects");
+
+        // A template that is gone fails before anything is made.
+        let failure = create_project(&parent.to_string_lossy(), "x", "user:missing").unwrap_err();
+        assert_eq!(failure.code, crate::project_templates::INVALID_TEMPLATE);
+        assert!(!dir.path().join("new").exists());
+
+        // A file that cannot be read fails partway through the copy.
+        let folder = dir.path().join("broken");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.txt"), "a").unwrap();
+        std::fs::write(folder.join("z.txt"), "z").unwrap();
+        let template = crate::project_templates::add_in(&store, &folder.to_string_lossy()).unwrap();
+        let prepared = || crate::project_templates::prepare_in(&store, &template.id);
+        let ready = prepared().unwrap();
+        std::fs::remove_file(folder.join("z.txt")).unwrap();
+        let failure = create_from(&parent.to_string_lossy(), "x", || Ok(ready)).unwrap_err();
+        assert_eq!(failure.code, FAILED);
+        assert!(!dir.path().join("new").exists(), "the folders made for it are gone too");
+
+        // An empty folder that was already there is kept, and emptied again.
+        std::fs::create_dir_all(parent.join("kept")).unwrap();
+        std::fs::write(folder.join("z.txt"), "z").unwrap();
+        let ready = prepared().unwrap();
+        std::fs::remove_file(folder.join("z.txt")).unwrap();
+        create_from(&parent.to_string_lossy(), "kept", || Ok(ready)).unwrap_err();
+        assert!(parent.join("kept").is_dir());
+        assert!(is_empty_dir(&parent.join("kept")));
+    }
+
+    #[test]
     fn quick_start_refuses_a_bad_name_or_a_folder_in_use() {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path().to_string_lossy().into_owned();
+        let empty = crate::project_templates::EMPTY;
         for bad in ["", "  ", "a/b", "..", "-rf"] {
-            assert_eq!(create_project(&parent, bad).unwrap_err().code, INVALID_NAME, "{bad:?}");
+            assert_eq!(create_project(&parent, bad, empty).unwrap_err().code, INVALID_NAME, "{bad:?}");
         }
         std::fs::create_dir_all(dir.path().join("taken")).unwrap();
         std::fs::write(dir.path().join("taken/file"), "x").unwrap();
-        assert_eq!(create_project(&parent, "taken").unwrap_err().code, DESTINATION_EXISTS);
+        assert_eq!(create_project(&parent, "taken", empty).unwrap_err().code, DESTINATION_EXISTS);
         assert!(!dir.path().join("taken/.git").exists());
-        assert_eq!(create_project("relative/dir", "ok").unwrap_err().code, INVALID_DESTINATION);
+        assert!(!dir.path().join("taken/README.md").exists());
+        assert_eq!(create_project("relative/dir", "ok", empty).unwrap_err().code, INVALID_DESTINATION);
     }
 
     #[test]
