@@ -53,10 +53,11 @@ import { openSettle, openWorkspaceRestore } from "@/lib/dialogs";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import type { Project, TabEntry, Workspace } from "@/types/session";
-import { sessionStatus, type SessionEntry, type TabStatus } from "@/types/session";
-import { RowTime } from "./SidebarRows";
+import type { SessionEntry } from "@/types/session";
 import { useFold } from "./useFold";
-import { SessionStatus } from "@/components/ui/SessionStatus";
+import { StatusMarkIcon } from "@/components/ui/SessionStatus";
+import { statusText } from "@terminalx/portable/sessionStatus";
+import { useSessionRowStatus } from "@/lib/sessionRowStatus";
 import { AppDestinations, ProjectAppearance, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations, useHasCloudOrganizations } from "./CloudOrganizations";
@@ -65,7 +66,7 @@ import { isPlaceholderBranch } from "@/lib/worktreeNames";
 import { IssueLinkContextItems, IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
 
 import { compareSidebarSessions, type SidebarSort } from "@/lib/sidebarView";
-import { ManualStatusIcon, ManualStatusMenu } from "@/components/session/ManualStatus";
+import { ManualStatusMenu } from "@/components/session/ManualStatus";
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { conversationTime } from "@/lib/messageActivity";
 
@@ -1116,12 +1117,6 @@ export function RowContextMenu(props: ConversationMenuProps) {
   return <ContextMenuContent className="w-56" onKeyDown={rowMenuKeys} onCloseAutoFocus={keepFocusForNameField}><ConversationMenuItems {...props} contextMenu /></ContextMenuContent>;
 }
 
-/** The state that matters most among several: a question waiting, then work in progress, then work done. */
-function pressingStatus(statuses: TabStatus[]): TabStatus {
-  const order: TabStatus[] = ["waiting", "in_progress", "completed", "idle"];
-  return order.find((status) => statuses.includes(status)) ?? "idle";
-}
-
 function ConversationRow({
   session,
   sortId = session.id,
@@ -1175,7 +1170,8 @@ function ConversationRow({
   const removed = session.worktreeRemoved;
   const cleanup = useMergedStatus(LOCAL_HOST, removed || named !== "branch" ? null : session.cwd);
   const location = removed ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null;
-  const status = pressingStatus(peers.map(sessionStatus));
+  // One status for all the sessions the row stands for: the mark leads the row, its label is the mark's name (02.04).
+  const rowStatus = useSessionRowStatus(peers);
   // A row is its name and its age: which agent runs it is in the chat, not repeated on every row.
   const branchName = locationLabel ?? label ?? branch;
   const branchLabel = locationLabel ?? label ?? readableBranchName(branch) ?? branch;
@@ -1212,7 +1208,8 @@ function ConversationRow({
             className="flex min-w-0 flex-1 flex-col items-start rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
             <span className="flex w-full min-w-0 items-center gap-2">
-              <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(session.manualStatus)}</span></span>
+              {/* The row leads with its session status mark; the reader's own status groups rows and is read out here. */}
+              <StatusMarkIcon status={rowStatus} decorative /><span id={statusDescriptionId} hidden>{statusText(rowStatus)}. Status: {manualStatusLabel(session.manualStatus)}</span>
               {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
               {named === "branch" ? (
                 <>
@@ -1220,28 +1217,23 @@ function ConversationRow({
                   <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchLabel ?? "No branch"}</span>
                   {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                   {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                  {/* One status for all sessions represented by this branch row; unread stays a separate reading indicator. */}
-                  <SessionStatus session={session} peers={peers} className="max-w-[48%] shrink" />
                   {unread && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
-                  <RowTime at={conversationTime(session)} />
                 </>
               ) : (
                 <>
                   <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
                   {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                  <SessionStatus session={session} peers={peers} className="max-w-[48%] shrink" />
                   {unread && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
                 </>
               )}
-              {named === "branch" || status === "in_progress" ? null : locationLabel || branch ? (
+              {/* A chat linked from elsewhere says where; any other row's place is its project and branch rows above it. */}
+              {locationLabel && (
                 <span className={cn("flex max-w-[45%] shrink-0 items-center gap-1 font-mono text-[10px] text-faint", yieldsToRowActions)}>
                   {branch ? <GitBranch className="size-3 shrink-0" /> : <Folder className="size-3 shrink-0" />}
-                  <span className="truncate">{locationLabel ?? branch}</span>
+                  <span className="truncate">{locationLabel}</span>
                 </span>
-              ) : (
-                <RowTime at={conversationTime(session)} />
               )}
-              <SessionRowExtras sessions={peers} selected={selected} />
+              <SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />
             </span>
             <DraftPreview text={draft} />
           </button>

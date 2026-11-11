@@ -67,8 +67,9 @@ it("shows detailed automatic statuses in the table while preserving workflow sta
   render(<AgentDashboard />);
   fireEvent.click(screen.getByRole("button", { name: "Table" }));
   const table = within(screen.getByRole("table", { name: "Sessions" }));
-  expect(table.getByText("Needs permission")).toBeTruthy();
-  expect(table.getByText("Checks failing")).toBeTruthy();
+  // One label for every kind of waiting; the tooltip says it is a permission. The PR number follows its state.
+  expect(table.getByTitle(/permission to run a tool/).textContent).toBe("Needs approval");
+  expect(table.getByText("Checks failing · PR #7")).toBeTruthy();
   expect(table.getAllByText("Working")).toHaveLength(2);
   expect(rowNames()).toEqual(["Failed build", "Needs approval"]);
 });

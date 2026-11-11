@@ -2,7 +2,11 @@ import { createContext, useContext, useEffect, useState, useSyncExternalStore, t
 import { Archive } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { DiffStats } from "./SidebarRows";
+import { DiffStats, RowTime } from "./SidebarRows";
+import { yieldsToRowActions } from "./RowActions";
+import { rowMeta } from "@/components/ui/SessionStatus";
+import type { StatusDescription } from "@terminalx/portable/sessionStatus";
+import { cn } from "@/lib/cn";
 import { getDraft, subscribeTabDrafts } from "@/lib/drafts";
 import { pty } from "@/lib/api";
 import { archiveSession, conversationTitle, refreshWorkspaces, useSessionStore } from "@/lib/sessions";
@@ -85,7 +89,12 @@ export function DraftPreview({ text }: { text: string }) {
   return text ? <span className="block min-w-0 w-full truncate text-[11px] text-faint" data-testid="row-draft"><span className="text-warning">Draft:</span> {text}</span> : null;
 }
 
-export function SessionRowExtras({ sessions, selected }: { sessions: readonly SessionEntry[]; selected: boolean }) {
+/**
+ * What follows a row's title: its line counts and live-process dot. Given the
+ * row's `status`, the first is the one item 02.04 draws there instead: the
+ * open PR's number, the line counts, or the time since `at` (see `rowMeta`).
+ */
+export function SessionRowExtras({ sessions, selected, status, at }: { sessions: readonly SessionEntry[]; selected: boolean; status?: StatusDescription; at?: string }) {
   const { workspaces } = useSessionStore();
   const { colourLineCounts } = usePrefs();
   const running = useContext(RunningSessions);
@@ -103,8 +112,11 @@ export function SessionRowExtras({ sessions, selected }: { sessions: readonly Se
   const command = sessions.some((session) => running.commands.has(session.id));
   const port = sessions.some((session) => running.ports.has(session.id));
   const activity = command && port ? "Running command and open port" : port ? "Open port" : "Running command";
+  const meta = status ? rowMeta(status, { additions, deletions }) : { kind: "lines" as const };
   return <>
-    <span className="text-[10px]"><DiffStats additions={additions} deletions={deletions} unpushed={0} coloured={colourLineCounts || selected} /></span>
+    {meta.kind === "pr" ? <span data-row-meta="pr" className={cn("shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground", yieldsToRowActions)}>PR #{meta.number}</span>
+      : meta.kind === "time" ? (at ? <span data-row-meta="time" className="font-mono text-[11px]"><RowTime at={at} /></span> : null)
+      : <span data-row-meta="lines" className={status ? "font-mono text-[11px]" : "text-[10px]"}><DiffStats additions={additions} deletions={deletions} unpushed={0} coloured={colourLineCounts || selected} /></span>}
     {(command || port) && <span role="img" aria-label={activity} title={activity} className="size-1.5 shrink-0 rounded-full bg-add" />}
   </>;
 }

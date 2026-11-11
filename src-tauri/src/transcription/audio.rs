@@ -10,14 +10,23 @@
 //! are probed, and none of it belongs on the thread that services the
 //! webview's IPC.
 
+#[cfg(target_os = "macos")]
 use std::sync::mpsc::{self, Receiver, Sender};
+#[cfg(target_os = "macos")]
 use std::thread::JoinHandle;
 
-use anyhow::{anyhow, Context, Result};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(any(target_os = "macos", test))]
+use anyhow::{anyhow, Result};
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+use cpal::traits::{DeviceTrait, HostTrait};
+#[cfg(target_os = "macos")]
+use cpal::traits::StreamTrait;
+#[cfg(target_os = "macos")]
 use cpal::{FromSample, SizedSample};
 use serde::Serialize;
 
+#[cfg(any(target_os = "macos", test))]
 use super::engine::TARGET_RATE;
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +64,7 @@ pub fn list_inputs() -> Vec<InputDevice> {
     out
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn pick_device(name: Option<&str>) -> Result<cpal::Device> {
     let host = cpal::default_host();
     if let Some(n) = name.filter(|n| !n.is_empty()) {
@@ -73,6 +83,8 @@ fn pick_device(name: Option<&str>) -> Result<cpal::Device> {
 
 /// Linear resampling with channel averaging. Speech tolerates it well and it
 /// keeps the dependency list short.
+// macOS captures audio in production; all platforms run the resampling tests.
+#[cfg(any(target_os = "macos", test))]
 pub struct Resampler {
     src_rate: f64,
     channels: usize,
@@ -82,6 +94,7 @@ pub struct Resampler {
     carry: Option<f32>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl Resampler {
     pub fn new(src_rate: u32, channels: u16) -> Self {
         Self { src_rate: src_rate as f64, channels: channels.max(1) as usize, pos: 0.0, carry: None }
@@ -125,6 +138,8 @@ impl Resampler {
 }
 
 /// A live microphone. Dropping it stops the stream and joins the thread.
+// Only macOS dictation starts a microphone stream; enumeration remains portable.
+#[cfg(target_os = "macos")]
 pub struct Capture {
     stop: Sender<()>,
     thread: Option<JoinHandle<()>>,
@@ -132,8 +147,10 @@ pub struct Capture {
 
 /// How opening the microphone went. `Ok` once frames are flowing, `Err` with a
 /// message meant for the reader if the device could not be opened.
+#[cfg(target_os = "macos")]
 pub type Opening = Receiver<Result<(), String>>;
 
+#[cfg(target_os = "macos")]
 impl Capture {
     /// Open the device and stream 16 kHz mono chunks to `out` until dropped.
     ///
@@ -151,6 +168,7 @@ impl Capture {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for Capture {
     fn drop(&mut self) {
         let _ = self.stop.send(());
@@ -163,6 +181,7 @@ impl Drop for Capture {
 /// Build an input stream for one sample format, converting every sample to
 /// `f32` on the way through. CoreAudio hands back `f32` or `i16` today, but the
 /// format is the device's to choose and the list grows with every cpal release.
+#[cfg(target_os = "macos")]
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -187,6 +206,7 @@ where
 /// Everything the capture thread does: pick the device, read its format, open
 /// the stream, then sit until told to stop. Every failure is reported through
 /// `ready` as a sentence the reader can act on.
+#[cfg(target_os = "macos")]
 fn run(device_name: Option<String>, out: Sender<Vec<f32>>, stop: Receiver<()>, ready: Sender<Result<(), String>>) {
     macro_rules! fail {
         ($($arg:tt)*) => {{

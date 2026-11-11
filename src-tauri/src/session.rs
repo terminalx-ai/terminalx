@@ -1141,6 +1141,8 @@ pub struct SessionManager {
     writers: Arc<Mutex<HashMap<String, Arc<PaneWriter>>>>,
     starts: Arc<std::sync::atomic::AtomicU64>,
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    /// Only callers hold this sender; its last drop wakes and ends the watcher.
+    watcher_lifetime: Option<std::sync::mpsc::Sender<()>>,
     stop_pids: Arc<Mutex<Vec<u32>>>,
     session_stop_pids: Arc<Mutex<HashMap<String, Vec<u32>>>>,
     /// Tabs following their terminal (#437); off until the desktop app asks.
@@ -1526,6 +1528,7 @@ impl SessionManager {
         status: Arc<crate::status::StatusState>,
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
+        let (watcher_lifetime, stop_watching) = std::sync::mpsc::channel();
         let manager = Self {
             row_prs: Arc::default(),
             mobile: Arc::new(crate::local_runtime::mobile::Registry::default()),
@@ -1542,18 +1545,23 @@ impl SessionManager {
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            watcher_lifetime: Some(watcher_lifetime),
             history_downloads: Arc::default(),
             typing: Arc::default(),
             stop_pids: Arc::new(Mutex::new(Vec::new())),
             session_stop_pids: Arc::default(),
             follow: Arc::default(),
         };
-        let watcher = manager.clone();
-        std::thread::spawn(move || loop {
-            // Short, because an unacknowledged prompt is judged here and the
-            // reader is waiting on it; a pass only looks at each tab.
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            watcher.watch_tabs(recovery::Patience::DEFAULT, Instant::now(), |pane| watcher.terminals.last_output(pane));
+        let mut watcher = manager.clone();
+        // The polling copy must not keep its own lifetime alive. In particular,
+        // dropping a test fixture must release its thread and retained state.
+        drop(watcher.watcher_lifetime.take());
+        std::thread::spawn(move || {
+            // Preserve the five-second polling interval, but wake immediately
+            // when every caller has dropped its manager.
+            while matches!(stop_watching.recv_timeout(std::time::Duration::from_secs(5)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                watcher.watch_tabs(recovery::Patience::DEFAULT, Instant::now(), |pane| watcher.terminals.last_output(pane));
+            }
         });
         manager
     }
@@ -4707,7 +4715,10 @@ impl SessionManager {
         // snapshot: the variables, the creator's own route for this agent
         // (PRO-18: its model, what its CLI takes on the command line) and
         // Codex's auth file. The tab is told what keeps a route from working.
-        let grant = crate::cloud_grants::launch_grant(&tab.harness, Path::new(&entry.cwd));
+        // On a Mac, the API key saved for the agent in Settings, if it uses
+        // one (`agent_keys`, PRO-306): a tab set to use a key this runtime
+        // does not have is not started on another login.
+        let grant = crate::agent_keys::launch_grant(&tab.harness, Path::new(&entry.cwd))?;
         if let Some(text) = grant.route.as_ref().and_then(|route| route.notice.clone()) {
             self.publish(rt, Payload::Status { text }, None);
         }
@@ -4726,6 +4737,7 @@ impl SessionManager {
         // The agent credentials read above; names to unset are dropped after
         // the login shell's profile has run.
         crate::cloud_grants::record_launch(&pane, &grant);
+        crate::agent_keys::record_launch(&pane, &tab.harness, &rt.session_id, &rt.tab_id);
         let mut unset = Vec::new();
         for (name, value) in grant.env {
             match value {
@@ -7070,6 +7082,9 @@ impl SessionManager {
         let payload = match payload {
             Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, detail, .. } => {
                 let head = None; // The publication path captures and pins the completed tree.
+                // Occupancy as the turn left it, and the tab's token and cost
+                // totals read again from its agent's transcript (PRO-273),
+                // both off this thread: a long transcript takes a moment.
                 if let Some(u) = &usage {
                     let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
                     let (cu, cm) = (u.context_used, u.context_max);
@@ -7084,6 +7099,10 @@ impl SessionManager {
                             Ok(())
                         });
                     });
+                }
+                if subagent.is_none() {
+                    let sink = self.sink.clone();
+                    crate::session_usage::schedule(&rt.session_id, &rt.tab_id, move |entry| sink.emit("session_updated", &entry));
                 }
                 let duration_ms = duration_ms.or_else(|| rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64));
                 let auth_failed = auth_failed || (subagent.is_none() && std::mem::take(&mut rt.signed_out_in_turn));
@@ -7249,6 +7268,10 @@ mod idle_tests;
 #[cfg(all(test, unix))]
 #[path = "session_send_tests.rs"]
 mod send_tests;
+
+#[cfg(all(test, unix))]
+#[path = "session_agent_key_tests.rs"]
+mod agent_key_tests;
 
 #[cfg(test)]
 static BEFORE_OPENCODE_HTTP: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);

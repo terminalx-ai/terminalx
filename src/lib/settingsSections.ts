@@ -15,7 +15,7 @@ export const SETTINGS_SECTIONS = [
   { id: "integrations", title: "Integrations", description: "Connect GitHub and Linear for issues and pull requests", terms: ["token api key login"] },
   { id: "storage", title: "Storage", description: "Clean up merged worktrees and leftover files", terms: ["disk space remove delete cleanup"] },
   { id: "shortcuts", title: "Shortcuts", description: "Customize keyboard shortcuts", terms: ["key bindings hotkeys"] },
-  { id: "experimental", title: "Experimental", description: "Try Native Codex", terms: ["app server stdio"] },
+  { id: "experimental", title: "Experimental", description: "Try Native Codex and session cost", terms: ["app server stdio", "session cost", "tokens"] },
   { id: "about", title: "About", description: "Version, updates and changelog", terms: ["release channel beta"] },
 ] as const;
 

@@ -449,6 +449,10 @@ fn shells() -> Vec<(PathBuf, Shell, bool)> {
 
 const STARTUP_PROBE: &str = "TERMINALX_READ_ONLY_STARTUP_PROBE";
 const STARTUP_PROBE_ROOT: &str = "TERMINALX_READ_ONLY_STARTUP_PROBE_ROOT";
+/// `NAME=VALUE` the probe puts in its own environment once it runs: what
+/// TerminalX inherited, where exporting it first would stop the probe itself
+/// from starting (glibc's loader trace flag).
+const STARTUP_PROBE_SET: &str = "TERMINALX_READ_ONLY_STARTUP_PROBE_SET";
 
 /// The child half of the test below: TerminalX started by a poisoned shell,
 /// inheriting everything that shell exported.
@@ -457,6 +461,12 @@ fn startup_launched_terminalx_runs_approved_commands_without_a_shell() {
     let Some(marker) = std::env::var_os(STARTUP_PROBE).map(PathBuf::from) else { return };
     let root = PathBuf::from(std::env::var_os(STARTUP_PROBE_ROOT).unwrap());
     let me = std::process::id();
+    if let Some(set) = std::env::var(STARTUP_PROBE_SET).ok().filter(|set| !set.is_empty()) {
+        let (name, value) = set.split_once('=').unwrap();
+        // This child runs this one test on one thread, so nothing else reads
+        // the environment while it changes.
+        std::env::set_var(name, value);
+    }
     // The shell that started this process ran its startup: that is the user
     // starting their own environment. Approving and running commands must
     // run no startup code at all, including any login-shell lookup.
@@ -467,15 +477,17 @@ fn startup_launched_terminalx_runs_approved_commands_without_a_shell() {
             .unwrap_or_else(|| panic!("{command} must be approved"))
     };
     let mut commands = vec![
-        ("pwd; cat file | grep hello", format!("{}\nhello\n", root.display())),
-        ("git status --short", "?? file\n".to_string()),
+        ("cat file", 0, "hello\n".to_string()),
+        ("grep absent file", 1, String::new()),
+        ("pwd; cat file | grep hello", 0, format!("{}\nhello\n", root.display())),
+        ("git status --short", 0, "?? file\n".to_string()),
     ];
     if which::which("rg").is_ok() {
-        commands.push(("rg hello file", "hello\n".into()));
+        commands.push(("rg hello file", 0, "hello\n".into()));
     }
-    for (command, expected) in commands {
+    for (command, status, expected) in commands {
         let ran = approved(command).run();
-        assert_eq!((ran.status, ran.output.as_str()), (0, expected.as_str()), "{command}");
+        assert_eq!((ran.status, ran.output.as_str()), (status, expected.as_str()), "{command}");
     }
     // Only TerminalX's fixed list reaches a program, whatever this process
     // inherited from startup: no loader, shell-option or function variables.
@@ -801,4 +813,301 @@ fn finder_launch_uses_trusted_developer_install_directories() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+// PRO-267's (#893) startup attacks on the in-shell guard, ported to the
+// PRO-330 path. Each keeps its startup and its control, which proves the
+// payload is live in that shell. The step "run the guarded replacement in
+// the startup shell" no longer exists: the provider is given nothing to run.
+// What is left to check is TerminalX itself started by that shell: approved
+// commands still give `cat file` 0 and `hello`, `grep absent file` 1, and
+// 125 with no output once the approved directory is swapped, and no payload
+// runs, whatever the process's own working directory.
+
+fn startup_shell_command(repo: &Repository, shell: &Path, command: &str) -> Output {
+    startup_shell_command_in(repo, shell, command, &repo.root)
+}
+
+fn startup_shell_command_in(repo: &Repository, shell: &Path, command: &str, cwd: &Path) -> Output {
+    Command::new(shell)
+        .env_clear()
+        .envs(repo.execution.env.iter().map(|(key, value)| (*key, value)))
+        .env("ZDOTDIR", &repo.home)
+        .env("BASH_ENV", repo.home.join(".zshenv"))
+        .current_dir(cwd)
+        .args(["-c", command])
+        .output()
+        .unwrap()
+}
+
+/// TerminalX's probe started by the startup shell above from `cwd`, after
+/// `prefix` ran in that shell, with `set` in the probe's own environment.
+fn probe_from_startup(repo: &Repository, shell: &Path, cwd: &Path, prefix: &str, marker: &Path, set: Option<&str>) -> Output {
+    let probe = std::env::current_exe().unwrap();
+    let script = format!(
+        "{prefix}\nexec {} --exact harness::read_only::security_tests::startup_launched_terminalx_runs_approved_commands_without_a_shell --nocapture --test-threads=1",
+        quote(probe.to_str().unwrap())
+    );
+    Command::new(shell)
+        .env_clear()
+        .envs(repo.execution.env.iter().map(|(key, value)| (*key, value)))
+        .env("ZDOTDIR", &repo.home)
+        .env("BASH_ENV", repo.home.join(".zshenv"))
+        .env(STARTUP_PROBE, marker)
+        .env(STARTUP_PROBE_ROOT, &repo.root)
+        .env(STARTUP_PROBE_SET, set.unwrap_or(""))
+        .current_dir(cwd)
+        .args(["-c", &script])
+        .output()
+        .unwrap()
+}
+
+fn assert_probe(output: &Output, context: &str) {
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("startup probe passed"),
+        "{context}:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn startup_global_aliases_cannot_replace_descriptor_operands() {
+    if std::env::var_os(STARTUP_PROBE).is_some() {
+        return;
+    }
+    let repo = Repository::new();
+    let shell = Path::new("/bin/zsh");
+    std::fs::write(repo.root.join("file"), "hello\n").unwrap();
+    let marker = repo.home.join("descriptor-alias-write");
+    for operand in ["0", "8", "-"] {
+        std::fs::write(
+            repo.home.join(".zshenv"),
+            format!(
+                "alias -g -- {}\n",
+                quote(&format!(
+                    "{operand}={operand}; printf invoked > {}; :",
+                    quote(marker.to_str().unwrap())
+                ))
+            ),
+        )
+        .unwrap();
+        // Redirection operands are words too: a global alias can insert a
+        // command and replace a failure status before the guard is evaluated.
+        startup_shell_command(&repo, shell, "'/usr/bin/true' 8<&0 0<&8 8<&-");
+        assert!(marker.exists(), "the {operand} alias must execute in the control");
+        std::fs::remove_file(&marker).unwrap();
+        for cwd in [&repo.root, &repo.home] {
+            let output = probe_from_startup(&repo, shell, cwd, "", &marker, None);
+            assert_probe(&output, &format!("descriptor alias {operand} from {cwd:?}"));
+            assert!(!marker.exists(), "descriptor alias {operand} executed");
+        }
+    }
+}
+
+#[test]
+fn startup_loader_namerefs_cannot_execute_before_the_directory_guard() {
+    if std::env::var_os(STARTUP_PROBE).is_some() {
+        return;
+    }
+    let repo = Repository::new();
+    let shell = Path::new("/bin/bash");
+    let supports_nameref = Command::new(shell)
+        .env_clear()
+        .args(["-c", "declare -n ref=target"])
+        .output()
+        .unwrap()
+        .status
+        .success();
+    // macOS's system bash 3.2 has no namerefs. Linux CI must exercise this
+    // Bash 5.x attack rather than silently treating an invalid fixture as safe.
+    assert!(supports_nameref || !cfg!(target_os = "linux"));
+    if !supports_nameref {
+        return;
+    }
+    std::fs::write(repo.root.join("file"), "hello\n").unwrap();
+    let marker = repo.home.join("nameref-write");
+    for target in ["declare -a target", "declare -a target=([0]='present')"] {
+        std::fs::write(
+            repo.home.join(".zshenv"),
+            format!(
+                "{target}\ndeclare -n LD_TRACE_LOADED_OBJECTS={}\n",
+                quote(&format!(
+                    "target[$(touch {}; printf 0)]",
+                    quote(marker.to_str().unwrap())
+                ))
+            ),
+        )
+        .unwrap();
+        // Even a presence-only expansion of an unexported reference to an
+        // unset element evaluates its subscript. Prove the fixture is active.
+        let control = startup_shell_command(
+            &repo,
+            shell,
+            "'/usr/bin/printf' '%s' \"${LD_TRACE_LOADED_OBJECTS+present}\"",
+        );
+        assert!(control.status.success(), "{control:?}");
+        assert!(marker.exists(), "the nameref payload must execute in the control");
+        std::fs::remove_file(&marker).unwrap();
+        for cwd in [&repo.root, &repo.home] {
+            let output = probe_from_startup(&repo, shell, cwd, "", &marker, None);
+            assert_probe(&output, &format!("{target} from {cwd:?}"));
+            assert!(!marker.exists(), "nameref executed");
+        }
+    }
+}
+
+#[test]
+fn startup_functions_cannot_run_during_environment_cleanup() {
+    if std::env::var_os(STARTUP_PROBE).is_some() {
+        return;
+    }
+    let repo = Repository::new();
+    std::fs::write(repo.root.join("file"), "hello\n").unwrap();
+    let marker = repo.home.join("unapproved-write");
+    // Poison likely cleanup builtins as well as unset. Quoting a command name
+    // suppresses aliases but still resolves these functions in bash and zsh.
+    let mut startup =
+        String::from("if [ -n \"$BASH_VERSION\" ]; then shopt -s expand_aliases; fi\n");
+    for name in [
+        "unset", "builtin", "command", "false", "exit", "true", ":", "trap",
+    ] {
+        startup.push_str(&format!(
+            "{name}() {{ printf invoked > {}; }}\n",
+            quote(marker.to_str().unwrap())
+        ));
+    }
+    startup.push_str(&format!(
+        "alias case={}\nalias unset={}\n",
+        quote(&format!(
+            "printf invoked > {}; case",
+            quote(marker.to_str().unwrap())
+        )),
+        quote(&format!(
+            "printf invoked > {}",
+            quote(marker.to_str().unwrap())
+        ))
+    ));
+    // Neither a command-less redirection nor an empty expansion is a safe
+    // status helper: zsh can dispatch NULLCMD or a global alias respectively.
+    startup.push_str("NULLCMD=unset\nREADNULLCMD=unset\nif [ -n \"$ZSH_VERSION\" ]; then alias -g '${?+}=unset'; fi\nalias '!=unset'\n");
+    for shell in ["/bin/bash", "/bin/zsh"] {
+        let shell = Path::new(shell);
+        let mut shell_startup = startup.clone();
+        if shell == Path::new("/bin/bash") {
+            let supports_nameref = Command::new(shell)
+                .env_clear()
+                .args(["-c", "declare -n ref=target"])
+                .output()
+                .unwrap()
+                .status
+                .success();
+            // Linux CI's bash supports namerefs; macOS's system bash 3.2 does
+            // not. Keep the Linux regression mandatory instead of skipping it.
+            assert!(supports_nameref || !cfg!(target_os = "linux"));
+            if supports_nameref {
+                shell_startup.push_str(&format!(
+                    "declare -a locale_target\ndeclare -n LC_ALL={}\n",
+                    quote(&format!(
+                        "locale_target[$(printf invoked > {}; printf 0)]",
+                        quote(marker.to_str().unwrap())
+                    ))
+                ));
+            }
+        }
+        std::fs::write(repo.home.join(".zshenv"), shell_startup).unwrap();
+        // Prove that this shell actually loaded the malicious startup function.
+        let control = startup_shell_command(&repo, shell, "'unset' LD_TRACE_LOADED_OBJECTS");
+        assert!(control.status.success(), "{control:?}");
+        assert!(marker.exists());
+        std::fs::remove_file(&marker).unwrap();
+        for cwd in [&repo.root, &repo.home] {
+            // Also with glibc's loader trace flag in TerminalX's environment.
+            for set in [None, Some("LD_TRACE_LOADED_OBJECTS=")] {
+                let output = probe_from_startup(&repo, shell, cwd, "", &marker, set);
+                assert_probe(&output, &format!("{shell:?} from {cwd:?} with {set:?}"));
+                assert!(!marker.exists(), "a startup function ran: {shell:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn startup_error_traps_cannot_turn_rejection_into_success() {
+    if std::env::var_os(STARTUP_PROBE).is_some() {
+        return;
+    }
+    let repo = Repository::new();
+    std::fs::write(repo.root.join("file"), "hello\n").unwrap();
+    let marker = repo.home.join("error-trap-write");
+    let handler = format!(
+        "printf invoked > {}; exit 0",
+        quote(marker.to_str().unwrap())
+    );
+    // zsh function traps survive subshell entry, unlike its list-style traps.
+    // Test both spellings and bash's ERR inheritance, including strict modes.
+    for (shell, trap) in [
+        ("/bin/zsh", format!("TRAPZERR() {{ {handler}; }}")),
+        ("/bin/zsh", format!("TRAPERR() {{ {handler}; }}")),
+        ("/bin/zsh", format!("trap {} ZERR", quote(&handler))),
+        ("/bin/bash", format!("set -E; trap {} ERR", quote(&handler))),
+    ] {
+        for strict in ["", "set -eu"] {
+            // Exporting glibc's trace flag from startup would stop TerminalX
+            // itself from starting, so it goes in the probe's environment.
+            for (loader, set) in [
+                ("", None),
+                ("export LD_TRACE_LOADED_OBJECTS=''", Some("LD_TRACE_LOADED_OBJECTS=")),
+                ("export LD_TRACE_LOADED_OBJECTS=1", Some("LD_TRACE_LOADED_OBJECTS=1")),
+                ("readonly LD_TRACE_LOADED_OBJECTS=1; export LD_TRACE_LOADED_OBJECTS", Some("LD_TRACE_LOADED_OBJECTS=1")),
+            ] {
+                std::fs::write(repo.home.join(".zshenv"), format!("{loader}\n{trap}\n{strict}\n")).unwrap();
+                let shell = Path::new(shell);
+                // Prove the fixture can write and forge success on an unguarded
+                // redirection error, before any executable loads.
+                let control = startup_shell_command(
+                    &repo,
+                    shell,
+                    "'/usr/bin/env' '-i' 9<'/dev/null/refused'",
+                );
+                assert!(control.status.success(), "{control:?}");
+                assert!(marker.exists(), "the error hook must be active: {shell:?}");
+                std::fs::remove_file(&marker).unwrap();
+                std::fs::write(repo.home.join(".zshenv"), format!("{trap}\n{strict}\n")).unwrap();
+                for cwd in [&repo.root, &repo.home] {
+                    let output = probe_from_startup(&repo, shell, cwd, "", &marker, set);
+                    assert_probe(&output, &format!("{shell:?}, {strict:?}, {loader:?} from {cwd:?}"));
+                    assert!(!marker.exists(), "error hook ran: {shell:?}, {strict:?}, {loader:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn loader_trace_cannot_replace_sanitized_execution_or_its_directory_guard() {
+    if std::env::var_os(STARTUP_PROBE).is_some() {
+        return;
+    }
+    let repo = Repository::new();
+    std::fs::write(repo.root.join("file"), "hello\n").unwrap();
+    let marker = repo.home.join("loader-trace-marker");
+    std::fs::write(repo.home.join(".zshenv"), "").unwrap();
+    for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+        let shell = Path::new(shell);
+        // Unexported, the flag stays in the shell. Exported, it is in what
+        // TerminalX inherits: put there once the probe runs, since glibc
+        // would otherwise trace the probe's own start and stop it, as it
+        // would TerminalX's. Approved programs must run normally either way.
+        for (prefix, set) in [
+            ("LD_TRACE_LOADED_OBJECTS=''", None),
+            ("", Some("LD_TRACE_LOADED_OBJECTS=")),
+            ("", Some("LD_TRACE_LOADED_OBJECTS=1")),
+        ] {
+            for cwd in [&repo.root, &repo.home] {
+                let output = probe_from_startup(&repo, shell, cwd, prefix, &marker, set);
+                assert_probe(&output, &format!("{shell:?} {prefix:?} {set:?} from {cwd:?}"));
+            }
+        }
+    }
 }

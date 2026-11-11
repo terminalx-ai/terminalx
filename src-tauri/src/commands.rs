@@ -530,12 +530,21 @@ pub async fn cloud_provider(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.provider(provider))
 }
 
-enum ProviderPromptError { Cancelled, Empty, Unavailable }
+enum ProviderPromptError {
+    // Only the AppKit secure dialog can be cancelled or submit an empty field.
+    #[cfg(target_os = "macos")]
+    Cancelled,
+    #[cfg(target_os = "macos")]
+    Empty,
+    Unavailable,
+}
 
 impl ProviderPromptError {
     fn client_error(self) -> crate::cloud_workspaces::CloudWorkspaceClientError {
         let code = match self {
+            #[cfg(target_os = "macos")]
             Self::Cancelled => "cloud_provider_entry_cancelled",
+            #[cfg(target_os = "macos")]
             Self::Empty => "cloud_provider_credential_required",
             Self::Unavailable => "cloud_provider_secure_input_unavailable",
         };
@@ -4958,12 +4967,32 @@ pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
     store::settings::load().experimental
 }
 
+/// Each switch is optional: the one the reader flipped is changed and the
+/// others are left as they are.
 #[tauri::command]
-pub fn set_experimental_settings(native_codex: bool) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Option<bool>) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
-    settings.experimental.native_codex = native_codex;
+    if let Some(on) = native_codex {
+        settings.experimental.native_codex = on;
+    }
+    if let Some(on) = session_cost {
+        settings.experimental.session_cost = on;
+    }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.experimental)
+}
+
+/// The header's usage popover (PRO-273): the session's tokens and estimated
+/// cost, read again from its agents' transcripts, and the session as it is
+/// now for the window to take.
+#[tauri::command]
+pub async fn session_usage(session_id: String) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (session, _) = crate::session_usage::refresh_session(&session_id).map_err(err)?;
+        Ok(serde_json::json!({"usage": crate::session_usage::session_json(&session), "session": session}))
+    })
+    .await
+    .map_err(err)?
 }
 
 type OrgWorkStatusResult = Result<crate::work_claims::client::OrganizationWorkStatus, crate::work_claims::client::WorkClaimsError>;

@@ -134,5 +134,9 @@ fn owner_read_only_approval_answers_with_the_result_through_the_hook_process() {
     let printed = message.split_once("\n\nOutput:\n").expect("the output follows").1.trim_end();
     let project = std::fs::canonicalize(&world.project).unwrap();
     assert!(printed == world.project.to_str().unwrap() || std::path::Path::new(printed) == project, "pwd ran in the project: {message}");
+    // PRO-267's check that the returned command, run from another directory,
+    // exits 125 has nothing left to run: the reply carries no command. The
+    // read-only security tests cover 125 for a swapped approved directory.
+    assert!(message.contains(&format!("\nDirectory: {}\n", world.project.display())), "it ran in the approved directory only: {message}");
     assert_eq!(serve.control("permissions.list", json!({}))["permissions"], json!([]));
 }

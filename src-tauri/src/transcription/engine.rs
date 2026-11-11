@@ -16,6 +16,7 @@ use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use anyhow::{anyhow, Result};
 
+#[cfg(any(target_os = "macos", test))]
 pub const TARGET_RATE: u32 = 16_000;
 
 #[cfg(target_os = "macos")]

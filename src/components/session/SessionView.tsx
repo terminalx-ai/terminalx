@@ -68,6 +68,7 @@ import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { copyText } from "@/lib/clipboard";
 import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
 import { BranchGitButton } from "./BranchGitButton";
+import { SessionCost } from "./SessionCost";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -563,6 +564,9 @@ export function SessionView({
     if (local) void activateLatestTerminal(session.id, session.cwd);
     else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
+  // What the session's agents have used, at API list prices (PRO-273), beside
+  // where it is; Settings → Experimental → Session cost.
+  const costChip = local ? <SessionCost session={session} className={HEADER_TIGHT} /> : null;
   return (
     <TerminalChatProvider session={local && !cloud ? session : undefined}>
     <div className="flex h-full min-h-0 min-w-0 flex-1">
@@ -601,6 +605,7 @@ export function SessionView({
                 <span className="truncate text-foreground" title={[`On ${own.branch}, a name drawn for the workspace`, workspaceTitle].join("\n")} data-testid="session-title">
                   {session.title}
                 </span>
+                {costChip}
                 <WorkspaceMenu session={session} branch={own.branch} folder={session.worktreeName ?? null} base={baseNote} onContinue={continueTab} />
               </>
             ) : local && workspaceLabel ? (
@@ -635,12 +640,16 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="shrink-0 text-[11px] text-faint">· workspace removed</span>}
                 {local && session.worktreeRemoved && <Button variant="ghost" size="sm" onClick={() => openWorkspaceRestore(session.id)}>Restore workspace…</Button>}
               </span>
+              {costChip}
               <WorkspaceMenu session={session} branch={movedTo ?? session.branch} folder={session.worktreeName && !session.worktreeRemoved ? session.worktreeName : null} base={baseNote} onContinue={continueTab} />
               </>
             ) : (
-              <span className="truncate text-foreground" title={session.title} data-testid="session-title">
-                {session.title}
-              </span>
+              <>
+                <span className="truncate text-foreground" title={session.title} data-testid="session-title">
+                  {session.title}
+                </span>
+                {costChip}
+              </>
             )}
             {session.issue && (
               <WithTooltip label={session.issue.title + (session.issueWork?.link ? ` · ${linkText(session.issueWork.link)}` : "")}>
