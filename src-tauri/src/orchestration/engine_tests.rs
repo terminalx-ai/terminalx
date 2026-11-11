@@ -1456,3 +1456,54 @@ fn a_check_under_way_ends_with_its_run_and_starts_again_when_its_worker_works_ag
     assert_eq!(after, stopped.run);
     assert!(host.world().checked.is_empty());
 }
+
+#[test]
+fn a_lead_waiting_on_its_run_is_woken_by_a_piece_settled_not_by_each_turn_that_ends() {
+    let _home = crate::store::temp_home();
+    let (host, id) = one_piece();
+    let id = id.as_str();
+    host.world().hold_checks = true;
+    let began = store::get(id).unwrap();
+    // Nothing has happened: the lead sleeps on.
+    assert_eq!(engine::wake(&began, &began, false), None);
+    // The worker's turn ends with `done`: its result is being checked, and that is not the lead's to act on.
+    host.reports("cli", Status::Done, "Moved.");
+    let verifying = engine::refreshed(&host, id).unwrap();
+    assert_eq!(verifying.piece("cli").unwrap().state, PieceState::Verifying);
+    assert_eq!(engine::wake(&began, &verifying, false), None);
+    // The check fails and the piece goes back to a fresh worker: still nothing for the lead.
+    host.finds("cli", Checked { gates: vec![GateResult::failed(Gate::Scope, "- src/control.rs")], ..passing(&[], 0) });
+    let retrying = engine::verify(&host, id).unwrap();
+    assert!(retrying.piece("cli").unwrap().retry_waits());
+    assert_eq!(engine::wake(&began, &retrying, false), None);
+    assert_eq!(engine::wake(&began, &retrying, true), None, "a retry that waits is still under way");
+    engine::start_retries(&host, id).unwrap();
+    // The second try passes its gates: the piece is done, and the piece behind it is the lead's to start.
+    host.world().checks.clear();
+    host.reports("cli", Status::Done, "Moved, within my files.");
+    engine::refreshed(&host, id).unwrap();
+    let accepted = engine::verify(&host, id).unwrap();
+    let woken = engine::wake(&began, &accepted, false).expect("an accepted piece wakes the lead");
+    assert_eq!(woken["why"], json!(["cli is done: its result passed its checks.", "Ready to start with `terminalx runs start`: docs."]));
+    assert_eq!((&woken["ready"], &woken["state"], &woken["pieces"][0]), (&json!(["docs"]), &json!("running"), &json!({"piece": "cli", "state": "done", "changed": true, "note": "Moved, within my files."})));
+    // A change the lead missed between two waits still shows: the piece is ready when the next wait begins.
+    assert_eq!(engine::wake(&accepted, &accepted, false).unwrap()["why"], json!(["Ready to start with `terminalx runs start`: docs."]));
+    // Started, the lead sleeps again until the run ends; `--all` returns only then.
+    engine::start(&host, id).unwrap();
+    let running = store::get(id).unwrap();
+    assert_eq!((engine::wake(&running, &running, false), engine::wake(&running, &running, true)), (None, None));
+    host.reports("docs", Status::Done, "Documented.");
+    engine::refreshed(&host, id).unwrap();
+    let done = engine::verify(&host, id).unwrap();
+    assert_eq!(engine::wake(&running, &done, true).unwrap()["why"], json!(["docs is done: its result passed its checks.", "The run is done."]));
+    // A piece that ran out of tries wakes it too, with how far it got.
+    let (stuck, stuck_id) = one_piece_for("lead-stuck");
+    let before = store::get(&stuck_id).unwrap();
+    for _ in 0..3 {
+        stuck.reports("cli", Status::Failed, "A test fails.");
+        engine::refreshed(&stuck, &stuck_id).unwrap();
+        engine::start_retries(&stuck, &stuck_id).unwrap();
+    }
+    let blocked = store::get(&stuck_id).unwrap();
+    assert_eq!(engine::wake(&before, &blocked, false).unwrap()["why"], json!(["cli is blocked after 3 tries.", "The run is failed."]));
+}

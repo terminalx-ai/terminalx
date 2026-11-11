@@ -1400,12 +1400,62 @@ impl ControlService {
     fn wait_children(&self, mut params: Value) -> Result<Value, ControlError> {
         let mode = optional_string(&params, "mode").unwrap_or_else(|| "any".into());
         let listed = self.sessions_children(json!({"childrenOf": required_string(&params, "childrenOf")?}))?;
+        // A lead whose run is under way waits on the run, not on each worker's turn.
+        if let Some(run) = listed["parent"]["sessionId"].as_str().and_then(|lead| crate::orchestration::store::open_for_lead(lead).ok().flatten()).filter(|run| run.state == crate::orchestration::RunState::Running) {
+            return self.wait_run(&run.id, &mode, &params);
+        }
         let workers: Vec<Value> = listed["sessions"].as_array().into_iter().flatten().map(|session| session["id"].clone()).collect();
         if workers.is_empty() {
             return Ok(json!({"mode": mode, "timedOut": false, "targets": [], "reason": "nothing to wait for: that session started no sessions"}));
         }
         params["targets"] = json!(workers);
         self.wait_many(params)
+    }
+
+    /// `wait --children-of` for a lead whose orchestration run is under way
+    /// (PRO-278): it returns when the run has something for the lead
+    /// (`orchestration::engine::wake`), not each time a worker's turn ends. A
+    /// worker's `done` is checked by the app first, and a result that fails a
+    /// check goes back to a fresh worker without the lead, so a run costs its
+    /// lead about one turn for each piece settled.
+    ///
+    /// The stored run is what is watched: a worker's or a verifier's turn
+    /// ending and the gates finishing each write it. It is brought up to date
+    /// from the transcripts now and then as well, for a worker that stopped
+    /// on a request nobody answered, which ends no turn.
+    fn wait_run(&self, run_id: &str, mode: &str, params: &Value) -> Result<Value, ControlError> {
+        use crate::orchestration::{engine, host::ManagerHost, store};
+        if !matches!(mode, "any" | "all") {
+            return Err(ControlError::invalid(format!("mode takes any or all, not {mode}.")));
+        }
+        let host = ManagerHost::new(self.sink.clone(), self.manager.clone());
+        let timeout = params.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600).min(86_400);
+        let deadline = Instant::now() + Duration::from_secs(timeout);
+        let _resumable = crate::hooks::resumable();
+        // What the lead last saw is at least this old: a piece settled since then wakes it at once
+        // only through `ready` or the run's end, which a missed change always shows up as.
+        let began = engine::refreshed(&host, run_id).map_err(ControlError::of_run)?;
+        let mut read = Instant::now();
+        loop {
+            if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
+                return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));
+            }
+            let now = if read.elapsed() >= Duration::from_secs(5) {
+                read = Instant::now();
+                engine::refreshed(&host, run_id).map_err(ControlError::of_run)?
+            } else {
+                store::get(run_id).map_err(ControlError::internal)?
+            };
+            let timed_out = Instant::now() >= deadline;
+            if let Some(mut woken) = engine::wake(&began, &now, mode == "all").or_else(|| timed_out.then(|| json!({"run": now.id, "state": now.state, "why": [], "ready": [], "pieces": now.pieces.iter().map(|piece| json!({"piece": piece.id, "state": piece.state, "changed": false, "note": piece.note})).collect::<Vec<_>>()}))) {
+                woken["mode"] = json!(mode);
+                woken["timedOut"] = json!(timed_out && woken["why"].as_array().is_none_or(|why| why.is_empty()));
+                // No tab is listed: the run is what was waited on. `runs show` has each worker.
+                woken["targets"] = json!([]);
+                return Ok(woken);
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     /// `wait` on several tabs at once (PRO-271). `any` returns as soon as one

@@ -1108,6 +1108,47 @@ pub fn worker_turn_ended(host: &dyn Host, session_id: &str) -> Option<String> {
     None
 }
 
+/// Why a lead that waits on its run is woken, or `None` while there is
+/// nothing for it to do. `began` is the run when the wait began.
+///
+/// A lead does not poll its workers, and is not woken each time one ends a
+/// turn: a `done` report is checked first, and a result that fails goes back
+/// to a fresh worker without the lead. It is woken when a piece's result is
+/// accepted, when a piece stops for good (blocked, failed), when a piece is
+/// ready for it to start, or when the run has ended. With `all`, only once
+/// nothing is under way any more.
+pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
+    let name = |state: PieceState| serde_json::to_value(state).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
+    let settled = |state: PieceState| matches!(state, PieceState::Done | PieceState::Blocked | PieceState::Failed | PieceState::Stopped);
+    let changed: Vec<&Piece> = now.pieces.iter().filter(|piece| settled(piece.state) && began.piece(&piece.id).is_none_or(|before| before.state != piece.state)).collect();
+    // A piece whose next try waits is started without the lead: it is not the lead's to start.
+    let ready: Vec<String> = if matches!(now.state, RunState::Planned | RunState::Running) { now.ready().into_iter().filter(|piece| !piece.retry_waits()).map(|piece| piece.id.clone()).collect() } else { Vec::new() };
+    let under_way = now.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Verifying) || piece.retry_waits());
+    let ended = now.state != RunState::Running;
+    let woken = match all {
+        true => ended || !under_way,
+        false => ended || !changed.is_empty() || !ready.is_empty(),
+    };
+    if !woken {
+        return None;
+    }
+    let mut why: Vec<String> = changed.iter().map(|piece| match piece.state {
+        PieceState::Done => format!("{} is done: its result passed its checks.", piece.id),
+        PieceState::Blocked if piece.gave_up() => format!("{} is blocked after {} tries.", piece.id, piece.tries.len()),
+        state => format!("{} is {}.", piece.id, name(state)),
+    }).collect();
+    if !ready.is_empty() {
+        why.push(format!("Ready to start with `terminalx runs start`: {}.", ready.join(", ")));
+    }
+    if ended {
+        why.push(format!("The run is {}.", state_name(now.state)));
+    }
+    Some(json!({
+        "run": now.id, "state": now.state, "reason": now.reason, "why": why, "ready": ready,
+        "pieces": now.pieces.iter().map(|piece| json!({"piece": piece.id, "state": piece.state, "changed": began.piece(&piece.id).is_none_or(|before| before.state != piece.state), "note": piece.note})).collect::<Vec<_>>(),
+    }))
+}
+
 /// A run as `runs show` returns it: the run, what it would start next, what
 /// waits on what, and what its workers cost so far.
 pub fn shown(run: &Run) -> Value {
