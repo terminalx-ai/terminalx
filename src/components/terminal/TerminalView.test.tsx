@@ -116,3 +116,21 @@ it("recovers on focus without replacing the terminal or stealing input focus", (
   expect(inst.term.dispose).not.toHaveBeenCalled();
   vi.useRealTimers();
 });
+
+it("reparents the same terminal across view trees with a full idle cache", async () => {
+  const create = vi.fn(() => ({ ...instance(), restorable: true }));
+  const view = render(<div key="dock"><TerminalView id="p1" visible create={create} /></div>);
+  const first = peekInstance("p1")!;
+  first.el.textContent = "existing scrollback";
+  const release = vi.fn();
+  first.release = release;
+  for (let i = 0; i < IDLE_TERMINAL_LIMIT; i++) getInstance(`move-idle-${i}`, create);
+  await act(async () => view.rerender(<section key="tab"><TerminalView id="p1" visible create={create} /></section>));
+  expect(peekInstance("p1")).toBe(first);
+  expect(first.el.closest("section")).not.toBeNull();
+  expect(first.el.textContent).toBe("existing scrollback");
+  expect(first.term.dispose).not.toHaveBeenCalled();
+  expect(release).not.toHaveBeenCalled();
+  view.unmount();
+  for (let i = 0; i < IDLE_TERMINAL_LIMIT; i++) disposeInstance(`move-idle-${i}`);
+});

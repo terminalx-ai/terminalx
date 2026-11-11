@@ -117,6 +117,8 @@ export function Composer({
   onSetModel,
   onSetEffort,
   onSetMode,
+  agentHandoff,
+  hasConversation = false,
   contextUsed,
   reportedModel,
   modelsAreLocal = true,
@@ -159,6 +161,8 @@ export function Composer({
   onSetModel: (id: string) => void;
   onSetEffort: (e: string | null) => void;
   onSetMode: (m: string) => void;
+  agentHandoff?: { name: string; id: string; run: () => void };
+  hasConversation?: boolean;
   contextUsed?: number;
   /** The full model id the session last said it ran (an alias like `opus` resolved). */
   reportedModel?: string | null;
@@ -594,6 +598,11 @@ export function Composer({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="min-w-[14rem]">
+              {(hasConversation || history.length > 0 || busy) && (
+                <p className="max-w-72 px-2 py-1.5 text-xs text-muted-foreground" role="note">
+                  Changing model or effort can rebuild the prompt cache. The next response may take longer and use more tokens.
+                </p>
+              )}
               <DropdownMenuLabel>Model</DropdownMenuLabel>
               <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={onSetModel}>
                 {modelGroups(models).map((group) => (
@@ -626,6 +635,15 @@ export function Composer({
                   </DropdownMenuRadioGroup>
                 </>
               ) : null}
+              {agentHandoff && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={agentHandoff.run}>
+                    <AgentMark id={agentHandoff.id} decorative />
+                    <span>Hand off to {agentHandoff.name}<span className="block text-xs text-faint">Opens in a new tab</span></span>
+                  </DropdownMenuItem>
+                </>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
 

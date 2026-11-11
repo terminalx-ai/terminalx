@@ -55,6 +55,7 @@ interface TurnProps {
   onSendQueuedNow?: (seq: number) => void;
   /** Send a message the agent dropped unanswered again, as a new message (#722); absent where that cannot be done. */
   onSendAgain?: (seq: number) => void;
+  onSecondOpinion?: (turn: Turn) => void;
   /** The time line above the turn when it opens a new sitting ("Yesterday, 5:21 PM"); see \`turnDivider\`. */
   divider?: string | null;
   onReset?: (endSeq: number) => void;
@@ -70,6 +71,7 @@ function TurnBody({
   streamingTool,
   onSendQueuedNow,
   onSendAgain,
+  onSecondOpinion,
   divider,
   onReset,
 }: TurnProps) {
@@ -161,7 +163,7 @@ function TurnBody({
 
       {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} onReset={onReset} />}
+      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} onReset={onReset} />}
     </div>
   );
 }
@@ -208,7 +210,7 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
  * A settled turn's one footer row: when the answer came, how the turn went
  * when no header said so, and a copy of the answer on hover.
  */
-function TurnFooter({ turn, outcome, onReset }: { turn: Turn; outcome: Outcome | null; onReset?: (endSeq: number) => void }) {
+function TurnFooter({ turn, outcome, onSecondOpinion, onReset }: { turn: Turn; outcome: Outcome | null; onSecondOpinion?: (turn: Turn) => void; onReset?: (endSeq: number) => void }) {
   const answer = turn.work.flatMap((w) => (w.kind === "text" && w.text.trim() ? [w] : []));
   const ts = answer.at(-1)?.messageTs;
   const text = answer.map((w) => w.text).join("\n\n");
@@ -219,7 +221,7 @@ function TurnFooter({ turn, outcome, onReset }: { turn: Turn; outcome: Outcome |
     return () => window.clearTimeout(id);
   }, [copied]);
   const quiet = outcome?.tone === "ok";
-  if (!messageTime(ts) && !outcome && !text && !turn.completed && !onReset) return null;
+  if (!messageTime(ts) && !outcome && !text && !turn.completed && !onSecondOpinion && !onReset) return null;
   return (
     <div className="flex min-h-7 flex-wrap items-center gap-x-1.5 text-xs text-faint" data-testid="turn-footer">
       <MessageTime ts={ts} inline />
@@ -243,6 +245,11 @@ function TurnFooter({ turn, outcome, onReset }: { turn: Turn; outcome: Outcome |
           >
             {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
           </button>
+      )}
+      {onSecondOpinion && (
+        <button type="button" onClick={() => onSecondOpinion(turn)} className="rounded-md px-1.5 py-1 text-muted-foreground hover:bg-veil-raised hover:text-foreground">
+          Second opinion
+        </button>
       )}
     </div>
   );

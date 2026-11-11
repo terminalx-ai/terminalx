@@ -18,6 +18,8 @@ pub(crate) struct History {
     pub created: String,
     pub title: Option<String>,
     pub renamed: bool,
+    #[serde(default)]
+    pub docked: Option<bool>,
     #[serde(with = "bytes")]
     pub data: Vec<u8>,
 }
@@ -112,7 +114,7 @@ mod tests {
     fn retained_bytes_are_bounded_and_never_restore_a_pid() {
         let terminals = crate::pty::Terminals::new();
         terminals.restore_history((0..100).map(|n| History { id: format!("fixture:{n}"), cwd: "/fixture".into(),
-            created: "now".into(), title: None, renamed: false, data: vec![b'x'; 512 * 1024] }).collect());
+            created: "now".into(), title: None, renamed: false, docked: None, data: vec![b'x'; 512 * 1024] }).collect());
         let history = terminals.history(TOTAL_BYTES);
         assert_eq!(history.len(),100);
         assert!(history.iter().map(|pane| pane.data.len()).sum::<usize>() <= TOTAL_BYTES);
@@ -128,9 +130,10 @@ mod tests {
         let terminals = crate::pty::Terminals::new();
         terminals.restore_history(["session:one", "session:two"].into_iter().map(|id| History {
             id: id.into(), cwd: "/fixture".into(), created: "now".into(), title: Some("original".into()),
-            renamed: false, data: b"retained output".to_vec(),
+            renamed: false, docked: None, data: b"retained output".to_vec(),
         }).collect());
         terminals.rename("session:one", "renamed after restore");
+        terminals.set_docked("session:one", true).unwrap();
         terminals.kill("session:two");
         let shell = terminals.shell("session:one").unwrap();
         assert_eq!(shell.title.as_deref(), Some("renamed after restore"));
@@ -139,6 +142,12 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].title, shell.title);
         assert!(history[0].renamed);
+        assert_eq!(history[0].docked, Some(true));
+        let restored = crate::pty::Terminals::new();
+        restored.restore_history(history.clone());
+        assert_eq!(restored.shell("session:one").unwrap().docked, Some(true));
+        restored.set_docked("session:one", false).unwrap();
+        assert_eq!(restored.history(TOTAL_BYTES)[0].docked, Some(false));
         let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let observed = output.clone();
         terminals.attach("fixture", "session:one", "fixture-view", Box::new(move |bytes| {

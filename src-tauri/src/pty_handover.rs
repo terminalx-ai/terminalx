@@ -210,6 +210,7 @@ pub(crate) struct FrozenPane {
     pub quiet: Option<Duration>,
     pub title: Option<String>,
     pub renamed: bool,
+    pub docked: Option<bool>,
 }
 
 #[cfg(unix)]
@@ -259,6 +260,8 @@ impl Terminals {
         let panes = self.panes.lock().unwrap();
         let titles = self.titles.lock().unwrap().clone();
         let renamed = self.renamed.lock().unwrap().clone();
+        let docked = self.docked.lock().unwrap().clone();
+        for pane in retained.values_mut() { pane.docked = docked.get(&pane.id).copied(); }
         let mut frozen = Vec::new();
         // A pane opened just as the freeze began, by a path that does not
         // wait for admission, would go on being read after this.
@@ -270,7 +273,7 @@ impl Terminals {
             let title = titles.get(id).cloned();
             if !*pane.alive.lock().unwrap() {
                 // Its program has gone: what it printed is all there is.
-                retained.insert(id.clone(), History { id: id.clone(), cwd: pane.cwd.clone(), created: pane.created.clone(), title, renamed: renamed.contains(id), data: scrollback });
+                retained.insert(id.clone(), History { id: id.clone(), cwd: pane.cwd.clone(), created: pane.created.clone(), title, renamed: renamed.contains(id), docked: docked.get(id).copied(), data: scrollback });
                 continue;
             }
             let fd = pane.master.as_raw_fd().context("a terminal has no descriptor to hand over")?;
@@ -304,7 +307,7 @@ impl Terminals {
                 screen,
                 quiet: pane.last_output.lock().unwrap().map(|at| at.elapsed()),
                 title,
-                renamed: renamed.contains(id),
+                renamed: renamed.contains(id), docked: docked.get(id).copied(),
             });
         }
         let led: std::collections::HashSet<u32> = frozen.iter().filter_map(|pane| pane.group).collect();
@@ -315,7 +318,7 @@ impl Terminals {
     /// program goes on in the same terminal, and its output from where the
     /// handover left it.
     pub(crate) fn adopt(&self, sink: Arc<dyn EventSink>, pane: FrozenPane) -> Result<()> {
-        let FrozenPane { id, master, pid, group, explicit_command, environment, cwd, created, tty, cols, rows, scrollback, printed, screen, quiet, title, renamed } = pane;
+        let FrozenPane { id, master, pid, group, explicit_command, environment, cwd, created, tty, cols, rows, scrollback, printed, screen, quiet, title, renamed, docked } = pane;
         if self.panes.lock().unwrap().contains_key(&id) {
             bail!("a terminal named {id} is already open");
         }
@@ -342,6 +345,7 @@ impl Terminals {
             screen: parser,
             last_output: quiet.and_then(|quiet| Instant::now().checked_sub(quiet)),
         })?;
+        if let Some(docked) = docked { self.docked.lock().unwrap().insert(id.clone(), docked); }
         if let Some(title) = title {
             self.titles.lock().unwrap().insert(id.clone(), title);
             if renamed {
@@ -358,6 +362,7 @@ impl Terminals {
             let mut titles = self.titles.lock().unwrap();
             let mut renamed = self.renamed.lock().unwrap();
             for pane in &retained {
+                if let Some(docked) = pane.docked { self.docked.lock().unwrap().insert(pane.id.clone(), docked); }
                 if let Some(title) = &pane.title {
                     titles.insert(pane.id.clone(), title.clone());
                 }

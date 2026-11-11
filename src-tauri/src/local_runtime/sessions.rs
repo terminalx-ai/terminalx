@@ -70,6 +70,10 @@ impl Sessions {
         self.0.call_within("runtime.session.workspace", json!({"operation":operation,"params":params}), std::time::Duration::from_secs(seconds))
     }
 
+    pub fn save_terminal_selection(&self, session: &str, tab: &str, text: &str) -> Result<String> {
+        self.tab("saveTerminalSelection", session, tab, json!({"text":text}))
+    }
+
     pub fn delete_session(&self, session: &str) -> Result<()> {
         self.call("runtime.session.deleteSession", json!({"sessionId":session}))
     }
