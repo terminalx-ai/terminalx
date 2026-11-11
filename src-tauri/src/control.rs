@@ -646,8 +646,11 @@ impl ControlService {
                 let selector = required_string(&params, "session")?;
                 let mut session = resolve_session(&selector)?;
                 self.manager.annotate_row_statuses(std::slice::from_mut(&mut session));
-                Ok(serde_json::to_value(session).map_err(ControlError::internal)?)
+                Ok(crate::session_usage::with_cost(&session))
             }
+            // Tokens and estimated cost (PRO-273): read again from the
+            // agents' transcripts, so a turn under way counts as far as it got.
+            "sessions.usage" => self.sessions_usage(params),
             "sessions.create" => self.sessions_create(params),
             "sessions.report" => self.sessions_report(params),
             // Commands of their own, not switches on `sessions.list`: a
@@ -794,6 +797,7 @@ impl ControlService {
             let (project, worktree) = resolve_worktree(&params)?;
             let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
             self.manager.annotate_row_statuses(&mut held);
+            let held: Vec<Value> = held.iter().map(crate::session_usage::with_cost).collect();
             return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
         }
         if let Some(selector) = optional_string(&params, "project") {
@@ -810,7 +814,43 @@ impl ControlService {
         }
         sessions.retain(|session| session.archived == archived);
         self.manager.annotate_row_statuses(&mut sessions);
+        let sessions: Vec<Value> = sessions.iter().map(crate::session_usage::with_cost).collect();
         Ok(json!({"sessions": sessions}))
+    }
+
+    /// `sessions usage <session>`, or `--children-of <lead>`: the lead's own
+    /// usage, a row per worker it started, and the grand total of them all.
+    fn sessions_usage(&self, params: Value) -> Result<Value, ControlError> {
+        use crate::session_usage::{merge, refresh_session, session_json, total};
+        let refresh = |id: &str| -> Result<SessionEntry, ControlError> {
+            let (session, changed) = refresh_session(id).map_err(ControlError::internal)?;
+            if changed {
+                self.sink.emit("session_updated", &session);
+            }
+            Ok(session)
+        };
+        let Some(selector) = optional_string(&params, "childrenOf") else {
+            let session = resolve_session(&required_string(&params, "session")?)?;
+            return Ok(session_json(&refresh(&session.id)?));
+        };
+        let sessions = index::load().map_err(ControlError::internal)?;
+        let lead = resolve_lead(&sessions, &selector)?;
+        let own = if lead.exists { Some(refresh(&lead.session_id)?) } else { None };
+        let workers = sessions
+            .iter()
+            .filter(|session| session.started_by(&lead.session_id))
+            .map(|session| refresh(&session.id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let everyone: Vec<&SessionEntry> = own.iter().chain(&workers).collect();
+        let models = merge(everyone.iter().flat_map(|session| &session.tabs).filter_map(|tab| tab.usage.as_ref()).flat_map(|usage| &usage.models));
+        Ok(json!({
+            "parent": lead,
+            "lead": own.as_ref().map(session_json),
+            "workers": workers.iter().map(session_json).collect::<Vec<_>>(),
+            "models": models,
+            "total": total(&models),
+            "estimate": true,
+        }))
     }
 
     /// `sessions list --children-of`: the sessions a lead started (PRO-270),

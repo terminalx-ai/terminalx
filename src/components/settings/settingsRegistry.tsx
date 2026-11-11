@@ -279,6 +279,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.nativeCodex" },
   }),
   defineSetting({
+    id: "experimental.sessionCost", section: "experimental", title: "Session cost",
+    description: "Show each session's estimated cost in its header, with its tokens by model. On a subscription it is what the tokens would cost at API prices, not what you are billed.",
+    searchTerms: ["experimental", "session", "cost", "tokens", "usage", "spend", "price"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.sessionCost" },
+  }),
+  defineSetting({
     id: "general.dataPrivacy", section: "general", title: "Data privacy mode",
     description: "Keep TerminalX cloud and remote features off on this Mac. Your agents still use their own network connections. Your sign-in stays saved.",
     searchTerms: ["privacy", "cloud", "remote", "organisations", "organizations", "pairing", "MCP", "logging", "managed"], scope: "user",

@@ -67,7 +67,7 @@ User-facing webview choices are under `preferences`, for example:
     "mode": "system"
   },
   "agents": { "idleStopMinutes": 60 },
-  "experimental": { "nativeCodex": false }
+  "experimental": { "nativeCodex": false, "sessionCost": false }
 }
 ```
 
@@ -100,6 +100,8 @@ terminalx sessions list [--project <project> | --quick] [--archived] --json
 terminalx sessions list --worktree <path-or-name> [--project <project>] --json
 terminalx sessions list --children-of <session> --json
 terminalx sessions show <session> --json
+terminalx sessions usage <session> --json
+terminalx sessions usage --children-of <session> --json
 terminalx tabs list <session> --json
 ```
 
@@ -553,6 +555,58 @@ and returns `sessionId`, `tabId` and one of two shapes:
 
 Handle `missing` yourself: read the `tail`, read the transcript, or `send` the worker a
 question. Do not treat it as done, and do not treat it as failed.
+
+### Tokens and cost (`sessions usage`)
+
+```text
+terminalx sessions usage <session> --json
+terminalx sessions usage --children-of <session> --json
+```
+
+Each agent tab keeps running totals of what its agents used: input (uncached), output,
+cache-read and cache-write tokens, and an estimated cost, **per model**, because a tab can
+change model mid-conversation. The totals are read from the agent's own usage records (Claude's
+transcript and its subagents' transcripts, Codex's rollout) at each turn end, and cover every
+conversation the tab holds or has held. A fork does not count the records it copied from its
+parent. Costs use the same price table as Stats & Usage, each request at its own rates (cache
+reads at the cache-read rate). Everything is computed on this computer.
+
+The cost is an **estimate at API list prices**. On a subscription login (Claude account,
+ChatGPT account) nothing is billed per token: it is what the same tokens would cost on an API
+key, not money spent. A model missing from the price table, or a request on a service tier
+without a published price, keeps its tokens and has `costUsd: null`, never `0`.
+
+`sessions usage <session>` reads the transcripts again as it answers, so a turn under way counts
+as far as it has got, and stores what it read. It returns:
+
+```json
+{
+  "sessionId": "…", "title": "…", "estimate": true,
+  "tabs": [
+    { "tabId": "…", "title": "…", "agent": "codex", "updated": "2026-11-11T10:00:00.000Z",
+      "models": [ { "model": "gpt-6.1-sol", "inputTokens": 38000, "outputTokens": 21000,
+                    "cacheReadTokens": 412000, "cacheWriteTokens": 0, "costUsd": 0.71 } ],
+      "total": { "inputTokens": 38000, "outputTokens": 21000, "cacheReadTokens": 412000,
+                 "cacheWriteTokens": 0, "costUsd": 0.71, "unpricedModels": [] } }
+  ],
+  "models": [ … every tab's rows merged by model, costliest first … ],
+  "total": { … the same fields as a tab's total … }
+}
+```
+
+A `total` sums every model's tokens. Its `costUsd` is the sum of the priced models;
+`unpricedModels` names the models it leaves out, and `costUsd` is `null` only when there are
+tokens and none of them is priced. A tab with no agent usage to read (a terminal) is not listed.
+
+`sessions usage --children-of <lead>` covers a lead and the sessions it started, as `sessions
+list --children-of` finds them: `parent` (as there), `lead` (the lead's own report as above;
+`null` once it was deleted), `workers` (one such report per worker), `models` (everyone's rows
+merged) and `total`, the grand total of the lead and its workers.
+
+`sessions list` (every form) and `sessions show` carry `estimatedCostUsd` on each session: its
+total `costUsd` as of each tab's last turn end, or `null` before any was read. Each tab entry
+carries the stored totals as `usage` (`models`, `updated`). The session header shows the cost
+when Settings → Experimental → Session cost is on.
 
 ### Permissions
 

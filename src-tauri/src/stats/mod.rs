@@ -413,12 +413,77 @@ fn discover_jsonl(
 
 fn parse_file(path: &Path, provider: Provider) -> Result<Vec<UsageEvent>> {
     match provider {
-        Provider::Claude => parse_claude(path),
+        Provider::Claude => parse_claude(path, &HashSet::new()),
         Provider::Codex => parse_codex(path),
     }
 }
 
-fn parse_claude(path: &Path) -> Result<Vec<UsageEvent>> {
+/// What one request cost at API list prices, by the same table and rules for
+/// Stats and for a session's own totals. `None` when its model or service
+/// tier has no price: never zero.
+fn event_cost(event: &UsageEvent) -> Option<f64> {
+    if event.unpriced {
+        return None;
+    }
+    match event.provider {
+        Provider::Claude => pricing::claude_request_cost(
+            event.model.as_deref(),
+            event.new_input_tokens,
+            event.output_tokens,
+            event.cache_read_tokens,
+            event.cache_write_tokens,
+            event.cache_write_hour_tokens,
+        ),
+        Provider::Codex => pricing::codex_cost(
+            event.model.as_deref(),
+            event
+                .new_input_tokens
+                .saturating_add(event.cache_read_tokens),
+            event.cache_read_tokens,
+            event.output_tokens,
+        ),
+    }
+}
+
+/// One model request from an agent's own transcript, counted as Stats counts
+/// it and priced as Stats prices it (PRO-273). Input is uncached input only;
+/// cache reads and writes are their own counts.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PricedRequest {
+    pub model: Option<String>,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub cost_usd: Option<f64>,
+}
+
+fn priced(events: Vec<UsageEvent>) -> Vec<PricedRequest> {
+    events
+        .into_iter()
+        .map(|event| PricedRequest {
+            cost_usd: event_cost(&event),
+            model: event.model,
+            input: event.new_input_tokens,
+            output: event.output_tokens,
+            cache_read: event.cache_read_tokens,
+            cache_write: event.cache_write_tokens,
+        })
+        .collect()
+}
+
+/// The requests in one Claude transcript file, leaving out the records whose
+/// uuid is in `skip`: a fork's copy of its parent, which the parent counts.
+pub(crate) fn claude_requests(path: &Path, skip: &HashSet<String>) -> Result<Vec<PricedRequest>> {
+    parse_claude(path, skip).map(priced)
+}
+
+/// The requests in one Codex rollout file.
+pub(crate) fn codex_requests(path: &Path) -> Result<Vec<PricedRequest>> {
+    parse_codex(path).map(priced)
+}
+
+fn parse_claude(path: &Path, skip: &HashSet<String>) -> Result<Vec<UsageEvent>> {
     let file = File::open(path)?;
     let fallback_session = path
         .file_stem()
@@ -436,6 +501,9 @@ fn parse_claude(path: &Path) -> Result<Vec<UsageEvent>> {
             continue;
         };
         if record.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if record["uuid"].as_str().is_some_and(|uuid| skip.contains(uuid)) {
             continue;
         }
         let Some(timestamp) = record.get("timestamp").and_then(Value::as_str) else {
@@ -1171,28 +1239,7 @@ fn aggregate(
             Provider::Claude => claude.add(event),
             Provider::Codex => codex.add(event),
         }
-        let cost = if event.unpriced {
-            None
-        } else {
-            match event.provider {
-                Provider::Claude => pricing::claude_request_cost(
-                    event.model.as_deref(),
-                    event.new_input_tokens,
-                    event.output_tokens,
-                    event.cache_read_tokens,
-                    event.cache_write_tokens,
-                    event.cache_write_hour_tokens,
-                ),
-                Provider::Codex => pricing::codex_cost(
-                    event.model.as_deref(),
-                    event
-                        .new_input_tokens
-                        .saturating_add(event.cache_read_tokens),
-                    event.cache_read_tokens,
-                    event.output_tokens,
-                ),
-            }
-        };
+        let cost = event_cost(event);
         match event.provider {
             Provider::Claude => claude.add_cost(cost, event.model.as_deref()),
             Provider::Codex => codex.add_cost(cost, event.model.as_deref()),
@@ -1538,7 +1585,7 @@ mod tests {
         let scope = UsageScope::from_paths([PathBuf::from("/work/repo")]);
         let snapshot = aggregate(
             &[CachedFile {
-                events: parse_claude(&path).unwrap(),
+                events: parse_claude(&path, &HashSet::new()).unwrap(),
                 path,
                 provider: Provider::Claude,
                 modified_nanos: 1,
@@ -1565,7 +1612,7 @@ mod tests {
                 }}
             })).unwrap();
         }
-        let events = parse_claude(&path).unwrap();
+        let events = parse_claude(&path, &HashSet::new()).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].total_tokens, 34);
         assert_eq!(events[0].day, "2026-09-02");
@@ -1679,7 +1726,7 @@ mod tests {
         assert!(optional_directory(&blocked).is_err());
         let transcript = dir.path().join("invalid-utf8.jsonl");
         fs::write(&transcript, [0xff, 0xfe, b'\n']).unwrap();
-        assert!(parse_claude(&transcript).is_err());
+        assert!(parse_claude(&transcript, &HashSet::new()).is_err());
         assert!(parse_codex(&transcript).is_err());
         assert!(scan_snapshot_with(
             dir.path(),

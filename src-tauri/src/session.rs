@@ -7008,6 +7008,9 @@ impl SessionManager {
         let payload = match payload {
             Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, detail, .. } => {
                 let head = None; // The publication path captures and pins the completed tree.
+                // Occupancy as the turn left it, and the tab's token and cost
+                // totals read again from its agent's transcript (PRO-273),
+                // both off this thread: a long transcript takes a moment.
                 if let Some(u) = &usage {
                     let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
                     let (cu, cm) = (u.context_used, u.context_max);
@@ -7022,6 +7025,10 @@ impl SessionManager {
                             Ok(())
                         });
                     });
+                }
+                if subagent.is_none() {
+                    let sink = self.sink.clone();
+                    crate::session_usage::schedule(&rt.session_id, &rt.tab_id, move |entry| sink.emit("session_updated", &entry));
                 }
                 let duration_ms = duration_ms.or_else(|| rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64));
                 let auth_failed = auth_failed || (subagent.is_none() && std::mem::take(&mut rt.signed_out_in_turn));

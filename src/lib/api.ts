@@ -2680,12 +2680,15 @@ export interface WorkStatusSettings {
 export interface ExperimentalSettings {
   /** New Codex sessions connect to Codex's app server instead of its terminal, where it can serve them (#644). */
   nativeCodex: boolean;
+  /** The session header shows the session's estimated cost and its tokens by model (PRO-273). */
+  sessionCost?: boolean;
 }
 
 /** Read when a tab is made: a change applies to new sessions, not to existing ones. */
 export const experimental = {
   settings: () => invoke<ExperimentalSettings>("experimental_settings"),
   setNativeCodex: (nativeCodex: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { nativeCodex }),
+  setSessionCost: (sessionCost: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { sessionCost }),
   /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
   nativeCodexFor: async (agent: string): Promise<boolean> => {
     if (agent !== "codex") return false;

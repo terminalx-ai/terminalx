@@ -68,6 +68,7 @@ import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { copyText } from "@/lib/clipboard";
 import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
 import { BranchGitButton } from "./BranchGitButton";
+import { SessionCost } from "./SessionCost";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -642,6 +643,8 @@ export function SessionView({
                 {session.title}
               </span>
             )}
+            {/* What the session's agents have used, at API list prices (PRO-273); Settings → Experimental. */}
+            {local && <SessionCost session={session} className={HEADER_TIGHT} />}
             {session.issue && (
               <WithTooltip label={session.issue.title + (session.issueWork?.link ? ` · ${linkText(session.issueWork.link)}` : "")}>
                 <button

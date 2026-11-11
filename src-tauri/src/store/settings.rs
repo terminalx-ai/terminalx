@@ -170,6 +170,10 @@ pub struct ExperimentalSettings {
     /// New Codex conversations a person starts go through Codex's app server
     /// (#644) where it can serve them (`session_ops::prefer_native_codex`).
     pub native_codex: bool,
+    /// The session header shows the session's estimated cost, with its
+    /// tokens by model in a popover (PRO-273). The totals are recorded and
+    /// `terminalx sessions usage` answers either way.
+    pub session_cost: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -394,7 +398,10 @@ mod tests {
         assert!(!legacy.experimental.native_codex);
         let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
         assert!(on.experimental.native_codex);
-        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true}));
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false}));
+        assert!(!legacy.experimental.session_cost);
+        let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
+        assert!(cost.experimental.session_cost && !cost.experimental.native_codex);
     }
 
     #[test]

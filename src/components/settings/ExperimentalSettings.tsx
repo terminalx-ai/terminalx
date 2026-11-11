@@ -3,7 +3,8 @@ import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Switch } from "@/components/ui/controls";
-import { errorMessage, experimental } from "@/lib/api";
+import { errorMessage, experimental, type ExperimentalSettings } from "@/lib/api";
+import { noteExperimentalSettings } from "@/lib/experimentalSettings";
 
 export { NATIVE_CODEX_DESCRIPTION } from "./settingsRegistry";
 
@@ -11,16 +12,22 @@ export { NATIVE_CODEX_DESCRIPTION } from "./settingsRegistry";
 export function ExperimentalTab() {
   const { revision } = useSettingsFile();
   const [nativeCodex, setNativeCodex] = useState<boolean | null>(null);
+  const [sessionCost, setSessionCost] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     Promise.resolve()
       .then(() => experimental.settings())
-      .then((settings) => live && setNativeCodex(settings?.nativeCodex ?? false))
+      .then((settings) => {
+        if (!live) return;
+        setNativeCodex(settings?.nativeCodex ?? false);
+        setSessionCost(settings?.sessionCost ?? false);
+      })
       .catch((e: unknown) => {
         if (!live) return;
         setNativeCodex(false);
+        setSessionCost(false);
         setError(errorMessage(e));
       });
     return () => {
@@ -31,8 +38,9 @@ export function ExperimentalTab() {
   // A paired phone can change it too (Settings → This Mac on the phone).
   useEffect(() => {
     let live = true;
-    const unlisten = listen<{ nativeCodex?: boolean }>("experimental_settings_changed", (event) => {
+    const unlisten = listen<{ nativeCodex?: boolean; sessionCost?: boolean }>("experimental_settings_changed", (event) => {
       if (live && typeof event.payload?.nativeCodex === "boolean") setNativeCodex(event.payload.nativeCodex);
+      if (live && typeof event.payload?.sessionCost === "boolean") setSessionCost(event.payload.sessionCost);
     }).catch(() => null);
     return () => {
       live = false;
@@ -45,9 +53,25 @@ export function ExperimentalTab() {
     setNativeCodex(on);
     setError(null);
     try {
-      setNativeCodex((await experimental.setNativeCodex(on)).nativeCodex);
+      const saved = await experimental.setNativeCodex(on);
+      setNativeCodex(saved.nativeCodex);
+      noteExperimentalSettings(saved);
     } catch (e) {
       setNativeCodex(before);
+      setError(errorMessage(e));
+    }
+  };
+
+  const changeSessionCost = async (on: boolean) => {
+    const before = sessionCost;
+    setSessionCost(on);
+    setError(null);
+    try {
+      const saved: ExperimentalSettings = await experimental.setSessionCost(on);
+      setSessionCost(saved.sessionCost ?? false);
+      noteExperimentalSettings(saved);
+    } catch (e) {
+      setSessionCost(before);
       setError(errorMessage(e));
     }
   };
@@ -57,6 +81,9 @@ export function ExperimentalTab() {
       <p className="pb-3 text-[13px] text-muted-foreground">These features are still being tested. Turn one off at any time; sessions it already started keep working.</p>
       <RegisteredSetting setting="experimental.nativeCodex"
         control={<Switch aria-label="Native Codex" checked={nativeCodex ?? false} disabled={nativeCodex === null} onCheckedChange={(on) => void change(on)} />}
+      />
+      <RegisteredSetting setting="experimental.sessionCost"
+        control={<Switch aria-label="Session cost" checked={sessionCost ?? false} disabled={sessionCost === null} onCheckedChange={(on) => void changeSessionCost(on)} />}
       />
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>
