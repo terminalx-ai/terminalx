@@ -398,6 +398,132 @@ describe("a piece's tries and what they cost (PRO-275)", () => {
   });
 });
 
+describe("checking a result before it is accepted (PRO-278)", () => {
+  const gate = (name: string, passed = true, detail?: string) => ({ gate: name, passed, detail }) as never;
+  const checked = (): Run => ({
+    ...waiting(), state: "running", approval: { at: "2026-11-11T00:00:00Z" }, maxTries: 3, verifierTokens: 5200,
+    pieces: [
+      // Accepted by the gates alone.
+      piece("store", "Typed store module", {
+        state: "done", note: "Store added, 14 tests pass", attempts: 1, worker: { sessionId: "w-store", tabId: "t" }, branch: "raccoon/store", doneChecks: [{ type: "command", run: "cargo t store::settings" }],
+        tries: [{ step: "first", model: "opus", effort: "medium", worker: { sessionId: "w-store", tabId: "t" }, outcome: "done", costUsd: 1.82, verification: {
+          outcome: "passed", facts: { files: ["src/store/mod.rs"], changedLines: 212, commit: "4c1e9a7" },
+          gates: [gate("report"), gate("scope"), gate("branch"), { gate: "commands", passed: true, commands: [{ run: "cargo t store::settings", exitCode: 0, passed: true, millis: 37600 }] }],
+        } }],
+      }),
+      // Its gates are running.
+      piece("session", "Move session code", { state: "verifying", note: "17 reads moved", attempts: 1, worker: { sessionId: "w-session", tabId: "t" },
+        tries: [{ step: "first", model: "sonnet", effort: "medium", worker: { sessionId: "w-session", tabId: "t" }, outcome: "done", verification: { gates: [gate("report")] } }] }),
+      // A verifier is reading it.
+      piece("pipeline", "Move pipeline code", { state: "verifying", note: "12 reads moved", kind: "refactor", attempts: 1, worker: { sessionId: "w-pipeline", tabId: "t" },
+        tries: [{ step: "first", model: "sonnet", effort: "medium", worker: { sessionId: "w-pipeline", tabId: "t" }, outcome: "done", verification: {
+          gates: [gate("report"), gate("scope"), gate("branch"), { gate: "commands", passed: true, commands: [{ run: "cargo t issue_pipeline", exitCode: 0, passed: true, millis: 61000 }] }],
+          review: { reasons: ["The piece is a refactor: its commands show it still works, not that it changed only what it should."], voters: 1, threshold: 1, promptChars: 9000, verifiers: [{ session: { sessionId: "w-pipeline", tabId: "v1" }, model: "sonnet", effort: "medium" }] },
+        } }] }),
+      // Read and passed by a verifier.
+      piece("guide", "Write the guide", { state: "done", note: "41 keys documented", attempts: 1, worker: { sessionId: "w-guide", tabId: "t" }, reviewOnly: true, reviewOnlyReason: "Prose.", doneChecks: [{ type: "review", text: "Every key is named." }],
+        tries: [{ step: "first", model: "sonnet", worker: { sessionId: "w-guide", tabId: "t" }, outcome: "done", verification: {
+          outcome: "passed", gates: [gate("report"), gate("scope"), gate("branch"), gate("review", true, "The verifier passed it.")],
+          review: { reasons: ["No command proves this piece: it is checked by review alone."], voters: 1, threshold: 1, promptChars: 4000, verifiers: [{ session: { sessionId: "w-guide", tabId: "v1" }, model: "sonnet", effort: "medium", verdict: "pass", tokens: { input: 4000, output: 200, cacheRead: 1000, cacheWrite: 0 } }] },
+        } }] }),
+      // Blocked: its done-check failed on each of three tries.
+      piece("cli", "Move CLI code", { state: "blocked", model: "opus", attempts: 3, worker: { sessionId: "w-cli-3", tabId: "t" }, doneChecks: [{ type: "command", run: "cargo t control" }], note: "Blocked after 3 tries: sonnet at medium, then sonnet at high, then opus at medium. It used all 3 tries.",
+        tries: [
+          { step: "first", model: "sonnet", effort: "medium", worker: { sessionId: "w-cli-1", tabId: "t" }, outcome: "checkFailed", costUsd: 0.61, detail: "The result did not pass the scope check…", verification: { outcome: "failed", gates: [gate("report"), gate("scope", false, "The change touches a file outside what the piece owns:\n- src/control.rs\nThis piece owns only: src/cli.rs.")] } },
+          { step: "effort", model: "sonnet", effort: "high", worker: { sessionId: "w-cli-2", tabId: "t" }, outcome: "checkFailed", costUsd: 0.92, verification: { outcome: "failed", gates: [gate("report"), gate("scope"), gate("branch"), gate("commands"), gate("review", false, "A verifier did not pass the result:\n- src/cli.rs:40: parse_runs was renamed")],
+            review: { reasons: ["The plan asks for a review of this piece."], voters: 1, threshold: 1, promptChars: 1, verifiers: [{ model: "sonnet", verdict: "fail", evidence: ["src/cli.rs:40: parse_runs was renamed"] }] } } },
+          { step: "tier", model: "opus", effort: "medium", worker: { sessionId: "w-cli-3", tabId: "t" }, outcome: "checkFailed", costUsd: 2.18, verification: { outcome: "failed", gates: [gate("report"), gate("scope"), gate("branch"),
+            { gate: "commands", passed: false, detail: "The done-check `cargo t control` exited 101.", commands: [{ run: "cargo t control", exitCode: 101, passed: false, millis: 41000, output: "running 12 tests\ntest control::tests::create_reads_default_mode ... FAILED\nleft: Some(\"manual\")  right: Some(\"auto\")\ncontrol.rs:1184" }] }] } },
+        ] }),
+    ],
+  });
+  const gates = () => Object.fromEntries([...detail().querySelectorAll<HTMLElement>("[data-gate]")].map((item) => [item.dataset.gate, item.dataset.gateState]));
+
+  it("shows a piece being checked as verifying, with what it waits on, and does not count it done", async () => {
+    await open(checked());
+    expect(row("session").getAttribute("data-piece-state")).toBe("verifying");
+    expect(within(row("session")).getAllByRole("cell")[2].textContent).toBe("Verifying");
+    expect(within(row("session")).getByTestId("piece-report").textContent).toBe("Running its checks");
+    expect(within(row("pipeline")).getByTestId("piece-report").textContent).toBe("Waiting on the verifier");
+    // Done is done and checked: two of five.
+    expect(screen.getByTestId("run-done").textContent).toBe("2");
+    // A piece a verifier read says so in its row; one the gates alone accepted keeps its worker's line.
+    expect(within(row("guide")).getByTestId("piece-report").textContent).toBe("41 keys documented, verifier passed");
+    expect(within(row("store")).getByTestId("piece-report").textContent).toBe("Store added, 14 tests pass");
+    fireEvent.click(within(row("session")).getByRole("button", { name: "Move session code" }));
+    expect(detail().textContent).toContain("Running its checks. Nothing that depends on it starts until it has passed.");
+    expect(gates()).toEqual({ report: "passed", scope: "running", branch: "waiting", commands: "waiting", review: "waiting" });
+  });
+
+  it("shows a result the gates accepted: each gate, the done-check as it ran, and that no model was asked", async () => {
+    await open(checked());
+    fireEvent.click(within(row("store")).getByRole("button", { name: "Typed store module" }));
+    expect(within(detail()).getByTestId("piece-check-passed").textContent).toBe("· check passed");
+    expect(within(detail()).getByTestId("piece-checks").getAttribute("data-check-outcome")).toBe("passed");
+    expect(gates()).toEqual({ report: "passed", scope: "passed", branch: "passed", commands: "passed", review: "notNeeded" });
+    const check = within(detail()).getByTestId("done-check");
+    expect(check.getAttribute("data-check")).toBe("passed");
+    expect(check.textContent).toBe("Done-checkpassed · 38scargo t store::settings");
+    expect(detail().textContent).toContain("Accepted without a model: the checks above were enough.");
+    expect(within(detail()).queryByTestId("piece-review")).toBeNull();
+  });
+
+  it("shows a verifier at work and a verifier's pass, with why it was asked and what it used", async () => {
+    await open(checked());
+    fireEvent.click(within(row("pipeline")).getByRole("button", { name: "Move pipeline code" }));
+    let review = within(detail()).getByTestId("piece-review");
+    expect(review.getAttribute("data-review")).toBe("open");
+    expect(review.textContent).toContain("Verifierreading");
+    expect(review.textContent).toContain("The piece is a refactor");
+    expect(gates().review).toBe("running");
+    // Its conversation is a tab of the worker's session.
+    fireEvent.click(within(review).getByRole("button", { name: "Open" }));
+    expect(mocks.selectSession).toHaveBeenCalledWith("w-pipeline");
+
+    fireEvent.click(within(row("guide")).getByRole("button", { name: "Write the guide" }));
+    review = within(detail()).getByTestId("piece-review");
+    expect(review.getAttribute("data-review")).toBe("passed");
+    expect(review.textContent).toContain("Verifierpassed · 5.2k tokens");
+    expect(review.textContent).toContain("No command proves this piece");
+    expect(review.querySelector("[data-verdict]")?.getAttribute("data-verdict")).toBe("pass");
+    expect(within(detail()).getByTestId("piece-check-passed").textContent).toBe("· checked and read");
+    // Review only: there was no command gate to run.
+    expect(gates()).toEqual({ report: "passed", scope: "passed", branch: "passed", commands: "notNeeded", review: "passed" });
+    expect(within(detail()).queryByTestId("done-check")).toBeNull();
+  });
+
+  it("shows a blocked piece's failed done-check with its exit code and the end of what it printed, and why each earlier try went back", async () => {
+    await open(checked());
+    fireEvent.click(within(row("cli")).getByRole("button", { name: "Move CLI code" }));
+    expect(within(detail()).getByTestId("piece-tries-used").textContent).toBe("· 3 of 3 tries used");
+    const tries = [...within(detail()).getByTestId("piece-tries").querySelectorAll("li")].map((item) => item.textContent ?? "");
+    expect(tries[0]).toContain("Check failed: changed src/control.rs, outside its files");
+    expect(tries[1]).toContain("Check failed: src/cli.rs:40: parse_runs was renamed");
+    expect(tries[2]).toContain("Check failed: cargo t control exited 101");
+    // The last try's check: the gates before the command passed, the review never ran.
+    expect(gates()).toEqual({ report: "passed", scope: "passed", branch: "passed", commands: "failed", review: "skipped" });
+    const check = within(detail()).getByTestId("done-check");
+    expect(check.getAttribute("data-check")).toBe("failed");
+    expect(check.textContent).toContain("Done-checkfailed · exit 101cargo t control");
+    expect(check.textContent).toContain("test control::tests::create_reads_default_mode ... FAILED");
+    expect(check.textContent).toContain("control.rs:1184");
+    expect(within(check).getByText("FAILED").className).toContain("text-destructive");
+  });
+
+  it("names the file a piece changed outside its own, and that a worker may not", async () => {
+    const run = checked();
+    const cli = run.pieces[4];
+    // Waiting for its second worker: the check shown is the first try's.
+    run.pieces[4] = { ...cli, state: "queued", worker: undefined, note: undefined, tries: [cli.tries![0], { step: "effort", model: "sonnet", effort: "high" }] };
+    await open(run);
+    fireEvent.click(within(row("cli")).getByRole("button", { name: "Move CLI code" }));
+    expect(detail().textContent).toContain("Checks of try 1");
+    expect(gates()).toEqual({ report: "passed", scope: "failed", branch: "skipped", commands: "skipped", review: "skipped" });
+    expect(within(detail()).getByTestId("gate-failure").textContent).toContain("- src/control.rs");
+    expect(within(detail()).getByRole("note").textContent).toBe("The change is outside this piece's files. A worker may not edit another piece's files.");
+  });
+});
+
 describe("a session with no run (PRO-274)", () => {
   it("says what a run is, what this project allows, and asks the lead to plan one", async () => {
     answers.orchestrator_limits = { requireApproval: false, pieceLimit: 12, workerMode: "acceptEdits" };

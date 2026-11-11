@@ -3,18 +3,18 @@ import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Check, CircleAlert, CircleCheck, CircleDashed, CircleX, FileJson, FolderOpen, Gauge, Info, Layers, LoaderCircle, Network, Pencil, Play, ScanSearch,
-  Settings, ShieldAlert, ShieldOff, Sparkles, Square, SquareArrowOutUpRight, Terminal, Trash2, UserRoundCheck, X,
+  Settings, ShieldAlert, ShieldOff, Sparkles, Square, SquareArrowOutUpRight, Terminal, Trash2, TriangleAlert, UserRoundCheck, X,
 } from "@/icons";
 import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { EFFORT_LABEL, effortChoices, modeLabel, modelForTab, modelLabel, modelOptionText, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
-  budgetText, checksFrom, checkText, costText, estimateText, fellShort, gaveUp, noteRun, PIECE_STATE_LABEL, pieceCost, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf,
-  requestOrchestratorSettings, RUN_STATE_LABEL, TIER_DOT, TRY_OUTCOME_LABEL, TRY_STEP_LABEL, useRun, withoutPiece,
+  budgetText, checksFrom, checkText, costText, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, noteRun, PIECE_STATE_LABEL, pieceCheck, pieceCost, pieceMode, pieceNumbers,
+  planOf, raisesMode, refusalOf, requestOrchestratorSettings, reviewTokens, RUN_STATE_LABEL, TIER_DOT, tokensText, TRY_OUTCOME_LABEL, TRY_STEP_LABEL, useRun, verifyingText, withoutPiece,
 } from "@/lib/orchestration";
 import { selectSession } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
-import type { PieceState, PieceTry, Run, RunPiece, RunPlan, RunPlanPiece, Tier } from "@/types/orchestration";
+import type { CommandRun, GateResult, PieceState, PieceTry, Run, RunPiece, RunPlan, RunPlanPiece, RunReview, RunVerification, RunVerifier, Tier } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
 /** What the lead is asked when a person presses Plan a run. The lead decides whether splitting helps at all. */
@@ -160,7 +160,9 @@ function subtitle(run: Run): string {
 function footnote(run: Run): string {
   const bypass = run.pieces.some((piece) => pieceMode(run, piece) === "bypassPermissions");
   const limits = "Push, merge and deploy stay blocked by deny rules.";
-  return bypass ? `In bypass, workers are not asked before edits or commands. ${limits}` : `${limits} Each worker has its own worktree and branch, cut from the lead's.`;
+  // Said once there are results to check: a plan that waits has none.
+  const checked = run.state === "awaitingApproval" || run.state === "planned" ? "" : " A piece is done once its result has passed its checks.";
+  return bypass ? `In bypass, workers are not asked before edits or commands. ${limits}${checked}` : `${limits} Each worker has its own worktree and branch, cut from the lead's.${checked}`;
 }
 
 /** Before a run starts: what it is expected to use, and what it runs with. */
@@ -202,7 +204,7 @@ function RunSummary({ run }: { run: Run }) {
         <div className="text-[11px] text-faint">Pieces</div>
         <div className="mt-1 text-[13px] text-muted-foreground"><span className="text-xl font-semibold text-foreground" data-testid="run-done">{done}</span> of {run.pieces.length} done</div>
         <div className="mt-2 flex gap-1" aria-hidden>
-          {run.pieces.map((piece) => <span key={piece.id} className={cn("h-1 flex-1 rounded-full", piece.state === "done" ? "bg-add" : piece.state === "running" ? "bg-accent" : piece.state === "failed" ? "bg-destructive" : "bg-veil-strong")} />)}
+          {run.pieces.map((piece) => <span key={piece.id} className={cn("h-1 flex-1 rounded-full", piece.state === "done" ? "bg-add" : piece.state === "running" ? "bg-accent" : piece.state === "verifying" ? "bg-info" : piece.state === "failed" ? "bg-destructive" : piece.state === "blocked" ? "bg-warning" : "bg-veil-strong")} />)}
         </div>
         <div className="mt-2 text-[11px] text-faint">{run.pieces.length - done} left</div>
       </div>
@@ -226,6 +228,7 @@ function RunSummary({ run }: { run: Run }) {
 const STATE_STYLE: Record<PieceState, { icon: typeof CircleCheck; className: string }> = {
   queued: { icon: CircleDashed, className: "text-faint" },
   running: { icon: LoaderCircle, className: "text-accent" },
+  verifying: { icon: ScanSearch, className: "text-info" },
   done: { icon: CircleCheck, className: "text-add" },
   blocked: { icon: CircleAlert, className: "text-warning" },
   failed: { icon: CircleX, className: "text-destructive" },
@@ -316,13 +319,21 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, onSelect,
               <div role="cell"><PieceStateMark state={piece.state} /></div>
               <div role="cell" className={cn("font-mono text-xs text-muted-foreground", wide)}>{piece.tries?.length || piece.attempts || "–"}</div>
               <div role="cell" className={cn("font-mono text-xs", wide)}>{pieceCostText(piece) ?? <span className="text-faint">–</span>}</div>
-              <div role="cell" className={cn("min-w-0 truncate text-xs text-muted-foreground", wide)}>{piece.note ?? (piece.state === "queued" && after ? `Waits for ${after}` : "")}</div>
+              <div role="cell" className={cn("min-w-0 truncate text-xs text-muted-foreground", wide)} data-testid="piece-report">{reportLine(piece, after)}</div>
             </>}
           </div>
         );
       })}
     </div>
   );
+}
+
+/** What a row says of its piece: what it waits on while it is checked, else its worker's line, and that a verifier passed it. */
+function reportLine(piece: RunPiece, after: string): string {
+  if (piece.state === "verifying") return verifyingText(piece);
+  const check = pieceCheck(piece);
+  const read = piece.state === "done" && check?.outcome === "passed" && check.review ? (check.review.voters === 1 ? "verifier passed" : `${check.review.verifiers.filter((verifier) => verifier.verdict === "pass").length} of ${check.review.voters} verifiers passed`) : "";
+  return [piece.note ?? (piece.state === "queued" && after ? `Waits for ${after}` : ""), read].filter(Boolean).join(", ");
 }
 
 function pieceCostText(piece: RunPiece): string | null {
@@ -345,12 +356,132 @@ function tryResult(attempt: PieceTry): { label: string; text: string; output: st
   const detail = attempt.detail ?? "";
   const tone = fellShort(attempt) ? "text-destructive" : attempt.outcome === "done" ? "text-foreground" : "text-warning";
   const label = TRY_OUTCOME_LABEL[attempt.outcome];
+  const failed = attempt.verification?.gates.find((gate) => !gate.passed);
+  // A check TerminalX ran: which gate, in a line. What it printed is shown with the checks, below the tries.
+  if (attempt.outcome === "checkFailed" && failed) return { label, text: gateFailureLine(failed), output: [], tone };
   if (attempt.outcome === "checkFailed") {
     const [first = "", ...rest] = detail.split("\n");
     // The end of what the check printed: that is where a test run says what failed.
     return { label, text: first.replace(/^The done-check did not hold:\s*/, ""), output: rest.filter((line) => line.trim()).slice(-8), tone };
   }
   return { label, text: detail.replace(/^The worker reported (failed|partial):\s*/, "").replace(/^Reported (partial|blocked):\s*/, ""), output: [], tone };
+}
+
+/** A failed gate in a line: the command and how it exited, the files out of scope, or the first thing the gate said. */
+function gateFailureLine(gate: GateResult): string {
+  const command = gate.commands?.find((ran) => !ran.passed);
+  if (command) return `${command.run} ${command.exitCode != null ? `exited ${command.exitCode}` : "did not finish"}`;
+  const lines = (gate.detail ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+  const named = lines.filter((line) => line.startsWith("- ")).map((line) => line.slice(2));
+  if (gate.gate === "scope" && named.length) return `changed ${named.join(", ")}, outside its files`;
+  if (gate.gate === "review" && named.length) return named[0];
+  return `${GATE_LABEL[gate.gate].toLowerCase()}: ${lines[0] ?? "failed"}`;
+}
+
+/** One command of the command gate: what was run, how it ended, and for one that failed the end of what it printed. */
+function CommandCard({ command }: { command: CommandRun }) {
+  const lines = (command.output ?? "").split("\n").filter((line) => line.trim()).slice(-12);
+  return (
+    <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="done-check" data-check={command.passed ? "passed" : "failed"}>
+      <div className="flex items-center gap-2 text-xs">
+        <Terminal aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="text-muted-foreground">{command.project ? "Project check" : "Done-check"}</span>
+        <span className={cn("ml-auto shrink-0", command.passed ? "text-add" : "text-destructive")}>
+          {command.passed ? `passed · ${durationText(command.millis)}` : command.exitCode != null ? `failed · exit ${command.exitCode}` : "failed · did not finish"}
+        </span>
+      </div>
+      <div className="mt-1 break-all font-mono text-xs">{command.run}</div>
+      {lines.length > 0 && (
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11.5px] leading-[17px] text-muted-foreground scrollbar-thin">
+          {lines.map((line, index) => <div key={index}>{line.split(/(FAILED|panicked|error(?=[:\[]))/).map((part, at) => (at % 2 ? <span key={at} className="text-destructive">{part}</span> : part))}</div>)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/** One verifier, or the verifiers of a vote: why a model was asked, what each said, and what it used. */
+function ReviewCard({ agent, review, check }: { agent: string; review: RunReview; check: RunVerification }) {
+  const tokens = tokensText(reviewTokens(review));
+  const passes = review.verifiers.filter((verifier) => verifier.verdict === "pass").length;
+  const status = check.outcome === "passed" ? { text: review.voters === 1 ? "passed" : `passed · ${passes} of ${review.voters}`, tone: "text-add" }
+    : check.outcome === "failed" ? { text: review.voters === 1 ? "failed" : `failed · ${passes} of ${review.voters} passed`, tone: "text-destructive" }
+    : check.outcome === "inconclusive" ? { text: "no verdict", tone: "text-warning" }
+    : { text: "reading", tone: "text-info" };
+  const said = (verifier: RunVerifier) => (verifier.verdict === "pass" ? "Pass" : verifier.verdict === "fail" ? "Fail" : verifier.problem ? "No verdict" : "Reading");
+  return (
+    <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="piece-review" data-review={check.outcome ?? "open"}>
+      <div className="flex items-center gap-2 text-xs">
+        <ScanSearch aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="text-muted-foreground">{review.voters === 1 ? "Verifier" : `Vote · ${review.threshold} of ${review.voters} must pass`}</span>
+        <span className={cn("ml-auto shrink-0", status.tone)}>{status.text}{tokens ? <span className="text-faint" title="What the verifier sessions used, apart from the worker"> · {tokens}</span> : null}</span>
+      </div>
+      <ul className="mt-1 text-[12px] leading-[18px] text-muted-foreground">{review.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+      <ul className="mt-2 flex flex-col gap-2">
+        {review.verifiers.map((verifier, index) => (
+          <li key={index} className="text-xs" data-verdict={verifier.verdict ?? (verifier.problem ? "none" : "open")}>
+            <div className="flex items-center gap-2">
+              <span className="min-w-0 truncate"><ModelName piece={{ agent, model: verifier.model, effort: verifier.effort }} /></span>
+              <span className={cn("shrink-0", verifier.verdict === "pass" ? "text-add" : verifier.verdict === "fail" ? "text-destructive" : verifier.problem ? "text-warning" : "text-info")}>{said(verifier)}</span>
+              {verifier.session && <button type="button" className="ml-auto shrink-0 text-[11.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:underline" onClick={() => selectSession(verifier.session!.sessionId)}>Open</button>}
+            </div>
+            {(verifier.evidence?.length ?? 0) > 0 && <ul className="mt-1 list-disc break-words pl-4 font-mono text-[11.5px] leading-[17px] text-muted-foreground">{verifier.evidence!.map((line) => <li key={line}>{line}</li>)}</ul>}
+            {verifier.problem && <p className="mt-1 text-[11.5px] leading-[17px] text-faint">{verifier.problem}</p>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** How a result was checked: each gate in the order it ran, the commands as TerminalX ran them, and the verifier when one was asked.
+ * The check shown is the current try's, or the last one a try had: a piece waiting for its next worker shows why it went back. */
+function Checks({ piece }: { piece: RunPiece }) {
+  const tries = piece.tries ?? [];
+  let at = tries.length - 1;
+  while (at >= 0 && !tries[at].verification) at -= 1;
+  if (at < 0) return null;
+  const check = tries[at].verification!;
+  const failed = check.gates.find((gate) => !gate.passed);
+  const commands = check.gates.flatMap((gate) => gate.commands ?? []);
+  const outside = failed?.gate === "scope" ? (failed.detail ?? "").split("\n").filter((line) => line.startsWith("- ")).map((line) => line.slice(2)) : [];
+  // The gate under way: the first that has not run, while nothing has failed and the check is open.
+  const next = !failed && !check.outcome ? GATE_ORDER.find((gate) => !check.gates.some((ran) => ran.gate === gate) && (gate !== "review" || !!check.review)) : undefined;
+  return (
+    <Section title={at === tries.length - 1 ? "Checks" : `Checks of try ${at + 1}`}>
+      <div data-testid="piece-checks" data-check-outcome={check.outcome ?? "open"}>
+        <ol aria-label="Gates" className="flex flex-wrap gap-x-3 gap-y-1 text-[11.5px]">
+          {GATE_ORDER.map((gate) => {
+            const ran = check.gates.find((result) => result.gate === gate);
+            const state = ran ? (ran.passed ? "passed" : "failed") : gate === next || (gate === "review" && check.review && !check.outcome) ? "running" : failed ? "skipped" : check.outcome ? "notNeeded" : "waiting";
+            const Icon = state === "passed" ? CircleCheck : state === "failed" ? CircleX : state === "running" ? LoaderCircle : CircleDashed;
+            const words = state === "notNeeded" ? (gate === "commands" ? "no command" : "not needed") : state === "skipped" ? "not run" : state;
+            return (
+              <li key={gate} data-gate={gate} data-gate-state={state} title={ran?.detail ?? (state === "skipped" ? "A check before it failed, so it did not run." : state === "notNeeded" && gate === "review" ? "The checks before it passed and nothing called for a reader: no model was asked." : undefined)}
+                className={cn("inline-flex items-center gap-1 whitespace-nowrap", state === "passed" ? "text-add" : state === "failed" ? "text-destructive" : state === "running" ? "text-info" : "text-faint")}>
+                <Icon aria-hidden className="size-3 shrink-0" />
+                <span className={state === "passed" || state === "failed" ? "text-foreground" : undefined}>{GATE_LABEL[gate]}</span>
+                <span className="sr-only">: {words}</span>
+              </li>
+            );
+          })}
+        </ol>
+        {failed && !failed.commands?.length && failed.gate !== "review" && (
+          <p className="mt-2 whitespace-pre-wrap break-words text-[12.5px] leading-[18px] text-destructive" data-testid="gate-failure">{failed.detail}</p>
+        )}
+        {outside.length > 0 && (
+          <p role="note" className="mt-2 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2.5 text-[12.5px] leading-[18px]">
+            <TriangleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0 text-warning" />
+            <span>The change is outside this piece's files. A worker may not edit another piece's files.</span>
+          </p>
+        )}
+        {commands.map((command, index) => <CommandCard key={index} command={command} />)}
+        {check.review && <ReviewCard agent={piece.agent} review={check.review} check={check} />}
+        {check.outcome === "passed" && !check.review && <p className="mt-2 text-[11.5px] leading-[17px] text-faint">Accepted without a model: the checks above were enough.</p>}
+        {check.outcome === "inconclusive" && <p className="mt-2 text-[12.5px] leading-[18px] text-warning">{check.failure}</p>}
+      </div>
+    </Section>
+  );
 }
 
 /** Every try of a piece, oldest first: what it ran on, what it cost, why it was made, and how it ended. */
@@ -488,6 +619,7 @@ function PieceDetail({ run, piece, number, editable, busy, onClose, onSave, onRe
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 scrollbar-thin">
           <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1.5">
             {editable ? (piece.kind ? <span className={chip}>{piece.kind}</span> : null) : <PieceStateMark state={piece.state} />}
+            {!editable && piece.state === "done" && pieceCheck(piece)?.outcome === "passed" && <span className="text-xs text-muted-foreground" data-testid="piece-check-passed">· {pieceCheck(piece)?.review ? "checked and read" : "check passed"}</span>}
             {!editable && (tries.length > 1 || gaveUp(piece)) && <span className="text-xs text-muted-foreground" data-testid="piece-tries-used">· {tries.length} of {maxTries} tries used</span>}
             <span className="ml-auto text-[13px]"><ModelName piece={piece} /></span>
           </div>
@@ -495,9 +627,11 @@ function PieceDetail({ run, piece, number, editable, busy, onClose, onSave, onRe
             <p role="note" className="-mt-2 mb-4 flex items-start gap-1.5 text-xs text-warning"><CircleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />{piece.modelNote}</p>
           )}
           {!editable && tries.length > 0 && <Section title="Tries"><Tries piece={piece} /></Section>}
+          {!editable && <Checks piece={piece} />}
           {!editable && (
             <Section title={piece.state === "done" ? "Result" : "Where it stands"}>
               {piece.note ?? (piece.state === "queued" ? (piece.dependsOn.length ? `Waits for ${piece.dependsOn.join(", ")}.` : "Not started yet.") : piece.state === "running" ? "Its worker is working." : "No report.")}
+              {piece.state === "verifying" && <div className="mt-1 text-info">{verifyingText(piece)}. Nothing that depends on it starts until it has passed.</div>}
               {piece.branch && <div className="mt-1.5 break-all font-mono text-[11.5px] text-faint">{piece.branch}</div>}
             </Section>
           )}

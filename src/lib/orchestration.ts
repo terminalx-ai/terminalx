@@ -2,7 +2,8 @@ import { useEffect, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { orchestration } from "@/lib/api";
 import type {
-  PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunPiece, RunPlan, RunRefusal, RunState, Tier, TryOutcome, TryStep,
+  PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunGate, RunPiece, RunPlan, RunRefusal, RunReview, RunState, RunVerification, Tier, TryOutcome,
+  TryStep,
 } from "@/types/orchestration";
 
 /** The runs this window has heard of, by the session that leads each: a lead has one run to show, its newest. */
@@ -282,11 +283,54 @@ export const RUN_STATE_LABEL: Record<RunState, string> = {
 export const PIECE_STATE_LABEL: Record<PieceState, string> = {
   queued: "Queued",
   running: "Running",
+  verifying: "Verifying",
   done: "Done",
   blocked: "Blocked",
   failed: "Failed",
   stopped: "Stopped",
 };
+
+/** A gate as a row names it (`verify::Gate`), in the order they run. */
+export const GATE_LABEL: Record<RunGate, string> = {
+  report: "Report",
+  scope: "Scope",
+  branch: "Branch state",
+  commands: "Command checks",
+  review: "Review",
+};
+export const GATE_ORDER: RunGate[] = ["report", "scope", "branch", "commands", "review"];
+
+/** The check of a piece's current try, when it has one. */
+export function pieceCheck(piece: Pick<RunPiece, "tries">): RunVerification | undefined {
+  return piece.tries?.[piece.tries.length - 1]?.verification;
+}
+
+/** What a piece being checked waits on: the gates TerminalX runs itself, or a verifier's answer. */
+export function verifyingText(piece: Pick<RunPiece, "tries">): string {
+  const review = pieceCheck(piece)?.review;
+  if (!review) return "Running its checks";
+  if (review.voters === 1) return "Waiting on the verifier";
+  const answered = review.verifiers.filter((verifier) => verifier.verdict || verifier.problem).length;
+  return `Waiting on verifiers, ${answered} of ${review.voters} answered`;
+}
+
+/** `38s`, `2m 05s`: how long a command ran. */
+export function durationText(millis: number): string {
+  const seconds = Math.max(1, Math.round(millis / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+/** `5.2k tokens`, `870 tokens`; `null` before any was read. */
+export function tokensText(tokens: number | null | undefined): string | null {
+  if (tokens == null) return null;
+  return `${tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 100_000 ? 0 : 1).replace(/\.0$/, "")}k` : tokens} tokens`;
+}
+
+/** What a review's verifiers used together; `null` before any was read. */
+export function reviewTokens(review: RunReview | undefined): number | null {
+  const read = (review?.verifiers ?? []).filter((verifier) => verifier.tokens);
+  return read.length ? read.reduce((sum, verifier) => sum + verifier.tokens!.input + verifier.tokens!.output + verifier.tokens!.cacheRead + verifier.tokens!.cacheWrite, 0) : null;
+}
 
 /** The 1-based place of each piece in the plan: what "After" names, as the plan's rows are numbered. */
 export function pieceNumbers(run: Pick<Run, "pieces">): Record<string, number> {

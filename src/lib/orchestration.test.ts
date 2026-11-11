@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  appRouting, budgetText, checksFrom, checkText, costText, defaultRoute, estimateText, fellShort, gaveUp, PIECE_KINDS, pieceCost, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf, sameRoute,
-  TIERS, withoutPiece,
+  appRouting, budgetText, checksFrom, checkText, costText, defaultRoute, durationText, estimateText, fellShort, gaveUp, PIECE_KINDS, pieceCheck, pieceCost, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf,
+  reviewTokens, sameRoute, TIERS, tokensText, verifyingText, withoutPiece,
 } from "./orchestration";
 import type { Run, RunPiece } from "@/types/orchestration";
 
@@ -156,5 +156,32 @@ describe("the routing table and a piece's tries (PRO-275)", () => {
     expect(gaveUp(piece("a", { state: "queued", tries: tries("failed") }))).toBe(false);
     expect(gaveUp(piece("a", { state: "blocked" }))).toBe(false);
     expect([fellShort({ outcome: "done" }), fellShort({})]).toEqual([false, false]);
+  });
+});
+
+describe("checking a result (PRO-278)", () => {
+  const verifier = (extra = {}) => ({ model: "sonnet", ...extra });
+  const review = (verifiers: object[], voters = verifiers.length) => ({ reasons: [], voters, threshold: Math.ceil(voters / 2), promptChars: 0, verifiers }) as never;
+
+  it("says what a piece being checked waits on: the gates, one verifier, or how many of a vote have answered", () => {
+    const tried = (verification: object | undefined) => piece("a", { state: "verifying", tries: [{ step: "first", model: "sonnet", outcome: "done", verification: verification as never }] });
+    expect(verifyingText(piece("a", { state: "verifying" }))).toBe("Running its checks");
+    expect(verifyingText(tried({ gates: [{ gate: "report", passed: true }] }))).toBe("Running its checks");
+    expect(verifyingText(tried({ gates: [], review: review([verifier()]) }))).toBe("Waiting on the verifier");
+    expect(verifyingText(tried({ gates: [], review: review([verifier({ verdict: "pass" }), verifier({ problem: "No block." }), verifier()]) }))).toBe("Waiting on verifiers, 2 of 3 answered");
+    // The check is the current try's: an earlier try's is that try's.
+    const retried = piece("a", { tries: [{ step: "first", model: "sonnet", outcome: "checkFailed", verification: { gates: [], outcome: "failed" } }, { step: "effort", model: "sonnet" }] });
+    expect(pieceCheck(retried)).toBeUndefined();
+    expect(pieceCheck(piece("a"))).toBeUndefined();
+  });
+
+  it("writes a command's time and a verifier's tokens the way a row has room for", () => {
+    expect([400, 37_600, 59_400, 61_000, 125_000].map(durationText)).toEqual(["1s", "38s", "59s", "1m 01s", "2m 05s"]);
+    expect([null, undefined, 0, 870, 1000, 5200, 10_500, 123_456].map(tokensText)).toEqual([null, null, "0 tokens", "870 tokens", "1k tokens", "5.2k tokens", "10.5k tokens", "123k tokens"]);
+    const tokens = (input: number) => ({ input, output: 100, cacheRead: 10, cacheWrite: 1 });
+    expect(reviewTokens(review([verifier({ tokens: tokens(1000) }), verifier(), verifier({ tokens: tokens(2000) })]))).toBe(3222);
+    // Nothing read yet is not zero.
+    expect(reviewTokens(review([verifier()]))).toBeNull();
+    expect(reviewTokens(undefined)).toBeNull();
   });
 });

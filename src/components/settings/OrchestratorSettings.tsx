@@ -45,8 +45,11 @@ function useOrchestratorSettings() {
   return { settings, error, save };
 }
 
-/** A count of pieces typed into a field: saved when the field is left or Enter is pressed, and only when it is one. */
-function PieceLimitField({ value, placeholder, disabled, label, onSave }: { value: number | undefined; placeholder?: string; disabled: boolean; label: string; onSave: (limit: number | null) => void }) {
+/** The most changed lines the diff threshold takes (`MAX_REVIEW_DIFF_LINES` in orchestration/verify.rs). */
+const MAX_DIFF_LINES = 100_000;
+
+/** A whole number typed into a field: saved when the field is left or Enter is pressed, and only when it is within its bounds. */
+function PieceLimitField({ value, placeholder, disabled, label, max = MAX_PIECES, wide, onSave }: { value: number | undefined; placeholder?: string; disabled: boolean; label: string; max?: number; wide?: boolean; onSave: (limit: number | null) => void }) {
   const [draft, setDraft] = useState<string | null>(null);
   const shown = draft ?? (value === undefined ? "" : String(value));
   const commit = () => {
@@ -59,16 +62,16 @@ function PieceLimitField({ value, placeholder, disabled, label, onSave }: { valu
       return;
     }
     const limit = Number(text);
-    if (Number.isInteger(limit) && limit >= 1 && limit <= MAX_PIECES && limit !== value) onSave(limit);
+    if (Number.isInteger(limit) && limit >= 1 && limit <= max && limit !== value) onSave(limit);
   };
   return (
     <input
       type="number"
       inputMode="numeric"
       min={1}
-      max={MAX_PIECES}
+      max={max}
       aria-label={label}
-      className={numberClass}
+      className={wide ? `${numberClass} w-20` : numberClass}
       value={shown}
       placeholder={placeholder}
       disabled={disabled}
@@ -101,6 +104,11 @@ export function OrchestratorTab() {
             {WORKER_MODES.map((mode) => <option key={mode} value={mode}>{modeName(mode)}</option>)}
           </select>
         }
+      />
+      <div className="mb-1 mt-4 text-xs font-medium uppercase tracking-wide text-faint">Checking results</div>
+      <p className="pb-1 text-xs leading-relaxed text-muted-foreground">When a worker reports done, TerminalX checks the result itself before the piece is done: its report, the files it touched, its branch, and the plan's commands. None of that uses a model. A verifier session reads the diff only when the piece has no command, the change touches a security area, the piece is a refactor, the plan asks for a review, or the diff is large. The verifier's model is the <span className="font-mono">verify</span> row of the table below.</p>
+      <RegisteredSetting setting="orchestrator.reviewDiffLines"
+        control={<PieceLimitField wide max={MAX_DIFF_LINES} label="Changed lines a result is accepted at without a verifier, at most" value={settings?.reviewDiffLines} disabled={!ready} onSave={(lines) => void save({ reviewDiffLines: lines })} />}
       />
       <RegisteredSetting setting="orchestrator.routing">
         <div><RoutingTableSettings settings={settings} save={(patch) => void save(patch)} /></div>
@@ -158,6 +166,13 @@ export function RepositoryOrchestratorSettings({ projectPath }: { projectPath: s
             <option value="">Default ({modeName(settings?.workerMode ?? "bypassPermissions")})</option>
             {WORKER_MODES.map((mode) => <option key={mode} value={mode}>{modeName(mode)}</option>)}
           </select>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2">
+          <div className="min-w-0">
+            <div className="text-[13px] font-medium">A verifier reads a diff over</div>
+            <div className="text-xs leading-relaxed text-muted-foreground">Changed lines. A smaller result whose commands pass is accepted without a model. Leave empty to follow the default.</div>
+          </div>
+          <PieceLimitField wide max={MAX_DIFF_LINES} label={`Changed lines a result in ${project.name} is accepted at without a verifier, at most`} value={own.reviewDiffLines} placeholder={settings ? String(settings.reviewDiffLines) : ""} disabled={!ready} onSave={(lines) => void save({ project: projectPath, reviewDiffLines: lines })} />
         </div>
         <RoutingTableSettings settings={settings} project={{ path: projectPath, name: project.name }} save={(patch) => void save(patch)} />
         <p className="text-xs text-muted-foreground">The defaults are in Settings → Orchestrator.</p>

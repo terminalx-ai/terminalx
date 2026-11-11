@@ -43,6 +43,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "orchestrator.requireApproval",
   "orchestrator.pieceLimit",
   "orchestrator.workerMode",
+  "orchestrator.reviewDiffLines",
   "orchestrator.routing",
   "general.dataPrivacy",
   "general.websiteLinks",

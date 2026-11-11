@@ -46,7 +46,7 @@ function routed(rows: RoutingRows | undefined, patch: OrchestratorPatch): Routin
 
 let stored: OrchestratorSettings;
 beforeEach(() => {
-  stored = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", projects: {} };
+  stored = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", reviewDiffLines: 400, projects: {} };
   mocks.projects = [{ path: "/repo", name: "terminalx" }, { path: "/notes", name: "notes", kind: "folder" }];
   mocks.settings.mockReset().mockImplementation(async () => stored);
   mocks.tierModels.mockReset().mockImplementation(async () => installed());
@@ -97,6 +97,40 @@ describe("Settings → Orchestrator (PRO-274)", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Workers run in" }), { target: { value: "acceptEdits" } });
     await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledTimes(3));
     expect(mocks.setSettings.mock.calls.map(([patch]) => patch)).toEqual([{ requireApproval: false }, { pieceLimit: 12 }, { workerMode: "acceptEdits" }]);
+  });
+
+  it("sets over how many changed lines a verifier reads a result, for the app and for one repository (PRO-278)", async () => {
+    const lines = "Changed lines a result is accepted at without a verifier, at most";
+    const view = render(<OrchestratorTab />);
+    await waitFor(() => expect(limit(lines).disabled).toBe(false));
+    expect(limit(lines).value).toBe("400");
+    const text = screen.getByTestId("orchestrator-settings").textContent ?? "";
+    for (const said of ["Checking results", "None of that uses a model.", "A result this size or smaller whose commands pass is accepted without a model"]) expect(text).toContain(said);
+    fireEvent.change(limit(lines), { target: { value: "1000" } });
+    fireEvent.blur(limit(lines));
+    await waitFor(() => expect(limit(lines).value).toBe("1000"));
+    expect(mocks.setSettings.mock.calls.map(([patch]) => patch)).toEqual([{ reviewDiffLines: 1000 }]);
+    // Out of its bounds, or not a whole number: not saved, and what is stored is shown again.
+    for (const typed of ["0", "100001", "12.5", ""]) {
+      fireEvent.change(limit(lines), { target: { value: typed } });
+      fireEvent.blur(limit(lines));
+    }
+    expect(mocks.setSettings).toHaveBeenCalledTimes(1);
+    expect(limit(lines).value).toBe("1000");
+    view.unmount();
+
+    // A repository's own: empty follows the app's, shown as the placeholder.
+    render(<RepositoryOrchestratorSettings projectPath="/repo" />);
+    const own = () => limit("Changed lines a result in terminalx is accepted at without a verifier, at most");
+    await waitFor(() => expect(own().disabled).toBe(false));
+    expect([own().value, own().placeholder]).toEqual(["", "1000"]);
+    fireEvent.change(own(), { target: { value: "250" } });
+    fireEvent.blur(own());
+    await waitFor(() => expect(stored.projects["/repo"]).toEqual({ reviewDiffLines: 250 }));
+    fireEvent.change(own(), { target: { value: "" } });
+    fireEvent.blur(own());
+    await waitFor(() => expect(stored.projects["/repo"]).toBeUndefined());
+    expect(mocks.setSettings.mock.calls.slice(1).map(([patch]) => patch)).toEqual([{ project: "/repo", reviewDiffLines: 250 }, { project: "/repo", reviewDiffLines: null }]);
   });
 
   it("does not save a limit that is not a number of pieces from 1 to 50", async () => {

@@ -313,6 +313,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.workerMode" },
   }),
   defineSetting({
+    id: "orchestrator.reviewDiffLines", section: "orchestrator", title: "A verifier reads a diff over",
+    description: "Changed lines. A result this size or smaller whose commands pass is accepted without a model; a larger one is read by a verifier session first. From 1 to 100000.",
+    searchTerms: ["orchestrator", "verify", "verifier", "review", "diff", "lines", "threshold", "check", "tokens"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.reviewDiffLines" },
+  }),
+  defineSetting({
     id: "orchestrator.routing", section: "orchestrator", title: "Starting model by kind of piece",
     description: "The model tier and effort each kind of piece starts on, for Claude Code workers and for Codex workers. A piece that falls short is retried on more effort, then on the next model up.",
     searchTerms: ["orchestrator", "routing", "table", "model", "effort", "tier", "kind", "haiku", "sonnet", "opus", "fable", "luna", "terra", "sol", "astra", "escalate", "retry"], scope: "user",
