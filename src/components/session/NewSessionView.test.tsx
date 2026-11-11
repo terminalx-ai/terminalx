@@ -457,7 +457,7 @@ describe("one new-chat composer (PRO-173)", () => {
     invoke.mockImplementation((command, args) => command === "preview_workspace_name" ? Promise.resolve("login-work")
       : command === "list_branches" ? Promise.resolve([]) : original(command, args));
     const { rerender, onCreated } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Branch" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start from" }));
     fireEvent.click(await screen.findByRole("option", { name: /New branch.*from feature\/login/ }));
     rerender(<NewSessionView onCreated={onCreated} />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Fix login" } });
@@ -473,8 +473,8 @@ describe("one new-chat composer (PRO-173)", () => {
     invoke.mockImplementation((command, args) => command === "preview_workspace_name" ? Promise.resolve("other-work")
       : command === "list_branches" ? Promise.resolve([{ name: "feature/other", remote: false }]) : original(command, args));
     const { rerender, onCreated } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Branch" }));
-    fireEvent.click(await screen.findByRole("option", { name: "feature/other" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+    fireEvent.click(await screen.findByRole("option", { name: "feature/other New worktree" }));
     rerender(<NewSessionView onCreated={onCreated} />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Continue other work" } });
     const create = screen.getByRole("button", { name: "Create" });
