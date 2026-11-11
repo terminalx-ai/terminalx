@@ -917,7 +917,7 @@ mod tests {
             .is_err());
     }
     #[test]
-    fn a_bypass_tab_anywhere_in_the_session_refuses_sharing() {
+    fn a_session_with_a_bypass_tab_is_shared_at_the_hosts_choice() {
         let _home = store::temp_home();
         let entry: index::SessionEntry = serde_json::from_value(json!({
             "id": "session", "projectPath": "/tmp", "cwd": "/tmp", "title": "Test",
@@ -928,28 +928,15 @@ mod tests {
             ]
         })).unwrap();
         index::save(&[entry]).unwrap();
-        assert!(shareable("session").is_err());
-        index::update_tab("session", "unsafe", |tab| {
-            tab.permission_mode = "default".into();
-            Ok(())
-        })
-        .unwrap();
+        // In Bypass, on the way into it, or in a stance with no sandbox: the host may share it.
         assert!(shareable("session").is_ok());
-        // Nor may a tab be on its way into Bypass, or in a stance with no
-        // sandbox under another name (#417).
         index::update_tab("session", "safe", |tab| {
             tab.requested_permission_mode = Some("bypassPermissions".into());
-            Ok(())
-        })
-        .unwrap();
-        assert!(shareable("session").is_err());
-        index::update_tab("session", "safe", |tab| {
-            tab.requested_permission_mode = None;
             tab.permission_mode = "on-request, danger-full-access".into();
             Ok(())
         })
         .unwrap();
-        assert!(shareable("session").is_err());
+        assert!(shareable("session").is_ok());
     }
     #[test]
     fn router_rejects_other_sessions_unknown_methods_and_internal_identifiers() {

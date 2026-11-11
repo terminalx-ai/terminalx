@@ -1,0 +1,47 @@
+{
+  "additions": 557,
+  "author": {
+    "id": "U_fixture_author",
+    "is_bot": false,
+    "login": "example-user",
+    "name": "Fixture Author"
+  },
+  "baseRefName": "main",
+  "body": "Closes #6\n\n## Summary\n\n- Records the Phase 1 decision not to build or operate the account backend yet, preserving account-free behavior and zero new ambient network traffic.\n- Makes the service cost explicit across engineering, stateful infrastructure, relay capacity, security, reliability, identity, privacy, and on-call ownership, with gates for reconsidering the decision.\n- Specifies the deferred endpoint inventory, exact host-binding metadata, QR/code/HPKE pairing flows, local and server data, scope rules, sign-out semantics, reconnect behavior, and security boundaries.\n- Includes proposed README privacy changes without applying them to the current product, staged to match the behavior that ships.\n\n## Review follow-up\n\n- Moves the directly paired-device rows in both README privacy sections to the account-free pairing release; only account, directory, relay, and `account.json` disclosures wait for sign-in.\n- Defines one inbound host listener and one stable `host.key` for paired-device and multiplayer traffic; a multiplayer invite is a credential onto that listener, not a second listener or key.\n- Makes `sessions.summaries` share-gated, requires remote RPC to use tab IDs that the host maps to panes after session scoping, and forbids remote PTY resize or a client-owned viewport.\n- States that no current scope covers permission decisions and reserves `permission.respond` for a future explicit scope after a method-by-method threat review.\n- Documents the macOS Sequoia and iOS Local Network permission flow, the iOS `NSLocalNetworkUsageDescription`, and the Mac incoming-connections firewall prompt.\n- Corrects Tailscale detection to `100.64.0.0/10` and `*.ts.net`, and places daily activity logs under `sessions/<session-id>/activity/<date>.jsonl`.\n\n## Verified\n\n- `pnpm exec tsc --noEmit`\n- `pnpm vitest run` \u2014 9 files and 65 tests passed\n- `CARGO_TARGET_DIR=/workspace/project/target/check cargo clippy --all-targets -- -D warnings`\n- `CARGO_TARGET_DIR=/workspace/project/target/check cargo test` \u2014 137 passed, 1 ignored\n- `git diff --cached --check`\n- Live verification: not applicable; this phase changes documentation only and intentionally adds no product or network behavior.\n\n## Video\n\nNo video was recorded because this is a docs-only PR.\n\n## Not verified\n\n- GitHub CI is not green: its `vitest` step fails before collecting tests with `webidl.util.markAsUncloneable is not a function`. The same failure is present on the current `main` run ([100](https://github.com/example/project/actions/runs/100)); the exact local Vitest command passes all 65 tests.\n- No account service, sign-in, host binding, pairing transport, relay, settings UI, or cloud machine behavior was built or exercised in Phase 1.\n- No live UI, network-monitor, packet-capture, keychain, or filesystem acceptance checks were run because there is no corresponding product change.\n",
+  "changedFiles": 2,
+  "deletions": 0,
+  "files": [
+    {
+      "path": "README.md",
+      "additions": 2,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+    },
+    {
+      "path": "docs/ACCOUNTS.md",
+      "additions": 555,
+      "deletions": 0,
+      "changeType": "ADDED"
+    }
+  ],
+  "headRefName": "example-user/accounts-phase1",
+  "isDraft": false,
+  "mergeable": "UNKNOWN",
+  "number": 12,
+  "reviewDecision": "",
+  "state": "MERGED",
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-01-01T00:01:00Z",
+      "conclusion": "FAILURE",
+      "detailsUrl": "https://github.com/example/project/actions/runs/100/job/200",
+      "name": "check",
+      "startedAt": "2026-01-01T00:00:00Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    }
+  ],
+  "title": "Record the account service decision",
+  "url": "https://github.com/example/project/pull/12"
+}

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TerminalInstance } from "./terminal";
 
 const pty = vi.hoisted(() => ({
+  setDocked: vi.fn(),
   spawn: vi.fn().mockResolvedValue(undefined),
   kill: vi.fn().mockResolvedValue(undefined),
   write: vi.fn().mockResolvedValue(undefined),
@@ -22,7 +23,26 @@ async function loadTerminalStore() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   listen.mockResolvedValue(() => {});
+});
+
+describe("persisted tab selection", () => {
+  it.each(["agent", "terminal", "browser", "review"] as const)("restores a %s selection and forgets only the deleted session on the next reload", async (kind) => {
+    const terminal = await loadTerminalStore();
+    terminal.selectSessionTab("s1", { kind, id: "selected-tab" });
+    terminal.setSelectedBrowser("s2", "other-tab");
+
+    const restored = await loadTerminalStore();
+    expect(restored.getTerminalState().selected).toEqual({
+      s1: { kind, id: "selected-tab" },
+      s2: { kind: "browser", id: "other-tab" },
+    });
+    restored.dropSessionTerminals(["s1"]);
+
+    const reloaded = await loadTerminalStore();
+    expect(reloaded.getTerminalState().selected).toEqual({ s2: { kind: "browser", id: "other-tab" } });
+  });
 });
 
 describe("session shell tabs", () => {
@@ -371,5 +391,50 @@ describe("a new live connection", () => {
     expect(pty.kill).not.toHaveBeenCalled();
     spawned();
     await opening;
+  });
+});
+
+describe("moving a shell between dock and tabs", () => {
+  it("changes placement and selection while keeping its id, instance and process", async () => {
+    const terminal = await loadTerminalStore();
+    const pane = await terminal.openDockTerminal("s1", "/repo");
+    const inst = terminal.getInstance(pane.id, () => ({ el: document.createElement("div"), term: { dispose: vi.fn() }, fit: {} }) as unknown as TerminalInstance);
+    pty.setDocked.mockImplementation(async (id, docked) => ({ id, sessionId: "s1", title: pane.title, cwd: "/repo", exited: false, docked }));
+    await terminal.moveTerminal(pane.id, false);
+    expect(terminal.dockPanes("s1")).toEqual([]);
+    expect(terminal.getTerminalState().selected.s1).toEqual({ kind: "terminal", id: pane.id });
+    expect(terminal.getTerminalState().panes[0].hidden).toBe(false);
+    await terminal.moveTerminal(pane.id, true);
+    expect(terminal.dockPanes("s1").map((pane) => pane.id)).toEqual([pane.id]);
+    expect(terminal.getTerminalState().selected.s1).toBeUndefined();
+    expect(terminal.peekInstance(pane.id)).toBe(inst);
+    expect(inst.term.dispose).not.toHaveBeenCalled();
+    expect(pty.spawn).toHaveBeenCalledOnce();
+    expect(pty.kill).not.toHaveBeenCalled();
+  });
+
+  it("uses explicit placement on reload and on another window's notification", async () => {
+    pty.shells.mockResolvedValueOnce([
+      { id: "s1:dock-old", sessionId: "s1", title: "Moved out", cwd: "/repo", exited: false, docked: false },
+      { id: "s1:ordinary", sessionId: "s1", title: "Moved in", cwd: "/repo", exited: false, docked: true },
+    ] as never);
+    const terminal = await loadTerminalStore();
+    await terminal.subscribeTerminals();
+    await vi.waitFor(() => expect(terminal.getTerminalState().panes).toHaveLength(2));
+    expect(terminal.dockPanes("s1").map((pane) => pane.id)).toEqual(["s1:ordinary"]);
+    const changed = listen.mock.calls.find(([name]) => name === "pty_renamed")![1];
+    changed({ payload: { id: "s1:dock-old", sessionId: "s1", title: "Moved out", cwd: "/repo", exited: false, docked: true } });
+    expect(terminal.dockPanes("s1")).toHaveLength(2);
+  });
+
+  it("keeps placement on failure and refuses agent-owned panes", async () => {
+    const terminal = await loadTerminalStore();
+    const pane = await terminal.openDockTerminal("s1", "/repo");
+    pty.setDocked.mockRejectedValueOnce(new Error("offline"));
+    await expect(terminal.moveTerminal(pane.id, false)).rejects.toThrow("offline");
+    expect(terminal.dockPanes("s1")).toHaveLength(1);
+    await terminal.adoptPane({ id: "tab:a", sessionId: "s1", title: "Agent", hidden: true, owned: true });
+    await expect(terminal.moveTerminal("tab:a", true)).rejects.toThrow("Only shell");
+    expect(pty.setDocked).toHaveBeenCalledOnce();
   });
 });

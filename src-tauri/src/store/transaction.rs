@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 
 thread_local! { static ACTIVE: Cell<bool> = const { Cell::new(false) }; }
 
-pub(super) fn run<T>(path: &Path, timeout: Duration, update: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn run<T>(path: &Path, timeout: Duration, update: impl FnOnce() -> Result<T>) -> Result<T> {
     if ACTIVE.with(|active| active.replace(true)) {
         bail!("nested store transactions are not supported");
     }

@@ -5,7 +5,7 @@ import type { SessionEntry } from "@/types/session";
 
 // #727: the real TabView, Chat and Composer over the local backend; only the
 // runtime's replies are held, so what the window does meanwhile is what is seen.
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {} } }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, convertFileSrc: (path: string) => path }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => () => {}) }) }));
@@ -16,6 +16,7 @@ vi.mock("@/lib/tabViews", () => ({
   useTabViews: () => mocks.views, isPtyFirst: () => false, startTabAgent: vi.fn(), terminalPaneId: (id: string) => id,
   clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
 }));
+vi.mock("@/components/raccoon/Raccoon", () => ({ Raccoon: () => null, RaccoonRunner: () => null, RaccoonScene: () => null }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => null }));
 vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn(), prepareSend: vi.fn(() => vi.fn()) }), useDictationShortcuts: vi.fn() }));
 vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => null }));
@@ -167,5 +168,32 @@ describe("sending a message (#727)", () => {
     expect(median(atOnce.wall), `drawn as sending: ${said(atOnce)}`).toBeLessThan(400);
     expect(median(asSent.wall), `drawn as sent: ${said(asSent)}`).toBeLessThan(400);
     expect(document.querySelectorAll("[data-turn]").length).toBeLessThan(20);
+  });
+});
+
+// PRO-254: exercise the real composer, route, backend command and queue tray.
+describe("held follow-ups", () => {
+  afterEach(async () => { const { setPrefs } = await import("@/lib/prefs"); setPrefs({ followUps: "now" }); });
+  it.each([
+    ["hold", false, false], ["now", true, false], ["hold", true, true],
+  ] as const)("routes setting %s, alternate shortcut=%s through the queue (send now=%s)", async (setting, alternate, sendNow) => {
+    const { setPrefs } = await import("@/lib/prefs");
+    setPrefs({ followUps: setting, shortcuts: {} });
+    runtime(false);
+    const normal = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command !== "change_held_queue") return normal(command, args);
+      return { queued: true, events: [{ id: "queue", seq: 1, sessionId: session.id, tabId: session.tabs[0].id, harness: "claude", ts: "",
+        payload: { type: "held_queue", queue: { items: [{ id: "held", text: "Fix the typo", images: [] }], paused: false, sending: null, next: null, error: null } } }] };
+    });
+    render(<Tab />);
+    fireEvent.change(field(), { target: { value: "Fix the typo" } });
+    fireEvent.keyDown(field(), { key: "Enter", ctrlKey: alternate });
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("change_held_queue", expect.objectContaining({ change: { type: "enqueue", text: "Fix the typo", images: [], sendNow } })));
+    await screen.findByRole("region", { name: "Held follow-ups" });
+    await waitFor(() => expect(sendingText()).toBeNull());
+    expect(field().value).toBe("");
+    expect(sentText("Fix the typo")).toBe(false);
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "send_message")).toBe(false);
   });
 });

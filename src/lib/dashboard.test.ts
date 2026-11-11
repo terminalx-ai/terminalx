@@ -216,3 +216,14 @@ describe("toggleFilter", () => {
     expect(list).toEqual(["a"]);
   });
 });
+
+it("keeps a manual unread reminder independent of the agent status", () => {
+  for (const status of ["idle", "waiting", "in_progress", "completed"] as const) {
+    const row = session("manual", [status]);
+    row.tabs[0].markedUnread = true;
+    expect(isUnread(row)).toBe(true);
+    expect(sessionColumn(row)).toBe(status === "waiting" ? "needs" : status === "in_progress" ? "working" : "done");
+    row.tabs[0].markedUnread = false;
+    expect(isUnread(row)).toBe(status === "completed");
+  }
+});

@@ -78,8 +78,16 @@ impl Sessions {
         self.0.call_within("runtime.session.workspace", json!({"operation":operation,"params":params}), std::time::Duration::from_secs(seconds))
     }
 
+    pub fn save_terminal_selection(&self, session: &str, tab: &str, text: &str) -> Result<String> {
+        self.tab("saveTerminalSelection", session, tab, json!({"text":text}))
+    }
+
     pub fn delete_session(&self, session: &str) -> Result<()> {
         self.call("runtime.session.deleteSession", json!({"sessionId":session}))
+    }
+
+    pub fn set_manual_status(&self, session: &str, status: crate::store::index::ManualStatus) -> Result<()> {
+        self.call("runtime.session.manualStatus", json!({"sessionId":session,"status":status}))
     }
 
     pub fn automations(&self) -> Result<Vec<crate::automations::Automation>> {
@@ -215,6 +223,10 @@ impl Sessions {
             "pressedAt":timings.pressed_at,"drawnAt":timings.drawn_at,"answeredAt":timings.answered_at,"shownAt":timings.shown_at}}))
     }
 
+    pub fn note_terminal_view(&self, session: &str, tab: &str, report: &crate::session::TerminalViewReport) -> Result<()> {
+        self.quick_tab("terminalViewReport", session, tab, json!({"report":report}))
+    }
+
     /// A window's report of a tab's warning (`SessionManager::note_incident_ui`).
     pub fn note_incident_ui(&self, session: &str, tab: &str, report: &crate::recovery_log::UiReport) -> Result<()> {
         self.quick_tab("incidentUi", session, tab, json!({"report": report}))
@@ -244,6 +256,10 @@ impl Sessions {
         self.quick_tab("interrupt", session, tab, json!({}))
     }
 
+    pub fn reset_chat(&self, session: &str, tab: &str, end_seq: Option<u64>, reset_files: bool) -> Result<Option<String>> {
+        self.tab("resetChat", session, tab, json!({"endSeq":end_seq,"resetFiles":reset_files}))
+    }
+
     pub fn stop(&self, session: &str, tab: &str) -> Result<()> {
         self.tab("stop", session, tab, json!({}))
     }
@@ -252,6 +268,10 @@ impl Sessions {
         self.tab("closeTab", session, tab, json!({}))
     }
 
+
+    pub fn change_held(&self, session: &str, tab: &str, change: crate::session::held::Change) -> Result<SendOutcome> {
+        self.tab("heldQueue", session, tab, json!({"change":change}))
+    }
 
     pub fn send_queued_now(&self, session: &str, tab: &str, seq: u64) -> Result<()> {
         self.quick_tab("sendQueuedNow", session, tab, json!({"seq":seq}))
@@ -281,6 +301,10 @@ impl Sessions {
         self.tab("effort", session, tab, json!({"effort":effort}))
     }
 
+    pub fn set_tab_unread(&self, session: &str, tab: &str, unread: bool) -> Result<()> {
+        self.quick_tab("setUnread", session, tab, json!({"unread": unread}))
+    }
+
     pub fn mark_read(&self, session: &str, tab: &str) -> Result<()> {
         self.quick_tab("markRead", session, tab, json!({}))
     }
@@ -289,8 +313,10 @@ impl Sessions {
         self.tab("handoff", session, tab, json!({}))
     }
 
-    pub fn to_terminal(&self, session: &str, tab: &str) -> Result<()> {
-        self.tab("toTerminal", session, tab, json!({}))
+    pub fn to_terminal(&self, session: &str, tab: &str, transition_id: Option<uuid::Uuid>) -> Result<bool> {
+        // Older local runtimes returned null for a completed handoff.
+        let ready: Option<bool> = self.tab("toTerminal", session, tab, json!({"transitionId":transition_id,"deferUntilIdle":true}))?;
+        Ok(ready.unwrap_or(true))
     }
 }
 

@@ -46,13 +46,14 @@ export function resolveSessionTab(input: {
   activeTab?: string | null;
   terminalIds: readonly string[];
   browserIds?: readonly string[];
+  reviewIds?: readonly string[];
 }): SelectedSessionTab | null {
   const { agentIds, terminalIds } = input;
   const exists = (tab: SelectedSessionTab | null | undefined): tab is SelectedSessionTab =>
-    !!tab && (tab.kind === "agent" ? agentIds.includes(tab.id) : tab.kind === "terminal" ? terminalIds.includes(tab.id) : !!input.browserIds?.includes(tab.id));
+    !!tab && (tab.kind === "agent" ? agentIds.includes(tab.id) : tab.kind === "terminal" ? terminalIds.includes(tab.id) : tab.kind === "review" ? !!input.reviewIds?.includes(tab.id) : !!input.browserIds?.includes(tab.id));
   if (exists(input.requested)) return input.requested;
   if (exists(input.current)) return input.current;
   const agent = (input.activeTab && agentIds.includes(input.activeTab) ? input.activeTab : null) ?? agentIds[0];
   if (agent) return { kind: "agent", id: agent };
-  return terminalIds.length ? { kind: "terminal", id: terminalIds[0] } : null;
+  return terminalIds.length ? { kind: "terminal", id: terminalIds[0] } : input.reviewIds?.length ? { kind: "review", id: input.reviewIds[0] } : null;
 }

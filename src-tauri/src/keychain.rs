@@ -245,6 +245,7 @@ mod tests {
             "account_status",
             "account_refresh_roles",
             "account_sign_in",
+            "account_paste_callback",
             "account_sign_out",
             "organization_create",
             "organization_select",

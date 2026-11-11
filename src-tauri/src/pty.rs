@@ -403,6 +403,7 @@ const FLOW_STALL: Duration = Duration::from_secs(2);
 const EXIT_AFTER_OUTPUT: Duration = Duration::from_millis(500);
 
 pub struct Terminals {
+    startup: Mutex<Option<Arc<crate::startup::Monitor>>>,
     panes: Mutex<HashMap<String, Pane>>,
     groups: Mutex<Vec<Arc<OwnedGroup>>>,
     retained: Mutex<HashMap<String, crate::local_runtime::scrollback::History>>,
@@ -421,6 +422,8 @@ pub struct Terminals {
     /// N" each is opened with. A chosen name is kept whatever the tab goes
     /// on to run (#437).
     renamed: Mutex<std::collections::HashSet<String>>,
+    /// Explicit placement overrides the legacy dock marker in a pane id.
+    docked: Mutex<HashMap<String, bool>>,
     /// Every pane is being handed to the runtime that replaces this one
     /// (#765): none is opened meanwhile.
     frozen: Mutex<bool>,
@@ -438,6 +441,8 @@ pub struct ShellPane {
     pub title: Option<String>,
     /// The reader named this tab; `title` is otherwise the one it was opened with.
     pub renamed: bool,
+    #[serde(default)]
+    pub docked: Option<bool>,
     pub cwd: String,
     pub exited: bool,
     /// When it was opened, so every window lists it in the same place.
@@ -481,7 +486,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), frozen: Mutex::new(false) }
+        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), docked: Mutex::default(), frozen: Mutex::new(false) }
     }
 }
 
@@ -609,6 +614,16 @@ fn push_scrollback(scrollback: &mut VecDeque<u8>, bytes: &[u8]) {
 }
 
 impl Terminals {
+    pub(crate) fn set_startup_monitor(&self, monitor: Arc<crate::startup::Monitor>) {
+        *self.startup.lock().unwrap() = Some(monitor);
+    }
+
+    fn startup_ticket(&self, id: &str, created: &str, pid: Option<u32>) -> Option<crate::startup::Ticket> {
+        self.startup.lock().unwrap().as_ref().and_then(|monitor| match monitor.begin(id, created, pid) {
+            Ok(ticket) => Some(ticket),
+            Err(error) => { log::warn!("track child startup: {error:#}"); None }
+        })
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -669,7 +684,7 @@ impl Terminals {
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
         });
-        let environment = crate::store::environment::launch(cwd);
+        let environment = crate::store::environment::launch(cwd)?;
         // Lifecycle hooks must not perform cleanup with missing credentials
         // or endpoints. Check the exact snapshot that this process receives.
         if executable.is_some() {
@@ -720,12 +735,18 @@ impl Terminals {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
+        let created = crate::store::index::now();
+        let startup = self.startup_ticket(id, &created, None);
+        let child = pair.slave.spawn_command(cmd).map_err(|e| {
+            if let Some(startup) = &startup { startup.exited(None); }
+            anyhow!("spawn shell: {e}")
+        })?;
         // Report actual execution even if setting up the reader or writer
         // subsequently fails. Lifecycle callers must not repeat its effects.
         if let Some(program) = executable { (program.started)(); }
         drop(pair.slave);
         let pid = child.process_id();
+        if let Some(startup) = &startup { startup.spawned(pid); }
         let mut screen = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
         screen.process(&printed);
         let mut scrollback = VecDeque::with_capacity(SCROLLBACK_BYTES);
@@ -740,7 +761,7 @@ impl Terminals {
             explicit_command,
             environment: environment.stamp,
             cwd: cwd.to_string(),
-            created: crate::store::index::now(),
+            created,
             scrollback,
             printed: 0,
             screen,
@@ -752,6 +773,8 @@ impl Terminals {
     /// or one handed over by the runtime this one replaced (#765).
     fn start(&self, sink: Arc<dyn EventSink>, id: &str, parts: Parts) -> Result<()> {
         let Parts { master, reader, writer, mut waiter, pid, group, explicit_command, environment, cwd, created, scrollback, printed, screen, last_output } = parts;
+        let startup = self.startup_ticket(id, &created, pid);
+        if last_output.is_some() { if let Some(startup) = &startup { startup.ready(); } }
         #[cfg(unix)]
         let reader = Arc::new(Mutex::new(reader));
         #[cfg(not(unix))]
@@ -942,6 +965,7 @@ impl Terminals {
             let hold = hold.clone();
             std::thread::Builder::new().name(format!("pty-wait-{id}")).spawn(move || {
                 let code = waiter.wait(pid, &hold);
+                if let Some(startup) = &startup { startup.exited(code.and_then(|code| code.try_into().ok())); }
                 let _ = group.pid();
                 // Let the emitter go if it is holding the pane for its view, then
                 // give it a moment to send the tail, so the exit is not announced
@@ -1324,6 +1348,14 @@ impl Terminals {
         }
     }
 
+    /// Reposition a shell without changing its PTY, identity or output.
+    pub fn set_docked(&self, id: &str, docked: bool) -> Result<ShellPane> {
+        let mut shell = self.shell(id).context("shell terminal no longer exists")?;
+        self.docked.lock().unwrap().insert(id.to_string(), docked);
+        shell.docked = Some(docked);
+        Ok(shell)
+    }
+
     /// What each running pane's terminal has in front, as the terminal itself
     /// reports it: two calls on the PTY per pane, and no process is looked at.
     /// Empty where a PTY cannot be asked.
@@ -1380,7 +1412,7 @@ impl Terminals {
         };
         let title = self.titles.lock().unwrap().get(id).cloned();
         let renamed = self.renamed.lock().unwrap().contains(id);
-        Some(ShellPane { id: id.to_string(), session_id, title, renamed, cwd, exited, created })
+        Some(ShellPane { id: id.to_string(), session_id, title, renamed, docked: self.docked.lock().unwrap().get(id).copied(), cwd, exited, created })
     }
 
     /// Whether the shell in `id` is running something: the terminal's
@@ -1497,12 +1529,13 @@ impl Terminals {
         for (id, pane) in panes.iter() {
             let printed = pane.scrollback.lock().unwrap();
             history.insert(id.clone(), History { id: id.clone(), cwd: pane.cwd.clone(), created: pane.created.clone(),
-                title: titles.get(id).cloned(), renamed: renamed.contains(id),
+                title: titles.get(id).cloned(), renamed: renamed.contains(id), docked: self.docked.lock().unwrap().get(id).copied(),
                 data: printed.iter().skip(printed.len().saturating_sub(each)).copied().collect() });
         }
         for pane in history.values_mut() {
             pane.title = titles.get(&pane.id).cloned();
             pane.renamed = renamed.contains(&pane.id);
+            pane.docked = self.docked.lock().unwrap().get(&pane.id).copied();
             if pane.data.len() > each {
                 pane.data.drain(..pane.data.len() - each);
             }
@@ -1521,6 +1554,7 @@ impl Terminals {
         for pane in &history {
             if let Some(title) = &pane.title { titles.insert(pane.id.clone(), title.clone()); }
             if pane.renamed { renamed.insert(pane.id.clone()); }
+            if let Some(docked) = pane.docked { self.docked.lock().unwrap().insert(pane.id.clone(), docked); }
         }
         drop(renamed);
         drop(titles);
@@ -1554,6 +1588,7 @@ impl Terminals {
             let retained = self.retained.lock().unwrap();
             self.titles.lock().unwrap().retain(|id, _| panes.contains_key(id) || retained.contains_key(id));
             self.renamed.lock().unwrap().retain(|id| panes.contains_key(id) || retained.contains_key(id));
+            self.docked.lock().unwrap().retain(|id, _| panes.contains_key(id) || retained.contains_key(id));
         }
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.emit(crate::status::resources::CHANGED_EVENT, &());
@@ -2266,6 +2301,33 @@ mod tests {
         // A pane whose program has gone has nothing in front.
         terminals.kill_all();
         assert!(terminals.fronts().is_empty());
+    }
+
+    #[test]
+    fn moving_a_shell_keeps_its_process_output_and_input() {
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(8));
+        let dir = tempfile::tempdir().unwrap();
+        let id = "session-a:dock-move";
+        pane(&terminals, &sink, &dir, id, "cat");
+        let (view, output) = collector();
+        terminals.attach("main", id, "moving", view);
+        terminals.write(id, b"before-move\n").unwrap();
+        read_until(&output, "before-move");
+        let pid = terminals.pid(id);
+        assert!(pid.is_some());
+        let before = terminals.read_output(id).unwrap();
+        for docked in [false, true] {
+            assert_eq!(terminals.set_docked(id, docked).unwrap().docked, Some(docked));
+            assert_eq!(terminals.pid(id), pid);
+            assert!(terminals.is_running(id));
+            assert!(terminals.read_output(id).unwrap().starts_with(&before));
+        }
+        terminals.write(id, b"after-move\n").unwrap();
+        read_until(&output, "after-move");
+        terminals.kill_all();
+        assert!(terminals.docked.lock().unwrap().is_empty());
+        assert!(terminals.set_docked(id, true).is_err());
     }
 
     #[test]

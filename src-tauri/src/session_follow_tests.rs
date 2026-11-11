@@ -544,7 +544,7 @@ impl Rig {
         let pane = self.launched_running("t1", CliKind::Codex, &transcript, &format!("sh -c 'read line; printf \"%s\\n\" \"{last}\"; exit 1'"));
         // As the composer sends one, keystrokes aside.
         let rt = self.runtime("t1");
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "fix the build".into(), display: "fix the build".into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "fix the build".into(), display: "fix the build".into() };
         self.manager.record_composer_prompt(&mut rt.lock().unwrap(), &prompt, Vec::new(), self.dir.path().to_str().unwrap(), None);
         self.exit(&pane);
         self.wait("the exit to be settled", || matches!(self.runtime("t1").lock().unwrap().engine, Engine::None));

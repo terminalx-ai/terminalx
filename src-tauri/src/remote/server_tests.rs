@@ -1643,9 +1643,11 @@ async fn shells_and_agent_terminals_need_the_same_right_on_every_call() {
 /// A session in the index, made by the same `session_ops` the runtime uses.
 fn seed_session(project: &Path, title: &str, cwd: Option<&Path>) -> SessionEntry {
     crate::session_ops::create_session_entry(crate::session_ops::NewSession {
+        parent: None,
         section_id: None,
         project_path: project.to_string_lossy().into_owned(),
         checkout_branch: None,
+        checkout_pr: None,
         title: Some(title.into()),
         use_worktree: false,
         base_ref: None,
@@ -1971,7 +1973,7 @@ async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list()
         &f.rpc,
         &manager,
         "session.update",
-        json!({ "sessionId": session.id, "title": "  Fix the login  ", "pinned": true, "clientRequestId": "request-upd-1" }),
+        json!({ "sessionId": session.id, "title": "  Fix the login  ", "pinned": true, "manualStatus": "in_review", "clientRequestId": "request-upd-1" }),
     )
     .await
     .unwrap();
@@ -1979,13 +1981,16 @@ async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list()
     let pushed = next_event(&mut events, "session.sessions").await;
     assert_eq!(pushed["sessions"].as_array().unwrap().len(), 1, "only this workspace's sessions");
     assert_eq!(pushed["sessions"][0]["title"], "Fix the login");
+    assert_eq!(pushed["sessions"][0]["manualStatus"], "in_review");
     call(&f.rpc, &manager, "session.update", json!({ "sessionId": session.id, "archived": true, "clientRequestId": "request-upd-2" }))
         .await
         .unwrap();
     let stored = index::get(&session.id).unwrap();
     assert!(stored.archived && stored.pinned && stored.title == "Fix the login");
+    assert_eq!(stored.manual_status, Some(index::ManualStatus::InReview));
     for (params, expected) in [
         (json!({ "sessionId": session.id, "clientRequestId": "request-upd-3" }), "invalid_params"),
+        (json!({ "sessionId": session.id, "manualStatus": "invalid", "clientRequestId": "request-status-invalid" }), "invalid_params"),
         (json!({ "sessionId": session.id, "title": "   ", "clientRequestId": "request-upd-4" }), "invalid_params"),
         (json!({ "sessionId": session.id, "title": "x".repeat(201), "clientRequestId": "request-upd-5" }), "invalid_params"),
         (json!({ "sessionId": session.id, "title": "x" }), "invalid_params"),
@@ -2306,6 +2311,7 @@ case "$1" in
   *) exec sleep 10 ;;
 esac
 while read -r line; do
+  printf '%s\n' "$line" >> "$here/received"
   id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
@@ -2313,6 +2319,9 @@ while read -r line; do
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
       printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}' ;;
+    *'"method":"turn/interrupt"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted"}}}' ;;
   esac
 done
 "#;
@@ -2371,9 +2380,10 @@ async fn native_terminal_child() {
         (peer, events)
     };
     let mut requests = 0;
-    let mut move_as = |peer: Arc<Peer>| {
+    let mut move_as = |peer: Arc<Peer>, defer: bool| {
         requests += 1;
-        let params = json!({ "sessionId": session, "tabId": tab, "clientRequestId": format!("to-terminal-{requests}") });
+        let mut params = json!({ "sessionId": session, "tabId": tab, "clientRequestId": format!("to-terminal-{requests}") });
+        if defer { params["deferUntilIdle"] = json!(true); }
         let rpc = f.rpc.clone();
         async move { call(&rpc, &peer, "session.toTerminal", params).await }
     };
@@ -2381,19 +2391,46 @@ async fn native_terminal_child() {
     // Viewers, and drivers who may not approve, cannot start its terminal.
     let (bob, _bob_events) = agent_person(f.rpc.clone(), "d-bob", "bob").await;
     let (erin, _erin_events) = agent_person(f.rpc.clone(), "d-erin", "erin").await;
-    assert_eq!(code(move_as(bob).await), "forbidden");
-    assert_eq!(code(move_as(erin).await), "forbidden");
+    assert_eq!(code(move_as(bob, false).await), "forbidden");
+    assert_eq!(code(move_as(erin, false).await), "forbidden");
     assert_eq!(transport(), Native);
 
-    // Never mid-turn.
+    // Active work defers the switch, without fencing protocol progress.
     let (alice, _alice_events) = agent_person(f.rpc.clone(), "d-alice", "alice").await;
     manager.send(&session, &tab, "hello".into(), Vec::new()).unwrap();
-    assert_eq!(code(move_as(alice.clone()).await), "conflict");
+    assert_eq!(code(move_as(alice.clone(), false).await), "conflict", "older clients must not mistake deferred work for a completed handoff");
+    assert_eq!(move_as(alice.clone(), true).await.unwrap()["waitingForTurn"], true);
     assert_eq!(transport(), Native);
-    manager.stop(&session, &tab).unwrap();
+    let log = crate::store::log_path(&session, &tab).unwrap();
+    let events = || crate::store::read_lines::<crate::events::AgentEvent>(&log).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while !events().iter().any(|event| matches!(event.payload, crate::events::Payload::TurnStarted { .. })) {
+        assert!(std::time::Instant::now() < until, "the deferred switch must allow the native prompt to start");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(move_as(alice.clone(), true).await.unwrap()["waitingForTurn"], true);
+    assert!(manager.interrupt(&session, &tab).unwrap());
+    while !events().iter().any(|event| matches!(event.payload, crate::events::Payload::TurnCompleted { .. })) {
+        assert!(std::time::Instant::now() < until, "interrupt must remain writable while the switch waits");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!events().iter().any(|event| matches!(event.payload, crate::events::Payload::Error { .. })));
+    assert_eq!(events().iter().filter(|event| matches!(event.payload, crate::events::Payload::UserMessage { .. })).count(), 1);
 
-    // A driver who may approve moves it, and its terminal starts.
-    move_as(alice.clone()).await.unwrap();
+
+    // No terminal may silently start a new conversation when the native
+    // thread has not saved its rollout yet. The refusal keeps Chat usable.
+    let refused = move_as(alice.clone(), true).await.unwrap_err();
+    assert!(refused.1.contains("saved conversation is not available"), "{refused:?}");
+    assert_eq!((transport(), terminal_launches()), (Native, 0));
+    assert_eq!(index::get(&session).unwrap().tab(&tab).unwrap().provider_session_id.as_deref(), Some("thread-1"));
+    assert!(!events().iter().any(|event| matches!(event.payload, crate::events::Payload::Error { .. })));
+    let saved = home.join("user-codex/sessions/2026/11/01/rollout-2026-11-01T00-00-00-thread-1.jsonl");
+    std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
+    std::fs::write(saved, "{}\n").unwrap();
+
+    // A driver who may approve retries, and the same conversation starts.
+    move_as(alice.clone(), true).await.unwrap();
     assert_eq!(transport(), Pty);
     let until = std::time::Instant::now() + Duration::from_secs(5);
     while terminal_launches() == 0 {
@@ -2401,8 +2438,12 @@ async fn native_terminal_child() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     // Asking again changes nothing and starts nothing more.
-    move_as(alice).await.unwrap();
+    let legacy = move_as(alice, false).await.unwrap();
+    assert!(legacy.get("waitingForTurn").is_none(), "a legacy success only means a completed handoff");
     assert_eq!((transport(), terminal_launches()), (Pty, 1));
+    assert!(launches().lines().any(|line| line.contains("resume thread-1")), "the terminal resumes the same conversation");
+    let frames = std::fs::read_to_string(bin.join("received")).unwrap();
+    assert_eq!(frames.lines().filter(|line| line.contains("\"method\":\"turn/start\"")).count(), 1, "the transition never replays the prompt");
     manager.stop(&session, &tab).unwrap();
 }
 

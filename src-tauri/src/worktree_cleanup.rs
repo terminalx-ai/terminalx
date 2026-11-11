@@ -961,7 +961,7 @@ fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>,
             return result(item, Outcome::Failed, format!("It was already removed, but its sessions' agents could not be stopped, so its sessions were left as they were. {}", failed.join("; ")));
         }
     }
-    match session_ops::mark_workspace_sessions_removed(&repository.root, &left) {
+    match session_ops::mark_workspace_sessions_removed(&repository.root, &left, None) {
         Ok(moved) => {
             let mut done = result(item, Outcome::AlreadyRemoved, "It was already removed; its conversations are now filed under the project.".to_string());
             done.sessions_kept = moved.iter().map(|session| session.id.clone()).collect();
@@ -1070,6 +1070,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
             return result(item, Outcome::Skipped, "It changed during its archive script. Review it again before removing it.".to_string());
         }
     }
+    let removed_workspace = crate::workspace_restore::removal_record(&repository.root, &target);
     step(Step::Removing);
     // Never forced, never deleted directly: git removes it or says why not.
     let options = crate::workspaces::DeleteOptions { delete_branch: false, direct: git::DirectDelete::Never, verified_head: Some(head) };
@@ -1090,7 +1091,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         session_ops::notify_workspace_deleted(sink, &repository.project.path, &affected);
         done.sessions_deleted = affected.iter().map(|session| session.id.clone()).collect();
     } else {
-        match session_ops::mark_workspace_sessions_removed(&repository.root, &affected) {
+        match session_ops::mark_workspace_sessions_removed(&repository.root, &affected, Some(&removed_workspace)) {
             Ok(moved) => {
                 session_ops::notify_workspace_settled(sink, &repository.project.path, &moved);
                 done.sessions_kept = moved.iter().map(|session| session.id.clone()).collect();

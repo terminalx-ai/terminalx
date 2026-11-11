@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Plus, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -6,6 +6,7 @@ import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { closeTerminal, dockPanes, openDockTerminal, useTerminals } from "@/lib/terminal";
+import { TerminalMoveButton } from "./TerminalMoveButton";
 import { TerminalView } from "./TerminalView";
 import { useWorkspaceSetups } from "@/lib/workspaceSetup";
 import { WorkspaceSetupPane, setupStatus } from "./WorkspaceSetupPane";
@@ -23,7 +24,9 @@ const clampHeight = (h: number) => Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, h))
 export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: string }) {
   const prefs = usePrefs();
   const open = prefs.panelTerminalOpen;
-  const panes = dockPanes(sessionId, useTerminals().panes);
+  const terminals = useTerminals();
+  const panes = dockPanes(sessionId, terminals.panes);
+  const moved = panes.find((pane) => pane.id === terminals.active[sessionId])?.id;
   const setups = useWorkspaceSetups();
   const setup = setups.runs.find((run) => run.sessionId === sessionId);
   const [picked, setPicked] = useState<string | null>(null);
@@ -35,6 +38,9 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
     if (setups.shown?.sessionId === sessionId) setPicked("setup");
   }, [sessionId, setups.shown]);
   const [height, setHeight] = useState(() => clampHeight(prefs.panelTerminalHeight));
+  useLayoutEffect(() => {
+    if (moved) setPicked(moved);
+  }, [moved, sessionId]);
   const dragging = useRef<{ y: number; h: number } | null>(null);
 
   const add = useCallback(async () => {
@@ -58,11 +64,8 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
     setPrefs({ panelTerminalOpen: true });
   };
 
-  // A shell that exited (`exit`, ^D) leaves its tab, as a closed terminal does.
-  const exited = panes.filter((pane) => pane.exited).map((pane) => pane.id).join(",");
-  useEffect(() => {
-    for (const id of exited ? exited.split(",") : []) void closeTerminal(id);
-  }, [exited]);
+  // Exited shells keep their output until explicitly closed, including a
+  // shell moved here from a tab to inspect its final error.
 
   const onDown = (e: React.PointerEvent) => {
     dragging.current = { y: e.clientY, h: height };
@@ -141,6 +144,7 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
             );
           })}
         </div>
+        {current && <TerminalMoveButton id={current.id} docked />}
         <WithTooltip label="New terminal">
           <Button variant="ghost" size="icon-xs" aria-label="New terminal" disabled={starting} onClick={() => void add()} className="text-muted-foreground">
             <Plus />
@@ -158,6 +162,7 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
           {panes.map((pane) => (
             <div key={pane.id} className={cn("absolute inset-0 pl-1", (showingSetup || pane.id !== current?.id) && "invisible")}>
               <TerminalView id={pane.id} visible={!showingSetup && pane.id === current?.id} redraw={false} />
+              {pane.exited && <span className="absolute bottom-2 left-3 rounded bg-popover px-2 py-1 text-[11px] text-muted-foreground">Process exited{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.</span>}
             </div>
           ))}
         </div>

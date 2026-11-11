@@ -35,4 +35,14 @@ describe("settings section search", () => {
     expect(searchSettingsSections("appearance text")[0].item.tab).toBe("appearance");
     expect(searchSettingsSections("zzzz-no-such-setting")).toEqual([]);
   });
+
+  it("finds the user settings file in General", () => {
+    expect(searchSettingsSections("json")[0].item.tab).toBe("general");
+    expect(searchSettingsSections("settings file")[0].item.tab).toBe("general");
+  });
+
+  it("finds repository copy settings by their include-file name", () => {
+    expect(searchSettingsSections("worktreeinclude")[0].item.tab).toBe("repositories");
+    expect(searchSettingsSections("files to copy")[0].item.tab).toBe("repositories");
+  });
 });

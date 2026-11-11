@@ -29,6 +29,10 @@
   // last message was: since PRO-180 a chat without one is "Not started".
   const session = { id: SESSION, projectPath: "/w", cwd: "/w", title, branch: f.branch ?? null, created: at, modified: at, lastMessageAt: at, archived: false, pinned: !!f.pinned, tabs: [tab], activeTab: TAB };
   const capabilities = ["pty/1", ...(f.sessionTerminals === false ? [] : ["pty/2"]), "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1", ...(f.agentTerminal ? ["agent-pty/1"] : [])];
+  if (f.manualStatus) {
+    session.manualStatus = f.manualStatus;
+    capabilities.push("session-status/1");
+  }
   const catalog = { version: 1, createMemory: {}, orgs: { [ORG]: { workspaces: [workspace], repositories: [], quota: { used: 1, limit: 3 }, fetchedAt: now, sessions: { [WS]: { sessions: [session], capabilities, at: now } } } } };
   const org = { id: ORG, name: "Local E2E", role: role === "manager" ? "owner" : "member", isPersonal: false, cloud: { enabled: true, flags: {} } };
 
@@ -80,6 +84,11 @@
         return ok({ tabs: [tabInfo()] });
       case "session.list":
         return ok({ sessions: [session] });
+      case "session.update":
+        if (authority !== "manage" || !capabilities.includes("session-status/1") || params.sessionId !== SESSION) return { id: frame.id, ok: false, error: { code: "forbidden", message: "Status update refused" } };
+        session.manualStatus = params.manualStatus;
+        notify("session.sessions", { sessions: [session] });
+        return ok({ session });
       case "session.subscribe": {
         const id = `sub-${++subscription}`;
         subscriptions.set(id, "session");
