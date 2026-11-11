@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
-import { Check, CircleAlert, CircleDot, ExternalLink, Loader2, X } from "@/icons";
+import { type ReactNode, useEffect, useState } from "react";
+import { ArrowUpRight, Check, ChevronRight, CircleAlert, CircleDot, CircleX, ExternalLink, Loader2, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { CheckLog, PrCheck, PullRequest } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
-import { actionsRuns, checkBucket, checkSummary, isFailingCheck, RUNNING_CHECKS } from "@/lib/checks";
+import { actionsRuns, checkBucket, checkMinutes, checkStateLabel, checkSummary, isFailingCheck, minutesLabel, RUNNING_CHECKS } from "@/lib/checks";
+import type { PipelineChecksView } from "@/lib/issuePipeline";
 import { cn } from "@/lib/cn";
 import { copyText } from "@/lib/clipboard";
 import { Button } from "@/components/ui/button";
@@ -37,16 +38,81 @@ export function PrChecks({ pr, source, disabled, fixBusy, onRerun, onFix, showSu
     </div>}
     {pr.checks.map((c, index) => {
       const requirement = pr.requiredChecks == null ? "Requirement unknown" : pr.requiredChecks.includes(c.name) ? "Required" : "Optional";
-      const url = webUrl(c.url);
-      return <div key={checkKey(c, index)} aria-label={`${c.name}: ${c.state}`} className="flex min-w-0 items-center gap-2 text-xs">
-        <CheckIcon state={c.state} />
-        {url ? <button type="button" onClick={() => void openUrl(url)} className="min-w-0 flex-1 truncate text-left text-muted-foreground hover:underline" title={`${c.name}: ${c.state}`}>{c.name}</button> : <span className="min-w-0 flex-1 truncate text-muted-foreground" title={`${c.name}: ${c.state}`}>{c.name}</span>}
+      return <CheckRow key={checkKey(c, index)} check={c}>
         <span className="shrink-0 text-[10px] text-faint">{requirement}</span>
         {c.actions && c.url && source.checkLog ? <Button size="xs" variant="ghost" disabled={RUNNING_CHECKS.includes(c.state)} aria-label={`View logs for ${c.name}`} aria-expanded={selected === checkKey(c, index)} onClick={() => setSelected(selected === checkKey(c, index) ? null : checkKey(c, index))}>Logs</Button> : <Button size="xs" variant="ghost" onClick={() => void openUrl(pr.url + "/checks")} aria-label={`Open on GitHub: ${c.name}`} title="Open on GitHub"><ExternalLink className="size-3" /></Button>}
-      </div>;
+      </CheckRow>;
     })}
     {check?.actions && check.url && source.checkLog && <CheckLogView key={`${pr.url}:${selected}:${check.state}`} pr={pr} check={check} source={source} onClose={() => setSelected(null)} />}
   </div>;
+}
+
+/**
+ * One check: its state's glyph, its name, a link to its run when GitHub gave
+ * one, and the line GitHub carries with it. What follows is the list's own.
+ * The pull request panel and the pipeline panel both list checks with it.
+ */
+function CheckRow({ check, emphasis, className, children }: { check: PrCheck; emphasis?: boolean; className?: string; children?: ReactNode }) {
+  const url = webUrl(check.url);
+  // The name keeps its room; GitHub's line gives way first, then the name is cut.
+  const name = cn("max-w-full shrink-0 truncate text-left", emphasis ? "text-foreground" : "text-muted-foreground");
+  return <div aria-label={`${check.name}: ${check.state}`} className={cn("flex min-w-0 items-center gap-2 text-xs", className)}>
+    <CheckIcon state={check.state} />
+    <span className="flex min-w-0 flex-1 items-baseline gap-2">
+      {url ? <button type="button" onClick={() => void openUrl(url)} className={cn(name, "hover:underline")} title={`${check.name}: ${check.state}`}>{check.name}</button> : <span className={name} title={`${check.name}: ${check.state}`}>{check.name}</span>}
+      {check.summary && <span className="min-w-0 truncate text-[11px] text-faint" title={check.summary}>{check.summary}</span>}
+    </span>
+    {children}
+  </div>;
+}
+
+/** A check's state and how long it has been in it, then the way to its run. */
+function TimedCheckRow({ check, now }: { check: PrCheck; now: number }) {
+  const url = webUrl(check.url);
+  const minutes = checkMinutes(check, now);
+  return <CheckRow check={check} emphasis className="px-3 py-2">
+    <span className={cn("w-16 shrink-0", checkBucket(check.state) === "failed" ? "text-destructive" : "text-muted-foreground")}>{checkStateLabel(check.state)}</span>
+    <span className="w-12 shrink-0 text-right tabular-nums text-muted-foreground">{minutes == null ? "" : minutesLabel(minutes)}</span>
+    {url
+      ? <button type="button" onClick={() => void openUrl(url)} aria-label={`Open the run: ${check.name}`} title="Open the run" className="shrink-0 text-faint hover:text-foreground"><ArrowUpRight className="size-3.5" /></button>
+      : <span className="w-3.5 shrink-0" aria-hidden />}
+  </CheckRow>;
+}
+
+/**
+ * The checks an issue pipeline's merge waits on or stopped on (#881): one row
+ * per required check with its state, time and run, the optional ones folded
+ * away, and how long the wait has gone on against when it asks for a person.
+ */
+export function PipelineCheckList({ view, now }: { view: PipelineChecksView; now: number }) {
+  const [optionalOpen, setOptionalOpen] = useState(false);
+  const failed = view.outcome === "failed";
+  const progress = failed || view.outcome === "stalled" ? 1 : view.waitedMinutes == null ? 0 : Math.min(1, view.waitedMinutes / view.limitMinutes);
+  const clock = view.waitedMinutes == null ? null : view.outcome === "waiting" ? `Waiting ${minutesLabel(view.waitedMinutes)} · asks you at ${view.limitMinutes} min` : `Waited ${minutesLabel(view.waitedMinutes)}`;
+  return <section aria-label="Required checks" data-testid="pipeline-checks" className="min-w-0 overflow-hidden rounded-lg bg-well">
+    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-3 pt-2.5">
+      <span className="text-xs font-medium">Required checks</span>
+      <span className="font-mono text-[11px] text-faint">{view.commit.slice(0, 7)}</span>
+      {clock && <span data-testid="pipeline-checks-clock" className="ml-auto text-[11px] text-muted-foreground">{clock}</span>}
+    </div>
+    <div role="progressbar" aria-label="Time waited" aria-valuemin={0} aria-valuemax={view.limitMinutes} aria-valuenow={Math.min(view.waitedMinutes ?? 0, view.limitMinutes)} className="mx-3 mb-2.5 mt-2 h-1 overflow-hidden rounded-full bg-veil-raised">
+      <div className={cn("h-full rounded-full", failed ? "bg-destructive" : view.outcome === "stalled" ? "bg-warning" : "bg-info")} style={{ width: `${progress * 100}%` }} />
+    </div>
+    <ul className="divide-y divide-hairline border-t border-hairline" aria-label="Required">
+      {view.required.length === 0 && <li className="px-3 py-2 text-xs text-faint">GitHub has not reported a check on this commit yet.</li>}
+      {view.required.map((check, index) => <li key={checkKey(check, index)}><TimedCheckRow check={check} now={now} /></li>)}
+    </ul>
+    {view.optional.length > 0 && <div className="border-t border-hairline">
+      <button type="button" aria-expanded={optionalOpen} onClick={() => setOptionalOpen((open) => !open)} className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[11px] text-muted-foreground hover:text-foreground">
+        <ChevronRight className={cn("size-3 shrink-0 transition-transform", optionalOpen && "rotate-90")} />
+        Optional
+        <span className="truncate text-faint">{checkSummary(view.optional)}</span>
+      </button>
+      {optionalOpen && <ul className="divide-y divide-hairline border-t border-hairline" aria-label="Optional">
+        {view.optional.map((check, index) => <li key={checkKey(check, index)}><TimedCheckRow check={check} now={now} /></li>)}
+      </ul>}
+    </div>}
+  </section>;
 }
 
 function CheckLogView({ pr, check, source, onClose }: { pr: PullRequest; check: PrCheck; source: GitSource; onClose: () => void }) {
@@ -97,11 +163,12 @@ function CheckIcon({ state }: { state: string }) {
   if (bucket === "running") return <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />;
   if (bucket === "passed") return <Check className="size-3.5 shrink-0 text-add" />;
   if (bucket === "skipped") return <CircleDot className="size-3.5 shrink-0 text-faint" />;
-  return <CircleAlert className={cn("size-3.5 shrink-0", bucket === "failed" ? "text-destructive" : "text-faint")} />;
+  if (bucket === "failed") return <CircleX className="size-3.5 shrink-0 text-destructive" />;
+  return <CircleAlert className="size-3.5 shrink-0 text-faint" />;
 }
 
 /** Provider URLs are untrusted data; only web links may leave the app. */
-function webUrl(value?: string | null): string | null {
+export function webUrl(value?: string | null): string | null {
   if (!value) return null;
   try {
     const url = new URL(value);

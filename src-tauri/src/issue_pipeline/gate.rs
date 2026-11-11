@@ -237,6 +237,20 @@ fn ignored(name: &str, patterns: &[String]) -> bool {
     patterns.iter().map(|pattern| pattern.trim().to_ascii_lowercase()).any(|pattern| !pattern.is_empty() && name.contains(&pattern))
 }
 
+/// The names of the checks a merge of this commit waits on, as
+/// [`gating_checks`] counts them: those branch protection requires, or,
+/// where it names none, every check on the commit the project does not
+/// ignore. Sorted, each once.
+pub fn gating_names(pr: &PrSnapshot, ignored_checks: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = match pr.required_checks.as_deref().filter(|required| !required.is_empty()) {
+        Some(required) => required.to_vec(),
+        None => pr.checks.iter().filter(|check| !ignored(&check.name, ignored_checks)).map(|check| check.name.clone()).collect(),
+    };
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// The checks that gate this commit, as (failed, pending) names.
 fn gating_checks(pr: &PrSnapshot, ignored_checks: &[String]) -> (Vec<String>, Vec<String>) {
     let mut failed = Vec::new();
@@ -408,7 +422,7 @@ pub(crate) mod tests {
     pub(crate) const NEXT: &str = "2222222222222222222222222222222222222222";
 
     pub(crate) fn check(name: &str, state: &str) -> PrCheck {
-        PrCheck { name: name.into(), state: state.into(), url: None, actions: None }
+        PrCheck { name: name.into(), state: state.into(), url: None, actions: None, ..Default::default() }
     }
 
     pub(crate) fn clean_pr() -> PrSnapshot {
