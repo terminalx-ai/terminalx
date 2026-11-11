@@ -69,8 +69,10 @@ export const DialogContent = React.forwardRef<
      * scrolls on its own while the header and footer stay where they are.
      */
     layout?: "page" | "pinned";
+    /** Classes for the backdrop, for a dialog that holds the whole window and dims it further. */
+    overlayClassName?: string;
   }
->(({ className, children, showClose = true, width = "max-w-[34rem]", layout = "page", ...props }, ref) => {
+>(({ className, children, showClose = true, width = "max-w-[34rem]", layout = "page", overlayClassName, ...props }, ref) => {
   const own = React.useRef<HTMLDivElement | null>(null);
   const setRef = React.useCallback((node: HTMLDivElement | null) => {
     own.current = node;
@@ -81,7 +83,7 @@ export const DialogContent = React.forwardRef<
   React.useLayoutEffect(() => () => leaveGracefully(own.current), []);
   return (
   <DialogPrimitive.Portal>
-    <DialogPrimitive.Overlay data-dialog-overlay className="fixed inset-0 z-(--z-dialog-overlay) bg-black/35 data-[state=open]:animate-overlay-in data-[state=closed]:animate-overlay-out" />
+    <DialogPrimitive.Overlay data-dialog-overlay className={cn("fixed inset-0 z-(--z-dialog-overlay) bg-black/35 data-[state=open]:animate-overlay-in data-[state=closed]:animate-overlay-out", overlayClassName)} />
     <DialogPrimitive.Content
       ref={setRef}
       className={cn(
