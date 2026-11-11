@@ -178,7 +178,7 @@ pub(super) fn restart(said: Said, continuation: Option<u64>, its_own: bool) -> O
 
 /// An image the reader sent, read back from where it was archived, to be
 /// sent again as it was.
-fn image_input(image: &ImageRef) -> Result<ImageInput> {
+pub(super) fn image_input(image: &ImageRef) -> Result<ImageInput> {
     use base64::Engine as _;
     let bytes = std::fs::read(&image.url).with_context(|| format!("An image in that prompt is no longer on this machine ({}).", image.name.as_deref().unwrap_or("unnamed")))?;
     Ok(ImageInput {

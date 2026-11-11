@@ -5,6 +5,7 @@ import type { Project } from "@/types/session";
 const mocks = vi.hoisted(() => ({
   projects: [] as Project[],
   updateProject: vi.fn(),
+  saveOrder: vi.fn(async (patch: object) => ({ custom: false, sessions: ["second", "first"], projects: ["/repos/two", "/repos/one"], revision: 1, ...patch })),
   environmentList: vi.fn(async (_project: string | null) => []),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
   preview: vi.fn(),
@@ -21,7 +22,15 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@/lib/api", async (original) => {
   const actual = await original<typeof import("@/lib/api")>();
-  return { ...actual, api: { ...actual.api, repositoryFilesPreview: mocks.preview }, experimental: { ...actual.experimental, settings: vi.fn(async () => ({ nativeCodex: false })) } };
+  return { ...actual,
+    invoke: (command: string, args?: { patch?: object }) => {
+      if (command === "sidebar_order") return Promise.resolve({ custom: false, sessions: ["second", "first"], projects: ["/repos/two", "/repos/one"], revision: 0 });
+      if (command === "set_sidebar_order") return mocks.saveOrder(args?.patch ?? {});
+      return actual.invoke(command, args);
+    },
+    api: { ...actual.api, repositoryFilesPreview: mocks.preview },
+    experimental: { ...actual.experimental, settings: vi.fn(async () => ({ nativeCodex: false })) },
+  };
 });
 vi.mock("@/lib/localEnvironment", async (original) => {
   const actual = await original<typeof import("@/lib/localEnvironment")>();
@@ -131,6 +140,26 @@ it("opens a Scripts row link on its repository's page and focuses its registered
   expect(row?.getAttribute("data-setting-instance")).toBe("/repos/two");
   expect(document.activeElement).toBe(row);
   expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
+});
+
+it("opens the custom order registry row and keeps the window choice independent of shared order events", async () => {
+  const view = render(<SettingsPage initialTab="appearance.customOrder" onBack={vi.fn()} />);
+  const row = view.container.querySelector('[data-setting-id="appearance.customOrder"]');
+  expect(row).not.toBeNull();
+  expect(document.activeElement).toBe(row);
+  const toggle = screen.getByRole("switch", { name: "Custom order" });
+  await waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
+  expect(mocks.saveOrder).toHaveBeenCalledWith({ custom: true });
+  act(() => mocks.listeners.get("sidebar_order_changed")!({ payload: { custom: false, sessions: ["first", "second"], projects: [], revision: 2 } }));
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect((await import("@/lib/sidebarOrder")).getSidebarOrder().sessions).toEqual(["first", "second"]);
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+  expect(mocks.saveOrder).toHaveBeenCalledWith({ custom: false });
+  expect((await import("@/lib/prefs")).getPrefs().sidebarSort).toBe("updated");
 });
 
 it("folder repositories have no file-copy navigation", () => {

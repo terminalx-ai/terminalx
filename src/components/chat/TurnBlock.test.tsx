@@ -17,6 +17,18 @@ afterEach(cleanup);
 const turn = (images: { url: string; name?: string }[]): Turn =>
   ({ key: "t1", prompt: { text: "what is this?", images, ts: "2026-10-03T00:00:00Z", seq: 1 }, work: [], live: false }) as unknown as Turn;
 
+it("offers a second opinion only for a finished turn with an available action", () => {
+  const value = { ...turn([]), completed: { status: "ok", ts: "" } };
+  const review = vi.fn();
+  const { rerender } = render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} onSecondOpinion={review} />);
+  fireEvent.click(screen.getByRole("button", { name: "Second opinion" }));
+  expect(review).toHaveBeenCalledExactlyOnceWith(value);
+  rerender(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+  expect(screen.queryByRole("button", { name: "Second opinion" })).toBeNull();
+  rerender(<TurnBlock turn={{ ...value, live: true, completed: undefined }} sessionId="s" stream={[]} working onSecondOpinion={review} />);
+  expect(screen.queryByRole("button", { name: "Second opinion" })).toBeNull();
+});
+
 it("shows verified sender attribution on prompts and queued inputs", () => {
   const value = turn([]);
   value.prompt!.author = { userId: "alice", displayName: "Alice" };
@@ -158,13 +170,13 @@ describe("a finished turn with a call an agent's safety check held", () => {
   it("says on its summary line which check held the call, or how many were held", () => {
     setPrefs({ foldToolCalls: true });
     render(<TurnBlock turn={held(["Approved past Claude's dangerous-removal check"])} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("2 tool calls · Approved past Claude's dangerous-removal check");
+    expect(screen.getByRole("button", { expanded: false, name: /tool calls?/ }).textContent).toBe("2 tool calls · Approved past Claude's dangerous-removal check");
     cleanup();
     render(<TurnBlock turn={held(["Approved past Claude's dangerous-removal check", "Stopped at Claude's safety check"])} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("3 tool calls · 2 held by a safety check");
+    expect(screen.getByRole("button", { expanded: false, name: /tool calls?/ }).textContent).toBe("3 tool calls · 2 held by a safety check");
     cleanup();
     render(<TurnBlock turn={held([])} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByRole("button", { expanded: false }).textContent).toBe("1 tool call");
+    expect(screen.getByRole("button", { expanded: false, name: /tool calls?/ }).textContent).toBe("1 tool call");
   });
 });
 
