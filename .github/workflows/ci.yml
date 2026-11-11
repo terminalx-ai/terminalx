@@ -25,7 +25,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Never restore another trust domain's cache, even via a prefix fallback.
+  # PR writes stay isolated; restores may fall back to public, trusted main caches.
   CI_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.ref == 'refs/heads/main' && 'main') || format('run-{0}', github.run_id) }}
 
 jobs:
@@ -140,7 +140,9 @@ jobs:
             ~/.cargo/git/db
             src-tauri/target
           key: ci-v3-linux-rust-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: ci-v3-linux-rust-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+          restore-keys: |
+            ci-v3-linux-rust-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ci-v3-linux-rust-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
       - name: clippy
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -225,7 +227,9 @@ jobs:
             ~/.cargo/git/db
             src-tauri/target
           key: ci-v3-macos-native-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: ci-v3-macos-native-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+          restore-keys: |
+            ci-v3-macos-native-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ci-v3-macos-native-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
 
       # tauri-build packages the frontend output into the Rust build.
       - name: Build the frontend
@@ -277,7 +281,9 @@ jobs:
             ~/.cargo/git/db
             src-tauri/target
           key: ci-v3-headless-serve-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: ci-v3-headless-serve-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+          restore-keys: |
+            ci-v3-headless-serve-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ci-v3-headless-serve-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
       - name: Build terminalx-serve
         working-directory: src-tauri/serve
         run: cargo build --locked --bin terminalx-serve
@@ -346,7 +352,9 @@ jobs:
             ~/.cargo/git/db
             src-tauri/target
           key: ci-v3-desktop-platforms-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: ci-v3-desktop-platforms-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+          restore-keys: |
+            ci-v3-desktop-platforms-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ci-v3-desktop-platforms-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
       - name: Build frontend and verify off-macOS helper build is a no-op
         run: pnpm build:computer-macos && pnpm build
       - name: Platform build

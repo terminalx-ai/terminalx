@@ -19,7 +19,8 @@ No tests are dropped or newly ignored. Earlier Linux portability, watcher
 lifetime and PTY deadline fixes are retained through the merge. Linux testing
 also caught a false-success bug in main's approval wrapper: an empty loader
 tracing flag prevented both command and directory guard execution. It is now
-unset before any executable starts, with fail-closed regression coverage.
+rejected before any executable starts, without resolving cleanup functions or
+aliases from shell startup files, with fail-closed regression coverage.
 Approval-wrapper changes always select the macOS suite as well. A cache fixture
 also sets its rewrite timestamp explicitly so same-size writes remain observable
 on Linux; its assertions and the production cache are unchanged.
@@ -29,8 +30,9 @@ on Linux; its assertions and the production cache are unchanged.
 - Every PR, including internal PRs, uses GitHub-hosted runners. Only main
   push/schedule/dispatch may select `CI_LINUX_RUNNER`; unset means Ubuntu.
 - Read-only workflow token, no PR secrets, no privileged PR trigger, no checkout
-  credential persistence, full-SHA action pins, and separate PR/main/job caches
-  with no cross-scope restore fallback. Policy regression fixtures run in CI.
+  credential persistence, full-SHA action pins, and PR/main/job cache write
+  isolation. PRs may restore matching public main caches; main cannot restore
+  PR caches. Policy regression fixtures run in CI.
 - **Do not activate a repository-only runner pool.** Forks can edit workflow YAML.
   Before registration, the owner must enforce GitHub runner-group access to this
   repository's protected-main CI workflow only, and verify denial canaries. If
@@ -46,12 +48,16 @@ on Linux; its assertions and the production cache are unchanged.
 
 ## Validation and measurements
 
-Passed locally: desktop/mobile type checks, 5,392 Vitest tests, frontend build,
-Clippy on Linux/macOS, the full Linux suite (3,371 unit + 14 integration tests),
-Swift (123) and icon checks (18), actionlint and 23 CI policy/helper tests.
-The merged macOS baseline passed its full suite (3,426 + 14); all changed
-security/cache fixtures passed again on macOS after the fixes. Hosted AMD64 CI
-and independent review are still required. No new tests are ignored or removed.
+Passed locally: desktop/mobile type checks, frontend build, Swift (123) and icon
+checks (18). After review corrections: Clippy on Linux/macOS, the full Linux
+suite (3,372 unit + 14 integration tests), 17 macOS approval-wrapper tests plus
+the session-directory regression, actionlint and 28 CI policy/helper tests.
+The merged macOS baseline passed its full suite (3,426 + 14); no second full
+macOS pass is claimed. Desktop TypeScript passed again. The review-time Vitest
+run had 5,385 passes and seven timeouts under heavy host load; all 63 tests in
+the five affected files passed with one worker and unchanged assertions/deadlines.
+Hosted AMD64 CI and the next independent review remain required. No new tests
+are ignored or removed.
 See [dated validation and reproducible observations](CI-RUNNERS-MEASUREMENTS.md).
 The historical ten-run unsplit baseline is 59.0 minutes median / 74.1 p90.
 Today's #882 baseline has only **6/10** successful first attempts using the exact current workflow: 52.2 median /

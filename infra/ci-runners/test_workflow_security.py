@@ -53,10 +53,11 @@ def validate(workflow):
                 if "/save@" in action:
                     assert inputs["key"] == "${{ steps.cargo-cache.outputs.cache-primary-key }}", "save must use restored scope"
                 else:
-                    prefix = f"ci-v3-{name}-${{{{ env.CI_CACHE_SCOPE }}}}-"
-                    assert inputs["key"].startswith(prefix), "cache key crosses trust scopes"
-                    for fallback in inputs.get("restore-keys", "").splitlines():
-                        assert fallback.startswith(prefix), "cache fallback crosses trust scopes"
+                    platform = "${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-"
+                    prefix = f"ci-v3-{name}-${{{{ env.CI_CACHE_SCOPE }}}}-{platform}"
+                    main = f"ci-v3-{name}-main-{platform}"
+                    assert inputs["key"] == prefix + "${{ github.sha }}", "cache writes must stay in the run's own scope"
+                    assert inputs.get("restore-keys", "").splitlines() == [prefix, main], "restore only own scope, then trusted main with matching job/platform/lock"
             assert "secrets." not in str(step), "secret expression"
             assert "continue-on-error" not in step, "required step failure ignored"
     rust = jobs["linux-rust"]["steps"]
@@ -107,6 +108,42 @@ class WorkflowSecurity(unittest.TestCase):
         def change(w):
             cache = next(s for s in w["jobs"]["linux-rust"]["steps"] if s.get("id") == "cargo-cache")
             cache["with"]["restore-keys"] = "ci-v3-linux-rust-"
+        self.rejects(change)
+
+    def test_all_cargo_jobs_require_main_fallback_without_shared_writes(self):
+        caches = [
+            s for job in self.workflow["jobs"].values() for s in job["steps"]
+            if s.get("uses", "").startswith("actions/cache")
+            and "/save@" not in s["uses"]
+        ]
+        self.assertEqual(len(caches), 4)
+        for cache in caches:
+            self.assertIn("${{ env.CI_CACHE_SCOPE }}", cache["with"]["key"])
+            self.assertIn("-main-", cache["with"]["restore-keys"].splitlines()[1])
+        validate(self.workflow)
+
+    def test_missing_main_fallback_is_rejected(self):
+        def change(w):
+            cache = next(s for s in w["jobs"]["macos-native"]["steps"] if s.get("id") == "cargo-cache")
+            cache["with"]["restore-keys"] = cache["with"]["restore-keys"].splitlines()[0]
+        self.rejects(change)
+
+    def test_other_pr_fallback_is_rejected(self):
+        def change(w):
+            cache = next(s for s in w["jobs"]["linux-rust"]["steps"] if s.get("id") == "cargo-cache")
+            cache["with"]["restore-keys"] = cache["with"]["restore-keys"].replace("-main-", "-pr-123-")
+        self.rejects(change)
+
+    def test_shared_main_primary_key_is_rejected(self):
+        def change(w):
+            cache = next(s for s in w["jobs"]["desktop-platforms"]["steps"] if s.get("uses", "").startswith("actions/cache@"))
+            cache["with"]["key"] = cache["with"]["key"].replace("${{ env.CI_CACHE_SCOPE }}", "main")
+        self.rejects(change)
+
+    def test_saving_to_the_matched_fallback_key_is_rejected(self):
+        def change(w):
+            cache = next(s for s in w["jobs"]["linux-rust"]["steps"] if s.get("uses", "").startswith("actions/cache/save@"))
+            cache["with"]["key"] = "${{ steps.cargo-cache.outputs.cache-matched-key }}"
         self.rejects(change)
 
     def test_missing_gate_dependency_is_rejected(self):

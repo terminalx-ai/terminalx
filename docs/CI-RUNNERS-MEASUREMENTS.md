@@ -113,7 +113,7 @@ of this one PR establishes the intended ten-run comparison.
   PR in CI; a second complete local macOS run is not claimed.
 - Passed: actionlint 1.7.12 and **23** CI policy/selector/measurement tests.
   Negative fixtures reject unguarded custom runners, mutable actions, token
-  escalation, workflow-wide secret expressions, privileged triggers, cross-scope
+  escalation, workflow-wide secret expressions, privileged triggers, broad
   cache fallbacks, missing aggregate dependencies and missing security tools.
   The aggregate accepts success and rejects failure, cancellation and skips.
 - Passed: diff whitespace checks and an added-line scan for credential/key/IP
@@ -121,9 +121,12 @@ of this one PR establishes the intended ten-run comparison.
 
 The first merged Linux run found four security-test failures: setting an empty
 loader-tracing flag returned success before executing either the command or its
-directory guard. The fix unsets it before launching an executable and fails
-closed if it is readonly. Mac testing also caught zsh's different `command`
-builtin lookup; the regression now exercises sh, bash and zsh directly. CI
+directory guard. The initial fix unset it before launching an executable.
+Independent review then found that a startup-defined `unset` function could
+execute before sanitization. The revised fix rejects a present flag using only
+redirection and parameter expansion, without a cleanup command or control
+keyword that startup functions or aliases could replace. Its regressions
+exercise sh, bash and zsh directly, including empty and readonly flags. CI
 requires both ripgrep and zsh so existing executable security fixtures cannot
 skip because of a missing tool.
 
@@ -140,6 +143,45 @@ and the transfer server were removed/stopped after validation.
 These checks establish local correctness, including a real Linux pass. Hosted
 AMD64 CI and independent review remain merge gates; no local timing is
 substituted for the incomplete ten-run comparisons or live Hetzner acceptance.
+
+## Review 1 corrections (2026-11-11)
+
+The reviewer reproduced an unapproved write through a startup-defined `unset`
+function, including when the later directory guard returned 125. The revised
+wrapper has no cleanup command to resolve: a present loader-tracing flag causes
+a redirection through `/dev/null/<fixed suffix>` to fail before execution.
+Normal execution retains stdin and the directory guard. The regression poisons
+`unset`, `builtin`, `command`, `false`, `exit` and aliases in bash/zsh startup
+files, proves the malicious fixture is active, and checks both accepted and
+refused commands without a marker write. The sh/bash/zsh loader tests also
+cover empty, unexported, exported and readonly flags.
+
+All four Cargo jobs now restore their own cache namespace first, then a matching
+main cache with the same job, OS, architecture and lockfile hash. Saves retain
+the original primary key and PR merge-ref isolation. The new namespace first
+needs a successful main run to populate it; no elapsed-time improvement is
+claimed, and the incomplete ten-run samples above remain unchanged.
+
+Validation of these corrections:
+
+- Passed: all 28 CI policy/selector/measurement tests and actionlint. New negative
+  fixtures reject other-PR restores, shared main write keys, saving to a matched
+  fallback key and removal of the main restore fallback.
+- Passed: desktop TypeScript. The full Vitest run had 5,385 passes and seven
+  five-second timeouts in five unchanged files while host load was about 199 on
+  16 CPUs. All 63 tests in those five files passed in a one-worker rerun, with
+  unchanged assertions and deadlines. No second full Vitest pass is claimed.
+- Passed: `cargo clippy --locked --all-targets -- -D warnings` on Linux and macOS.
+- Passed on macOS: all 17 approval-wrapper tests, plus the session-directory
+  regression using that freshly compiled test binary. A redundant second Cargo
+  compile was stopped; no second full macOS suite is claimed.
+- Passed in TerminalX Local VM (Debian 12 ARM64): full default-feature
+  `cargo test --locked`, **3,372 unit tests and 14 integration tests**, zero
+  failures and the same 17 pre-existing ignores. Both changed Rust files had
+  identical hashes in the VM and worktree. Unit tests took 297.49 seconds;
+  this is local correctness evidence, not a CI timing sample.
+- Passed: Rust formatting, diff whitespace and added-line credential/key/address
+  pattern checks. No runner, repository-setting or activation changes were made.
 
 ## Observed baseline
 

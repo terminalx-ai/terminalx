@@ -197,18 +197,22 @@ fn approved_input_in(
     }
     // The provider's outer shell may have loaded .zshenv, .bashrc, etc.
     // Clear what those files supplied before invoking our non-login shell.
-    // Quoted absolute paths also prevent aliases/functions replacing tools.
+    // Quoted absolute paths avoid aliases and PATH lookup; the clean inner
+    // shell does not inherit startup-defined functions.
     // env -i clears variables only after env itself has loaded. Mask loader
     // controls with shell assignments first, so startup-file LD_* / DYLD_*
     // values cannot inject libraries or create loader trace/profile files.
     // glibc enables LD_TRACE_LOADED_OBJECTS by presence, even when empty:
     // assigning '' makes env print libraries and exit 0 without running the
-    // directory guard or command. Unset it with a shell builtin before any
-    // executable loads, in a subshell so the caller's environment is retained.
-    // A readonly flag must stop execution rather than masquerade as success.
-    // Invoke unset directly: zsh's `command` modifier searches external tools,
-    // whereas bash/sh also allow builtins through it.
-    let mut wrapper = String::from("('unset' 'LD_TRACE_LOADED_OBJECTS' || exit 125; ");
+    // directory guard or command. Refuse that environment before loading any
+    // executable. Even quoted unset/builtin/command can resolve startup
+    // functions, and aliases can replace control keywords like case. Instead,
+    // use a redirection below: /dev/null is not a directory, so a present flag
+    // makes opening /dev/null/<fixed suffix> fail before command dispatch.
+    // With no flag, opening /dev/null then closing the temporary fd succeeds.
+    // This also rejects empty, unexported and readonly flags without evaluating
+    // their contents, changing stdin or calling any cleanup command.
+    let mut wrapper = String::from("(");
     for key in [
         "LD_PRELOAD",
         "LD_AUDIT",
@@ -234,7 +238,9 @@ fn approved_input_in(
     }
     wrapper.push_str(" '/bin/sh' '-c' ");
     wrapper.push_str(&quote(&script));
-    wrapper.push(')');
+    wrapper.push_str(
+        " 9<\"/dev/null${LD_TRACE_LOADED_OBJECTS+/LD_TRACE_LOADED_OBJECTS-is-not-allowed}\" 9<&-)",
+    );
     let mut updated = input.clone();
     let field = if input.get("command").is_some() {
         "command"

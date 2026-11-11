@@ -60,10 +60,14 @@ unread input and proves that neither nudge adds another byte.
 The merged main also exposed a Linux loader bug in the read-only approval
 wrapper: assigning an empty `LD_TRACE_LOADED_OBJECTS` made glibc print loader
 information and return success before `env` could run the directory guard or
-command. The wrapper now unsets that flag with a shell builtin inside a subshell
-before launching any executable, and fails closed if it is readonly. Existing
-security assertions remain, plus a regression covering empty/set/readonly flags
-and execution in a different directory across sh, bash and zsh. CI explicitly
+command. The wrapper now refuses any environment where that flag is present,
+including empty and readonly values, before launching any executable. It uses
+a failing redirection through a non-directory (`/dev/null/<fixed suffix>`),
+not a cleanup command: startup-defined functions can replace even quoted
+`unset`, `builtin` or `command`, and aliases can replace shell keywords. With
+the flag absent, a temporary descriptor opens `/dev/null` and closes before
+execution; stdin is unchanged. Regression coverage exercises sh, bash and zsh,
+poisoned startup functions/aliases, normal execution and a mismatched directory. CI explicitly
 installs/requires ripgrep and zsh so executable security fixtures cannot take
 their missing-tool fallback. The [glibc implementation treats the
 flag as enabled by presence](https://sourceware.org/pipermail/glibc-cvs/2022q1/076642.html).
@@ -126,7 +130,7 @@ access, future jobs and repository integrity are the assets to protect.
 | Action tag changes after review | All `uses:` actions pinned to full 40-character commit SHAs, including GitHub actions; policy tests reject mutable references. | Review SHA updates and snapshot/toolchain upgrades. Lockfiles remain enforced; pins do not certify dependencies as harmless. |
 | One job persists into the next or escapes through host privileges | Self-hosted job preflight rejects root, passwordless sudo and standard Docker/Podman sockets. No shared disk cache configured. | Fresh VM and runner registration for exactly one job; non-root user, no sudo rights/capabilities/privileged sockets or host mounts. Controller deletes VMs on all outcomes and reconciles orphans. Preflight is diagnostic, not a sandbox. |
 | Runner steals cloud, controller or release credentials | CI references no secrets; release/notarization/signing workflows are not moved here. | Long-lived GitHub/cloud tokens only on a separate controller, never in runner images, environment, user-data or checkout. No deploy keys or operator SSH keys on runners. |
-| Cache poisoning crosses a trust boundary | Job + PR-number/main/run namespace + OS + architecture + lockfile keys; restore prefixes stay in that namespace. No implicit pnpm cache. PRs do not restore main caches or other PR caches through this workflow. | No shared volumes or writable object-store caches. Native GitHub merge-ref cache write scope must remain in use. All cached content must be public and credential-free. |
+| Cache poisoning crosses a trust boundary | Job + PR-number/main/run namespace + OS + architecture + lockfile write keys. Restores try the run's own namespace, then matching public main artifacts. No other-PR or broad fallback and no implicit pnpm cache. | No shared volumes or writable object-store caches. Native GitHub merge-ref cache write scope must remain in use. All cached content must be public and credential-free. |
 | Runner reaches production, metadata or controller | No network/cloud setup performed by this PR. | CI-only cloud project, no private network, no inbound firewall rules, external egress controls denying private/link-local/metadata/controller destinations. Allow only required build/GitHub traffic. |
 | Resource abuse, failed deletion or controller compromise | Default remains GitHub-hosted. | Controller concurrency/cost/lifetime caps, bounded deletion grace, independent cleanup reconciliation, patched separate controller with minimal credentials and private operational logs. |
 | Security policy regresses in a later edit | `test_workflow_security.py` exercises violations and is run by required `frontend`. `check` gates every job. | Normal branch protection and review of workflow/runner changes. PR-authored policy tests cannot authorize access to private runners. |
@@ -168,7 +172,16 @@ Caches use `ci-v3-<job>-<scope>-<os>-<arch>-<lock>-<sha>`, with restore prefixes
 ending after the lock hash. Scope is `pr-<number>`, `main`, or `run-<id>` for a
 manual non-main run. Successful jobs may save only to their selected key; a PR
 cannot overwrite a main cache under GitHub's native cache write rules. There
-is no cross-scope fallback and no shared local Cargo/pnpm directory between VMs.
+is no shared local Cargo/pnpm directory between VMs. All four Cargo jobs first
+restore their own namespace, then fall back to `main` with the same job, OS,
+architecture and lockfile hash. This lets a fresh PR reuse warm main builds.
+Saving always uses the original scoped primary key, never the matched fallback
+key. GitHub stores PR writes under the PR merge ref: main and other PRs cannot
+read them, even if a fork changes the YAML to name its key `main`. Main runs
+restore only main-scoped keys. Cache reuse is one-way across the trust boundary;
+its elapsed-time benefit remains unmeasured. The new job namespaces need a
+successful main run to populate them after merge; this fallback does not restore
+legacy unscoped caches.
 
 Namespaces are not a confidentiality boundary: a malicious fork can request
 other readable caches by modifying its YAML. GitHub permits PRs to read base
@@ -271,8 +284,9 @@ separate change. Do not treat this checklist as a deployed or certified setup.
 - An isolated test attempts to create a unique Git ref with the job's
   `GITHUB_TOKEN` and gets HTTP 403. Any successful write fails acceptance and
   requires owner cleanup. Do not add this write attempt to ordinary CI.
-- Trusted/main and untrusted/PR runs restore only their own configured cache
-  namespace. Legacy caches are removed; no writable disk is shared.
+- A fresh PR can restore a matching main Cargo cache, saves only under its own
+  merge ref/key, and cannot overwrite main or supply caches to main/other PRs.
+  Legacy caches are removed; no writable disk is shared.
 - Removing/emptying the variable sends subsequent main Linux jobs to
   `ubuntu-latest`; all PRs use GitHub-hosted runners with either variable value.
 - Ten successful runs per phase, plus median/p90 per job and whole run, are

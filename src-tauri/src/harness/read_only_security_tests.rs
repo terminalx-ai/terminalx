@@ -329,15 +329,85 @@ fn shell_startup_cannot_supply_ripgrep_preprocessors_or_git_environment() {
 }
 
 fn startup_shell_command(repo: &Repository, shell: &Path, command: &str) -> Output {
+    startup_shell_command_in(repo, shell, command, &repo.root)
+}
+
+fn startup_shell_command_in(repo: &Repository, shell: &Path, command: &str, cwd: &Path) -> Output {
     Command::new(shell)
         .env_clear()
         .envs(repo.execution.env.iter().map(|(key, value)| (*key, value)))
         .env("ZDOTDIR", &repo.home)
         .env("BASH_ENV", repo.home.join(".zshenv"))
-        .current_dir(&repo.root)
+        .current_dir(cwd)
         .args(["-c", command])
         .output()
         .unwrap()
+}
+
+#[test]
+fn startup_functions_cannot_run_during_environment_cleanup() {
+    let repo = Repository::new();
+    std::fs::write(repo.root.join("file"), "hello\n").unwrap();
+    let marker = repo.home.join("unapproved-write");
+    // Poison likely cleanup builtins as well as unset. Quoting a command name
+    // suppresses aliases but still resolves these functions in bash and zsh.
+    let mut startup =
+        String::from("if [ -n \"$BASH_VERSION\" ]; then shopt -s expand_aliases; fi\n");
+    for name in ["unset", "builtin", "command", "false", "exit"] {
+        startup.push_str(&format!(
+            "{name}() {{ printf invoked > {}; }}\n",
+            quote(marker.to_str().unwrap())
+        ));
+    }
+    startup.push_str(&format!(
+        "alias case={}\nalias unset={}\n",
+        quote(&format!(
+            "printf invoked > {}; case",
+            quote(marker.to_str().unwrap())
+        )),
+        quote(&format!(
+            "printf invoked > {}",
+            quote(marker.to_str().unwrap())
+        ))
+    ));
+    std::fs::write(repo.home.join(".zshenv"), startup).unwrap();
+    let updated = repo.approved("cat file").unwrap();
+    let command = updated["command"].as_str().unwrap();
+    for shell in ["/bin/bash", "/bin/zsh"] {
+        let shell = Path::new(shell);
+        // Prove that this shell actually loaded the malicious startup function.
+        let control = startup_shell_command(&repo, shell, "'unset' LD_TRACE_LOADED_OBJECTS");
+        assert!(control.status.success(), "{control:?}");
+        assert!(marker.exists());
+        std::fs::remove_file(&marker).unwrap();
+
+        for cwd in [&repo.root, &repo.home] {
+            let output = startup_shell_command_in(&repo, shell, command, cwd);
+            assert!(
+                !marker.exists(),
+                "cleanup invoked a startup function: {shell:?}"
+            );
+            if cwd == &repo.root {
+                assert!(output.status.success(), "{output:?}");
+                assert_eq!(output.stdout, b"hello\n");
+            } else {
+                assert_eq!(output.status.code(), Some(125), "{output:?}");
+                assert!(output.stdout.is_empty());
+            }
+            let refused = startup_shell_command_in(
+                &repo,
+                shell,
+                &format!("export LD_TRACE_LOADED_OBJECTS=''; {command}"),
+                cwd,
+            );
+            assert!(!refused.status.success(), "{refused:?}");
+            assert!(refused.stdout.is_empty());
+            assert!(
+                !marker.exists(),
+                "refusal invoked a startup function: {shell:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -365,6 +435,19 @@ fn sanitized_execution_preserves_pipes_conditionals_and_literal_arguments() {
         );
         assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
     }
+    // The loader guard may use a temporary descriptor, but must preserve stdin.
+    let updated = repo.approved("cat").unwrap();
+    let mut child = Command::new("/bin/sh")
+        .current_dir(&repo.root)
+        .args(["-c", updated["command"].as_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"input\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"input\n");
 }
 
 #[test]
@@ -376,21 +459,31 @@ fn loader_trace_cannot_replace_sanitized_execution_or_its_directory_guard() {
     for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
         // Set the flag inside the already-running shell: putting it in Command's
         // environment would trace the outer shell before our wrapper can run.
-        for value in ["", "1"] {
-            let script = format!("export LD_TRACE_LOADED_OBJECTS={}; {command}", quote(value));
+        for setup in [
+            "LD_TRACE_LOADED_OBJECTS=''",
+            "export LD_TRACE_LOADED_OBJECTS=''",
+            "export LD_TRACE_LOADED_OBJECTS=1",
+        ] {
+            let script = format!("{setup}; {command}");
             let output = Command::new(shell)
                 .current_dir(&repo.root)
                 .args(["-c", &script])
                 .output()
                 .unwrap();
-            assert!(output.status.success(), "{output:?}");
-            assert_eq!(output.stdout, b"hello\n");
+            assert!(
+                !output.status.success(),
+                "loader flags must fail closed: {output:?}"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "no loader or tool should run: {output:?}"
+            );
             let outside = Command::new(shell)
                 .current_dir(&repo.home)
                 .args(["-c", &script])
                 .output()
                 .unwrap();
-            assert_eq!(outside.status.code(), Some(125), "{outside:?}");
+            assert!(!outside.status.success(), "{outside:?}");
             assert!(outside.stdout.is_empty());
         }
         let output = Command::new(shell)
