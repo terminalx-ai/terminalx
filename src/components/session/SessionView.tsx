@@ -1,3 +1,4 @@
+import { openWorkspaceRestore } from "@/lib/dialogs";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { PanelPresence } from "@/components/layout/PanelPresence";
@@ -27,6 +28,7 @@ import { EmptySession } from "./EmptySession";
 import { TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
 import { activateLatestTerminal, selectSessionTab, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
+import { TerminalChatProvider } from "@/components/terminal/TerminalChat";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { BrowserView } from "@/components/browser/BrowserView";
 import { bootBrowser, pagesFor, useBrowser } from "@/lib/browser";
@@ -555,6 +557,7 @@ export function SessionView({
     else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
   return (
+    <TerminalChatProvider session={local && !cloud ? session : undefined}>
     <div className="flex h-full min-h-0 min-w-0 flex-1">
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header
@@ -623,6 +626,7 @@ export function SessionView({
                   <span className="truncate">{workspaceLabel}</span>
                 )}
                 {session.worktreeRemoved && <span className="shrink-0 text-[11px] text-faint">· workspace removed</span>}
+                {local && session.worktreeRemoved && <Button variant="ghost" size="sm" onClick={() => openWorkspaceRestore(session.id)}>Restore workspace…</Button>}
               </span>
               <WorkspaceMenu session={session} branch={movedTo ?? session.branch} folder={session.worktreeName && !session.worktreeRemoved ? session.worktreeName : null} base={baseNote} onContinue={continueTab} />
               </>
@@ -852,7 +856,7 @@ export function SessionView({
                   aria-hidden={selected?.kind !== "terminal" || pane.id !== selected.id}
                   className={cn("absolute inset-0", (selected?.kind !== "terminal" || pane.id !== selected.id) && "invisible")}
                 >
-                  <TerminalView id={pane.id} visible={pane.id === activeShell?.id} />
+                  <TerminalView id={pane.id} visible={pane.id === activeShell?.id} moveToDock={!compact} />
                   {pane.exited && (
                     <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">
                       Process exited{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.
@@ -972,6 +976,7 @@ export function SessionView({
         </>
       )}
     </div>
+    </TerminalChatProvider>
   );
 }
 

@@ -8,6 +8,8 @@ export interface AgentReadiness {
   state: "missing" | "signed_out" | "ready" | "unknown";
   checkedAt: string | null;
   version: string | null;
+  loginMethod?: string | null;
+  plan?: string | null;
 }
 
 export const READINESS_LABELS: Record<AgentReadiness["state"], string> = {

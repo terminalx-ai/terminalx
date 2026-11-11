@@ -1063,6 +1063,8 @@ describe("assignees", () => {
     const release = hold("issue_viewer", true);
     render(<IssuesView />);
     await chooseAssignee("Assigned to me");
+    // Let the debounced filtered read arrive before editing its row.
+    await waitFor(() => expect(invoke.mock.calls.some(([command, args]) => command === "issues_list" && (args as { filter: IssueFilter }).filter.assignee?.kind === "me")).toBe(true));
     const listed = (await screen.findByText("Repair the login timeout")).closest("button")!;
     fireEvent.click(listed);
     fireEvent.click(await screen.findByRole("button", { name: "Assignees: sam, kim" }));

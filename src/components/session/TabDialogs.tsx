@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogScrollArea, DialogTitle } from "@/components/ui/dialog";
 import { errorMessage, pty } from "@/lib/api";
-import { closeCloseTabs, closeRenameTab, useDialogs, type TabRequest } from "@/lib/dialogs";
+import { closeAgentHandoff, closeCloseTabs, closeRenameTab, useDialogs, type TabRequest } from "@/lib/dialogs";
+import { ContinuationDialog } from "./ContinuationDialog";
 import { useSessionStore } from "@/lib/sessions";
 import { paneRow, hasOwnTitle, isShellPeer, peerLabel, peerPaneId, peerShell, useTabRow, type PeerTab } from "@/lib/sessionTabs";
 import { BULK_CLOSE_LABEL, busyTabs, closeTabs, planBulkClose, renamePeer, type BulkClose } from "@/lib/tabActions";
@@ -23,6 +24,7 @@ export function TabDialogs() {
   const closing = sessions.find((session) => session.id === dialogs.closeTabs?.sessionId);
   return (
     <>
+      {dialogs.agentHandoff && <ContinuationDialog session={dialogs.agentHandoff.session} source={dialogs.agentHandoff.source} initialHarness={dialogs.agentHandoff.harness} reviewPrompt={dialogs.agentHandoff.reviewPrompt} onClose={closeAgentHandoff} />}
       {renaming && dialogs.renameTab && <RenameTabDialog key={dialogs.renameTab.tab} session={renaming} request={dialogs.renameTab} onClose={closeRenameTab} />}
       {closing && dialogs.closeTabs && <CloseTabsDialog session={closing} request={dialogs.closeTabs} onClose={closeCloseTabs} />}
     </>

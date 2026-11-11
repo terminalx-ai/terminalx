@@ -70,6 +70,10 @@ impl Sessions {
         self.0.call_within("runtime.session.workspace", json!({"operation":operation,"params":params}), std::time::Duration::from_secs(seconds))
     }
 
+    pub fn save_terminal_selection(&self, session: &str, tab: &str, text: &str) -> Result<String> {
+        self.tab("saveTerminalSelection", session, tab, json!({"text":text}))
+    }
+
     pub fn delete_session(&self, session: &str) -> Result<()> {
         self.call("runtime.session.deleteSession", json!({"sessionId":session}))
     }
@@ -256,6 +260,10 @@ impl Sessions {
         self.tab("closeTab", session, tab, json!({}))
     }
 
+
+    pub fn change_held(&self, session: &str, tab: &str, change: crate::session::held::Change) -> Result<SendOutcome> {
+        self.tab("heldQueue", session, tab, json!({"change":change}))
+    }
 
     pub fn send_queued_now(&self, session: &str, tab: &str, seq: u64) -> Result<()> {
         self.quick_tab("sendQueuedNow", session, tab, json!({"seq":seq}))

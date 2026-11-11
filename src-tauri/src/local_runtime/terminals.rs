@@ -51,6 +51,10 @@ impl Terminals {
         self.0.quick("runtime.pty.rename", json!({"id":id,"title":title}))
     }
 
+    pub fn set_docked(&self, id: &str, docked: bool) -> Result<crate::pty::ShellPane> {
+        self.0.quick("runtime.pty.setDocked", json!({"id":id,"docked":docked}))
+    }
+
     pub fn kill(&self, id: &str) -> Result<()> {
         self.0.call("runtime.pty.kill", json!({"id":id}))
     }

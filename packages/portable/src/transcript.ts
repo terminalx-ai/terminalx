@@ -1,4 +1,4 @@
-import type { AgentEvent, BackgroundTask, FileEdit, Goal, Payload, PermissionOption, Question, ToolResult } from "./events";
+import type { AgentEvent, BackgroundTask, FileEdit, Goal, Payload, PermissionOption, Question, ToolResult, Usage } from "./events";
 import { withoutHarnessBlocks } from "./harnessText";
 import { compactionOperationKey, emptyCompactionLifecycle, reduceCompactionLifecycle, type CompactionLifecycle, type CompactionOperation } from "./compactionLifecycle";
 
@@ -69,7 +69,9 @@ export interface Turn {
   /** Under a failed turn's `finalText`: the agent's last line, when it exited before it ever worked (#667). */
   detail?: string;
   completed?: { seq?: number; status: string; durationMs?: number; ts: string; head?: string };
-  usage?: { contextUsed?: number; contextMax?: number };
+  usage?: Usage;
+  agent?: string;
+  model?: string;
   toolCount: number;
   editedFiles: number;
   live: boolean;
@@ -316,7 +318,7 @@ export class TranscriptReducer {
 
   private ensureTurn(event: AgentEvent): Turn {
     if (!this.current) {
-      this.current = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, work: [], toolCount: 0, editedFiles: 0, live: false };
+      this.current = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, agent: event.harness, model: this.model, work: [], toolCount: 0, editedFiles: 0, live: false };
       this.turns.push(this.current);
     }
     this.touch(this.current);
@@ -341,7 +343,7 @@ export class TranscriptReducer {
   }
 
   private newTurn(event: AgentEvent, prompt?: Turn["prompt"]): Turn {
-    const turn: Turn = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, work: [], toolCount: 0, editedFiles: 0, live: false };
+    const turn: Turn = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, agent: event.harness, model: this.model, work: [], toolCount: 0, editedFiles: 0, live: false };
     if (prompt) turn.prompt = prompt;
     this.current = turn;
     this.turns.push(turn);
@@ -566,7 +568,9 @@ export class TranscriptReducer {
         if (payload.usage) {
           if (payload.usage.contextUsed != null) this.contextUsed = payload.usage.contextUsed;
           if (payload.usage.contextMax != null) this.contextMax = payload.usage.contextMax;
-          turn.usage = { contextUsed: payload.usage.contextUsed, contextMax: payload.usage.contextMax };
+          if (payload.usage.model) this.model = payload.usage.model;
+          turn.usage = payload.usage;
+          turn.model = payload.usage.model ?? turn.model;
         }
         if (payload.authFailed) this.authFailed = true;
         this.modelRequestOpen = false;

@@ -5,7 +5,7 @@
 //! by path, mtime and size so unchanged multi-gigabyte histories cost only a
 //! metadata read on later visits.
 
-mod pricing;
+pub(crate) mod pricing;
 #[cfg(test)]
 mod reconciliation;
 mod saved;
@@ -542,16 +542,16 @@ fn parse_claude(path: &Path) -> Result<Vec<UsageEvent>> {
     Ok(events)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RawUsage {
-    input: u64,
-    cached_input: u64,
-    output: u64,
-    reasoning: u64,
-    total: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RawUsage {
+    pub input: u64,
+    pub cached_input: u64,
+    pub output: u64,
+    pub reasoning: u64,
+    pub total: u64,
 }
 
-fn raw_usage(value: &Value) -> Option<RawUsage> {
+pub(crate) fn raw_usage(value: &Value) -> Option<RawUsage> {
     let record = value.as_object()?;
     let input = number(record.get("input_tokens").unwrap_or(&Value::Null));
     let cached_input = number(
@@ -600,7 +600,7 @@ fn add(left: RawUsage, right: RawUsage) -> RawUsage {
     }
 }
 
-fn same_counts(left: RawUsage, right: RawUsage) -> bool {
+pub(crate) fn same_counts(left: RawUsage, right: RawUsage) -> bool {
     left.input == right.input
         && left.cached_input == right.cached_input
         && left.output == right.output
@@ -614,11 +614,11 @@ fn monotonic(current: RawUsage, previous: RawUsage) -> bool {
         && current.reasoning >= previous.reasoning
 }
 
-enum Delta {
+pub(crate) enum Delta {
     Event(RawUsage, Option<RawUsage>),
 }
 
-fn codex_delta(
+pub(crate) fn codex_delta(
     total: Option<RawUsage>,
     last: Option<RawUsage>,
     previous: Option<RawUsage>,
@@ -795,7 +795,7 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
 }
 
 // Unknown/fast/flex tiers must not silently receive standard prices.
-fn nonstandard_tier(value: &Value) -> bool {
+pub(crate) fn nonstandard_tier(value: &Value) -> bool {
     value
         .get("service_tier")
         .and_then(Value::as_str)
