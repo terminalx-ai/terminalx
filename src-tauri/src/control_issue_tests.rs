@@ -297,3 +297,139 @@ esac
     });
     server.join().unwrap();
 }
+
+#[test]
+fn a_run_goes_from_plan_to_approved_workers_in_their_own_worktrees() {
+    run_child("orchestration_run_child");
+}
+
+/// A run through the control service, as `terminalx runs` and the window's
+/// Approve drive it, against a real repository and a stand-in `claude`.
+#[test]
+fn orchestration_run_child() {
+    if std::env::var(CHILD).as_deref() != Ok("1") { return; }
+    let _home = crate::store::temp_home();
+    let bin = crate::store::root().unwrap().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // It records how it was launched and then sits there, as an agent waiting
+    // for its first prompt does: what a worker is started with is what is checked.
+    let launches = bin.join("launches.log");
+    std::fs::write(bin.join("claude"), format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *--settings*) stty -icanon; exec cat ;; esac\nexit 0\n", launches.display())).unwrap();
+    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let repo = super::tests::git_repo();
+    let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+    let (service, sink) = super::tests::headless_service();
+    let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(Duration::from_secs(60)));
+    let git = |dir: &str, args: &[&str]| crate::git::run(std::path::Path::new(dir), args).map(|out| out.trim().to_string());
+
+    // The lead, on a branch of its own with a commit `main` does not have.
+    let lead = service.execute("sessions.create", json!({"project": project.path, "agent": "claude", "prompt": "plan it", "useWorktree": true, "noPipeline": true}), "lead").unwrap();
+    let (lead_id, lead_path, lead_branch) = (lead["sessionId"].as_str().unwrap(), lead["path"].as_str().unwrap(), lead["branch"].as_str().unwrap());
+    git(lead_path, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "the lead's own commit"]).unwrap();
+    let lead_head = git(lead_path, &["rev-parse", "HEAD"]).unwrap();
+    assert_ne!(lead_head, git(repo.path().to_str().unwrap(), &["rev-parse", "main"]).unwrap());
+    let caller = json!({"session": lead_id, "tab": lead["tabId"]});
+    let plan = json!({"goal": "Move settings reads to the typed store", "pieces": [
+        {"id": "store", "title": "Typed store module", "doneCheck": "cargo t store", "owns": ["src/store/"], "model": "sonnet", "effort": "high", "readFirst": ["docs/SETTINGS.md"]},
+        {"id": "docs", "title": "Update the docs", "doneCheck": "every key is documented", "owns": ["docs/"], "dependsOn": ["store"], "permissionMode": "acceptEdits"},
+    ]});
+
+    // Each rule refuses with its own code and the piece, and leaves nothing behind.
+    let refused = |change: &dyn Fn(&mut Value)| {
+        let mut broken = plan.clone();
+        change(&mut broken);
+        service.execute("runs.create", json!({"plan": broken, "caller": caller}), "refused").unwrap_err()
+    };
+    let error = refused(&|plan| plan["pieces"][1]["doneCheck"] = json!(""));
+    assert_eq!((error.code.as_str(), error.details.as_ref().unwrap()["piece"].as_str()), ("no_done_check", Some("docs")));
+    let error = refused(&|plan| plan["pieces"][1]["owns"] = json!(["src/store/settings.rs"]));
+    assert_eq!((error.code.as_str(), error.details.as_ref().unwrap()["piece"].as_str(), error.details.as_ref().unwrap()["other"].as_str()), ("shared_file", Some("docs"), Some("store")));
+    let error = refused(&|plan| plan["pieces"][0]["dependsOn"] = json!(["docs"]));
+    assert_eq!((error.code.as_str(), error.details.as_ref().unwrap()["piece"].as_str()), ("dependency_cycle", Some("store")));
+    assert_eq!(refused(&|plan| *plan = json!({"pieces": "none"})).code, "plan_invalid");
+    // The piece limit is the setting: one piece allowed refuses this plan of two, and names the limit.
+    let mut settings = crate::store::settings::load();
+    settings.orchestrator.projects.entry(project.path.clone()).or_default().piece_limit = Some(1);
+    crate::store::settings::save(&settings).unwrap();
+    let error = service.execute("runs.create", json!({"plan": plan, "caller": caller}), "limit").unwrap_err();
+    assert_eq!((error.code.as_str(), error.details.clone().unwrap()), ("too_many_pieces", json!({"limit": 1, "pieces": 2})));
+    assert!(error.message.contains("the limit is 1"), "{}", error.message);
+    settings.orchestrator.projects.clear();
+    crate::store::settings::save(&settings).unwrap();
+    // Outside any session there is no lead to run for.
+    assert_eq!(service.execute("runs.create", json!({"plan": plan}), "nobody").unwrap_err().code, "lead_required");
+    assert!(service.execute("runs.list", json!({"all": true}), "list").unwrap()["runs"].as_array().unwrap().is_empty());
+
+    // A valid plan is a run that waits for a person.
+    let mut heard = sink.subscribe_app();
+    let created = service.execute("runs.create", json!({"plan": plan, "caller": caller}), "create").unwrap();
+    let run_id = created["run"]["id"].as_str().unwrap().to_string();
+    assert_eq!((&created["approvalRequired"], &created["run"]["state"], &created["run"]["lead"]), (&json!(true), &json!("awaitingApproval"), &json!({"sessionId": lead_id, "tabId": lead["tabId"]})));
+    let told = std::iter::from_fn(|| heard.try_recv().ok()).any(|published| &*published.event == crate::orchestration::RUN_EVENT && serde_json::from_str::<Value>(&published.payload).is_ok_and(|run| run["id"] == run_id.as_str() && run["state"] == "awaitingApproval"));
+    assert!(told, "the window is told of the run");
+    let sessions_before = index::load().unwrap().len();
+    let error = service.execute("runs.start", json!({"run": run_id}), "start").unwrap_err();
+    assert_eq!(error.code, "awaiting_approval");
+    // Inside the lead's session the run need not be named.
+    assert_eq!(service.execute("runs.start", json!({"caller": caller}), "start").unwrap_err().code, "awaiting_approval");
+    assert_eq!((index::load().unwrap().len(), crate::git::list_worktrees(repo.path()).unwrap().len()), (sessions_before, 2), "no worker before approval");
+
+    // A person approves, in the window: the first piece's worker starts, and only that one.
+    let approved = service.manager.orchestration("approve", json!({"id": run_id})).unwrap();
+    assert_eq!((&approved["started"], &approved["run"]["state"]), (&json!(["store"]), &json!("running")));
+    let shown = service.execute("runs.show", json!({"caller": caller}), "show").unwrap();
+    assert_eq!((&shown["id"], &shown["pieces"][0]["state"], &shown["pieces"][1]["state"]), (&json!(run_id), &json!("running"), &json!("queued")));
+    assert_eq!(shown["waiting"], json!([{"piece": "docs", "on": ["store"]}]));
+    let piece = &shown["pieces"][0];
+    let worker = index::get(piece["worker"]["sessionId"].as_str().unwrap()).unwrap();
+    let tab = worker.tab(piece["worker"]["tabId"].as_str().unwrap()).unwrap();
+    // Its own session, started by the lead, with the planned model and effort, in bypass.
+    assert_eq!(serde_json::to_value(&worker.parent).unwrap(), json!({"sessionId": lead_id, "tabId": lead["tabId"]}));
+    assert_eq!((tab.harness.as_str(), tab.model.as_str(), tab.effort.as_deref(), tab.permission_mode.as_str()), ("claude", "sonnet", Some("high"), "bypassPermissions"));
+    assert_eq!(piece["startedMode"], "bypassPermissions");
+    assert!(crate::worker_report::expected(&worker.id, &tab.id), "the worker is held to a report");
+    // Its own worktree and branch, cut from the lead's branch, with no upstream.
+    let branch = worker.branch.as_deref().unwrap();
+    assert_eq!(piece["branch"], branch);
+    assert!(worker.cwd != lead_path && branch != lead_branch && worker.worktree_name.is_some());
+    assert_eq!(git(&worker.cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), branch);
+    assert_eq!(git(&worker.cwd, &["rev-parse", "HEAD"]).unwrap(), lead_head, "branched from the lead's branch, not from main");
+    assert!(git(&worker.cwd, &["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")]).is_err(), "the branch has no upstream");
+    assert_eq!(crate::git::list_worktrees(repo.path()).unwrap().len(), 3);
+    // It is a run's worker, and the lead is not.
+    assert!(crate::orchestration::guard::limited(&worker));
+    assert!(!crate::orchestration::guard::limited(&index::get(lead_id).unwrap()));
+
+    // The agent was launched in bypass with the deny rules in its settings, and sent its brief.
+    let until = Instant::now() + Duration::from_secs(20);
+    let launch = loop {
+        let logged = std::fs::read_to_string(&launches).unwrap_or_default();
+        if let Some(line) = logged.lines().find(|line| line.contains("--dangerously-skip-permissions") && line.contains("Bash(git push:*)")) { break line.to_string(); }
+        assert!(Instant::now() < until, "no worker launch with deny rules in:\n{logged}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    for rule in ["Bash(git merge:*)", "Bash(gh pr merge:*)", "Bash(npm publish:*)", "--model sonnet"] {
+        assert!(launch.contains(rule), "{rule} is missing from the worker's launch: {launch}");
+    }
+    // The lead's own launch carries no such rule.
+    assert!(std::fs::read_to_string(&launches).unwrap().lines().filter(|line| line.contains("--settings")).any(|line| !line.contains("Bash(git push:*)")));
+
+    // Called again while `store` works, `runs start` starts nothing; `docs` still waits.
+    let again = service.execute("runs.start", json!({"run": run_id}), "start").unwrap();
+    assert_eq!((&again["started"], &again["waiting"]), (&json!([]), &json!([{"piece": "docs", "on": ["store"]}])));
+    assert_eq!(service.execute("runs.list", json!({"lead": lead_id}), "list").unwrap()["runs"].as_array().unwrap().len(), 1);
+    // A second run for the same lead waits its turn.
+    assert_eq!(service.execute("runs.create", json!({"plan": plan, "caller": caller}), "second").unwrap_err().code, "run_exists");
+
+    // Stopped: the run says so, nothing more starts, and the session and its worktree stay.
+    let stopped = service.execute("runs.stop", json!({"run": &run_id[..13]}), "stop").unwrap();
+    assert_eq!((&stopped["run"]["state"], &stopped["run"]["pieces"][0]["state"], &stopped["run"]["pieces"][1]["state"]), (&json!("stopped"), &json!("stopped"), &json!("stopped")));
+    assert_eq!(service.execute("runs.start", json!({"run": run_id}), "start").unwrap_err().code, "run_ended");
+    assert!(index::get(&worker.id).is_ok() && std::path::Path::new(&worker.cwd).is_dir());
+    assert!(service.execute("runs.list", json!({}), "list").unwrap()["runs"].as_array().unwrap().is_empty(), "an ended run is listed only with --all");
+    assert_eq!(service.execute("runs.list", json!({"all": true}), "list").unwrap()["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(service.execute("runs.show", json!({"run": "no-such-run"}), "show").unwrap_err().code, "not_found");
+    // Once a worker, always one: stopping the run does not lift the limits from its session.
+    assert!(crate::orchestration::guard::limited(&worker));
+}

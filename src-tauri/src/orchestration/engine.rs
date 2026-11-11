@@ -123,8 +123,8 @@ fn stored(id: &str) -> Result<Run, EngineError> {
     store::get(id).map_err(|_| EngineError::not_found(id))
 }
 
-fn rules_for<'a>(limits: &OrchestratorLimits, lead: &'a Lead, agents: &'a [String]) -> plan::Rules<'a> {
-    plan::Rules { piece_limit: limits.piece_limit, default_agent: &lead.agent, agents }
+fn rules_for<'a>(limits: &'a OrchestratorLimits, lead: &'a Lead, agents: &'a [String]) -> plan::Rules<'a> {
+    plan::Rules { piece_limit: limits.piece_limit, default_agent: &lead.agent, agents, worker_mode: &limits.worker_mode, approval: limits.require_approval }
 }
 
 /// Validate a plan and store it as a run of `lead_session`. It waits for
@@ -173,7 +173,10 @@ pub fn update_plan(host: &dyn Host, id: &str, plan: &Plan) -> Result<Run, Engine
     }
     let lead = host.lead(&run.lead.session_id)?;
     let agents = host.worker_agents();
-    let pieces = plan::validate(plan, &rules_for(&host.limits(&run.project_path), &lead, &agents))?;
+    // The run asks for approval or not as it did when it was made: an edit does not change who must see it.
+    let mut limits = host.limits(&run.project_path);
+    limits.require_approval = run.state == RunState::AwaitingApproval;
+    let pieces = plan::validate(plan, &rules_for(&limits, &lead, &agents))?;
     let (run, ()) = store::update(id, |run| {
         run.goal = plan.goal.trim().to_string();
         run.budget = plan.budget.clone();

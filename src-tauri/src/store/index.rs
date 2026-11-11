@@ -548,7 +548,23 @@ pub struct SessionEntry {
     pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
+/// The key a run's worker is marked with on its entry. Kept among the
+/// unknown keys rather than as a field: a build that knows nothing of runs
+/// then writes it back untouched, and the limits it stands for stay.
+const RUN_WORKER: &str = "runWorker";
+
 impl SessionEntry {
+    /// Whether this session was started as an orchestration run's worker
+    /// (`orchestration::guard`): it never pushes, merges or deploys.
+    pub fn run_worker(&self) -> bool {
+        self.unknown.get(RUN_WORKER).is_some_and(|marked| marked == true)
+    }
+
+    /// Mark the session as a run's worker. Never unmarked: the limits outlive the run.
+    pub fn mark_run_worker(&mut self) {
+        self.unknown.insert(RUN_WORKER.into(), serde_json::Value::Bool(true));
+    }
+
     /// Whether `session_id` is recorded as having started this session.
     pub fn started_by(&self, session_id: &str) -> bool {
         self.parent.as_ref().is_some_and(|parent| parent.session_id == session_id)

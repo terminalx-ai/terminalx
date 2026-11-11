@@ -4452,6 +4452,14 @@ impl SessionManager {
             (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
         ];
+        // A run's worker never pushes (`orchestration::guard`): every git its
+        // agent starts, in a script as much as on a command line, reads a
+        // configuration that sends a push nowhere. Without it the worker
+        // does not start.
+        if crate::orchestration::guard::limited(entry) {
+            let config = crate::orchestration::guard::git_config(&entry.id, Path::new(&entry.cwd)).context("write the run worker's git configuration")?;
+            env.push(("GIT_CONFIG_GLOBAL".to_string(), config.to_string_lossy().into_owned()));
+        }
         // A fresh secret per launch, per tab: the socket path is inherited by
         // every process the agent starts, so what keeps one tab's hooks from
         // speaking for another is that only this CLI was given this token.

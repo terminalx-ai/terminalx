@@ -13,8 +13,16 @@
 //! 2. **The app's own gate on every tool call** ([`refusal`]), which reads the
 //!    command as a shell would, so `git -C elsewhere push` and
 //!    `sh -c 'git push'` are refused where a prefix rule would let them by.
-//! 3. **A branch with no upstream** ([`no_upstream`]): a bare `git push` has
-//!    nowhere to go even if something else let it run.
+//! 3. **git itself** ([`git_config`], [`no_upstream`]): the worker's agent is
+//!    launched with a git configuration that sends every push to an address
+//!    no transport serves, and its branch has no upstream. A push made by a
+//!    script the worker runs, where no rule ever sees the words `git push`,
+//!    stops there.
+//!
+//! None of these is a sandbox. A worker set on pushing can still unset what it
+//! was launched with; the limits are there so that a worker which is not
+//! trying to get around them cannot push by accident, by habit, or because
+//! text it read told it to.
 //!
 //! One table, [`RULES`], feeds all of them, and the brief states the same
 //! limits ([`super::brief`]).
@@ -123,10 +131,70 @@ impl Drop for Starting {
 
 /// Whether a session is a run's worker, and so has the limits. Once a
 /// worker, always one: stopping the run does not lift them from a session
-/// someone resumes.
+/// someone resumes. The session's own entry says so; the runs say so too,
+/// for a worker whose entry could not be marked. A runs file that cannot be
+/// read lifts nothing: every session a lead started is then held to the limits.
 pub fn limited(session: &SessionEntry) -> bool {
+    if session.run_worker() {
+        return true;
+    }
     let being_started = session.parent.as_ref().is_some_and(|parent| STARTING.lock().unwrap_or_else(|error| error.into_inner()).as_ref().is_some_and(|leads| leads.contains(&parent.session_id)));
-    being_started || super::store::for_worker(&session.id).is_ok_and(|found| found.is_some())
+    being_started
+        || match super::store::for_worker(&session.id) {
+            Ok(found) => found.is_some(),
+            Err(error) => {
+                log::warn!("read the runs to see whether {} is a worker: {error:#}", session.id);
+                session.parent.is_some()
+            }
+        }
+}
+
+/// Where a push by a run's worker is sent instead of its remote. No such
+/// transport exists, so git stops before it connects anywhere.
+pub const REFUSED_URL: &str = "terminalx-refused://a-run-worker-does-not-push/";
+
+/// The git configuration a worker's agent is launched with, as the file
+/// `GIT_CONFIG_GLOBAL` names: the person's own, and after it every push sent
+/// to [`REFUSED_URL`]. The deny rules match a command line; this holds for a
+/// push however it comes about: a script the worker runs, a shell fed from
+/// standard input, an alias. Fetching is untouched.
+pub fn git_config(session_id: &str, cwd: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let mut out = String::from("# Written by TerminalX at each launch of this run worker. A worker of a run never pushes.\n");
+    // What `git` would have read as the person's own configuration, kept as it is.
+    let home = dirs::home_dir();
+    let own: Vec<std::path::PathBuf> = match std::env::var_os("GIT_CONFIG_GLOBAL").filter(|path| !path.is_empty()) {
+        Some(path) => vec![path.into()],
+        None => {
+            let xdg = std::env::var_os("XDG_CONFIG_HOME").filter(|path| !path.is_empty()).map(std::path::PathBuf::from).or_else(|| home.as_ref().map(|home| home.join(".config")));
+            xdg.map(|xdg| xdg.join("git/config")).into_iter().chain(home.as_ref().map(|home| home.join(".gitconfig"))).collect()
+        }
+    };
+    let quoted = |text: &str| format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
+    for path in own.iter().filter(|path| path.is_file()) {
+        out.push_str(&format!("[include]\n\tpath = {}\n", quoted(&path.to_string_lossy())));
+    }
+    // A push to a remote by its name.
+    let remotes = crate::git::run(cwd, &["remote"]).unwrap_or_default();
+    let mut explicit = Vec::new();
+    for remote in remotes.lines().map(str::trim).filter(|remote| !remote.is_empty()) {
+        out.push_str(&format!("[remote {}]\n\tpushurl = {REFUSED_URL}{remote}\n", quoted(remote)));
+        // A remote with a push address of its own keeps pushing there as well: that address is rewritten.
+        if let Ok(urls) = crate::git::run(cwd, &["config", "--get-all", &format!("remote.{remote}.pushurl")]) {
+            explicit.extend(urls.lines().map(|url| url.trim().to_string()).filter(|url| !url.is_empty()));
+        }
+    }
+    // A push to an address written out: every form git takes one in.
+    out.push_str(&format!("[url {}]\n", quoted(REFUSED_URL)));
+    for prefix in ["https://", "http://", "ssh://", "git://", "git+ssh://", "ssh+git://", "ftp://", "ftps://", "file://", "git@", "/", "./", "../", "~"] {
+        out.push_str(&format!("\tpushInsteadOf = {}\n", quoted(prefix)));
+    }
+    for url in explicit {
+        out.push_str(&format!("\tinsteadOf = {}\n", quoted(&url)));
+    }
+    let dir = crate::store::ensure_dir(crate::store::root()?.join("run-workers"))?;
+    let path = dir.join(format!("{session_id}.gitconfig"));
+    crate::store::write_atomic(&path, out.as_bytes())?;
+    Ok(path)
 }
 
 /// The rules as Claude Code's `permissions.deny` takes them.
@@ -562,5 +630,91 @@ mod tests {
         no_upstream(&worker, "piece").unwrap();
         assert!(std::process::Command::new("git").current_dir(&worker).args(["rev-parse", "--abbrev-ref", "piece@{upstream}"]).output().unwrap().status.code() != Some(0));
         no_upstream(&worker, "piece").unwrap();
+    }
+
+    #[test]
+    fn a_workers_git_sends_every_push_nowhere_and_still_fetches() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, other, repo) = (dir.path().join("remote.git"), dir.path().join("other.git"), dir.path().join("repo"));
+        for bare in [&remote, &other] {
+            std::fs::create_dir(bare).unwrap();
+            git(bare, &["init", "-q", "--bare", "-b", "main"]);
+        }
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        // A remote with a push address of its own, as a mirror has.
+        git(&repo, &["remote", "add", "mirror", remote.to_str().unwrap()]);
+        git(&repo, &["config", "remote.mirror.pushurl", other.to_str().unwrap()]);
+        // The person's own configuration, which the worker's git still reads.
+        let own = dir.path().join("own.gitconfig");
+        std::fs::write(&own, "[user]\n\tname = The Person\n").unwrap();
+        // Outside the worker, a push works: what refuses it below is the configuration.
+        let as_person = |args: &[&str]| std::process::Command::new("git").current_dir(&repo).env("GIT_CONFIG_GLOBAL", &own).env("GIT_CONFIG_NOSYSTEM", "1").args(args).output().unwrap();
+        assert!(as_person(&["push", "-q", "origin", "HEAD:refs/heads/by-person"]).status.success());
+
+        std::env::set_var("GIT_CONFIG_GLOBAL", &own);
+        let config = git_config("worker-1", &repo);
+        std::env::remove_var("GIT_CONFIG_GLOBAL");
+        let config = config.unwrap();
+        assert!(config.ends_with("run-workers/worker-1.gitconfig"));
+        let as_worker = |args: &[&str]| std::process::Command::new("git").current_dir(&repo).env("GIT_CONFIG_GLOBAL", &config).env("GIT_CONFIG_NOSYSTEM", "1").args(args).output().unwrap();
+        let (remote_url, file_url) = (remote.to_str().unwrap().to_string(), format!("file://{}", remote.display()));
+        for push in [
+            vec!["push", "origin", "HEAD:refs/heads/by-worker"],
+            vec!["push", "--no-verify", "--force", "origin", "HEAD:refs/heads/by-worker"],
+            vec!["push", "mirror", "HEAD:refs/heads/by-worker"],
+            vec!["push", &remote_url, "HEAD:refs/heads/by-worker"],
+            vec!["push", &file_url, "HEAD:refs/heads/by-worker"],
+            vec!["push", "../remote.git", "HEAD:refs/heads/by-worker"],
+            vec!["-c", "alias.send=push", "send", "origin", "HEAD:refs/heads/by-worker"],
+        ] {
+            let output = as_worker(&push);
+            assert!(!output.status.success(), "git {push:?} went through");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("terminalx-refused"), "git {push:?}: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        // A script that pushes is stopped the same way: no rule ever saw its command.
+        let script = std::process::Command::new("sh").current_dir(&repo).env("GIT_CONFIG_GLOBAL", &config).env("GIT_CONFIG_NOSYSTEM", "1").args(["-c", "echo 'git push origin HEAD:refs/heads/by-script' | sh"]).output().unwrap();
+        assert!(!script.status.success());
+        for bare in [&remote, &other] {
+            let branches = git(bare, &["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+            assert!(!branches.contains("by-worker") && !branches.contains("by-script"), "{branches}");
+        }
+        // Fetching still works, and the person's own configuration is still read.
+        assert!(as_worker(&["fetch", "-q", "origin"]).status.success());
+        assert_eq!(String::from_utf8_lossy(&as_worker(&["config", "user.name"]).stdout).trim(), "The Person");
+    }
+
+    #[test]
+    fn a_session_is_limited_by_its_own_mark_by_its_run_or_while_its_lead_starts_workers() {
+        let _home = crate::store::temp_home();
+        let session = |id: &str, parent: Option<&str>| -> SessionEntry {
+            let mut value = json!({"id": id, "title": id, "projectPath": "/repo", "cwd": "/repo", "created": "2026-11-11T00:00:00Z", "modified": "2026-11-11T00:00:00Z", "tabs": []});
+            if let Some(parent) = parent {
+                value["parent"] = json!({"sessionId": parent});
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        assert!(!limited(&session("anyone", None)));
+        assert!(!limited(&session("child", Some("lead"))), "a session a lead started by hand is not a run's worker");
+        // Marked on its own entry: nothing else is read.
+        let mut marked = session("worker", Some("lead"));
+        marked.mark_run_worker();
+        assert!(limited(&marked));
+        let kept: SessionEntry = serde_json::from_value(serde_json::to_value(&marked).unwrap()).unwrap();
+        assert!(kept.run_worker(), "the mark is written with the entry");
+        // While its lead's workers are being created, before any piece names it.
+        {
+            let _starting = starting("lead");
+            assert!(limited(&session("child", Some("lead"))));
+            assert!(!limited(&session("child", Some("another-lead"))));
+        }
+        assert!(!limited(&session("child", Some("lead"))));
+        // A runs file that cannot be read lifts nothing from a session a lead started.
+        std::fs::write(crate::store::root().unwrap().join("orchestration-runs.json"), "{ not json").unwrap();
+        assert!(limited(&session("child", Some("lead"))));
+        assert!(!limited(&session("anyone", None)));
     }
 }

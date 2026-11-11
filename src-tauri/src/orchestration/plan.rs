@@ -101,13 +101,26 @@ pub struct Rules<'a> {
     /// The agents a worker can be: ones that run in their own terminal and so
     /// can be held to a report.
     pub agents: &'a [String],
+    /// The mode the project's workers run in.
+    pub worker_mode: &'a str,
+    /// A person approves the plan before anything starts. Without that, no
+    /// piece may ask for a mode that allows more than the project's.
+    pub approval: bool,
+}
+
+/// How much a mode lets an agent do unasked: plan changes nothing, manual
+/// asks every time, acceptEdits edits unasked, auto also runs what it judges
+/// safe, bypass asks nothing.
+fn allows(mode: &str) -> usize {
+    ["plan", "manual", "acceptEdits", "auto", "bypassPermissions"].iter().position(|known| *known == mode).unwrap_or(0)
 }
 
 /// Check a plan and turn it into the pieces of a run, every one `queued`.
 ///
 /// Refused, in this order: a plan with no goal or no pieces; more pieces
 /// than the limit; a piece without an id or a title, or with an id another
-/// piece has; an agent that is not on offer or an unknown permission mode; a
+/// piece has; an agent that is not on offer, an unknown permission mode, or
+/// one that allows more than the project's where nobody approves the plan; a
 /// piece with no done-check; a dependency on a piece the plan does not have;
 /// a dependency cycle; two pieces that own the same file.
 pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
@@ -153,6 +166,15 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
                 Some(id),
                 format!("Piece {id} names the permission mode {mode}. Use one of: {}.", MODES.join(", ")),
                 json!({"mode": mode}),
+            ));
+        }
+        // A lead does not raise its own workers' permissions: only a person who sees the plan may.
+        if let Some(mode) = piece.permission_mode.as_deref().filter(|mode| !rules.approval && allows(mode) > allows(rules.worker_mode)) {
+            return Err(PlanError::new(
+                "mode_not_allowed",
+                Some(id),
+                format!("Piece {id} asks for the permission mode {mode}, which allows more than the {} this project's workers run in, and this project starts runs without a person's approval. Use {} or a stricter mode, or ask the person to change the project's setting.", rules.worker_mode, rules.worker_mode),
+                json!({"mode": mode, "workerMode": rules.worker_mode}),
             ));
         }
         if let Some(estimate) = piece.estimate.filter(|e| !(e.low.is_finite() && e.high.is_finite() && e.low >= 0.0 && e.high >= e.low)) {
@@ -396,7 +418,7 @@ mod tests {
 
     fn check(plan: &Plan, limit: u32) -> Result<Vec<Piece>, PlanError> {
         let agents = ["claude".to_string(), "codex".to_string()];
-        validate(plan, &Rules { piece_limit: limit, default_agent: "claude", agents: &agents })
+        validate(plan, &Rules { piece_limit: limit, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true })
     }
 
     fn refused(plan: &Plan) -> PlanError {
@@ -511,6 +533,39 @@ mod tests {
         assert_eq!(check(&nine, 9).unwrap().len(), 9);
         let error = check(&plan(vec![piece("a"), piece("b"), piece("c")]), 2).unwrap_err();
         assert_eq!((error.code, &error.details), ("too_many_pieces", &json!({"limit": 2, "pieces": 3})));
+    }
+
+    #[test]
+    fn a_piece_may_not_raise_its_mode_above_the_projects_unless_a_person_approves_the_plan() {
+        let agents = ["claude".to_string()];
+        let asking = |mode: &str| {
+            let mut piece = piece("a");
+            piece.permission_mode = Some(mode.into());
+            plan(vec![piece])
+        };
+        let rules = |worker_mode: &'static str, approval: bool| Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode, approval };
+        // Nobody approves this project's runs: a piece may be stricter than the project, never looser.
+        for (project, piece, allowed) in [
+            ("manual", "bypassPermissions", false),
+            ("manual", "auto", false),
+            ("manual", "acceptEdits", false),
+            ("manual", "manual", true),
+            ("manual", "plan", true),
+            ("acceptEdits", "auto", false),
+            ("acceptEdits", "manual", true),
+            ("bypassPermissions", "bypassPermissions", true),
+            ("bypassPermissions", "plan", true),
+        ] {
+            let checked = validate(&asking(piece), &rules(project, false));
+            assert_eq!(checked.is_ok(), allowed, "{piece} in a project whose workers run in {project}");
+            if let Err(error) = checked {
+                assert_eq!((error.code, error.piece.as_deref()), ("mode_not_allowed", Some("a")));
+                assert_eq!(error.details, json!({"mode": piece, "workerMode": project}));
+                assert!(error.message.contains(&format!("allows more than the {project}")), "{}", error.message);
+            }
+        }
+        // A person who approves the plan sees the mode of every piece, and may let it stand.
+        assert_eq!(validate(&asking("bypassPermissions"), &rules("manual", true)).unwrap()[0].permission_mode.as_deref(), Some("bypassPermissions"));
     }
 
     #[test]

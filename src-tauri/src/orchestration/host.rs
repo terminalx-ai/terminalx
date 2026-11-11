@@ -81,6 +81,12 @@ impl Host for ManagerHost {
         )
         .map_err(|error| anyhow!("{error}"))?;
         let tab = entry.tabs.first().ok_or_else(|| anyhow!("the new session has no tab"))?;
+        // Marked on its own entry before anything is sent to it: its limits do not depend on the runs file.
+        index::update_session(&entry.id, |session| {
+            session.mark_run_worker();
+            Ok(())
+        })
+        .with_context(|| format!("session {} was created, but could not be marked as a run's worker", entry.id))?;
         if let Some(branch) = entry.branch.as_deref() {
             // The session stays if this fails; its piece says why it did not start.
             guard::no_upstream(Path::new(&entry.cwd), branch).with_context(|| format!("session {} was created, but its branch {branch} could not be left without an upstream", entry.id))?;
@@ -120,8 +126,8 @@ impl Host for ManagerHost {
             Some(status) => WorkerNow::Reported { status, result: text("result") },
             // No report: still on its way, or not coming.
             None if row["reason"] == "working" || row["reminderPending"] == true => WorkerNow::Working,
-            // Its brief is typed into a CLI that is still starting.
-            None if row["reason"] == "noTurn" && view.running => WorkerNow::Working,
+            // Its brief is on its way into a CLI that is still starting.
+            None if row["reason"] == "noTurn" && (view.running || view.queued) => WorkerNow::Working,
             None => WorkerNow::Stuck(text("detail")),
         }
     }

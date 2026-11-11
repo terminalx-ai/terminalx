@@ -65,7 +65,7 @@ mod tests {
 
     fn run() -> Run {
         let agents = ["claude".to_string()];
-        let rules = plan::Rules { piece_limit: 8, default_agent: "claude", agents: &agents };
+        let rules = plan::Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true };
         let source: plan::Plan = serde_json::from_value(serde_json::json!({
             "goal": "Move settings reads to the typed store",
             "pieces": [

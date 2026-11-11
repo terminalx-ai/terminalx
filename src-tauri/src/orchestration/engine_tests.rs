@@ -346,24 +346,38 @@ fn each_worker_gets_its_pieces_agent_model_effort_and_mode_and_a_brief_built_fro
 }
 
 #[test]
-fn the_projects_mode_is_the_default_of_its_workers_and_a_piece_may_still_choose() {
+fn the_projects_mode_is_the_default_of_its_workers_and_a_piece_may_choose_within_it() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
     {
         let mut settings = host.settings.lock().unwrap();
         settings.require_approval = false;
-        settings.projects.entry("/repo".into()).or_default().worker_mode = Some("manual".into());
+        settings.projects.entry("/repo".into()).or_default().worker_mode = Some("acceptEdits".into());
     }
-    let plan: Plan = serde_json::from_value(json!({"goal": "Two", "pieces": [
-        {"id": "a", "title": "A", "doneCheck": "x"},
-        {"id": "b", "title": "B", "doneCheck": "x", "permissionMode": "bypassPermissions"},
-    ]}))
-    .unwrap();
-    let run = engine::create(&host, &plan, "lead", None).unwrap();
-    assert_eq!(run.worker_mode, "manual");
+    let two = |mode: &str| -> Plan {
+        serde_json::from_value(json!({"goal": "Two", "pieces": [
+            {"id": "a", "title": "A", "doneCheck": "x"},
+            {"id": "b", "title": "B", "doneCheck": "x", "permissionMode": mode},
+        ]}))
+        .unwrap()
+    };
+    // Nobody approves this project's runs, so its lead cannot hand a worker more than the project allows.
+    let error = engine::create(&host, &two("bypassPermissions"), "lead", None).unwrap_err();
+    assert_eq!((error.code, error.details["piece"].as_str(), error.details["workerMode"].as_str()), ("mode_not_allowed", Some("b"), Some("acceptEdits")));
+    assert!(store::list().unwrap().is_empty());
+    // A stricter mode is the piece's to choose.
+    let run = engine::create(&host, &two("manual"), "lead", None).unwrap();
+    assert_eq!(run.worker_mode, "acceptEdits");
     engine::start(&host, &run.id).unwrap();
     let modes: Vec<(String, String)> = host.world().made.iter().map(|made| (made.piece.clone(), made.mode.clone())).collect();
-    assert_eq!(modes, vec![("a".to_string(), "manual".to_string()), ("b".into(), "bypassPermissions".into())]);
+    assert_eq!(modes, vec![("a".to_string(), "acceptEdits".to_string()), ("b".into(), "manual".into())]);
+
+    // Where a person approves the plan, they see the piece's mode and may let it stand.
+    host.settings.lock().unwrap().require_approval = true;
+    let approved = engine::create(&host, &two("bypassPermissions"), "another-lead", None).unwrap();
+    assert_eq!((approved.state, approved.piece("b").unwrap().permission_mode.as_deref()), (RunState::AwaitingApproval, Some("bypassPermissions")));
+    engine::approve(&host, &approved.id).unwrap();
+    assert_eq!(host.world().made.last().map(|made| (made.piece.as_str(), made.mode.as_str())), Some(("b", "bypassPermissions")));
 }
 
 #[test]
