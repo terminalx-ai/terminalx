@@ -5,11 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
   setNativeCodex: vi.fn(),
+  setOrchestratorRuns: vi.fn(),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@/lib/api", () => ({
-  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex },
+  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setOrchestratorRuns: mocks.setOrchestratorRuns },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
 
@@ -25,6 +26,7 @@ const { ExperimentalTab } = await import("./ExperimentalSettings");
 beforeEach(() => {
   mocks.settings.mockReset().mockResolvedValue({ nativeCodex: false });
   mocks.setNativeCodex.mockReset();
+  mocks.setOrchestratorRuns.mockReset();
 });
 afterEach(cleanup);
 
@@ -68,5 +70,47 @@ describe("Settings → Experimental (#644)", () => {
     await waitFor(() => expect(toggle().getAttribute("aria-checked")).toBe("true"));
     cleanup();
     await waitFor(() => expect(mocks.listeners.has("experimental_settings_changed")).toBe(false));
+  });
+});
+
+const runs = () => screen.getByRole("switch", { name: "Orchestration runs" });
+
+describe("Settings → Experimental: orchestration runs (PRO-274)", () => {
+  it("is off until turned on, and says what it shows and what works either way", async () => {
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(runs().hasAttribute("disabled")).toBe(false));
+    expect(runs().getAttribute("aria-checked")).toBe("false");
+    const text = screen.getByTestId("experimental-settings").textContent ?? "";
+    for (const said of ["each piece goes to a worker session on its own branch", "you approve the lead's plan before any worker starts", "Settings → Orchestrator", "The terminalx runs commands work either way"]) {
+      expect(text).toContain(said);
+    }
+  });
+
+  it("saves through its own command, leaves Native Codex as it is, and shows the feature at once", async () => {
+    mocks.settings.mockResolvedValue({ nativeCodex: true, orchestratorRuns: false });
+    mocks.setOrchestratorRuns.mockResolvedValue({ nativeCodex: true, orchestratorRuns: true });
+    const { useExperimental, resetExperimentalForTests } = await import("@/lib/experimental");
+    resetExperimentalForTests();
+    const Shown = () => <output data-testid="runs-shown">{String(useExperimental().orchestratorRuns)}</output>;
+    render(<><ExperimentalTab /><Shown /></>);
+    await waitFor(() => expect(runs().hasAttribute("disabled")).toBe(false));
+    expect(screen.getByTestId("runs-shown").textContent).toBe("false");
+    fireEvent.click(runs());
+    await waitFor(() => expect(mocks.setOrchestratorRuns).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(runs().getAttribute("aria-checked")).toBe("true"));
+    expect(mocks.setNativeCodex).not.toHaveBeenCalled();
+    expect(toggle().getAttribute("aria-checked")).toBe("true");
+    // The rest of the app reads the saved answer without waiting for the settings file to be watched.
+    await waitFor(() => expect(screen.getByTestId("runs-shown").textContent).toBe("true"));
+    resetExperimentalForTests();
+  });
+
+  it("puts the switch back and says why when saving fails", async () => {
+    mocks.setOrchestratorRuns.mockRejectedValue(new Error("settings.json is not writable"));
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(runs().hasAttribute("disabled")).toBe(false));
+    fireEvent.click(runs());
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("settings.json is not writable"));
+    expect(runs().getAttribute("aria-checked")).toBe("false");
   });
 });
