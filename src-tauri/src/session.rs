@@ -6699,7 +6699,7 @@ impl SessionManager {
             (kind == CliKind::Codex && crate::harness::read_only::command(&tool_name, &input).is_some())
                 .then(|| crate::harness::read_only::reported_scope(&input, frame.payload["cwd"].as_str())).flatten()
         });
-        let session_command = {
+        let (session_command, discovery) = {
             let rt = rt_arc.lock().unwrap();
             let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
             if !p.origin.accepts(frame) { return HookReply::default(); }
@@ -6717,19 +6717,25 @@ impl SessionManager {
                         return reply_for(kind, gate, Decision::Execute(updated));
                     }
                 }
-                if let Some(updated) = store::settings::load().agents.read_only_commands
-                    .then(|| crate::harness::read_only::approved_input(&tool_name, &input, cwd)).flatten() {
-                    // Approve only the sanitized replacement. The unchanged
-                    // input may inherit executors/config from shell startup.
-                    let output = match kind {
-                        CliKind::Codex => codex::pty::pre_tool_rewrite(updated),
-                        CliKind::Claude => claude::pty::permission_decision(true, Some(updated), vec![]),
-                    };
-                    return HookReply { output: Some(output), refused: None };
+                match store::settings::load().agents.read_only_commands
+                    .then(|| crate::harness::read_only::approved(&tool_name, &input, cwd)).flatten() {
+                    Some(approved) => (None, Some(approved)),
+                    None => (key, None),
                 }
-                key
-            } else { None }
+            } else { (None, None) }
         };
+        if let Some(approved) = discovery {
+            // TerminalX runs the vetted programs itself, outside this tab's
+            // lock, and answers with their result. The provider's shell has
+            // loaded the user's startup files, so it runs nothing (PRO-330).
+            let approved = if verified_cwd.is_some() { approved } else { approved.directory_was_reported() };
+            let report = approved.run().report();
+            let output = match kind {
+                CliKind::Codex => codex::pty::pre_tool_ran(&report),
+                CliKind::Claude => claude::pty::permission_ran(&report),
+            };
+            return HookReply { output: Some(output), refused: None };
+        }
 
         let (tx, rx) = std::sync::mpsc::channel::<Decision>();
         {

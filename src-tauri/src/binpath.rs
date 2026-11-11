@@ -136,6 +136,23 @@ pub fn resolve(name: &str) -> Option<PathBuf> {
     resolve_at(name, Instant::now())
 }
 
+/// Like [`resolve`], but never asks a shell: only a cached hit or the
+/// directories of [`login_path`], which is read once per process. For a
+/// program TerminalX runs on a command's behalf, whose lookup must not run
+/// the user's startup files (PRO-330). A name a shell alone knows is None.
+#[cfg(unix)]
+pub fn find(name: &str) -> Option<PathBuf> {
+    if let Some(Lookup::Found(path)) = cache().lock().unwrap().get(name).cloned() {
+        return Some(path);
+    }
+    scan(name)
+}
+
+#[cfg(windows)]
+pub fn find(name: &str) -> Option<PathBuf> {
+    resolve(name)
+}
+
 fn resolve_at(name: &str, now: Instant) -> Option<PathBuf> {
     let cached = cache().lock().unwrap().get(name).cloned();
     let found = match cached {
