@@ -26,6 +26,8 @@ run what you change.
   the resolved CLI's help before fresh or resumed launches. Older CLIs such
   as 0.152.0 and 0.153.4 need upgrading; TerminalX reports this before starting
   an agent instead of falling back to a shared daemon with another tab's identity.
+- **zsh** and **ripgrep** are required for the full Rust security fixtures.
+  Linux CI installs both; install them locally too before running that suite.
 - macOS on Apple silicon and Linux are checked in CI. Apple native helpers
   and WebKit layout checks run on macOS; Windows CI remains disabled.
 

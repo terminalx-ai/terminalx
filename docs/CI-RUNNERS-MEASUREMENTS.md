@@ -100,7 +100,7 @@ of this one PR establishes the intended ten-run comparison.
   all-target Clippy with warnings denied.
 - Passed in TerminalX Local VM (Linux ARM64): frontend build and full-default-
   feature, all-target Clippy with warnings denied.
-- Passed: actionlint 1.7.12; all 20 CI helper/policy tests, including rejection
+- Passed: actionlint 1.7.12; all 21 CI helper/policy tests, including rejection
   fixtures for mutable actions, unguarded runners, write tokens, privileged
   triggers, cross-scope cache fallbacks and missing aggregate dependencies.
 - The first merged Linux run exposed four security-test failures: an empty

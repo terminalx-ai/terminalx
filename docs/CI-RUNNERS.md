@@ -63,7 +63,9 @@ information and return success before `env` could run the directory guard or
 command. The wrapper now unsets that flag with a shell builtin inside a subshell
 before launching any executable, and fails closed if it is readonly. Existing
 security assertions remain, plus a regression covering empty/set/readonly flags
-and execution in a different directory. The [glibc implementation treats the
+and execution in a different directory across sh, bash and zsh. CI explicitly
+installs/requires ripgrep and zsh so executable security fixtures cannot take
+their missing-tool fallback. The [glibc implementation treats the
 flag as enabled by presence](https://sourceware.org/pipermail/glibc-cvs/2022q1/076642.html).
 No test is suppressed to accommodate this behavior.
 
@@ -210,7 +212,7 @@ separate change. Do not treat this checklist as a deployed or certified setup.
 5. Build a clean versioned image with Rust/Clippy from `rust-toolchain.toml`, Node
    from `.nvmrc`, pnpm from `package.json`, Git supporting
    `merge-tree --write-tree --merge-base`, and `ci.yml`'s GTK/WebKit/audio/compiler
-   packages and zsh. Prepare an unprivileged runner user and writable tool cache
+   packages, zsh and ripgrep. Prepare an unprivileged runner user and writable tool cache
    local to this VM only. Bootstrap as root before accepting jobs; run jobs as
    that user with no sudo, capabilities, cloud identity or host sockets. The
    image has no registration, checkout, caches, tokens or SSH keys. Never create

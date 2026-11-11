@@ -121,7 +121,7 @@ jobs:
           persist-credentials: false
       - name: Install Linux build dependencies
         if: runner.environment == 'github-hosted'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -129,7 +129,7 @@ jobs:
       - name: Install npm dependencies and build the frontend
         run: pnpm install --frozen-lockfile && pnpm build
       - name: Show the Rust toolchain
-        run: rustup show && cargo --version && cargo clippy --version
+        run: rustup show && cargo --version && cargo clippy --version && command -v rg zsh
       - name: Restore the cargo cache
         id: cargo-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -213,7 +213,7 @@ jobs:
 
       # rust-toolchain.toml decides the channel and pulls in clippy.
       - name: Show the Rust toolchain
-        run: rustup show && cargo --version && cargo clippy --version
+        run: rustup show && cargo --version && cargo clippy --version && command -v rg zsh
 
       - name: Restore the cargo cache
         id: cargo-cache

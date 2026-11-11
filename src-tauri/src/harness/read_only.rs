@@ -206,8 +206,9 @@ fn approved_input_in(
     // directory guard or command. Unset it with a shell builtin before any
     // executable loads, in a subshell so the caller's environment is retained.
     // A readonly flag must stop execution rather than masquerade as success.
-    let mut wrapper =
-        String::from("('command' 'unset' 'LD_TRACE_LOADED_OBJECTS' || exit 125; ");
+    // Invoke unset directly: zsh's `command` modifier searches external tools,
+    // whereas bash/sh also allow builtins through it.
+    let mut wrapper = String::from("('unset' 'LD_TRACE_LOADED_OBJECTS' || exit 125; ");
     for key in [
         "LD_PRELOAD",
         "LD_AUDIT",

@@ -62,7 +62,10 @@ def validate(workflow):
     assert any(s.get("run") == "cargo clippy --locked --all-targets -- -D warnings" for s in rust), "Linux Clippy"
     install = next(s for s in rust if s.get("name") == "Install Linux build dependencies")
     assert install["if"] == "runner.environment == 'github-hosted'", "sudo on the private pool"
+    assert "ripgrep" in install["run"] and "zsh" in install["run"], "security fixture dependencies"
     native = jobs["macos-native"]
+    for steps in [rust, native["steps"]]:
+        assert any("command -v rg zsh" in s.get("run", "") for s in steps), "security fixtures must not skip missing tools"
     assert native["needs"] == "macos-rust-changes", "macOS coverage selection dependency"
     assert any(s.get("run") == "cargo test --locked" and s.get("if") == "needs.macos-rust-changes.outputs.required == 'true'" for s in native["steps"]), "macOS full suite"
 
@@ -103,6 +106,12 @@ class WorkflowSecurity(unittest.TestCase):
 
     def test_missing_gate_dependency_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["check"]["needs"].remove("linux-rust"))
+
+    def test_missing_security_fixture_dependency_is_rejected(self):
+        def change(w):
+            install = next(s for s in w["jobs"]["linux-rust"]["steps"] if s.get("name") == "Install Linux build dependencies")
+            install["run"] = install["run"].replace(" ripgrep", "")
+        self.rejects(change)
 
 
 if __name__ == "__main__":
