@@ -474,6 +474,9 @@ export function SessionView({
     browserIds: browserPages.map((page) => page.id),
     reviewIds: local ? ed.editors.filter((e) => e.sessionId === session.id && isReviewEditor(e)).map((e) => e.id) : [],
   });
+  // The asked-for tab is restored across reloads, before its shell or page has loaded. Until it is the
+  // tab shown, the fallback on screen is no request: following it would rewrite the panes' saved tabs.
+  const selectionShown = !!terminals.selected[session.id] && !!requested && selected?.kind === requested.kind && selected.id === requested.id;
   const opened = !!kept || (!!session.activeTab && agentIds.includes(session.activeTab));
   shownTab.current = cloud && selected && opened ? { sessionId: session.id, tab: selected } : null;
   // The sidebar marks the row of the tab that is on screen.
@@ -827,7 +830,7 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
-              {!cloud && !compact ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} selectionRequested={!!terminals.selected[session.id]} continuationOpen={!!continuationSource} /> : <>
+              {!cloud && !compact ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
               {session.tabs.map((t) => (
                 <div
                   key={t.id}
