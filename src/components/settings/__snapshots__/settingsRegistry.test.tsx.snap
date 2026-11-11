@@ -160,6 +160,8 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "shortcuts.session.tab7",
   "shortcuts.session.tab8",
   "shortcuts.session.lastTab",
+  "shortcuts.session.focusOtherPane",
+  "shortcuts.session.moveTabToOtherPane",
   "shortcuts.session.moveTabLeft",
   "shortcuts.session.moveTabRight",
   "shortcuts.session.reopenTab",

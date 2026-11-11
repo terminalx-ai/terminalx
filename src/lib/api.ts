@@ -286,6 +286,12 @@ export interface PaneAgent {
  * session a tab belongs to. A tab is named `agent:<tab id>`,
  * `terminal:<pane id>` or `browser:<page id>` (`tabKey` in `@/lib/tabLayouts`).
  */
+export interface TabPane {
+  id: "left" | "right";
+  tabs: string[];
+  active: string | null;
+}
+
 export interface TabLayout {
   /** The tabs in the order the reader put them in; a tab not listed comes after these, oldest first. */
   order: string[];
@@ -295,6 +301,10 @@ export interface TabLayout {
   muted: string[];
   /** The reader's own title for a tab. */
   titles: Record<string, string>;
+  /** Optional for layouts saved before split panes. Preserved by the backend's extension fields. */
+  panes?: TabPane[];
+  focusedPane?: TabPane["id"];
+  splitRatio?: number;
 }
 
 /** An agent tab the reader closed, kept with its conversation so it can be reopened. */

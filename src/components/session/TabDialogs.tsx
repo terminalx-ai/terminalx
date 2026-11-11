@@ -5,7 +5,7 @@ import { errorMessage, pty } from "@/lib/api";
 import { closeAgentHandoff, closeCloseTabs, closeRenameTab, useDialogs, type TabRequest } from "@/lib/dialogs";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { useSessionStore } from "@/lib/sessions";
-import { hasOwnTitle, isShellPeer, peerLabel, peerPaneId, peerShell, useTabRow, type PeerTab } from "@/lib/sessionTabs";
+import { paneRow, hasOwnTitle, isShellPeer, peerLabel, peerPaneId, peerShell, useTabRow, type PeerTab } from "@/lib/sessionTabs";
 import { BULK_CLOSE_LABEL, busyTabs, closeTabs, planBulkClose, renamePeer, type BulkClose } from "@/lib/tabActions";
 import { useVisibleSessionTab } from "@/lib/visibleTab";
 import type { SessionEntry } from "@/types/session";
@@ -107,7 +107,7 @@ function RenameTabDialog({ session, request, onClose }: { session: SessionEntry;
  * open unless the reader includes them.
  */
 function CloseTabsDialog({ session, request, onClose }: { session: SessionEntry; request: TabRequest & { action: BulkClose }; onClose: () => void }) {
-  const row = useTabRow(session);
+  const row = paneRow(useTabRow(session), request.tab);
   const harnessName = useHarnessName();
   const selected = useVisibleSessionTab(session.id);
   const [withPinned, setWithPinned] = useState(false);

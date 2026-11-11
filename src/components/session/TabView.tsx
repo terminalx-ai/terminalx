@@ -105,6 +105,7 @@ export function TabView({
   session,
   tab,
   active,
+  focused = active,
   continuationOpen = false,
   backend: given,
   gitSource,
@@ -113,6 +114,8 @@ export function TabView({
   session: SessionEntry;
   tab: TabEntry;
   active: boolean;
+  /** Both split panes are active; only the focused one owns keyboard shortcuts. */
+  focused?: boolean;
   continuationOpen?: boolean;
   /** Where the tab runs; the local Tauri commands when absent. */
   backend?: SessionBackend;
@@ -538,11 +541,11 @@ export function TabView({
   // The chat's Escape is the agent's Escape. In the terminal view (local or cloud) the action is not bound at all:
   // there the key is typed into the agent's own screen, like every other key.
   useShortcut("session.interrupt", () => (takesKey() ? (actions.pressedWith("shortcut"), interrupt(), true) : false), {
-    enabled: active && !continuationOpen && !terminalMode && interrupts,
+    enabled: focused && active && !continuationOpen && !terminalMode && interrupts,
   });
   // The hard stop has no keys unless the reader gives it some. A cloud tab's terminal view passes those through too.
   useShortcut("session.stop", () => (takesKey() ? (actions.pressedWith("shortcut"), stop("chat"), true) : false), {
-    enabled: active && !continuationOpen && !(remoteTerminal && terminalMode),
+    enabled: focused && active && !continuationOpen && !(remoteTerminal && terminalMode),
   });
 
   const answerPermission = useCallback(
@@ -771,7 +774,7 @@ export function TabView({
           settingsNoteWarning={settingsNotice === "ignored"}
           canStop={!gate || gate.mayStop}
           disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? backend.readOnlyReason}
-          autoFocus={active}
+          autoFocus={active && focused}
         />
         </>
         )
@@ -807,6 +810,7 @@ export function TabView({
         <TerminalView
           id={paneId}
           visible={active && terminalMode}
+          focused={focused}
           pinned={terminalTab && !!held && !pane?.exited}
           actions={
             <>
