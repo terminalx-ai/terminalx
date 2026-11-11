@@ -20,6 +20,17 @@
   Settings → Experimental → Orchestration runs; the limits are in Settings →
   Orchestrator and per repository. (PRO-274)
 
+- Experimental: with Orchestration runs on, a lead's workers sit under it in the
+  sidebar, whatever worktree they run in, each named by its piece with its
+  model's tier and its piece's state mark. Fold a lead and its row keeps what
+  matters: pieces done out of total, how many workers are running, a Needs
+  approval or Needs you mark with how many wait on you, and a worker's unread
+  mark. Hover it for the pieces that are not done. Clicking a lead opens its
+  run. The Run view now shows what each worker has cost, the run's spend against
+  its dollar budget, and a Needs you list for a blocked piece, a worker waiting
+  on an answer or spend past the budget, each opening the worker it is about.
+  Sessions that no other session started look as before. (PRO-281)
+
 - Each release also uploads its notarized DMG as `TerminalX-latest-aarch64.dmg`
   and lists it in `SHA256SUMS`, so
   [one link](https://github.com/terminalx-ai/terminalx/releases/latest/download/TerminalX-latest-aarch64.dmg)
