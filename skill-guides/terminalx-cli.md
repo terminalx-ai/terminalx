@@ -72,13 +72,16 @@ User-facing webview choices are under `preferences`, for example:
     "requireApproval": true,
     "pieceLimit": 8,
     "workerMode": "bypassPermissions",
+    "reviewDiffLines": 400,
     "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12 } }
   }
 }
 ```
 
 `orchestrator` holds the limits of orchestration runs: whether a run waits for approval, the
-most pieces a plan may have (1 to 50), and the permission mode workers start in. A project
+most pieces a plan may have (1 to 50), the permission mode workers start in, and over how
+many changed lines a result is read by a verifier though its commands pass
+(`reviewDiffLines`, 1 to 100000). A project
 may answer for itself under `projects`, by its path; a setting it leaves out follows the
 app-wide value. These are the person's to change, in Settings → Orchestrator: do not edit
 them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that

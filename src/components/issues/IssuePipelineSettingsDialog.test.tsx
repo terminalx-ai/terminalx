@@ -22,6 +22,7 @@ vi.mock("@/lib/sessions", () => ({ updateProject }));
 
 const { CloudIssuePipelineSettingsDialog, IssuePipelineSettingsDialog } = await import("./IssuePipelineSettingsDialog");
 const { getPrefs, setPrefs } = await import("@/lib/prefs");
+const { noteExperimental } = await import("@/lib/experimental");
 
 // As the app fills in a project that set nothing: no choice made for the launch switches.
 const defaults: IssuePipelineSettings = {
@@ -94,6 +95,9 @@ describe("a project's issue pipeline settings", () => {
 
   it("puts the reviewer on the project's own model and effort, and back on the author's", async () => {
     const view = render(<IssuePipelineSettingsDialog project={project()} open onOpenChange={() => {}} />);
+    // Part of the orchestrator work: not shown until its switch in Settings → Experimental is on.
+    expect(screen.queryByRole("combobox", { name: "Reviewer model" })).toBeNull();
+    act(() => noteExperimental({ orchestratorRuns: true }));
     const model = () => screen.getByRole("combobox", { name: "Reviewer model" }) as HTMLSelectElement;
     const effort = () => screen.getByRole("combobox", { name: "Reviewer effort" }) as HTMLSelectElement;
     // Left alone: the reviewer copies the author, and nothing is stored.

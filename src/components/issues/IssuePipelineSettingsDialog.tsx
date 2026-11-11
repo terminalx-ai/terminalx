@@ -3,6 +3,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
 import { cloudPipelineSettings, pipelineSettings, switchChoiceOf, switchDefaultOf, type SwitchDefault } from "@/lib/issuePipeline";
+import { useExperimental } from "@/lib/experimental";
 import { EFFORT_LABEL, useModels } from "@/lib/models";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { updateProject } from "@/lib/sessions";
@@ -77,6 +78,7 @@ function lines(text: string, alsoCommas: boolean): string[] {
  * the rest of the project menu.
  */
 export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { project: Project; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const reviewerChoice = useExperimental().orchestratorRuns;
   const stored = pipelineSettings(project);
   // What was last asked for, until the project says the same. Two changes
   // made before the first is saved build on each other rather than on what
@@ -196,12 +198,15 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
               />
             }
           />
-          <SettingRow
-            disabled={off}
-            label="Reviewer runs on"
-            description="The model and effort of the Reviewer tab. Left alone it copies the author's. A model of another agent than the author's is not used: the author's stands."
-            control={<ReviewerChoice settings={settings} disabled={off} save={save} />}
-          />
+          {/* Part of the orchestrator work: shown with its switch in Settings → Experimental. */}
+          {reviewerChoice && (
+            <SettingRow
+              disabled={off}
+              label="Reviewer runs on"
+              description="The model and effort of the Reviewer tab. Left alone it copies the author's. A model of another agent than the author's is not used: the author's stands."
+              control={<ReviewerChoice settings={settings} disabled={off} save={save} />}
+            />
+          )}
           <SettingRow
             disabled={off}
             label="Merge method"
