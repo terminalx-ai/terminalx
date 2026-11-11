@@ -1,4 +1,8 @@
+import { bootSelfUi } from "@/lib/selfUi";
+import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
+import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
 import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
 import { PanelLeft, PanelRight } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -52,6 +56,7 @@ import { useRuntimeSwitch } from "@/lib/localRuntime";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { bootIssuePipelines } from "@/lib/issuePipeline";
+import { PanelPresence } from "./PanelPresence";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
@@ -69,6 +74,7 @@ import { openLocalProject } from "@/lib/projectStart";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { REPO_URL, repoFile } from "@/lib/repo";
 import { stepVisibleSession } from "@/lib/sessionNavigation";
+import { ImageViewerHost } from "@/components/ui/ImageViewer";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
@@ -118,6 +124,7 @@ export function AppShell() {
     startIdleArchive();
     void bootAutomations();
     void bootIssuePipelines();
+    void bootSelfUi();
     void loadModels();
     startNotifications();
     void bootStatus();
@@ -226,18 +233,26 @@ export function AppShell() {
 
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
-      <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
+      <SelfUiAccess />
+      {/* Merged-workspace notices, top right under the tabs: a stack of them in the bottom corner covered the composer
+          and its send button. Toasts and close-undo notices, which answer what was just done there, stay below. */}
+      <div className="pointer-events-none fixed top-22 right-4 z-(--z-toast) flex max-h-[calc(100dvh-8rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <MergedCleanupNotices />
+      </div>
+      <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <CloseUndoNotices />
         <Toasts />
+        <WorktreeCopyNotices />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
         <CleanupIndicator onOpenStorage={openStorageSettings} />
       </div>
       <BypassDialog />
+      <ImageViewerHost />
       <SessionDialogs />
       <CloudShareDialogHost />
       <CloudSchedulesDialogHost />
       <ShareSessionDialogHost />
+      <SignInLinkDialog />
       <GuestSessionHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />
@@ -262,6 +277,7 @@ export function AppShell() {
           </Suspense>
         ) : (
           <>
+            <PanelPresence side="left" open={sidebarOpen}>
             {sidebarOpen && (
               <Sidebar
                 onToggle={toggleSidebar}
@@ -276,6 +292,7 @@ export function AppShell() {
                 onSearch={() => setPaletteOpen(true)}
               />
             )}
+            </PanelPresence>
 
             {cloudKey ? (
               <main className={MAIN}>
@@ -360,20 +377,20 @@ function UnselectedWorkspace({
 
   const preset = store.newSessionPreset;
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject ?? store.lastProject;
-  const newProject = store.projects.find((project) => project.path === wanted) ?? store.projects[0] ?? null;
+  const newProject = store.projects.find((project) => project.path === wanted) ?? (preset ? null : store.projects[0]) ?? null;
   const issueProject = store.projects.find((project) => project.path === issueProjectPath) ?? null;
-  const project = view === "new" ? (store.newSessionQuick ? null : newProject) : view === "issues" ? issueProject : null;
+  const project = view === "new" ? (store.newSessionChat ? null : newProject) : view === "issues" ? issueProject : null;
   const cwd = view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
   const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
   // A cloud or project-less draft has no local checkout to show.
-  const panelAvailable = !!cwd && !!project && !(view === "new" && (store.cloudSessionPreset || store.newSessionQuick));
+  const panelAvailable = !!cwd && !!project && !(view === "new" && (store.cloudSessionPreset || store.newSessionChat));
   const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
   const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && view === "new" ? "branch" : useWorktree ? "base" : "branch";
   // Home always offers the welcome actions, including after a project has been added.
   // With no local project there is nothing to start a session in: the start screen offers the ways to get one.
   // Not before the projects are read, or over a cloud or project-less draft.
-  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(view === "new" && store.newSessionQuick));
+  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(view === "new" && store.newSessionChat));
 
   return (
     <>
@@ -448,6 +465,7 @@ function UnselectedWorkspace({
           {checkoutEditorId && hasCheckoutEditors ? <EditorSplit sessionId={checkoutEditorId} active /> : null}
         </section>
       </main>
+      <PanelPresence side="right" open={!!(prefs.panelOpen && panelAvailable && cwd && project)}>
       {prefs.panelOpen && panelAvailable && cwd && project && (
         <RightPanel
           key={cwd}
@@ -460,6 +478,7 @@ function UnselectedWorkspace({
           workspace={workspace?.managed && !workspace.isMain ? { projectPath: project.path, name: workspace.name } : undefined}
         />
       )}
+      </PanelPresence>
       {underDialog && <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />}
     </>
   );

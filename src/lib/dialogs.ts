@@ -12,6 +12,8 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  * Permanent deletion is chosen separately in the dialog.
  */
 export interface WorkspaceRemoveRequest {
+  archiveFailure?: import("@terminalx/portable/workspace").ArchiveFailure;
+  archiveNotice?: string;
   projectPath: string;
   path: string;
   name: string;

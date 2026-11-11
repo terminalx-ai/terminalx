@@ -74,6 +74,10 @@ function backend(command: string, args: Record<string, unknown> = {}): unknown {
       session().title = args.title as string;
       emit("session_updated", structuredClone(session()));
       return null;
+    case "set_session_status":
+      session().manualStatus = args.status as SessionEntry["manualStatus"];
+      emit("session_updated", structuredClone(session()));
+      return null;
     case "set_session_pinned":
       session().pinned = args.pinned as boolean;
       emit("session_updated", structuredClone(session()));
@@ -126,7 +130,7 @@ async function openWindow(label: "main" | "floating") {
   await sessions.bootSessions();
   await agentEvents.subscribeAgentEvents();
   await terminal.subscribeTerminals();
-  return { sessions, terminal, agentEvents };
+  return { sessions, terminal, agentEvents, api: (await import("./api")).api };
 }
 
 const titles = (win: Awaited<ReturnType<typeof openWindow>>) => win.sessions.getSessionStore().sessions.map((session) => session.title);
@@ -146,6 +150,15 @@ beforeEach(() => {
 });
 
 describe("one session, two windows", () => {
+  it("removes a closed chat window's sidebar preferences when the main window hears its destruction", async () => {
+    await openWindow("main");
+    localStorage.setItem("raccoon.prefs.sidebar.chat-test", "{}");
+    localStorage.setItem("raccoon.prefs.sidebar.main", "{}");
+    emit("chat_window_closed", "chat-test");
+    expect(localStorage.getItem("raccoon.prefs.sidebar.chat-test")).toBeNull();
+    expect(localStorage.getItem("raccoon.prefs.sidebar.main")).toBe("{}");
+  });
+
   it("shows a session renamed or pinned in one window the same way in the other", async () => {
     const main = await openWindow("main");
     const floating = await openWindow("floating");
@@ -158,6 +171,10 @@ describe("one session, two windows", () => {
 
     await main.sessions.pinSession("chat-0", true);
     expect(floating.sessions.getSessionStore().sessions[0].pinned).toBe(true);
+    await floating.api.setSessionStatus("chat-0", "in_review");
+    expect(main.sessions.getSessionStore().sessions[0].manualStatus).toBe("in_review");
+    expect(floating.sessions.getSessionStore().sessions[0].manualStatus).toBe("in_review");
+    expect(main.sessions.getSessionStore().sessions[0].tabs[0].status).toBe("idle");
   });
 
   it("lists a quick chat started in the floating window in the main window at once, and forgets it in both when either deletes it", async () => {

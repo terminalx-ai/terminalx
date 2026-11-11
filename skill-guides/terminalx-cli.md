@@ -43,6 +43,52 @@ selectors accept an attached project's exact path, exact name, or an unambiguous
 
 When automation passes ids between commands, copy the full ids from JSON output.
 
+## User settings
+
+The user file is `~/.raccoon/settings.json`, or `$TERMINALX_HOME/settings.json`
+when that home is set (`RACCOON_HOME` is the legacy fallback). Settings → General
+shows the actual location and offers **Create settings file** when it is absent.
+Keep the file private: it can contain a Linear API key. Do not print or copy the
+whole file into a conversation.
+
+The current precedence is user file → app defaults. A missing key inherits its
+default; removing a key resets it. Repository and organization layers are not
+available yet. The layered resolver and schema follow-up will supply the schema
+and source badges once those features land.
+
+User-facing webview choices are under `preferences`, for example:
+
+```json
+{
+  "preferences": {
+    "sounds": false,
+    "fontScale": "lg",
+    "theme": "slate",
+    "mode": "system"
+  },
+  "agents": { "idleStopMinutes": 60 },
+  "experimental": { "nativeCodex": false }
+}
+```
+
+The first window migrates existing localStorage preferences once, without
+overwriting choices already in the file. Navigation state and pane sizes stay
+local to the webview. Leave `preferencesMigrated` alone.
+
+Edits reload automatically, including editor saves that replace the file.
+Unknown keys and `$schema` are allowed and preserved when Settings saves.
+An invalid type or option produces one error with its key and line in Settings.
+Every valid field still applies, including on a cold start. Only invalid fields
+use their previous value (or their default if none was loaded). Settings refuses
+to overwrite a file containing invalid entries; fix those entries in the editor
+before saving through the UI. Malformed JSON retains the running process's
+previous settings; a process with no readable object uses defaults.
+
+Deleting the file resets all settings to defaults, including clearing the Linear
+credential. Migration removes the old localStorage copies: downgrading to a
+build without settings-file preferences will use that build's defaults for
+those choices. The migrated values remain in `settings.json`.
+
 ## Commands
 
 ### App and discovery
@@ -52,6 +98,7 @@ terminalx status --json
 terminalx projects list --json
 terminalx sessions list [--project <project> | --quick] [--archived] --json
 terminalx sessions list --worktree <path-or-name> [--project <project>] --json
+terminalx sessions list --children-of <session> --json
 terminalx sessions show <session> --json
 terminalx tabs list <session> --json
 ```
@@ -64,6 +111,44 @@ only the archived ones, as the sidebar's Show archived does; it combines with `-
 `--quick`. Each entry carries `archived`, and `autoArchived` when the app archived it for
 sitting idle. `sessions show` and every other session command take an archived session's id
 as they take any other.
+
+### Sessions a session started (`parent`)
+
+```text
+terminalx sessions list --children-of <session> --json
+terminalx sessions stop --children-of <session> --json
+```
+
+A session started with `sessions create` from inside another session records that session as
+its `parent`: `{"sessionId": …, "tabId": …}`, the session and the tab the command ran in.
+`sessions create` returns it as `parent`, and `sessions list` and `sessions show` carry it on
+the entry. A session nobody else started has no `parent` field. The field is a record of who
+started whom and nothing more: it gives the parent no hold over the session and changes no
+permission. Archiving or deleting the parent leaves the sessions it started, and their
+`parent`, exactly as they are, so a `parent` may name a session that no longer exists.
+
+`sessions list --children-of <session>` returns exactly the sessions that session started
+(its workers), in every project and worktree, quick chats and archived ones included; for
+that reason it does not combine with `--project`, `--worktree`, `--quick`, `--archived` or
+`--cloud`. Only direct children are listed: a worker's own workers are listed under the
+worker. The result has:
+
+- `parent`: the lead's `sessionId` and `title`, and `exists` (`false` once it was deleted;
+  name a deleted lead by its full id).
+- `workers`: one row per session, with `sessionId`, `title`, `kind`, `tabId`, `agent`,
+  `status`, `model`, `effort`, `running`, `worktree` (its name; `null` on the project's own
+  checkout), `path`, `branch`, `archived`, `created` and `parent`. `status`, `model` and
+  `effort` are those of the session's own agent; `running` says whether any of its agents has
+  a live process.
+- `sessions`: the same sessions as full entries.
+
+`sessions stop --children-of <session>` stops every running agent of those sessions, as Stop
+in the app does: the agent's process ends, the conversation stays, and its next prompt
+resumes it. Nothing is deleted or archived, the lead itself is not stopped, and a terminal or
+an agent a person started by hand in one is left running. The result lists `stopped` (each
+with `sessionId`, `tabId`, `title`), `failed` (the same with an `error`; the rest are still
+stopped) and `workers`, the number of sessions it looked at. Stop only the workers of a lead
+you are, or were asked to manage.
 
 ### Archive sessions
 
@@ -86,6 +171,21 @@ pull request is open. A new message to an archived session brings it back; so do
 `unarchive`. Archive only what the person asked to tidy; do not archive a session you are
 working in, or another agent's.
 
+### Set a session’s manual status
+
+```text
+terminalx sessions status <session> --status backlog|in_progress|in_review|done|canceled --json
+```
+
+This sets the session’s workflow status, independent of its agent’s activity. Unset or
+unrecognized stored values display in Backlog. The change is stored in the session index and reaches
+all windows and paired phones. Sessions sharing a branch keep their own statuses.
+Done and Canceled do not archive the session or stop its agent. The result includes
+`session.manualStatus`; `sessions list` and `sessions show` include it when set.
+Manual status does not exempt a session from idle archiving or reset its last-message
+clock. In progress and In review sessions still follow the configured idle limit;
+Show archived brings archived sessions back into view.
+
 ### Start a session
 
 Keep work in the current conversation by default. Create another session only when the
@@ -105,6 +205,7 @@ terminalx sessions create \
   --prompt <text> \
   [--title <text>] [--name <name>] \
   [--worktree | --on-main] \
+  [--parent <session> | --no-parent] \
   [--model <id>] [--effort <level>] [--mode <mode>] \
   --json
 ```
@@ -133,9 +234,17 @@ terminalx sessions create --project <project> --agent codex --prompt "Fix the ti
 terminalx sessions rename <session> --title "#203 ready for review" --json
 ```
 
-Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`, `branch`, and
-`path`, alongside the full `session` and prompt delivery `outcome`. Renaming a session changes
-its title without changing its worktree name.
+Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`, `branch`,
+`path`, and `parent`, alongside the full `session` and prompt delivery `outcome`. Renaming a
+session changes its title without changing its worktree name.
+
+`parent` is the session that started this one (see "Sessions a session started" above). Run
+from inside a TerminalX session, `sessions create` records that session and tab without being
+told; run from any other shell it records none, and `parent` is `null`. `--parent <session>`
+records the named session instead, whoever runs the command; one that matches no session
+fails with `parent_not_found` before anything is created. `--no-parent` records none. The two
+flags are mutually exclusive, and both also apply to `--quick` and `--issue` sessions. A cloud
+session records no parent: `--parent` is refused there.
 
 ### Experimental Codex connection (new local sessions only)
 
@@ -188,6 +297,7 @@ terminalx sessions create --quick \
   --agent <claude|codex> \
   --prompt <text> \
   [--title <text>] [--cwd <directory>] \
+  [--parent <session> | --no-parent] \
   [--model <id>] [--effort <level>] [--mode <mode>] \
   --json
 ```
@@ -264,6 +374,158 @@ still reports that `recovery`.
 
 The safe polling loop is: capture the largest `seq` from `read`, `wait`, then `read --since`
 that sequence. Do not scrape terminal escape sequences.
+
+#### Wait on several sessions
+
+```text
+terminalx wait <session-or-tab>... [--any|--all] [--timeout <seconds>] --json
+```
+
+With several targets, one call waits on all of them. `--any`, the default, returns as soon as
+one target stops, asks for a decision or fails. `--all` returns when every target has. Either
+returns at the timeout. The result lists every target, in the order given:
+
+```json
+{"mode": "any", "timedOut": false, "targets": [
+  {"target": "s1", "sessionId": "…", "tabId": "…", "state": "stopped", "reason": "stop", "status": "completed", "changed": true},
+  {"target": "s2", "sessionId": "…", "tabId": "…", "state": "running", "status": "in_progress", "changed": false}
+]}
+```
+
+- `state` is `running`, `stopped`, `needsPermission`, `failed` or `timedOut`. `timedOut` is a
+  target still running when the timeout passed; top-level `timedOut` says whether it did.
+- `reason` is the single-target reason behind a settled state: `stop` or `stopped` for
+  `stopped`, `permission` or `terminal` for `needsPermission`, `recovery` for `failed` (with
+  `recovery` naming the error). It is absent for `running` and `timedOut`.
+- `changed` is true when the target's state differs from when the call began. Read those
+  targets; the others are as you last saw them.
+
+A target that has already settled when the call begins is reported at once and is not waited
+on, so nothing that ended between two calls is missed. To loop on `--any`, handle the targets
+it reports as settled, then leave them out of the next call (or send them more work first):
+a call that still names one returns at once. `--all` returns only while every target is
+settled, so a target waiting on a decision holds it until the timeout unless someone answers;
+use `--any` to react to requests.
+
+One target with neither flag gives the single-target result above. Pass `--any` or `--all`
+with one target to get the list. A target that names no session fails the call before any
+waiting. Several targets are local sessions or tabs: wait on a cloud session by itself.
+
+#### Wait on all of a lead's workers
+
+```text
+terminalx wait --children-of <session> [--any|--all] [--timeout <seconds>] --json
+```
+
+Waits on every session that session started, the ones `sessions list --children-of` shows,
+archived workers and quick chats included. The result is the one above, with the workers as
+its targets. The workers are found once, when the call begins: a session the lead starts
+after that is not waited on, so make the call again to include it.
+
+`--children-of` cannot be combined with named targets, an empty value or a cloud session
+(each is refused as on `sessions list`). A lead with no workers returns at once with
+`"targets": []`, `"timedOut": false` and a `reason` saying there was nothing to wait for;
+the exit code is 0.
+### Worker reports
+
+When you start a session to do part of your work (a worker), ask it for a report and read
+that instead of its whole transcript:
+
+```text
+terminalx sessions create --project <project> --agent <agent> --prompt <text> --report --json
+terminalx sessions create --quick --agent <agent> --prompt <text> --report --json
+terminalx wait <session-or-tab> --json
+terminalx sessions report <session-or-tab> --json
+```
+
+`--report` adds the report instructions to the worker's prompt and holds it to them: a worker
+whose turn ends without a readable report is asked for it once more, and after that its report
+stays `missing`. A worker never gets an issue pipeline of its own, so `--report` cannot be
+combined with `--issue`, `--auto-merge` or `--resolve-conflicts`, and it is not available for
+cloud sessions. It needs an agent that runs in its own terminal, `claude` or `codex`: such a
+Codex worker stays on the terminal connection whatever Native Codex is set to, and
+`--experimental-codex-stdio` and other agents are refused, because they could not be reminded.
+Creation returns `"report": true`, and a `reportNote` that is null unless the worker was briefed
+but could not be recorded as owing a report (it is then not reminded).
+
+To read every worker's report at once, name the session that started them:
+
+```text
+terminalx sessions report --children-of <session> --json
+```
+
+It returns `parent` (the lead, as `sessions list --children-of` gives it) and `reports`, one
+row for each session that session started: the same sessions `sessions list --children-of`
+lists, in any project or worktree, quick chats and archived ones included. Each row is what
+`sessions report <session>` returns, described below, plus the session's `title`. A row is
+read from the worker's own agent, the first tab it was given, which is the `tabId` of its
+`workers` row and the tab `--report` holds to a report; to read another tab, name that tab.
+A lead that started nothing gets `"reports": []` and exit code 0. A worker with no agent tab
+is `missing` with reason `noAgent`, and one whose transcript cannot be read is `missing`
+with reason `unreadable`; neither hides the other rows. `--children-of` takes a session on
+this computer and no other target: an empty value and a cloud session are refused.
+
+The worker ends its final reply with a `terminalx-report` block, JSON in a fenced code block:
+
+````text
+```terminalx-report
+{
+  "status": "done",
+  "result": "Two or three sentences on what you did or found.",
+  "evidence": ["cargo test auth: exit 0", "src/auth.rs:42"],
+  "changed": {"files": ["src/auth.rs"], "branch": "fix-login", "commit": "abc1234"},
+  "notDone": [],
+  "couldNotRead": [],
+  "uncertain": []
+}
+```
+````
+
+- `status`: `done`, `partial`, `blocked` or `failed`. Nothing else is accepted.
+- `result`: two or three sentences.
+- `evidence`: commands run with their exit codes, or `file:line` for a claim.
+- `changed`: `files`, `branch` and `commit`, or null when nothing changed.
+- `notDone`: what was skipped, and why.
+- `couldNotRead`: sources the worker tried to read and could not. A failed read is listed
+  here; it is never the same as "nothing found".
+- `uncertain`: claims made without direct evidence.
+
+`status` and `result` are required. A list that is left out is empty. If you write a worker's
+prompt yourself and send it without `--report`, include the block above in it; `sessions
+report` reads any session's last reply, but only a session started with `--report` is reminded.
+
+`sessions report` reads the tab's last turn (a session's active tab, like `read` and `wait`)
+and returns `sessionId`, `tabId` and one of two shapes:
+
+- A report: the seven fields, plus `seq` (the transcript sequence number of the reply that
+  holds the block) and `at` (when the turn ended).
+  - `noEvidence: true` is added when `status` is `done` and `evidence` is empty. Treat such a
+    result as a claim: check it before you rely on it.
+  - A block over 8,000 characters is cut to that much text, and `truncated` says so:
+    `limit`, `chars` (the full size), `seq`, and `cut` (the fields that lost text; `evidence`
+    gives way first). The whole block is in the transcript: `terminalx read <tab> --since <seq - 1>`
+    returns the event that holds it first.
+- Either shape may carry `laterTurn: {"seq": N}`: after the turn this was read from, the
+  agent started a turn of its own (a background task reporting in, a scheduled check) that
+  ended without a report. The report stands; read what it said from `seq` if it matters. A
+  turn of its own that ends with a report block is read as the newer report instead.
+- `"status": "missing"`: there is no readable report. `reason` says why, `detail` says it in
+  a sentence, `tail` is the last 2,000 characters of the reply, and `reminded` is true once
+  the worker has been asked again and still sent none. A status is never guessed from prose.
+  - `noBlock`: the reply has no report block. `malformed`: the block is not JSON, has no
+    valid `status` or `result`, or has a field of the wrong shape.
+  - `reminderPending: true` is added for a `--report` worker whose turn has just ended and
+    whose reminder has not reached it yet. Do not `send` it anything: `wait` again, then ask
+    again. If it is still pending after that, the reminder could not be delivered; treat the
+    report as missing.
+  - `working`: the tab is still in a turn, the reminder's turn included. `wait`, then ask
+    again. `waiting`: its turn has stopped on a permission request, a question or an error;
+    `wait` says which.
+  - `turnAborted`, `turnFailed`: the last turn was interrupted or ended on an error.
+    `noReply`, `noTurn`: it said nothing, or has not finished a turn.
+
+Handle `missing` yourself: read the `tail`, read the transcript, or `send` the worker a
+question. Do not treat it as done, and do not treat it as failed.
 
 ### Permissions
 
@@ -363,18 +625,24 @@ it, or a file, for a comment with quotes, backticks or several lines. `--to`, `-
   `"comments"` added under `--comments`; `comment` answers `{"comment": …}`; every other write
   answers `{"issue": …}`, re-read from GitHub or Linear after the change.
 
-Reading needs no confirmation. **Every write is an outward action**: it changes the issue where
-other people see it and may notify them, so TerminalX shows a pending request in the main
-window, whoever runs the command. The person chooses Review to see the reported session,
+Reading and creating issues need no confirmation. When the person asks to file an issue,
+`issues create --provider github|linear` validates and submits it using the configured provider
+credentials, then returns the created issue, including its identifier and URL. Creation needs
+no app dialog or desktop window, and does not wait for confirmation or its timeout. Provider
+failures are reported without automatically retrying creation; check the provider before
+retrying an uncertain result to avoid duplicates.
+
+Other issue writes show a pending request in the main window, whoever runs the command.
+The person chooses Review to see the reported session,
 project, target, action and complete text in a bounded, scrollable dialog. Background requests
 do not open the dialog or switch conversations. Only the explicit action button approves;
 Cancel request refuses, while Escape leaves it pending. Unanswered requests expire after
 40 seconds. Computer-use actions remain paused while a request is pending. A refusal answers
 `declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
-what you wanted to do instead. A comment, title or description longer than 4000 characters or 40
-lines is refused before anyone is asked; link to the details instead. A project can let comments and
+what you wanted to do instead. The existing limit of 4000 characters or 40 lines for a comment,
+new issue title or description still applies; link to the details instead. A project can let comments and
 status moves on its own GitHub repository's issues go ahead without asking (Issue pipeline… in
-the project menu); assigning, labels, new issues and Linear issues always ask.
+the project menu); assigning, labels and edits to existing Linear issues always ask.
 
 When to use them: read the issue you were started on (`view --comments`) before working on it,
 and when you are done, comment the pull-request link or a short summary on the issue. Move its
@@ -417,12 +685,42 @@ The response carries `pipeline` (or `null`, with the reason in `pipelineNote`, w
 has the pipeline turned off or the session is not on a branch of its own).
 
 ```text
+terminalx pipelines start <existing-session-or-author-tab> [--adopt-pr] \
+  [--auto-merge|--no-auto-merge] [--resolve-conflicts|--no-resolve-conflicts] --json
+terminalx pipelines attach <existing-session-or-author-tab> [--adopt-pr] --json
 terminalx pipelines list [--project <project>] --json
 terminalx pipelines show <pipeline> [--project <project>] --json
 terminalx pipelines auto-merge <pipeline> on|off [--project <project>] --json
 terminalx pipelines resolve-conflicts <pipeline> on|off [--project <project>] --json
 terminalx pipelines stop|resume|advance|review|merge|refresh <pipeline> [--project <project>] --json
 ```
+
+`start` (`attach` is an alias) activates Autopilot in an existing local session. A session
+selector uses its active author tab; use the exact tab id to avoid ambiguity. It preserves the
+session, conversation, checkout and branch. No new author is created. The project must allow
+pipelines and the checkout must be on a non-base branch; experimental stdio tabs are refused.
+With no existing pipeline, launch switches take the project's issue/session defaults unless
+specified. Repeating the command returns the same pipeline and does not resend the author brief
+or change its switches. Use the switch commands below to change an existing pipeline.
+
+Use `--adopt-pr` when the branch already has an open PR. TerminalX verifies the clean checkout
+matches that PR's branch and exact head before attaching it. It never pushes, rewrites history,
+edits the PR body or creates a replacement PR during adoption. The original author yields its
+turn; TerminalX then independently reviews the same PR, with the existing review, security,
+local-check and CI gates. Prior reviews are not imported as a fabricated TerminalX verdict.
+An existing pipeline at Work with no PR can adopt too; one already attached to a PR is returned
+unchanged. Reviewer/resolver tabs cannot take over as author. A stopped pipeline needs `resume`.
+
+Without `--adopt-pr`, a new pipeline sends its handoff brief to the original author once (queued
+when busy). The response includes `pipeline` and `authorBrief`; inspect its state/note if delivery
+fails. An existing open PR is reused later when the author reports completion. After attaching
+from the author tab, finish the turn so review can proceed. These commands need no UI grant and
+never authorize human-only confirmations, review extensions or security overrides.
+
+For explicitly authorized operation of the visible session controls, use
+`terminalx computer self-ui` as documented in `terminalx skills get computer-use`. Its expiring
+grant names one session, tab, main window and control allowlist. Raw self-app screenshots,
+accessibility trees and coordinate/keyboard actions remain protected.
 
 `<pipeline>` is a pipeline id or its unique prefix, the issue (`433`, `ENG-42`; the newest
 pipeline when an issue has several), or the author session's id. When more than one project
@@ -503,7 +801,8 @@ open, `terminalx computer` actions answer `confirmation_pending`: only the perso
 Do not try to work around any of this, and do not answer it for them: ask the person.
 
 What the confirmation is and is not: it stops mistakes, and an agent that only uses this app.
-TerminalX's computer use never operates TerminalX's own windows (`own_app_protected`), and on
+TerminalX's raw computer use protects its own windows (`own_app_protected`). The scoped
+`computer self-ui` route exposes approved session controls only, never confirmations. On
 macOS this version's helper serves only the app itself: an agent that talks to it directly, or
 starts its own copy of it, is refused. It does not stop a hostile program that drives the
 screen by other means: a computer-use helper from an older TerminalX (0.2.8 or earlier), which
@@ -588,7 +887,8 @@ request an explicit complete guide; the embedded guide is complete either way.
 
 The built-in browser is TerminalX's own Chromium, opened as a headed window the reader can see
 and take over, with tabs scoped to TerminalX workspaces. It is not the reader's Chrome or
-Safari and not TerminalX's own app chrome; for those use a desktop-control tool, not these
+Safari or TerminalX's own app chrome. Use desktop computer use for Safari, and scoped
+`computer self-ui` for approved TerminalX session controls, rather than these
 commands. Tabs and cookies persist in a browser profile under `$TERMINALX_HOME/browser`, so a
 login survives across commands and sessions.
 
@@ -707,6 +1007,8 @@ JSON failures have this shape:
   it receives the new launch environment.
 - `not_found`: refresh the relevant list and use an id from the result.
 - `ambiguous_selector`: use the full id or exact project path.
+- `parent_not_found`: `sessions create --parent` named a session the app does not have.
+  Nothing was created; use an id from `sessions list`, or `--no-parent` to record none.
 - `invalid_arguments`: correct the named flag or missing value; do not invent a substitute.
 - `confirmation_required`: inspect the target, then repeat the destructive command with
   `--yes` only when deletion is intended.
@@ -723,9 +1025,9 @@ JSON failures have this shape:
 - `cloud_control_disabled`: the person has not allowed cloud commands from the command line. Tell
   them the setting named in `recovery`; do not retry.
 - `declined`: the person refused the request in the app window. Do not retry.
-- `expired`, `busy`, `backoff`: an issue write was not answered in time, another question was
+- `expired`, `busy`, `backoff`: an edit to an existing issue was not answered in time, another question was
   already on screen, or the person refused one a moment ago. Nothing was changed.
-- `confirmation_unavailable`: an issue write needs the person's answer and this runtime has no
+- `confirmation_unavailable`: an edit to an existing issue needs the person's answer and this runtime has no
   window to ask in. Nothing was changed; ask the person.
 - `account_signed_out`: sign in to TerminalX in the app.
 - `cloud_unavailable`: the app's window did not answer. Check the session with `read` before

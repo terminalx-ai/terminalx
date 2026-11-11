@@ -335,6 +335,7 @@ impl WorkspaceGit {
             "git.reviewRange" => self.review_range(params),
             "git.changesBetween" => self.changes_between(params),
             "git.fileContents" => self.file_contents(params),
+            "git.mediaContent" => self.media_content(params),
             "git.log" => self.log(params),
             "git.branches" => self.branches(params),
             "git.checkout" => self.checkout(params),
@@ -345,6 +346,7 @@ impl WorkspaceGit {
             "git.push" => self.push(params),
             "git.pull" => self.pull(params),
             "git.prs" => self.prs(params),
+            "git.prConversation" | "git.prConversationAction" | "git.prReviewerSearch" => self.pr_conversation(method, params),
             "git.prAssociations" => self.pr_associations(params),
             "git.prLanded" => self.pr_landed(params),
             "git.prCreate" => self.pr_create(params),
@@ -580,7 +582,7 @@ impl WorkspaceGit {
         let repo = self.repo(params)?;
         let head = crate::git::head_tree(&repo.dir).map_err(git_error)?;
         let snapshot = crate::git::snapshot_tree(&repo.dir).map_err(git_error)?;
-        let mut files = if head == snapshot { Vec::new() } else { crate::git::changes_between(&repo.dir, &head, Some(&snapshot)).map_err(git_error)? };
+        let mut files = if head == snapshot { Vec::new() } else { crate::git::changes_between_options(&repo.dir, &head, Some(&snapshot), params.get("hideWhitespace").and_then(Value::as_bool).unwrap_or(false)).map_err(git_error)? };
         let truncated = files.len() > MAX_CHANGED_FILES;
         files.truncate(MAX_CHANGED_FILES);
         Ok(json!({ "repo": repo.name, "head": head, "files": files, "truncated": truncated }))
@@ -601,10 +603,28 @@ impl WorkspaceGit {
         if !valid_object_id(base) || head.is_some_and(|head| !valid_object_id(head)) {
             return Err(RpcError::invalid("base and head are tree ids"));
         }
-        let mut files = crate::git::changes_between(&repo.dir, base, head).map_err(git_error)?;
+        let mut files = crate::git::changes_between_options(&repo.dir, base, head, params.get("hideWhitespace").and_then(Value::as_bool).unwrap_or(false)).map_err(git_error)?;
         let truncated = files.len() > MAX_CHANGED_FILES;
         files.truncate(MAX_CHANGED_FILES);
         Ok(json!({ "repo": repo.name, "files": files, "truncated": truncated }))
+    }
+
+    fn media_content(&self, params: &Value) -> Result<Value, RpcError> {
+        let repo = self.repo(params)?;
+        let path = Self::repo_path(required_str(params, "path")?)?;
+        let tree = params.get("tree").and_then(Value::as_str);
+        // The same workspace containment check as text and fs/1, before any live read.
+        if tree.is_none() {
+            let relative = if repo.name == "." { path.clone() } else { format!("{}/{path}", repo.name) };
+            match self.files.existing_path(&relative) {
+                Ok(_) => {},
+                Err(error) if error.code == "not_found" => return Ok(Value::Null),
+                Err(error) => return Err(error),
+            }
+        }
+        // Base64 plus the envelope fits the relay's 1 MiB frame.
+        let content = crate::git_media::read(&repo.dir, &path, tree, 512 * 1024).map_err(git_error)?;
+        Ok(json!(content))
     }
 
     /// One file at tree `base` and at tree `head` (or in the working tree).
@@ -926,6 +946,38 @@ impl WorkspaceGit {
             let repo = repositories.iter().find(|(_, prefix)| association.url.starts_with(prefix)).map(|(name, _)| name);
             json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo })
         }).collect::<Vec<_>>() })
+    }
+
+    fn pr_conversation(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+        use crate::github::conversation::{self, Action, Target};
+        // Cloud gh uses an organisation App installation token, never the
+        // caller's personal identity. It must not satisfy required reviews.
+        let action = if method == "git.prConversationAction" {
+            let action = serde_json::from_value(params["action"].clone()).map_err(|_| RpcError::invalid("Invalid PR action"))?;
+            if matches!(action, Action::Approve { .. }) {
+                return Err(RpcError::forbidden("Approve from GitHub with your personal account. Cloud workspaces cannot approve as the organisation App."));
+            }
+            Some(action)
+        } else { None };
+        let repo = self.repo(params)?;
+        let target = Target::new(required_str(params, "url")?).map_err(RpcError::internal)?;
+        // Resolve through this repository's gh routing before allowing a supplied
+        // URL to address anything. A participant cannot use workspace credentials
+        // to read an unrelated private repository.
+        let info = self.gh(&repo, &["repo", "view", "--json", "url"], NETWORK_TIMEOUT)?;
+        let info: Value = serde_json::from_str(&info).map_err(RpcError::internal)?;
+        let expected = format!("https://{}/{}/{}", target.host, target.owner, target.name);
+        if info["url"].as_str().map(|url| url.trim_end_matches('/').to_lowercase()).as_deref() != Some(&expected) {
+            return Err(RpcError::invalid("The pull request belongs to another repository."));
+        }
+        let run = |args: &[&str]| self.gh(&repo, args, NETWORK_TIMEOUT).map_err(|error| anyhow::anyhow!("{}", error.message));
+        match method {
+            "git.prConversation" => conversation::read_with(&target, run).map(|value| json!(value)),
+            "git.prReviewerSearch" => conversation::search_with(&target, required_str(params, "query")?, run).map(|value| json!(value)),
+            _ => {
+                conversation::act_with(&target, action.ok_or_else(|| RpcError::invalid("Invalid PR action"))?, run).map(|()| Value::Null)
+            }
+        }.map_err(RpcError::internal)
     }
 
     fn pr_landed(&self, params: &Value) -> Result<Value, RpcError> {

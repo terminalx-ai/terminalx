@@ -1,10 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
+import { cn } from "@/lib/cn";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { EnvironmentNotice } from "./EnvironmentNotice";
 import { pty } from "@/lib/api";
-import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
+import { disposeInstance, getInstance, isAgentPane, peekInstance, registerTerminalFactory, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
 import { terminalInput } from "@/lib/terminalInput";
 import { deferredTerminalFit, fitTerminal } from "@/lib/terminalFit";
@@ -29,9 +30,10 @@ function cssVar(name: string): string {
 /** The terminal's palette follows the app's mode; ANSI colours are tuned per mode. */
 export function themeFor(mode: "dark" | "light") {
   const fg = terminalColorHex(cssVar("--foreground"), mode === "dark" ? "#e6e6e6" : "#222222");
-  // The page surface, opaque: programs that query the background (OSC 11)
-  // then learn the real mode instead of a transparent black.
-  const bg = terminalColorHex(cssVar("--surface-page"), mode === "dark" ? "#1c1c1f" : "#f7f7f5");
+  // The terminal's own surface, opaque: programs that query the background (OSC 11)
+  // then learn the real mode instead of a transparent black. The view around the
+  // canvas is drawn in the same colour (`bg-terminal`), so there is no box.
+  const bg = terminalColorHex(cssVar("--surface-terminal"), mode === "dark" ? "#0b0b0b" : "#f7f7f5");
   return mode === "dark"
     ? {
         background: bg,
@@ -116,17 +118,31 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
   // (this one disposed, the next one created), or this one attached again
   // over a new connection, has another, and neither can detach or answer for
   // the other, in whatever order their calls land.
-  const attach = () => {
+  const attach = (reset = false) => {
     const token = crypto.randomUUID();
-    const view = { token, retired: false, feed: feedLocalPane(id, token, term, { paced: !isAgentPane(id), retire: () => disposeInstance(id) }) };
-    void subscribeTerminals()
-      .then(() => (view.retired ? undefined : pty.attachSized(id, token, view.feed.data)))
-      // Retired while the attach was on its way: it must not be left attached to nothing.
+    const view = { token, retired: false, failed: false, ready: Promise.resolve(), feed: feedLocalPane(id, token, term, { paced: !isAgentPane(id), retire: () => disposeInstance(id) }) };
+    // Finish already queued parser writes before replaying a new attachment.
+    const drained = reset ? new Promise<void>((resolve) => term.write("", () => {
+      if (!view.retired) term.reset();
+      resolve();
+    })) : Promise.resolve();
+    view.ready = drained.then(() => subscribeTerminals())
       .then(() => {
-        if (view.retired) return pty.detach(id, token);
+        if (view.retired) throw new Error("The terminal attachment was cancelled. Try opening Terminal view again.");
+        return pty.attachSized(id, token, view.feed.data);
+      })
+      // Retired while the attach was on its way: it must not be left attached to nothing.
+      .then(async () => {
+        if (view.retired) {
+          await pty.detach(id, token);
+          throw new Error("The terminal attachment was replaced. Try opening Terminal view again.");
+        }
         reassertTerminalResize(term);
       })
-      .catch(() => {});
+      .catch((error: unknown) => { view.failed = true; throw error; });
+    // Hidden views attach in the background. Explicit switches observe this
+    // same promise through ensureAttached and retain Chat on rejection.
+    void view.ready.catch(() => {});
     return view;
   };
   const retire = (view: ReturnType<typeof attach>) => {
@@ -136,7 +152,6 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
   };
   let view = attach();
   let released = false;
-  let reattaching = 0;
   const input = terminalInput(id);
   term.onData(input.write);
   term.onBinary(input.write);
@@ -148,17 +163,17 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
     fit,
     restorable: true,
     attachedAs: (token) => !released && view.token === token,
+    ensureAttached: async () => {
+      if (released) throw new Error("The terminal view was closed. Try opening it again.");
+      if (view.failed) { retire(view); view = attach(true); }
+      const requested = view;
+      await requested.ready;
+      if (released || view !== requested) throw new Error("The terminal connection changed while opening. Try again.");
+    },
     reattach: () => {
       if (released) return;
       retire(view);
-      const request = ++reattaching;
-      // What the old connection delivered is parsed first; then the screen is
-      // drawn again from the pane's scrollback, which the attach replays.
-      term.write("", () => {
-        if (released || request !== reattaching) return;
-        term.reset();
-        view = attach();
-      });
+      view = attach(true);
     },
     release: () => {
       released = true;
@@ -196,6 +211,8 @@ export function TerminalView({
   fit = true,
   dropRefusal,
   redraw = true,
+  actions,
+  pinned = false,
 }: {
   id: string;
   visible: boolean;
@@ -204,6 +221,10 @@ export function TerminalView({
   dropRefusal?: TerminalDropRefusal;
   /** The "Redraw terminal" control above it; a compact view leaves it out. */
   redraw?: boolean;
+  /** More controls for the same corner toolbar, beside Redraw. */
+  actions?: ReactNode;
+  /** Keep the toolbar on screen; otherwise it shows only while the pointer or focus is on the terminal. */
+  pinned?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLDivElement>(null);
@@ -214,6 +235,9 @@ export function TerminalView({
   const pageShown = useSyncExternalStore(subscribeVisibility, pageVisible, () => true);
   const shown = visible && pageShown;
   const make = () => (create ? create(resolvedMode) : createInstance(id, resolvedMode));
+  const factory = useRef(make);
+  factory.current = make;
+  useEffect(() => registerTerminalFactory(id, () => factory.current()), [id]);
   const fitting = useRef(fit);
   fitting.current = fit;
 
@@ -315,19 +339,31 @@ export function TerminalView({
   }, [id, shown, fit]);
 
   return (
-    <div ref={frame} className="relative flex h-full w-full flex-col" data-testid="terminal-drop-target" {...drop.zoneProps}>
+    <div ref={frame} className="group/terminal relative flex h-full w-full flex-col bg-terminal" data-testid="terminal-drop-target" {...drop.zoneProps}>
       <EnvironmentNotice id={id} active={visible && !create} />
-      {redraw && <div className="flex h-6 shrink-0 justify-end px-3">
-        <button
-          type="button"
-          className="rounded px-2 text-xs text-muted-foreground hover:text-foreground"
-          onClick={recover}
-          title="Redraw the terminal without restarting its process"
-          tabIndex={visible ? 0 : -1}
+      {(redraw || actions) && (
+        // Floats over the terminal's corner rather than taking a row: nothing is drawn until it is wanted.
+        <div
+          className={cn(
+            "absolute top-1.5 right-3 z-10 flex items-center gap-1 rounded-md border border-hairline bg-terminal/90 p-0.5 shadow-sm backdrop-blur transition-opacity duration-150",
+            pinned ? "opacity-100" : "pointer-events-none opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100",
+          )}
+          data-testid="terminal-toolbar"
         >
-          Redraw terminal
-        </button>
-      </div>}
+          {actions}
+          {redraw && (
+            <button
+              type="button"
+              className="h-6 rounded px-2 text-xs text-muted-foreground hover:bg-veil-raised hover:text-foreground"
+              onClick={recover}
+              title="Redraw the terminal without restarting its process"
+              tabIndex={visible ? 0 : -1}
+            >
+              Redraw terminal
+            </button>
+          )}
+        </div>
+      )}
       <div ref={host} className="terminal-host min-h-0 w-full flex-1 px-2 pt-1" />
       <TerminalDropHint drop={drop} />
     </div>

@@ -28,6 +28,14 @@ import { listen } from "@tauri-apps/api/event";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { continuationPrompt, IN_INPUT } from "@/lib/continuation";
 import { ContinuationDialog } from "./ContinuationDialog";
+
+/** The Autopilot fold, opened. */
+const inMore = () => {
+  const fold = screen.queryByRole("button", { name: "Autopilot" });
+  if (fold?.getAttribute("aria-expanded") === "false") fireEvent.click(fold);
+  return screen;
+};
+
 const source = { id: "source", harness: "claude", title: "Fix issue", status: "waiting", model: "sonnet", effort: "low", permissionMode: "plan" } as TabEntry;
 const session = { id: "workspace", cwd: "/same/cwd", title: "Workspace" } as SessionEntry;
 const context: ContinuationContext = { sessionId: session.id, tabId: source.id, title: "Fix issue", cwd: session.cwd, provider: "claude", providerSessionId: "original", sourceActive: true, transcriptPath: "/history.jsonl", fullUnavailableReason: null, lastPrompt: "Fix issue", lastUpdate: "Halfway", partialCapture: null };
@@ -76,9 +84,7 @@ it("shows accessible source details, the source's launch settings, focused defau
   open(); await loaded();
   expect(screen.getByRole("dialog").getAttribute("aria-labelledby")).toBeTruthy();
   expect(shown()).toEqual(["Claude Code", "Sonnet", "Low", "Plan"]);
-  expect((screen.getByRole("radio", { name: /Focused handoff/ }) as HTMLInputElement).checked).toBe(true);
-  expect(screen.getByText("/same/cwd")).toBeTruthy();
-  expect(screen.getByText(/Source work may still be progressing/)).toBeTruthy();
+  expect((inMore().getByRole("radio", { name: /Recent context/ }) as HTMLInputElement).checked).toBe(true);
 });
 it("starts the new tab with exactly the source conversation's settings", async () => {
   mocks.launch.mockResolvedValue({ stage: "delivered", launched: { sessionId: session.id, tab: { id: "new" } } });
@@ -91,7 +97,7 @@ it("switches provider to that provider's saved settings, keeps the mode, and lau
   open(); await loaded();
   await pickAgent("Codex");
   expect(shown()).toEqual(["Codex", "GPT-6 Mini", "Medium", "Plan"]);
-  fireEvent.click(screen.getByRole("radio", { name: /Full session transcript/ }));
+  fireEvent.click(inMore().getByRole("radio", { name: /Full transcript/ }));
   fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
   await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6-mini", effort: "medium", permissionMode: "plan", pipeline: { autoMerge: false, resolveConflicts: false } }, continuationPrompt(context, "full"), expect.any(Function), undefined, expect.any(Function)));
 });
@@ -112,7 +118,7 @@ it("falls back to the configured provider and disables full mode with an explana
   mocks.prepare.mockResolvedValue({ ...context, transcriptPath: null, fullUnavailableReason: "Saved history is unreadable.", partialCapture: "Partial recent history" });
   open(); await loaded();
   expect(shown()).toEqual(["Codex", "GPT-6 Mini", "Medium", "Plan"]);
-  expect(screen.getByRole("radio", { name: /Full session transcript/ }).hasAttribute("disabled")).toBe(true);
+  expect(inMore().getByRole("radio", { name: /Full transcript/ }).hasAttribute("disabled")).toBe(true);
   expect(screen.getByText("Saved history is unreadable.")).toBeTruthy();
 });
 it.each(["detection", "none", "context"])("shows %s failure without allowing a launch", async (failure) => {
@@ -150,14 +156,14 @@ it("retains the dialog on launch failure and resets errors and selection on reop
   mocks.launch.mockResolvedValue({ stage: "launch", error: "Could not launch" });
   const view = open(); await loaded();
   await pickAgent("Codex");
-  fireEvent.click(screen.getByRole("radio", { name: /Full session transcript/ }));
+  fireEvent.click(inMore().getByRole("radio", { name: /Full transcript/ }));
   fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
   expect(await screen.findByRole("alert")).toBeTruthy();
   expect(view.onClose).not.toHaveBeenCalled();
   view.unmount(); open(); await loaded();
   expect(screen.queryByRole("alert")).toBeNull();
   expect(shown()).toEqual(["Claude Code", "Sonnet", "Low", "Plan"]);
-  expect((screen.getByRole("radio", { name: /Focused handoff/ }) as HTMLInputElement).checked).toBe(true);
+  expect((inMore().getByRole("radio", { name: /Recent context/ }) as HTMLInputElement).checked).toBe(true);
 });
 it.each(["button", "escape"])("allows opening the destination with %s while delivery is pending", async (dismiss) => {
   let resolve!: (value: unknown) => void;
@@ -204,7 +210,6 @@ describe("linking a chat to a project", () => {
     mocks.move.mockResolvedValue({ stage: "delivered", launched: { sessionId: "work-1", tab: { id: "work-tab" } } });
     const view = link(repo, true); await loaded("Link and Start");
     expect(screen.getByRole("heading", { name: "Link to a Project" })).toBeTruthy();
-    expect(screen.getByText("/repos/web")).toBeTruthy();
     expect((screen.getByRole("switch", { name: "Start on a new branch in a worktree" }) as HTMLButtonElement).getAttribute("aria-checked")).toBe("true");
     expect(shown()).toEqual(["Claude Code", "Sonnet", "Low", "Plan"]);
     await pickAgent("Codex");
@@ -227,7 +232,7 @@ describe("linking a chat to a project", () => {
     link(repo, true); await loaded("Link and Start");
     fireEvent.click(screen.getByRole("switch", { name: "Start on a new branch in a worktree" }));
     expect(screen.getByText("In its main checkout, shared with its other conversations")).toBeTruthy();
-    fireEvent.click(screen.getByRole("radio", { name: /Full session transcript/ }));
+    fireEvent.click(inMore().getByRole("radio", { name: /Full transcript/ }));
     fireEvent.click(screen.getByRole("button", { name: "Link and Start" }));
     await waitFor(() => expect(mocks.move).toHaveBeenCalled());
     expect(mocks.move.mock.calls[0][1]).toEqual({ projectPath: "/repos/web", worktree: false });
@@ -307,7 +312,7 @@ it.each(["delivered", "delivery"])("shows confirmation progress and handles dela
     return new Promise((resolve) => { finish = resolve; });
   });
   const view = open(); await loaded();
-  fireEvent.click(screen.getByRole("radio", { name: /Full session transcript/ }));
+  fireEvent.click(inMore().getByRole("radio", { name: /Full transcript/ }));
   fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
   expect(screen.getByRole("button", { name: "Starting…" }).hasAttribute("disabled")).toBe(true);
   act(created);
