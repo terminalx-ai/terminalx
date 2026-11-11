@@ -295,7 +295,8 @@ mod tests {
         let _program = claude::pty::claude_program_for_tests(program);
         let cwd = store::root().unwrap().join("checkout");
         std::fs::create_dir(&cwd).unwrap();
-        let provider = "32610000-0000-4000-8000-000000000002";
+        // The fixture's conversation: reset refuses a transcript of another one.
+        let provider = "32610000-0000-4000-8000-000000000001";
         let entry: index::SessionEntry = serde_json::from_value(json!({"id":"reset-held-s", "projectPath":cwd,"cwd":cwd,"title":"Reset", "created":"now", "modified":"now", "tabs":[{"id":"reset-held-t","harness":"claude","providerSessionId":provider,"created":"now"}]})).unwrap();
         index::save(std::slice::from_ref(&entry)).unwrap();
         let native = native_path(&entry, &entry.tabs[0]).unwrap();
@@ -305,11 +306,13 @@ mod tests {
         let held = |items: serde_json::Value, paused: bool| json!({"type":"held_queue","queue":{"items":items,"paused":paused}});
         for (seq, payload) in [
             (1, json!({"type":"turn_started"})),
-            (2, held(json!([{"id":"h1","text":"HELD_BEFORE_RESET","images":[]}]), true)),
-            (3, json!({"type":"turn_completed","status":"ok"})),
-            (4, held(json!([]), false)),
-            (5, json!({"type":"user_message","text":"LATER","images":[],"queued":false})),
-            (6, json!({"type":"turn_completed","status":"ok"})),
+            // The answer reset anchors the cut to in the agent's transcript.
+            (2, json!({"type":"assistant_text","text":"FIRST_RESET_MARKER"})),
+            (3, held(json!([{"id":"h1","text":"HELD_BEFORE_RESET","images":[]}]), true)),
+            (4, json!({"type":"turn_completed","status":"ok"})),
+            (5, held(json!([]), false)),
+            (6, json!({"type":"user_message","text":"LATER","images":[],"queued":false})),
+            (7, json!({"type":"turn_completed","status":"ok"})),
         ] {
             store::append_line(&log, &json!({"id":format!("e{seq}"),"sessionId":"reset-held-s","tabId":"reset-held-t","harness":"claude","seq":seq,"ts":"2026-11-07T10:56:21.941Z","payload":payload}).to_string()).unwrap();
         }
@@ -317,11 +320,11 @@ mod tests {
         let rt = m.runtime("reset-held-s", "reset-held-t").unwrap();
         assert!(rt.lock().unwrap().held_queue.items.is_empty());
         rt.lock().unwrap().held_queue = held::Queue { items: vec![held::Item { id: "h2".into(), text: "CLAIMED".into(), images: Vec::new() }], sending: Some("h2".into()), ..Default::default() };
-        let error = m.reset_chat("reset-held-s", "reset-held-t", Some(3), false).unwrap_err();
+        let error = m.reset_chat("reset-held-s", "reset-held-t", Some(4), false).unwrap_err();
         assert!(error.to_string().contains("queued messages"), "{error:#}");
         assert_eq!(store::log_path("reset-held-s", "reset-held-t").unwrap(), log);
         rt.lock().unwrap().held_queue = held::Queue::default();
-        m.reset_chat("reset-held-s", "reset-held-t", Some(3), false).unwrap();
+        m.reset_chat("reset-held-s", "reset-held-t", Some(4), false).unwrap();
         let new_log = store::log_path("reset-held-s", "reset-held-t").unwrap();
         assert_ne!(new_log, log);
         assert!(held::Queue::restore(&new_log).unwrap().items.is_empty());
