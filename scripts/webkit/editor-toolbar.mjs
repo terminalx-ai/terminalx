@@ -188,6 +188,12 @@ try {
     await page.getByRole('radiogroup', { name, exact: true }).waitFor();
     for (const width of [360, 240]) {
       await page.setViewportSize({ width, height: 900 });
+      // WebKit can sample neighbouring boxes from different frames of a dialog's
+      // entrance scale, reporting an overlap that is absent in the settled grid.
+      // Measure the real layout after that animation, keeping every assertion.
+      await page.waitForFunction(() => [...document.querySelectorAll('[role="dialog"]')]
+        .every(dialog => dialog.getAnimations().every(animation => animation.playState === 'finished')),
+      undefined, { timeout: 3000 });
       for (const group of await page.getByRole('radiogroup').all()) {
         const ok = await group.evaluate(group => {
           const radios = [...group.querySelectorAll('[role=radio]')];

@@ -1343,6 +1343,9 @@ mod tests {
     #[test]
     fn a_slash_command_is_typed_so_the_palette_opens() {
         assert_eq!(String::from_utf8(body_bytes("/model opus")).unwrap(), "/model opus");
+        for command in ["/goal Reduce p95 latency below 120 ms", "/goal", "/goal pause", "/goal resume", "/goal clear"] {
+            assert_eq!(body_bytes(command), command.as_bytes());
+        }
         // Only a lone line counts; prose that happens to start with a slash
         // and carries on is still a paste.
         assert!(String::from_utf8(body_bytes("/tmp/x\nand more")).unwrap().starts_with(BRACKETED_PASTE_START));

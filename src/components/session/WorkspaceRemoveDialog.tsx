@@ -5,6 +5,9 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/controls";
 import { CONVERSATION_DELETION } from "@/lib/conversationRetention";
+import type { ArchiveFailure } from "@terminalx/portable/workspace";
+import { ArchiveTerminal } from "@/components/terminal/ArchiveTerminal";
+import { archiveFailure, archiveFailureMessage, useArchiveTerminal } from "@/lib/archiveScript";
 import { errorMessage } from "@/lib/api";
 import { closeWorkspaceRemove, openWorktreeCleanup, useDialogs } from "@/lib/dialogs";
 import { relocateSession } from "@/lib/sessions";
@@ -33,6 +36,9 @@ const MERGED_HOW: Record<NonNullable<Landed["merged"]>, string> = {
  */
 export function WorkspaceRemoveDialog() {
   const { workspaceRemove: request } = useDialogs();
+  const [failure, setFailure] = useState<ArchiveFailure | null>(null);
+  const [showLog, setShowLog] = useState(false);
+  const archivePane = useArchiveTerminal(request?.path ?? null);
   const [disp, setDisp] = useState<WorkspaceDisposition | null>(null);
   // The check itself failed: the workspace is then as unknown as one that
   // could not be verified.
@@ -68,6 +74,8 @@ export function WorkspaceRemoveDialog() {
   useEffect(() => {
     if (!host) return;
     setError(null);
+    setFailure(request?.archiveFailure ?? null);
+    setShowLog(false);
     setDeleteConversations(false);
     setDeleteBranch(false);
     let live = true;
@@ -75,7 +83,7 @@ export function WorkspaceRemoveDialog() {
     return () => {
       live = false;
     };
-  }, [host, check]);
+  }, [host, check, request?.archiveFailure]);
 
   if (!request || !host) return null;
   const settle = !deleteConversations;
@@ -94,17 +102,21 @@ export function WorkspaceRemoveDialog() {
   const pr = disp?.pr ?? null;
   const verb = settle ? "Remove" : "Delete";
 
-  const remove = async () => {
+  const remove = async (bypass?: string, retry?: string) => {
     if (settle && keepUnavailable) return;
     if (risky && !(await confirmRiskyRemoval(request.path, losses))) return;
     setBusy("remove");
     setError(null);
+    setFailure(null);
+    setShowLog(false);
     try {
       const report = await host.remove({
         keepSessions: settle,
         deleteBranch,
         confirmedDigest: risky ? (landed?.digest ?? null) : null,
         expectedSessions: disp?.sessionIds ?? [],
+        ...(bypass ? { archiveFailure: bypass } : {}),
+        ...(retry ? { archiveRetry: retry } : {}),
       });
       closeWorkspaceRemove();
       await reportBranchOutcome(report);
@@ -112,7 +124,9 @@ export function WorkspaceRemoveDialog() {
       // It may have changed since it was checked, or been partly removed:
       // read it again before the next attempt is offered.
       await check(host);
-      setError(errorMessage(e));
+      const failed = archiveFailure(errorMessage(e));
+      setFailure(failed);
+      setError(failed ? null : errorMessage(e));
     } finally {
       setBusy(null);
     }
@@ -133,7 +147,7 @@ export function WorkspaceRemoveDialog() {
   };
 
   return (
-    <Dialog open onOpenChange={(o) => !o && closeWorkspaceRemove()}>
+    <Dialog open onOpenChange={(o) => !o && !busy && closeWorkspaceRemove()}>
       <DialogContent width="max-w-[30rem]">
         <DialogHeader>
           <DialogTitle className="pr-6">{settle ? "Remove workspace, keep conversations" : "Permanently delete conversations and workspace"}</DialogTitle>
@@ -227,6 +241,13 @@ export function WorkspaceRemoveDialog() {
           </label>
         )}
 
+        {!failure && request.archiveNotice && <p className="mt-3 text-xs text-warning">{request.archiveNotice}</p>}
+        {failure && <div role="alert" className="mt-3 text-xs text-destructive">
+          <p>{archiveFailureMessage(failure)}</p>
+          <Button variant="outline" size="xs" onClick={() => setShowLog(!showLog)}>{showLog ? "Hide log" : "Open log"}</Button>
+          <Button variant="outline" size="xs" className="ml-2" disabled={!!busy || !known || !confirmable || !!disp?.isMain || (settle && !!keepUnavailable)} onClick={() => void remove(undefined, failure.token)}>Run archive script again</Button>
+        </div>}
+        {(busy === "remove" && archivePane || showLog && failure?.pane) && <ArchiveTerminal pane={showLog && failure ? failure.pane : archivePane!} output={showLog ? failure?.log : undefined} />}
         <DialogFooter className="mt-4">
           <Button variant="ghost" onClick={closeWorkspaceRemove} disabled={!!busy}>
             {settle ? "Keep as is" : "Cancel"}
@@ -241,8 +262,8 @@ export function WorkspaceRemoveDialog() {
               {busy === "relocate" ? <Loader2 className="animate-spin" /> : <FolderInput />} Move session to project
             </Button>
           )}
-          <Button variant={risky || !settle ? "destructive" : "default"} onClick={() => void remove()} disabled={!!busy || !known || !confirmable || !!disp?.isMain || (settle && !!keepUnavailable)}>
-            {busy === "remove" ? <Loader2 className="animate-spin" /> : <Trash2 />} {risky ? `${verb} anyway…` : settle ? "Remove workspace" : "Delete conversations and workspace"}
+          <Button variant={risky || !settle ? "destructive" : "default"} onClick={() => void remove(failure?.token)} disabled={!!busy || !known || !confirmable || !!disp?.isMain || (settle && !!keepUnavailable)}>
+            {busy === "remove" ? <Loader2 className="animate-spin" /> : <Trash2 />} {failure ? "Remove anyway" : risky ? `${verb} anyway…` : settle ? "Remove workspace" : "Delete conversations and workspace"}
           </Button>
         </DialogFooter>
       </DialogContent>

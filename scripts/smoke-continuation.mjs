@@ -86,7 +86,7 @@ export async function runContinuationSmoke({ projectPath, reportPath, sourceProv
       const action = await waitFor(() => document.querySelector('button[aria-label="Continue in New Session…"]'), Boolean, 'header action');
       action.click();
       await waitFor(() => document.querySelector('[role="dialog"]'), Boolean, 'continuation dialog');
-      assert(document.querySelector('[role="dialog"]').textContent.includes('Full session transcript'), 'Header opens the real dialog');
+      assert(document.querySelector('[role="dialog"]').textContent.includes('Full transcript'), 'Header opens the real dialog');
       const cancel = [...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent === 'Cancel');
       cancel.click();
       // Keep source provider sessions intact and idle, as the feature requires.

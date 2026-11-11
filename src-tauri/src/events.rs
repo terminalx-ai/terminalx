@@ -262,9 +262,33 @@ pub struct BackgroundTask {
     pub kind: Option<String>,
 }
 
+/// Codex's reported goal state. Budget accounting is independent of context occupancy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Goal {
+    pub objective: String,
+    pub status: GoalStatus,
+    pub token_budget: Option<u64>,
+    pub tokens_used: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    Complete,
+    Blocked,
+    BudgetLimited,
+    UsageLimited,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Payload {
+    /// A durable snapshot, including counters: reopening the chat must restore the banner.
+    GoalUpdated { goal: Goal },
+    GoalCleared,
     // ---- lifecycle
     TurnStarted {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -288,6 +312,8 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         initiating_prompt: Option<String>,
     },
+    /// The durable checkpoint belonging to the turn that is about to complete.
+    TurnCheckpoint { seq: u64, base: String, head: String },
     TurnCompleted {
         status: TurnStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -382,6 +408,10 @@ pub enum Payload {
     /// not sent, and will not be. It can be sent again.
     PromptWithdrawn {
         prompt_seq: u64,
+        /// A native request may have reached Codex, but no acknowledgement
+        /// arrived. Retain the text without claiming definite non-delivery.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unconfirmed: bool,
     },
     AssistantText {
         #[serde(default, skip_serializing_if = "Option::is_none")]

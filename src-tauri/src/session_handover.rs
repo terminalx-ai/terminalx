@@ -358,7 +358,9 @@ impl SessionManager {
 
     fn unadoptable_tab(rt: &TabRuntime) -> Option<Work> {
         match &rt.engine {
-            Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) if rt.child_pid.is_some_and(crate::harness::host::is_alive) => {
+            Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) if rt.child_pid.is_some_and(crate::harness::host::group_or_process_alive) => {
+                // A drained leader can leave descendants behind. These native
+                // process groups are not among the PTYs the record carries.
                 let kind = if rt.turn_open || matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting) { WorkKind::Turn } else { WorkKind::Processes };
                 Some(Work { kind, session_id: Some(rt.session_id.clone()), tab_id: Some(rt.tab_id.clone()), harness: Some(rt.harness.clone()), title: None })
             }
@@ -442,8 +444,11 @@ impl SessionManager {
     /// carry. Fails with [`Unsettled`] while it is about to change.
     fn tab_record(&self, rt: &TabRuntime) -> Result<Option<TabRecord>> {
         let name = || format!("{}/{}", rt.session_id, rt.tab_id);
-        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting || !rt.compaction.is_idle() {
+        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting {
             return Err(Unsettled(format!("The agent in {} is starting or stopping", name())).into());
+        }
+        if !rt.compaction.is_idle() {
+            return Err(Unsettled(format!("The agent in {} has compaction state that cannot be handed over", name())).into());
         }
         let mut record = TabRecord {
             session_id: rt.session_id.clone(),

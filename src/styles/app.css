@@ -10,6 +10,7 @@
 @theme inline {
   --color-background: var(--background);
   --color-chat: var(--surface-chat);
+  --color-terminal: var(--surface-terminal);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
@@ -198,7 +199,8 @@
   }
 }
 
-.animate-fade-in {
+/* A utility so `data-[state=open]:animate-fade-in` (menus, popovers) applies at all. */
+@utility animate-fade-in {
   animation: fade-in 140ms ease-out both;
 }
 .animate-pulse-soft {
@@ -251,9 +253,30 @@
 
 /* ---------- Transcript prose ---------- */
 .prose-chat {
-  font-size: 14px;
-  line-height: 1.65;
+  /* 15px reads without effort at a desk; 14px was small for long replies. Body text a step softer than full white, so
+     what is bold, a heading or a link stands out of it. */
+  font-size: 15px;
+  line-height: 1.7;
   overflow-wrap: anywhere;
+  color: color-mix(in oklab, var(--foreground) 86%, transparent);
+}
+/* A line the eye can follow back: about 70 characters, not the column's 110. Tables and code keep the full width. */
+.prose-chat p,
+.prose-chat li,
+.prose-chat blockquote,
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3,
+.prose-chat h4 {
+  max-width: 72ch;
+}
+.prose-chat strong,
+.prose-chat b,
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3,
+.prose-chat h4 {
+  color: var(--foreground);
 }
 .prose-chat > :first-child {
   margin-top: 0;
@@ -266,7 +289,7 @@
 .prose-chat ol,
 .prose-chat blockquote,
 .prose-chat table {
-  margin: 0.6em 0;
+  margin: 0.75em 0;
 }
 .prose-chat h1,
 .prose-chat h2,
@@ -301,12 +324,20 @@
   color: var(--foreground);
   text-decoration: none;
 }
+/* A quiet pill: set apart from the words by its face, a soft ground and a warm tint, not by an outline that pulls the eye. */
 .prose-chat code:not(pre code) {
   font-family: var(--font-mono);
-  font-size: 0.92em;
-  background: var(--code-bg);
-  border-radius: 4px;
-  padding: 0.1em 0.35em;
+  font-size: 0.84em;
+  color: color-mix(in oklab, var(--accent) 55%, var(--foreground));
+  background: var(--veil-raised);
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  padding: 0.12em 0.38em;
+  /* Its own line box is no taller than the text's, so a pill on a line does not open it up. */
+  line-height: 1;
+  /* Broken across lines, each part is a whole pill. */
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 .prose-chat pre {
   font-family: var(--font-mono);
@@ -438,22 +469,27 @@ body:has([role="alertdialog"]) [data-star-reminder] {
 }
 
 /* Dialogs ease in and out instead of appearing at once: the backdrop fades,
-   the dialog rises a touch and grows from 96%. The open is a little slower
-   than the close, so arriving reads as deliberate and leaving as quick. */
+   the dialog rises into place and grows from 94% on a long, soft ease; it
+   leaves quicker, sinking a little as it fades. Arriving reads as deliberate,
+   leaving as quick. A dialog its caller removes at once still plays the exit
+   (`ui/dialog.tsx`, `leaveGracefully`). */
 @keyframes dialog-in {
-  from { opacity: 0; transform: translateY(6px) scale(0.96); }
+  from { opacity: 0; transform: translateY(12px) scale(0.94); }
   to { opacity: 1; transform: none; }
 }
 @keyframes dialog-out {
   from { opacity: 1; transform: none; }
-  to { opacity: 0; transform: translateY(4px) scale(0.98); }
+  to { opacity: 0; transform: translateY(8px) scale(0.96); }
 }
 @keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes overlay-out { from { opacity: 1; } to { opacity: 0; } }
-.animate-dialog-in { animation: dialog-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both; }
-.animate-dialog-out { animation: dialog-out 140ms ease-in both; }
-.animate-overlay-in { animation: overlay-in 220ms ease-out both; }
-.animate-overlay-out { animation: overlay-out 140ms ease-in both; }
+/* Utilities, not plain classes: they are applied through `data-[state=…]:`
+   variants, and Tailwind drops a variant of a class it did not define, which
+   left every dialog appearing and vanishing at once. */
+@utility animate-dialog-in { animation: dialog-in 340ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+@utility animate-dialog-out { animation: dialog-out 200ms cubic-bezier(0.4, 0, 1, 1) both; }
+@utility animate-overlay-in { animation: overlay-in 280ms ease-out both; }
+@utility animate-overlay-out { animation: overlay-out 200ms ease-in both; }
 
 /* The share dialog's collaboration scene (CollaborationScene.tsx), told at
    the prompt over a nine-second loop:
@@ -541,8 +577,32 @@ body:has([role="alertdialog"]) [data-star-reminder] {
 .cs-cursor-me { animation-name: cs-cursor-me; }
 .cs-cursor-designer { animation-name: cs-cursor-designer; }
 
+/* HandoffScene: context carried from this session to a new one. Five seconds a loop. */
+.hs-packet, .hs-fill, .hs-target { animation: 5s cubic-bezier(0.65, 0, 0.35, 1) infinite both; }
+/* Along its path only (percentages of it, no calc(), which WebKit would not animate). */
+@keyframes hs-packet {
+  0%, 8% { left: 4%; opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
+  14% { left: 18%; opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  40% { left: 82%; opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  48%, 100% { left: 96%; opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
+}
+.hs-packet { animation-name: hs-packet; }
+@keyframes hs-target { 0%, 38% { box-shadow: none; } 44% { box-shadow: inset 0 0 0 1.5px var(--color-accent); } 60%, 100% { box-shadow: none; } }
+.hs-target { animation-name: hs-target; }
+.hs-fill { transform-origin: left; animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes hs-fill-1 { 0%, 44% { opacity: 0; transform: scaleX(0); } 52%, 90% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; transform: none; } }
+@keyframes hs-fill-2 { 0%, 50% { opacity: 0; transform: scaleX(0); } 58%, 90% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; transform: none; } }
+@keyframes hs-fill-3 { 0%, 58% { opacity: 0; } 64%, 90% { opacity: 1; } 98%, 100% { opacity: 0; } }
+.hs-fill-1 { animation-name: hs-fill-1; }
+.hs-fill-2 { animation-name: hs-fill-2; }
+.hs-fill-3 { animation-name: hs-fill-3; }
+@keyframes hs-caret { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+.hs-caret { animation: hs-caret 1s steps(1) infinite; }
+
 @media (prefers-reduced-motion: reduce) {
   .cs-row, .cs-typing, .cs-ring, .cs-cursor, .cs-send, .cs-think, .cs-reply, .cs-dot, .cs-joined { animation: none; }
+  .hs-packet, .hs-fill, .hs-target, .hs-caret { animation: none; }
+  .hs-packet { opacity: 0; }
   .cs-typing, .cs-ring, .cs-think { opacity: 0; }
   .cs-cursor-me { left: 0%; top: 30%; }
   .cs-cursor-designer { left: 72%; top: 18%; }

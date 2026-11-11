@@ -167,15 +167,10 @@ describe("buildTranscript", () => {
     expect(bDead?.kind === "tool" && bDead.call.abandoned).toBe(true);
   });
 
-  it("groups runs of the same tool", () => {
-    const items = groupWork([
-      { kind: "tool", call: { callId: "1", name: "Read", toolType: "file_read", input: { file_path: "a" }, seq: 1 }, key: "1" },
-      { kind: "tool", call: { callId: "2", name: "Read", toolType: "file_read", input: { file_path: "b" }, seq: 2 }, key: "2" },
-      { kind: "text", text: "x", key: "t", seq: 3 },
-      { kind: "tool", call: { callId: "3", name: "Read", toolType: "file_read", input: {}, seq: 4 }, key: "3" },
-    ]);
-    expect(items[0].kind).toBe("tool_group");
-    expect(items[2].kind).toBe("tool");
+  it("groups long runs of the same tool, and keeps a row per step in a short one", () => {
+    const read = (id: string, seq: number) => ({ kind: "tool" as const, call: { callId: id, name: "Read", toolType: "file_read" as const, input: { file_path: id }, seq }, key: id });
+    const items = groupWork([read("1", 1), read("2", 2), read("3", 3), read("4", 4), { kind: "text", text: "x", key: "t", seq: 5 }, read("5", 6), read("6", 7), read("7", 8)]);
+    expect(items.map((item) => item.kind)).toEqual(["tool_group", "text", "tool", "tool", "tool"]);
   });
 
   // #775: why a card is up is the app's to say, apart from the agent's words; a call an agent's safety check held keeps a row that says so.

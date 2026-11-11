@@ -1,6 +1,56 @@
 import { describe, expect, it } from "vitest";
-import type { AgentEvent, Payload } from "./events";
+import type { AgentEvent, Goal, Payload } from "./events";
 import { buildTranscript, compactionStatus, ConversationView, conversationEvents, TranscriptReducer } from "./transcript";
+
+describe("Codex goals", () => {
+  const goal: Goal = { objective: "Reduce latency", status: "active", tokenBudget: 1000, tokensUsed: 0 };
+  const event = (seq: number, payload: Payload, extra: Partial<AgentEvent> = {}): AgentEvent => ({
+    id: `goal-${seq}`, seq, sessionId: "s", tabId: "t", harness: "codex", ts: "2026-11-07T10:48:53Z", payload, ...extra,
+  });
+
+  it("shows a goal before any turn, replaces accounting snapshots and restores them on replay", () => {
+    const reducer = new TranscriptReducer();
+    const events = [event(1, { type: "goal_updated", goal })];
+    reducer.push(events[0]);
+    const before = reducer.snapshot(true);
+    expect(before.goal).toEqual(goal);
+    expect(before.turns).toEqual([]);
+    events.push(event(2, { type: "goal_updated", goal: { ...goal, tokensUsed: 700, status: "paused" } }));
+    reducer.push(events[1]);
+    expect(before.goal?.tokensUsed).toBe(0);
+    expect(reducer.snapshot(false).goal).toEqual({ ...goal, tokensUsed: 700, status: "paused" });
+    expect(buildTranscript(events, false)).toEqual(reducer.snapshot(false));
+    // A new goal replaces old usage, including an explicitly absent budget.
+    reducer.push(event(3, { type: "goal_updated", goal: { ...goal, objective: "Next task", tokenBudget: null } }));
+    expect(reducer.snapshot(false).goal).toEqual({ ...goal, objective: "Next task", tokenBudget: null });
+  });
+
+  it("does not let context usage, errors, turn completion, or subagents change the goal", () => {
+    const transcript = buildTranscript([
+      event(1, { type: "goal_updated", goal }),
+      event(2, { type: "usage_update", contextUsed: 95000, contextMax: 200000 }),
+      event(3, { type: "error", message: "Retry needed", fatal: false }),
+      event(4, { type: "turn_completed", status: "error", authFailed: false }),
+      event(5, { type: "goal_updated", goal: { ...goal, status: "complete" } }, { subagent: { id: "child" } }),
+      event(6, { type: "goal_cleared" }, { subagent: { id: "child" } }),
+      event(7, { type: "goal_cleared" }, { harness: "claude" }),
+    ], false);
+    expect(transcript.goal).toEqual(goal);
+    expect(transcript.contextUsed).toBe(95000);
+  });
+
+  it("clears only on reported clearance and isolates conversations", () => {
+    const events = [event(1, { type: "goal_updated", goal }),
+      event(2, { type: "conversation", id: "second", harness: "codex" }),
+      event(3, { type: "goal_updated", goal: { ...goal, objective: "Another thread" } })];
+    expect(new ConversationView(null, true).update(events).transcript(false).goal).toEqual(goal);
+    expect(new ConversationView("second", true).update(events).transcript(false).goal?.objective).toBe("Another thread");
+    events.push(event(4, { type: "goal_cleared" }));
+    expect(new ConversationView("second", true).update(events).transcript(false).goal).toBeUndefined();
+    expect(new ConversationView(null, true).update(events).transcript(false).goal).toEqual(goal);
+    expect(buildTranscript([], false).goal).toBeUndefined();
+  });
+});
 
 /**
  * The incremental transcript (#727) against the whole-log build it replaces:
@@ -173,6 +223,41 @@ function log(seed: number, length: number): AgentEvent[] {
 const json = (value: unknown) => JSON.parse(JSON.stringify(value));
 
 describe("TranscriptReducer", () => {
+  it("joins acknowledged native prompts to their turns and carries later queued messages forward", () => {
+    const reducer = new TranscriptReducer();
+    const events: AgentEvent[] = [];
+    const push = (payload: Payload) => {
+      const seq = events.length + 1;
+      const event: AgentEvent = { id: `e${seq}`, sessionId: "s", tabId: "t", harness: "codex", seq, ts: "2026-01-01T00:00:00Z", payload };
+      events.push(event);
+      reducer.push(event);
+      expect(json(reducer.snapshot(true))).toEqual(json(buildTranscript(events, true)));
+      return seq;
+    };
+    const first = push({ type: "user_message", text: "first", queued: true });
+    push({ type: "prompt_absorbed", promptSeq: first });
+    push({ type: "turn_started", promptSeq: first });
+    push({ type: "assistant_text", text: "first answer" });
+    const second = push({ type: "user_message", text: "second", queued: true });
+    const third = push({ type: "user_message", text: "third", queued: true });
+    push({ type: "turn_completed", status: "ok" });
+    push({ type: "prompt_absorbed", promptSeq: second });
+    push({ type: "turn_started", promptSeq: second });
+    push({ type: "assistant_text", text: "second answer" });
+    const turns = reducer.snapshot(true).turns;
+    expect(turns.map((turn) => turn.prompt?.text)).toEqual(["first", "second"]);
+    expect(turns.map((turn) => turn.work.filter((item) => item.kind === "text").map((item) => item.text))).toEqual([["first answer"], ["second answer"]]);
+    expect(turns[0].work).not.toEqual(expect.arrayContaining([expect.objectContaining({ seq: second })]));
+    expect(turns[1].work).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "queued", seq: third })]));
+    push({ type: "turn_completed", status: "ok" });
+    push({ type: "prompt_absorbed", promptSeq: third });
+    push({ type: "turn_started", promptSeq: third });
+    push({ type: "assistant_text", text: "third answer" });
+    expect(reducer.snapshot(true).turns.map((turn) => turn.prompt?.text)).toEqual(["first", "second", "third"]);
+    expect(reducer.snapshot(true).turns.map((turn) => turn.work.filter((item) => item.kind === "text").map((item) => item.text))).toEqual([["first answer"], ["second answer"], ["third answer"]]);
+    expect(reducer.snapshot(true).turns.flatMap((turn) => turn.work).filter((item) => item.kind === "queued" || item.kind === "message")).toEqual([]);
+  });
+
   it("gives, event by event, the transcript the whole log builds, live or not", () => {
     for (let seed = 1; seed <= 24; seed++) {
       const events = log(seed, 120);
@@ -271,4 +356,24 @@ describe("what a compaction's row says, on the desktop and the phone (#644)", ()
     expect(compactionStatus(row({ state: "stopped", stoppedBy: "interrupted" }))).toBe("Compaction stopped: turn interrupted");
     expect(compactionStatus(row({ state: "stopped", stoppedBy: "failed" }))).toBe("Compaction stopped: turn failed");
   });
+});
+
+it("keeps the runtime checkpoint identity when a queued prompt becomes a new turn", () => {
+  const payloads: Payload[] = [
+    { type: "user_message", text: "First", queued: false },
+    { type: "user_message", text: "Next", queued: true },
+    { type: "turn_checkpoint", seq: 1, base: "a", head: "b" },
+    { type: "turn_completed", status: "ok", authFailed: false },
+    { type: "turn_started", promptSeq: 2 },
+    { type: "turn_checkpoint", seq: 5, base: "b", head: "c" },
+    { type: "turn_completed", status: "ok", authFailed: false },
+    { type: "turn_started", startedBy: "Scheduled task" },
+    { type: "turn_checkpoint", seq: 8, base: "c", head: "d" },
+    { type: "turn_completed", status: "ok", authFailed: false },
+  ];
+  const events: AgentEvent[] = payloads.map((payload, i) => ({ id: `cp${i}`, sessionId: "s", tabId: "t", harness: "claude", seq: i + 1, ts: "2026-11-07T00:00:00Z", payload }));
+  const turns = buildTranscript(events, false).turns;
+  expect(turns.map((turn) => turn.checkpointSeq)).toEqual([1, 5, 8]);
+  expect(turns[1].prompt?.seq).toBe(2);
+  expect(turns[2].prompt).toBeUndefined();
 });
