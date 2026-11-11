@@ -175,13 +175,13 @@ function subtitle(run: Run): string {
     case "planned":
       return `The lead split this into ${count}. This repository starts runs without asking: the lead starts it with terminalx runs start.`;
     default: {
+      // A run held up by a blocked piece, with nothing else running, says so (18.03); while workers run, the Needs you list names it.
       const blocked = run.pieces.filter((piece) => piece.state === "blocked");
-      if (blocked.length && run.state === "running") {
+      if (blocked.length && run.state === "running" && !run.pieces.some((piece) => piece.state === "running")) {
         const numbers = pieceNumbers(run);
         const names = blocked.map((piece) => numbers[piece.id]).join(", ");
         const held = run.waiting.filter((entry) => entry.on.some((on) => blocked.some((piece) => piece.id === on))).map((entry) => numbers[entry.piece]);
-        const running = run.pieces.some((piece) => piece.state === "running");
-        return `${blocked.length === 1 ? `Piece ${names} is` : `Pieces ${names} are`} blocked.${held.length ? ` ${held.length === 1 ? `Piece ${held[0]} waits` : `Pieces ${held.join(", ")} wait`} for ${blocked.length === 1 ? "it" : "them"}${running ? "." : "; nothing else is running."}` : running ? "" : " Nothing else is running."}`;
+        return `${blocked.length === 1 ? `Piece ${names} is` : `Pieces ${names} are`} blocked.${held.length ? ` ${held.length === 1 ? `Piece ${held[0]} waits` : `Pieces ${held.join(", ")} wait`} for ${blocked.length === 1 ? "it" : "them"}; nothing else is running.` : " Nothing else is running."}`;
       }
       if (!run.approval) return `${count} · started without approval, as this repository is set`;
       const since = relativeTime(run.approval.at);

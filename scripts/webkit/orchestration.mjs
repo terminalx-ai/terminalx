@@ -241,7 +241,7 @@ try {
           "the Run tab carries no waiting mark": (await page.getByTestId("run-strip").getByRole("status").count()) === 0,
           "the run says how many pieces are done and that the plan was approved": (await view.getByTestId("run-done").textContent()) === "2" && (await view.getByRole("region", { name: "Run summary" }).textContent()).includes("of 6 done") && (await view.getByText("6 pieces · started 14m ago · approved by you", { exact: true }).count()) === 1,
           "each piece shows the state its worker reported": states === "done,done,running,blocked,running,queued",
-          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultStore added, 14 tests pass.") && detail.includes("raccoon/store-piece") && (await view.getByRole("button", { name: "Open worker", exact: true }).count()) === 1,
+          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultStore added, 14 tests pass.") && detail.includes("raccoon/store-piece") && (await view.getByTestId("piece-detail").getByRole("button", { name: "Open worker", exact: true }).count()) === 1,
           "the plan can no longer be edited or approved": (await view.getByRole("button", { name: "Approve and start" }).count()) === 0 && (await view.getByRole("button", { name: "Edit plan" }).count()) === 0 && (await view.getByRole("combobox").count()) === 0,
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
         };
