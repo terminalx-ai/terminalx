@@ -947,11 +947,26 @@ fn a_run_paused_on_a_window_resumes_by_itself_after_the_reset_when_asked() {
     assert!(engine::watch(&host), "a resume to come is something to watch");
     assert_eq!(store::get(&run.id).unwrap().state, RunState::NeedsYou, "not before the reset");
 
-    // The window resets: the next watch lets it go on.
+    // Past the reset, but nothing has read the window since: the status bar marks the old
+    // reading stale and it still says 90%. The run waits for a fresh reading; the ask stands.
     {
         let mut world = host.world();
-        world.clock = resets + 1_000;
-        world.windows = vec![window("five_hour", "5h", 2.0, resets + 5 * 3_600_000)];
+        world.clock = resets + 60_000;
+        world.windows[0].stale = true;
+        world.windows[0].updated_at = resets - 600_000;
+    }
+    let told = host.world().told.len();
+    assert!(engine::watch(&host), "still something to watch");
+    let waiting = store::get(&run.id).unwrap();
+    assert_eq!((waiting.state, waiting.pause.as_ref().unwrap().resume_at), (RunState::NeedsYou, Some(resets)));
+    assert_eq!(host.world().told.len(), told, "the lead is not told it cannot go on");
+    assert_eq!(host.made(), Vec::<String>::new());
+
+    // A fresh reading of the new window: the next watch lets it go on.
+    {
+        let mut world = host.world();
+        world.clock = resets + 120_000;
+        world.windows = vec![UsageWindow { updated_at: resets + 90_000, ..window("five_hour", "5h", 2.0, resets + 5 * 3_600_000) }];
     }
     engine::watch(&host);
     let run = store::get(&run.id).unwrap();
@@ -1034,3 +1049,35 @@ fn a_lead_may_ask_for_less_budget_than_the_settings_allow_never_more() {
     let run = engine::create(&host, &plan, "lead", None).unwrap();
     assert_eq!((run.limits.points, run.limits.dollars), (10.0, 15.0));
 }
+
+#[test]
+fn a_held_piece_briefed_in_the_session_it_has_waits_for_a_slot_too() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| settings.workers_per_run = 1);
+    // p1's new session cannot be made safe to brief: it keeps the session, held.
+    host.world().no_secure.insert("p1".into());
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    let first = engine::start(&host, &run.id).unwrap();
+    assert_eq!(first.started, vec!["p2"], "p1 is held, p2 takes the one slot");
+    assert!(first.run.piece("p1").unwrap().held.is_some());
+
+    // p1 can now be secured, but the run's one slot is p2's: its brief waits for it.
+    host.world().no_secure.clear();
+    let again = engine::start(&host, &run.id).unwrap();
+    assert!(again.started.is_empty());
+    let p1 = again.run.piece("p1").unwrap();
+    assert_eq!((p1.queued_for, p1.held.is_some()), (Some(Hold::RunLimit), true));
+    assert_eq!(again.run.in_turn(), 1);
+    let p1_session = host.session_of("p1");
+    assert!(!host.world().briefs.contains_key(&p1_session));
+
+    // p2 finishes: p1 is briefed in the session it already has, and no second one is made.
+    host.reports("p2", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("p2"));
+    let run = store::get(&run.id).unwrap();
+    let p1 = run.piece("p1").unwrap();
+    assert_eq!((p1.state, p1.queued_for, p1.held.is_none()), (PieceState::Running, None, true));
+    assert!(host.world().briefs.contains_key(&p1_session));
+    assert_eq!(host.made(), vec!["p1", "p2"]);
+}
+

@@ -781,9 +781,9 @@ less; the person can change them for the run in the approval view, or when it st
   workers on both logins keeps both and stops on whichever comes first. It becomes
   `needsYou`, `reason` and `pause.message` say which limit (a window by name, with its reset
   time), and you are told once. Workers already in a turn finish it. `runs start` is then
-  refused with `needs_you`; what you asked for starts when the person raises the budget or
-  resumes the run, or by itself after the window resets if they asked for that, and you are
-  told. Tell the person and end your turn; do not get the work done another way.
+  refused with `needs_you`; what you asked for starts when the person resumes the run
+  (raising the budget alone does not), or by itself once the window has reset and been read
+  again, if they asked for that, and you are told. Tell the person and end your turn; do not get the work done another way.
 - **Stalls.** A worker in a turn with no tool call or file change for the stall time (10
   minutes unless the person changed it), no command or background task of its running, and
   its agent idle on the CPU, is `stalled`, and you are told once. A long build or test run is

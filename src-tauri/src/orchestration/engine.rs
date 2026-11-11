@@ -306,7 +306,7 @@ pub fn start(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
             let mut error = EngineError::new(
                 "needs_you",
                 format!("Run {id} reached its budget and starts nothing new until the person lets it go on. {why}"),
-                Some("Tell the person, then end your turn. The pieces you asked for start when they raise the budget or resume the run, and you are told here."),
+                Some("Tell the person, then end your turn. The pieces you asked for start when they resume the run (raising the budget alone does not), or after the window resets if they asked for that; you are told here."),
             );
             error.details = json!({"run": id, "pause": run.pause});
             Err(error)
@@ -446,32 +446,33 @@ fn launch_ready(host: &dyn Host, id: &str, which: Which) -> Result<Start, Engine
         let piece_id = piece_id.clone();
         // Read again each time: the brief of a later piece names what earlier ones reported.
         let run = stored(id)?;
-        let Some(piece) = run.piece(&piece_id) else { continue };
-        let reuse = piece.worker.is_some() && piece.held.is_some();
-        if !reuse {
-            // The budget first: a run past it starts nothing, whatever the slots. A window's
-            // baseline is taken here, before the run's first worker starts in it.
-            let reading = read_usage(host, &run);
-            let (current, ()) = store::update(id, |run| {
-                apply_usage(run, &reading, true);
-                Ok(())
-            })
-            .map_err(EngineError::internal)?;
-            if let Some(reached) = budget::reached(&current, host.now_ms()) {
-                pause(host, id, reached, &ready[index..])?;
-                break;
-            }
-            let hold = if current.in_turn() >= current.limits.workers as usize {
-                Some(Hold::RunLimit)
-            } else if in_turn_everywhere()? >= app_limit {
-                Some(Hold::AppLimit)
-            } else {
-                None
-            };
-            if let Some(hold) = hold {
-                set_piece(id, &piece_id, |piece| piece.queued_for = Some(hold))?;
-                continue;
-            }
+        if run.piece(&piece_id).is_none() {
+            continue;
+        }
+        // Every brief starts a turn, a held piece's in the session it already has as much as a
+        // new one: each passes the budget and the worker limits.
+        // The budget first: a run past it starts nothing, whatever the slots. A window's
+        // baseline is taken here, before the run's first worker starts in it.
+        let reading = read_usage(host, &run);
+        let (current, ()) = store::update(id, |run| {
+            apply_usage(run, &reading, true);
+            Ok(())
+        })
+        .map_err(EngineError::internal)?;
+        if let Some(reached) = budget::reached(&current, host.now_ms()) {
+            pause(host, id, reached, &ready[index..])?;
+            break;
+        }
+        let hold = if current.in_turn() >= current.limits.workers as usize {
+            Some(Hold::RunLimit)
+        } else if in_turn_everywhere()? >= app_limit {
+            Some(Hold::AppLimit)
+        } else {
+            None
+        };
+        if let Some(hold) = hold {
+            set_piece(id, &piece_id, |piece| piece.queued_for = Some(hold))?;
+            continue;
         }
         let run = stored(id)?;
         let Some(piece) = run.piece(&piece_id) else { continue };
@@ -521,6 +522,7 @@ fn launch_ready(host: &dyn Host, id: &str, which: Which) -> Result<Start, Engine
         // Running before the brief goes: the turn it starts may end first.
         let run = set_piece(id, &piece_id, |piece| {
             piece.held = None;
+            piece.queued_for = None;
             piece.state = PieceState::Running;
             piece.note = None;
         })?;
@@ -846,7 +848,9 @@ pub fn fill_slots(host: &dyn Host) {
         Err(error) => return log::warn!("read the runs to start queued pieces: {error:#}"),
     };
     for run in runs.iter().filter(|run| run.state == RunState::Running) {
-        if !run.ready().iter().any(|piece| matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit))) {
+        // Ready pieces a limit held, and pieces whose session waits for its brief behind one.
+        let held = |piece: &&Piece| matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit));
+        if !run.ready().iter().any(held) && !run.pieces.iter().filter(|piece| piece.held.is_some() && piece.worker.is_some()).any(|piece| held(&piece)) {
             continue;
         }
         match launch_ready(host, &run.id, Which::Held) {
@@ -865,6 +869,9 @@ pub fn watch(host: &dyn Host) -> bool {
     for run in runs.iter().filter(|run| !run.state.ended()) {
         if run.state == RunState::NeedsYou {
             match run.pause.as_ref().and_then(|pause| pause.resume_at) {
+                // Past the reset, but the window has not been read since: its last reading is the
+                // full one before the reset. Wait for one that is not; the person's ask stands.
+                Some(at) if at <= now && !read_since_reset(host, run, at) => more = true,
                 Some(at) if at <= now => {
                     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
                     match resume_locked(host, &run.id, Resume::Now, true) {
@@ -891,6 +898,15 @@ pub fn watch(host: &dyn Host) -> bool {
         more |= stored(&run.id).is_ok_and(|run| run.in_turn() > 0);
     }
     more
+}
+
+/// Whether the window that paused a run has been read afresh since it reset at
+/// `at`: a reading that is not stale, taken after the reset or naming a later one.
+fn read_since_reset(host: &dyn Host, run: &Run, at: i64) -> bool {
+    let Some(paused) = run.pause.as_ref().and_then(|pause| pause.window.as_ref()) else { return true };
+    host.windows().iter().any(|window| {
+        window.agent == paused.agent && window.key == paused.key && !window.stale && (window.updated_at >= at || window.resets_at.is_some_and(|next| next > at + 60_000))
+    })
 }
 
 /// Whether a worker in a turn is stalled: nothing for the stall time, no
