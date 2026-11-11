@@ -1,3 +1,6 @@
+import type { RepositorySettings, WorktreeCopyReport } from "@/types/repositorySettings";
+import type { ManualStatus } from "@terminalx/portable/manualStatus";
+export type { ManualStatus } from "@terminalx/portable/manualStatus";
 import type { AutomationRef } from "@/types/automations";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 
@@ -22,6 +25,8 @@ export interface TabEntry {
   /** A mode asked for that waits for the restart that applies it. Drawn as pending, never as current. */
   requestedPermissionMode?: string | null;
   providerSessionId?: string | null;
+  resetLogId?: string;
+  resetBackupId?: string;
   /**
    * How the app reaches the agent. Absent is its CLI in the tab's terminal.
    * An experimental Codex connection has no terminal: opening the terminal
@@ -29,10 +34,14 @@ export interface TabEntry {
    */
   transport?: "experimentalCodexStdio";
   status: TabStatus;
+  /** A persisted reminder, independent of the agent status. */
+  markedUnread?: boolean;
   created: string;
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
+  /** A user/assistant message exists, even when its timestamp cannot be verified. */
+  hasMessages?: boolean;
   contextUsed?: number | null;
   contextMax?: number | null;
   /** A cloud tab whose conversation has not been read yet: the chat says it is loading, not that it is empty. */
@@ -94,6 +103,19 @@ export interface RemovedWorkspace {
   path: string;
   name: string;
   branch?: string | null;
+  commit?: string | null;
+  repository?: string | null;
+}
+
+export interface WorkspaceRestorePreview {
+  projectPath: string;
+  path: string;
+  branch: string | null;
+  commit: string;
+  needsBranch: string | null;
+  suggestedBranch: string;
+  legacy: boolean;
+  sessionIds: string[];
 }
 
 /**
@@ -103,9 +125,26 @@ export interface RemovedWorkspace {
  */
 export type SessionKind = "project" | "quick";
 
+/**
+ * The session that started another (PRO-270): `terminalx sessions create` run
+ * from inside it, or told `--parent`. A record only: the parent may since
+ * have been archived or deleted.
+ */
+export interface SessionParent {
+  sessionId: string;
+  /** The tab the command ran in; absent when `--parent` named the session. */
+  tabId?: string | null;
+}
+
 export interface SessionEntry {
+  /** Live presentation facts supplied by the owning runtime. */
+  rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
+  /** The person’s workflow status; older entries default to Backlog. */
+  manualStatus?: ManualStatus;
   id: string;
   kind?: SessionKind;
+  /** Absent for a session no other session started. */
+  parent?: SessionParent | null;
   /**
    * The session's project. A quick chat has none: this is then its scratch
    * directory under the TerminalX home, which is in no project list. Ask
@@ -116,7 +155,8 @@ export interface SessionEntry {
   worktreeName?: string | null;
   branch?: string | null;
   baseRef?: string | null;
-  worktreeBase?: { commit: string; fetched: boolean; warning: string | null } | null;
+  /** `from`: the ref the worktree was made from, which its branch is read against. */
+  worktreeBase?: { commit: string; fetched: boolean; warning: string | null; from?: string | null; fileCopy?: WorktreeCopyReport | null } | null;
   worktreeRemoved: boolean;
   removedWorkspace?: RemovedWorkspace | null;
   /** The issue the session works on: the one it was started from, or one linked later (`issueWork.link`). */
@@ -128,6 +168,8 @@ export interface SessionEntry {
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
+  /** Includes messages in closed tabs and legacy transcripts without verified times. */
+  hasMessages?: boolean;
   archived: boolean;
   /** Archived by the idle sweep rather than by a person (#718); absent otherwise. */
   autoArchived?: boolean;
@@ -138,6 +180,11 @@ export interface SessionEntry {
   activeTab?: string | null;
   /** A chat's link: the repo its agent last worked in, and the branch there. */
   link?: { path: string; branch?: string | null } | null;
+}
+
+export interface RepositoryScripts {
+  setup: string;
+  archive: string;
 }
 
 export interface Project {
@@ -157,9 +204,12 @@ export interface Project {
   agentIssueUpdates?: boolean;
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;
+  scripts?: RepositoryScripts | null;
+  repositorySettings?: RepositorySettings;
 }
 
 export interface ProjectPatch {
+  scripts?: RepositoryScripts;
   name?: string;
   color?: string | null;
   mascot?: string | null;
@@ -170,6 +220,7 @@ export interface ProjectPatch {
   agentIssueUpdates?: boolean;
   /** Set one branch's label; null or blank clears it. */
   branchLabel?: { branch: string; label: string | null };
+  repositorySettings?: RepositorySettings;
 }
 
 /** One checkout of a project: the root or any worktree, whoever made it. */
@@ -308,6 +359,8 @@ export interface HarnessInfo {
   path?: string;
   installHint: string;
   installUrl: string;
+  /** The app installs this CLI and signs in to it by itself (PRO-152). */
+  installable?: boolean;
   caps: Capabilities;
 }
 
@@ -338,6 +391,8 @@ export type ChangeStatus = "added" | "modified" | "deleted" | "renamed";
 export interface ChangedFile {
   path: string;
   oldPath?: string;
+  /** Head blob ID, or deleted:<removed blob ID>. Absent on older runtimes. */
+  blobHash?: string;
   status: ChangeStatus;
   additions: number;
   deletions: number;

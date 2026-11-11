@@ -1,3 +1,4 @@
+import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -24,6 +25,7 @@ import type {
   SessionEntry,
   Workspace,
   WorkspaceDisposition,
+  WorkspaceRestorePreview,
   TabEntry,
   TabStatus,
   UnfinishedMerge,
@@ -37,6 +39,7 @@ import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
+import type { RepositoryFilesPreview } from "@/types/repositorySettings";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
 import type { IssueUser } from "@/lib/issueOps";
 import { noteCallFailure } from "@/lib/accountRoles";
@@ -198,6 +201,7 @@ export interface StatsUsageState {
 }
 
 export interface NewSession {
+  sectionId?: string | null;
   projectPath: string;
   /** Run in this existing workspace instead of creating a worktree. */
   cwd?: string | null;
@@ -208,6 +212,7 @@ export interface NewSession {
   worktreeName?: string | null;
   /** An existing branch to check out in the new worktree, instead of a new branch. */
   checkoutBranch?: string | null;
+  checkoutPr?: number | null;
   /** Explicit acknowledgement that a requested worktree should be skipped. */
   onMain?: boolean;
   issue?: IssueRef | null;
@@ -224,6 +229,7 @@ export interface WorkspaceRename {
 }
 
 export interface NewQuickChat {
+  sectionId?: string | null;
   title?: string | null;
   cwd?: string | null;
   tab?: NewTab | null;
@@ -262,6 +268,8 @@ export interface ShellPane {
   title: string | null;
   /** The reader named it; `title` is otherwise the name it was opened with. */
   renamed?: boolean;
+  /** Explicit placement; absent for terminals opened by older runtimes. */
+  docked?: boolean | null;
   cwd: string;
   exited: boolean;
   /** When it was opened, so every window lists it in the same place. */
@@ -279,6 +287,12 @@ export interface PaneAgent {
  * session a tab belongs to. A tab is named `agent:<tab id>`,
  * `terminal:<pane id>` or `browser:<page id>` (`tabKey` in `@/lib/tabLayouts`).
  */
+export interface TabPane {
+  id: "left" | "right";
+  tabs: string[];
+  active: string | null;
+}
+
 export interface TabLayout {
   /** The tabs in the order the reader put them in; a tab not listed comes after these, oldest first. */
   order: string[];
@@ -288,6 +302,10 @@ export interface TabLayout {
   muted: string[];
   /** The reader's own title for a tab. */
   titles: Record<string, string>;
+  /** Optional for layouts saved before split panes. Preserved by the backend's extension fields. */
+  panes?: TabPane[];
+  focusedPane?: TabPane["id"];
+  splitRatio?: number;
 }
 
 /** An agent tab the reader closed, kept with its conversation so it can be reopened. */
@@ -303,8 +321,20 @@ export interface TabState {
   closed: ClosedTab[];
 }
 
+/** One local repository's mirror; source stays set when cleanup is needed. */
+export interface RepoMirrorStatus {
+  root: string;
+  source: string | null;
+  active: boolean;
+  error: string | null;
+}
+
 /** How a workspace is removed. */
 export interface WorkspaceRemoveOptions {
+  /** Receipt for the failed archive run the person explicitly chose to bypass. */
+  archiveFailure?: string;
+  /** Receipt for the failed run the person explicitly chose to retry. */
+  archiveRetry?: string;
   /** Settling: the conversations stay and move to the project. */
   keepSessions: boolean;
   deleteBranch: boolean;
@@ -340,6 +370,7 @@ export const api = {
    */
   accountRefreshRoles: (force: boolean) => invoke<{ status: AccountStatus; fresh: boolean }>("account_refresh_roles", { force }),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
+  accountPasteCallback: (link: string) => invoke<void>("account_paste_callback", { link }),
   /** Opens the organization's page in the web console, in the system browser. */
   organizationConsoleOpen: (organizationId: string) => invoke<void>("organization_console_open", { organizationId }),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
@@ -520,6 +551,7 @@ export const api = {
 
   // opt-in device pairing
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),
+  pairingRetryRelay: () => invoke<PairingStatus>("pairing_retry_relay"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
   /** This Mac's name as the user's other devices show it (#686). */
@@ -528,6 +560,7 @@ export const api = {
   setMachineName: (name: string | null) => invoke<MachineName>("set_machine_name", { name }),
 
   // projects
+  repositoryFilesPreview: (path: string, patterns?: string[], snapshot?: string) => invoke<RepositoryFilesPreview>("repository_files_preview", { path, patterns, snapshot }),
   listProjects: () => invoke<{ projects: Project[]; lastSelected: string | null }>("list_projects"),
   addProject: (path: string) => invoke<Project>("add_project", { path }),
   chatsDir: () => invoke<string>("chats_dir"),
@@ -536,6 +569,9 @@ export const api = {
   updateProject: (path: string, patch: ProjectPatch) => invoke<Project>("update_project", { path, patch }),
   setProjectLogo: (path: string, source: string | null) => invoke<Project>("set_project_logo", { path, source }),
   listWorkspaces: (projectPath: string) => invoke<Workspace[]>("list_workspaces", { projectPath }),
+  repoMirrorStatus: (sessionId: string) => invoke<RepoMirrorStatus>("repo_mirror_status", { sessionId }),
+  repoMirrorStart: (sessionId: string, confirmed: boolean) => invoke<RepoMirrorStatus>("repo_mirror_start", { sessionId, confirmed }),
+  repoMirrorStop: (sessionId: string) => invoke<RepoMirrorStatus>("repo_mirror_stop", { sessionId }),
   previewWorkspaceName: (projectPath: string, requested?: string | null) =>
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
@@ -571,8 +607,13 @@ export const api = {
   removeWorkspace: (projectPath: string, path: string, options: WorkspaceRemoveOptions) =>
     invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
 
+  previewWorkspaceRestore: (sessionId: string) => invoke<WorkspaceRestorePreview>("preview_workspace_restore", { sessionId }),
+  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) =>
+    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch }),
+
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
+  sessionRowStatuses: (ids: string[]) => invoke<Record<string, import("@terminalx/portable/sessionStatus").SessionStatusInput>>("session_row_statuses", { ids }),
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
   statsUsageSnapshot: () => invoke<StatsUsageState>("stats_usage_snapshot"),
@@ -625,6 +666,7 @@ export const api = {
    * doing (#718). `keep`: what this window shows. Resolves to the ids archived; the windows hear of each as usual.
    */
   archiveIdleSessions: (keep: string[]) => invoke<string[]>("archive_idle_sessions", { keep }),
+  setSessionStatus: (sessionId: string, status: import("@/types/session").ManualStatus) => invoke<void>("set_session_status", { sessionId, status }),
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
   /** Delete one session; its workspace and every other session stay. */
@@ -656,6 +698,13 @@ export const api = {
 
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
+  /** `base`: the ref the session's worktree was made from, read against instead of the default branch. */
+  branchOverview: (cwd: string, base?: string | null, localOnly = false) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null, localOnly }),
+  projectForge: (cwd: string) => invoke<ProjectForge>("project_forge", { cwd }),
+  /** Brings the remote's branches up to date; false when it could not (offline, no remote). */
+  branchFetch: (cwd: string) => invoke<boolean>("branch_fetch", { cwd }),
+  /** Retained for command clients; the Branch panel sends an agent prompt instead. */
+  branchMergeInto: (cwd: string, into: string) => invoke<string>("branch_merge_into", { cwd, into }),
   // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
   // None of these takes a local path: the native side derives the mirror's
   // directory from the two ids and only reports it back (`root`).
@@ -685,12 +734,18 @@ export const api = {
   /** The person's global Git identity; it authors their commits in cloud workspaces. */
   gitIdentity: () => invoke<{ name: string; email: string } | null>("git_identity"),
   listBranches: (cwd: string) => invoke<BranchInfo[]>("list_branches", { cwd }),
+  turnCheckpoint: (sessionId: string, tabId: string, seq: number) => invoke<TurnCheckpoint | null>("turn_checkpoint", { sessionId, tabId, seq }),
+  keepTurn: (sessionId: string, tabId: string, seq: number) => invoke<void>("keep_turn", { sessionId, tabId, seq }),
+  restoreUndo: (sessionId: string, tabId: string, seq: number, confirmed: string | null = null) => invoke<TurnUndoResult>("restore_undo", { sessionId, tabId, seq, confirmed }),
+  undoTurn: (sessionId: string, tabId: string, seq: number, confirmed: string | null = null) => invoke<TurnUndoResult>("undo_turn", { sessionId, tabId, seq, confirmed }),
   snapshotTree: (cwd: string) => invoke<string>("snapshot_tree", { cwd }),
   headTree: (cwd: string) => invoke<string | null>("head_tree", { cwd }),
   reviewRange: (cwd: string, target: string | null, uncommitted: boolean) =>
     invoke<{ target: string; base: string; head: string }>("review_range", { cwd, target, uncommitted }),
-  changesBetween: (cwd: string, base: string, head: string | null) =>
-    invoke<ChangedFile[]>("changes_between", { cwd, base, head }),
+  changesBetween: (cwd: string, base: string, head: string | null, hideWhitespace = false) =>
+    invoke<ChangedFile[]>("changes_between", { cwd, base, head, hideWhitespace }),
+  diffMediaContent: (cwd: string, path: string, tree: string | null) =>
+    invoke<{ data: string; mime: string } | null>("diff_media_content", { cwd, path, tree }),
   fileContentsAt: (cwd: string, path: string, base: string, head: string | null) =>
     invoke<{ before: string | null; after: string | null }>("file_contents_at", { cwd, path, base, head }),
   logCommits: (cwd: string, range?: string | null, limit?: number) =>
@@ -713,6 +768,8 @@ export interface AccountIdentity {
   organization: string | null;
   /** The active (default) organization's id. */
   organizationId?: string | null;
+  /** The person's picture from the sign-in service, an https: URL; absent when it sends none. */
+  picture?: string | null;
 }
 
 export interface AccountStatus {
@@ -1968,6 +2025,8 @@ export const agent = {
   send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number) =>
     invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }) }),
   /** The chat drew the message `seq` it sent: its timings join the runtime's in the tab's diagnostics (#727). */
+  reportTerminalView: (sessionId: string, tabId: string, report: { transitionId: string; sequence: number; elapsedMs: number; surface: "window"; stage: "requested" | "waiting_for_turn" | "starting_terminal" | "attaching" | "opened" | "cancelled" | "failed"; errorCategory: "handoff" | "start" | "attach" | null }) =>
+    invoke<void>("report_terminal_view", { sessionId, tabId, report }),
   reportSendShown: (sessionId: string, tabId: string, seq: number, timings: { pressedAt?: number; drawnAt?: number; answeredAt?: number; shownAt: number }) =>
     invoke<void>("report_send_shown", { sessionId, tabId, seq, timings }),
   /** Send the tab's last prompt again, images and all: the one its agent never received (#663). */
@@ -1978,7 +2037,7 @@ export const agent = {
   /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */
   interrupt: (sessionId: string, tabId: string) => invoke<boolean>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
-  tabToTerminal: (sessionId: string, tabId: string) => invoke<void>("tab_to_terminal", { sessionId, tabId }),
+  tabToTerminal: (sessionId: string, tabId: string, transitionId?: string) => invoke<boolean | void>("tab_to_terminal", { sessionId, tabId, transitionId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
   ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
   /**
@@ -1993,10 +2052,14 @@ export const agent = {
     invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId }),
   /** The hard stop: ends the tab's agent process, keeping what it needs to resume. */
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
+  resetChat: (sessionId: string, tabId: string, endSeq: number | null, resetFiles: boolean) =>
+    invoke<string | null>("reset_chat", { sessionId, tabId, endSeq, resetFiles }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
   /** Send a message the CLI holds behind its running turn now: the turn is interrupted and the message typed again. */
   sendQueuedNow: (sessionId: string, tabId: string, seq: number) => invoke<void>("send_queued_now", { sessionId, tabId, seq }),
+  changeHeldQueue: (sessionId: string, tabId: string, change: import("@/lib/heldQueue").HeldQueueChange) =>
+    invoke<SendOutcome>("change_held_queue", { sessionId, tabId, change }),
   listQueued: (sessionId: string, tabId: string) => invoke<QueuedMessage[]>("list_queued", { sessionId, tabId }),
   respondPermission: (sessionId: string, tabId: string, requestId: string, optionId: string) =>
     invoke<void>("respond_permission", { sessionId, tabId, requestId, optionId }),
@@ -2007,6 +2070,7 @@ export const agent = {
     invoke<void>("set_tab_permission_mode", { sessionId, tabId, mode }),
   setEffort: (sessionId: string, tabId: string, effort: string | null) =>
     invoke<void>("set_tab_effort", { sessionId, tabId, effort }),
+  setUnread: (sessionId: string, tabId: string, unread: boolean) => invoke<void>("set_tab_unread", { sessionId, tabId, unread }),
   markRead: (sessionId: string, tabId: string) => invoke<void>("mark_tab_read", { sessionId, tabId }),
   listModels: (refresh?: boolean) => invoke<ModelInfo[]>("list_models", { refresh: refresh ?? false }),
 };
@@ -2045,6 +2109,55 @@ export interface PrCheck {
   name: string;
   state: string;
   url?: string | null;
+  actions?: { runId: number; jobId: number | null } | null;
+}
+
+export interface CheckLog {
+  text: string;
+  truncated: boolean;
+}
+
+export interface BranchContributor {
+  name: string;
+  email: string;
+  commits: number;
+  /** Their newest commit's author date. */
+  last: string;
+}
+
+export type ProjectForge = "github" | "githubUnavailable" | "localOnly";
+
+/** A checkout's branch against the branch it merges into, read from refs already here. */
+export interface BranchOverview {
+  /** Resolved by the same native function as the session header. */
+  nextStep: "pull" | "reconcile" | "detached" | "conflicts" | "commit" | "empty" | "local" | "push" | null;
+  branch: string | null;
+  /** `origin/main`, else the local default branch; null outside a repository or without one. */
+  base: string | null;
+  onBase: boolean;
+  /** Main checkout path reported by Git. */
+  mainCheckout: string | null;
+  /** Compared using canonical checkout roots, including sessions reached through symlinks. */
+  inMainCheckout: boolean;
+  forkPoint: CommitInfo | null;
+  /** Commits only on the branch, and on the base since the fork. */
+  ahead: number;
+  behind: number;
+  commits: CommitInfo[];
+  baseCommits: CommitInfo[];
+  contributors: BranchContributor[];
+  baseContributors: BranchContributor[];
+  upstream: string | null;
+  unpushed: number;
+  unpulled: number;
+  /** The upstream's commits not pulled yet, newest first. */
+  incoming: CommitInfo[];
+  dirty: boolean;
+  /** Files changed and not committed. */
+  changed: number;
+  /** Has a remote at all: without one there is no push and no pull request. */
+  hasRemote: boolean;
+  merge: { state: "clean" | "conflicts" | "merged" | "unknown"; conflicted: string[] };
 }
 
 export interface PullRequest {
@@ -2058,6 +2171,14 @@ export interface PullRequest {
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  /** Absent on older workspace runtimes. */
+  mergeState?: string;
+  mergeQueueEnabled?: boolean | null;
+  mergeQueueEntry?: { position: number; state: string } | null;
+  autoMergeEnabled?: boolean;
+  requiredChecks?: string[] | null;
+  deployments?: { name: string; state: string; url?: string | null }[];
+  detailsError?: string | null;
   reviewDecision: string | null;
   checks: PrCheck[];
   body: string;
@@ -2065,12 +2186,14 @@ export interface PullRequest {
 }
 
 export const git = {
+  hasRemote: (cwd: string) => invoke<boolean>("git_has_remote", { cwd }),
+  addRemote: (cwd: string, url: string) => invoke<void>("git_add_remote", { cwd, url }),
   commit: (cwd: string, message: string, paths?: string[]) => invoke<string>("git_commit", { cwd, message, paths: paths ?? null }),
   push: (cwd: string) => invoke<string>("git_push", { cwd }),
   pull: (cwd: string) => invoke<string>("git_pull", { cwd }),
-  discard: (cwd: string, path: string) => invoke<void>("git_discard", { cwd, path }),
+  discard: (cwd: string, path: string, base: string | null = null, oldPath: string | null = null) => invoke<void>("git_discard", { cwd, path, base, oldPath }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
-  workingChanges: (cwd: string) => invoke<[string, ChangedFile[]]>("working_changes", { cwd }),
+  workingChanges: (cwd: string, hideWhitespace = false) => invoke<[string, ChangedFile[]]>("working_changes", { cwd, hideWhitespace }),
   /** The merge left in progress in the checkout, with what each uncommitted file is; null when none is. */
   unfinishedMerge: (cwd: string) => invoke<UnfinishedMerge | null>("unfinished_merge", { cwd }),
   /** Commit the merge that was read; refused if the checkout moved on or a file is still conflicted. */
@@ -2087,15 +2210,39 @@ export interface PrAssociation {
   scope: PrScope;
 }
 
+export interface GitHubConnectionStatus {
+  state: "missing" | "signed_out" | "connected" | "unavailable";
+  details: string | null;
+  hostname?: string;
+}
+
 export const gh = {
+  search: (cwd: string, query: string) => invoke<PullRequest[]>("pr_search", { cwd, query }),
+  attach: (cwd: string, number: number) => invoke<string>("pr_attach", { cwd, number }),
+  connectionStatus: (cwd?: string) => invoke<GitHubConnectionStatus>("gh_connection_status", { cwd: cwd ?? null }),
+  loginStart: (id: string, hostname: string) => invoke<void>("gh_login_start", { id, hostname }),
+  createRepository: (cwd: string, name: string, privateRepo: boolean) => invoke<void>("gh_create_repository", { cwd, name, private: privateRepo }),
+  conversation: (url: string): PrConversationAccess => ({
+    read: () => invoke("pr_conversation", { url }),
+    act: (action) => invoke("pr_conversation_action", { url, action }),
+    search: (query) => invoke("pr_reviewer_search", { url, query }),
+  }),
+  checkLog: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<CheckLog>("pr_check_log", { cwd, prUrl, checkUrl, failed }),
+  rerunCheck: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<void>("pr_check_rerun", { cwd, prUrl, checkUrl, failed }),
+  fixAttachment: (sessionId: string, tabId: string, prUrl: string) => invoke<{ path: string; truncated: boolean }>("pr_check_fix_attachment", { sessionId, tabId, prUrl }),
+  reviewFiles: (url: string, head: string, base: string) => invoke<import("./reviewThreads").ReviewFile[]>("pr_review_files", { url, head, base }),
+  reviewThreads: (url: string) => invoke<import("./reviewThreads").ReviewThreads>("pr_review_threads", { url }),
+  resolveReview: (url: string, threadId: string, resolved: boolean) => invoke<void>("pr_review_resolve", { url, threadId, resolved }),
+  replyReview: (url: string, threadId: string, body: string) => invoke<void>("pr_review_reply", { url, threadId, body }),
   landed: (cwd: string) => invoke<import("@/types/session").Landed>("pr_landed", { cwd }),
   available: () => invoke<boolean>("gh_available"),
+  associationsBatch: (sessionIds: string[]) => invoke<Record<string, PrAssociation[]>>("pr_associations_batch", { sessionKeys: sessionIds }),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
   list: (cwd: string, branch: string) => invoke<PullRequest[]>("pr_list", { cwd, branch }),
   details: (cwd: string, number: number, url?: string) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}) }),
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
     invoke<string>("pr_create", { cwd, title, body, base, draft, ...(sessionId ? { sessionId } : {}) }),
-  merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
+  merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase" | "queue", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
   ready: (cwd: string, number: number, url?: string) => invoke<void>("pr_ready", { cwd, number, ...(url ? { url } : {}) }),
 };
 
@@ -2203,8 +2350,27 @@ export const floatingWindow = {
   openInMain: (sessionId: string, tabId?: string | null) => invoke<void>("floating_open_in_main", { sessionId, tabId: tabId ?? null }),
 };
 
+// ---- agent setup (PRO-152)
+export type AgentSetupStep = "install" | "login";
+export const agentSetup = {
+  /**
+   * Run an agent's official installer, or its own sign-in, in setup pane `id`
+   * (`setup:<harness>:<run>`, a pane of no session). A pane whose step has
+   * ended goes on with the next one, its output kept above. The pane's exit
+   * code says how the step ended (`agentSetupFlow.ts`).
+   */
+  start: (id: string, harness: string, step: AgentSetupStep, cols: number, rows: number) =>
+    invoke<void>("agent_setup_start", { id, harness, step, cols, rows }),
+  /**
+   * The agent's step that runs now, wherever it was started (another window,
+   * or this one before a reload): the runtime runs one at a time per agent.
+   */
+  running: (harness: string) => invoke<{ pane: string; step: AgentSetupStep } | null>("agent_setup_running", { harness }),
+};
+
 // ---- terminals
 export const pty = {
+  localLinks: (id: string) => invoke<{ sessionId: string; cwd: string; urls: string[] } | null>("pty_local_links", { id }),
   /** `title` names a shell tab for every window that lists it. */
   spawn: (id: string, cwd: string, cols: number, rows: number, command?: string, title?: string) =>
     invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null, title: title ?? null }),
@@ -2213,6 +2379,9 @@ export const pty = {
   /** The agents in front of terminals right now (#437), for a window that loads after they were started. */
   agents: () => invoke<PaneAgent[]>("pane_agents"),
   rename: (id: string, title: string) => invoke<void>("pty_rename", { id, title }),
+  /** Sessions with a TCP listener working in their checkout, including detached servers. */
+  listeningSessions: (sessions: Pick<SessionEntry, "id" | "cwd">[]) => invoke<string[]>("listening_sessions", { sessions }),
+  setDocked: (id: string, docked: boolean) => invoke<ShellPane>("pty_set_docked", { id, docked }),
   /** Which of these shell tabs are running a command now. */
   busy: (ids: string[]) => invoke<string[]>("pty_busy", { ids }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
@@ -2227,6 +2396,16 @@ export const pty = {
     const channel = new Channel<ArrayBuffer>();
     channel.onmessage = (message) => onData(new Uint8Array(message));
     return invoke<void>("pty_attach", { id, token, channel });
+  },
+  attachSized: (id: string, token: string, onData: (bytes: Uint8Array, size?: { cols: number; rows: number }) => void) => {
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (message) => {
+      if (message.byteLength < 4) return;
+      const header = new DataView(message);
+      const cols = header.getUint16(0, true), rows = header.getUint16(2, true);
+      onData(new Uint8Array(message, 4), cols > 0 && rows > 0 ? { cols, rows } : undefined);
+    };
+    return invoke<void>("pty_attach_sized", { id, token, channel });
   },
   /** This window has drawn `drawn` bytes of the pane's output since it attached; the backend holds a pane that gets too far ahead. */
   ack: (id: string, token: string, drawn: number) => invoke<void>("pty_ack", { id, token, drawn }),
@@ -2428,6 +2607,7 @@ export interface WorkCloudSession {
 
 /** When an agent nobody is using is stopped (#696). */
 export interface AgentSettings {
+  readOnlyCommands: boolean;
   /** Minutes an agent may sit idle before it is stopped; 0 is never. */
   idleStopMinutes: number;
 }
@@ -2437,6 +2617,7 @@ export const IDLE_STOP_MINUTES = [0, 30, 60, 120, 240, 480, 1440] as const;
 
 export const agentSettings = {
   get: () => invoke<AgentSettings>("agent_settings"),
+  setReadOnlyCommands: (enabled: boolean) => invoke<AgentSettings>("set_read_only_commands", { enabled }),
   setIdleStopMinutes: (minutes: number) => invoke<AgentSettings>("set_agent_idle_stop_minutes", { minutes }),
 };
 
@@ -2479,6 +2660,36 @@ export const experimental = {
     }
   },
 };
+
+/** Settings → Storage: what is kept about the warnings tabs raise (#815). */
+export interface DiagnosticsSettings {
+  /** Record when a tab's warning was raised, shown, acted on and cleared: labels, counts and times only. */
+  recoveryIncidents: boolean;
+}
+
+/**
+ * The runtime's log of recovery incidents (#815, `recovery_log.rs`). A
+ * window reports what it showed and what was pressed; every field is a label
+ * or a number, refused otherwise at the boundary. Reports are best effort.
+ */
+export const recoveryIncidents = {
+  report: (sessionId: string, tabId: string, report: import("@/lib/recoveryReports").UiReport) => invoke<void>("report_recovery_ui", { sessionId, tabId, report }),
+  settings: () => invoke<DiagnosticsSettings>("diagnostics_settings"),
+  setEnabled: (enabled: boolean) => invoke<DiagnosticsSettings>("set_recovery_incidents", { enabled }),
+  summary: () => invoke<RecoveryIncidentSummary>("recovery_incidents_summary"),
+  export: (path: string) => invoke<void>("recovery_incidents_export", { path }),
+  clear: () => invoke<void>("clear_recovery_incidents"),
+};
+
+/** What `recovery_log::summarize` says, as far as the settings row reads it. */
+export interface RecoveryIncidentSummary {
+  lines: number;
+  lines_lost: number;
+  incidents: number;
+  busy_refusals_while_turn_open: number;
+  suspected_false_positives: { incident: string; reason: string; why: string }[];
+  groups: { reason: string; runtime: string; transport: string; incidents: number; occurrences: number }[];
+}
 
 export interface OrganizationWorkStatus {
   shareWorkStatus: boolean;
@@ -2525,6 +2736,8 @@ export interface GithubIdentity {
   source: "ssh" | "gh" | null;
   email: string | null;
   repo: string | null;
+  /** Where the origin remote is hosted; `null` for a project with no remote, on this computer only. */
+  remoteHost?: "github" | "gitlab" | "other" | null;
 }
 /** Sessions started from an issue, carried on to a pull request, a review and a merge. */
 export const issuePipelines = {
@@ -2821,3 +3034,6 @@ export function closeWorkspaceConnectionsIn(orgId: string): void {
     void pending.then((connection) => connection.close()).catch(() => undefined);
   }
 }
+
+export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null }
+export interface TurnUndoResult { overlap: string[]; token: string; undone: boolean; backupRef?: string | null }

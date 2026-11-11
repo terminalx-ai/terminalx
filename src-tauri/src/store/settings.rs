@@ -1,5 +1,6 @@
-//! Settings the Rust side needs before the webview exists. Anything the
-//! frontend can read for itself lives in localStorage instead.
+//! User settings shared by the runtime and every window.
+
+pub mod file;
 
 use std::path::PathBuf;
 
@@ -9,6 +10,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    /// User-facing webview preferences. Missing keys inherit app defaults.
+    pub preferences: std::collections::BTreeMap<String, serde_json::Value>,
+    /// The first window copied the legacy localStorage choices successfully.
+    pub preferences_migrated: bool,
+    // Keep layered keys written/reset by another window while an unrelated
+    // settings control holds a previously loaded snapshot. Not persisted.
+    #[serde(skip)]
+    pub(crate) loaded_configuration: Option<(String, String)>,
     /// Where new worktrees go, relative to the project root.
     pub worktree_dir: String,
     /// Branch prefix for session worktrees.
@@ -56,6 +65,24 @@ pub struct Settings {
     /// Settings → Experimental. Tabs are made by the Rust side, which reads
     /// these when it makes one, so they live here.
     pub experimental: ExperimentalSettings,
+    /// What the runtime keeps about the warnings tabs raise (#815,
+    /// `recovery_log.rs`). The runtime writes it, so it reads this itself.
+    pub diagnostics: DiagnosticsSettings,
+}
+
+/// Private evidence kept on this Mac only, for reports the reader makes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DiagnosticsSettings {
+    /// Record when a tab's warning was raised, shown, acted on and cleared:
+    /// labels, counts and times, never a message, code or a path.
+    pub recovery_incidents: bool,
+}
+
+impl Default for DiagnosticsSettings {
+    fn default() -> Self {
+        Self { recovery_incidents: true }
+    }
 }
 
 /// Agents the app started that sit idle are stopped after a while (#696),
@@ -63,6 +90,8 @@ pub struct Settings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentSettings {
+    /// Skip Ask mode's card for built-in read-only discovery commands.
+    pub read_only_commands: bool,
     /// Minutes an agent may sit idle before it is stopped; 0 never stops one
     /// for that alone.
     #[serde(deserialize_with = "idle_stop_minutes")]
@@ -84,7 +113,7 @@ fn idle_stop_minutes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::
 
 impl Default for AgentSettings {
     fn default() -> Self {
-        Self { idle_stop_minutes: DEFAULT_IDLE_STOP_MINUTES }
+        Self { idle_stop_minutes: DEFAULT_IDLE_STOP_MINUTES, read_only_commands: true }
     }
 }
 
@@ -298,6 +327,9 @@ impl Default for StatusBarSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            preferences: Default::default(),
+            preferences_migrated: false,
+            loaded_configuration: None,
             worktree_dir: ".raccoon/worktrees".into(),
             branch_prefix: "raccoon/".into(),
             extra_bin_dirs: Vec::new(),
@@ -316,33 +348,23 @@ impl Default for Settings {
             agents: AgentSettings::default(),
             conversations: ConversationSettings::default(),
             experimental: ExperimentalSettings::default(),
+            diagnostics: DiagnosticsSettings::default(),
         }
     }
 }
 
-fn file_path() -> Result<PathBuf> {
+pub(super) fn file_path() -> Result<PathBuf> {
     Ok(super::root()?.join("settings.json"))
 }
 
 pub fn load() -> Settings {
-    file_path()
-        .ok()
-        .and_then(|p| super::read_json::<Settings>(&p).ok().flatten())
-        .unwrap_or_default()
+    let mut settings = file::load();
+    settings.loaded_configuration = Some((settings.branch_prefix.clone(), settings.worktree_dir.clone()));
+    settings
 }
 
 pub fn save(s: &Settings) -> Result<()> {
-    let path = file_path()?;
-    super::write_json(&path, s)?;
-    // A new file is already owner-only; this is what tightens one left loose
-    // by an older build, which matters because the file can hold a tracker
-    // API key. Raccoon owns this file, so narrowing it is ours to do.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    file::save(s)
 }
 
 #[cfg(test)]
@@ -417,6 +439,14 @@ mod tests {
             let damaged: Settings = serde_json::from_str(&format!(r#"{{"mergedCleanup":{{"graceMinutes":{invalid}}}}}"#)).unwrap();
             assert_eq!(damaged.merged_cleanup.grace_minutes, 10, "{invalid}");
         }
+    }
+
+    #[test]
+    fn read_only_commands_default_on_and_an_explicit_opt_out_round_trips() {
+        assert!(serde_json::from_str::<Settings>(r#"{"agents":{"idleStopMinutes":30}}"#).unwrap().agents.read_only_commands);
+        let chosen: Settings = serde_json::from_str(r#"{"agents":{"readOnlyCommands":false}}"#).unwrap();
+        assert!(!chosen.agents.read_only_commands);
+        assert!(!serde_json::from_value::<Settings>(serde_json::to_value(chosen).unwrap()).unwrap().agents.read_only_commands);
     }
 
     #[test]

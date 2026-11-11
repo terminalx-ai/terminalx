@@ -148,7 +148,7 @@ describe("new session in a cloud project", () => {
     await waitFor(() => expect(flow.startInWorkspace).toHaveBeenCalledTimes(1));
     // The reader last pinned Opus 5 for local work. The workspace's CLI may not have it, so the alias goes instead,
     // and the button claims no version for it.
-    expect(screen.getByRole("button", { name: "Opus" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Opus, Bypass" })).toBeTruthy();
     expect(flow.startInWorkspace).toHaveBeenCalledWith({ kind: "wake", node }, { agent: "claude", model: "opus", effort: null, mode: "bypassPermissions", prompt: "Fix the login redirect", useWorktree: true });
     expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
     expect(invoke.mock.calls.map(([command]) => command)).toEqual(["transcription_personalization_load"]);
@@ -167,7 +167,7 @@ describe("new session in a cloud project", () => {
     flow.planCloudStart.mockReturnValue({ kind: "reuse", node: { ...node, item: { workspace: { ...node.item.workspace, state: "ready" } } } });
     flow.startInWorkspace.mockResolvedValue("cloud:org-a:ws-1:s1");
     const view = render(<NewSessionView />);
-    const button = await screen.findByRole("button", { name: "Opus 4.6" });
+    const button = await screen.findByRole("button", { name: "Opus 4.6, Bypass" });
     expect(modelConnection.targets).toHaveBeenLastCalledWith({ orgId: "org-a", workspaceId: "ws-1" });
     mouseClick(button);
     const top = await screen.findByRole("menu");
@@ -182,7 +182,7 @@ describe("new session in a cloud project", () => {
     flow.planCloudStart.mockReturnValue({ kind: "wake", node });
     view.rerender(<NewSessionView />);
     expect(modelConnection.targets).toHaveBeenLastCalledWith(null);
-    expect(screen.getByRole("button", { name: "Opus" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Opus, Bypass" })).toBeTruthy();
   });
 
   it("asks once for the cost, showing the quota, before creating a workspace", async () => {

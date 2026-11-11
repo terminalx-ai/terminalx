@@ -64,6 +64,9 @@ use crate::AppState;
 
 /// How often an older runtime is asked what it is running.
 const CHECK_EVERY: Duration = Duration::from_secs(5);
+/// A stuck old runtime cannot receive a lifecycle fix until it upgrades.
+/// Bound its busy retries, then leave recovery to the reader (#818).
+const BUSY_ATTEMPTS: u8 = 6;
 /// How long nothing may be found under way before an older runtime is
 /// replaced by itself. A CLI starts the follow-up typed during a turn only
 /// once that turn has ended, and until then neither the runtime nor the
@@ -125,6 +128,15 @@ struct Inner {
     /// The runtime whose handover to this app's runtime has been found
     /// possible once: it is not checked again each time it is read.
     verified: Option<String>,
+    busy_attempts: u8,
+    /// An older runtime was just handed over or stopped, and the next one
+    /// attached should be the runtime bundled with this app.
+    switched: bool,
+    /// The runtime that came up after a switch was older than this app too:
+    /// the bundled runtime itself is, as in a development build left running
+    /// across a version bump. Switching again would only bring it back, so
+    /// for as long as this app runs it is attached as it is.
+    bundled_older: bool,
 }
 
 impl Inner {
@@ -155,6 +167,8 @@ pub(crate) enum Due {
 pub struct Replacement {
     inner: Mutex<Inner>,
     wake: Condvar,
+    #[cfg(test)]
+    before_wait: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 /// This app's version, which its bundled runtime shares.
@@ -182,11 +196,28 @@ impl Replacement {
             inner.forced = false;
             inner.planned_stop.clear();
             inner.verified = None;
+            inner.switched = false;
+            return;
+        }
+        // Older again straight after a switch: what came up is the bundled
+        // runtime, and it is no newer. Replacing it would hand it over to
+        // itself, round and round, dropping the connection each time.
+        if std::mem::take(&mut inner.switched) && !inner.bundled_older {
+            let running = build.version.as_ref().map_or_else(|| "a version it would not say".to_string(), ToString::to_string);
+            log::warn!("the runtime bundled with this app ({running}) is older than the app ({app}); it is attached as it is and not replaced again");
+            inner.bundled_older = true;
+        }
+        if inner.bundled_older {
+            inner.pending = None;
+            inner.quiet_since = None;
+            inner.forced = false;
+            inner.planned_stop.clear();
             return;
         }
         let plan = plan.filter(|plan| plan.epoch == epoch && plan.current(clock));
         // A new attachment to the same older runtime keeps what was found.
         if inner.pending.as_ref().is_none_or(|(pending, _)| pending != epoch) {
+            inner.busy_attempts = 0;
             // The runtime bundled with this app reads the record it writes.
             let keeps = keeps(build);
             let running = build.version.as_ref().map_or_else(|| "a version it would not say".to_string(), ToString::to_string);
@@ -253,12 +284,50 @@ impl Replacement {
         self.inner.lock().unwrap().verified = Some(epoch.into());
     }
 
-    /// The handover of runtime `epoch` was refused with nothing stopped:
-    /// something it cannot carry came up, or it is still settling (#765).
+    /// The handover of runtime `epoch` was refused: something it cannot
+    /// carry came up, or the runtime was replaced meanwhile (#765).
     /// Whatever failed before, what it runs is read again and shown.
     fn handover_refused(&self, epoch: &str) {
         self.declined(epoch, None);
-        if let Some(outdated) = self.inner.lock().unwrap().outdated(epoch) { outdated.failed = false; }
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(outdated) = inner.outdated(epoch) {
+            outdated.failed = false;
+            inner.busy_attempts = 0;
+        }
+        drop(inner);
+        // A manual retry can make a failed replacement checkable again
+        // while the watcher is parked without a timeout.
+        self.wake.notify_all();
+    }
+
+    /// A stop may already have succeeded before collecting the handover
+    /// failed. Never claim nothing stopped, or turn that consent into a
+    /// stop-all. Give transitions time, then show the exact blocker and the
+    /// existing explicit recovery action instead of looping indefinitely.
+    fn handover_busy(&self, epoch: &str, problem: String) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.outdated(epoch).is_none() { return; }
+        inner.switching = None;
+        inner.stopping = false;
+        inner.quiet_since = None;
+        inner.due = false;
+        inner.busy_attempts = inner.busy_attempts.saturating_add(1);
+        if inner.busy_attempts >= BUSY_ATTEMPTS {
+            let outdated = inner.outdated(epoch).expect("checked above");
+            outdated.failed = true;
+            outdated.problem = Some(format!("The runtime update is still blocked: {problem}. Try again after the agent settles. If it remains blocked, choose TerminalX → Stop all and quit, then reopen TerminalX. That action stops all agents and terminal commands; no full stop has been performed automatically."));
+        } else {
+            inner.outdated(epoch).expect("checked above").failed = false;
+        }
+        drop(inner);
+        // Resume the watcher's timed checks after a refused manual retry;
+        // due stays false, so the normal busy retry interval still applies.
+        self.wake.notify_all();
+    }
+
+    fn retry_requested(&self, epoch: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.outdated(epoch).is_some() { inner.busy_attempts = 0; }
     }
 
     /// Runtime `epoch` cannot be handed over to this app's after all, for
@@ -316,7 +385,9 @@ impl Replacement {
     /// The older runtime has gone: the switch ends with the next attachment,
     /// or with a failure to make one.
     fn stopped(&self) {
-        self.inner.lock().unwrap().stopping = false;
+        let mut inner = self.inner.lock().unwrap();
+        inner.stopping = false;
+        inner.switched = true;
     }
 
     /// The runtime was left running, nothing of it stopped: work began after
@@ -351,6 +422,10 @@ impl Replacement {
         let mut inner = self.inner.lock().unwrap();
         loop {
             if inner.checkable().is_none() {
+                // Signal while still holding inner: a test that receives this
+                // cannot change the predicate until wait atomically unlocks.
+                #[cfg(test)]
+                if let Some(waiting) = self.before_wait.lock().unwrap().take() { waiting.send(()).unwrap(); }
                 inner = self.wake.wait(inner).unwrap();
                 continue;
             }
@@ -416,6 +491,7 @@ pub(crate) trait Host {
 pub(crate) fn switch(replacement: &Replacement, host: &impl Host, epoch: &str, forced: bool, stop: &[Work]) -> Result<(), String> {
     let keeps = replacement.keeps(epoch);
     if !replacement.begin(epoch) { return Ok(()); }
+    if forced { replacement.retry_requested(epoch); }
     host.changed();
     // Handed over, it keeps what it runs; stopped, Restart now stops all of it.
     let result = if keeps { host.hand_over(epoch, if forced { stop } else { &[] }) } else { host.retire(epoch, forced) };
@@ -437,9 +513,14 @@ pub(crate) fn switch(replacement: &Replacement, host: &impl Host, epoch: &str, f
             replacement.cannot_keep(epoch, format!("{error:#}"));
             Ok(())
         }
-        // Something it cannot carry came up, or it is still settling, or it
-        // was replaced meanwhile: nothing was stopped, and it is looked at again.
-        Err(error) if keeps && ["handover_unadoptable", "handover_busy", "runtime_restarted"].iter().any(|code| super::launch::refused(&error, code)) => {
+        Err(error) if keeps && super::launch::refused(&error, "handover_busy") => {
+            log::info!("the older local runtime is waiting to hand over: {error:#}");
+            replacement.handover_busy(epoch, format!("{error:#}"));
+            Ok(())
+        }
+        // Something it cannot carry came up, or it was replaced meanwhile:
+        // read what remains again, without broadening the approved stops.
+        Err(error) if keeps && ["handover_unadoptable", "runtime_restarted"].iter().any(|code| super::launch::refused(&error, code)) => {
             log::info!("the older local runtime was not handed over yet: {error:#}");
             replacement.handover_refused(epoch);
             Ok(())
@@ -749,6 +830,35 @@ mod tests {
         assert_eq!(replacement.outdated("unsaid"), None);
     }
 
+    /// A runtime that comes up older straight after a switch is the bundled
+    /// one, and no newer: it is attached as it is, not handed over to itself
+    /// again and again (a development build left running across a version bump).
+    #[test]
+    fn a_bundled_runtime_older_than_the_app_is_not_switched_round_and_round() {
+        let replacement = Replacement::default();
+        replacement.attached("old", &build(Some(&older())), None);
+        assert!(replacement.outdated("old").is_some());
+        assert!(replacement.begin("old"));
+        replacement.stopped();
+        // What came up in its place is just as old.
+        replacement.attached("bundled", &build(Some(&older())), None);
+        assert_eq!(replacement.outdated("bundled"), None, "not replaced again");
+        assert_eq!(replacement.switching(), None);
+        assert_eq!(replacement.next_now(), None, "nothing left to check");
+        // Nor on a later attachment, for as long as the app runs.
+        replacement.attached("bundled-again", &build(Some(&older())), None);
+        assert_eq!(replacement.outdated("bundled-again"), None);
+
+        // One older runtime replaced by a current one is the normal case: nothing is held back.
+        let normal = Replacement::default();
+        normal.attached("old", &build(Some(&older())), None);
+        assert!(normal.begin("old"));
+        normal.stopped();
+        normal.attached("bundled", &build(Some(env!("CARGO_PKG_VERSION"))), None);
+        normal.attached("older-later", &build(Some(&older())), None);
+        assert!(normal.outdated("older-later").is_some(), "a later older runtime is still replaced");
+    }
+
     /// #730 review: anything the runtime would cut short is waited for, a
     /// reading that found nothing must hold for SETTLE, and one that failed
     /// never switches.
@@ -1007,6 +1117,81 @@ mod tests {
         assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "read again, to be shown");
     }
 
+    /// #818: an already-running old runtime cannot receive the cleanup fix
+    /// until it upgrades. Do not hammer that runtime or broaden stop consent
+    /// when its lifecycle state never settles.
+    #[test]
+    fn repeated_busy_handovers_pause_with_recovery_and_allow_an_explicit_retry() {
+        let replacement = Replacement::default();
+        replacement.attached("old", &handing(&older()), None);
+        let busy = Supervisor::new(&replacement, |_| Err(Refused {
+            code: "handover_busy".into(), message: "The agent in session/tab is starting or stopping".into(),
+        }.into()));
+        for attempt in 1..=6 {
+            switch(&replacement, &busy, "old", false, &[]).unwrap();
+            assert_eq!(replacement.next_now(), None, "busy attempts wait for the periodic check, never immediately retry");
+            assert_eq!(replacement.outdated("old").unwrap().failed, attempt == 6);
+        }
+        let outdated = replacement.outdated("old").unwrap();
+        assert!(outdated.keeps, "a busy handover never authorizes a full stop");
+        let problem = outdated.problem.unwrap();
+        assert!(problem.contains("session/tab") && problem.contains("Stop all and quit"), "{problem}");
+        replacement.attached("old", &handing(&older()), None);
+        assert_eq!(replacement.next_now(), None, "reattaching the same runtime does not restart the loop");
+        assert!(busy.steps.borrow().iter().all(|step| !step.starts_with("retire")));
+        let retry = Supervisor::new(&replacement, |_| Ok(()));
+        switch(&replacement, &retry, "old", true, &[]).unwrap();
+        assert!(replacement.outdated("old").is_none(), "an explicit retry can still hand over safely");
+    }
+
+    fn refused_manual_retry_wakes_the_waiting_loop(code: &'static str) {
+        use std::sync::{mpsc, Arc};
+        let replacement = Arc::new(Replacement::default());
+        replacement.attached("old", &handing(&older()), None);
+        let refusal = |code: &'static str| move |_| Err(Refused { code: code.into(), message: "still blocked".into() }.into());
+        let busy = Supervisor::new(&replacement, refusal("handover_busy"));
+        for _ in 0..BUSY_ATTEMPTS { switch(&replacement, &busy, "old", false, &[]).unwrap(); }
+        assert!(replacement.outdated("old").unwrap().failed);
+
+        let (waiting, parked) = mpsc::channel();
+        *replacement.before_wait.lock().unwrap() = Some(waiting);
+        let (returned, result) = mpsc::channel();
+        let watcher = replacement.clone();
+        let thread = std::thread::spawn(move || {
+            let due = watcher.next();
+            returned.send((due, Instant::now())).unwrap();
+        });
+        parked.recv_timeout(Duration::from_secs(2)).unwrap();
+        let retried = Instant::now();
+        let retry = Supervisor::new(&replacement, refusal(code));
+        switch(&replacement, &retry, "old", true, &[]).unwrap();
+        assert!(!replacement.outdated("old").unwrap().failed);
+        let outcome = result.recv_timeout(CHECK_EVERY + Duration::from_secs(2));
+        // Also join on failure: this regression must not leak a sleeping
+        // watcher when the production notification is missing.
+        if outcome.is_err() {
+            replacement.inner.lock().unwrap().due = true;
+            replacement.wake.notify_all();
+        }
+        thread.join().unwrap();
+        let (due, returned_at) = outcome.expect("a refused manual retry must wake the paused watcher");
+        assert_eq!(due, Due::Check("old".into()));
+        if code == "handover_busy" {
+            assert!(returned_at.duration_since(retried) >= CHECK_EVERY, "waking the watcher must preserve the busy retry delay");
+        }
+        assert!(retry.steps.borrow().iter().all(|step| !step.starts_with("retire")), "no broader stop consent");
+    }
+
+    #[test]
+    fn manual_busy_retry_wakes_the_paused_watcher() {
+        refused_manual_retry_wakes_the_waiting_loop("handover_busy");
+    }
+
+    #[test]
+    fn manual_unadoptable_retry_wakes_the_paused_watcher() {
+        refused_manual_retry_wakes_the_waiting_loop("handover_unadoptable");
+    }
+
     /// #765: a handover refused for something it cannot carry, or for work
     /// still settling, stops nothing and is no failure; one the bundled
     /// runtime cannot take over at all is replaced as before handovers.
@@ -1021,7 +1206,8 @@ mod tests {
             assert_eq!(busy.steps.borrow().last().map(String::as_str), Some("changed: outdated"), "{code}: never reattached");
             let outdated = replacement.outdated("old").unwrap();
             assert!(!outdated.failed && outdated.keeps && outdated.problem.is_none(), "{code}: {outdated:?}");
-            assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "{code}: looked at again");
+            let next = if code == "handover_busy" { None } else { Some(Due::Check("old".into())) };
+            assert_eq!(replacement.next_now(), next, "{code}: busy waits for the periodic check");
         }
         let replacement = Replacement::default();
         replacement.attached("old", &handing(&older()), None);
@@ -1219,7 +1405,7 @@ mod tests {
         let status = |tab_status: &str| json!({"pid": 100, "appVersion": "0.2.21",
             "runningTabs": [{"sessionId": "s1", "tabId": "t1", "harness": "claude", "status": tab_status}]});
         let shell = |exited: bool| crate::pty::ShellPane { id: "s1:1".into(), session_id: "s1".into(), title: Some("npm run dev".into()),
-            renamed: false, cwd: "/p".into(), exited, created: "2026-11-01T00:00:00Z".into() };
+            renamed: false, docked: None, cwd: "/p".into(), exited, created: "2026-11-01T00:00:00Z".into() };
         let table = |extra: &str| super::super::idle::parse(&format!("1 1 1 launchd\n100 1 100 terminalx-serve\n\
             200 100 200 claude\n201 200 200 npm exec @playwright/mcp\n202 201 200 node\n203 200 200 cua\n150 100 150 -zsh\n{extra}")).unwrap();
         // The runtime (100) runs an agent (200) with its MCP servers, and a terminal's shell (150).

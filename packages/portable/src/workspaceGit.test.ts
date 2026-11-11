@@ -68,6 +68,22 @@ function connect(handlers: Record<string, Handler>) {
 const refusal = (code: string, message = code) => Object.assign(new Error(message), { code });
 
 describe("workspace git", () => {
+  it("sends whitespace options and binary revision reads through the selected repository", async () => {
+    const { runtime, client } = connect({
+      "git.changesBetween": () => ({ files: [] }),
+      "git.workingChanges": () => ({ files: [], head: "base" }),
+      "git.mediaContent": () => ({ data: "AAH/", mime: "image/png" }),
+    });
+    const git = new RemoteGit(client, "app");
+    await git.changesBetween("base", "head", true);
+    await git.workingChanges(true);
+    expect(await git.mediaContent("image.png", "base")).toEqual({ data: "AAH/", mime: "image/png" });
+    expect(runtime.calls("git.changesBetween")[0]).toEqual({ repo: "app", base: "base", head: "head", hideWhitespace: true });
+    expect(runtime.calls("git.workingChanges")[0]).toEqual({ repo: "app", hideWhitespace: true });
+    expect(runtime.calls("git.mediaContent")[0]).toEqual({ repo: "app", path: "image.png", tree: "base" });
+    client.close();
+  });
+
   it("names the repository on every call and sends the author with a commit, never credentials", async () => {
     const { runtime, client } = connect({
       "git.repositories": () => ({ repositories: [{ repo: "app" }, { repo: "libs/core" }] }),
@@ -86,6 +102,31 @@ describe("workspace git", () => {
     expect(typeof commit.clientRequestId).toBe("string");
     expect(Object.keys(commit).sort()).toEqual(["author", "clientRequestId", "message", "repo"]);
     expect(runtime.calls("git.push")[0]).toMatchObject({ repo: "libs/core" });
+  });
+
+  it("routes conversations to their repository and resends an action with the same id", async () => {
+    let actions = 0;
+    const { runtime, client } = connect({
+      "git.prConversation": () => ({ title: "A pull request" }),
+      "git.prReviewerSearch": () => ["ada"],
+      "git.prConversationAction": () => (++actions === 1 ? HOLD : null),
+    });
+    const url = "https://github.com/acme/repo/pull/2";
+    const access = new RemoteGit(client, "libs/core").prConversation(url);
+    expect((await access.read()).title).toBe("A pull request");
+    expect(await access.search("ada")).toEqual(["ada"]);
+    const action = { kind: "request", login: "ada", team: false } as const;
+    const pending = access.act(action);
+    runtime.setState({ state: "reconnecting", attempt: 1 });
+    runtime.setState(connected);
+    await pending;
+    expect(runtime.calls("git.prConversation")[0]).toEqual({ repo: "libs/core", url });
+    expect(runtime.calls("git.prReviewerSearch")[0]).toEqual({ repo: "libs/core", url, query: "ada" });
+    const calls = runtime.calls("git.prConversationAction");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ repo: "libs/core", url, action });
+    expect(typeof calls[0].clientRequestId).toBe("string");
+    expect(calls[1].clientRequestId).toBe(calls[0].clientRequestId);
   });
 
   it("resends a push whose answer was lost with the same request id, so the runtime answers it once", async () => {

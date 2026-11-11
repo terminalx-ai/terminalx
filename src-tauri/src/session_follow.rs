@@ -453,7 +453,6 @@ impl SessionManager {
             turn_tail: Default::default(),
             transcript_turn: None,
             transcript_end_owed: false,
-            answered: HashMap::new(),
             command: format!("{} (started in this terminal)", crate::harness::display_name(agent.harness)),
             // No hook of the app's was given to this CLI, so no frame can be
             // its: the token is one nobody holds, and no path is under the root.
@@ -898,7 +897,7 @@ impl SessionManager {
                 self.sign_in_refused(&rt);
             }
             self.release_cli(&mut rt);
-            self.needs_recovery(&mut rt, exit.recovery());
+            self.needs_recovery(&mut rt, exit.recovery(), crate::recovery_log::Source::Connection);
         } else if !follows {
             if by_hand {
                 // Followed, and closed by the app with its pane. If the tab
@@ -922,7 +921,7 @@ impl SessionManager {
                 self.publish(&mut rt, Payload::Status { text }, None);
             }
             if let Some(kind) = recovery {
-                self.needs_recovery(&mut rt, kind);
+                self.needs_recovery(&mut rt, kind, crate::recovery_log::Source::Connection);
             }
         } else {
             self.became_terminal(&mut rt, Gone::Exited, said.as_deref());
@@ -988,7 +987,7 @@ impl SessionManager {
     }
 
     /// Tell every window what the tab is now.
-    fn announce_tab(&self, rt: &TabRuntime) {
+    pub(super) fn announce_tab(&self, rt: &TabRuntime) {
         if let Ok(session) = index::get(&rt.session_id) {
             self.sink.emit("session_updated", &session);
         }
@@ -1030,7 +1029,8 @@ impl SessionManager {
             if entry.is_quick() && crate::store::quick::is_scratch(&entry.id, &entry.cwd) {
                 crate::store::quick::create(&entry.id).context("make the quick chat's scratch directory")?;
             }
-            let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: None, env: &[] };
+            let env = index::workspace_ports::environment(&entry.cwd)?;
+            let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: None, env: &env };
             self.terminals.respawn(self.sink.clone(), &pane, spec).context("open the tab's shell")?;
         }
         self.sink.emit("tab_pty", &Self::terminal_pane_event(&entry.id, tab));

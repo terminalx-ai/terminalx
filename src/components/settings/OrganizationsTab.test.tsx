@@ -4,12 +4,23 @@ import type { AccountStatus } from "@/lib/api";
 import { SettingsPage } from "./SettingsPage";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { getCloudCatalog } from "@/lib/cloudCatalog";
+import { api } from "@/lib/api";
 
-const mocks = vi.hoisted(() => ({ status: null as unknown as AccountStatus, ask: vi.fn() }));
-vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: mocks.status }), subscribeAccount: () => () => {}, useAccount: () => ({ status: mocks.status, ready: true }) }));
+const mocks = vi.hoisted(() => ({ status: null as unknown as AccountStatus, ask: vi.fn(), refreshAccount: vi.fn(), signIn: vi.fn() }));
+vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: mocks.status }), subscribeAccount: () => () => {}, useAccount: () => ({ status: mocks.status, ready: true, busy: false }), refreshAccount: mocks.refreshAccount, signIn: mocks.signIn }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask }));
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return { ...actual, api: { ...actual.api, organizationCreate: vi.fn() } };
+});
+vi.mock("./ProviderControls", () => ({ ProviderControls: () => <div>Provider setup</div> }));
+vi.mock("./OrganizationSetupSteps", () => ({ OrganizationSetupSteps: ({ organizationId }: { organizationId: string }) => <div data-testid="setup-organization">{organizationId}</div> }));
 
 beforeEach(() => {
+  localStorage.clear();
+  mocks.refreshAccount.mockReset().mockResolvedValue(undefined);
+  mocks.signIn.mockReset();
+  vi.mocked(api.organizationCreate).mockReset();
   mocks.ask.mockReset().mockResolvedValue(true);
   mocks.status = { state: "signed-in", identity: { name: "Ada", email: "ada@example.com", organization: "Acme", organizationId: "a" }, expiresAt: null, lastError: null, multiOrg: true, organizations: [
     { id: "a", name: "Acme", role: "owner", isPersonal: false, cloud: { enabled: true, flags: {} } },
@@ -21,6 +32,43 @@ afterEach(cleanup);
 const mount = () => render(<SettingsPage initialTab="organizations" onBack={vi.fn()} />);
 
 describe("organization Settings", () => {
+  it.each([false, true])("creates from the empty state and continues setup (existing organization: %s)", async (existing) => {
+    mocks.status = {
+      ...mocks.status,
+      identity: { name: "Ada", email: "ada@example.com", organization: existing ? "Existing" : null, organizationId: existing ? "old" : null },
+      organizations: existing ? [{ id: "old", name: "Existing", role: "owner", cloud: { enabled: false, flags: {} } }] : [],
+    };
+    const created = { id: "new", name: "New team", role: "owner", cloud: { enabled: true, flags: {} } };
+    vi.mocked(api.organizationCreate).mockResolvedValue(created);
+    const view = mount();
+    expect(screen.getByText("No cloud-enabled organizations.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Create organization" }));
+    const name = screen.getByRole("textbox", { name: "Organization name" });
+    fireEvent.change(name, { target: { value: "  New team  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(mocks.refreshAccount).toHaveBeenCalledOnce());
+    expect(api.organizationCreate).toHaveBeenCalledExactlyOnceWith("New team", expect.any(String));
+
+    mocks.status = {
+      ...mocks.status,
+      identity: { ...mocks.status.identity!, organization: created.name, organizationId: created.id },
+      organizations: [...mocks.status.organizations!, created],
+    };
+    view.rerender(<SettingsPage initialTab="organizations" onBack={vi.fn()} />);
+    expect(screen.queryByText("No cloud-enabled organizations.")).toBeNull();
+    expect(screen.getByTestId("setup-organization").textContent).toBe(created.id);
+    expect(screen.getByText("Provider setup")).toBeTruthy();
+  });
+
+  it("offers sign-in before organization creation when signed out", () => {
+    mocks.status = { state: "signed-out", identity: null, expiresAt: null, lastError: null };
+    mount();
+    expect(screen.queryByRole("textbox", { name: "Organization name" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to create an organization" }));
+    expect(mocks.signIn).toHaveBeenCalledOnce();
+    expect(api.organizationCreate).not.toHaveBeenCalled();
+  });
+
   it("lists names, roles, running state, and Show in sidebar switches; Local has no hide switch", () => {
     mount();
     expect(screen.getByRole("heading", { name: "Organizations" })).toBeTruthy();
@@ -48,7 +96,7 @@ describe("organization Settings", () => {
     expect(getPrefs().selectedOrganization).toBe("b");
     fireEvent.click(choices.getByRole("radio", { name: "All organizations" }));
     expect(getPrefs()).toMatchObject({ organizationDisplay: "all", hiddenOrganizations: ["a", "b"] });
-    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Organization in sidebar" })).toBeNull();
     expect(screen.getAllByRole("switch").every((toggle) => !toggle.hasAttribute("disabled"))).toBe(true);
   });
 

@@ -44,6 +44,13 @@ try {
   // The row's actions show on hover.
   await chats.getByRole("button", { name: /Plan the login page/ }).hover();
   await chats.getByRole("button", { name: "Menu for Plan the login page" }).click();
+  const menuActions = () => page.getByRole("menu").locator('[role^="menuitem"]').allTextContents();
+  const actions = await menuActions();
+  await page.keyboard.press("Escape");
+  await page.getByRole("menu").waitFor({ state: "hidden" });
+  await chats.getByRole("button", { name: /^Plan the login page/ }).click({ button: "right" });
+  await page.getByRole("menu").waitFor();
+  assert.deepEqual(await menuActions(), actions, "right-click shares the chat's ⋯ actions, including project linking");
   await page.getByRole("menuitem", { name: "Link to a project" }).click();
   await page.getByRole("menuitem", { name: "local-0" }).click();
   await page.getByRole("menuitem", { name: "On a new branch (worktree)" }).click();
@@ -56,7 +63,7 @@ try {
   const pills = () => Promise.all(["Agent", "Model", "Effort", "Permissions"].map((title) => dialog.getByTitle(title).textContent()));
   assert.deepEqual(await pills(), ["Claude Code", "Sonnet", "Low", "Plan"]);
   assert.equal(await dialog.getByRole("switch", { name: "Start on a new branch in a worktree" }).getAttribute("aria-checked"), "true");
-  assert.ok(await dialog.getByText("/repos/p0").isVisible());
+  assert.ok(await dialog.getByText(/new session in local-0/).isVisible());
   const box = await dialog.boundingBox();
   assert.ok(box.x >= 0 && box.y >= 0 && box.x + box.width <= 1100 && box.y + box.height <= 720, `dialog inside the window: ${JSON.stringify(box)}`);
   assert.ok(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth), "no sideways scroll in the dialog");

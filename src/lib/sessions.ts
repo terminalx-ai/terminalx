@@ -1,20 +1,22 @@
+import { dropEditors, isReviewEditor, pruneReviewTabs } from "@/lib/editors";
 import { forgetClosedTabViews } from "@/lib/tabViews";
 import { keepMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { api, workStatus, type WorkspaceRemoveOptions } from "@/lib/api";
-import { getPrefs, setPrefs } from "@/lib/prefs";
+import { api, agent, workStatus, type WorkspaceRemoveOptions } from "@/lib/api";
+import { forgetSidebarWindow, getPrefs, pruneSidebarWindows, setPrefs, sidebarChatWindowLabels } from "@/lib/prefs";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
 import { activateLatestTerminal, closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import { bootTabLayouts } from "@/lib/tabLayouts";
-import { isFloatingWindow } from "@/lib/appWindow";
+import { isCompactWindow } from "@/lib/appWindow";
+import { listenForChatWindowDrafts } from "@/lib/chatWindowHandoff";
 import type { NewQuickChat, OpenTarget } from "@/lib/api";
 import type {
   ProjectPatch,
-  Workspace, HarnessInfo, IssueRef, Project, SessionEntry, TabEntry } from "@/types/session";
+  Workspace, WorkspaceRestorePreview, HarnessInfo, IssueRef, Project, SessionEntry, TabEntry } from "@/types/session";
 
 /**
  * The index of sessions and projects, mirrored from ~/.raccoon and kept in a
@@ -59,7 +61,13 @@ interface State {
    */
   newSessionReturn: { sessionId: string | null; view: State["view"] } | null;
   /** A new-session form pre-filled from a workspace row. */
-  newSessionPreset: { projectPath: string; cwd: string | null } | null;
+  newSessionPreset: { projectPath: string; cwd: string | null; fromBranch?: string } | null;
+  /** An ordinary chat in the shared Chats directory, composed before its first send. */
+  newSessionChat: boolean;
+  /** A keyboard request to show Start from in the new-session form. */
+  startFromRequest: number;
+  /** Personal local section chosen from its header; cleared on leaving the composer. */
+  newSessionSectionId: string | null;
   /**
    * A new-session form for a cloud project (`cloud:<orgId>:<identity>`),
    * from the project row's `+`. Cleared by the same navigation that clears
@@ -86,13 +94,16 @@ let state: State = {
   newIssueRequested: false,
   selectedAutomationId: null,
   skillsFilter: null,
-  showArchived: false,
+  showArchived: getPrefs().sidebarShowArchived,
   selectedProject: null,
   workspaces: {},
   workspacesLoading: {},
   selectedCloudWorkspace: null,
   newSessionReturn: null,
   newSessionPreset: null,
+  newSessionChat: false,
+  startFromRequest: 0,
+  newSessionSectionId: null,
   cloudSessionPreset: null,
   selectedCloudProject: null,
   paletteIndex: buildPaletteIndex([], [], {}, []),
@@ -115,9 +126,14 @@ function set(patch: Partial<State>) {
   // Clear the draft destination when navigating away, not in React cleanup
   // (Strict Mode also runs cleanup when a workspace first mounts).
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
+  if (next.view !== "new" || next.selectedSessionId || "newSessionPreset" in patch || "cloudSessionPreset" in patch) next.newSessionChat = patch.newSessionChat ?? false;
+  if (next.view !== "new" || next.selectedSessionId || patch.cloudSessionPreset) next.newSessionSectionId = null;
   // Opened from a session, the form remembers it; any other way out forgets it.
   // Only an explicit "New session" (`openNewSession`, a project's or branch's +) records where to go back to; any way out forgets it.
-  if (next.view !== "new" || next.selectedSessionId) next.newSessionReturn = null;
+  if (next.view !== "new" || next.selectedSessionId) {
+    next.newSessionReturn = null;
+    next.startFromRequest = 0;
+  }
   // A cloud draft goes the same way, and gives way to any local one.
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId || ("newSessionPreset" in patch && !("cloudSessionPreset" in patch))) next.cloudSessionPreset = null;
   if ("selectedProject" in patch && !("selectedCloudProject" in patch)) next.selectedCloudProject = null;
@@ -167,8 +183,8 @@ export function subscribeSessionStore(listener: () => void): () => void {
 let booted = false;
 const workspaceRefreshVersions = new Map<string, number>();
 // Backfill can publish while the first list is being read. Subscribe first,
-// retaining only chronology until initialization supplies the session rows.
-const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt">>();
+// retaining message activity until initialization supplies the session rows.
+const initialMessageTimes = new Map<string, Pick<SessionEntry, "lastMessageAt" | "hasMessages">>();
 export async function bootSessions() {
   if (booted) return;
   booted = true;
@@ -176,7 +192,7 @@ export async function bootSessions() {
     await listen<SessionEntry>("session_updated", (e) => {
       if (state.loaded) upsertSession(e.payload);
       else initialMessageTimes.set(e.payload.id, keepMessageTime(
-        { lastMessageAt: e.payload.lastMessageAt }, initialMessageTimes.get(e.payload.id),
+        { lastMessageAt: e.payload.lastMessageAt, hasMessages: e.payload.hasMessages }, initialMessageTimes.get(e.payload.id),
       ));
     });
     // A new live connection (#643): what changed during the gap was never
@@ -211,7 +227,15 @@ async function loadIndex() {
     // Another window added, removed or edited a project.
     await listen("projects_changed", () => void refreshProjects());
     // The floating window hands a session over ("Open in main window").
-    if (!isFloatingWindow()) await listen<OpenTarget>("open_session", (e) => openTarget(e.payload));
+    if (!isCompactWindow()) {
+      await listen<string>("chat_window_closed", (e) => forgetSidebarWindow(e.payload));
+      // Include leftovers from a crash or quit, without deleting a window opened during this read.
+      const candidates = sidebarChatWindowLabels();
+      void import("@tauri-apps/api/window").then(({ getAllWindows }) => getAllWindows())
+        .then((windows) => pruneSidebarWindows(windows.map((window) => window.label), candidates)).catch(() => {});
+      await listen<OpenTarget>("open_session", (e) => openTarget(e.payload));
+      await listenForChatWindowDrafts();
+    }
   } catch {
     /* outside a webview */
   }
@@ -227,6 +251,7 @@ async function resyncSessions() {
 
 export async function refreshSessions() {
   const incoming = await api.listSessions();
+  pruneReviewTabs(incoming);
   const before = state.sessions;
   const sessions = incoming.map((session) => keepMessageTime(session, before.find((old) => old.id === session.id)));
   set({ sessions });
@@ -246,6 +271,7 @@ export async function refreshSessions() {
 }
 
 export function upsertSession(s: SessionEntry) {
+  if (s.worktreeRemoved) dropEditors((e) => e.sessionId === s.id && isReviewEditor(e));
   const i = state.sessions.findIndex((x) => x.id === s.id);
   s = keepMessageTime(s, state.sessions[i]);
   // Its checkout was just removed: a shell left running there has no directory.
@@ -274,6 +300,7 @@ export function upsertSession(s: SessionEntry) {
 
 /** Forget sessions the backend has deleted, dropping the selection if it was one of them. */
 export function removeSessions(ids: string[]) {
+  dropEditors((e) => ids.includes(e.sessionId));
   dropSessionTerminals(ids);
   const gone = new Set(ids);
   const selectedGone = !!state.selectedSessionId && gone.has(state.selectedSessionId);
@@ -313,7 +340,7 @@ export function openWelcome(closedWorkspaceSessionId: string | null = null) {
 
 export function selectSession(id: string | null) {
   const selected = id ? state.sessions.find((session) => session.id === id) : null;
-  const patch: Partial<State> = { selectedSessionId: id, view: id ? "welcome" : "new", newSessionPreset: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null };
+  const patch: Partial<State> = { selectedSessionId: id, view: id ? "welcome" : "new", newSessionPreset: null, newSessionSectionId: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null };
   // A quick chat has no project to focus: the one in focus stays as it is.
   if (selected && selected.kind !== "quick") focusProject(selected.projectPath, patch);
   else set(patch);
@@ -341,7 +368,7 @@ async function refreshProjects() {
  * wakes the workspace. Local project focus is left as it is.
  */
 export function selectCloudSession(key: string) {
-  set({ selectedSessionId: key, view: "welcome", newSessionPreset: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+  set({ selectedSessionId: key, view: "welcome", newSessionPreset: null, newSessionSectionId: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
 }
 
 /** The issues browser takes the workspace; no session stays selected. */
@@ -423,8 +450,8 @@ export function selectProjectInSidebar(path: string | null) {
 }
 
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
-export function startSessionIn(projectPath: string, cwd: string | null) {
-  focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+export function startSessionIn(projectPath: string, cwd: string | null, fromBranch?: string) {
+  focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionSectionId: null, newSessionPreset: { projectPath, cwd, ...(fromBranch ? { fromBranch } : {}) }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
 }
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
@@ -478,10 +505,10 @@ function returnHere(): State["newSessionReturn"] {
 }
 
 /** "New session" (⌘N, the + buttons): the form, as a dialog over what is shown now. */
-export function openNewSession() {
+export function openNewSession(startFrom = false) {
   const back = returnHere();
   selectSession(null);
-  set({ newSessionReturn: back });
+  set({ newSessionReturn: back, startFromRequest: startFrom ? state.startFromRequest + 1 : 0 });
 }
 
 /** Close the new-session dialog: back to the session or view it was opened over. */
@@ -557,6 +584,14 @@ export async function removeWorkspace(projectPath: string, path: string, options
   return report;
 }
 
+/** Reopen the retained tabs after the owner has restored their checkout. */
+export async function restoreWorkspace(sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) {
+  const restored = await api.restoreWorkspace(sessionId, expected, newBranch);
+  for (const session of restored) upsertSession(session);
+  await refreshWorkspaces(expected.projectPath);
+  selectSession(sessionId);
+}
+
 export async function refreshHarnesses() {
   const harnesses = await api.listHarnesses();
   set({ harnesses });
@@ -577,6 +612,7 @@ export function debug(message: string) {
 
 /** Show archived: each project's archived sessions, and the chats', under a fold of their own (#718). */
 export function setShowArchived(v: boolean) {
+  setPrefs({ sidebarShowArchived: v });
   set({ showArchived: v });
 }
 
@@ -587,38 +623,24 @@ export async function addProject(path: string) {
   return p;
 }
 
-/**
- * The sidebar's New chat: an agent conversation in the store's Chats folder,
- * so talking to a model needs no project. The folder is a plain directory, so
- * the session runs in place with no worktree, and it is never added as a
- * project: the sidebar lists its sessions on their own.
- */
-export async function startChat(place?: { projectPath: string; cwd?: string; fromBranch?: string }): Promise<SessionEntry> {
-  const harness = state.harnesses.find((item) => item.id === "claude" && item.available) ?? state.harnesses.find((item) => item.available);
-  if (!harness) throw new Error("Install and sign in to an agent to start a chat.");
-  // Without a place, a chat of its own; with one, another session in that
-  // checkout, on its branch, or in a new workspace branched from `fromBranch`.
-  const chatsPath = place ? null : (state.chatsPath ?? (await api.chatsDir()));
-  if (chatsPath && chatsPath !== state.chatsPath) set({ chatsPath });
-  const prefs = getPrefs();
-  const session = await api.createSession({
-    projectPath: place?.projectPath ?? chatsPath!,
-    cwd: place?.fromBranch ? null : (place?.cwd ?? chatsPath!),
-    title: "Chat",
-    useWorktree: !!place?.fromBranch,
-    baseRef: place?.fromBranch ?? null,
-    // The workspace is named after the branch it comes from (made unique), not after the chat.
-    worktreeName: place?.fromBranch ? (place.fromBranch.split("/").pop() ?? null) : null,
-    tab: {
-      harness: harness.id,
-      model: prefs.lastModel[harness.id] ?? "",
-      effort: prefs.lastEffort[harness.id] ?? null,
-      permissionMode: prefs.lastMode,
-    },
-  });
-  upsertSession(session);
-  selectSession(session.id);
-  return session;
+/** Open New chat without creating a session, workspace, or running tab until the first send. */
+export async function startChat(place?: { projectPath: string; cwd?: string; fromBranch?: string }): Promise<void> {
+  if (place) {
+    // Retained conversations can outlive their project's sidebar entry. Resolve
+    // that project again instead of letting the composer choose a different one.
+    const project = state.projects.find((item) => item.path === place.projectPath) ?? await addProject(place.projectPath);
+    startSessionIn(project.path, place.cwd ?? null, place.fromBranch);
+    return;
+  }
+  const back = returnHere();
+  selectSession(null);
+  set({ newSessionReturn: back, newSessionChat: true });
+}
+
+export function startSessionInSection(sectionId: string) {
+  const back = returnHere();
+  selectSession(null);
+  set({ newSessionReturn: back, newSessionChat: true, newSessionSectionId: sectionId });
 }
 
 export async function removeProject(path: string) {
@@ -687,7 +709,7 @@ export async function runIdleArchive(): Promise<string[]> {
 
 /** The main window runs the idle sweep, once soon after launch and then every half hour. */
 export function startIdleArchive() {
-  if (idleArchiveStarted || isFloatingWindow()) return;
+  if (idleArchiveStarted || isCompactWindow()) return;
   idleArchiveStarted = true;
   const next = (delay: number) => setTimeout(() => void runIdleArchive().finally(() => next(IDLE_ARCHIVE_EVERY)), delay);
   next(IDLE_ARCHIVE_FIRST);
@@ -703,6 +725,18 @@ export async function renameSession(id: string, title: string) {
   patchSession(id, { title });
 }
 
+/** Mark every tab represented by a row read, or leave a reminder on its active tab. */
+export async function setSessionUnread(ids: string[], unread: boolean) {
+  for (const id of ids) {
+    const session = state.sessions.find((entry) => entry.id === id);
+    if (!session) continue;
+    const tabs = unread ? [session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0]].filter((tab): tab is TabEntry => !!tab) : session.tabs;
+    for (const tab of tabs) await agent.setUnread(id, tab.id, unread);
+  }
+  // The runtime also broadcasts to every window; reread for callers without a live subscription.
+  await refreshSessions();
+}
+
 /** A conversation's name: its agent's title for it once there is one. */
 export function conversationTitle(session: SessionEntry): string {
   const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
@@ -713,7 +747,7 @@ export function conversationTitle(session: SessionEntry): string {
 export async function renameConversation(session: SessionEntry, title: string) {
   await renameSession(session.id, title);
   const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
-  if (tab?.title?.trim()) await api.renameTab(session.id, tab.id, title);
+  if (tab) await api.renameTab(session.id, tab.id, title);
 }
 
 /** Rename a branch in git where it is checked out; its sessions and its label go with it. */
@@ -744,6 +778,22 @@ export async function setSessionWorkPrivate(id: string, isPrivate: boolean) {
 export async function deleteSession(id: string) {
   await api.deleteSession(id);
   removeSessions([id]);
+}
+
+/** Ordinary sidebar chats keep their retention and automatic project linking through the shared Chats path. */
+export async function createChat(req: NewQuickChat) {
+  const chatsPath = state.chatsPath ?? await api.chatsDir();
+  if (chatsPath !== state.chatsPath) set({ chatsPath });
+  const session = await api.createSession({
+    ...(req.sectionId ? { sectionId: req.sectionId } : {}),
+    projectPath: chatsPath,
+    cwd: req.cwd ?? chatsPath,
+    title: req.title,
+    useWorktree: false,
+    tab: req.tab ?? undefined,
+  });
+  upsertSession(session);
+  return session;
 }
 
 /** Start a quick chat: a session with no project. The caller selects it and sends the first prompt. */

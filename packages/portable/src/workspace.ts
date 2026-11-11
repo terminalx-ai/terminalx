@@ -58,7 +58,7 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -141,6 +141,7 @@ export const MUTATING_METHODS = new Set([
   "git.pull",
   "git.fetch",
   "git.prCreate",
+  "git.prConversationAction",
   "git.prReady",
   "git.prMerge",
   "notes.post",
@@ -188,6 +189,7 @@ export type AgentTabStatus = "idle" | "in_progress" | "waiting" | "completed";
 export interface AgentTabInfo {
   sessionCreated?: string | null;
   sessionLastMessageAt?: string | null;
+  sessionHasMessages?: boolean;
   sessionId: string;
   tabId: string;
   title: string | null;
@@ -221,6 +223,7 @@ export interface AgentTabInfo {
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
 }
 
 /** An agent tab as the runtime's session index stores it. */
@@ -236,6 +239,7 @@ export interface RuntimeSessionTab {
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
 }
 
 /** `workspace.remove`: the sessions that went with the worktree, and what became of its branch. */
@@ -310,6 +314,7 @@ export type MergedPhase = "scheduled" | "kept" | "held" | "removed";
 
 /** Where one workspace whose pull request merged stands after a pass. */
 export interface MergedStatus {
+  archiveBlocked?: boolean;
   projectPath: string;
   path: string;
   name: string;
@@ -382,7 +387,17 @@ export interface CleanupProject {
   candidates: CleanupCandidate[];
 }
 
+export interface ArchiveFailure {
+  log?: string | null;
+  sessionsStopped?: boolean;
+  token: string;
+  pane: string;
+  code: number | null;
+  timedOut: boolean;
+}
+
 export interface CleanupRemoveItem {
+  archiveFailure?: string;
   projectPath: string;
   path: string;
   token: string;
@@ -395,6 +410,7 @@ export interface CleanupRemoveItem {
 }
 
 export interface CleanupResult {
+  archiveFailure?: ArchiveFailure;
   projectPath: string;
   path: string;
   outcome: "removed" | "alreadyRemoved" | "skipped" | "failed";
@@ -408,7 +424,7 @@ export interface CleanupResult {
 }
 
 /** What a removal is doing to the worktree it is on. */
-export type CleanupStep = "measuring" | "checking" | "removing" | "sessions";
+export type CleanupStep = "measuring" | "checking" | "archiving" | "removing" | "sessions";
 
 /**
  * How far one removal call is, as its host reports it while it runs
@@ -427,6 +443,9 @@ export type CleanupProgress =
  * `cwd` and `projectPath` are paths on the VM: never hand them to a local command.
  */
 export interface RuntimeSession {
+  rowStatus?: import("./sessionStatus").SessionStatusInput;
+  manualStatus?: import("./manualStatus").ManualStatus;
+  automation?: { id: string } | null;
   id: string;
   projectPath: string;
   cwd: string;
@@ -437,6 +456,7 @@ export interface RuntimeSession {
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
   archived: boolean;
   pinned: boolean;
   tabs: RuntimeSessionTab[];
@@ -447,6 +467,7 @@ export interface RuntimeSession {
 
 /** `session.update`: `undefined` leaves a field as it is. Archiving only hides the session. */
 export interface RuntimeSessionPatch {
+  manualStatus?: import("./manualStatus").ManualStatus;
   title?: string;
   pinned?: boolean;
   archived?: boolean;
@@ -539,7 +560,7 @@ export interface PtyHandlers {
    * or what was missed while away). A terminal emulator must not answer the
    * queries it finds in them: the program that asked is long past them.
    */
-  onData(bytes: Uint8Array, offset: number, replay: boolean): void;
+  onData(bytes: Uint8Array, offset: number, replay: boolean, size?: { cols: number; rows: number }): void;
   onExit?(code: number | null): void;
   onControl?(control: PtyControl, controllerId?: string | null): void;
   /** The controller resized the terminal; a viewer should match it. */
@@ -880,12 +901,18 @@ export class WorkspaceRpcClient {
       this.forgetPty(ptyId);
       handlers.onGone?.(reason);
     };
-    const emit = (dataB64: string, offset: number) => {
+    const emit = (dataB64: string, offset: number, size?: { cols: number; rows: number }) => {
       const bytes = decodeBase64(dataB64);
       // Replay and live output can overlap by a chunk around a reconnect.
       const skip = cursor === undefined ? 0 : Math.max(0, cursor.offset - offset);
-      if (skip < bytes.length) handlers.onData(bytes.subarray(skip), offset + skip, offset + skip < replayUntil);
-      cursor = { offset: Math.max(cursor?.offset ?? 0, offset + bytes.length), epoch: this.ptyEpochs.get(ptyId) ?? cursor?.epoch ?? "" };
+      // A zero-byte sized batch completes a resize at this stream position.
+      // It changes no byte cursor and must not be dropped as duplicate data.
+      if (skip < bytes.length || (size && bytes.length === 0 && offset >= (cursor?.offset ?? 0))) {
+        const args = [bytes.subarray(skip), offset + skip, offset + skip < replayUntil] as const;
+        if (size) handlers.onData(...args, size);
+        else handlers.onData(...args);
+      }
+      cursor = { offset: bytes.length ? Math.max(cursor?.offset ?? 0, offset + bytes.length) : cursor?.offset ?? 0, epoch: this.ptyEpochs.get(ptyId) ?? cursor?.epoch ?? "" };
     };
     const stop = await this.subscribe({
       method: "pty.attach",
@@ -930,7 +957,10 @@ export class WorkspaceRpcClient {
         const params = notification.params;
         switch (notification.event) {
           case "pty.output":
-            emit(String(params.data), Number(params.offset));
+            emit(String(params.data), Number(params.offset), outputSize(params.size));
+            break;
+          case "pty.resize-complete":
+            emit("", Number(params.offset), outputSize(params.size));
             break;
           case "pty.exit":
             handlers.onExit?.((params.code as number | null | undefined) ?? null);
@@ -1056,10 +1086,11 @@ export class WorkspaceRpcClient {
   /**
    * Native Codex's terminal view (#644): move the tab to Codex's own terminal
    * on the same thread, for good, and start it there. The runtime refuses it
-   * mid-turn and to anyone who may not start the agent's terminal.
+   * to anyone who may not start the agent's terminal. Only a caller that
+   * handles waitingForTurn and polls again may opt into deferred completion.
    */
-  moveAgentTabToTerminal(sessionId: string, tabId: string): Promise<{ sessionId: string; tabId: string }> {
-    return this.mutate("session.toTerminal", { sessionId, tabId });
+  moveAgentTabToTerminal(sessionId: string, tabId: string, options: { transitionId?: string; deferUntilIdle?: boolean } = {}): Promise<{ sessionId: string; tabId: string; waitingForTurn?: boolean }> {
+    return this.mutate("session.toTerminal", { sessionId, tabId, ...options });
   }
 
   /** The sessions this connection may see (`session.list`). */
@@ -1070,6 +1101,7 @@ export class WorkspaceRpcClient {
 
   /** Rename, pin or archive a session (`session/2`, manage only). */
   async updateSession(sessionId: string, patch: RuntimeSessionPatch): Promise<RuntimeSession> {
+    if (patch.manualStatus !== undefined) this.assertCapability("session-status/1", "session.update");
     const defined = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
     const result = await this.mutate<{ session: RuntimeSession }>("session.update", { sessionId, ...defined });
     return result.session;
@@ -1511,6 +1543,12 @@ function refusalError(method: string, refusal: RpcErrorData): WorkspaceRpcError 
 
 function randomRequestId(): string {
   return `req-${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+function outputSize(value: unknown): { cols: number; rows: number } | undefined {
+  if (!value || typeof value !== "object") return;
+  const { cols, rows } = value as { cols?: unknown; rows?: unknown };
+  if (typeof cols === "number" && typeof rows === "number" && Number.isInteger(cols) && Number.isInteger(rows) && cols > 0 && rows > 0 && cols <= 1_000 && rows <= 1_000) return { cols, rows };
 }
 
 function decodeBase64(value: string): Uint8Array {

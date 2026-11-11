@@ -122,6 +122,16 @@ pub struct MergeRecord {
 }
 
 /// One line of the record on the issue page.
+/// Attribution only: a CLI's reported session grants no person-only authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SwitchActor {
+    Person,
+    SelfUi { session_id: Option<String>, tab_id: Option<String> },
+    Cli { session_id: Option<String>, tab_id: Option<String> },
+    System,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {
@@ -130,7 +140,7 @@ pub struct Event {
     /// `started`, `workDone`, `pullRequest`, `tracker`, `reviewRequested`,
     /// `reviewPending`, `verdict`, `findingsPosted`, `findingsSent`, `pushed`,
     /// `reminder`, `waiting`, `readyToMerge`, `needsYou`, `answered`, `merged`,
-    /// `stopped`, `resumed`, `participantsReleased`, `lateReply`, `autoMerge`,
+    /// `stopped`, `resumed`, `participantsReleased`, `lateReply`, `autoMerge`, `resolveConflicts`,
     /// `resolutionRequested`, `resolutionPending` (a resolver waiting on work
     /// it left running), `resolved`, `resolutionStopped`, `mergeAborted`
     /// (a resolver's unfinished merge undone), `mergeLeft` (one left as it
@@ -143,6 +153,8 @@ pub struct Event {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<SwitchActor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,12 +279,24 @@ pub struct LaunchOptions {
     pub resolve_conflicts: bool,
 }
 
+/// One verified push destination. Store a digest rather than a URL that may
+/// contain credentials; a changed destination invalidates the resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolutionTarget {
+    pub remote: String,
+    pub repository: Option<String>,
+    pub url_hash: String,
+}
+
 /// The exact inputs of a resolution. A remote writer moving the head invalidates it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Resolution {
     pub head: String,
     pub remote_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ResolutionTarget>,
     pub base: String,
     pub base_commit: String,
     pub return_stage: Stage,
@@ -284,7 +308,7 @@ pub struct Resolution {
 }
 
 /// The newest lines of the record kept per pipeline.
-const EVENT_LIMIT: usize = 200;
+pub(crate) const EVENT_LIMIT: usize = 200;
 
 impl Pipeline {
     pub fn label(&self) -> &str {
@@ -296,7 +320,7 @@ impl Pipeline {
             let over = self.events.len() + 1 - EVENT_LIMIT;
             self.events.drain(..over);
         }
-        self.events.push(Event { at: at.to_string(), stage: self.stage, kind: kind.to_string(), message: message.into(), commit: None, url: None, session_id: None });
+        self.events.push(Event { at: at.to_string(), stage: self.stage, kind: kind.to_string(), message: message.into(), commit: None, url: None, session_id: None, actor: None });
         self.events.last_mut().expect("just pushed")
     }
 

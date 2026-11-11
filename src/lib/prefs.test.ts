@@ -23,18 +23,28 @@ describe("organization display preferences", () => {
   });
 });
 
-describe("permission mode preferences", () => {
-  it("defaults fresh preferences to bypass permissions", async () => {
-    const { getPrefs } = await import("./prefs");
-
-    expect(getPrefs().lastMode).toBe("bypassPermissions");
-  });
-
-  it("preserves an explicitly saved permission mode", async () => {
-    localStorage.setItem("raccoon.prefs", JSON.stringify({ lastMode: "manual" }));
+describe("permission mode preferences (PRO-162)", () => {
+  it("starts a fresh profile in Ask every time", async () => {
     const { getPrefs } = await import("./prefs");
 
     expect(getPrefs().lastMode).toBe("manual");
+  });
+
+  it("remembers the mode picked after that across a restart", async () => {
+    const { setPrefs } = await import("./prefs");
+    setPrefs({ lastMode: "plan" });
+    vi.resetModules();
+
+    expect((await import("./prefs")).getPrefs().lastMode).toBe("plan");
+  });
+
+  it("keeps a saved Bypass, and gives saved preferences that hold no mode the first-run one", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ lastMode: "bypassPermissions", sounds: false }));
+    expect((await import("./prefs")).getPrefs()).toMatchObject({ lastMode: "bypassPermissions", sounds: false });
+
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ sounds: false }));
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs()).toMatchObject({ lastMode: "manual", sounds: false });
   });
 });
 
@@ -82,7 +92,9 @@ describe("website browser preferences", () => {
       linkBrowser: "system", linkBrowserChosen: false, sounds: false, fontScale: "lg", sidebarWidth: 310,
       shortcuts: { "app.toggleSidebar": ["mod+shift+b"] },
     });
-    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toEqual(getPrefs());
+    const { sidebarSort, ...persisted } = getPrefs();
+    expect(sidebarSort).toBe("updated"); // Runtime fallback is not a saved choice.
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toEqual(persisted);
     expect(write).toHaveBeenCalledTimes(1);
 
     vi.resetModules();
@@ -166,7 +178,9 @@ describe("shortcuts saved before Escape was split into interrupt and stop", () =
     expect(keymap["session.stop"]).toEqual([]);
     expect(prefs).toMatchObject({ sounds: false, shortcutsVersion: 2 });
     // Saved, with its version, by the one write the migration makes (the first is the test's own).
-    expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual(prefs);
+    const { sidebarSort, ...persisted } = prefs;
+    expect(sidebarSort).toBe("updated"); // The migration leaves an unchosen sort absent.
+    expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual(persisted);
     expect(write).toHaveBeenCalledTimes(2);
 
     vi.resetModules();
@@ -293,5 +307,162 @@ describe("cloud pipeline switches saved by a newer version", () => {
     expect(getPrefs().cloudIssuePipelines["cloud:o:a"].resolveConflicts).toBe(false);
     setPrefs({ sounds: false });
     expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).cloudIssuePipelinesVersion).toBe(2);
+  });
+});
+
+describe("follow-up delivery preferences", () => {
+  it("preserves today's default and persists Hold across restarts", async () => {
+    const { getPrefs, setPrefs } = await import("./prefs");
+    expect(getPrefs().followUps).toBe("now");
+    setPrefs({ followUps: "hold" });
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().followUps).toBe("hold");
+  });
+  it("uses the default for an unrecognized saved value", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ followUps: "invalid" }));
+    expect((await import("./prefs")).getPrefs().followUps).toBe("now");
+  });
+});
+
+describe("sidebar choices per window (PRO-164)", () => {
+  it.each([
+    { sounds: false },
+    { panelWidth: 520 },
+    { lastAgent: "codex" },
+    { sidebarSort: "created" as const, sidebarProject: "/a" },
+  ])("keeps the file layout inherited after saving %j and reloading", async (patch) => {
+    const prefs = await import("./prefs");
+    prefs.connectPreferenceFile(vi.fn());
+    prefs.applyFilePreferences({ sidebarLayout: "list" });
+    prefs.setPrefs(patch);
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs.sidebar.main") ?? "{}")).not.toHaveProperty("sidebarLayout");
+    prefs.applyFilePreferences({ sidebarLayout: "status" });
+    expect(prefs.getPrefs().sidebarLayout).toBe("status");
+    vi.resetModules();
+    const reloaded = await import("./prefs");
+    reloaded.connectPreferenceFile(vi.fn());
+    reloaded.applyFilePreferences({ sidebarLayout: "simple" });
+    expect(reloaded.getPrefs().sidebarLayout).toBe("simple");
+    // An explicit layout remains an override through subsequent unrelated saves.
+    reloaded.setPrefs({ sidebarLayout: "status" });
+    reloaded.setPrefs(patch);
+    reloaded.applyFilePreferences({ sidebarLayout: "list" });
+    expect(reloaded.getPrefs().sidebarLayout).toBe("status");
+  });
+
+  it("does not freeze the default before the settings file loads", async () => {
+    const prefs = await import("./prefs");
+    prefs.setPrefs({ panelWidth: 520 });
+    prefs.connectPreferenceFile(vi.fn());
+    prefs.applyFilePreferences({ sidebarLayout: "status" });
+    expect(prefs.getPrefs().sidebarLayout).toBe("status");
+  });
+
+  it("migrates the old shared layout without promoting a window override into the settings file", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ sidebarLayout: "list", sounds: false }));
+    localStorage.setItem("raccoon.prefs.sidebar.main", JSON.stringify({ sidebarLayout: "status" }));
+    const prefs = await import("./prefs");
+    expect(prefs.getPrefs().sidebarLayout).toBe("status");
+    expect(prefs.legacyUserPreferences()).toEqual({ sidebarLayout: "list", sounds: false });
+  });
+
+  it("keeps Custom and Updated window views independent of settings-file updates and shared storage events", async () => {
+    const main = await import("./prefs");
+    const writeMain = vi.fn();
+    main.connectPreferenceFile(writeMain);
+    main.applyFilePreferences({ sidebarLayout: "list", sounds: false });
+    expect(main.getPrefs().sidebarLayout).toBe("list");
+    expect(localStorage.getItem("raccoon.prefs.sidebar.main")).toBeNull();
+    main.setPrefs({ sidebarLayout: "status", sidebarSort: "custom", sidebarProject: "/a", sounds: true });
+    expect(writeMain).toHaveBeenCalledExactlyOnceWith({ sounds: true });
+
+    vi.resetModules();
+    (await import("./appWindow")).setAppWindowForTest("chat-secondary");
+    const second = await import("./prefs");
+    const writeSecond = vi.fn();
+    second.connectPreferenceFile(writeSecond);
+    second.applyFilePreferences({ sidebarLayout: "list", sounds: true });
+    expect(second.getPrefs().sidebarLayout).toBe("list");
+    second.setPrefs({ sidebarLayout: "simple", sidebarSort: "updated", sidebarProject: "/b" });
+    expect(writeSecond).not.toHaveBeenCalled();
+
+    // An external file edit updates shared settings without resetting either view.
+    for (const prefs of [main, second]) prefs.applyFilePreferences({ sidebarLayout: "simple", sounds: false });
+    window.dispatchEvent(new StorageEvent("storage", { key: "raccoon.prefs", storageArea: localStorage }));
+    expect(main.getPrefs()).toMatchObject({ sidebarLayout: "status", sidebarSort: "custom", sidebarProject: "/a", sounds: false });
+    expect(second.getPrefs()).toMatchObject({ sidebarLayout: "simple", sidebarSort: "updated", sidebarProject: "/b", sounds: false });
+    const shared = JSON.parse(localStorage.getItem("raccoon.prefs")!);
+    for (const key of ["sidebarLayout", "sidebarSort", "sidebarProject", "sounds"]) expect(shared).not.toHaveProperty(key);
+
+    vi.resetModules();
+    const reloaded = await import("./prefs");
+    reloaded.connectPreferenceFile(vi.fn());
+    reloaded.applyFilePreferences({ sidebarLayout: "list", sounds: false });
+    expect(reloaded.getPrefs()).toMatchObject({ sidebarLayout: "status", sidebarSort: "custom", sidebarProject: "/a", sounds: false });
+  });
+
+  it("removes closed chat records, retaining live, newly opened and persistent windows", async () => {
+    for (const label of ["main", "floating", "chat-live", "chat-closed"]) localStorage.setItem(`raccoon.prefs.sidebar.${label}`, "{}");
+    const prefs = await import("./prefs");
+    const candidates = prefs.sidebarChatWindowLabels();
+    localStorage.setItem("raccoon.prefs.sidebar.chat-new", "{}");
+    prefs.pruneSidebarWindows(["main", "floating", "chat-live"], candidates);
+    expect(localStorage.getItem("raccoon.prefs.sidebar.chat-closed")).toBeNull();
+    for (const label of ["main", "floating", "chat-live", "chat-new"]) expect(localStorage.getItem(`raccoon.prefs.sidebar.${label}`)).not.toBeNull();
+    prefs.forgetSidebarWindow("chat-live");
+    prefs.forgetSidebarWindow("main");
+    expect(localStorage.getItem("raccoon.prefs.sidebar.chat-live")).toBeNull();
+    expect(localStorage.getItem("raccoon.prefs.sidebar.main")).not.toBeNull();
+  });
+
+  it("preserves inherited views when another window saves its first choices", async () => {
+    const legacy = { sidebarLayout: "list", sidebarFilters: { local: "unread" }, sidebarSections: { chats: "collapsed" } };
+    localStorage.setItem("raccoon.prefs", JSON.stringify(legacy));
+    const main = await import("./prefs");
+    vi.resetModules();
+    (await import("./appWindow")).setAppWindowForTest("chat-secondary");
+    const second = await import("./prefs");
+    second.setPrefs({ sidebarLayout: "status", sounds: false });
+    window.dispatchEvent(new StorageEvent("storage", { key: "raccoon.prefs", storageArea: localStorage }));
+    expect(main.getPrefs()).toMatchObject({ ...legacy, sounds: false });
+    expect(second.getPrefs().sidebarLayout).toBe("status");
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs()).toMatchObject({ ...legacy, sounds: false });
+  });
+
+  it("remembers each window independently across a reload and shared preference changes", async () => {
+    const main = await import("./prefs");
+    main.setPrefs({ sidebarLayout: "status", sidebarSort: "created", sidebarProject: "/a", sidebarFilters: { local: "needs" }, sidebarSections: { "status:local:done": "collapsed" }, sidebarShowArchived: true });
+    vi.resetModules();
+    (await import("./appWindow")).setAppWindowForTest("chat-secondary");
+    const second = await import("./prefs");
+    expect(second.getPrefs()).toMatchObject({ sidebarLayout: "simple", sidebarSort: "updated", sidebarProject: null, sidebarFilters: {}, sidebarSections: {}, sidebarShowArchived: false });
+    second.setPrefs({ sidebarLayout: "list", sidebarProject: "/b", sounds: false });
+    vi.resetModules();
+    const again = await import("./prefs");
+    expect(again.getPrefs()).toMatchObject({ sidebarLayout: "status", sidebarSort: "created", sidebarProject: "/a", sidebarFilters: { local: "needs" }, sidebarSections: { "status:local:done": "collapsed" }, sidebarShowArchived: true, sounds: false });
+    vi.resetModules();
+    (await import("./appWindow")).setAppWindowForTest("chat-secondary");
+    expect((await import("./prefs")).getPrefs()).toMatchObject({ sidebarLayout: "list", sidebarProject: "/b" });
+  });
+
+  it("ignores malformed view choices without losing shared preferences", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ sounds: false }));
+    localStorage.setItem("raccoon.prefs.sidebar.main", JSON.stringify({ sidebarSort: "random", sidebarProject: 42, sidebarLayout: "invalid", sidebarSections: [], sidebarFilters: null }));
+    expect((await import("./prefs")).getPrefs()).toMatchObject({ sounds: false, sidebarSort: "updated", sidebarProject: null, sidebarLayout: "simple", sidebarSections: {}, sidebarFilters: {} });
+  });
+});
+
+describe("dashboard preferences", () => {
+  it("restores the view, sorting and hidden columns after a restart", async () => {
+    const saved = { view: "table" as const, sort: { column: "pr" as const, direction: "asc" as const }, hiddenColumns: ["owner" as const, "branch" as const] };
+    const prefs = await import("./prefs");
+    prefs.setPrefs({ dashboard: saved });
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().dashboard).toEqual(saved);
+  });
+  it("recovers from malformed dashboard preferences", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ dashboard: { view: "unknown", sort: null, hiddenColumns: ["branch", "branch", 12] } }));
+    expect((await import("./prefs")).getPrefs().dashboard).toEqual({ view: "board", sort: { column: "updated", direction: "desc" }, hiddenColumns: ["branch"] });
   });
 });

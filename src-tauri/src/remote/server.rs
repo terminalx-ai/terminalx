@@ -1044,7 +1044,7 @@ impl WorkspaceRpc {
             "pipeline.resolveConflicts" => {
                 let pipeline = self.own_pipeline(&params)?;
                 let value = params.get("value").and_then(Value::as_bool).ok_or_else(|| RpcError::invalid("value must be boolean"))?;
-                let pipeline = crate::issue_pipeline::engine::set_resolve_conflicts(&self.pipeline_host()?, &pipeline.id, value).map_err(RpcError::internal)?;
+                let pipeline = crate::issue_pipeline::engine::set_resolve_conflicts_by(&self.pipeline_host()?, &pipeline.id, value, crate::issue_pipeline::SwitchActor::Person).map_err(RpcError::internal)?;
                 Ok(json!({ "pipeline": pipeline_on_the_wire(json!(pipeline)) }))
             },
             "pipeline.noteMerge" => self.pipeline_note_merge(params),
@@ -1901,7 +1901,9 @@ impl WorkspaceRpc {
         let Some((session_id, tab_id)) = start else { return Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref())) };
         // Outside the lock: the CLI's first output is recorded under it.
         drop(ptys);
-        self.start_in_terminal(session_id, tab_id)?;
+        if !self.start_in_terminal(session_id, tab_id, None)? {
+            return Err(RpcError::new("conflict", "Wait for Codex to finish this turn, or interrupt it, before opening its terminal."));
+        }
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         // The CLI starts at its default size; the controller's applies from here.
@@ -1926,17 +1928,26 @@ impl WorkspaceRpc {
             Some(refusal) => return Err(refusal),
             None => {}
         }
-        self.start_in_terminal(&tab.session_id, &tab.tab_id)?;
-        Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id }))
+        let transition_id = serde_json::from_value(params["transitionId"].clone()).map_err(|_| RpcError::new("invalid_params", "transitionId must be a UUID"))?;
+        let ready = self.start_in_terminal(&tab.session_id, &tab.tab_id, transition_id)?;
+        if params["deferUntilIdle"] == true {
+            Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id, "waitingForTurn": !ready }))
+        } else if ready {
+            Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id }))
+        } else {
+            // Existing session/3 clients treat any success as a completed
+            // switch and cannot poll. Keep their original busy refusal.
+            Err(RpcError::new("conflict", "Codex is still working. Wait or interrupt before opening Terminal view."))
+        }
     }
 
     /// Start a tab's CLI in its terminal, moving native Codex there first.
-    fn start_in_terminal(&self, session_id: &str, tab_id: &str) -> Result<(), RpcError> {
+    fn start_in_terminal(&self, session_id: &str, tab_id: &str, transition_id: Option<uuid::Uuid>) -> Result<bool, RpcError> {
         let manager = self.manager()?;
-        manager.codex_stdio_to_terminal(session_id, tab_id).map_err(|error| RpcError::new("conflict", format!("{error:#}")))?;
+        if !manager.codex_stdio_to_terminal_reported(session_id, tab_id, transition_id).map_err(|error| RpcError::new("conflict", format!("{error:#}")))? { return Ok(false); }
         manager.ensure_started(session_id, tab_id).map_err(|error| RpcError::new("unavailable", format!("the agent did not start: {error:#}")))?;
         self.tabs_changed.notify_one();
-        Ok(())
+        Ok(true)
     }
 
     fn pty_kill(&self, params: Value) -> Result<Value, RpcError> {
@@ -2031,6 +2042,9 @@ impl WorkspaceRpc {
         result["truncated"] = json!(since.is_some_and(|since| since < start));
         result["runtimeGeneration"] = json!(self.generation());
         drop(ptys);
+        // Queue the snapshot at the PTY, behind unread/emitting output;
+        // publishing it here would race the producer's pending batches.
+        let _ = self.terminals.publish_size(&pty_id);
         self.subscriptions.lock().unwrap().insert(subscription_id, Subscription::Pty { peer: peer.id, pty_id });
         Ok(result)
     }
@@ -2083,9 +2097,9 @@ impl WorkspaceRpc {
                     continue;
                 }
                 peer.notify_sized(
-                    "pty.output",
-                    json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset, "data": data.data }),
-                    data.data.len(),
+                    if bytes.is_empty() && data.size.is_some() { "pty.resize-complete" } else { "pty.output" },
+                    json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset, "data": data.data, "size": data.size }),
+                    data.data.len().max(256), // Size-only completions also consume the slow-peer budget.
                 );
             }
             for subscription_id in &lagged {
@@ -2240,7 +2254,7 @@ impl WorkspaceRpc {
             Some(manager) => manager.stop_agents_confirmed(entry).map_err(|error| format!("{error:#}")),
             None => Ok(()),
         };
-        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents) }))
+        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents), archive: None }))
     }
 
     /// `cleanup/1`: every worktree of the workspace's repositories with
@@ -2321,7 +2335,9 @@ impl WorkspaceRpc {
     /// Every session of this workspace, whoever asks.
     fn workspace_sessions(&self) -> Result<Vec<SessionEntry>, RpcError> {
         crate::store::message_activity::backfill(self.sink.clone());
-        Ok(index::load().map_err(RpcError::internal)?.into_iter().filter(|session| super::session_target::owns_project(&self.root, &session.project_path)).collect())
+        let mut sessions: Vec<_> = index::load().map_err(RpcError::internal)?.into_iter().filter(|session| super::session_target::owns_project(&self.root, &session.project_path)).collect();
+        if let Ok(manager) = self.manager() { manager.annotate_row_statuses(&mut sessions); }
+        Ok(sessions)
     }
 
     /// Sharing is workspace-wide (PRO-30): a person it is shared with sees
@@ -2439,12 +2455,15 @@ impl WorkspaceRpc {
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
+                parent: None,
+                section_id: None,
                 project_path: root,
                 title: p.title,
                 use_worktree: p.use_worktree,
                 on_main: !p.use_worktree,
                 base_ref: None,
                 checkout_branch: None,
+                checkout_pr: None,
                 worktree_name: p.worktree_name.filter(|_| p.use_worktree),
                 issue: p.issue.clone(),
                 automation: None,
@@ -2717,7 +2736,7 @@ impl WorkspaceRpc {
             patch.title = Some(title);
         }
         if patch.is_empty() {
-            return Err(RpcError::invalid("name a title, pinned or archived"));
+            return Err(RpcError::invalid("name a title, pinned, archived or manualStatus"));
         }
         let updated = crate::session_ops::update_session_meta(&session.id, &patch).map_err(RpcError::internal)?;
         self.sink.emit("session_updated", &updated);
@@ -2796,7 +2815,7 @@ impl WorkspaceRpc {
                     expected_sessions: Some(&expected),
                     direct: crate::git::DirectDelete::Never,
                     fetch: crate::landed::Fetch::Fresh,
-                    guard: None,
+                    guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
                 };
                 let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
                 kept_branch = removed.removal.kept_branch;
@@ -2889,7 +2908,7 @@ impl WorkspaceRpc {
             expected_sessions: Some(&p.expected_sessions),
             direct: crate::git::DirectDelete::Never,
             fetch: crate::landed::Fetch::Fresh,
-            guard: None,
+            guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
         };
         let stop = |doomed: &SessionEntry| self.stop_before_removal(doomed);
         let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;

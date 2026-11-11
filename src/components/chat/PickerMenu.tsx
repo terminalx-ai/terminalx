@@ -22,6 +22,7 @@ export function PickerMenu({
   title,
   empty,
   note = null,
+  inline = false,
 }: {
   items: PickerItem[];
   highlighted: number;
@@ -31,6 +32,8 @@ export function PickerMenu({
   empty: string;
   /** Why the list is shorter than the reader may expect; said under it. */
   note?: string | null;
+  /** New-session dialogs scroll around the list instead of clipping an overlay. */
+  inline?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -40,7 +43,7 @@ export function PickerMenu({
     <div
       ref={ref}
       role="listbox"
-      className="absolute bottom-full left-0 right-0 z-30 mb-2 max-h-72 overflow-y-auto scrollbar-thin rounded-lg p-1 shadow-surface hairline animate-fade-in backdrop-blur-2xl"
+      className={cn("z-30 mb-2 max-h-72 overflow-y-auto scrollbar-thin rounded-lg p-1 shadow-surface hairline animate-fade-in backdrop-blur-2xl", inline ? "relative" : "absolute bottom-full left-0 right-0")}
       style={{ background: "color-mix(in oklab, var(--surface-card) 94%, transparent)" }}
     >
       <div className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-faint">{title}</div>

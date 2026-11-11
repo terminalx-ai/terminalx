@@ -26,6 +26,45 @@ const SESSION: &str = "watched-session";
 const TAB: &str = "watched-tab";
 const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.jsonl");
 
+#[test]
+fn row_status_distinguishes_live_permission_question_and_plan_and_clears_after_answer() {
+    let rig = Rig::new();
+    for (tool, expected) in [("Bash", "needs_permission"), ("AskUserQuestion", "needs_answer"), ("ExitPlanMode", "review_plan")] {
+        let mut rt = rig.rt.lock().unwrap();
+        rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            request_id: tool.into(), tool_use_id: tool.into(), tool_name: tool.into(), input: json!({}),
+            title: None, description: None, reason: None, cwd: None, options: vec![],
+        }, None);
+        assert_eq!(rt.status, TabStatus::Waiting);
+        assert_eq!(row_status::activity(&rt), Some(expected));
+        rig.manager.apply(&mut rt, Payload::PermissionDecided { request_id: tool.into(), tool_use_id: Some(tool.into()), allowed: true, label: "Allowed".into(), automatic: true }, None);
+        assert!(rt.pending.is_empty());
+        assert_ne!(row_status::activity(&rt), Some(expected));
+    }
+    let mut rt = rig.rt.lock().unwrap();
+    rt.stopping = true;
+    assert_eq!(row_status::activity(&rt), Some("stopping"));
+    rt.stopping = false;
+    rt.setup_failed = true;
+    assert_eq!(row_status::activity(&rt), Some("setup_failed"));
+}
+
+#[test]
+fn row_status_keeps_a_failed_launch_through_completion_and_idle_until_work_restarts() {
+    let rig = Rig::new();
+    let mut rt = rig.rt.lock().unwrap();
+    rt.engine = Engine::None;
+    rt.turn_open = true;
+    rig.manager.fail_open_turn(&mut rt, &recovery::EarlyExit::said("Agent exited before starting"));
+    assert!(!rt.turn_open);
+    assert_eq!(rt.status, TabStatus::Waiting);
+    assert_eq!(row_status::activity(&rt), Some("setup_failed"));
+    rig.manager.set_status(&mut rt, TabStatus::Idle);
+    assert_eq!(row_status::activity(&rt), Some("setup_failed"));
+    rig.manager.set_status(&mut rt, TabStatus::InProgress);
+    assert_eq!(row_status::activity(&rt), None);
+}
+
 #[derive(Default)]
 struct Observer {
     rt: Mutex<std::sync::Weak<Mutex<TabRuntime>>>,
@@ -46,15 +85,12 @@ impl SessionObserver for Observer {
         // Another thread may hold the lock for a moment, as the input thread a
         // typed `/effort` starts does. Only the caller holding it never lets go.
         let deadline = Instant::now() + Duration::from_secs(10);
-        let rt = loop {
+        loop {
             match rt.try_lock() {
-                Ok(rt) => break rt,
+                Ok(_) => break,
                 Err(std::sync::TryLockError::WouldBlock) if Instant::now() < deadline => std::thread::sleep(MOMENT),
                 Err(_) => panic!("completion must release the tab lock before calling the observer"),
             }
-        };
-        if let Engine::Cli(p) = &rt.engine {
-            assert!(p.answered.is_empty(), "the turn's tool answers must be forgotten before notifying the observer");
         }
         self.completed.lock().unwrap().push((session.into(), tab.into(), message));
     }
@@ -87,24 +123,66 @@ struct Rig {
 }
 
 #[test]
-fn sharing_blocks_bypass_before_changing_the_saved_tab_or_runtime() {
-    let rig = Rig::new();
-    let entry: index::SessionEntry = serde_json::from_value(json!({
-        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
-        "title": "shared", "created": index::now(), "modified": index::now(),
-        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
-    })).unwrap();
-    index::save(&[entry]).unwrap();
-    rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
-        crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
-    assert!(rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").is_err());
-    assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().permission_mode, "default");
-    let rt = rig.rt.lock().unwrap();
-    assert!(matches!(&rt.engine, Engine::Cli(p) if p.mode == "default"));
+fn a_shared_session_may_switch_to_bypass_at_the_hosts_choice() {
+    struct StopBeforeGuards<'a>(&'a SessionManager);
+    impl Drop for StopBeforeGuards<'_> {
+        fn drop(&mut self) {
+            // Stop invalidates the CLI under its runtime lock, fencing late
+            // transcript callbacks, and confirms process exit before either
+            // the program override or the process-wide test home is released.
+            self.0.closing();
+            self.0.stop(SESSION, TAB).unwrap();
+        }
+    }
+    struct TeardownUnwind;
+
+    for unwinding in [false, true] {
+        let mut rig = Rig::new();
+        // An idle mode change really restarts the CLI. Keep that path under
+        // test without depending on (or launching) an installed agent.
+        rig.pane = SessionManager::pane_id(TAB);
+        let program = rig._dir.path().join("claude-fixture");
+        let ran = rig._dir.path().join("claude-fixture.ran");
+        // Stay alive after the marker so teardown must stop a real process;
+        // a lucky watcher tick cannot make the cleanup assertions pass.
+        std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.ran\"\nIFS= read -r line\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _program = claude::pty::claude_program_for_tests(program);
+        let entry: index::SessionEntry = serde_json::from_value(json!({
+            "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+            "title": "shared", "created": index::now(), "modified": index::now(),
+            "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
+        })).unwrap();
+        index::save(&[entry]).unwrap();
+        rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
+            crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
+        let pid = Cell::new(None);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _stop = StopBeforeGuards(&rig.manager);
+            rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").unwrap();
+            assert_eq!(rig.mode(), now_in("bypassPermissions"));
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !std::fs::read_to_string(&ran).is_ok_and(|args| args.lines().any(|arg| arg == "--dangerously-skip-permissions")) {
+                assert!(Instant::now() < deadline, "the restarted fixture never received the host's requested mode");
+                std::thread::sleep(MOMENT);
+            }
+            pid.set(rig.manager.terminals.pid(&rig.pane));
+            assert!(rig.manager.terminals.is_running(&rig.pane));
+            if unwinding { std::panic::panic_any(TeardownUnwind); }
+        }));
+        assert_eq!(outcome.is_err(), unwinding);
+        if let Err(payload) = outcome { assert!(payload.is::<TeardownUnwind>()); }
+        assert!(rig.released(), "late watcher callbacks must no longer own a CLI");
+        assert!(!crate::harness::host::group_or_process_alive(pid.get().unwrap()), "the fixture must exit before releasing the test home");
+        assert_eq!(rig.mode(), now_in("bypassPermissions"));
+    }
 }
 
 #[test]
-fn a_shared_session_takes_no_new_bypass_tab_and_an_unshared_one_still_does() {
+fn a_shared_session_takes_a_bypass_tab_at_the_hosts_choice() {
     let rig = Rig::new();
     let entry: index::SessionEntry = serde_json::from_value(json!({
         "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
@@ -115,8 +193,7 @@ fn a_shared_session_takes_no_new_bypass_tab_and_an_unshared_one_still_does() {
     let tab = |mode: &str| crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some(mode.into()) };
     rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
         crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
-    assert!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).is_err());
-    assert_eq!(index::get(SESSION).unwrap().tabs.len(), 1);
+    assert_eq!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).unwrap().permission_mode, "bypassPermissions");
     assert_eq!(rig.manager.add_tab(SESSION, &tab("plan")).unwrap().permission_mode, "plan");
     rig.manager.sharing.lock().unwrap().sessions.clear();
     assert_eq!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).unwrap().permission_mode, "bypassPermissions");
@@ -208,10 +285,11 @@ impl Rig {
             seq: 0,
             source_timestamp: None,
             message_times: HashMap::new(),
-            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_retiring: None,
+            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(), stdio_retiring: None,
             status: TabStatus::Idle,
             child: None,
             child_pid: None,
+            environment: Default::default(),
             engine: Engine::Cli(CliTab {
                 usage_account: None,
                 harness: kind,
@@ -244,22 +322,24 @@ impl Rig {
                 turn_tail: Default::default(),
                 transcript_turn: None,
                 transcript_end_owed: false,
-                answered: HashMap::new(),
                 command: "claude".into(),
                 origin: Origin { token: token.clone(), transcript_root: dir.path().to_path_buf(), conversation: None },
                 by_hand: None,
             }),
             pending: HashMap::new(),
             queued: Vec::new(),
+            held_queue: Default::default(),
             turn_open: false,
             turn_opener: None,
             compact_completed: false,
             compact_boundary_at: None,
             turn_started_at: None,
+            turn_usage: Default::default(),
             turn_by_command: false,
             signed_out_in_turn: false,
             last_activity: now,
             recovery: None,
+            incidents: Default::default(),
             stalled_at: None,
             last_settings_report: None,
             reported_mode_to_judge: None,
@@ -408,6 +488,11 @@ fn a_pretool_report_from_a_replaced_launch_is_not_acknowledged() {
 /// records it, and what the hook was told. The reader answers `answer`.
 fn permission_card(kind: CliKind, mode: &str, gate: &str, payload: Value, answer: Decision) -> (Value, HookReply) {
     let rig = Rig::in_mode(kind, mode);
+    // These tests exercise cards, including discovery commands whose cards
+    // the default read-only policy would now skip.
+    let mut settings = store::settings::load();
+    settings.agents.read_only_commands = false;
+    store::settings::save(&settings).unwrap();
     let manager = rig.manager.clone();
     let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(), payload };
     let worker = std::thread::spawn(move || manager.on_hook(frame));
@@ -431,8 +516,8 @@ fn permission_card(kind: CliKind, mode: &str, gate: &str, payload: Value, answer
 fn permission_context_survives_the_hook_without_changing_tool_input() {
     // The app's own gate is said apart from the agent's words (#775).
     for (gate, input, description, reason) in [
-        ("PreToolUse", json!({"command":"git status --short --branch"}), Value::Null, json!("Approval is required because this session is set to Ask every time.")),
-        ("PermissionRequest", json!({"cmd":"pwd", "workdir":"/workspace/other", "justification":"Inspect the selected checkout"}), json!("Inspect the selected checkout"), Value::Null),
+        ("PreToolUse", json!({"command":"git status --short --branch", "workdir":"/workspace/app"}), Value::Null, json!("Approval is required because this session is set to Ask every time.")),
+        ("PermissionRequest", json!({"cmd":"pwd", "workdir":"/workspace/other", "justification":"Inspect the selected checkout"}), json!("Inspect the selected checkout"), json!(codex::pty::OUTSIDE_SANDBOX)),
     ] {
         let (payload, _) = permission_card(CliKind::Codex, "manual", gate, json!({"cwd":"/workspace/app", "tool_name":"Bash", "tool_input":input}), Decision::Deny);
         assert_eq!(payload["cwd"], "/workspace/app", "the hook's directory must reach the recorded permission event");
@@ -440,6 +525,403 @@ fn permission_context_survives_the_hook_without_changing_tool_input() {
         assert_eq!(payload["reason"], reason, "{gate}: why the card is up");
         assert_eq!(payload["input"], input, "display context must not rewrite the provider's tool arguments");
     }
+}
+
+/// Codex 0.166.0's hooks for one command the model asks to run outside the
+/// sandbox, as a session's first command, recorded from the real TUI in Ask
+/// every time (`-a on-request -s workspace-write`) against a stand-in model on
+/// 2026-11-06. The model is a code-mode one, as every model Codex lists is:
+/// it writes a script for Codex's `exec` tool, and the script runs the
+/// command. Each hook has a start record with its stdin and an end record
+/// with what it printed, so hooks that waited at once are replayed that way.
+/// Only paths are rewritten.
+const FIRST_COMMAND: &str = include_str!("harness/codex/fixtures/permission_gates_first_command.jsonl");
+/// The same, with the command denied, and the model running it once more.
+const DENIED: &str = include_str!("harness/codex/fixtures/permission_gates_denied.jsonl");
+/// The same, with the card left for a while: `exec` hands the turn back to
+/// the model after its yield time while the call waits on the card, and
+/// the model runs the same command again. The hook that recorded it turned
+/// the repeat away as TerminalX now does.
+const REPEATED_WHILE_WAITING: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_while_waiting.jsonl");
+/// The same, with the command allowed and its card to leave the sandbox left
+/// for a while: the model's repeat reaches `PreToolUse`, the other gate.
+const REPEATED_WHILE_LEAVING_SANDBOX: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_while_leaving_sandbox.jsonl");
+/// In auto mode, where only the sandbox asks: the model's repeat reaches
+/// `PermissionRequest` with its justification reworded.
+const REPEATED_REWORDED_IN_AUTO: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_reworded_in_auto.jsonl");
+
+/// Replay a recording through the tab's hook handler, as its hooks started
+/// and ended. A permission hook that files a card is answered as the
+/// recorded hook was, when the recording says it ended, and every reply must
+/// be what that hook printed. Returns the cards filed, in order.
+fn replay_codex_hooks(rig: &Rig, recording: &str) -> Vec<String> {
+    let mut running = HashMap::new();
+    let mut cards: Vec<String> = Vec::new();
+    for line in recording.lines() {
+        let record: Value = serde_json::from_str(line).unwrap();
+        let (hook, event) = (record["hook"].as_u64().unwrap(), record["event"].as_str().unwrap().to_string());
+        let asks = matches!(event.as_str(), "PreToolUse" | "PermissionRequest");
+        if record["phase"] == "start" {
+            let mut payload = record["payload"].clone();
+            // The transcript is the rig's own file, which its tail reads.
+            payload.as_object_mut().unwrap().remove("transcript_path");
+            if !asks {
+                rig.hook(&event, payload);
+                continue;
+            }
+            let manager = rig.manager.clone();
+            let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: event.clone(), payload };
+            let (replied, reply) = std::sync::mpsc::channel();
+            std::thread::spawn(move || replied.send(manager.on_hook(frame)).unwrap());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (card, early) = loop {
+                if let Some(card) = rig.rt.lock().unwrap().pending.keys().find(|id| !cards.contains(id)).cloned() { break (Some(card), None); }
+                if let Ok(early) = reply.try_recv() { break (None, Some(early)); }
+                assert!(Instant::now() < deadline, "hook {hook} ({event}): neither a card nor a reply");
+                std::thread::sleep(MOMENT);
+            };
+            cards.extend(card.clone());
+            running.insert(hook, (reply, card, early));
+        } else if let Some((reply, card, early)) = running.remove(&hook) {
+            let recorded = record["reply"].clone();
+            let said = &recorded["hookSpecificOutput"];
+            let allowed = said["permissionDecision"] != "deny" && said["decision"]["behavior"] != "deny";
+            let reply = match (card, early) {
+                (_, Some(early)) => early,
+                (Some(card), None) => {
+                    rig.manager.respond_permission(SESSION, TAB, &card, if allowed { "allow" } else { "deny" }).unwrap();
+                    reply.recv_timeout(Duration::from_secs(10)).expect("the answered hook replies")
+                }
+                (None, None) => unreachable!(),
+            };
+            assert_eq!(reply.output, Some(recorded), "hook {hook} ({event}) prints what the recorded hook printed");
+        }
+    }
+    assert!(running.is_empty(), "every hook the recording started ended");
+    cards
+}
+
+/// The tab's permission events after a replay: each card's reason and the
+/// agent's own words, and each decision's label.
+fn permission_log(rig: &Rig) -> Vec<(String, Option<String>, Option<String>)> {
+    rig.events().into_iter().filter_map(|event| match event.payload {
+        Payload::PermissionRequested { reason, description, .. } => Some(("asked".into(), reason, description)),
+        Payload::PermissionDecided { label, .. } => Some((label, None, None)),
+        _ => None,
+    }).collect()
+}
+
+/// A stale card clicked after the replay answers nothing and logs nothing.
+fn stale_clicks_do_nothing(rig: &Rig, cards: &[String]) {
+    let logged = rig.events().len();
+    for card in cards {
+        assert!(rig.manager.respond_permission(SESSION, TAB, card, "allow").is_err(), "{card} is no longer open");
+    }
+    assert_eq!(rig.events().len(), logged, "a stale answer is not logged");
+    assert!(rig.rt.lock().unwrap().pending.is_empty(), "no card is left open");
+}
+
+/// Why a Codex card in Ask every time is up when the hook names no workdir,
+/// as code-mode calls never do: the session allowance it offers is held to
+/// the directory Codex reports (PRO-198).
+const ASK_IN_REPORTED_DIRECTORY: &str = "Session allowances are limited to /workspace/app. Commands executing in another directory are blocked and need a separate one-time approval.";
+const JUSTIFICATION: &str = "Probe: may I create a file outside the workspace?";
+
+/// PRO-160 as it was seen: a reader takes a while over a session's first
+/// card, the model's `exec` yields while the call waits, and the model runs
+/// the same command again. Before, the repeat filed a second, identical
+/// card that stayed live after Allow, and answering it ran the command
+/// again. Now the repeat files no card and is turned away with a reason the
+/// model reads, and the command runs once.
+#[test]
+fn a_command_run_again_while_it_waits_on_its_card_files_no_second_card() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let cards = replay_codex_hooks(&rig, REPEATED_WHILE_WAITING);
+    assert_eq!(permission_log(&rig), [
+        ("asked".into(), Some(ASK_IN_REPORTED_DIRECTORY.into()), None),
+        ("Allowed".into(), None, None),
+        ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
+        ("Allowed".into(), None, None),
+    ], "one card for the command, then one for running it outside the sandbox");
+    stale_clicks_do_nothing(&rig, &cards);
+}
+
+/// A repeat is the same command whichever gate it reaches and whichever gate
+/// the first call waits at: here the first waits to leave the sandbox and
+/// the repeat asks at `PreToolUse`. It files no card, and the command runs once.
+#[test]
+fn a_command_run_again_while_it_waits_to_leave_the_sandbox_files_no_second_card() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let cards = replay_codex_hooks(&rig, REPEATED_WHILE_LEAVING_SANDBOX);
+    assert_eq!(permission_log(&rig), [
+        ("asked".into(), Some(ASK_IN_REPORTED_DIRECTORY.into()), None),
+        ("Allowed".into(), None, None),
+        ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
+        ("Allowed".into(), None, None),
+    ]);
+    stale_clicks_do_nothing(&rig, &cards);
+}
+
+/// The model's words are not what runs: a repeat whose justification is
+/// reworded is still the command already waiting, in a mode where only the
+/// sandbox asks.
+#[test]
+fn a_command_run_again_with_a_reworded_justification_files_no_second_card() {
+    let rig = Rig::in_mode(CliKind::Codex, "auto");
+    let cards = replay_codex_hooks(&rig, REPEATED_REWORDED_IN_AUTO);
+    assert_eq!(permission_log(&rig), [
+        ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
+        ("Allowed".into(), None, None),
+    ]);
+    stale_clicks_do_nothing(&rig, &cards);
+}
+
+/// Allowing the command at `PreToolUse` does not let it out of the sandbox:
+/// Codex then asks for that at `PermissionRequest`, on its own card, which
+/// says so and carries the model's justification.
+#[test]
+fn a_codex_command_asked_about_runs_outside_the_sandbox_only_when_that_is_allowed_too() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let cards = replay_codex_hooks(&rig, FIRST_COMMAND);
+    assert_eq!(permission_log(&rig), [
+        ("asked".into(), Some(ASK_IN_REPORTED_DIRECTORY.into()), None),
+        ("Allowed".into(), None, None),
+        ("asked".into(), Some(codex::pty::OUTSIDE_SANDBOX.into()), Some(JUSTIFICATION.into())),
+        ("Allowed".into(), None, None),
+    ]);
+    stale_clicks_do_nothing(&rig, &cards);
+}
+
+/// A denied command is blocked at `PreToolUse`, and Codex does not ask about
+/// it again. When the model runs it once more, that run is asked about too:
+/// an earlier answer stands for nothing but the call it was given to.
+#[test]
+fn a_denied_codex_command_run_again_is_asked_about_again() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let cards = replay_codex_hooks(&rig, DENIED);
+    assert_eq!(permission_log(&rig), [
+        ("asked".into(), Some(ASK_IN_REPORTED_DIRECTORY.into()), None),
+        ("Denied".into(), None, None),
+        ("asked".into(), Some(ASK_IN_REPORTED_DIRECTORY.into()), None),
+        ("Denied".into(), None, None),
+    ]);
+    stale_clicks_do_nothing(&rig, &cards);
+}
+
+fn command_frame(rig: &Rig, gate: &str, command: &str, cwd: &str) -> HookFrame {
+    HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(),
+        payload: json!({"cwd": cwd, "tool_name":"Bash", "tool_input":{"command":command}}) }
+}
+
+/// Exercise the real response path, including validation of session options.
+fn answer_command(rig: &Rig, frame: HookFrame, option: &str, session_option: bool) -> HookReply {
+    let unverified_codex = {
+        let rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &rt.engine else { unreachable!() };
+        p.harness == CliKind::Codex && permission_directory(p.harness, &frame.payload).is_none()
+    };
+    let manager = rig.manager.clone();
+    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(!worker.is_finished(), "the command must ask");
+        assert!(Instant::now() < deadline, "the command must publish a card");
+        std::thread::sleep(MOMENT);
+    };
+    let pending = rig.manager.pending_permissions();
+    assert_eq!(pending[0].options.iter().any(|id| id == crate::harness::read_only::SESSION_OPTION), session_option);
+    let event = rig.events().into_iter().rev().find_map(|event| match event.payload {
+        Payload::PermissionRequested { options, .. } => Some(options), _ => None,
+    }).unwrap();
+    assert_eq!(event.iter().any(|o| o.id == crate::harness::read_only::SESSION_OPTION), session_option);
+    if !session_option {
+        if unverified_codex {
+            // A pending card handed over from an older runtime may still
+            // advertise its old session option. Revalidate at answer time.
+            let mut rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            p.decisions.get_mut(&request).unwrap().session_command = Some("legacy-session-key".into());
+        }
+        assert!(rig.manager.respond_permission(SESSION, TAB, &request, crate::harness::read_only::SESSION_OPTION).is_err());
+        if unverified_codex {
+            let mut rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            p.decisions.get_mut(&request).unwrap().session_command = None;
+        }
+    }
+    rig.manager.respond_permission(SESSION, TAB, &request, option).unwrap();
+    let reply = worker.join().unwrap();
+    assert!(reply.output.is_some());
+    reply
+}
+
+#[test]
+#[cfg(unix)]
+fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        let mut commands = vec!["pwd; ls", "ls; cat file", "cat file | grep -n hello"];
+        if which::which("rg").is_ok() { commands.push("pwd; rg --files"); }
+        for command in commands {
+            let frame = command_frame(&rig, gate, command, "/workspace/app");
+            let updated = crate::harness::read_only::approved_input("Bash", &frame.payload["tool_input"], Some("/workspace/app")).unwrap();
+            let reply = rig.manager.on_hook(frame);
+            assert_eq!(reply.output, Some(if kind == CliKind::Codex { codex::pty::pre_tool_rewrite(updated) } else { claude::pty::permission_decision(true, Some(updated), vec![]) }));
+            assert!(rig.manager.pending_permissions().is_empty());
+            assert!(!rig.events().iter().any(|event| matches!(event.payload, Payload::PermissionRequested { .. })));
+        }
+        for command in ["pwd; touch file", "ls && rm file", "cat file | curl example.com", "ls > file"] {
+            answer_command(&rig, command_frame(&rig, gate, command, "/workspace/app"), "deny", true);
+        }
+    }
+}
+
+#[test]
+fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    // Codex 0.164 reports session A here even when exec_command runs in B.
+    let input = json!({"command":"rm relative-file"});
+    // No answer stands in for another (PRO-160): each run asks.
+    for answer in ["deny", "allow"] {
+        let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(),
+            payload: json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":input.clone()}) };
+        answer_command(&rig, frame, answer, true);
+    }
+    for input in [
+        json!({"command":"pwd", "workdir":"../b"}),
+        json!({"command":"pwd", "workdir":null}),
+        json!({"command":"pwd", "workdir":"/workspace/a", "cwd":"/workspace/b"}),
+    ] {
+        let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(),
+            payload: json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":input}) };
+        answer_command(&rig, frame, "deny", false);
+    }
+    assert!(rig.events().iter().any(|event| matches!(&event.payload, Payload::PermissionRequested { reason: Some(reason), .. } if reason.contains("verifiable execution directory"))));
+}
+
+/// Captured with Codex 0.164.0 and a loopback Responses provider requesting
+/// exec_command({cmd:"pwd", workdir:B}) from session A. Only paths and IDs
+/// are anonymized: the hook omits B, and calls the tool Bash.
+fn codex_0164_frame(rig: &Rig, cwd: &std::path::Path, command: &str) -> HookFrame {
+    let mut payload: Value = serde_json::from_str(include_str!("harness/codex/fixtures/pre_tool_use_0164.json")).unwrap();
+    assert_eq!(payload["tool_input"], json!({"command":"pwd"}));
+    payload["cwd"] = json!(cwd);
+    payload["tool_input"]["command"] = json!(command);
+    HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(), payload }
+}
+
+#[test]
+#[cfg(unix)]
+fn codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let a = rig._dir.path().join("a");
+    let b = rig._dir.path().join("b");
+    for cwd in [&a, &b] {
+        std::fs::create_dir(cwd).unwrap();
+        std::fs::write(cwd.join("relative-file"), "hello\n").unwrap();
+    }
+    let execute = |reply: &HookReply, cwd: &std::path::Path| {
+        let command = reply.output.as_ref().unwrap()["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap();
+        std::process::Command::new("/bin/sh").current_dir(cwd).args(["-c", command]).output().unwrap()
+    };
+    let discovery = rig.manager.on_hook(codex_0164_frame(&rig, &a, "pwd; cat relative-file | grep hello"));
+    assert!(execute(&discovery, &a).status.success(), "normal Codex discovery must run without a card");
+    assert_eq!(execute(&discovery, &b).status.code(), Some(125), "a session directory must not stand in for another execution workdir");
+    assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionRequested { .. })));
+
+    let first = answer_command(&rig, codex_0164_frame(&rig, &a, "rm relative-file"), crate::harness::read_only::SESSION_OPTION, true);
+    assert_eq!(execute(&first, &b).status.code(), Some(125), "even the first session approval must be guarded");
+    assert!(execute(&first, &a).status.success());
+    std::fs::write(a.join("relative-file"), "again\n").unwrap();
+    let cards = rig.events().iter().filter(|e| matches!(e.payload, Payload::PermissionRequested { .. })).count();
+    let replay = rig.manager.on_hook(codex_0164_frame(&rig, &a, "rm relative-file"));
+    assert!(execute(&replay, &a).status.success(), "the same command reuses its grant without another card");
+    assert_eq!(execute(&replay, &b).status.code(), Some(125));
+    assert!(b.join("relative-file").exists(), "relative deletion grants cannot cross directories");
+    assert_eq!(rig.events().iter().filter(|e| matches!(e.payload, Payload::PermissionRequested { .. })).count(), cards);
+    assert!(rig.events().iter().any(|e| matches!(&e.payload, Payload::PermissionRequested { reason: Some(reason), .. } if reason.contains("Session allowances are limited to"))));
+}
+
+#[test]
+fn execution_directory_never_falls_back_to_a_codex_session_directory() {
+    let mut payload = json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":{"command":"git diff"}});
+    assert_eq!(permission_directory(CliKind::Codex, &payload), None);
+    payload["tool_input"]["workdir"] = json!("/workspace/b");
+    assert_eq!(permission_directory(CliKind::Codex, &payload), Some("/workspace/b"));
+    assert_eq!(permission_directory(CliKind::Claude, &payload), None);
+    payload["tool_input"].as_object_mut().unwrap().remove("workdir");
+    assert_eq!(permission_directory(CliKind::Claude, &payload), Some("/workspace/a"));
+}
+
+#[test]
+#[cfg(unix)]
+fn turning_the_builtin_list_off_asks_on_the_next_command_in_a_running_tab() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        assert!(rig.manager.on_hook(command_frame(&rig, gate, "pwd", "/workspace/app")).output.is_some());
+        let mut settings = store::settings::load();
+        settings.agents.read_only_commands = false;
+        store::settings::save(&settings).unwrap();
+        answer_command(&rig, command_frame(&rig, gate, "pwd", "/workspace/app"), "deny", true);
+    }
+}
+
+#[test]
+fn session_allowance_matches_the_exact_input_directory_and_tab_across_turns() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        let option = crate::harness::read_only::SESSION_OPTION;
+        // Allow once does not create a session grant.
+        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/app"), "allow", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/app"), option, true);
+        rig.hook("Stop", json!({}));
+        let cards = rig.events().iter().filter(|event| matches!(event.payload, Payload::PermissionRequested { .. })).count();
+        let mut repeat = command_frame(&rig, gate, "touch note", "/workspace/app");
+        repeat.payload["tool_input"]["description"] = json!("Create the note for the next step");
+        assert!(rig.manager.on_hook(repeat).output.is_some());
+        assert_eq!(rig.events().iter().filter(|event| matches!(event.payload, Payload::PermissionRequested { .. })).count(), cards);
+        answer_command(&rig, command_frame(&rig, gate, "touch other", "/workspace/app"), "deny", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note; rm file", "/workspace/app"), "deny", true);
+        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/other"), "deny", true);
+        // A grant for another tab cannot authorize this one.
+        let grants = rig.manager.session_commands.lock().unwrap().remove(&key_of(SESSION, TAB)).unwrap();
+        rig.manager.session_commands.lock().unwrap().insert(key_of(SESSION, "another-tab"), grants);
+        answer_command(&rig, command_frame(&rig, gate, "touch note", "/workspace/app"), "deny", true);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn automatic_discovery_and_session_grants_never_answer_codex_escalation() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "pwd", "/workspace/app")).output.is_some());
+    answer_command(&rig, command_frame(&rig, "PermissionRequest", "pwd", "/workspace/app"), "deny", false);
+    answer_command(&rig, command_frame(&rig, "PreToolUse", "touch note", "/workspace/app"), crate::harness::read_only::SESSION_OPTION, true);
+    assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "touch note", "/workspace/app")).output.is_some());
+    answer_command(&rig, command_frame(&rig, "PermissionRequest", "touch note", "/workspace/app"), "deny", false);
+}
+
+#[test]
+fn a_codex_cmd_approval_cannot_authorize_a_different_write_in_the_same_turn() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let mut allowed = command_frame(&rig, "PreToolUse", "", "/workspace/app");
+    allowed.payload["tool_name"] = json!("exec_command");
+    allowed.payload["tool_input"] = json!({"cmd":"touch note", "workdir":"/workspace/app"});
+    answer_command(&rig, allowed, "allow", true);
+    let mut frame = command_frame(&rig, "PreToolUse", "", "/workspace/app");
+    frame.payload["tool_name"] = json!("exec_command");
+    frame.payload["tool_input"] = json!({"cmd":"rm file", "workdir":"/workspace/app"});
+    answer_command(&rig, frame, "deny", true);
+}
+
+#[test]
+fn claude_read_only_safety_requests_in_bypass_still_ask() {
+    let rig = Rig::in_mode(CliKind::Claude, "bypassPermissions");
+    answer_command(&rig, command_frame(&rig, "PermissionRequest", "pwd", "/workspace/app"), "deny", false);
 }
 
 /// #775: TerminalX's Claude hooks only ever deny, so in bypass mode a card
@@ -487,7 +969,7 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         let old = Instant::now() - PATIENCE.stall - MOMENT;
         rig.rt.lock().unwrap().last_activity = old;
         rig.drew.set(Some(old));
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
         // The production send path, up to dispatching the input thread. Do
         // not use `stamp`: the send itself must refresh the activity clock.
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
@@ -554,26 +1036,6 @@ fn a_stop_hook_still_notifies_automation_when_only_a_hook_opened_the_turn() {
     rig.hook("UserPromptSubmit", json!({ "prompt": "hello" }));
     rig.hook("Stop", json!({}));
     assert_eq!(*rig.observer.completed.lock().unwrap(), [(SESSION.to_string(), TAB.to_string(), None)]);
-}
-
-#[test]
-fn the_watcher_forgets_tool_answers_for_the_completed_turn() {
-    let rig = Rig::of(CliKind::Codex, "");
-    rig.append(include_str!("harness/codex/fixtures/rollout.jsonl"));
-    {
-        let mut rt = rig.rt.lock().unwrap();
-        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
-        p.answered.insert(tool_key("Bash", &json!({ "command": "ls" })), true);
-        p.answered.insert(tool_key("Bash", &json!({ "command": "rm file" })), false);
-    }
-    assert!(rig.turn_open());
-    assert_eq!(rig.transcript_turn(), Some(tui::TurnMark::Ended));
-    rig.advance(PATIENCE.settle);
-    rig.tick();
-    assert!(!rig.turn_open());
-    let rt = rig.rt.lock().unwrap();
-    let Engine::Cli(p) = &rt.engine else { unreachable!() };
-    assert!(p.answered.is_empty(), "neither allowed nor denied answers carry into the next turn");
 }
 
 #[test]
@@ -785,7 +1247,7 @@ fn a_queued_compact_echo_preserves_command_classification() {
     for completed in [false, true] {
         let rig = Rig::new();
         rig.start_turn();
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
         let (sent, queued) = rig.manager.record_composer_prompt(
             &mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None,
         );
@@ -980,7 +1442,7 @@ fn cloud_counts_distinguish_silence_from_errors_and_unconfirmed_delivery() {
     for kind in [RecoveryKind::Timeout, RecoveryKind::DeliveryUnconfirmed, RecoveryKind::Disconnected] {
         let rig = Rig::with_live_pane();
         rig.start_turn();
-        rig.manager.needs_recovery(&mut rig.rt.lock().unwrap(), kind);
+        rig.manager.needs_recovery(&mut rig.rt.lock().unwrap(), kind, crate::recovery_log::Source::AgentError);
         assert_eq!(rig.counts(), (0, 0), "a reported {kind:?} is not a silence guess");
         if kind == RecoveryKind::DeliveryUnconfirmed {
             rig.rt.lock().unwrap().stalled_at = Some(rig.now.get());
@@ -1992,45 +2454,16 @@ fn bypass_chosen_in_the_terminal_is_shown_when_nothing_forbids_it() {
     assert!(!rig.released());
 }
 
-/// A shared session may not be in Bypass, and a guest's prompt must never be
-/// typed into a CLI that is. Showing the mode would not undo it: the CLI is
-/// let go of at once and brought back in the mode the tab was in.
+/// A shared session may be in Bypass, at the host's choice: a switch to it in
+/// the terminal is taken as reported, as any other mode is, and the CLI kept.
 #[test]
-fn a_shared_session_is_restarted_out_of_a_mode_it_may_not_be_in() {
-    // Codex: "Full Access" confirmed in the TUI's `/permissions`.
-    let rig = Rig::in_mode(CliKind::Codex, "auto");
-    rig.share();
-    rig.rt.lock().unwrap().turn_open = true;
-    for record in CODEX_PERMISSIONS.lines() {
-        rig.append(&format!("{record}\n"));
-    }
-    assert_eq!(rig.mode(), now_in("auto"), "never stored");
-    assert!(rig.mode_changes().iter().all(|mode| mode != "bypassPermissions"));
-    assert!(rig.released(), "the CLI that was in it is gone before anything else is typed");
-    assert!(!rig.turn_open());
-    assert_eq!(
-        rig.notices(),
-        ["Codex was switched to Bypass in the terminal. A shared session cannot be in Bypass, so Codex was restarted in Auto. Stop sharing this session before switching to Bypass."]
-    );
-
-    // Claude Code, and a stance with no sandbox under any other name.
-    // One rig at a time: each holds the test home.
-    drop(rig);
+fn a_shared_session_takes_a_switch_to_bypass_in_the_terminal_as_reported() {
     let rig = Rig::in_mode(CliKind::Claude, "plan");
     rig.share();
     rig.hook("PreToolUse", json!({ "permission_mode": "bypassPermissions", "tool_name": "Bash", "tool_input": {}, "tool_use_id": "t1" }));
-    assert_eq!(rig.mode(), now_in("plan"));
-    assert!(rig.released());
+    assert_eq!(rig.mode(), now_in("bypassPermissions"));
+    assert!(!rig.released());
 
-    // One rig at a time: each holds the test home.
-    drop(rig);
-    let rig = Rig::in_mode(CliKind::Codex, "plan");
-    rig.share();
-    rig.append("{\"type\":\"turn_context\",\"payload\":{\"approval_policy\":\"on-request\",\"sandbox_policy\":{\"type\":\"danger-full-access\"}}}\n");
-    assert_eq!(rig.mode(), now_in("plan"));
-    assert!(rig.released());
-
-    // Any other mode changed in the terminal of a shared session is just shown.
     // One rig at a time: each holds the test home.
     drop(rig);
     let rig = Rig::in_mode(CliKind::Claude, "plan");

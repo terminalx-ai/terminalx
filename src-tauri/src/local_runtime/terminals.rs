@@ -24,6 +24,21 @@ impl Terminals {
         self.0.call("runtime.pty.spawn", json!({"id":id,"cwd":cwd,"cols":cols,"rows":rows,"command":command,"title":title}))
     }
 
+    /// Settings can connect GitHub before there is any project or session.
+    pub fn github_login(&self, id: &str, hostname: &str) -> Result<()> {
+        self.0.call("runtime.pty.githubLogin", json!({"id":id,"hostname":hostname}))
+    }
+
+    /// Run an agent's install or sign-in step in setup pane `id` (PRO-152).
+    pub fn agent_setup(&self, id: &str, harness: &str, step: &str, cols: u16, rows: u16) -> Result<()> {
+        self.0.call("runtime.pty.agentSetup", json!({"id":id,"harness":harness,"step":step,"cols":cols,"rows":rows}))
+    }
+
+    /// The setup step running for an agent, as `{pane, step}`, or null.
+    pub fn agent_setup_running(&self, harness: &str) -> Result<serde_json::Value> {
+        self.0.quick("runtime.pty.agentSetupRunning", json!({"harness":harness}))
+    }
+
     pub fn write(&self, id: &str, bytes: &[u8]) -> Result<()> {
         self.0.quick("runtime.pty.write", json!({"id":id,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}))
     }
@@ -36,8 +51,24 @@ impl Terminals {
         self.0.quick("runtime.pty.rename", json!({"id":id,"title":title}))
     }
 
+    pub fn set_docked(&self, id: &str, docked: bool) -> Result<crate::pty::ShellPane> {
+        self.0.quick("runtime.pty.setDocked", json!({"id":id,"docked":docked}))
+    }
+
     pub fn kill(&self, id: &str) -> Result<()> {
         self.0.call("runtime.pty.kill", json!({"id":id}))
+    }
+
+    pub fn environment_changed(&self, id: &str) -> Result<crate::store::environment::Status> {
+        self.0.quick("runtime.pty.environmentChanged", json!({"id":id}))
+    }
+
+    pub fn local_links(&self, id: &str) -> Result<serde_json::Value> {
+        self.0.quick("runtime.pty.localLinks", json!({"id":id}))
+    }
+
+    pub fn environment_ready(&self, project: Option<&str>) -> Result<bool> {
+        self.0.quick("runtime.pty.environmentReady", json!({"projectPath":project}))
     }
 
     pub fn shells(&self) -> Result<Vec<crate::pty::ShellPane>> {

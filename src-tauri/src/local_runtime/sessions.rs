@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
@@ -19,6 +19,14 @@ pub struct Sessions(Arc<Client>);
 
 impl Sessions {
     pub fn new(client: Arc<Client>) -> Self { Self(client) }
+
+    pub fn create(&self, req: &crate::session_ops::NewSession) -> Result<crate::store::index::SessionEntry> {
+        self.call("runtime.session.create", json!({"req": req}))
+    }
+
+    pub fn workspace_setup(&self, operation: &str, session: Option<&str>, pane: Option<&str>) -> Result<Value> {
+        self.call("runtime.session.workspaceSetup", json!({"operation": operation, "sessionId": session, "paneId": pane}))
+    }
 
     fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
         self.0.call(command,params)
@@ -48,12 +56,38 @@ impl Sessions {
         self.call("runtime.session.pipeline",json!({"operation":operation,"params":params}))
     }
 
+    /// An older owner ignores unknown project fields; it must not silently
+    /// remove a workspace whose new desktop saved an archive script.
+    pub fn require_archive_support(&self) -> Result<()> {
+        let supported: bool = self.quick("runtime.session.workspace", json!({"operation":"archiveSupport","params":{}}))
+            .context("Restart the local runtime before using archive scripts; older runtimes can discard saved scripts when updating projects")?;
+        anyhow::ensure!(supported, "Restart the local runtime before using archive scripts; older runtimes can discard saved scripts when updating projects");
+        Ok(())
+    }
+
     pub fn workspace<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
-        self.call("runtime.session.workspace", json!({"operation":operation,"params":params}))
+        // Archive hooks may take five minutes each. Keep the caller waiting
+        // for the result rather than reporting a timeout while removal runs.
+        let seconds = match operation {
+            "removeWorkspace" => 480,
+            "remove" => 120 + 360 * params["items"].as_array().map_or(1, |items| items.len() as u64),
+            "removeLeftovers" => 120 + 360 * params["ids"].as_array().map_or(1, |items| items.len() as u64),
+            "mergedSweep" => 3600 + 360 * crate::merged_cleanup::ARCHIVES_PER_PASS as u64,
+            _ => 120,
+        };
+        self.0.call_within("runtime.session.workspace", json!({"operation":operation,"params":params}), std::time::Duration::from_secs(seconds))
+    }
+
+    pub fn save_terminal_selection(&self, session: &str, tab: &str, text: &str) -> Result<String> {
+        self.tab("saveTerminalSelection", session, tab, json!({"text":text}))
     }
 
     pub fn delete_session(&self, session: &str) -> Result<()> {
         self.call("runtime.session.deleteSession", json!({"sessionId":session}))
+    }
+
+    pub fn set_manual_status(&self, session: &str, status: crate::store::index::ManualStatus) -> Result<()> {
+        self.call("runtime.session.manualStatus", json!({"sessionId":session,"status":status}))
     }
 
     pub fn automations(&self) -> Result<Vec<crate::automations::Automation>> {
@@ -118,6 +152,10 @@ impl Sessions {
 
     pub fn resume_conversation(&self, session: &str, tab: &str, harness: &str, provider_session_id: &str) -> Result<()> {
         self.tab("resumeConversation", session, tab, json!({"harness":harness,"providerSessionId":provider_session_id}))
+    }
+
+    pub fn row_statuses(&self, ids: Vec<String>) -> Result<Value> {
+        self.quick("runtime.session.rowStatuses", json!({"ids":ids}))
     }
 
     pub fn running_tabs(&self) -> Result<Vec<RunningTab>> {
@@ -189,6 +227,15 @@ impl Sessions {
             "pressedAt":timings.pressed_at,"drawnAt":timings.drawn_at,"answeredAt":timings.answered_at,"shownAt":timings.shown_at}}))
     }
 
+    pub fn note_terminal_view(&self, session: &str, tab: &str, report: &crate::session::TerminalViewReport) -> Result<()> {
+        self.quick_tab("terminalViewReport", session, tab, json!({"report":report}))
+    }
+
+    /// A window's report of a tab's warning (`SessionManager::note_incident_ui`).
+    pub fn note_incident_ui(&self, session: &str, tab: &str, report: &crate::recovery_log::UiReport) -> Result<()> {
+        self.quick_tab("incidentUi", session, tab, json!({"report": report}))
+    }
+
     pub fn send_confirmed(&self, session: &str, tab: &str, text: String) -> Result<SendOutcome> {
         self.tab("sendConfirmed", session, tab, json!({"text":text}))
     }
@@ -213,6 +260,10 @@ impl Sessions {
         self.quick_tab("interrupt", session, tab, json!({}))
     }
 
+    pub fn reset_chat(&self, session: &str, tab: &str, end_seq: Option<u64>, reset_files: bool) -> Result<Option<String>> {
+        self.tab("resetChat", session, tab, json!({"endSeq":end_seq,"resetFiles":reset_files}))
+    }
+
     pub fn stop(&self, session: &str, tab: &str) -> Result<()> {
         self.tab("stop", session, tab, json!({}))
     }
@@ -221,6 +272,10 @@ impl Sessions {
         self.tab("closeTab", session, tab, json!({}))
     }
 
+
+    pub fn change_held(&self, session: &str, tab: &str, change: crate::session::held::Change) -> Result<SendOutcome> {
+        self.tab("heldQueue", session, tab, json!({"change":change}))
+    }
 
     pub fn send_queued_now(&self, session: &str, tab: &str, seq: u64) -> Result<()> {
         self.quick_tab("sendQueuedNow", session, tab, json!({"seq":seq}))
@@ -250,6 +305,10 @@ impl Sessions {
         self.tab("effort", session, tab, json!({"effort":effort}))
     }
 
+    pub fn set_tab_unread(&self, session: &str, tab: &str, unread: bool) -> Result<()> {
+        self.quick_tab("setUnread", session, tab, json!({"unread": unread}))
+    }
+
     pub fn mark_read(&self, session: &str, tab: &str) -> Result<()> {
         self.quick_tab("markRead", session, tab, json!({}))
     }
@@ -258,8 +317,10 @@ impl Sessions {
         self.tab("handoff", session, tab, json!({}))
     }
 
-    pub fn to_terminal(&self, session: &str, tab: &str) -> Result<()> {
-        self.tab("toTerminal", session, tab, json!({}))
+    pub fn to_terminal(&self, session: &str, tab: &str, transition_id: Option<uuid::Uuid>) -> Result<bool> {
+        // Older local runtimes returned null for a completed handoff.
+        let ready: Option<bool> = self.tab("toTerminal", session, tab, json!({"transitionId":transition_id,"deferUntilIdle":true}))?;
+        Ok(ready.unwrap_or(true))
     }
 }
 

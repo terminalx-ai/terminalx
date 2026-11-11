@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Chat, visibleTurns } from "./Chat";
 import { buildTranscript } from "@/lib/transcript";
@@ -7,6 +7,8 @@ import type { StreamBlock } from "@/lib/agentEvents";
 import type { AgentEvent } from "@/types/events";
 import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { registerShortcut } from "@/lib/hotkeys";
+import { setPrefs } from "@/lib/prefs";
 
 // jsdom lays nothing out, so this models the one box that matters: a scroller
 // of fixed height over content whose children stack at known heights. Like a
@@ -84,7 +86,11 @@ const overSpacer = () =>
 const shortTurn = (index: number) => 180 + (index % 7) * 60;
 /** Every third turn 3000–6000 px, far taller than the drawn band reaches past the view (#771). */
 const tallTurn = (index: number) => (index % 3 === 1 ? 3000 + (index % 4) * 1000 : shortTurn(index));
-const latestShown = () => screen.getByRole("button", { name: /latest/i }).parentElement!.classList.contains("opacity-100");
+const latestShown = () => {
+  // Keep the role/name check local: a long transcript has thousands of prompt-map buttons.
+  const button = screen.getByText("Latest", { selector: "button" });
+  return within(button.parentElement!).getByRole("button", { name: /latest/i }).parentElement!.classList.contains("opacity-100");
+};
 
 function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
   const transcript = buildTranscript(log, true);
@@ -104,7 +110,7 @@ function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
   const stream = (): StreamBlock[] => [
     { ref: { messageId: "m-live", index: 0 }, kind: "text", text: `streamed delta ${++seq}`, partialJson: "", done: false },
   ];
-  const view = render(<Chat {...props} stream={stream()} />);
+  const view = render(<Chat {...props} stream={stream()} />, { wrapper: TooltipProvider });
   mountScrollModel(view.container);
   setTop(maxTop());
   frame();
@@ -119,6 +125,25 @@ function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
 }
 
 describe("chat scroll follow", () => {
+  it("shows a reported goal above the scroller before the first turn and hides a cleared goal", () => {
+    const event: AgentEvent = { id: "goal", seq: 1, sessionId: "s", tabId: "t", harness: "codex", ts: "",
+      payload: { type: "goal_updated", goal: { objective: "Finish the migration", status: "active", tokenBudget: 1000, tokensUsed: 0 } } };
+    const props = { sessionId: "s", live: false, progressing: false, answering: false, stream: [], onAnswerPermission: () => {}, onAnswerQuestions: () => {}, footer: null };
+    const view = render(<Chat {...props} transcript={buildTranscript([event], false)} />, { wrapper: TooltipProvider });
+    const banner = screen.getByRole("region", { name: "Codex goal" });
+    expect(banner.textContent).toContain("Finish the migration");
+    expect(view.container.querySelector("[data-chat-scroller]")?.contains(banner)).toBe(false);
+    // The banner shares main's focusable chat root; it must not replace search.
+    fireEvent.pointerDown(banner);
+    const region = view.container.querySelector('[data-find-scope="chat"]');
+    expect(document.activeElement).toBe(region);
+    fireEvent.keyDown(document.activeElement!, { key: "f", ctrlKey: true });
+    expect(screen.getByRole("textbox", { name: "Find in chat" })).toBeDefined();
+    expect(screen.getByRole("region", { name: "Codex goal" })).toBe(banner);
+    view.rerender(<Chat {...props} transcript={buildTranscript([event, { ...event, id: "clear", seq: 2, payload: { type: "goal_cleared" } }], false)} />);
+    expect(screen.queryByRole("region", { name: "Codex goal" })).toBeNull();
+  });
+
   it("shows confirmed compaction while ordinary work is idle", () => {
     const scope = { sessionId: "s", tabId: "t", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
     const events: AgentEvent[] = [
@@ -330,8 +355,9 @@ describe("chat scroll follow", () => {
   // through the turn holding its lower edge, so a reply taller than the
   // overscan never leaves the view empty, scrolling either way, right after
   // a step or once the reader holds still. Its 510 steps redraw a 200-turn
-  // chat four times each: about 2 s alone, 6–7 s in CI's full run, so it gets
-  // more than the default 5 s.
+  // chat four times each: about 2 s alone, 6–7 s in CI's full run, and over
+  // 30 s in a loaded shared VM. Allow for that without reducing the steps.
+  // VITEST_SLOW_TEST_TIMEOUT_MS can raise this bound further on a busy host.
   it("never leaves the view over spacers while scrolling past turns taller than the overscan", () => {
     const keys = buildTranscript(syntheticLog(200, true), true).turns.map((turn) => turn.key);
     keys.forEach((key, index) => heights.set(key, tallTurn(index)));
@@ -355,11 +381,12 @@ describe("chat scroll follow", () => {
         expect(overSpacer(), `${run}, step ${step} (${delta} px) at ${top}: settled`).toBe(0);
       });
     }
-  }, 30_000);
+  }, Math.max(120_000, Number(process.env.VITEST_SLOW_TEST_TIMEOUT_MS) || 0));
 
   // #727: a turn scrolled far from the view is not drawn. What the reader
   // opened in it is the chat's to keep, so it comes back as they left it.
   it("keeps a turn's tool calls unfolded after it was scrolled out of the drawn band and back", () => {
+    setPrefs({ foldToolCalls: true });
     const { transcript } = setup(200);
     const key = transcript.turns.at(-2)!.key;
     const fold = () => content.querySelector<HTMLElement>(`[data-turn="${key}"]`)?.querySelector<HTMLElement>("button[aria-expanded]") ?? null;
@@ -399,6 +426,86 @@ describe("chat scroll follow", () => {
     frame();
     expect(content.querySelector<HTMLElement>(`[data-turn="${far}"]`)!.getBoundingClientRect().top).toBe(0);
     expect(latestShown()).toBe(true);
+  });
+
+  it("finds and highlights a far-off Markdown phrase without mounting the full transcript", async () => {
+    const highlights = new Map<string, Set<Range>>();
+    vi.stubGlobal("Highlight", class extends Set<Range> { priority = 0; constructor(...ranges: Range[]) { super(ranges); } });
+    vi.stubGlobal("CSS", { escape: CSS.escape.bind(CSS), highlights });
+    const log = syntheticLog(2000, true);
+    const answer = log.filter((event) => event.payload.type === "assistant_text")[3];
+    answer.payload = { type: "assistant_text", text: "The **elusive** [file](https://example.test) is here. Another elusive file." };
+    const { transcript, view } = setup(2000, log);
+    const far = transcript.turns[3].key;
+    expect(content.querySelector(`[data-turn="${far}"]`)).toBeNull();
+    const region = scroller.closest<HTMLElement>('[data-find-scope="chat"]')!;
+    fireEvent.pointerDown(content);
+    expect(document.activeElement).toBe(region);
+    fireEvent.keyDown(region, { key: "f", ctrlKey: true });
+    const field = screen.getByRole("textbox", { name: "Find in chat" });
+    fireEvent.change(field, { target: { value: "elusive file" } });
+    expect(screen.getByRole("status").textContent).toBe("1 of 2");
+    expect(content.querySelector(`[data-turn="${far}"]`)).not.toBeNull();
+    expect(content.querySelectorAll("[data-turn]").length).toBeLessThan(25);
+    const shownTop = content.querySelector<HTMLElement>(`[data-turn="${far}"]`)!.getBoundingClientRect().top;
+    expect(shownTop).toBeGreaterThanOrEqual(0);
+    expect(shownTop).toBeLessThan(VIEWPORT);
+    await act(async () => {}); // MutationObserver paints the newly mounted row.
+    const selected = () => [...highlights.entries()].find(([name]) => name.endsWith("-active"))![1];
+    expect([...selected()].map((range) => range.toString())).toEqual(["elusive file"]);
+    fireEvent.keyDown(field, { key: "g", ctrlKey: true });
+    expect(screen.getByRole("status").textContent).toBe("2 of 2");
+    fireEvent.keyDown(field, { key: "g", ctrlKey: true, shiftKey: true });
+    expect(screen.getByRole("status").textContent).toBe("1 of 2");
+    fireEvent.keyDown(field, { key: "Enter", shiftKey: true });
+    expect(screen.getByRole("status").textContent).toBe("2 of 2");
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 229 });
+    expect(screen.getByRole("status").textContent).toBe("2 of 2");
+    const updated = { ...transcript, turns: [...transcript.turns, { ...transcript.turns.at(-1)!, key: "new", work: [], prompt: { seq: 99999, ts: "", text: "A new prompt" } }] };
+    view.rerender(<Chat sessionId="s" transcript={updated} stream={[]} live answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} />);
+    frame();
+    expect(content.querySelector(`[data-turn="${far}"]`)).not.toBeNull();
+    expect(latestShown()).toBe(true);
+    const interrupt = vi.fn();
+    const unbind = registerShortcut("session.interrupt", interrupt, { global: true });
+    try {
+      fireEvent.keyDown(field, { key: "Escape" });
+      expect(screen.queryByRole("search", { name: "Find in chat" })).toBeNull();
+      expect(interrupt).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(region);
+      expect(highlights.size).toBe(0);
+    } finally { unbind(); }
+  });
+
+  it("reveals folded reasoning and grouped Read output beyond its preview, then restores folds", () => {
+    setPrefs({ foldToolCalls: true });
+    const { transcript, view } = setup(4);
+    const first = transcript.turns[0];
+    const updated = { ...transcript, turns: [{ ...first, completed: { status: "ok", ts: "" }, work: [
+      { kind: "reasoning" as const, key: "thought", seq: 1, text: "Consider the hidden clue" },
+      { kind: "tool_group" as const, key: "group", name: "Read", calls: [
+        { callId: "one", seq: 2, name: "Read", toolType: "file_read", input: {}, result: { isError: false, text: "x".repeat(21000) + "hidden clue" } },
+        { callId: "two", seq: 3, name: "Read", toolType: "file_read", input: {}, result: { isError: false, text: "other" } },
+      ] },
+      { kind: "text" as const, key: "answer", seq: 4, text: "Finished." },
+    ] }, ...transcript.turns.slice(1)] };
+    view.rerender(<Chat sessionId="s" transcript={updated} stream={[]} live={false} answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={<textarea aria-label="Composer" />} />);
+    const composer = screen.getByRole("textbox", { name: "Composer" });
+    composer.focus();
+    fireEvent.keyDown(composer, { key: "f", ctrlKey: true });
+    const field = screen.getByRole("textbox", { name: "Find in chat" });
+    fireEvent.change(field, { target: { value: "hidden clue" } });
+    expect(screen.getByRole("status").textContent).toBe("1 of 2");
+    expect(screen.getByText("Consider the hidden clue")).toBeTruthy();
+    fireEvent.keyDown(field, { key: "g", ctrlKey: true });
+    expect(screen.getByRole("status").textContent).toBe("2 of 2");
+    expect(screen.getByText("x".repeat(21000) + "hidden clue")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Include tool output" }));
+    expect(screen.getByRole("status").textContent).toBe("1 of 1");
+    expect(screen.queryByText("x".repeat(21000) + "hidden clue")).toBeNull();
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(screen.queryByText("Consider the hidden clue")).toBeNull();
+    expect(document.activeElement).toBe(composer);
   });
 });
 

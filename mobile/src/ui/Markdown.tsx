@@ -110,7 +110,7 @@ function MarkdownTable({ table, palette }: { table: Tokens.Table; palette: Palet
 
 const styles = StyleSheet.create({
   blocks: { gap: 10, minWidth: 0 },
-  body: { fontSize: 15, lineHeight: 22 },
+  body: { fontSize: 16, lineHeight: 24 },
   heading: { fontWeight: "700", lineHeight: 29 },
   strong: { fontWeight: "700" },
   emphasis: { fontStyle: "italic" },

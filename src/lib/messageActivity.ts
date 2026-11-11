@@ -2,6 +2,7 @@
 export interface MessageActivity {
   created: string;
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
   pinned: boolean;
 }
 const timestamp = (value: string | null | undefined): number | null => {
@@ -22,8 +23,9 @@ export function compareMessageActivity(a: MessageActivity, b: MessageActivity, a
 }
 
 /** A delayed metadata snapshot cannot erase a message already observed. */
-export function keepMessageTime<T extends { lastMessageAt?: string | null }>(incoming: T, previous?: { lastMessageAt?: string | null }): T {
+export function keepMessageTime<T extends { lastMessageAt?: string | null; hasMessages?: boolean }>(incoming: T, previous?: { lastMessageAt?: string | null; hasMessages?: boolean }): T {
   const lastMessageAt = newestMessageTime(incoming.lastMessageAt, previous?.lastMessageAt);
+  if (previous?.hasMessages && !incoming.hasMessages) incoming = { ...incoming, hasMessages: true };
   return lastMessageAt === incoming.lastMessageAt || (!lastMessageAt && incoming.lastMessageAt == null)
     ? incoming : { ...incoming, lastMessageAt };
 }

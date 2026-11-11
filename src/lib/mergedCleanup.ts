@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { MergedRemoval, MergedRemovalView, MergedRestored, MergedStatus, MergedSwept, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { mergedCleanup as native, type MergedCleanupSettings } from "@/lib/api";
-import { isFloatingWindow } from "@/lib/appWindow";
+import { isCompactWindow } from "@/lib/appWindow";
 import { getCloudCatalog, type CloudCatalogState } from "@/lib/cloudCatalog";
 import { connectedCloudClient } from "@/lib/cloudConnections";
 import { forgetCloudSessions, managesOf, refreshCloudSessions } from "@/lib/cloudSessions";
@@ -49,8 +49,8 @@ export interface HostedStatus extends MergedStatus {
 export interface MergedNotice {
   id: string;
   hostId: string;
-  /** `scheduled` offers to keep the workspace; `removed` offers to undo; `kept` says why a merged one stays. */
-  kind: "scheduled" | "removed" | "kept";
+  /** `scheduled` offers to keep the workspace; `removed` offers to undo. */
+  kind: "scheduled" | "removed";
   status: HostedStatus;
 }
 
@@ -248,8 +248,6 @@ let again = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 let lastPass = 0;
 const noticeTimers = new Map<string, ReturnType<typeof setTimeout>>();
-/** The kept notices this window has shown, by host, path, pull request and reason: each is said once. */
-const keptSaid = new Set<string>();
 
 function hidden(): boolean {
   return typeof document !== "undefined" && document.visibilityState === "hidden";
@@ -329,12 +327,8 @@ function apply(swept: Map<string, MergedSwept | null>) {
       if (status.phase === "scheduled" && (status.fresh || (was && was.phase !== "scheduled"))) {
         pushed.push({ id: `scheduled:${key}`, hostId, kind: "scheduled", status });
       }
-      // A merge first seen that the pass did not act on: the row alone is easy to miss (#476).
-      const said = `${key}\n${status.pr.number}\n${status.reason ?? ""}`;
-      if (status.phase === "kept" && status.fresh && !keptSaid.has(said)) {
-        keptSaid.add(said);
-        pushed.push({ id: `kept:${key}`, hostId, kind: "kept", status });
-      }
+      // A kept one is not a notice: it is said in its Branch tab, marked on its sidebar row and counted under the
+      // projects (docs/CLEANUP-PLACEMENT.md). Only what has a short window to answer pops up.
     }
   }
   // A notice about waiting, or about what keeps it, is moot once that is no longer so.
@@ -460,7 +454,7 @@ export async function saveMergedCleanupSettings(patch: Parameters<typeof native.
 
 /** Passes are the main window's to run: two windows would only ask twice. */
 function drives(): boolean {
-  return !isFloatingWindow();
+  return !isCompactWindow();
 }
 
 let booted: Promise<void> | null = null;
@@ -502,7 +496,6 @@ export function resetMergedCleanupForTest() {
   timer = undefined;
   for (const pending of noticeTimers.values()) clearTimeout(pending);
   noticeTimers.clear();
-  keptSaid.clear();
   if (typeof window !== "undefined") {
     window.removeEventListener("focus", onReturn);
     document.removeEventListener("visibilitychange", onReturn);

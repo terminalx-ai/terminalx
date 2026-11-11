@@ -85,6 +85,38 @@ authenticated control API. The hook token is minted per launch of the tab's
 CLI; the server drops any frame whose token does not match the live tab, and
 only accepts a `transcript_path` under that tab's own transcript directory.
 
+### New-chat composer (PRO-173)
+
+Sidebar **New chat**, a project's **New chat**, and a branch's start action
+open `NewSessionView`. Opening or closing the form creates no session,
+scratch folder, worktree, or running agent tab. The destination is a draft in
+`sessions.ts`. Sidebar chats remain ordinary sessions in the shared Chats
+directory, retaining their history and automatic project linking; they are
+not disposable quick chats. Only the floating window's explicit `quick`
+form uses quick-chat creation and its retention policy. A project or branch
+draft retains that destination until Send, including the source advertised
+by New branch. A removed project is resolved again before a retained
+conversation opens its branch composer; an absent explicit destination must
+never fall back to another project. Only the first send creates the session
+and delivers its prompt.
+
+`useSessionAgent` reads and writes the existing `prefs.ts` preferences for
+agent, per-agent model and effort, and permission mode. Local new-chat forms
+check all offered agents before choosing: a remembered signed-in agent wins,
+then another signed-in agent. A missing or signed-out agent is never selected.
+When neither can run, setup instructions stay beside the unsent draft.
+Unknown probes remain distinct from a known missing login: custom routes can
+work without an account the probe recognizes, so an installed unknown agent
+is a fallback only when no verified login exists, or an explicit choice.
+Cloud forms continue to use the workspace's agents and model catalog.
+
+Discovery and fallback never overwrite preferences; only explicit picker
+choices do. Send checks login again before creating anything. A refusal keeps
+the prompt and attachments. Both readiness hooks refresh on app resume and
+embedded sign-in terminal exit; Check again also picks up a completed login.
+The zero-, one-, and two-login cases are covered by `useSessionAgent.test.ts`,
+with asynchronous discovery and stale-probe tests in `agentReadiness.test.ts`.
+
 Opening a Claude tab starts its CLI (`ensure_tab_started`); it does not wait for
 a first prompt, because in this model the tab *is* the CLI.
 
@@ -234,6 +266,8 @@ of a tab share a submission guard: a confirmed local response retires its
 card even before the broadcast arrives, and a stale click sends no second
 decision. A cloud mailbox enqueue still waits for the owner's decision event;
 queuing an answer does not establish that the request was answered.
+A Codex call that the model runs again while the same call still waits on
+its card files no second card (see "Two gates, a card for each").
 
 ### The composer writes keystrokes
 
@@ -346,14 +380,46 @@ control becomes "Stop session" and the next press is the hard stop: the way
 out for an agent that does not answer an interrupt. The next turn's Stop is
 an interrupt again.
 
-**The queue is the CLI's.** A message sent mid-turn is typed into the CLI at
-once and held by it; the app keeps no queue for these tabs. Checked against
-the real CLIs with a message queued behind a running turn:
+**By default, the queue is the CLI's.** With Settings → Agents → “Follow-ups
+while the agent works” set to “Send to the agent now”, a message sent mid-turn
+is typed into the CLI at once and held by it. Checked against the real CLIs
+with a message queued behind a running turn:
 
 | CLI | Escape with a message queued | Escape with nothing queued |
 | --- | --- | --- |
 | Claude Code 2.1.296 | The turn is interrupted and the queued message is sent at once as the next prompt. The transcript reads `queue-operation` dequeue, the partial reply, `[Request interrupted by user]`, then the prompt. | The turn is interrupted: "Interrupted · What should Claude do instead?" |
 | Codex 0.153.4 | The same: its queue line reads "press esc to interrupt and send immediately", and it then says "Model interrupted to submit steer instructions". The rollout has `turn_aborted` (`interrupted`), then a new `task_started` with the prompt. | "Conversation interrupted", and `turn_aborted`. |
+
+**Held follow-ups belong to the app (PRO-254).** “Hold until the turn ends”
+keeps local desktop composer messages typed during a running turn in the tray
+above the input. Idle prompts send immediately, including when an older queue
+is paused or the tab needs recovery. Held messages are not read mid-turn. The tray can
+collapse, edit, delete, drag or move items with buttons, and pause/resume
+delivery. Editing pauses the queue until Save or Cancel, then restores its
+previous pause state. Successful `Stop`/turn
+completion dispatches one item through normal prompt delivery; a failed turn
+or ordinary interrupt does not drain it. “Send now” selects one held item,
+interrupts the current turn, then sends that item once the turn ends, even
+when the queue is paused. The rebindable “Send the other way” shortcut defaults
+to Cmd/Ctrl+Enter and chooses the opposite of the setting: hold under “now”,
+interrupt-and-send under “hold”. An existing Send binding takes precedence
+over that new default. The setting defaults to “now” and is stored per device.
+
+`held_queue` snapshots in the tab log preserve order, edits, archived image
+references and pause state. Delivery claims are recorded before sending; a
+claim interrupted before its prompt is logged is restored paused. Once the
+normal user-message event exists, restart does not resend it. A hard Stop
+pauses and retains held items. After reopening an idle tab, Resume/Send next
+starts the queue; otherwise its next finished turn does. Recovery blocks
+automatic delivery with a visible reason; explicit Resume or Send now retries.
+Earlier CLI-queued input, or input still awaiting acceptance without a recovery
+warning, keeps automatic delivery waiting without pausing the app queue. After
+that input's turn finishes, held messages continue in order. An explicit retry
+that cannot get past earlier CLI input still reports how to recover. A paused
+queue does not keep an idle agent or runtime alive.
+Cloud mailboxes and messages already typed into the CLI retain their existing
+behavior. The phone does not display or edit this queue, and phone messages
+use their existing delivery path, ahead of held items when the CLI takes them.
 
 So the chat keeps expecting a queued message when its turn is stopped. When
 the CLI's record of it arrives it becomes the prompt of the next turn, which
@@ -779,7 +845,7 @@ configuration snapshots and draw nothing. Occupancy is
 `token_count.info.last_token_usage.total_tokens`; the sibling `total` is
 cumulative over the turn and would over-report it several times.
 
-### Two gates, one card
+### Two gates, a card for each
 
 `PermissionRequest` is a decision-returning hook for Codex as it is for Claude,
 but its shape and its reach both differ:
@@ -814,10 +880,74 @@ that decision is supported only alongside rewritten `updatedInput`. `ask` is
 also unsupported. This is checked against the
 [0.164.0 hook parser](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/hooks/src/engine/output_parser.rs).
 
-Acknowledging `PreToolUse` does *not* satisfy the sandbox, so an escalating command reaches
-`PermissionRequest` a moment later with the same `tool_input.command`. One tool
-must not cost two cards, so the answer is remembered for the turn under the
-tool and its target and reused for the request that follows.
+Acknowledging `PreToolUse` does *not* satisfy the sandbox, so an escalating
+command reaches `PermissionRequest` a moment later with the same
+`tool_input.command`. That second ask wants more than the first: running
+the command outside the sandbox. It gets a card of its own, which says
+"Codex asks to run this outside its sandbox" and carries the model's
+justification. Until PRO-160 the answer at `PreToolUse` was remembered for
+the turn and reused there, and for any later call of the same command, so
+the escalation was granted without the reader seeing it. No answer is
+reused now. Each hook that asks gets a card.
+
+The one exception is a repeat of a call that is still waiting. Codex's
+code-mode `exec` hands the turn back to the model once its yield time
+passes (30 s by default) while a call inside it waits on a card. The model
+then sees `Script running with cell ID …` and should call `wait`, but it can
+run the same command again instead. That repeat is a second request for the
+same command while the first is still waiting. Filed as a card, it was an
+identical card that stayed live after Allow, and answering it ran the
+command a second time (PRO-160).
+
+The repeat can reach either gate while the first waits at either one. Its
+`PreToolUse` can arrive while the first waits to leave the sandbox, and in
+any mode its `PermissionRequest` can carry a reworded justification. So a
+repeat is told by what it runs, not by which gate asks or by the agent's
+words. That is the tool and its input, less `description` and
+`justification` and less a command's trailing whitespace. A request that
+matches a card the same launch still waits on, at either gate, files no
+card. It is refused at once with `This command is already waiting for
+approval in another call. Wait for that call's result instead of running it
+again.` The model reads that as `Command blocked by PreToolUse hook: …`. The
+call that is waiting keeps its card and the reader's answer.
+
+The check runs under the same lock that files a card, so two such hooks
+cannot both pass. A call's own `PermissionRequest` is not a repeat: it
+starts only after that call's `PreToolUse` hook has been answered, and an
+answered card no longer waits.
+
+What the hooks say was recorded from the real Codex 0.166.0 TUI on
+2026-11-06, with a stand-in model. Every model Codex lists is code-mode
+(`tool_mode: code_mode_only`). The model writes JavaScript for one `exec`
+tool, and the script calls `tools.exec_command({cmd, sandbox_permissions,
+justification})` or `tools.apply_patch(…)`.
+
+- `exec` and `wait` fire no hooks. Each nested call does, as
+  `tool_name: "Bash"` or `"apply_patch"`, with `tool_input.command`.
+- `PreToolUse` carries the call's `tool_use_id` (`exec-<uuid>`).
+  `PermissionRequest` carries none. For `Bash` it adds the justification as
+  `tool_input.description`. For `apply_patch` it drops the patch's final
+  newline.
+- One call's `PermissionRequest` starts only after its `PreToolUse` hook has
+  exited, 60–260 ms later. No call gets either hook twice.
+- Calls a script makes at once (`Promise.all`) ask at once, each with its own
+  hooks.
+- After a denial at `PreToolUse` there is no `PermissionRequest`. The script
+  gets `Command blocked by PreToolUse hook: The user declined this action.`
+- A command the sandbox blocks without asking to escalate fails back to the
+  model. Codex does not ask to retry it outside the sandbox.
+
+`harness/codex/fixtures/permission_gates_*.jsonl` hold five of these
+recordings, with only the paths rewritten:
+- a session's first escalated command;
+- a denied command run again;
+- a command run again while its first card waits;
+- a command run again while its card to leave the sandbox waits;
+- in auto mode, a command run again with its justification reworded.
+
+The tests replay each one through the hook handler, starting and ending
+hooks as they did, and expect each reply to be what the recorded hook
+printed.
 
 Permission modes map as `plan → -a on-request -s read-only`, everything else
 `→ -a on-request -s workspace-write` (with the `PreToolUse` gate for "Ask every
@@ -908,9 +1038,9 @@ rule at click time rather than trusting the rendered row.
   receipt.
 - **Images by path.** An attachment is archived as today and its *path* is
   pasted for the CLI to pick up, rather than base64 bytes on a wire.
-- **Queueing.** A prompt sent mid-turn is written immediately — the CLI queues
-  typed input itself. The chat shows it as queued until the CLI takes it and the
-  transcript says so; the app keeps no queue of its own for these tabs. What
+- **Queueing.** With the default “Send to the agent now”, a prompt sent
+  mid-turn is written immediately — the CLI queues typed input itself. The
+  chat shows it as queued until the CLI takes it and the transcript says so. Opt-in held follow-ups use the app queue above. What
   Escape does with that queue is the CLI's to decide (see "Escape interrupts;
   only Stop ends the process"). "Send now" flushes available acceptance records,
   then sends one Escape for the provider to deliver its queue in its own order.

@@ -9,6 +9,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::reply_block::{last_block, text_field};
+
 pub const STATUS_FENCE: &str = "terminalx-status";
 pub const REVIEW_FENCE: &str = "terminalx-review";
 
@@ -160,46 +162,6 @@ impl Verdict {
             ReviewChecks::NotRun => with("Reviewed by reading only, tests not run"),
         })
     }
-}
-
-/// The body of the last fenced block labelled `label`. A fence opens and
-/// closes on a line of its own, so backticks inside the JSON (a finding that
-/// quotes code) do not end the block, and a block shown inside another fenced
-/// block, as when instructions are quoted back, is not a report.
-fn last_block(text: &str, label: &str) -> Option<String> {
-    enum Inside<'a> {
-        Nothing,
-        /// A block of ours, with its lines so far.
-        Labelled(Vec<&'a str>),
-        Other,
-    }
-    let mut found = None;
-    let mut inside = Inside::Nothing;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        inside = match inside {
-            Inside::Nothing => match trimmed.strip_prefix("```") {
-                Some(info) if info.trim().eq_ignore_ascii_case(label) => Inside::Labelled(Vec::new()),
-                Some(_) => Inside::Other,
-                None => Inside::Nothing,
-            },
-            Inside::Labelled(lines) if trimmed == "```" => {
-                found = Some(lines.join("\n"));
-                Inside::Nothing
-            }
-            Inside::Labelled(mut lines) => {
-                lines.push(line);
-                Inside::Labelled(lines)
-            }
-            Inside::Other if trimmed == "```" => Inside::Nothing,
-            Inside::Other => Inside::Other,
-        };
-    }
-    found
-}
-
-fn text_field(value: &Value, names: &[&str]) -> Option<String> {
-    names.iter().find_map(|name| value.get(name).and_then(Value::as_str)).map(str::trim).filter(|text| !text.is_empty()).map(String::from)
 }
 
 /// Whether the author says the work is finished and checked.

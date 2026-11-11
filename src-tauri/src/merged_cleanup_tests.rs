@@ -54,6 +54,7 @@ struct Fixture {
     /// workspace, while it fetches and weighs the grace period unfenced.
     meanwhile: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     start: DateTime<Utc>,
+    archive: Option<(Arc<crate::pty::Terminals>, Arc<dyn EventSink>)>,
 }
 
 impl Fixture {
@@ -86,6 +87,7 @@ impl Fixture {
             stopped: Mutex::new(Vec::new()),
             meanwhile: Mutex::new(None),
             start: Utc::now().trunc_subsecs(0),
+            archive: None,
         };
         fixture.open(&path, "alpha");
         fixture
@@ -95,12 +97,20 @@ impl Fixture {
         self.projects.push(serde_json::from_value(serde_json::json!({ "path": path, "name": name })).unwrap());
     }
 
+    fn archive_script(&mut self, archive: &str) {
+        let project = crate::store::projects::add(self.alpha().to_str().unwrap()).unwrap();
+        crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+        }).unwrap();
+        if self.archive.is_none() { self.archive = Some((Arc::new(crate::pty::Terminals::new()), Arc::new(crate::sink::BroadcastSink::new(64)))); }
+    }
+
     fn alpha(&self) -> PathBuf {
         self.base.join("alpha")
     }
 
-    fn branch(name: &str) -> String {
-        git::worktree_branch(name)
+    fn branch(&self, name: &str) -> String {
+        git::worktree_branch_for(&self.alpha(), name).unwrap()
     }
 
     /// A worktree TerminalX made, with a commit of its own pushed to its branch.
@@ -114,23 +124,23 @@ impl Fixture {
     /// GitHub's answer for the worktree's branch: a pull request in `state`
     /// whose head is where the branch is now.
     fn pr(&self, name: &str, number: u64, state: &str) {
-        let branch = Self::branch(name);
+        let branch = self.branch(name);
         let head = sh(&self.alpha(), &["rev-parse", &format!("refs/heads/{branch}")]);
-        let pr = BranchPr { number, title: format!("Pull request for {name}"), url: format!("https://github.com/o/r/pull/{number}"), state: state.into(), head, base: "main".into() };
+        let pr = BranchPr { number, title: format!("Pull request for {name}"), url: format!("https://github.com/o/r/pull/{number}"), state: state.into(), head, base: "main".into(), ..Default::default() };
         self.prs.lock().unwrap().as_mut().unwrap().insert(branch, pr);
     }
 
     /// Merge the worktree's branch into `main` on the remote, as GitHub's
     /// "Create a merge commit" does, and say its pull request merged.
     fn merge(&self, name: &str, number: u64) {
-        sh(&self.alpha(), &["merge", "-q", "--no-ff", "-m", &format!("Merge {name}"), &Self::branch(name)]);
+        sh(&self.alpha(), &["merge", "-q", "--no-ff", "-m", &format!("Merge {name}"), &self.branch(name)]);
         sh(&self.alpha(), &["push", "-q", "origin", "main"]);
         self.pr(name, number, "MERGED");
     }
 
     /// "Squash and merge": the branch's whole change as one new commit.
     fn squash(&self, name: &str, number: u64) {
-        sh(&self.alpha(), &["merge", "-q", "--squash", &Self::branch(name)]);
+        sh(&self.alpha(), &["merge", "-q", "--squash", &self.branch(name)]);
         sh(&self.alpha(), &["commit", "-q", "-m", &format!("{name} (#{number})")]);
         sh(&self.alpha(), &["push", "-q", "origin", "main"]);
         self.pr(name, number, "MERGED");
@@ -140,13 +150,13 @@ impl Fixture {
     /// has moved on, so none of the branch's own commits is in it.
     fn rebase(&self, name: &str, number: u64) {
         commit(&self.alpha(), &format!("moved-on-before-{name}.txt"));
-        sh(&self.alpha(), &["cherry-pick", &format!("main..{}", Self::branch(name))]);
+        sh(&self.alpha(), &["cherry-pick", &format!("main..{}", self.branch(name))]);
         sh(&self.alpha(), &["push", "-q", "origin", "main"]);
         self.pr(name, number, "MERGED");
     }
 
     fn session(&self, cwd: &Path, status: TabStatus) -> SessionEntry {
-        let tab = TabEntry { transport: Default::default(),
+        let tab = TabEntry { marked_unread: false, transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: "claude".into(),
             title: None,
@@ -168,6 +178,7 @@ impl Fixture {
             id: uuid::Uuid::now_v7().to_string(),
             kind: crate::store::index::SessionKind::Project,
             link: None,
+            parent: None,
             project_path: project.to_string_lossy().into_owned(),
             cwd: cwd.to_string_lossy().into_owned(),
             worktree_name: (cwd != project).then(|| cwd.file_name().unwrap().to_string_lossy().into_owned()),
@@ -185,6 +196,7 @@ impl Fixture {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             active_tab: None,
             tabs: vec![tab],
             unknown: BTreeMap::new(),
@@ -212,7 +224,7 @@ impl Fixture {
             }
             live
         };
-        f(&Host { projects: &self.projects, protected: &[], confine: None, live: &live, fetch: Fetch::Fresh, stop_agents: None })
+        f(&Host { projects: &self.projects, protected: &[], confine: None, live: &live, fetch: Fetch::Fresh, stop_agents: None, archive: self.archive.as_ref().map(|(terminals, sink)| crate::archive_script::Runner { terminals, sink, unattended: false }) })
     }
 
     fn sweep_scope(&self, scope: &Scope, minutes: i64) -> Vec<Status> {
@@ -248,11 +260,11 @@ impl Fixture {
     }
 
     fn local_branch(&self, name: &str) -> Option<String> {
-        git::run(&self.alpha(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", Self::branch(name))]).ok().map(|sha| sha.trim().to_string())
+        git::run(&self.alpha(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", self.branch(name))]).ok().map(|sha| sha.trim().to_string())
     }
 
     fn remote_branch(&self, name: &str) -> Option<String> {
-        remote_tip(&self.alpha(), &Self::branch(name)).unwrap()
+        remote_tip(&self.alpha(), &self.branch(name)).unwrap()
     }
 }
 
@@ -367,7 +379,7 @@ fn squash_and_rebase_merges_are_recognised_and_their_branches_go_too() {
     f.rebase("rebased-one", 71);
     // Neither branch's own commits are in main.
     for name in ["squashed-one", "rebased-one"] {
-        assert_ne!(sh(&f.alpha(), &["rev-list", "--count", &format!("origin/main..{}", Fixture::branch(name))]), "0");
+        assert_ne!(sh(&f.alpha(), &["rev-list", "--count", &format!("origin/main..{}", f.branch(name))]), "0");
     }
 
     assert!(f.sweep(1).iter().all(|status| status.phase == Phase::Scheduled));
@@ -594,7 +606,7 @@ fn only_a_merged_pull_request_counts_and_only_for_a_worktree_terminalx_made() {
     // GitHub would even say the default branch has a merged pull request.
     let mut answers = f.prs.lock().unwrap().clone().unwrap();
     for (branch, head) in [("by-hand", head), ("main", sh(&alpha, &["rev-parse", "main"]))] {
-        answers.insert(branch.into(), BranchPr { number: 9, title: "T".into(), url: "u".into(), state: "MERGED".into(), head, base: "main".into() });
+        answers.insert(branch.into(), BranchPr { number: 9, title: "T".into(), url: "u".into(), state: "MERGED".into(), head, base: "main".into(), ..Default::default() });
     }
     *f.prs.lock().unwrap() = Ok(answers);
     f.session(&alpha, TabStatus::Idle);
@@ -830,6 +842,28 @@ fn an_undo_is_refused_when_what_it_would_put_back_is_in_the_way() {
 }
 
 #[test]
+fn restoring_from_a_retained_session_holds_the_merged_workspace_and_rolls_back_failed_holds() {
+    let f = Fixture::new();
+    let wt = f.worktree("session-restore");
+    let session = f.session(&wt, TabStatus::Idle);
+    f.squash("session-restore", 196);
+    f.sweep(1);
+    let record = of(&f.sweep(12), &wt).record.clone().unwrap();
+    let before = serde_json::to_value(Ledger::load().unwrap()).unwrap();
+    let failed: anyhow::Result<()> = with_workspace_restore(wt.to_str().unwrap(), &record.project_path, &record.commit, || anyhow::bail!("checkout failed"));
+    assert!(failed.is_err());
+    assert_eq!(serde_json::to_value(Ledger::load().unwrap()).unwrap(), before);
+    with_workspace_restore(wt.to_str().unwrap(), &record.project_path, "another-commit", || Ok(())).unwrap();
+    assert!(Ledger::load().unwrap().removed.iter().find(|item| item.id == record.id).unwrap().restored_at.is_none());
+    let plan = crate::workspace_restore::preview(&session.id).unwrap();
+    assert_eq!(plan.commit, record.commit);
+    crate::workspace_restore::restore(&*f.events, &session.id, &plan, Some(&record.branch), &|_| Ok(())).unwrap();
+    assert_eq!(reason(of(&f.sweep(600), &wt)), (Phase::Held, ""));
+    assert!(wt.exists());
+    assert!(Ledger::load().unwrap().removed.iter().find(|item| item.id == record.id).unwrap().restored_at.is_some());
+}
+
+#[test]
 fn when_github_cannot_be_asked_nothing_is_forgotten_and_nothing_goes() {
     let f = Fixture::new();
     let wt = f.worktree("offline");
@@ -886,4 +920,170 @@ fn turning_it_off_and_on_again_starts_the_grace_period_again() {
     let again = f.sweep(60);
     assert_eq!((of(&again, &wt).phase, of(&again, &wt).fresh, of(&again, &wt).due.clone()), (Phase::Scheduled, true, Some(stamp(f.at(70)))));
     assert!(wt.exists());
+}
+
+#[test]
+fn unattended_archive_failure_is_persisted_closed_and_removed_only_with_manual_consent() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-fails");
+    f.merge("archive-fails", 1);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; echo archive-log; exit 17");
+    f.sweep(0);
+    let failed = f.sweep(11);
+    assert!(failed[0].archive_blocked);
+    assert!(failed[0].detail.as_ref().unwrap().contains("exit 17"));
+    assert!(f.archive.as_ref().unwrap().0.panes().is_empty());
+    // A new pass, a watch gap and a new runtime all keep the durable pause.
+    f.sweep(12);
+    f.archive = Some((Arc::new(crate::pty::Terminals::new()), Arc::new(crate::sink::BroadcastSink::new(64))));
+    assert!(f.sweep(40)[0].archive_blocked);
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
+    let (terminals, sink) = f.archive.as_ref().unwrap();
+    let project = f.alpha();
+    let mut request = WorkspaceRemoval {
+        project_path: project.to_str().unwrap(), path: tree.to_str().unwrap(), sessions: SessionsFate::Keep,
+        delete_branch: false, confirmation: Confirmation::Single, expected_sessions: Some(&[]), direct: git::DirectDelete::Never,
+        fetch: Fetch::Fresh, guard: None, archive: Some(crate::archive_script::Runner { terminals, sink, unattended: false }), archive_failure: None, archive_retry: None, archive_started: None,
+    };
+    let error = session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap_err();
+    let failure = crate::archive_script::Failure::from_error(&error).unwrap();
+    assert!(failure.log.as_ref().unwrap().contains("archive-log"));
+    assert!(terminals.panes().is_empty(), "reading a saved log does not start a terminal");
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
+    request.archive_failure = Some(&failure.token);
+    session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap();
+    assert!(!tree.exists());
+}
+
+#[test]
+fn automatic_archive_budget_is_bounded_and_script_changes_allow_a_new_attempt() {
+    let mut f = Fixture::new();
+    let a = f.worktree("archive-a");
+    let b = f.worktree("archive-b");
+    f.merge("archive-a", 1);
+    f.merge("archive-b", 2);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; exit 9");
+    f.sweep(0);
+    let first = f.sweep(11);
+    assert_eq!(first.iter().filter(|status| status.archive_blocked).count(), 1);
+    assert_eq!(first.iter().filter(|status| status.phase == Phase::Scheduled).count(), 1);
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap().lines().count(), ARCHIVES_PER_PASS);
+    assert!(f.sweep(12).iter().all(|status| status.archive_blocked));
+    f.sweep(13);
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap().lines().count(), 2);
+    f.archive_script("exit 0");
+    f.sweep(14);
+    f.sweep(15);
+    assert!(!a.exists() && !b.exists());
+    assert!(f.archive.as_ref().unwrap().0.panes().is_empty());
+}
+
+#[test]
+fn a_successful_archive_that_creates_local_data_is_not_repeated_automatically() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-data");
+    f.merge("archive-data", 1);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; echo local-data > .env");
+    f.sweep(0);
+    assert!(f.sweep(11)[0].archive_blocked);
+    assert!(f.sweep(12)[0].archive_blocked);
+    assert!(tree.join(".env").exists());
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
+    assert!(f.archive.as_ref().unwrap().0.panes().is_empty());
+}
+
+#[test]
+fn a_head_change_made_by_a_failed_archive_does_not_schedule_it_again() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-head");
+    f.merge("archive-head", 1);
+    let head = sh(&tree, &["rev-parse", "HEAD"]);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; git reset --hard HEAD^; exit 7");
+    f.sweep(0);
+    assert!(f.sweep(11)[0].archive_blocked);
+    assert_ne!(sh(&tree, &["rev-parse", "HEAD"]), head);
+    assert!(f.sweep(12)[0].archive_blocked);
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
+    assert!(f.archive.as_ref().unwrap().0.panes().is_empty());
+}
+
+#[test]
+fn a_saved_archive_failure_can_be_explicitly_retried_after_an_external_fix() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-retry");
+    f.merge("archive-retry", 1);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; test -f \"$TERMINALX_REPO_ROOT/ready\"");
+    f.sweep(0);
+    assert!(f.sweep(11)[0].archive_blocked);
+    let project = f.alpha();
+    let (terminals, sink) = f.archive.as_ref().unwrap();
+    let mut request = WorkspaceRemoval {
+        project_path: project.to_str().unwrap(), path: tree.to_str().unwrap(), sessions: SessionsFate::Keep,
+        delete_branch: false, confirmation: Confirmation::Single, expected_sessions: Some(&[]), direct: git::DirectDelete::Never,
+        fetch: Fetch::Fresh, guard: None, archive: Some(crate::archive_script::Runner { terminals, sink, unattended: false }),
+        archive_failure: None, archive_retry: None, archive_started: None,
+    };
+    let saved = session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap_err();
+    let saved = crate::archive_script::Failure::from_error(&saved).unwrap();
+    request.archive_retry = Some(&saved.token);
+    let retried = session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap_err();
+    let retried = crate::archive_script::Failure::from_error(&retried).unwrap();
+    assert_ne!(saved.token, retried.token);
+    // A failed explicit retry does not re-enable unattended execution.
+    assert!(f.sweep(12)[0].archive_blocked);
+    assert_eq!(std::fs::read_to_string(project.join("runs")).unwrap(), "ran\nran\n");
+    std::fs::write(project.join("ready"), "").unwrap();
+    request.archive_retry = Some(&retried.token);
+    session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap();
+    assert!(!tree.exists());
+    assert_eq!(std::fs::read_to_string(project.join("runs")).unwrap(), "ran\nran\nran\n");
+    assert!(terminals.panes().is_empty());
+}
+
+#[test]
+fn a_stop_error_before_the_archive_starts_does_not_pause_future_attempts() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-not-started");
+    f.merge("archive-not-started", 1);
+    f.session(&tree, TabStatus::Idle);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"");
+    f.sweep(0);
+    let failed = f.with_host(|host| sweep_fallible(&FallibleSweep {
+        host, sink: &*f.events, stop: &|_| Err("stop failed".into()),
+        pull_requests: &|_, _| Ok(f.prs.lock().unwrap().as_ref().unwrap().clone()), now: f.at(11),
+    }, &f.on()).unwrap());
+    assert_eq!(of(&failed.statuses, &tree).phase, Phase::Kept);
+    assert!(!of(&failed.statuses, &tree).archive_blocked);
+    assert!(Ledger::load().unwrap().seen[tree.to_str().unwrap()].archive_pause.is_none());
+    assert!(!f.alpha().join("runs").exists());
+    assert_eq!(of(&f.sweep(12), &tree).phase, Phase::Removed);
+    assert_eq!(std::fs::read_to_string(f.alpha().join("runs")).unwrap(), "ran\n");
+}
+
+#[test]
+fn a_corrupt_automatic_ledger_blocks_sweeps_but_manual_removal_still_runs_its_hook() {
+    let mut f = Fixture::new();
+    let tree = f.worktree("archive-corrupt-ledger");
+    f.merge("archive-corrupt-ledger", 1);
+    f.archive_script("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"");
+    f.sweep(0);
+    std::fs::write(Ledger::file().unwrap(), "{invalid").unwrap();
+    let result = f.with_host(|host| sweep_fallible(&FallibleSweep {
+        host, sink: &*f.events, stop: &|_| Ok(()),
+        pull_requests: &|_, _| Ok(f.prs.lock().unwrap().as_ref().unwrap().clone()), now: f.at(11),
+    }, &f.on()));
+    assert!(result.is_err());
+    assert!(tree.exists());
+    assert!(!f.alpha().join("runs").exists());
+    let project = f.alpha();
+    let (terminals, sink) = f.archive.as_ref().unwrap();
+    let request = WorkspaceRemoval {
+        project_path: project.to_str().unwrap(), path: tree.to_str().unwrap(), sessions: SessionsFate::Keep,
+        delete_branch: false, confirmation: Confirmation::Single, expected_sessions: Some(&[]), direct: git::DirectDelete::Never,
+        fetch: Fetch::Fresh, guard: None, archive: Some(crate::archive_script::Runner { terminals, sink, unattended: false }),
+        archive_failure: None, archive_retry: None, archive_started: None,
+    };
+    session_ops::remove_workspace(&**sink, &request, &|_| {}).unwrap();
+    assert!(!tree.exists());
+    assert_eq!(std::fs::read_to_string(project.join("runs")).unwrap(), "ran\n");
 }

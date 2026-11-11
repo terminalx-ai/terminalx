@@ -246,9 +246,10 @@ fn yes() -> bool {
 }
 
 /// The permission mode an automation gets when its input carries none.
-/// Automations run unattended, so this is the same "never stop to ask" mode
-/// new interactive tabs start in; a run that paused for approval would sit
-/// until someone noticed. An explicit mode in the input always wins.
+/// Automations run unattended, so this is the runtime's "never stop to ask"
+/// default, not the Ask every time a new desktop chat starts in; a run that
+/// paused for approval would sit until someone noticed. An explicit mode in
+/// the input always wins.
 fn default_mode() -> String {
     index::DEFAULT_PERMISSION_MODE.into()
 }
@@ -845,6 +846,8 @@ fn start_run(
         let entry = crate::session_ops::create_session_blocking(
             app.sink().as_ref(),
             crate::session_ops::NewSession {
+                parent: None,
+                section_id: None,
                 project_path: automation.project_path.clone(),
                 title: Some(title),
                 use_worktree: automation.workspace == AutomationWorkspace::NewWorktree,
@@ -852,6 +855,7 @@ fn start_run(
                 worktree_name,
                 on_main: false,
                 checkout_branch: None,
+                checkout_pr: None,
                 issue,
                 automation: Some(index::AutomationRef {
                     id: automation.id.clone(),
@@ -875,6 +879,7 @@ fn start_run(
             Ok(())
         })?;
         emit_run(app, &run);
+        crate::store::environment::prepare_unattended(&entry.cwd, None)?;
         let manager = app.sessions()?;
         let mut prompt = prompt;
         if let Some(options) = automation.pipeline.as_ref().filter(|options| options.auto_merge || options.resolve_conflicts) {

@@ -45,18 +45,28 @@ vi.mock("@/lib/prefs", () => ({
 
 const project = { path: "/repos/raccoon", name: "raccoon" } as Project;
 const harness = { id: "claude", name: "Claude", available: true, installHint: "" } as HarnessInfo;
-const store = { projects: [project] as Project[], selectedProject: project.path as string | null };
-const { createQuickChat, selectSession } = vi.hoisted(() => ({ createQuickChat: vi.fn(), selectSession: vi.fn() }));
+const store = {
+  projects: [project] as Project[], selectedProject: project.path as string | null,
+  harnesses: [harness], newSessionChat: false,
+  newSessionSectionId: null as string | null,
+  newSessionPreset: null as { projectPath: string; cwd: string | null; fromBranch?: string } | null,
+};
+const { createChat, createQuickChat, selectSession } = vi.hoisted(() => ({ createChat: vi.fn(), createQuickChat: vi.fn(), selectSession: vi.fn() }));
 vi.mock("@/lib/sessions", () => ({
-  useSessionStore: () => ({ projects: store.projects, harnesses: [harness], selectedProject: store.selectedProject, workspaces: {}, newSessionPreset: null }),
+  useSessionStore: () => ({ ...store, workspaces: {} }),
   createQuickChat,
+  createChat,
+  refreshHarnesses: vi.fn(async () => {}),
+  refreshWorkspaces: vi.fn(async () => {}),
   addProject: vi.fn(),
-  clearNewSessionPreset: vi.fn(),
+  clearNewSessionPreset: vi.fn(() => { store.newSessionPreset = null; }),
   linkSessionIssue: vi.fn(async () => {}),
   selectProject: vi.fn(),
   selectProjectInSidebar: vi.fn(),
   selectSession,
-  startSessionIn: vi.fn(),
+  startSessionIn: vi.fn((projectPath: string, cwd: string | null, fromBranch?: string) => {
+    store.newSessionPreset = { projectPath, cwd, ...(fromBranch ? { fromBranch } : {}) };
+  }),
   upsertSession: vi.fn(),
 }));
 
@@ -69,6 +79,7 @@ beforeEach(() => {
   dragDropListener.mockResolvedValue(vi.fn());
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string) => {
+    if (cmd === "check_agent_readiness") return { state: "ready", checkedAt: null, version: null };
     if (cmd === "work_status") return { branch: "main", defaultBranch: "main" };
     if (cmd === "create_session") return created;
     if (cmd === "read_image_file") return { name: "shot.png", mediaType: "image/png", data: "AQID" };
@@ -77,13 +88,19 @@ beforeEach(() => {
   openDialog.mockReset();
   createQuickChat.mockReset();
   createQuickChat.mockResolvedValue({ id: "quick-1", kind: "quick", tabs: [{ id: "quick-tab" }] });
+  createChat.mockReset();
+  createChat.mockResolvedValue(created);
   selectSession.mockReset();
   store.projects = [project];
+  store.harnesses = [harness];
+  store.newSessionChat = false;
+  store.newSessionSectionId = null;
+  store.newSessionPreset = null;
   store.selectedProject = project.path;
   project.kind = "git";
   delete project.issuePipeline;
   vi.stubGlobal("crypto", { randomUUID: vi.fn(() => "attachment-1") });
-  vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn(() => "blob:preview"), revokeObjectURL: vi.fn() });
+  vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL: vi.fn(() => "blob:preview"), revokeObjectURL: vi.fn() }));
 });
 
 afterEach(() => {
@@ -98,7 +115,7 @@ function renderView(onCreated = vi.fn()) {
 
 describe("new session attachments", () => {
   it("retains the draft and attachment when fresh login preflight refuses creation, then sends once after login", async () => {
-    let signedIn = false;
+    let signedIn = true;
     invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "check_agent_readiness") return { state: signedIn ? "ready" : "signed_out", checkedAt: "2026-10-26T14:00:00Z", version: "1.0.0" };
       if (cmd === "work_status") return { branch: "main", defaultBranch: "main" };
@@ -113,6 +130,7 @@ describe("new session attachments", () => {
     await screen.findByAltText("shot.png");
     const start = screen.getByRole("button", { name: "Create" });
     await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    signedIn = false;
     fireEvent.click(start);
     await screen.findByText(/Your draft is kept and no session has been created/);
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this task");
@@ -120,6 +138,7 @@ describe("new session attachments", () => {
     expect(invoke.mock.calls.filter(([cmd]) => cmd === "create_session")).toHaveLength(0);
     expect(onCreated).not.toHaveBeenCalled();
     signedIn = true;
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
     fireEvent.click(start);
     await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
@@ -133,9 +152,9 @@ describe("new session attachments", () => {
     render(<NewSessionView quick />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this question" } });
     const ask = screen.getByRole("button", { name: "Ask" });
-    await waitFor(() => expect(ask.hasAttribute("disabled")).toBe(false));
-    fireEvent.click(ask);
-    await screen.findByText(/Your draft is kept and no session has been created/);
+    await screen.findByText("Sign in to an agent to start a chat. Your draft is kept.");
+    expect(ask.hasAttribute("disabled")).toBe(true);
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", metaKey: true });
     expect(createQuickChat).not.toHaveBeenCalled();
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this question");
   });
@@ -191,6 +210,7 @@ describe("folder projects", () => {
     expect(screen.getByText("No Git")).toBeTruthy();
     expect(screen.queryByRole("switch")).toBeNull();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Inspect this folder" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("create_session", expect.objectContaining({ req: expect.objectContaining({
       projectPath: project.path, useWorktree: false, worktreeName: null, cwd: null,
@@ -216,7 +236,7 @@ describe("folder projects", () => {
       if (cmd === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
     });
     render(<NewSessionView />);
-    expect(screen.getByRole("button", { name: "Branch" }).textContent).toContain("New branch");
+    expect(screen.getByRole("button", { name: "Start from" }).textContent).toContain("New branch");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_workspace_name", expect.anything()));
     expect(screen.queryByText("No Git")).toBeNull();
   });
@@ -260,6 +280,7 @@ describe("starting a quick chat", () => {
     expect(openDialog).toHaveBeenCalledWith(expect.objectContaining({ directory: true }));
 
     fireEvent.change(screen.getByPlaceholderText("Ask anything"), { target: { value: "Summarise these" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Ask" }).hasAttribute("disabled")).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
     await waitFor(() => expect(createQuickChat).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/Users/me/notes" })));
     expect(addProject).not.toHaveBeenCalled();
@@ -272,6 +293,7 @@ describe("starting a quick chat", () => {
     render(<NewSessionView quick onCreated={onCreated} />);
     const prompt = screen.getByPlaceholderText("Ask anything") as HTMLTextAreaElement;
     fireEvent.change(prompt, { target: { value: "hello" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Ask" }).hasAttribute("disabled")).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
     expect(await screen.findByText("Not a directory: /nope")).toBeTruthy();
     expect(prompt.value).toBe("hello");
@@ -353,8 +375,9 @@ it("starts a branch with both switches off, and one started from an issue picked
   expect(switches()).toEqual(["false", "false"]);
   closeOptions();
 
-  fireEvent.click(screen.getByRole("button", { name: "Start from an issue" }));
-  fireEvent.click(await screen.findByText("Merge issue sessions when green"));
+  fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+  fireEvent.mouseDown(screen.getByRole("tab", { name: "Issues" }), { button: 0 });
+  fireEvent.click(await screen.findByRole("option", { name: /Merge issue sessions when green/ }));
   await screen.findByTestId("picked-issue");
   expect(switches()).toEqual(["true", "true"]);
   closeOptions();
@@ -362,4 +385,230 @@ it("starts a branch with both switches off, and one started from an issue picked
   fireEvent.click(screen.getByRole("button", { name: "Create" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("issue_pipeline_start", { sessionId: "session-1", tabId: "tab-1", autoMerge: true }));
   expect(invoke).toHaveBeenCalledWith("issue_pipeline_set_resolve_conflicts", { id: "p1", value: true });
+});
+
+it("opening the main window preserves an unsent initial prompt in the source view", async () => {
+  const view = render(<NewSessionView quick compact />);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "An initial prompt I have not sent" } });
+  invoke.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+    if (cmd === "chat_window_open_in_main" && args.closeSource !== false) view.unmount();
+  });
+  const { openChatWindowInMain } = await import("@/lib/chatWindowHandoff");
+  await act(async () => { await openChatWindowInMain("", null); });
+  expect(screen.getByRole("textbox")).toHaveProperty("value", "An initial prompt I have not sent");
+  expect(invoke).toHaveBeenCalledWith("chat_window_open_in_main", { sessionId: "", tabId: null, closeSource: false });
+});
+
+describe("one new-chat composer (PRO-173)", () => {
+  it("updates setup and enables the installed agent after returning from Terminal without Check again (PRO-170)", async () => {
+    store.harnesses = [{ ...harness, id: "codex", name: "Codex", available: false }];
+    let readiness = "missing";
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: readiness, checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this draft" } });
+    await screen.findByText("Not installed");
+
+    readiness = "signed_out";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await screen.findByText("Installed · sign in required");
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
+
+    readiness = "ready";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await screen.findByText("Ready · local login found");
+    expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Codex · Bypass");
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+    expect(createQuickChat).not.toHaveBeenCalled();
+  });
+
+  it("submits a sidebar draft as an ordinary chat, preserving retention and Chats linking", async () => {
+    store.newSessionChat = true;
+    store.projects = [];
+    const { onCreated } = renderView();
+    expect(createChat).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this conversation" } });
+    const send = screen.getByRole("button", { name: "Ask" });
+    await waitFor(() => expect(send.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(send);
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    expect(createQuickChat).not.toHaveBeenCalled();
+    expect(createChat).toHaveBeenCalledWith({ title: "Keep this conversation", cwd: null, tab: { harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions" } });
+  });
+
+  it("does not substitute another project if the explicit destination disappears", async () => {
+    store.newSessionPreset = { projectPath: "/repos/removed", cwd: "/repos/removed/worktrees/task" };
+    renderView();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Continue the task" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Check again" }).hasAttribute("disabled")).toBe(false));
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByRole("button", { name: project.name })).toBeNull();
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", metaKey: true });
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+  });
+
+  it("keeps the advertised source when New branch is selected again", async () => {
+    store.newSessionPreset = { projectPath: project.path, cwd: null, fromBranch: "feature/login" };
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "preview_workspace_name" ? Promise.resolve("login-work")
+      : command === "list_branches" ? Promise.resolve([]) : original(command, args));
+    const { rerender, onCreated } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+    fireEvent.click(await screen.findByRole("option", { name: /New branch.*from feature\/login/ }));
+    rerender(<NewSessionView onCreated={onCreated} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Fix login" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({ projectPath: project.path, baseRef: "feature/login", useWorktree: true, cwd: null }) });
+  });
+
+  it("replaces the source preset when another existing branch is chosen", async () => {
+    store.newSessionPreset = { projectPath: project.path, cwd: null, fromBranch: "feature/login" };
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "preview_workspace_name" ? Promise.resolve("other-work")
+      : command === "list_branches" ? Promise.resolve([{ name: "feature/other", remote: false }]) : original(command, args));
+    const { rerender, onCreated } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+    fireEvent.click(await screen.findByRole("option", { name: "feature/other New worktree" }));
+    rerender(<NewSessionView onCreated={onCreated} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Continue other work" } });
+    const create = screen.getByRole("button", { name: "Create" });
+    await waitFor(() => expect(create.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(create);
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({
+      projectPath: project.path, checkoutBranch: "feature/other", baseRef: null, useWorktree: true, cwd: null,
+    }) });
+  });
+
+  it.each([
+    [false, "signed_out", "signed_out", null], [true, "signed_out", "signed_out", null],
+    [false, "ready", "signed_out", "Claude"], [true, "ready", "signed_out", "Claude"],
+    [false, "signed_out", "ready", "Codex"], [true, "signed_out", "ready", "Codex"],
+    [false, "ready", "ready", "Claude"], [true, "ready", "ready", "Claude"],
+  ] as const)("projectless=%s, Claude=%s, Codex=%s selects %s without creating a session", async (projectless, claude, codex, chosen) => {
+    store.harnesses = [harness, { ...harness, id: "codex", name: "Codex" }];
+    store.newSessionChat = projectless;
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: args.harness === "codex" ? codex : claude, checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this draft" } });
+    if (chosen) {
+      await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe(`${chosen} · Bypass`));
+      expect(screen.getByRole("button", { name: projectless ? "Ask" : "Create" }).hasAttribute("disabled")).toBe(false);
+    } else {
+      await screen.findByText("Sign in to an agent to start a chat. Your draft is kept.");
+      expect(screen.getByRole("button", { name: projectless ? "Ask" : "Create" }).hasAttribute("disabled")).toBe(true);
+    }
+    expect(createQuickChat).not.toHaveBeenCalled();
+    expect(createChat).not.toHaveBeenCalled();
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this draft");
+  });
+
+  it("sends a branch preset only with the first prompt, even with a saved in-place preference", async () => {
+    store.newSessionPreset = { projectPath: project.path, cwd: null, fromBranch: "feature/login" };
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "preview_workspace_name" ? Promise.resolve("login-work") : original(command, args));
+    const { onCreated } = renderView();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Check again" }).hasAttribute("disabled")).toBe(false));
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Fix login" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({ projectPath: project.path, baseRef: "feature/login", useWorktree: true, cwd: null }) });
+  });
+});
+
+it.each([null, "release"])("starts a selected PR in its own worktree and keeps the prompt and section (%s)", async (sectionId) => {
+  store.newSessionSectionId = sectionId;
+  Element.prototype.scrollIntoView = vi.fn();
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "check_agent_readiness") return { state: "ready", checkedAt: null, version: null };
+    if (command === "preview_workspace_name") return "pr-12-parser";
+    if (command === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
+    if (command === "list_branches") return [];
+    if (command === "pr_search") return [{ number: 12, title: "Fix parser", author: "alice", state: "OPEN", url: "https://github.com/acme/app/pull/12" }];
+    if (command === "create_session") return created;
+    throw new Error(`Unexpected command ${command}`);
+  });
+  const onCreated = vi.fn();
+  render(<NewSessionView onCreated={onCreated} />);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Check the edge cases" } });
+  fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+  fireEvent.mouseDown(screen.getByRole("tab", { name: "Pull requests" }), { button: 0 });
+  fireEvent.click(await screen.findByRole("option", { name: /#12 Fix parser/ }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({ checkoutPr: 12, checkoutBranch: null, baseRef: null, cwd: null, useWorktree: true }) });
+  expect(invoke.mock.calls.find(([command]) => command === "create_session")?.[1].req.sectionId).toBe(sectionId ?? undefined);
+  expect(onCreated.mock.calls[0][2]).toBe("Check the edge cases\n\nContinue work on pull request #12: Fix parser\nhttps://github.com/acme/app/pull/12");
+});
+
+it("allows Tab and starts with the literal issue number on Enter when PR search has no match", async () => {
+  Element.prototype.scrollIntoView = vi.fn();
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => command === "pr_search" ? Promise.resolve([]) : original(command, args));
+  const { onCreated } = renderView();
+  const field = screen.getByRole("textbox");
+  fireEvent.change(field, { target: { value: "fix #45" } });
+  await screen.findByText("No matching pull requests");
+  expect(fireEvent.keyDown(field, { key: "Tab" })).toBe(true);
+  expect(onCreated).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.keyDown(field, { key: "Enter" });
+  await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+  expect(onCreated.mock.calls[0][2]).toBe("fix #45");
+  expect(invoke.mock.calls.some(([command]) => command === "pr_attach")).toBe(false);
+});
+
+it.each([false, true])("waits for PR context before creating a session, unless Escape cancels it (cancel=%s)", async (cancel) => {
+  Element.prototype.scrollIntoView = vi.fn();
+  let finish!: (path: string) => void;
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => {
+    if (command === "pr_search") return Promise.resolve([{ number: 12, title: "Fix parser", author: "alice", state: "OPEN" }]);
+    if (command === "pr_attach") return new Promise<string>((resolve) => { finish = resolve; });
+    return original(command, args);
+  });
+  const { onCreated } = renderView();
+  const field = screen.getByRole("textbox");
+  fireEvent.change(field, { target: { value: "Review #12" } });
+  fireEvent.mouseDown(await screen.findByRole("option", { name: /#12 Fix parser/ }));
+  expect(invoke).toHaveBeenCalledWith("pr_attach", expect.objectContaining({ number: 12 }));
+  const start = screen.getByRole("button", { name: "Create" });
+  expect(start.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(start);
+  expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+  if (cancel) fireEvent.keyDown(field, { key: "Escape" });
+  else await act(async () => finish("/context/pr-12.md"));
+  await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+  fireEvent.click(start);
+  await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  expect(onCreated.mock.calls[0][2]).toBe(cancel ? "Review #12" : "Review @/context/pr-12.md ");
+  if (cancel) await act(async () => finish("/context/pr-12.md"));
+});
+
+describe("new sessions in a personal section", () => {
+  it.each([false, true])("includes the section in the creation request (projectless=%s)", async (projectless) => {
+    store.newSessionSectionId = "release";
+    store.newSessionChat = projectless;
+    const { onCreated } = renderView();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Ship the release" } });
+    const send = screen.getByRole("button", { name: projectless ? "Ask" : "Create" });
+    await waitFor(() => expect(send.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(send);
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    if (projectless) expect(createChat).toHaveBeenCalledWith(expect.objectContaining({ sectionId: "release" }));
+    else expect(invoke).toHaveBeenCalledWith("create_session", expect.objectContaining({ req: expect.objectContaining({ sectionId: "release" }) }));
+  });
 });

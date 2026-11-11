@@ -21,10 +21,14 @@ export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(
 
 export type ShortcutGroup = "App" | "Session" | "Panel" | "Files" | "Issues" | "Composer";
 
+export type NativeMenuSection = "app" | "file" | "view" | "go" | "help";
+
 interface ActionDef {
   id: string;
   label: string;
   group: ShortcutGroup;
+  /** Native menus are a projection of this registry, using the same action IDs. */
+  menu?: { section: NativeMenuSection; order: number; label: string; separator?: boolean; target?: "focused" };
   /** Default bindings. */
   keys: readonly string[];
   /** Default bindings on macOS, when they differ. */
@@ -42,21 +46,48 @@ interface ActionDef {
 }
 
 const ACTIONS = [
+  { id: "app.about", label: "About TerminalX", group: "App", keys: [], menu: { section: "app", order: 0, label: "About TerminalX" } },
+  { id: "app.checkUpdates", label: "Check for updates", group: "App", keys: [], menu: { section: "app", order: 2, label: "Check for Updates…" } },
+  { id: "app.newWindow", label: "New chat window", group: "App", keys: [], menu: { section: "file", order: 1, label: "New Window" } },
+  { id: "app.addProject", label: "Add project", group: "App", keys: ["mod+o"], menu: { section: "file", order: 2, label: "Add Project…" } },
+  { id: "app.openRecent", label: "Open recent", group: "App", keys: [], menu: { section: "file", order: 3, label: "Open Recent" } },
+  { id: "app.closeWindow", label: "Close window", group: "App", keys: ["mod+shift+w"], menu: { section: "file", order: 5, label: "Close Window", target: "focused" } },
+  { id: "app.zoomIn", label: "Zoom in", group: "App", keys: ["mod+=", "mod+shift+="], menu: { section: "view", order: 4, label: "Zoom In", separator: true, target: "focused" } },
+  { id: "app.zoomOut", label: "Zoom out", group: "App", keys: ["mod+-"], menu: { section: "view", order: 5, label: "Zoom Out", target: "focused" } },
+  { id: "app.zoomReset", label: "Actual size", group: "App", keys: ["mod+0"], menu: { section: "view", order: 6, label: "Actual Size", target: "focused" } },
+  { id: "app.fullscreen", label: "Toggle full screen", group: "App", keys: ["f11"], macKeys: ["mod+ctrl+f"], menu: { section: "view", order: 7, label: "Toggle Full Screen", separator: true, target: "focused" } },
+  { id: "app.nextSession", label: "Next session", group: "App", keys: ["mod+alt+down"], menu: { section: "go", order: 3, label: "Next Session", separator: true } },
+  { id: "app.nextAttention", label: "Go to next session needing attention", group: "App", keys: ["mod+alt+l"], menu: { section: "go", order: 5, label: "Next Session Needing Attention" } },
+  { id: "app.previousSession", label: "Previous session", group: "App", keys: ["mod+alt+up"], menu: { section: "go", order: 4, label: "Previous Session" } },
+  { id: "app.docs", label: "Documentation", group: "App", keys: [], menu: { section: "help", order: 0, label: "Documentation" } },
+  { id: "app.shortcuts", label: "Keyboard shortcuts", group: "App", keys: [], menu: { section: "help", order: 1, label: "Keyboard Shortcuts" } },
+  { id: "app.reportIssue", label: "Report an issue", group: "App", keys: [], menu: { section: "help", order: 2, label: "Report an Issue…" } },
+
   { id: "app.commandPalette", label: "Command palette", group: "App", keys: ["mod+k"] },
   { id: "app.home", label: "Home", group: "App", keys: [] },
-  { id: "app.newSession", label: "New session", group: "App", keys: ["mod+n"] },
-  { id: "app.issues", label: "Issues", group: "App", keys: ["mod+i"] },
-  { id: "app.agentDashboard", label: "Agent dashboard", group: "App", keys: ["mod+shift+a"] },
+  { id: "app.newSession", label: "New session", group: "App", keys: ["mod+n"], menu: { section: "file", order: 0, label: "New Chat", target: "focused" } },
+  { id: "app.startFrom", label: "Start session from…", group: "App", keys: ["mod+shift+n"], menu: { section: "file", order: 1.5, label: "Start From…" } },
+  { id: "app.issues", label: "Issues", group: "App", keys: ["mod+i"], menu: { section: "go", order: 1, label: "Issues" } },
+  { id: "app.agentDashboard", label: "Agent dashboard", group: "App", keys: ["mod+shift+a"], menu: { section: "go", order: 0, label: "Dashboard" } },
   { id: "app.stats", label: "Stats & Usage", group: "App", keys: ["mod+shift+u"] },
-  { id: "app.automations", label: "Automations", group: "App", keys: ["mod+shift+r"] },
+  { id: "app.automations", label: "Automations", group: "App", keys: ["mod+shift+r"], menu: { section: "go", order: 2, label: "Automations" } },
   { id: "app.skills", label: "Skills", group: "App", keys: ["mod+shift+k"] },
-  { id: "app.settings", label: "Settings", group: "App", keys: ["mod+,"] },
-  { id: "app.toggleSidebar", label: "Toggle sidebar", group: "App", keys: ["mod+b"] },
-  { id: "app.togglePanel", label: "Toggle right panel", group: "App", keys: ["mod+e"] },
+  { id: "app.settings", label: "Settings", group: "App", keys: ["mod+,"], menu: { section: "app", order: 1, label: "Settings…" } },
+  { id: "app.toggleSidebar", label: "Toggle sidebar", group: "App", keys: ["mod+b"], menu: { section: "view", order: 0, label: "Toggle Sidebar" } },
+  { id: "app.togglePanel", label: "Toggle right panel", group: "App", keys: ["mod+e"], menu: { section: "view", order: 1, label: "Toggle Right Panel" } },
   // No keys inside the window by default: the floating window has a system-wide shortcut of its own (Settings → Shortcuts).
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
+  { id: "session.archive", label: "Archive session", group: "Session", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
-  { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"] },
+  { id: "git.commitPush", label: "Commit and push", group: "Session", keys: ["mod+shift+y"] },
+  { id: "git.pull", label: "Pull latest", group: "Session", keys: ["mod+shift+l"] },
+  // Main's "Fix failing CI checks" owns mod+shift+x: defaults are claimed first-listed-first,
+  // so a second default here would leave one of the two without keys.
+  { id: "git.fixChecks", label: "Fix checks", group: "Session", keys: [] },
+  { id: "git.merge", label: "Merge pull request", group: "Session", keys: ["mod+shift+m"] },
+  { id: "git.createPr", label: "Create pull request", group: "Session", keys: ["mod+shift+c"] },
+  { id: "session.fixErrors", label: "Fix failing CI checks", group: "Session", keys: ["mod+shift+x"] },
+  { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"], menu: { section: "file", order: 4, label: "Close Tab", target: "focused", separator: true } },
   { id: "session.nextTab", label: "Next tab", group: "Session", keys: ["mod+shift+]"] },
   { id: "session.previousTab", label: "Previous tab", group: "Session", keys: ["mod+shift+["] },
   // The browser's keys: the main modifier and a digit for a position in the tab row, 9 for the last tab.
@@ -69,24 +100,26 @@ const ACTIONS = [
   { id: "session.tab7", label: "Switch to tab 7", group: "Session", keys: ["mod+7"] },
   { id: "session.tab8", label: "Switch to tab 8", group: "Session", keys: ["mod+8"] },
   { id: "session.lastTab", label: "Switch to last tab", group: "Session", keys: ["mod+9"] },
+  { id: "session.focusOtherPane", label: "Focus other pane", group: "Session", keys: ["mod+alt+o"] },
+  { id: "session.moveTabToOtherPane", label: "Move tab to other pane", group: "Session", keys: ["mod+alt+shift+o"] },
   { id: "session.moveTabLeft", label: "Move tab left", group: "Session", keys: ["mod+alt+shift+["] },
   { id: "session.moveTabRight", label: "Move tab right", group: "Session", keys: ["mod+alt+shift+]"] },
   // The browser's own keys for this (mod+shift+t) switch the tab to its terminal view here; Ctrl+Alt+T opens a terminal on most Linux desktops.
   { id: "session.reopenTab", label: "Reopen closed tab", group: "Session", keys: ["mod+alt+shift+t"], macKeys: ["mod+alt+t"] },
-  { id: "session.latestShell", label: "Activate latest shell tab", group: "Session", keys: ["mod+j"] },
-  { id: "session.toggleTerminalView", label: "Switch the tab between chat and terminal view", group: "Session", keys: ["mod+shift+t"] },
+  { id: "session.latestShell", label: "Activate latest shell tab", group: "Session", keys: ["mod+j"], menu: { section: "view", order: 2, label: "Terminal", target: "focused" } },
+  { id: "session.toggleTerminalView", label: "Switch the tab between chat and terminal view", group: "Session", keys: ["mod+shift+t"], menu: { section: "view", order: 3, label: "Switch Chat / Terminal", target: "focused" } },
   // Escape in the chat is Escape in the agent: the turn is interrupted and the agent's process stays (#427).
   { id: "session.interrupt", label: "Interrupt the running turn", group: "Session", keys: ["escape"], scope: "context" },
   // No keys by default: it ends the agent's process, so it is never a key pressed out of habit.
   { id: "session.stop", label: "Stop the session (ends the agent's process)", group: "Session", keys: [] },
   { id: "panel.changes", label: "Changes", group: "Panel", keys: ["mod+alt+1"] },
-  { id: "panel.repository", label: "Repository", group: "Panel", keys: ["mod+alt+2"] },
-  { id: "panel.pullRequests", label: "Pull requests", group: "Panel", keys: ["mod+alt+3"] },
+  { id: "panel.repository", label: "Branch", group: "Panel", keys: ["mod+alt+2"] },
+  { id: "panel.pullRequests", label: "Pull request", group: "Panel", keys: ["mod+alt+3"] },
   { id: "panel.files", label: "Files", group: "Panel", keys: ["mod+alt+4"] },
   { id: "files.quickOpen", label: "Open file by name", group: "Files", keys: ["mod+p"] },
   { id: "files.search", label: "Search in project", group: "Files", keys: ["mod+shift+f"] },
   { id: "files.replace", label: "Replace in project", group: "Files", keys: ["mod+shift+h"] },
-  { id: "files.find", label: "Find in the open file", group: "Files", keys: ["mod+f"] },
+  { id: "files.find", label: "Find in the focused chat, file or terminal", group: "Files", keys: ["mod+f"] },
   { id: "files.save", label: "Save the open file", group: "Files", keys: ["mod+s"] },
   { id: "files.togglePreview", label: "Preview or source for a markdown file", group: "Files", keys: ["mod+shift+p"] },
   { id: "files.closeAll", label: "Close all open files", group: "Files", keys: ["mod+alt+w"] },
@@ -98,6 +131,7 @@ const ACTIONS = [
   // Right Option is AltGr on many Windows and Linux layouts, so holding it to dictate is a macOS default only.
   { id: "composer.dictate", label: "Start or stop dictation", group: "Composer", keys: ["mod+shift+d"], macKeys: ["hold:AltRight", "mod+shift+d"], hold: true },
   { id: "composer.send", label: "Send", group: "Composer", keys: ["enter"], scope: "context" },
+  { id: "composer.sendAlternate", label: "Send the other way (hold or interrupt)", group: "Composer", keys: ["mod+enter"], scope: "context" },
   { id: "composer.newLine", label: "New line", group: "Composer", keys: ["shift+enter"], scope: "context" },
   { id: "composer.historyPrevious", label: "Recall the previous message", group: "Composer", keys: ["up"], scope: "context" },
   { id: "composer.historyNext", label: "Recall the next message, then the draft", group: "Composer", keys: ["down"], scope: "context" },

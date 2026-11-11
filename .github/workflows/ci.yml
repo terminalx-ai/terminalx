@@ -1,7 +1,8 @@
 name: CI
 
-# Portable checks run in parallel with Apple-only checks. `check` remains
-# the required aggregate status; see docs/CI-RUNNERS.md for coverage and rollout.
+# Required statuses stay check, frontend and webkit-layout. All PR work is
+# GitHub-hosted; only protected main runs may opt into the owner-managed pool.
+# YAML is not a runner access boundary: see docs/CI-RUNNERS.md before enabling it.
 
 on:
   push:
@@ -24,6 +25,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Never restore another trust domain's cache, even via a prefix fallback.
+  CI_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.ref == 'refs/heads/main' && 'main') || format('run-{0}', github.run_id) }}
 
 jobs:
   legacy-runtime-probe:
@@ -33,69 +36,111 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Test legacy AppImage diagnostic
         run: python3 scripts/linux-runtime-probe.test.py
 
-  linux-frontend:
-    runs-on: ${{ vars.CI_LINUX_RUNNER || 'ubuntu-latest' }}
+  frontend:
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .nvmrc
-          cache: pnpm
       - name: Install npm dependencies
         run: pnpm install --frozen-lockfile
       - name: tsc
         run: pnpm exec tsc --noEmit
       - name: tsc (phone app)
         run: pnpm --dir mobile exec tsc --noEmit
+      - name: Install shells used by the tests
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - name: vitest
         run: pnpm vitest run
+
       - name: Build the frontend
         run: pnpm build
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - name: Verify portable source icons
+      - name: Verify portable source icons and CI policy
         run: |
-          python3 -m pip install Pillow==11.1.0
+          python3 -m pip install Pillow==11.1.0 PyYAML==6.0.2
           python3 scripts/test_icons.py
-      - name: Test the macOS Rust coverage selector and timing report
-        run: python3 -m unittest discover -s infra/ci-runners -p 'test_*.py'
+          python3 -m unittest discover -s infra/ci-runners -p 'test_*.py'
+
+  webkit-layout:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+      # Layout checks that jsdom cannot make: the built app in WebKit, measured.
+      - name: Build the frontend
+        run: pnpm build
+      - name: Install WebKit for the layout checks
+        run: pnpm exec playwright install webkit
+      - name: WebKit layout checks
+        run: |
+          pnpm test:webkit-layout
+          node scripts/webkit/permission-details.mjs
 
   linux-rust:
-    runs-on: ${{ vars.CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) && vars.CI_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      # This detects image mistakes; the owner must enforce isolation before registration.
+      - name: Verify the self-hosted image is unprivileged
+        if: runner.environment == 'self-hosted'
+        run: |
+          test "$(id -u)" -ne 0
+          if sudo -n true 2>/dev/null; then
+            echo 'Runner user must not have passwordless sudo' >&2
+            exit 1
+          fi
+          test ! -S /var/run/docker.sock
+          test ! -S /run/podman/podman.sock
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Install Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake
+        if: runner.environment == 'github-hosted'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install npm dependencies and build the frontend
+        run: pnpm install --frozen-lockfile && pnpm build
       - name: Show the Rust toolchain
         run: rustup show && cargo --version && cargo clippy --version
       - name: Restore the cargo cache
         id: cargo-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             src-tauri/target
-          key: linux-tests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: linux-tests-${{ runner.os }}-${{ runner.arch }}-
+          key: ci-v3-linux-rust-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: ci-v3-linux-rust-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
       - name: clippy
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -103,92 +148,8 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked
       - name: Save the cargo cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            src-tauri/target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
-
-  macos:
-    runs-on: macos-latest
-    timeout-minutes: 45
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-
-      - name: Install npm dependencies
-        run: pnpm install --frozen-lockfile
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Verify source and compiled app icons
-        run: |
-          python3 -m pip install Pillow==11.1.0
-          python3 scripts/test_icons.py
-          python3 scripts/test_packaged_icons.py
-          python3 scripts/test_compiled_icons.py
-
-      # rust-toolchain.toml decides the channel and pulls in clippy.
-      - name: Show the Rust toolchain
-        run: rustup show && cargo --version && cargo clippy --version
-
-      # Restored everywhere, saved only from main. Avoid retaining a separate
-      # multi-gigabyte Cargo build cache for every pull request.
-      - name: Restore the cargo cache
-        id: cargo-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            src-tauri/target
-          key: macos-clippy-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: macos-clippy-${{ runner.os }}-
-
-      # Layout checks that jsdom cannot make: the built app in WebKit, measured.
-      - name: Build the frontend
-        run: pnpm build
-
-      - name: Install WebKit for the layout checks
-        run: pnpm exec playwright install webkit
-
-      - name: WebKit layout checks
-        run: |
-          pnpm test:webkit-layout
-          node scripts/webkit/permission-details.mjs
-
-      # The computer-use helper is a Swift package with its own unit tests.
-      # It is built before the Rust checks so tauri-build packages a real
-      # helper rather than the empty stand-in build.rs creates.
-      - name: swift test (computer-use helper)
-        run: swift test --package-path native/computer-use-macos
-
-      - name: build the computer-use helper app
-        run: node scripts/build-computer-macos.mjs
-
-      - name: clippy
-        working-directory: src-tauri
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Save the cargo cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index
@@ -203,7 +164,7 @@ jobs:
     outputs:
       required: ${{ steps.select.outputs.required }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -220,39 +181,77 @@ jobs:
             echo 'required=true' >> "$GITHUB_OUTPUT"
           fi
 
-  macos-rust:
+  macos-native:
     needs: macos-rust-changes
-    if: needs.macos-rust-changes.outputs.required == 'true'
     runs-on: macos-latest
     timeout-minutes: 90
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .nvmrc
+
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify source and compiled app icons
+        run: |
+          python3 -m pip install Pillow==11.1.0
+          python3 scripts/test_icons.py
+          python3 scripts/test_packaged_icons.py
+          python3 scripts/test_compiled_icons.py
+
+      # rust-toolchain.toml decides the channel and pulls in clippy.
       - name: Show the Rust toolchain
-        run: rustup show && cargo --version
-      - name: Build the computer-use helper app
-        run: node scripts/build-computer-macos.mjs
+        run: rustup show && cargo --version && cargo clippy --version
+
       - name: Restore the cargo cache
         id: cargo-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             src-tauri/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
-      - name: cargo test (full macOS suite)
+          key: ci-v3-macos-native-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: ci-v3-macos-native-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+
+      # tauri-build packages the frontend output into the Rust build.
+      - name: Build the frontend
+        run: pnpm build
+
+      # The computer-use helper is a Swift package with its own unit tests.
+      # It is built before the Rust checks so tauri-build packages a real
+      # helper rather than the empty stand-in build.rs creates.
+      - name: swift test (computer-use helper)
+        run: swift test --package-path native/computer-use-macos
+
+      - name: build the computer-use helper app
+        run: node scripts/build-computer-macos.mjs
+
+      - name: clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo test (full macOS suite when selected)
+        if: needs.macos-rust-changes.outputs.required == 'true'
         working-directory: src-tauri
         run: cargo test --locked
+
       - name: Save the cargo cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index
@@ -261,47 +260,24 @@ jobs:
             src-tauri/target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
-  # Keep the existing required status and fail closed on a cancelled/failed
-  # dependency. Only the intentionally unselected macOS suite may be skipped.
-  check:
-    if: always()
-    needs: [linux-frontend, linux-rust, macos, macos-rust-changes, macos-rust, legacy-runtime-probe, headless-serve, desktop-platforms]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require every selected check
-        env:
-          RESULTS: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PY'
-          import json, os
-          needs = json.loads(os.environ['RESULTS'])
-          for name, job in needs.items():
-              expected = 'success'
-              if name == 'macos-rust' and needs['macos-rust-changes']['outputs'].get('required') == 'false':
-                  expected = 'skipped'
-              if job['result'] != expected:
-                  raise SystemExit(f"{name}: {job['result']} (expected {expected})")
-          PY
-
   # The headless runtime a cloud workspace boots. The runner has no WebView,
   # GTK or ALSA development packages, so a GUI dependency fails the build.
   headless-serve:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git/db
             src-tauri/target
-          key: serve-cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: serve-cargo-${{ runner.os }}-
+          key: ci-v3-headless-serve-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: ci-v3-headless-serve-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
       - name: Build terminalx-serve
         working-directory: src-tauri/serve
         run: cargo build --locked --bin terminalx-serve
@@ -326,6 +302,12 @@ jobs:
       - name: Handing the runtime over without stopping what it runs (#765)
         working-directory: src-tauri/serve
         run: cargo test --locked --test local_handover
+      - name: CLI issue starts in the shipped runtime (#786)
+        working-directory: src-tauri/serve
+        run: cargo test --locked --features local-ui --test local_issue_start
+      - name: A lead lists and stops the sessions it started (PRO-270)
+        working-directory: src-tauri/serve
+        run: cargo test --locked --test session_parent
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
@@ -341,15 +323,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .nvmrc
-          cache: pnpm
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Install Linux build dependencies
@@ -358,14 +339,14 @@ jobs:
       - name: Install npm dependencies
         run: pnpm install --frozen-lockfile
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git/db
             src-tauri/target
-          key: desktop-cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: desktop-cargo-${{ runner.os }}-
+          key: ci-v3-desktop-platforms-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: ci-v3-desktop-platforms-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
       - name: Build frontend and verify off-macOS helper build is a no-op
         run: pnpm build:computer-macos && pnpm build
       - name: Platform build
@@ -374,6 +355,11 @@ jobs:
       - name: Computer contract tests
         working-directory: src-tauri
         run: "cargo test --lib computer::"
+      # The local owner path needs no macOS APIs; reuse Linux's build setup.
+      - name: Local issue starts without desktop features (#786)
+        if: runner.os == 'Linux'
+        working-directory: src-tauri
+        run: cargo test --no-default-features --features local-ui --lib control::issue_tests
       - name: Windows process exit observation
         if: runner.os == 'Windows'
         working-directory: src-tauri
@@ -401,3 +387,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./native/computer-use-windows/runtime-render.test.ps1
+  check:
+    # Keep the exact required status and fail closed on failed/cancelled/skipped jobs.
+    if: always()
+    needs: [frontend, webkit-layout, linux-rust, macos-rust-changes, macos-native, headless-serve, desktop-platforms, legacy-runtime-probe]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every check to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success")'

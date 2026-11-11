@@ -1,3 +1,5 @@
+import { freeSectionName, groupSidebarItems } from "@/lib/sidebarSections";
+export { freeSectionName } from "@/lib/sidebarSections";
 import { getAccount, useAccount } from "@/lib/account";
 import type { AccountStatus } from "@/lib/api";
 import { getPrefs, setPrefs, usePrefs, type CloudSidebarSection } from "@/lib/prefs";
@@ -56,13 +58,6 @@ function newId(): string {
   return `s${Date.now().toString(36)}${counter.toString(36)}`;
 }
 
-/** The name a new section gets: "New section", then "New section 2", … whatever is free. */
-export function freeSectionName(sections: readonly CloudSidebarSection[], base = "New section"): string {
-  const taken = new Set(sections.map((section) => section.name.toLowerCase()));
-  if (!taken.has(base.toLowerCase())) return base;
-  for (let n = 2; ; n++) if (!taken.has(`${base} ${n}`.toLowerCase())) return `${base} ${n}`;
-}
-
 /** Add a section at the end, optionally with a project moved into it; returns its id. */
 export function createCloudSection(orgId: string, project?: string): string {
   const sections = read(orgId).map((section) => (project ? { ...section, projects: section.projects.filter((id) => id !== project) } : section));
@@ -118,12 +113,8 @@ export function sectionOfProject(sections: readonly CloudSidebarSection[], proje
  * not listed; it returns to its section if it comes back.
  */
 export function groupIntoSections(projects: readonly CloudProject[], sections: readonly CloudSidebarSection[]): { sections: { section: CloudSidebarSection; projects: CloudProject[] }[]; ungrouped: CloudProject[] } {
-  const placed = new Map<string, string>();
-  for (const section of sections) for (const id of section.projects) if (!placed.has(id)) placed.set(id, section.id);
-  return {
-    sections: sections.map((section) => ({ section, projects: projects.filter((project) => placed.get(project.identity) === section.id) })),
-    ungrouped: projects.filter((project) => !placed.has(project.identity)),
-  };
+  const grouped = groupSidebarItems(projects, sections, (project) => project.identity, (section) => section.projects);
+  return { sections: grouped.sections.map(({ section, items }) => ({ section, projects: items })), ungrouped: grouped.ungrouped };
 }
 
 // A section just created opens with its name ready to type over.

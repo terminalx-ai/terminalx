@@ -20,7 +20,7 @@ const { bootSessions, refreshSessions, selectSession, getSessionStore } = await 
 const { bootBrowser, refreshBrowserPages } = await import("./browser");
 const { adoptPane, dropSessionTerminals, getTerminalState, openTerminal, setSelectedAgent } = await import("./terminal");
 const { getTabState, isTabMuted, layoutOf, resetTabLayouts } = await import("./tabLayouts");
-const { closePeer, hasOwnTitle, peerAgent, peerKind, peerLabel, peerOrder, peerStateWords, workspaceRow } = await import("./sessionTabs");
+const { paneRow, closePeer, hasOwnTitle, peerAgent, peerKind, peerLabel, peerOrder, peerStateWords, workspaceRow } = await import("./sessionTabs");
 const actions = await import("./tabActions");
 const { setDraft } = await import("./drafts");
 const { noteStatusChange } = await import("./notify");
@@ -484,5 +484,37 @@ describe("reopening from welcome", () => {
     await flush();
     expect(store()).toMatchObject({ view: "new", selectedSessionId: null, closedWorkspaceSessionId: null });
     expect(backend.callsOf("reopen_tab")).toHaveLength(0);
+  });
+});
+
+
+describe("split pane actions", () => {
+  it("keeps navigation and bulk-close plans within the focused pane", () => {
+    actions.moveTabToPane(row(), pick("agent:b1"), "right", { kind: "agent", id: "a1" });
+    expect(store().selectedSessionId).toBe("b");
+    const focused = paneRow(row());
+    expect(focused.tabs.map((tab) => tab.key)).toEqual(["agent:b1"]);
+    expect(actions.planBulkClose("all", focused.tabs, pick("agent:b1")).targets.map((tab) => tab.key)).toEqual(["agent:b1"]);
+    actions.stepTab(focused, { kind: "agent", id: "b1" }, 1);
+    expect(store().selectedSessionId).toBe("b");
+  });
+
+  it("closes the last tab of a pane and selects a surviving sibling session", async () => {
+    actions.moveTabToPane(row(), pick("agent:b1"), "right", { kind: "agent", id: "a1" });
+    const focused = paneRow(row("b"));
+    await closePeer("b", focused.tabs[0], focused.tabs, { kind: "agent", id: "b1" });
+    expect(store().selectedSessionId).toBe("a");
+    expect(row().layout.panes).toHaveLength(1);
+    expect(row().layout.panes?.[0].tabs).not.toContain("agent:b1");
+    expect(closedKeys()).toEqual(["agent:b1"]);
+  });
+
+  it("bulk-closing a whole pane leaves the other pane open and selected", async () => {
+    actions.moveTabToPane(row(), pick("agent:b1"), "right", { kind: "agent", id: "a1" });
+    const focused = paneRow(row("b"));
+    await actions.closeTabs(focused, focused.tabs, { kind: "agent", id: "b1" });
+    expect(store().selectedSessionId).toBe("a");
+    expect(closedKeys()).toEqual(["agent:b1"]);
+    expect(row().tabs.some((tab) => tab.key === "agent:a1")).toBe(true);
   });
 });

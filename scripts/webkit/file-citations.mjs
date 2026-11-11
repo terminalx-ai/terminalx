@@ -51,7 +51,7 @@ try {
         await page.emulateMedia({ colorScheme });
         await page.evaluate((zoom) => { document.documentElement.style.zoom = String(zoom); }, zoom);
         const result = await page.evaluate(() => {
-          const root = [...document.querySelectorAll("[data-chat-scroller]")].find((el) => el.getBoundingClientRect().width > 0);
+          const root = [...document.querySelectorAll("[data-chat-scroller]")].find((el) => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility === "visible");
           const prose = root.querySelector(".prose-chat");
           const box = prose.getBoundingClientRect();
           const inside = (r) => r.left >= box.left - 1 && r.right <= box.right + 1;

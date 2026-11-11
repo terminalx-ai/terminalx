@@ -3,6 +3,18 @@
 window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3 };
 (() => {
   const f = window.__PW_FIXTURE__;
+  // The native file survives a webview reload. Keep its fixture separate from
+  // the legacy preferences whose migration the layout checks exercise.
+  const settingsKey = "__pw_settings_file__";
+  const settings = JSON.parse(sessionStorage.getItem(settingsKey) || "null") ?? {
+    file: { path: "/Users/demo/.raccoon/settings.json", exists: false, error: null, preferences: {} },
+    migrated: false,
+  };
+  const saveSettings = () => {
+    sessionStorage.setItem(settingsKey, JSON.stringify(settings));
+    window.__PW_STUB__.emit("settings_file_changed", null);
+    return structuredClone(settings.file);
+  };
   const ORG = "org-a";
   const now = Date.now();
   const projects = Array.from({ length: f.localProjects }, (_, i) => ({ path: `/repos/p${i}`, name: `local-${i}` }));
@@ -14,6 +26,15 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   const catalog = { version: 1, createMemory: {}, orgs: { [ORG]: { workspaces: [ws("w1", "parity-test"), ws("w2", "demo workspace")], repositories: [], quota: { used: 2, limit: 3 }, fetchedAt: now,
     sessions: { w1: { sessions: Array.from({ length: 12 }, (_, i) => session(`s${i}`, i === 11 ? "Last session" : `Session ${i}`)), capabilities: ["session/2"], at: now }, w2: { sessions: [session("s3", "Demo session")], capabilities: null, at: now } } } } };
   const answers = {
+    settings_file_status: () => structuredClone(settings.file),
+    update_user_preferences: ({ patch, migrate }) => {
+      if (migrate && (settings.migrated || (!settings.file.exists && !Object.keys(patch).length))) return structuredClone(settings.file);
+      settings.file.preferences = migrate ? { ...patch, ...settings.file.preferences } : { ...settings.file.preferences, ...patch };
+      settings.file.exists = true;
+      settings.migrated ||= migrate;
+      return saveSettings();
+    },
+    create_settings_file: () => { settings.file.exists = true; return saveSettings(); },
     // Layout fixtures have no app update. The generic plugin handle below is
     // truthy and would otherwise become a bogus Update after the startup check.
     "plugin:updater|check": null,
@@ -47,6 +68,20 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     status_bar_settings: { visible: false },
     // How the workspaces' tabs are arranged: nothing saved, and what a page saves is kept and announced as the backend does.
     tab_state: { workspaces: {}, closed: [] },
+    sidebar_order: { custom: false, sessions: [], projects: [], revision: 0 },
+    set_sidebar_order: ({ patch }) => {
+      const merge = (saved, requested) => {
+        if (!requested) return saved;
+        const ids = [...new Set(requested)];
+        const slots = [...ids.filter((id) => !saved.includes(id)), ...saved];
+        let at = 0;
+        return slots.map((id) => ids.includes(id) ? ids[at++] : id);
+      };
+      const saved = answers.sidebar_order;
+      answers.sidebar_order = { ...saved, ...patch, sessions: merge(saved.sessions, patch.sessions), projects: merge(saved.projects, patch.projects), revision: saved.revision + 1 };
+      setTimeout(() => window.__PW_STUB__.emit("sidebar_order_changed", answers.sidebar_order), 0);
+      return answers.sidebar_order;
+    },
     set_tab_layout: ({ workspace, layout }) => {
       answers.tab_state = { ...answers.tab_state, workspaces: { ...answers.tab_state.workspaces, [workspace]: layout } };
       setTimeout(() => window.__PW_STUB__.emit("tab_state_changed", answers.tab_state), 0);
@@ -172,6 +207,7 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   const listening = new Map();
   window.__PW_STUB__ = {
     answers,
+    settingsFile: settings.file,
     fixture: f,
     emit(event, payload) {
       for (const { eventId, handler } of listening.get(event) ?? []) callbacks.get(handler)?.({ event, id: eventId, payload });
@@ -189,6 +225,8 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
         return null;
       }
       if (cmd in answers) return typeof answers[cmd] === "function" ? answers[cmd](args ?? {}) : answers[cmd];
+      // No update is ever found here: a made-up one would cover the page with its card.
+      if (cmd === "plugin:updater|check") return null;
       if (cmd.startsWith("plugin:")) return id++;
       return new Promise(() => undefined);
     },

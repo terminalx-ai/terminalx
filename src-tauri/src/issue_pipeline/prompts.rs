@@ -113,8 +113,11 @@ fn verdict_format(commit: &str, pending: bool) -> String {
     } else {
         String::new()
     };
+    let comments = if pending {
+        "For each finding on an existing file, leave one local line comment with `terminalx review comment --file <path> --line <n>[-<m>] --body <text> --json`. Use the current file (after-side) line numbers and include the severity, title and explanation in the body. First read `terminalx review comments --json` to avoid repeating an unchanged finding. These commands save outside the checkout and do not post to the pull request. If a finding has no valid current-file line (for example a deleted file), or the command is unavailable or fails, keep it in your verdict and briefly say why it has no line comment. Never omit a finding from the verdict because it was also saved as a comment. Give a short summary, then the verdict block.\n\n"
+    } else { "" };
     format!(
-        "End your reply with your verdict in exactly this form:\n\n\
+        "{comments}End your reply with your verdict in exactly this form:\n\n\
 ```{REVIEW_FENCE}\n{{\"commit\": \"{commit}\", \"verdict\": \"changes\", \"securityPass\": \"not_needed\", \"checks\": \"not_run\", \"checksNote\": \"What you ran and how it went, or why nothing ran.\", \"findings\": [{{\"severity\": \"high\", \"title\": \"Short statement of the defect\", \"file\": \"path/from/the/repository/root\", \"line\": 42, \"detail\": \"What goes wrong, and when.\", \"security\": false}}]}}\n```\n\n\
 - `commit` is the commit you actually read (`git rev-parse HEAD`).\n\
 - `verdict` is \"merge\" only if the change is right to merge as it stands; otherwise \"changes\".\n\
@@ -321,7 +324,12 @@ mod tests {
         for prompt in [review(&request), review_again(&request, None), reviewer_reminder("abc1234def", "its reply did not end with the review block.")] {
             assert!(prompt.contains(r#"`{"commit": "abc1234def", "verdict": "pending", "reason": "what is still running"}`"#), "{prompt}");
             assert!(prompt.contains("TerminalX waits up to 20 minutes for it."));
+            assert!(prompt.contains("terminalx review comment --file"));
+            assert!(prompt.contains("terminalx review comments --json"));
+            assert!(prompt.contains("Never omit a finding from the verdict"));
+            assert!(prompt.contains("Give a short summary"));
         }
+        assert!(!reviewer_deadline("abc1234def", 20).contains("terminalx review"));
         assert!(reviewer_reminder("abc1234def", "x.").contains("If checks you started are still running, say so with a pending block"));
         // Past the deadline it is not offered again.
         let deadline = reviewer_deadline("abc1234def", 20);
@@ -331,7 +339,7 @@ mod tests {
 
     #[test]
     fn the_resolver_commits_its_merge_before_any_check_and_amends_fixes_into_it() {
-        let resolution = crate::issue_pipeline::Resolution { head: "1111111111aa".into(), remote_head: None, base: "main".into(), base_commit: "2222222222bb".into(), return_stage: crate::issue_pipeline::Stage::Work, waiting_since: None };
+        let resolution = crate::issue_pipeline::Resolution { head: "1111111111aa".into(), remote_head: None, target: None, base: "main".into(), base_commit: "2222222222bb".into(), return_stage: crate::issue_pipeline::Stage::Work, waiting_since: None };
         let prompt = resolve(&resolution);
         assert!(prompt.contains("The original head is 1111111111aa. The base main is pinned to 2222222222bb."));
         // `--no-ff` stays: verification wants exactly one commit with both parents.

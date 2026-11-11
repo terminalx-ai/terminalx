@@ -119,19 +119,21 @@ const fits = (layout) => ({
   // A changed shortcut works at the next keypress.
   await openShortcuts(page);
   await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').click();
-  await page.keyboard.press("Meta+Shift+Y");
+  await page.keyboard.press("Meta+Shift+V");
   await page.getByTestId("shortcut-editor").getByRole("button", { name: "Save", exact: true }).click();
   const shown = await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').textContent();
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
   await sidebar(page);
+  // Since #847 the sidebar slides out (320 ms) and stays on screen until it has, so
+  // wait out the motion: longer than a slide before saying the old keys did nothing,
+  // and for the slide to end after the new ones.
   await page.keyboard.press("Meta+B");
-  await page.waitForTimeout(150);
-  const afterOld = await sidebarShown();
-  await page.keyboard.press("Meta+Shift+Y");
-  await page.waitForTimeout(150);
-  const afterNew = await sidebarShown();
-  await page.keyboard.press("Meta+Shift+Y");
-  await sidebar(page);
+  await page.waitForTimeout(600);
+  const afterOld = await sidebarShown() && await page.locator('[data-testid="panel-presence"][data-side="left"]').getAttribute("data-state") === "open";
+  await page.keyboard.press("Meta+Shift+V");
+  const afterNew = await page.locator('[data-testid="sidebar-rail"]').waitFor({ state: "hidden", timeout: 2000 }).then(() => false, () => true);
+  await page.keyboard.press("Meta+Shift+V");
+  await page.locator('[data-testid="panel-presence"][data-side="left"][data-state="open"]').waitFor();
   // The command palette shows the keys in force.
   await page.keyboard.press("Meta+K");
   await page.getByRole("dialog").locator("input").fill("Toggle sidebar");
@@ -142,10 +144,10 @@ const fits = (layout) => ({
   failed += report(
     "a changed shortcut",
     {
-      "the tab shows the new keys": shown === "⌘⇧Y",
+      "the tab shows the new keys": shown === "⌘⇧V",
       "the old keys do nothing": afterOld === true,
       "the new keys run the action": afterNew === false,
-      "the command palette shows the new keys": paletteKeys === "⌘⇧Y",
+      "the command palette shows the new keys": paletteKeys === "⌘⇧V",
     },
     { shown, afterOld, afterNew, paletteKeys },
   );
@@ -163,19 +165,25 @@ const fits = (layout) => ({
   await page.keyboard.up("AltLeft");
   const afterLeft = await dictation();
 
+  // Keep short key sequences below the hold threshold even when the test
+  // driver is descheduled between real key events on a busy runner.
+  await page.clock.install();
+  await page.clock.pauseAt(Date.now() + 60_000);
+
   // A combination: Right Option, then a key before the hold counts.
   await page.keyboard.down("AltRight");
   await page.keyboard.press("KeyE");
-  await page.waitForTimeout(500);
+  await page.clock.runFor(500);
   await page.keyboard.up("AltRight");
   const afterCombination = await dictation();
 
   // A tap is not a hold.
   await page.keyboard.down("AltRight");
-  await page.waitForTimeout(40);
+  await page.clock.runFor(40);
   await page.keyboard.up("AltRight");
-  await page.waitForTimeout(400);
+  await page.clock.runFor(400);
   const afterTap = await dictation();
+  await page.clock.resume();
 
   await page.keyboard.down("AltRight");
   await page.getByText("Listening. Speak, then release the key.", { exact: true }).waitFor();

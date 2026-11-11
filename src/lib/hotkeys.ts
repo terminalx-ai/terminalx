@@ -66,6 +66,16 @@ export const HOLD_DELAY_MS = 160;
 
 let hold: { code: string; binding: HeldBinding; started: boolean; timer: ReturnType<typeof setTimeout> | null } | null = null;
 let suspended = 0;
+const suspensionListeners = new Set<() => void>();
+
+export function hotkeysSuspended(): boolean {
+  return suspended > 0;
+}
+
+export function subscribeHotkeySuspension(listener: () => void): () => void {
+  suspensionListeners.add(listener);
+  return () => { suspensionListeners.delete(listener); };
+}
 
 export function isEditable(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -79,20 +89,23 @@ export function inTerminal(target: EventTarget | null): boolean {
   return target instanceof Element && !!target.closest(".xterm, .terminal-host");
 }
 
-/** Escape belongs to an open surface before background tabs or reminders. */
-export function hasEscapeOverlay(): boolean {
-  return !!document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]');
+/** Escape belongs to an open surface before background tabs or reminders. A surface may exclude its own inline list. */
+export function hasEscapeOverlay(except?: Element | null): boolean {
+  return Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]'))
+    .some((element) => element !== except);
 }
 
 /** Stop binding keys while something records them (the Shortcuts tab). Returns the resume. */
 export function suspendHotkeys(): () => void {
   suspended++;
   endHold(true);
+  for (const listener of suspensionListeners) listener();
   let done = false;
   return () => {
     if (done) return;
     done = true;
     suspended--;
+    for (const listener of suspensionListeners) listener();
   };
 }
 

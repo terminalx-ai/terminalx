@@ -1,3 +1,4 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useState } from "react";
 import { Loader2 } from "@/icons";
 import { MachineNameSettings } from "./MachineNameSettings";
@@ -6,6 +7,7 @@ import { WorkStatusSettings } from "./WorkStatusSettings";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
 import { signIn, signOut, useAccount } from "@/lib/account";
+import { PasteSignInLink } from "@/components/account/PasteSignInLink";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { usePairing } from "@/lib/pairing";
 import { openOrganizationSettings } from "@/lib/settingsLinks";
@@ -31,21 +33,23 @@ export function AccountTab() {
     const activeId = identity.organizationId ?? (named.length === 1 ? named[0].id : null);
     return (
       <div className="flex flex-col gap-4">
-        <div className="flex items-center gap-3 rounded-lg bg-well px-3 py-3">
+        <RegisteredSetting setting="account.identity"><div className="flex items-center gap-3 rounded-lg bg-well px-3 py-3">
           <AccountAvatar identity={identity} className="size-10 text-sm" />
           <div className="min-w-0">
             <div className="truncate text-sm font-medium">{identity.name ?? identity.email}</div>
             <div className="truncate text-xs text-muted-foreground">{identity.email}</div>
             {identity.organization && <div className="mt-0.5 truncate text-xs text-faint">{identity.organization}</div>}
           </div>
-        </div>
+        </div></RegisteredSetting>
+        <MachineNameSettings />
+        <WorkStatusSettings />
         <p className="text-xs leading-relaxed text-muted-foreground">
           Your TerminalX account is optional. The session refreshes automatically and its credentials are stored in macOS Keychain.
         </p>
-        <OrganizationOnboarding key={identity.email} organizationName={identity.organization} organizationId={identity.organizationId ?? null} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} multiOrg={isMultiOrg(status)} />
+        <RegisteredSetting setting="account.organizations"><div className="contents"><OrganizationOnboarding key={identity.email} organizationName={identity.organization} organizationId={identity.organizationId ?? null} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} multiOrg={isMultiOrg(status)} /></div></RegisteredSetting>
         {/* An organization's own settings, agent logins among them, are on its page (PRO-107). */}
         {identity.organization && activeId && (
-          <div className="flex items-center justify-between gap-3 rounded-lg border border-hairline p-3" data-testid="account-organization-settings">
+          <RegisteredSetting setting="account.organizationSettings"><div className="flex items-center justify-between gap-3 rounded-lg border border-hairline p-3" data-testid="account-organization-settings">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium">{identity.organization} settings</div>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
@@ -55,13 +59,12 @@ export function AccountTab() {
             <Button size="sm" variant="outline" className="shrink-0" onClick={() => openOrganizationSettings(activeId)}>
               Open
             </Button>
-          </div>
+          </div></RegisteredSetting>
         )}
-        <MachineNameSettings />
-        <WorkStatusSettings />
         {pairing.status.host && (
-          <div className="rounded-lg border border-hairline px-3 py-3">
-            <div className="text-xs font-medium">What this Mac shares</div>
+          <RegisteredSetting setting="account.sharing"><details className="rounded-lg border border-hairline px-3 py-3">
+            <summary className="cursor-pointer text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring/40">Advanced</summary>
+            <div className="mt-3 text-xs font-medium">What this Mac shares</div>
             <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
               The account directory receives exactly the seven binding fields below so your signed-in phone can find this Mac. Sessions, projects, worktrees, transcripts, paths, scrollback, and device credentials never leave through account binding. The work status above names, for each session linked to an issue, only the issue, the session’s title and branch, its state and when it was last active.
             </p>
@@ -78,11 +81,11 @@ export function AccountTab() {
             <p className="mt-3 text-[11px] leading-relaxed text-faint">
               Relay proof also sends app version {pairing.status.host.appVersion}; the directory derives liveness from the last heartbeat{pairing.status.host.lastSeenAt ? ` at ${new Date(pairing.status.host.lastSeenAt).toLocaleString()}` : ""}.
             </p>
-          </div>
+          </details></RegisteredSetting>
         )}
         {status.lastError && <p className="text-xs text-warning">{status.lastError}</p>}
         {confirmingSignOut ? (
-          <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3">
+          <RegisteredSetting setting="account.signOut"><div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3">
             <p className="text-xs leading-relaxed text-muted-foreground">
               Automatic account pairings will be removed and disconnected. QR and code pairings keep working, and running agents are untouched.
             </p>
@@ -92,11 +95,11 @@ export function AccountTab() {
               </Button>
               <Button variant="ghost" size="sm" disabled={account.busy} onClick={() => setConfirmingSignOut(false)}>Cancel</Button>
             </div>
-          </div>
+          </div></RegisteredSetting>
         ) : (
-          <div>
+          <RegisteredSetting setting="account.signOut"><div>
             <Button variant="destructive" size="sm" disabled={account.busy} onClick={() => setConfirmingSignOut(true)}>Sign out</Button>
-          </div>
+          </div></RegisteredSetting>
         )}
       </div>
     );
@@ -104,7 +107,7 @@ export function AccountTab() {
 
   const signingIn = status.state === "signing-in";
   return (
-    <div className="flex flex-col gap-4">
+    <RegisteredSetting setting="account.identity"><div className="flex flex-col gap-4">
       <div>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
           Sign in through TerminalX to find and pair your devices; every local workspace and agent continues to work without an account.
@@ -115,12 +118,15 @@ export function AccountTab() {
           <Loader2 className="size-3.5 animate-spin" /> Finish signing in in your browser, then return here.
         </div>
       )}
+      {/* The dev app asks for the link in a dialog as sign-in starts; a built app shows the field as a fallback. */}
+      {signingIn && !import.meta.env.DEV && <PasteSignInLink />}
       {status.lastError && <p className="text-xs text-destructive">{status.lastError}</p>}
       <div>
         <Button size="sm" disabled={account.busy} onClick={() => void signIn()}>
           {account.busy ? <Loader2 className="animate-spin" /> : null} {signingIn ? "Open sign-in again" : "Sign in"}
         </Button>
       </div>
-    </div>
+    </div></RegisteredSetting>
   );
 }
+

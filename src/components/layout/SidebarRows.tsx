@@ -1,11 +1,11 @@
 import { useLayoutEffect, useRef, type HTMLAttributes, type ReactNode, type Ref } from "react";
-import { Archive, ArrowUp, ChevronDown, Globe, Lock, Pin, Terminal, X } from "@/icons";
+import { Archive, ArrowUp, ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Pin, Terminal, X } from "@/icons";
 import { AgentMark, agentName } from "@/components/AgentMark";
 import { actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { formatSize } from "@/lib/workspaceSizes";
 import type { WorkspaceState } from "@/types/session";
 import { cn } from "@/lib/cn";
-import { relativeTime } from "@/lib/time";
+import { recentTime } from "@/lib/time";
 import { TAB_STATUS_LABEL, type TabStatus } from "@/types/session";
 
 /**
@@ -64,10 +64,10 @@ const TREE_ROW = {
  * "item" row is a session; `selected` marks the active workspace or the
  * selected session. Trailing content can yield to a {@link RowActions} toolbar.
  */
-export function TreeRow({ level, selected, title, children }: { level: keyof typeof TREE_ROW; selected: boolean; title?: string; children: ReactNode }) {
+export function TreeRow({ level, selected, children, ...props }: { level: keyof typeof TREE_ROW; selected: boolean } & HTMLAttributes<HTMLDivElement>) {
   const style = TREE_ROW[level];
   return (
-    <div data-tree-row className={cn(actionRow, style.base, selected ? style.selected : style.idle)} title={title}>
+    <div {...props} data-tree-row className={cn(actionRow, style.base, selected ? style.selected : style.idle)}>
       {children}
     </div>
   );
@@ -142,12 +142,12 @@ export function WorkspaceFacts({ state, bytes }: { state?: WorkspaceState; bytes
 }
 
 /** Added and deleted lines plus unpushed commits. Draws nothing when all are zero. */
-export function DiffStats({ additions, deletions, unpushed }: { additions: number; deletions: number; unpushed: number }) {
+export function DiffStats({ additions, deletions, unpushed, coloured = true }: { additions: number; deletions: number; unpushed: number; coloured?: boolean }) {
   if (!additions && !deletions && !unpushed) return null;
   return (
     <span className={cn("flex shrink-0 items-center gap-1 tabular-nums", yieldsToRowActions)}>
-      {additions > 0 ? <span className="text-add">+{additions}</span> : null}
-      {deletions > 0 ? <span className="text-destructive">−{deletions}</span> : null}
+      {additions > 0 ? <span className={coloured ? "text-add" : "text-faint"}>+{additions}</span> : null}
+      {deletions > 0 ? <span className={coloured ? "text-destructive" : "text-faint"}>−{deletions}</span> : null}
       {unpushed > 0 ? (
         <span className="flex items-center text-warning" title={`${unpushed} unpushed commit${unpushed === 1 ? "" : "s"}`}>
           <ArrowUp className="size-3" />
@@ -158,11 +158,13 @@ export function DiffStats({ additions, deletions, unpushed }: { additions: numbe
   );
 }
 
-/** Relative age of a row's last activity, which gives way to the row's toolbar. */
+/** Relative age of a row's last activity, up to six days, which gives way to the row's toolbar. Older rows show none. */
 export function RowTime({ at }: { at: string }) {
+  const age = recentTime(at);
+  if (!age) return null;
   return (
     <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>
-      {relativeTime(at)}
+      {age}
     </span>
   );
 }
@@ -253,7 +255,7 @@ const TAB_ROW = {
 } as const;
 
 /** Props a menu trigger (`asChild`) or a caller may add to a tab row's element. */
-type TabRowPassThrough = Omit<HTMLAttributes<HTMLDivElement>, "id" | "title" | "className" | "children" | "onClick" | "onKeyDown" | "onAuxClick"> & {
+type TabRowPassThrough = Omit<HTMLAttributes<HTMLDivElement>, "id" | "title" | "className" | "children" | "onClick" | "onAuxClick"> & {
   ref?: Ref<HTMLDivElement>;
 };
 
@@ -281,7 +283,7 @@ export interface TabRowProps extends TabRowPassThrough {
  * middle click or its hover close button. Remaining props (a context menu
  * trigger's handlers and ref, `aria-description`) land on the row element.
  */
-export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLabel, onOpen, onClose, pinned, children, ...rest }: TabRowProps) {
+export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLabel, onOpen, onClose, pinned, children, onKeyDown, ...rest }: TabRowProps) {
   const style = TAB_ROW[tone];
   return (
     <div
@@ -296,6 +298,8 @@ export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLab
       onClick={onOpen}
       onAuxClick={(event) => event.button === 1 && onClose?.()}
       onKeyDown={(event) => {
+        onKeyDown?.(event);
+        if (event.defaultPrevented) return;
         if (event.target !== event.currentTarget) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -384,4 +388,14 @@ export function BrowserTabRow({ label, url, agentTarget, ...row }: TabRowBase & 
       {agentTarget ? <span className="size-1.5 shrink-0 rounded-full bg-info" aria-label="Active page for agents" /> : null}
     </TabRow>
   );
+}
+
+/** A full-width diff or pull request, sharing selection with the workspace strip. */
+export function ReviewTabRow({ label, kind, dirty, ...row }: TabRowBase & { label: string; kind: "diff" | "pr"; dirty: boolean }) {
+  const Icon = kind === "diff" ? FileDiff : GitPullRequest;
+  return <TabRow {...row} tone="peer" label={label} title={label} closeLabel={`Close ${label}`}>
+    <Icon className="size-3.5 shrink-0" />
+    <span className="min-w-0 flex-1 truncate">{label}</span>
+    {dirty && <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-label="Unsaved" />}
+  </TabRow>;
 }

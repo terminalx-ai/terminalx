@@ -2,8 +2,27 @@ import * as React from "react";
 import { ContextMenu as Ctx, DropdownMenu as Prim } from "radix-ui";
 import { Check, ChevronRight } from "@/icons";
 import { cn } from "@/lib/cn";
+import { isContextMenuKey, isContextMenuTextField, openContextMenu } from "@/lib/contextMenu";
+
+const CloseMenu = React.createContext<(() => void) | null>(null);
+
+/** Close the owning root after an asynchronous menu action succeeds. */
+export const useCloseMenu = () => React.useContext(CloseMenu);
+
+function useMenuState({ open, defaultOpen = false, onOpenChange }: { open?: boolean; defaultOpen?: boolean; onOpenChange?: (open: boolean) => void }) {
+  const [ownOpen, setOwnOpen] = React.useState(defaultOpen);
+  const change = React.useCallback((value: boolean) => { setOwnOpen(value); onOpenChange?.(value); }, [onOpenChange]);
+  const close = React.useCallback(() => change(false), [change]);
+  return { open: open ?? ownOpen, onOpenChange: change, close };
+}
 
 export const DropdownMenu = Prim.Root;
+
+/** Opt in only when an action must close its menu after asynchronous work. */
+export function AsyncDropdownMenu(props: React.ComponentProps<typeof Prim.Root>) {
+  const { close, ...state } = useMenuState(props);
+  return <Prim.Root {...props} {...state}><CloseMenu.Provider value={close}>{props.children}</CloseMenu.Provider></Prim.Root>;
+}
 export const DropdownMenuTrigger = Prim.Trigger;
 export const DropdownMenuGroup = Prim.Group;
 export const DropdownMenuSub = Prim.Sub;
@@ -114,7 +133,29 @@ export function MenuShortcut({ keys }: { keys: string[] }) {
 // ---- Context menus share the dropdown's look; only the trigger differs.
 
 export const ContextMenu = Ctx.Root;
-export const ContextMenuTrigger = Ctx.Trigger;
+
+export function AsyncContextMenu(props: React.ComponentProps<typeof Ctx.Root>) {
+  const { close, ...state } = useMenuState(props);
+  return <Ctx.Root {...props} {...state}><CloseMenu.Provider value={close}>{props.children}</CloseMenu.Provider></Ctx.Root>;
+}
+export const ContextMenuTrigger = React.forwardRef<
+  React.ComponentRef<typeof Ctx.Trigger>,
+  React.ComponentPropsWithoutRef<typeof Ctx.Trigger>
+>(({ onKeyDown, disabled, ...props }, ref) => (
+  <Ctx.Trigger
+    {...props}
+    ref={ref}
+    disabled={disabled}
+    onKeyDown={(event) => {
+      onKeyDown?.(event);
+      if (event.defaultPrevented || disabled || !isContextMenuKey(event) || isContextMenuTextField(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openContextMenu(event.currentTarget);
+    }}
+  />
+));
+ContextMenuTrigger.displayName = "ContextMenuTrigger";
 
 export const ContextMenuContent = React.forwardRef<
   React.ComponentRef<typeof Ctx.Content>,

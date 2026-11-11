@@ -293,13 +293,17 @@ impl Desktop {
     }
 
     pub fn attach(&self, window: &str, id: &str, token: &str, tap: Tap) -> Result<()> {
+        self.attach_sized(window, id, token, Box::new(move |bytes, _| tap(bytes)))
+    }
+
+    pub fn attach_sized(&self, window: &str, id: &str, token: &str, tap: crate::pty::SizedTap) -> Result<()> {
         self.attachment()?;
         let mut windows = self.windows.lock().unwrap();
         if !windows.bridges.get(window).is_some_and(|(_, bridge)| bridge.attachment().is_ok()) {
             let view = self.view(window)?;
             windows.bridges.insert(window.into(), view);
         }
-        windows.bridges[window].1.attach(id, token, tap)
+        windows.bridges[window].1.attach_sized(id, token, tap)
     }
 
     /// Re-establish `window`'s view connection after a loss, and mark it

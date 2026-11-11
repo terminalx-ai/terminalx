@@ -31,14 +31,14 @@ try {
   });
   const calls = () => page.evaluate(() => window.__VISIBILITY_CALLS__);
   const confirmations = async () => (await calls()).filter((call) => call.command === "plugin:dialog|message").map((call) => call.args.message);
-  const prefs = () => page.evaluate(() => JSON.parse(localStorage.getItem("raccoon.prefs") || "{}"));
+  const prefs = () => page.evaluate(() => window.__PW_STUB__.settingsFile.preferences);
   const openOrganizations = async () => {
     await (await sidebar(page)).getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Organizations", exact: true }).click();
     await page.getByRole("heading", { name: "Organizations", exact: true }).waitFor();
   };
   const closeSettings = async () => {
-    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
     await sidebar(page);
   };
   const shown = (org) => page.getByRole("switch", { name: `Show ${org} in sidebar` }).getAttribute("aria-checked");

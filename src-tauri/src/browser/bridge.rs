@@ -2,9 +2,15 @@
 //! commands serialized per session, each bounded by a timeout, and a stuck
 //! daemon restarted after repeated timeouts.
 //!
-//! Every invocation re-asserts the launch options (`--profile`, `--headed`,
-//! `--download-path`): a daemon that idled out and was relaunched by the next
-//! command would otherwise open a headless, profile-less browser.
+//! Every invocation re-asserts the launch options (`--profile`,
+//! `--download-path`, and `--headed` when asked for): a daemon that idled out
+//! and was relaunched by the next command would otherwise open a profile-less
+//! browser.
+//!
+//! The browser runs headless: the page lives in the app, in its browser
+//! views, streamed and driven over DevTools, never in a window of its own.
+//! `TERMINALX_BROWSER_HEADED=1` brings the window back, for debugging the
+//! browser itself.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -179,7 +185,10 @@ impl Ctx<'_> {
         let mut argv: Vec<&str> = vec!["--session", &self.session.name];
         let profile_dir = self.session.profile_dir.to_string_lossy().into_owned();
         let download_dir = self.session.download_dir.to_string_lossy().into_owned();
-        argv.extend(["--profile", &profile_dir, "--headed", "--download-path", &download_dir]);
+        argv.extend(["--profile", &profile_dir, "--download-path", &download_dir]);
+        if headed() {
+            argv.push("--headed");
+        }
         argv.extend_from_slice(args);
         argv.push("--json");
         self.lane.last_command_at = Some(Instant::now());
@@ -369,6 +378,12 @@ pub fn check_text_argument(name: &str, value: &str) -> BrowserResult<()> {
     Ok(())
 }
 
+/// Whether to show the Chromium window (`TERMINALX_BROWSER_HEADED=1`); the
+/// app's own browser views are the page's place otherwise.
+pub fn headed() -> bool {
+    std::env::var("TERMINALX_BROWSER_HEADED").is_ok_and(|v| v == "1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,25 +448,81 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn three_timeouts_close_the_session_and_reset_the_lane() {
+        timeout_cleanup_fixture(false, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn three_timeouts_before_command_handling_reset_the_lane() {
+        timeout_cleanup_fixture(true, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn three_timeouts_reset_a_previously_launched_lane() {
+        timeout_cleanup_fixture(false, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn three_timeouts_before_command_handling_reset_a_previously_launched_lane() {
+        timeout_cleanup_fixture(true, true);
+    }
+
+    #[cfg(unix)]
+    fn timeout_cleanup_fixture(stall_before_log: bool, previously_launched: bool) {
         let tmp = tempfile::tempdir().unwrap();
         let fake = tmp.path().join("agent-browser");
-        // Sleeps unless asked to close, and records every argv it sees.
-        std::fs::write(&fake, "#!/bin/sh\necho \"$@\" >> \"$AB_LOG\"\ncase \"$*\" in *close*) echo '{\"success\":true,\"data\":{\"closed\":true}}';; *) sleep 5;; esac\n").unwrap();
+        // Setup and close succeed; snapshots can stall before command handling.
+        // Exec keeps a sleeping grandchild from retaining the output pipes.
+        std::fs::write(&fake, r#"#!/bin/sh
+case "$*" in
+  *close*) echo "$@" >> "$AB_LOG"; echo '{"success":true,"data":{"closed":true}}' ;;
+  *snapshot*)
+    if [ "$AB_STALL_BEFORE_LOG" = 1 ]; then exec sleep 5; fi
+    echo "$@" >> "$AB_LOG"
+    exec sleep 5 ;;
+  *) echo "$@" >> "$AB_LOG"; echo '{"success":true,"data":{}}' ;;
+esac
+"#).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let log_path = tmp.path().join("log");
         let mut env = ProcessEnvironment { vars: Vec::new(), socket_dir: None, owns_socket_directory: false };
         env.vars.push(("AB_LOG".into(), log_path.to_string_lossy().into_owned()));
+        env.vars.push(("AB_STALL_BEFORE_LOG".into(), u8::from(stall_before_log).to_string()));
         let bridge = Bridge::with_binary(env, fake);
         let session = bridge.session("default", tmp.path().join("profile"), tmp.path().join("downloads"));
-        for _ in 0..CONSECUTIVE_TIMEOUT_LIMIT {
+        if previously_launched {
+            bridge.with_session(&session, |ctx| {
+                ctx.ensure_tab("t1").unwrap();
+                ctx.lane.capture_active = true;
+            });
+        }
+        assert_eq!(bridge.live_session_names(), if previously_launched { vec![session.name.clone()] } else { Vec::new() });
+        for attempt in 1..=CONSECUTIVE_TIMEOUT_LIMIT {
             let err = bridge
                 .with_session(&session, |ctx| ctx.run(&["snapshot"], ExecOptions { timeout: Duration::from_millis(1200), stdin: None }))
                 .unwrap_err();
             assert_eq!(err.code, "browser_timeout");
+            // Count the bridge's timeout results, not child log writes: a
+            // timed-out client need not have reached its command handler.
+            let reset = attempt == CONSECUTIVE_TIMEOUT_LIMIT;
+            let still_live = previously_launched && !reset;
+            bridge.with_session(&session, |ctx| {
+                assert_eq!(ctx.lane.consecutive_timeouts, if reset { 0 } else { attempt });
+                assert_eq!(ctx.lane.launched, still_live);
+                assert_eq!(ctx.lane.active_tab.as_deref(), if still_live { Some("t1") } else { None });
+                assert_eq!(ctx.lane.capture_active, still_live);
+            });
+            assert_eq!(bridge.live_session_names(), if still_live { vec![session.name.clone()] } else { Vec::new() });
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            assert_eq!(log.matches("close").count(), usize::from(reset), "{log}");
         }
         let log = std::fs::read_to_string(&log_path).unwrap();
-        assert_eq!(log.matches("snapshot").count(), 3);
+        if stall_before_log {
+            assert!(!log.contains("snapshot"), "the client must stall before handling snapshots: {log}");
+        }
         assert!(log.lines().last().unwrap().contains("close"), "{log}");
         bridge.with_session(&session, |ctx| {
             assert_eq!(ctx.lane.consecutive_timeouts, 0);

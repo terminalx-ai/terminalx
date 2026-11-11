@@ -1,12 +1,18 @@
-import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
+import { cn } from "@/lib/cn";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { TerminalMoveButton } from "./TerminalMoveButton";
+import { TerminalTools } from "./TerminalTools";
+import { EnvironmentNotice } from "./EnvironmentNotice";
+import { LocalTerminalLinks } from "./LocalTerminalLinks";
 import { pty } from "@/lib/api";
-import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
+import { disposeInstance, getInstance, isAgentPane, peekInstance, registerTerminalFactory, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
 import { terminalInput } from "@/lib/terminalInput";
-import { fitTerminal } from "@/lib/terminalFit";
+import { deferredTerminalFit, fitTerminal } from "@/lib/terminalFit";
+import { acknowledgeTerminalResize, coordinateTerminalResize, isOutputResize, reassertTerminalResize, requestTerminalResize, requestedTerminalSize, stopTerminalOutput } from "@/lib/terminalOutput";
 import { TerminalBufferCleanup } from "@/lib/terminalBufferCleanup";
 import { terminalColorHex } from "@/lib/terminalColor";
 import { hideWebgl, recoverWebgl, showWebgl } from "@/lib/terminalWebgl";
@@ -27,9 +33,10 @@ function cssVar(name: string): string {
 /** The terminal's palette follows the app's mode; ANSI colours are tuned per mode. */
 export function themeFor(mode: "dark" | "light") {
   const fg = terminalColorHex(cssVar("--foreground"), mode === "dark" ? "#e6e6e6" : "#222222");
-  // The page surface, opaque: programs that query the background (OSC 11)
-  // then learn the real mode instead of a transparent black.
-  const bg = terminalColorHex(cssVar("--surface-page"), mode === "dark" ? "#1c1c1f" : "#f7f7f5");
+  // The terminal's own surface, opaque: programs that query the background (OSC 11)
+  // then learn the real mode instead of a transparent black. The view around the
+  // canvas is drawn in the same colour (`bg-terminal`), so there is no box.
+  const bg = terminalColorHex(cssVar("--surface-terminal"), mode === "dark" ? "#0b0b0b" : "#f7f7f5");
   return mode === "dark"
     ? {
         background: bg,
@@ -114,14 +121,31 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
   // (this one disposed, the next one created), or this one attached again
   // over a new connection, has another, and neither can detach or answer for
   // the other, in whatever order their calls land.
-  const attach = () => {
+  const attach = (reset = false) => {
     const token = crypto.randomUUID();
-    const view = { token, retired: false, feed: feedLocalPane(id, token, term, { paced: !isAgentPane(id), retire: () => disposeInstance(id) }) };
-    void subscribeTerminals()
-      .then(() => (view.retired ? undefined : pty.attach(id, token, view.feed.data)))
+    const view = { token, retired: false, failed: false, ready: Promise.resolve(), feed: feedLocalPane(id, token, term, { paced: !isAgentPane(id), retire: () => disposeInstance(id) }) };
+    // Finish already queued parser writes before replaying a new attachment.
+    const drained = reset ? new Promise<void>((resolve) => term.write("", () => {
+      if (!view.retired) term.reset();
+      resolve();
+    })) : Promise.resolve();
+    view.ready = drained.then(() => subscribeTerminals())
+      .then(() => {
+        if (view.retired) throw new Error("The terminal attachment was cancelled. Try opening Terminal view again.");
+        return pty.attachSized(id, token, view.feed.data);
+      })
       // Retired while the attach was on its way: it must not be left attached to nothing.
-      .then(() => (view.retired ? pty.detach(id, token) : undefined))
-      .catch(() => {});
+      .then(async () => {
+        if (view.retired) {
+          await pty.detach(id, token);
+          throw new Error("The terminal attachment was replaced. Try opening Terminal view again.");
+        }
+        reassertTerminalResize(term);
+      })
+      .catch((error: unknown) => { view.failed = true; throw error; });
+    // Hidden views attach in the background. Explicit switches observe this
+    // same promise through ensureAttached and retain Chat on rejection.
+    void view.ready.catch(() => {});
     return view;
   };
   const retire = (view: ReturnType<typeof attach>) => {
@@ -131,31 +155,32 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
   };
   let view = attach();
   let released = false;
-  let reattaching = 0;
   const input = terminalInput(id);
   term.onData(input.write);
   term.onBinary(input.write);
-  term.onResize(({ cols, rows }) => void pty.resize(id, cols, rows).catch(() => {}));
+  coordinateTerminalResize(term, (size) => pty.resize(id, size.cols, size.rows).then(() => acknowledgeTerminalResize(term, size)));
+  term.onResize((size) => { if (!isOutputResize(term)) requestTerminalResize(term, size); });
   return {
     el,
     term,
     fit,
     restorable: true,
     attachedAs: (token) => !released && view.token === token,
+    ensureAttached: async () => {
+      if (released) throw new Error("The terminal view was closed. Try opening it again.");
+      if (view.failed) { retire(view); view = attach(true); }
+      const requested = view;
+      await requested.ready;
+      if (released || view !== requested) throw new Error("The terminal connection changed while opening. Try again.");
+    },
     reattach: () => {
       if (released) return;
       retire(view);
-      const request = ++reattaching;
-      // What the old connection delivered is parsed first; then the screen is
-      // drawn again from the pane's scrollback, which the attach replays.
-      term.write("", () => {
-        if (released || request !== reattaching) return;
-        term.reset();
-        view = attach();
-      });
+      view = attach(true);
     },
     release: () => {
       released = true;
+      stopTerminalOutput(term);
       input.stop();
       retire(view);
     },
@@ -185,18 +210,29 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
 export function TerminalView({
   id,
   visible,
+  focused = visible,
   create,
   fit = true,
   dropRefusal,
   redraw = true,
+  moveToDock = false,
+  actions,
+  pinned = false,
 }: {
   id: string;
   visible: boolean;
+  focused?: boolean;
   create?: (mode: "dark" | "light") => TerminalInstance;
   fit?: boolean;
   dropRefusal?: TerminalDropRefusal;
   /** The "Redraw terminal" control above it; a compact view leaves it out. */
   redraw?: boolean;
+  /** A standalone local shell can move into the session dock. */
+  moveToDock?: boolean;
+  /** More controls for the same corner toolbar, beside Redraw. */
+  actions?: ReactNode;
+  /** Keep the toolbar on screen; otherwise it shows only while the pointer or focus is on the terminal. */
+  pinned?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLDivElement>(null);
@@ -207,6 +243,9 @@ export function TerminalView({
   const pageShown = useSyncExternalStore(subscribeVisibility, pageVisible, () => true);
   const shown = visible && pageShown;
   const make = () => (create ? create(resolvedMode) : createInstance(id, resolvedMode));
+  const factory = useRef(make);
+  factory.current = make;
+  useEffect(() => registerTerminalFactory(id, () => factory.current()), [id]);
   const fitting = useRef(fit);
   fitting.current = fit;
 
@@ -236,7 +275,7 @@ export function TerminalView({
     if (!shown || create) return;
     const assert = () => {
       const inst = peekInstance(id);
-      if (inst && inst.el.isConnected) void pty.resize(id, inst.term.cols, inst.term.rows).catch(() => {});
+      if (inst && inst.el.isConnected) requestTerminalResize(inst.term, requestedTerminalSize(inst.term), true);
     };
     assert();
     window.addEventListener("focus", assert);
@@ -258,13 +297,15 @@ export function TerminalView({
         /* not laid out yet */
       }
     };
-    const ro = new ResizeObserver(refit);
+    const deferred = deferredTerminalFit(() => fitting.current ? peekInstance(id)?.term : undefined, el);
+    const ro = new ResizeObserver(deferred.schedule);
     ro.observe(el);
     const frame = requestAnimationFrame(refit);
     trimTerminalInstances();
     return () => {
       cancelAnimationFrame(frame);
       ro.disconnect();
+      deferred.cancel();
       trimTerminalInstances();
     };
   }, [id]);
@@ -281,9 +322,13 @@ export function TerminalView({
     const inst = getInstance(id, make, el);
     showWebgl(inst.term);
     return () => {
-      hideWebgl(inst.term);
-      if (inst.el.parentNode === el) el.removeChild(inst.el);
-      trimTerminalInstances();
+      if (inst.el.parentNode === el) {
+        hideWebgl(inst.term);
+        el.removeChild(inst.el);
+      }
+      // A dock/tab move mounts its new host in this same commit. Trim only
+      // afterward, so an archived or full idle cache cannot evict it mid-move.
+      queueMicrotask(() => trimTerminalInstances());
     };
   }, [id, shown]);
 
@@ -297,27 +342,43 @@ export function TerminalView({
       try {
         if (fitting.current) fitTerminal(inst.term, el);
         inst.term.refresh(0, inst.term.rows - 1);
-        inst.term.focus();
+        if (focused) inst.term.focus();
       } catch {
         /* ignore */
       }
     });
     return () => cancelAnimationFrame(frame);
-  }, [id, shown, fit]);
+  }, [id, shown, fit, focused]);
 
   return (
-    <div ref={frame} className="relative flex h-full w-full flex-col" data-testid="terminal-drop-target" {...drop.zoneProps}>
-      {redraw && <div className="flex h-6 shrink-0 justify-end px-3">
-        <button
-          type="button"
-          className="rounded px-2 text-xs text-muted-foreground hover:text-foreground"
-          onClick={recover}
-          title="Redraw the terminal without restarting its process"
-          tabIndex={visible ? 0 : -1}
+    <div ref={frame} className="group/terminal relative flex h-full w-full flex-col bg-terminal" data-testid="terminal-drop-target" {...drop.zoneProps}>
+      <TerminalTools id={id} shown={shown} frame={frame} />
+      <EnvironmentNotice id={id} active={visible && !create} />
+      {!create && <LocalTerminalLinks id={id} active={shown} />}
+      {(redraw || actions || moveToDock) && (
+        // Floats over the terminal's corner rather than taking a row: nothing is drawn until it is wanted.
+        <div
+          className={cn(
+            "absolute top-1.5 right-3 z-10 flex items-center gap-1 rounded-md border border-hairline bg-terminal/90 p-0.5 shadow-sm backdrop-blur transition-opacity duration-150",
+            pinned ? "opacity-100" : "pointer-events-none opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100",
+          )}
+          data-testid="terminal-toolbar"
         >
-          Redraw terminal
-        </button>
-      </div>}
+          {actions}
+          {moveToDock && <TerminalMoveButton id={id} docked={false} />}
+          {redraw && (
+            <button
+              type="button"
+              className="h-6 rounded px-2 text-xs text-muted-foreground hover:bg-veil-raised hover:text-foreground"
+              onClick={recover}
+              title="Redraw the terminal without restarting its process"
+              tabIndex={visible ? 0 : -1}
+            >
+              Redraw terminal
+            </button>
+          )}
+        </div>
+      )}
       <div ref={host} className="terminal-host min-h-0 w-full flex-1 px-2 pt-1" />
       <TerminalDropHint drop={drop} />
     </div>

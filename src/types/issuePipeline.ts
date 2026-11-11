@@ -45,6 +45,7 @@ export interface PipelineEvent {
   commit?: string | null;
   url?: string | null;
   sessionId?: string | null;
+  actor?: { kind: "person" | "system" } | { kind: "selfUi"; sessionId?: string | null; tabId?: string | null } | { kind: "cli"; sessionId?: string | null; tabId?: string | null };
 }
 
 /** Why a pipeline is at Ready to merge or Needs you; `note` says it in words. */

@@ -1,4 +1,8 @@
+import { bootSelfUi } from "@/lib/selfUi";
+import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
+import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
 import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
 import { PanelLeft, PanelRight } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -23,8 +27,8 @@ import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
-import { startUpdateChecks } from "@/lib/updates";
-import { bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
+import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
+import { archiveSession, getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent, type ImageInput } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -33,7 +37,6 @@ import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
-import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
 import { GuestSessionHost } from "@/components/session/GuestSession";
@@ -45,6 +48,7 @@ import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
 import { bootMergedCleanup } from "@/lib/mergedCleanup";
+import { WorkspaceRestoreDialog } from "@/components/session/WorkspaceRestoreDialog";
 import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
 import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialog";
 import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
@@ -53,6 +57,7 @@ import { useRuntimeSwitch } from "@/lib/localRuntime";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { bootIssuePipelines } from "@/lib/issuePipeline";
+import { PanelPresence } from "./PanelPresence";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
@@ -66,6 +71,13 @@ import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
+import { openLocalProject } from "@/lib/projectStart";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { REPO_URL, repoFile } from "@/lib/repo";
+import { workspaceKey, branchSessionsAsTabs } from "@/lib/tabLayouts";
+import { conversationBranch } from "@/lib/checkout";
+import { stepAttentionSession, stepVisibleSession } from "@/lib/sessionNavigation";
+import { ImageViewerHost } from "@/components/ui/ImageViewer";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
@@ -102,6 +114,8 @@ export function AppShell() {
   // Every request for Settings, so asking again with it open still lands on the section asked for.
   const [settingsRequest, setSettingsRequest] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // A menu/palette selection navigates away from Settings just like the sidebar.
+  useEffect(() => setSettingsOpen(false), [store.navigationVersion]);
 
   // An update is looked for in the background, so it is seen without going to Settings for it.
   useEffect(() => startUpdateChecks(), []);
@@ -113,6 +127,7 @@ export function AppShell() {
     startIdleArchive();
     void bootAutomations();
     void bootIssuePipelines();
+    void bootSelfUi();
     void loadModels();
     startNotifications();
     void bootStatus();
@@ -159,8 +174,8 @@ export function AppShell() {
   }, []);
   // An organization's page (PRO-107): a message that names its Agent logins offers the way there, with the
   // organization it is about. The Organizations section opens that page, and the logins scroll themselves into view.
-  const openOrganizationsSettings = useCallback(() => {
-    setSettingsTab("organizations");
+  const openOrganizationsSettings = useCallback((row: "organizations.overview" | "organizations.agentLogins") => {
+    setSettingsTab(row);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
@@ -180,17 +195,32 @@ export function AppShell() {
     setSettingsOpen(false);
     openHome();
   }, []);
-  const showIssues = useCallback(() => openIssues(), []);
-  const showAgents = useCallback(() => openAgents(), []);
+  const showIssues = useCallback(() => { setSettingsOpen(false); openIssues(); }, []);
+  const showAgents = useCallback(() => { setSettingsOpen(false); openAgents(); }, []);
   const showStats = useCallback(() => openStats(), []);
   const showSkills = useCallback(() => openSkills(), []);
-  const showAutomations = useCallback(() => openAutomations(), []);
+  const showAutomations = useCallback(() => { setSettingsOpen(false); openAutomations(); }, []);
   const showQuickChat = useCallback(() => void showFloatingWindow().catch((e) => console.error("floating window", e)), []);
 
+  useShortcut("app.about", () => openSettings("about"));
+  useShortcut("app.checkUpdates", () => { openSettings("about"); void checkForUpdate(); });
+  useShortcut("app.shortcuts", () => openSettings("shortcuts"));
+  useShortcut("app.addProject", () => { setSettingsOpen(false); void openLocalProject().catch((error) => console.error("add project", error)); });
+  useShortcut("app.openRecent", () => setPaletteOpen(true));
+  useShortcut("app.nextSession", () => { setSettingsOpen(false); stepVisibleSession(1); });
+  useShortcut("app.nextAttention", () => { setSettingsOpen(false); stepAttentionSession(); });
+  useShortcut("session.archive", () => {
+    const id = getSessionStore().selectedSessionId;
+    if (id && !isCloudKey(id)) void archiveSession(id, true).catch(() => {});
+  });
+  useShortcut("app.previousSession", () => { setSettingsOpen(false); stepVisibleSession(-1); });
+  useShortcut("app.docs", () => { void openUrl(repoFile("README.md")).catch(console.error); });
+  useShortcut("app.reportIssue", () => { void openUrl(`${REPO_URL}/issues/new`).catch(console.error); });
   useShortcut("app.toggleSidebar", toggleSidebar);
   useShortcut("app.togglePanel", togglePanel);
   useShortcut("app.settings", () => openSettings());
   useShortcut("app.newSession", newSession);
+  useShortcut("app.startFrom", () => { setSettingsOpen(false); openNewSession(true); });
   useShortcut("app.home", showHome);
   useShortcut("app.issues", showIssues);
   useShortcut("app.agentDashboard", showAgents);
@@ -212,22 +242,30 @@ export function AppShell() {
 
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
-      <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
-        <StarReminder />
+      <SelfUiAccess />
+      {/* Merged-workspace notices, top right under the tabs: a stack of them in the bottom corner covered the composer
+          and its send button. Toasts and close-undo notices, which answer what was just done there, stay below. */}
+      <div className="pointer-events-none fixed top-22 right-4 z-(--z-toast) flex max-h-[calc(100dvh-8rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <MergedCleanupNotices />
+      </div>
+      <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <CloseUndoNotices />
         <Toasts />
+        <WorktreeCopyNotices />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
         <CleanupIndicator onOpenStorage={openStorageSettings} />
       </div>
       <BypassDialog />
+      <ImageViewerHost />
       <SessionDialogs />
       <CloudShareDialogHost />
       <CloudSchedulesDialogHost />
       <ShareSessionDialogHost />
+      <SignInLinkDialog />
       <GuestSessionHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />
+      <WorkspaceRestoreDialog />
       <WorktreeCleanupDialog />
       <ProjectStartDialogHost />
       <div className="flex min-h-0 flex-1">
@@ -249,6 +287,7 @@ export function AppShell() {
           </Suspense>
         ) : (
           <>
+            <PanelPresence side="left" open={sidebarOpen}>
             {sidebarOpen && (
               <Sidebar
                 onToggle={toggleSidebar}
@@ -263,6 +302,7 @@ export function AppShell() {
                 onSearch={() => setPaletteOpen(true)}
               />
             )}
+            </PanelPresence>
 
             {cloudKey ? (
               <main className={MAIN}>
@@ -272,7 +312,7 @@ export function AppShell() {
               </main>
             ) : selected ? (
               <main className={MAIN}>
-                <ErrorBoundary key={selected.id} label="the session">
+                <ErrorBoundary key={branchSessionsAsTabs(prefs) ? `${workspaceKey(selected, store.chatsPath)}:${conversationBranch(selected, store.chatsPath, store.workspaces)}` : selected.id} label="the session">
                   <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                 </ErrorBoundary>
               </main> ) : behind ? (
@@ -347,20 +387,20 @@ function UnselectedWorkspace({
 
   const preset = store.newSessionPreset;
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject ?? store.lastProject;
-  const newProject = store.projects.find((project) => project.path === wanted) ?? store.projects[0] ?? null;
+  const newProject = store.projects.find((project) => project.path === wanted) ?? (preset ? null : store.projects[0]) ?? null;
   const issueProject = store.projects.find((project) => project.path === issueProjectPath) ?? null;
-  const project = view === "new" ? newProject : view === "issues" ? issueProject : null;
+  const project = view === "new" ? (store.newSessionChat ? null : newProject) : view === "issues" ? issueProject : null;
   const cwd = view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
   const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
-  // A cloud draft has no local checkout to show.
-  const panelAvailable = !!cwd && !!project && !(view === "new" && store.cloudSessionPreset);
+  // A cloud or project-less draft has no local checkout to show.
+  const panelAvailable = !!cwd && !!project && !(view === "new" && (store.cloudSessionPreset || store.newSessionChat));
   const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
   const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && view === "new" ? "branch" : useWorktree ? "base" : "branch";
   // Home always offers the welcome actions, including after a project has been added.
   // With no local project there is nothing to start a session in: the start screen offers the ways to get one.
-  // Not before the projects are read, and not over a cloud draft, which needs no local project.
-  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset);
+  // Not before the projects are read, or over a cloud or project-less draft.
+  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(view === "new" && store.newSessionChat));
 
   return (
     <>
@@ -435,6 +475,7 @@ function UnselectedWorkspace({
           {checkoutEditorId && hasCheckoutEditors ? <EditorSplit sessionId={checkoutEditorId} active /> : null}
         </section>
       </main>
+      <PanelPresence side="right" open={!!(prefs.panelOpen && panelAvailable && cwd && project)}>
       {prefs.panelOpen && panelAvailable && cwd && project && (
         <RightPanel
           key={cwd}
@@ -447,6 +488,7 @@ function UnselectedWorkspace({
           workspace={workspace?.managed && !workspace.isMain ? { projectPath: project.path, name: workspace.name } : undefined}
         />
       )}
+      </PanelPresence>
       {underDialog && <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />}
     </>
   );

@@ -10,6 +10,7 @@
 @theme inline {
   --color-background: var(--background);
   --color-chat: var(--surface-chat);
+  --color-terminal: var(--surface-terminal);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
@@ -198,7 +199,8 @@
   }
 }
 
-.animate-fade-in {
+/* A utility so `data-[state=open]:animate-fade-in` (menus, popovers) applies at all. */
+@utility animate-fade-in {
   animation: fade-in 140ms ease-out both;
 }
 .animate-pulse-soft {
@@ -251,9 +253,30 @@
 
 /* ---------- Transcript prose ---------- */
 .prose-chat {
-  font-size: 14px;
-  line-height: 1.65;
+  /* 15px reads without effort at a desk; 14px was small for long replies. Body text a step softer than full white, so
+     what is bold, a heading or a link stands out of it. */
+  font-size: 15px;
+  line-height: 1.7;
   overflow-wrap: anywhere;
+  color: color-mix(in oklab, var(--foreground) 86%, transparent);
+}
+/* A line the eye can follow back: about 70 characters, not the column's 110. Tables and code keep the full width. */
+.prose-chat p,
+.prose-chat li,
+.prose-chat blockquote,
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3,
+.prose-chat h4 {
+  max-width: 72ch;
+}
+.prose-chat strong,
+.prose-chat b,
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3,
+.prose-chat h4 {
+  color: var(--foreground);
 }
 .prose-chat > :first-child {
   margin-top: 0;
@@ -266,7 +289,7 @@
 .prose-chat ol,
 .prose-chat blockquote,
 .prose-chat table {
-  margin: 0.6em 0;
+  margin: 0.75em 0;
 }
 .prose-chat h1,
 .prose-chat h2,
@@ -301,12 +324,20 @@
   color: var(--foreground);
   text-decoration: none;
 }
+/* A quiet pill: set apart from the words by its face, a soft ground and a warm tint, not by an outline that pulls the eye. */
 .prose-chat code:not(pre code) {
   font-family: var(--font-mono);
-  font-size: 0.92em;
-  background: var(--code-bg);
-  border-radius: 4px;
-  padding: 0.1em 0.35em;
+  font-size: 0.84em;
+  color: color-mix(in oklab, var(--accent) 55%, var(--foreground));
+  background: var(--veil-raised);
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  padding: 0.12em 0.38em;
+  /* Its own line box is no taller than the text's, so a pill on a line does not open it up. */
+  line-height: 1;
+  /* Broken across lines, each part is a whole pill. */
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 .prose-chat pre {
   font-family: var(--font-mono);
@@ -430,9 +461,180 @@
   background-color: var(--background);
 }
 
-/* Support reminders yield to approval and update dialogs. Keep their stack
-   space so higher-priority agent notices do not jump when a dialog opens. */
+/* Support reminders yield to approval and update dialogs. Keep their layout
+   space so the workspace does not jump when a dialog opens. */
 body:has([role="dialog"]) [data-star-reminder],
 body:has([role="alertdialog"]) [data-star-reminder] {
   visibility: hidden;
+}
+
+/* Dialogs ease in and out instead of appearing at once: the backdrop fades,
+   the dialog rises into place and grows from 94% on a long, soft ease; it
+   leaves quicker, sinking a little as it fades. Arriving reads as deliberate,
+   leaving as quick. A dialog its caller removes at once still plays the exit
+   (`ui/dialog.tsx`, `leaveGracefully`). */
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.94); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes dialog-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(8px) scale(0.96); }
+}
+@keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes overlay-out { from { opacity: 1; } to { opacity: 0; } }
+/* Utilities, not plain classes: they are applied through `data-[state=…]:`
+   variants, and Tailwind drops a variant of a class it did not define, which
+   left every dialog appearing and vanishing at once. */
+@utility animate-dialog-in { animation: dialog-in 340ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+@utility animate-dialog-out { animation: dialog-out 200ms cubic-bezier(0.4, 0, 1, 1) both; }
+@utility animate-overlay-in { animation: overlay-in 280ms ease-out both; }
+@utility animate-overlay-out { animation: overlay-out 200ms ease-in both; }
+
+/* The share dialog's collaboration scene (CollaborationScene.tsx), told at
+   the prompt over a nine-second loop:
+     0–25%  you go to the prompt, click, type, send (row 1);
+     28–37% the model thinks, then answers (row 2);
+     35–60% the designer goes to the prompt, clicks, types, sends (row 3);
+     63–72% the model thinks, then answers again (row 4);
+     74–82% the agent, which joined, types and sends its own prompt (row 5);
+     92%    the conversation clears for the next loop.
+   The conversation sits in a short window above the prompt: each row takes
+   no room until it arrives, so it pushes the earlier ones up, where they fade.
+   Under the prompt, "Agent joined" from the start and "Designer joined"
+   just before the designer's cursor appears. */
+.cs-row, .cs-typing, .cs-ring, .cs-cursor, .cs-send, .cs-think, .cs-reply { animation: 9s infinite both; }
+.cs-reply { transform-origin: left; animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes cs-dot { 0%, 60%, 100% { opacity: 0.35; transform: none; } 30% { opacity: 1; transform: translateY(-1.5px); } }
+.cs-dot { animation: cs-dot 0.9s ease-in-out infinite; }
+/* A row takes no room until it arrives, so each new one pushes the ones above it up the window. */
+.cs-row { animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); overflow: hidden; }
+/* The window the conversation scrolls through: older rows fade out at its top. */
+.cs-window { mask-image: linear-gradient(to bottom, transparent, black 55%); }
+@keyframes cs-row-1 { 0%, 24% { opacity: 0; max-height: 0; transform: translateY(6px); } 28%, 92% { opacity: 1; max-height: 2.5rem; transform: none; } 97% { opacity: 0; max-height: 2.5rem; } 100% { opacity: 0; max-height: 0; } }
+@keyframes cs-agent-1 { 0%, 27% { opacity: 0; max-height: 0; transform: translateY(6px); } 30%, 92% { opacity: 1; max-height: 2.5rem; transform: none; } 97% { opacity: 0; max-height: 2.5rem; } 100% { opacity: 0; max-height: 0; } }
+@keyframes cs-row-3 { 0%, 59% { opacity: 0; max-height: 0; transform: translateY(6px); } 63%, 92% { opacity: 1; max-height: 2.5rem; transform: none; } 97% { opacity: 0; max-height: 2.5rem; } 100% { opacity: 0; max-height: 0; } }
+@keyframes cs-agent-2 { 0%, 62% { opacity: 0; max-height: 0; transform: translateY(6px); } 65%, 92% { opacity: 1; max-height: 2.5rem; transform: none; } 97% { opacity: 0; max-height: 2.5rem; } 100% { opacity: 0; max-height: 0; } }
+@keyframes cs-think-1 { 0%, 28% { opacity: 0; } 30%, 33% { opacity: 1; } 35%, 100% { opacity: 0; } }
+@keyframes cs-think-2 { 0%, 63% { opacity: 0; } 65%, 68% { opacity: 1; } 70%, 100% { opacity: 0; } }
+@keyframes cs-reply-1 { 0%, 33% { opacity: 0; transform: scaleX(0); } 38%, 100% { opacity: 1; transform: none; } }
+@keyframes cs-reply-2 { 0%, 68% { opacity: 0; transform: scaleX(0); } 73%, 100% { opacity: 1; transform: none; } }
+.cs-row-1 { animation-name: cs-row-1; }
+.cs-agent-1 { animation-name: cs-agent-1; }
+.cs-think-1 { animation-name: cs-think-1; }
+.cs-reply-1 { animation-name: cs-reply-1; }
+.cs-row-3 { animation-name: cs-row-3; }
+@keyframes cs-row-5 { 0%, 81% { opacity: 0; max-height: 0; transform: translateY(6px); } 85%, 92% { opacity: 1; max-height: 2.5rem; transform: none; } 97% { opacity: 0; max-height: 2.5rem; } 100% { opacity: 0; max-height: 0; } }
+.cs-row-5 { animation-name: cs-row-5; }
+@keyframes cs-ring-agent { 0%, 73% { opacity: 0; } 74%, 82% { opacity: 1; } 85%, 100% { opacity: 0; } }
+@keyframes cs-typing-agent { 0%, 74% { opacity: 0; width: 0; } 75% { opacity: 1; width: 0; } 81% { opacity: 1; width: 52%; } 82%, 100% { opacity: 0; width: 52%; } }
+.cs-ring-agent { animation-name: cs-ring-agent; }
+.cs-typing-agent { animation-name: cs-typing-agent; }
+.cs-agent-2 { animation-name: cs-agent-2; }
+.cs-think-2 { animation-name: cs-think-2; }
+.cs-reply-2 { animation-name: cs-reply-2; }
+
+@keyframes cs-typing-me { 0%, 10% { opacity: 0; width: 0; } 11% { opacity: 1; width: 0; } 23% { opacity: 1; width: 58%; } 25%, 100% { opacity: 0; width: 58%; } }
+@keyframes cs-typing-designer { 0%, 45% { opacity: 0; width: 0; } 46% { opacity: 1; width: 0; } 58% { opacity: 1; width: 48%; } 60%, 100% { opacity: 0; width: 48%; } }
+.cs-typing { animation-timing-function: steps(14, end); }
+.cs-typing-me { animation-name: cs-typing-me; }
+.cs-typing-designer { animation-name: cs-typing-designer; }
+
+@keyframes cs-ring-me { 0%, 9% { opacity: 0; } 10%, 25% { opacity: 1; } 28%, 100% { opacity: 0; } }
+@keyframes cs-ring-designer { 0%, 44% { opacity: 0; } 45%, 60% { opacity: 1; } 63%, 100% { opacity: 0; } }
+.cs-ring-me { animation-name: cs-ring-me; }
+.cs-ring-designer { animation-name: cs-ring-designer; }
+
+@keyframes cs-send { 0%, 23%, 27%, 58%, 62%, 80%, 84%, 100% { transform: none; opacity: 0.5; } 25%, 60%, 82% { transform: scale(1.25); opacity: 1; } }
+.cs-send { animation-name: cs-send; }
+
+.cs-cursor { animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1); will-change: left, top, transform; }
+/* You: from the top left to the prompt, a click, still while typing, then away. */
+@keyframes cs-cursor-me {
+  0%, 100% { left: 4%; top: 6%; transform: none; }
+  8% { left: 24%; top: 62%; transform: none; }
+  9% { transform: scale(0.82); }
+  10%, 25% { left: 24%; top: 62%; transform: none; }
+  36%, 90% { left: 0%; top: 30%; }
+}
+/* The designer: waits at the right, goes to the prompt in their turn, then back. */
+/* The designer: not there until they join (29%), then takes the prompt in their turn. */
+@keyframes cs-cursor-designer {
+  0%, 28% { left: 80%; top: 10%; opacity: 0; transform: none; }
+  32%, 35% { left: 74%; top: 6%; opacity: 1; transform: none; }
+  43% { left: 30%; top: 62%; transform: none; }
+  44% { transform: scale(0.82); }
+  45%, 60% { left: 30%; top: 62%; transform: none; }
+  72%, 94% { left: 72%; top: 18%; opacity: 1; }
+  98%, 100% { left: 74%; top: 18%; opacity: 0; }
+}
+/* Joined notices under the prompt: the agent's at the start, the designer's just before they appear. */
+.cs-joined { animation: 9s ease-out infinite both; }
+@keyframes cs-joined-agent { 0% { opacity: 0; transform: translateY(3px); } 4%, 94% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; } }
+@keyframes cs-joined-designer { 0%, 27% { opacity: 0; transform: translateY(3px); } 31%, 94% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; } }
+.cs-joined-agent { animation-name: cs-joined-agent; }
+.cs-joined-designer { animation-name: cs-joined-designer; }
+.cs-cursor-me { animation-name: cs-cursor-me; }
+.cs-cursor-designer { animation-name: cs-cursor-designer; }
+
+/* HandoffScene: context carried from this session to a new one. Five seconds a loop. */
+.hs-packet, .hs-fill, .hs-target { animation: 5s cubic-bezier(0.65, 0, 0.35, 1) infinite both; }
+/* Along its path only (percentages of it, no calc(), which WebKit would not animate). */
+@keyframes hs-packet {
+  0%, 8% { left: 4%; opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
+  14% { left: 18%; opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  40% { left: 82%; opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  48%, 100% { left: 96%; opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
+}
+.hs-packet { animation-name: hs-packet; }
+@keyframes hs-target { 0%, 38% { box-shadow: none; } 44% { box-shadow: inset 0 0 0 1.5px var(--color-accent); } 60%, 100% { box-shadow: none; } }
+.hs-target { animation-name: hs-target; }
+.hs-fill { transform-origin: left; animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes hs-fill-1 { 0%, 44% { opacity: 0; transform: scaleX(0); } 52%, 90% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; transform: none; } }
+@keyframes hs-fill-2 { 0%, 50% { opacity: 0; transform: scaleX(0); } 58%, 90% { opacity: 1; transform: none; } 98%, 100% { opacity: 0; transform: none; } }
+@keyframes hs-fill-3 { 0%, 58% { opacity: 0; } 64%, 90% { opacity: 1; } 98%, 100% { opacity: 0; } }
+.hs-fill-1 { animation-name: hs-fill-1; }
+.hs-fill-2 { animation-name: hs-fill-2; }
+.hs-fill-3 { animation-name: hs-fill-3; }
+@keyframes hs-caret { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+.hs-caret { animation: hs-caret 1s steps(1) infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cs-row, .cs-typing, .cs-ring, .cs-cursor, .cs-send, .cs-think, .cs-reply, .cs-dot, .cs-joined { animation: none; }
+  .hs-packet, .hs-fill, .hs-target, .hs-caret { animation: none; }
+  .hs-packet { opacity: 0; }
+  .cs-typing, .cs-ring, .cs-think { opacity: 0; }
+  .cs-cursor-me { left: 0%; top: 30%; }
+  .cs-cursor-designer { left: 72%; top: 18%; }
+}
+
+/* Panel motion, one system for every panel that comes and goes beside the
+   main view (PanelPresence.tsx): the left sidebar, the right panel, and any
+   panel added later. Tune it here, not per panel.
+
+   The panel's space is what moves: its width grows from nothing to the
+   panel's size, so the main view beside it glides over rather than jumping
+   once at the start or end. The panel itself stays solid, at its full width,
+   and slides in with the space, its inner edge leading, as a drawer does. Opening and closing share one curve, a
+   long deceleration that starts briskly and settles softly; closing is a
+   little shorter. */
+:root {
+  --panel-in-duration: 380ms;
+  --panel-out-duration: 320ms;
+  --panel-in-ease: cubic-bezier(0.25, 0.8, 0.25, 1);
+  --panel-out-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  /* A panel's content fading in when it is drawn from data read after the panel opened. */
+  --panel-content-duration: 300ms;
+}
+@keyframes panel-in { from { width: 0; } to { width: var(--panel-size); } }
+@keyframes panel-out { from { width: var(--panel-size); } to { width: 0; } }
+.animate-panel-in { animation: panel-in var(--panel-in-duration) var(--panel-in-ease) both; }
+.animate-panel-out { animation: panel-out var(--panel-out-duration) var(--panel-out-ease) both; }
+/* Content inside a panel that is drawn once its data is read (a branch, a list
+   of changes, a file tree) fades in as it arrives, so it never pops in after
+   the panel has opened. Put it on the view's own root. */
+@keyframes panel-content-in { from { opacity: 0; } to { opacity: 1; } }
+.animate-panel-content { animation: panel-content-in var(--panel-content-duration) ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .animate-panel-in, .animate-panel-out, .animate-panel-content { animation-duration: 1ms; }
 }

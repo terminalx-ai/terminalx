@@ -61,7 +61,9 @@ cd src-tauri && cargo test
 
 `pnpm check` runs the first two together and `pnpm test` runs vitest alone.
 The same four run on every pull request in `.github/workflows/ci.yml`, with
-portable checks and the full Rust suite on Linux. macOS keeps Clippy, WebKit,
+portable checks and the full Rust suite on GitHub-hosted Linux for PRs. The
+required statuses remain `check`, `frontend`, and `webkit-layout`; `check`
+aggregates every job. macOS keeps Clippy, WebKit,
 Apple icon checks and native helper checks. The full macOS Rust suite also runs
 on main, nightly and PRs selected for Apple-specific changes; see
 [CI runners and coverage](docs/CI-RUNNERS.md). Run `pnpm test:computer-macos`

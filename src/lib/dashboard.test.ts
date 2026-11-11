@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bucketSessions, DONE_PAGE, isUnread, matchesQuery, sessionColumn, toggleFilter, workspaceName, NO_FILTERS } from "@/lib/dashboard";
+import { bucketSessions, COLUMNS, DONE_PAGE, isUnread, matchesQuery, sessionColumn, toggleFilter, workspaceName, NO_FILTERS } from "@/lib/dashboard";
 import type { SessionEntry, TabStatus } from "@/types/session";
 
 function session(id: string, statuses: TabStatus[], patch: Partial<SessionEntry> = {}): SessionEntry {
@@ -13,6 +13,7 @@ function session(id: string, statuses: TabStatus[], patch: Partial<SessionEntry>
     title: id,
     created: "2026-01-01T00:00:00.000Z",
     modified: "2026-01-01T00:00:00.000Z",
+    lastMessageAt: statuses.length ? "2026-01-01T00:00:00.000Z" : null,
     archived: false,
     pinned: false,
     tabs: statuses.map((status, i) => ({
@@ -32,11 +33,42 @@ function session(id: string, statuses: TabStatus[], patch: Partial<SessionEntry>
 const opts = { query: "", filters: NO_FILTERS, projectName: () => "Raccoon" };
 
 describe("sessionColumn", () => {
+  it("keeps a legacy chat in Done after it is read without inventing a message timestamp", () => {
+    const legacy = { ...session("legacy", ["completed"], { lastMessageAt: null }), hasMessages: true };
+    expect(sessionColumn(legacy)).toBe("done");
+    legacy.tabs[0].status = "idle";
+    expect(sessionColumn(legacy)).toBe("done");
+    expect(bucketSessions([legacy]).done).toEqual([legacy]);
+    expect(legacy.lastMessageAt).toBeNull();
+  });
+
+  it("keeps a chat with no prompt out of Done", () => {
+    const empty = session("not-started", ["idle"], { lastMessageAt: null, modified: "2026-02-01T00:00:00.000Z" });
+    expect(sessionColumn(empty)).toBe("not-started");
+    expect(bucketSessions([empty]).done).toEqual([]);
+    expect(bucketSessions([empty])["not-started"]).toEqual([empty]);
+    expect(isUnread(empty)).toBe(false);
+    expect(COLUMNS).toContainEqual({ id: "not-started", label: "Not started" });
+  });
+
+  it("keeps active states first and recognizes messages in any tab", () => {
+    const value = session("mixed", ["idle", "idle"], { lastMessageAt: null });
+    value.tabs[1].lastMessageAt = value.created;
+    expect(sessionColumn(value)).toBe("done");
+    value.tabs[1].lastMessageAt = null;
+    value.tabs[1].status = "completed";
+    expect(sessionColumn(value)).toBe("done");
+    value.tabs[1].status = "in_progress";
+    expect(sessionColumn(value)).toBe("working");
+    value.tabs[0].status = "waiting";
+    expect(sessionColumn(value)).toBe("needs");
+  });
+
   it("puts a waiting tab first, then a running one, then everything else", () => {
     expect(sessionColumn(session("a", ["in_progress", "waiting"]))).toBe("needs");
     expect(sessionColumn(session("b", ["idle", "in_progress"]))).toBe("working");
     expect(sessionColumn(session("c", ["completed", "idle"]))).toBe("done");
-    expect(sessionColumn(session("d", []))).toBe("done");
+    expect(sessionColumn(session("d", []))).toBe("not-started");
   });
 
   it("counts a finished session as unread only while nothing else is happening", () => {
@@ -114,8 +146,8 @@ describe("bucketSessions", () => {
     expect(bucketSessions(sessions).done).toHaveLength(DONE_PAGE + 9);
   });
 
-  it("returns all three empty buckets and excludes ineligible sessions in every status", () => {
-    const empty = { needs: [], working: [], done: [] };
+  it("returns all four empty buckets and excludes ineligible sessions in every status", () => {
+    const empty = { needs: [], working: [], done: [], "not-started": [] };
     expect(bucketSessions([])).toEqual(empty);
     const sessions = [
       session("workspace", []),
@@ -131,7 +163,21 @@ describe("bucketSessions", () => {
 
   it("skips sessions that have no agent tabs", () => {
     const b = bucketSessions([session("workspace", [])], opts);
-    expect(b).toEqual({ needs: [], working: [], done: [] });
+    expect(b).toEqual({ needs: [], working: [], done: [], "not-started": [] });
+  });
+
+  it("filters and sorts Not started separately from Done, including quick chats", () => {
+    const empty = session("empty", ["idle"], { kind: "quick", lastMessageAt: null });
+    const newer = session("newer", ["idle"], { lastMessageAt: null, modified: "2026-02-01T00:00:00.000Z" });
+    const finished = session("finished", ["idle"]);
+    const archived = { ...empty, id: "archived", archived: true };
+    const all = [empty, finished, newer, archived];
+    const buckets = bucketSessions(all);
+    expect(buckets["not-started"].map((s) => s.id)).toEqual(["newer", "empty"]);
+    expect(buckets.done).toEqual([finished]);
+    expect(bucketSessions(all, { ...opts, filters: { ...NO_FILTERS, columns: ["done"] } })["not-started"]).toEqual([]);
+    expect(bucketSessions(all, { ...opts, filters: { ...NO_FILTERS, columns: ["not-started"] } }).done).toEqual([]);
+    expect(bucketSessions(all, { ...opts, query: "empty" })["not-started"]).toEqual([empty]);
   });
 
   it("drops archived sessions and sorts each column newest first", () => {
@@ -169,4 +215,15 @@ describe("toggleFilter", () => {
     expect(toggleFilter(list, "a")).toEqual([]);
     expect(list).toEqual(["a"]);
   });
+});
+
+it("keeps a manual unread reminder independent of the agent status", () => {
+  for (const status of ["idle", "waiting", "in_progress", "completed"] as const) {
+    const row = session("manual", [status]);
+    row.tabs[0].markedUnread = true;
+    expect(isUnread(row)).toBe(true);
+    expect(sessionColumn(row)).toBe(status === "waiting" ? "needs" : status === "in_progress" ? "working" : "done");
+    row.tabs[0].markedUnread = false;
+    expect(isUnread(row)).toBe(status === "completed");
+  }
 });

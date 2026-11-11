@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { ManualStatusIcon, ManualStatusMenu } from "@/components/session/ManualStatus";
+import { manualStatusLabel } from "@terminalx/portable/manualStatus";
+import { StatusGroups } from "../StatusGroups";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { AppWindow, Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, GitPullRequest, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
+  AsyncDropdownMenu,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -15,7 +19,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { StatusMark } from "@/components/ui/StatusMark";
+import { StatusBadge } from "@/components/ui/SessionStatus";
+import { sessionStatus as detailedStatus } from "@terminalx/portable/sessionStatus";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { archiveLine, deletionLine } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { archivingText, describeWorkspace } from "@/components/cloud/CloudWorkspaceView";
@@ -195,10 +200,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
       <div
         className={cn(actionRow, "relative flex h-8 min-w-0 items-center gap-2 rounded-md px-2", drafting ? "bg-selected" : "hover:bg-selected/50")}
         title={[project.blank ? `${project.fullName} · no repository` : project.identity, extra?.card].filter(Boolean).join("\n")}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          menu.setOpen(true);
-        }}
+        {...menu.surface}
       >
         <button
           type="button"
@@ -401,14 +403,16 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
   const filter = useSidebarFilter();
   const menu = useRowMenu();
   const [error, run] = useRowError();
+  const { sidebarSort, sidebarLayout } = usePrefs();
   const { sessions: every, capabilities, manage: manages, known } = useCloudWorkspaceSessions(node, { load: open, showArchived: store.showArchived, selectedKey: store.selectedSessionId });
   const sessions = useMemo(() => {
-    if (!filter.active) return every;
-    const found = every.filter((row) => filter.shows(row.key));
+    const sorted = sidebarSort === "created" ? [...every].sort((a, b) => Number(b.pinned) - Number(a.pinned) || (Date.parse(b.created) || 0) - (Date.parse(a.created) || 0) || a.key.localeCompare(b.key)) : every;
+    if (!filter.active) return sorted;
+    const found = sorted.filter((row) => filter.shows(row.key));
     // The list says this workspace waits for a person, and no session known here says which: all of them show
     // (or, for one never opened on this desktop, the line that opens it).
-    return !found.length && filter.showsWorkspace(node.key) ? every : found;
-  }, [every, filter, node.key]);
+    return !found.length && filter.showsWorkspace(node.key) ? sorted : found;
+  }, [every, filter, node.key, sidebarSort]);
   const activity = useWorkspaceActivity(node, every, !known || every.every((row) => row.source !== "live"));
   // Each session's mark as the Dashboard shows it: the live tabs while connected, else the server's list.
   const dashboard = useCloudDashboard();
@@ -425,11 +429,10 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
   const openable = workspaceOpenable(node.item, activity.tone);
   // Filtered: a workspace with no such session has no rows, unless the server's list alone says it waits for a person.
   if (filter.active && !sessions.length && !filter.showsWorkspace(node.key)) return null;
+  const sessionRow = (row: CloudSessionRow) => <CloudSessionItem key={row.key} row={row} status={marks.get(row.key) ?? cloudSessionStatus(row)} manage={manage} canSetStatus={!!capabilities?.includes("session-status/1")} selected={store.selectedSessionId === row.key} />;
   const rows = (
     <>
-      {sessions.map((row) => (
-        <CloudSessionItem key={row.key} row={row} status={marks.get(row.key) ?? cloudSessionStatus(row)} manage={manage} selected={store.selectedSessionId === row.key} />
-      ))}
+      {sidebarLayout === "status" ? <StatusGroups sessions={sessions} scope={node.key}>{sessionRow}</StatusGroups> : sessions.map(sessionRow)}
       {sessions.length === 0 && (
         <li className="truncate px-2 py-1 text-[12px] text-faint" data-testid="cloud-workspace-empty" data-workspace={workspace.id} title={workspaceCard(node.item, activity)}>
           {known ? (
@@ -453,10 +456,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
       <div
         className={cn(actionRow, "relative flex h-8 min-w-0 items-center gap-2 rounded-md pl-2 pr-1 text-foreground/85", selected ? "bg-selected text-foreground" : "hover:bg-selected/50")}
         title={[workspaceCard(node.item, activity), extra?.card].filter(Boolean).join("\n")}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          menu.setOpen(true);
-        }}
+        {...menu.surface}
       >
         <button
           type="button"
@@ -505,7 +505,8 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
  * manages the workspace, on a runtime with session/2) renames, pins, archives
  * and deletes it, as a local conversation's does.
  */
-function CloudSessionItem({ row, status, manage, selected }: { row: CloudSessionRow; status: TabStatus; manage: boolean; selected: boolean }) {
+function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row: CloudSessionRow; status: TabStatus; manage: boolean; canSetStatus: boolean; selected: boolean }) {
+  const statusDescriptionId = useId();
   const menu = useRowMenu();
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(row.title);
@@ -559,14 +560,7 @@ function CloudSessionItem({ row, status, manage, selected }: { row: CloudSession
         title={row.branch ? `${row.branch} · ${row.title}` : row.title}
         data-testid="cloud-session-row"
         data-session={row.key}
-        onContextMenu={
-          manage
-            ? (event) => {
-                event.preventDefault();
-                menu.setOpen(true);
-              }
-            : undefined
-        }
+        {...(manage ? menu.surface : {})}
       >
         {renaming ? (
           <input
@@ -589,12 +583,14 @@ function CloudSessionItem({ row, status, manage, selected }: { row: CloudSession
           <button
             type="button"
             onClick={() => selectCloudSession(row.key)}
+            aria-describedby={statusDescriptionId}
             aria-current={selected ? "true" : undefined}
             className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
+            <span title={manualStatusLabel(row.manualStatus)}><ManualStatusIcon status={row.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(row.manualStatus)}</span></span>
             {row.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             <span className={cn("min-w-0 flex-1 truncate text-[13px]", row.archived && "text-faint")}>{row.title}</span>
-            <StatusMark status={status} />
+            <StatusBadge status={detailedStatus(row.rowStatus ?? { tabs: [{ status }] })} className="max-w-[48%]" />
             {status === "in_progress" ? null : row.branch ? (
               <span className={cn("flex max-w-[45%] shrink-0 items-center gap-1 font-mono text-[10px] text-faint", yieldsToRowActions)}>
                 <GitBranch className="size-3 shrink-0" />
@@ -607,7 +603,7 @@ function CloudSessionItem({ row, status, manage, selected }: { row: CloudSession
         )}
         {manage && !renaming && (
           <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
-            <DropdownMenu {...menu.root}>
+            <AsyncDropdownMenu {...menu.root}>
               <DropdownMenuTrigger asChild {...menu.trigger}>
                 <Button variant="ghost" size="icon-xs" aria-label={`Session menu for ${row.title}`}>
                   <Ellipsis />
@@ -622,6 +618,7 @@ function CloudSessionItem({ row, status, manage, selected }: { row: CloudSession
                 >
                   <Pencil /> Rename
                 </DropdownMenuItem>
+                {canSetStatus && <ManualStatusMenu sessionId={row.sessionId} status={row.manualStatus} onChange={(manualStatus) => updateCloudSession(row, { manualStatus })} />}
                 <DropdownMenuItem onSelect={() => void act(() => updateCloudSession(row, { pinned: !row.pinned }))}>
                   <Pin /> {row.pinned ? "Unpin" : "Pin"}
                 </DropdownMenuItem>
@@ -633,7 +630,7 @@ function CloudSessionItem({ row, status, manage, selected }: { row: CloudSession
                   <Trash2 /> Delete session…
                 </DropdownMenuItem>
               </DropdownMenuContent>
-            </DropdownMenu>
+            </AsyncDropdownMenu>
           </RowActions>
         )}
       </div>
@@ -714,10 +711,7 @@ function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode;
       <div
         className={cn(actionRow, "relative flex min-w-0 items-start gap-1 rounded-md pl-2 pr-1", selected ? "bg-selected text-foreground" : "hover:bg-selected/50")}
         title={[describeWorkspace(item), text.line, text.saved].filter(Boolean).join("\n")}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          menu.setOpen(true);
-        }}
+        {...menu.surface}
       >
         <button
           type="button"

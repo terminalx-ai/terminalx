@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentReadinessMap } from "./agentReadiness";
 import type { ModelInfo } from "@/lib/api";
 import { closeBypass, useDialogs } from "@/lib/dialogs";
 import { getPrefs, setPrefs } from "@/lib/prefs";
@@ -58,13 +59,32 @@ describe("launch settings from preferences", () => {
     expect(controlled.result.current.harness?.id).toBe("claude");
   });
 
-  it("reads the saved mode in the picker's own spelling, and the default for one it does not offer", () => {
+  it("reads the saved mode in the picker's own spelling, and Ask every time for one it does not offer", () => {
     setPrefs({ lastMode: "ask" });
     const { result, rerender } = renderHook(() => useSessionAgent(HARNESSES));
     expect(result.current.mode).toBe("manual");
+    // Never Bypass for a saved mode the picker cannot read: that is no choice, and starts where a fresh profile does.
     setPrefs({ lastMode: "dontAsk" });
     rerender();
-    expect(result.current.mode).toBe("bypassPermissions");
+    expect(result.current.mode).toBe("manual");
+  });
+
+  it("starts a fresh profile's new chats in Ask every time, then in whatever the reader picked (PRO-162)", async () => {
+    localStorage.clear();
+    vi.resetModules();
+    const fresh = await import("./useSessionAgent");
+    const prefs = await import("@/lib/prefs");
+    expect(fresh.launchDefaults().permissionMode).toBe("manual");
+    const { result } = renderHook(() => fresh.useSessionAgent(HARNESSES));
+    expect(result.current.mode).toBe("manual");
+
+    act(() => result.current.selectMode("plan"));
+    expect(prefs.getPrefs().lastMode).toBe("plan");
+    // After a restart the pick is where the next new chat starts.
+    vi.resetModules();
+    const restarted = await import("./useSessionAgent");
+    expect(restarted.launchDefaults().permissionMode).toBe("plan");
+    expect(renderHook(() => restarted.useSessionAgent(HARNESSES)).result.current.mode).toBe("plan");
   });
 
   it("saves a mode that leaves something asking at once", () => {
@@ -72,6 +92,53 @@ describe("launch settings from preferences", () => {
     act(() => result.current.selectMode("acceptEdits"));
     expect(getPrefs().lastMode).toBe("acceptEdits");
     expect(result.current.mode).toBe("acceptEdits");
+  });
+});
+
+describe("new-chat login defaults", () => {
+  const readiness = (claude: "ready" | "signed_out" | "unknown", codex: "ready" | "signed_out" | "unknown"): AgentReadinessMap => ({
+    claude: { state: claude, checkedAt: null, version: null },
+    codex: { state: codex, checkedAt: null, version: null },
+  });
+  it("selects nothing while login checks are pending or neither agent is signed in", () => {
+    const { result, rerender } = renderHook(({ value }) => useSessionAgent(HARNESSES, true, null, undefined, value), { initialProps: { value: null as AgentReadinessMap | null } });
+    expect(result.current.harness).toBeNull();
+    rerender({ value: readiness("signed_out", "signed_out") });
+    expect(result.current.harness).toBeNull();
+    expect(result.current.modelId).toBe("");
+  });
+  it.each(["claude", "codex"])("uses %s when it is the only signed-in agent, keeping its own model and effort", (id) => {
+    setPrefs({ lastAgent: id === "claude" ? "codex" : "claude", lastModel: { claude: "sonnet", codex: "gpt-5.6-sol" }, lastEffort: { claude: "low", codex: "high" }, lastMode: "plan" });
+    const before = getPrefs();
+    const value = readiness(id === "claude" ? "ready" : "signed_out", id === "codex" ? "ready" : "signed_out");
+    const { result } = renderHook(() => useSessionAgent(HARNESSES, true, null, undefined, value));
+    expect(result.current.harness?.id).toBe(id);
+    expect(result.current.modelId).toBe(before.lastModel[id]);
+    expect(result.current.effort).toBe(before.lastEffort[id]);
+    expect(result.current.mode).toBe("plan");
+    expect(getPrefs()).toEqual(before);
+  });
+  it.each(["claude", "codex"])("keeps remembered %s settings when both agents are signed in, across composer mounts", (id) => {
+    setPrefs({ lastAgent: id });
+    const value = readiness("ready", "ready");
+    const first = renderHook(() => useSessionAgent(HARNESSES, true, null, undefined, value));
+    act(() => first.result.current.selectModel(id === "claude" ? "sonnet" : "gpt-5.6-sol"));
+    act(() => first.result.current.selectEffort("high"));
+    act(() => first.result.current.selectMode("plan"));
+    first.unmount();
+    const next = renderHook(() => useSessionAgent(HARNESSES, true, null, undefined, value));
+    expect(next.result.current.harness?.id).toBe(id);
+    expect(next.result.current.modelId).toBe(id === "claude" ? "sonnet" : "gpt-5.6-sol");
+    expect(next.result.current.effort).toBe("high");
+    expect(next.result.current.mode).toBe("plan");
+  });
+  it("prefers a verified login to a saved unknown probe but permits unknown custom routes when no login is verified", () => {
+    const { result, rerender } = renderHook(({ value }) => useSessionAgent(HARNESSES, true, null, undefined, value), { initialProps: { value: readiness("unknown", "ready") } });
+    expect(result.current.harness?.id).toBe("codex");
+    act(() => result.current.selectHarness("claude"));
+    expect(result.current.harness?.id).toBe("claude");
+    rerender({ value: readiness("unknown", "signed_out") });
+    expect(result.current.harness?.id).toBe("claude");
   });
 });
 

@@ -1,118 +1,107 @@
 # PRO-267 measurements
 
-The before sample below was collected on 2026-11-06 from the latest ten
-successful **first-attempt pull-request** CI runs. This differs from the issue’s
-26-run mixed-event baseline (63 minutes median, 76 p90); event and sample size
-are explicit to make later comparisons reproducible.
+## Status on 2026-11-11
 
-| Phase | Qualifying PR runs | Whole-run median | Whole-run p90 | Status |
+The branch now integrates main `7284dbcba023` and its three-job split from
+[#882](https://github.com/terminalx-ai/terminalx/pull/882), merged at
+02:29:20 UTC on November 11. It preserves required names `check`, `frontend`
+and `webkit-layout`, moves the full portable Rust suite to Linux, and reserves
+private-runner selection for protected-main events only. No Hetzner deployment,
+activation or measured PR speedup is claimed.
+
+| Phase | Successful first-attempt PR runs | Whole-run median | Whole-run p90 | Status |
 | --- | ---: | ---: | ---: | --- |
-| Before split | 10 | 59.0 min | 74.1 min | Observed below |
-| Step 1, GitHub-hosted split | 0 | — | — | Pending publication and 10 successful runs |
-| Step 3, Hetzner | 0 | — | — | Pending infrastructure, person’s activation and 10 runs |
+| Historical unsplit baseline, November 6 | 10 | 59.0 min | 74.1 min | Frozen historical sample, not today's three-job baseline |
+| Main's #882 three-job layout, November 11 | 6 | 51.8 min | 57.3 min | **Incomplete: 6/10**; descriptive only |
+| PRO-267 Linux Rust split | 0 | — | — | **Incomplete: 0/10** at preparation; collect after publication |
+| Hetzner main/nightly pilot | 0 main runs | — | — | Owner prerequisites and activation pending; cannot represent PR acceleration |
 
-No after result or 20-minute target attainment is claimed. Step 1’s measurement
-acceptance criterion remains open until its after column has real observations.
+The issue's 26-run mixed-event baseline (63-minute median, 76 p90) is a different
+cohort. Do not mix it with these samples or compare heterogeneous cohorts as a
+measured speedup. The November 11 sample contains successful first-attempt PR
+runs started after #882 merged, with all three job names and no `linux-rust` job.
+The raw sanitized observations are in
+[`baseline-three-jobs.json`](../infra/ci-runners/baseline-three-jobs.json).
+The ten-run performance acceptance criteria remain open.
 
-## Publication checkpoint (2026-11-06, 13:45 UTC)
+## Current main's three-job sample (incomplete)
 
-The validated Step 1 implementation is committed in `5e9ce715` and `f1bae20c`.
-Read-only GitHub queries found no pull request and zero CI runs for
-`raccoon/pro-267-run-ci-s-linux-tests-on-our-own`. The post-split sample is
-therefore **0 of the required 10 successful runs**; there are no after timings
-to report. The frozen ten-run baseline above was reproduced from its saved
-input without replacing it with a different sample.
+Main three-job layout before PRO-267 (incomplete sample): 6 successful first attempts; durations in minutes.
 
-Publication remains with TerminalX. Its installed 0.2.23 pipeline guide and
-matching release source were checked: `advance` from the work stage records
-"Taken as done by a person", settles the pending author-blocked state and
-creates a PR with an issue-closing `Fixes PRO-267` reference. It also requests
-an independent reviewer inheriting the author's agent, model and permission
-mode. There is no documented publish-only option preserving the incomplete
-issue. The action was not invoked; this is a capability limitation, not a
-reported runtime approval refusal.
+| Job | Runs | Median | p90 (nearest rank) |
+| --- | ---: | ---: | ---: |
+| Whole run | 6 | 51.8 | 57.3 |
+| check | 6 | 40.2 | 47.4 |
+| desktop-platforms (instabox-medium) | 6 | 9.9 | 10.1 |
+| frontend | 6 | 3.9 | 4.3 |
+| headless-serve | 6 | 4.9 | 5.8 |
+| legacy-runtime-probe (instabox-medium) | 6 | 0.1 | 0.2 |
+| legacy-runtime-probe (macos-latest) | 6 | 0.2 | 0.2 |
+| webkit-layout | 6 | 19.1 | 22.9 |
 
-A person/app publication path must publish **Step 1: split portable CI from
-macOS**, keep PRO-267 open for Steps 2 and 3 and their measurements, and retain
-the human-only infrastructure, settings and activation decisions. Once that
-PR exists, record its URL and CI run links here. During the rollout, select
-only runs actually using the split workflow; a date window alone can include
-other PRs still using the old workflow. Do not count reruns of one attempt as
-independent first-attempt observations or fill the after table with local test
-durations.
+Samples:
+- [42976833560](https://github.com/terminalx-ai/terminalx/actions/runs/42976833560) · 2026-11-11T07:04:28Z · `cdcd82088080`
+- [42974110579](https://github.com/terminalx-ai/terminalx/actions/runs/42974110579) · 2026-11-11T06:40:44Z · `bf27a131d9d4`
+- [42950103996](https://github.com/terminalx-ai/terminalx/actions/runs/42950103996) · 2026-11-11T03:02:58Z · `0313b907a36f`
+- [42949051452](https://github.com/terminalx-ai/terminalx/actions/runs/42949051452) · 2026-11-11T02:53:25Z · `1260ee3e4ca5`
+- [42947045989](https://github.com/terminalx-ai/terminalx/actions/runs/42947045989) · 2026-11-11T02:35:20Z · `014d477cd82e`
+- [42946576296](https://github.com/terminalx-ai/terminalx/actions/runs/42946576296) · 2026-11-11T02:31:17Z · `22ea1940251f`
 
-## Supported manual publication route (2026-11-07)
+## Method and collection after publication
 
-The installed app is now 0.2.24. Its guide still exposes no partial-publication
-CLI command, and its pipeline `advance` retains the behavior above. The earlier
-checkpoint missed a separate, supported **manual PR form** in the desktop app.
-Checking that release's `PrPanel.tsx`, `commands::pr_create`,
-`github::create_pr` and `pr_associations::record_local` confirms that the form
-passes the supplied title/body/draft flag through and records a session PR
-association. It does not advance the issue pipeline, add a closing reference,
-change tracker status, or start an agent.
+Whole-run duration is `run_started_at` to the last successful job's
+`completed_at`, including runner queue time. Job duration is `started_at` to
+`completed_at`, including setup and cache post-steps. p90 uses nearest rank
+(`ceil(0.9 * n)`). For six observations p90 is the maximum, which is another
+reason not to treat this small sample as stable. Failed, cancelled and rerun
+attempts are excluded; partial reruns are not independent observations.
+Skipped optional steps are not treated as zero-duration successful suites.
 
-The person can publish Step 1 as follows, without any Hetzner setup:
-
-1. Open the existing PRO-267 session/workspace, on branch
-   `raccoon/pro-267-run-ci-s-linux-tests-on-our-own`.
-2. In the right panel, choose **Repo → Uncommitted → Push**. The app handles
-   setting the upstream for a branch that has not been published.
-3. Choose **PR → Create pull request**. Copy the title and body from
-   [the prepared Step 1 PR text](CI-RUNNERS-STEP1-PR.md), choose **main** as
-   the base, check **Draft**, and press **Create**.
-4. Leave PRO-267 open and its pipeline hold intact. Share the PR URL so its
-   actual CI results can be collected. The draft needs independent review and
-   the ordinary merge gates before it can land; publication is not approval
-   to merge or activate runners. Do not use pipeline `advance` to adopt the
-   draft: that path would add the closing reference again.
-
-These are person-operated app controls. The installed CLI does not expose
-this manual form or its Push action, and its guide says TerminalX's computer
-use cannot operate TerminalX's own windows (`own_app_protected`). No direct
-push, undocumented RPC, UI automation workaround, or approval bypass was used.
-No runtime refusal was triggered. The next action is the person's **Push** and
-**Create** in the app, rather than a missing Hetzner credential.
-
-Read-only GitHub queries on 2026-11-07 still found no PR and no CI runs for this
-branch: the after sample remains **0/10**. Earlier validations stand; no broad
-suite or helper was restarted for this documentation-only follow-up.
-
-## Method
-
-Whole-run duration is `run_started_at` to the last successful job’s
-`completed_at`, so it includes runner queue time. Each job’s duration is its
-`started_at` to `completed_at`, including setup and cache post-steps. p90 uses
-nearest rank (`ceil(0.9 * n)`, the ninth sorted observation for ten runs). Failed,
-cancelled and rerun attempts are excluded; reruns can contain only some jobs.
-A skipped optional job is not treated as a zero-duration success. The report
-shows each job’s sample size; collect additional runs before comparing a job
-with fewer than ten observations.
-
-The read-only collector uses `gh api` locally, not in CI. It stores only public
-run identifiers, commit hashes, timestamps and durations, without runner names,
-addresses or credentials. Reproduce the committed baseline offline:
+The read-only collector uses `gh api` locally, never in CI. Stored observations
+contain only public run IDs/URLs, commit hashes, timestamps and durations; no
+runner identities, addresses or credentials. Reproduce the historical baseline:
 
 ```sh
-python3 infra/ci-runners/timings.py --label 'Before split: PR baseline' \
+python3 infra/ci-runners/timings.py --label 'Historical unsplit PR baseline' \
   --input infra/ci-runners/baseline.json
 ```
 
-For each later phase, choose a non-overlapping creation-time window in GitHub’s
-`START..END` date/timestamp syntax, then run:
+Choose a non-overlapping creation-time window in GitHub's `START..END` syntax
+for each phase, then collect:
 
 ```sh
-python3 infra/ci-runners/timings.py --label 'Step 1: GitHub-hosted split' \
+python3 infra/ci-runners/timings.py --label 'PRO-267: GitHub-hosted PR split' \
   --created "$CI_SAMPLE_WINDOW" --count 10 --output /tmp/ci-step1.json
 ```
 
-Repeat after activation with a distinct window and label for Step 3. Copy the
-resulting Markdown tables and public sample links into the PR and PRO-267. Keep
-PR and main-push samples separate. Report the number of PRs that selected
-`macos-rust`; compare ordinary PRs and Apple-related PRs separately if the mixes
-differ. A macOS-selected PR still waits for the full macOS suite. Record cache
-hits/misses and runner CPU architecture/type alongside Step 3’s results. The
-collector refuses to claim a comparison with fewer than ten qualifying runs.
+The collector rejects fewer than ten runs rather than claiming a comparison.
+Inspect each selected run's workflow/jobs: a date window alone can include PRs
+still using the previous layout. Keep only runs with this split. This PR changes
+native Rust/workflow files and therefore selects the full macOS suite; it cannot
+stand in for the faster ordinary-PR cohort. Record whether the macOS test step
+ran within `macos-native`, and compare ordinary and Apple-selected PRs separately.
+
+After owner activation, collect **main pushes separately**, using `--event push`.
+Compare main before/after on the same job mix, cache state and CPU architecture.
+Record cache hit/miss, server CPU type and queue effects. Post the public run
+links and per-job median/p90 in the PR and PRO-267. Local test durations are
+correctness evidence, not CI measurements. Neither a projection nor ten reruns
+of this one PR establishes the intended ten-run comparison.
+
+## Validation after merging current main (2026-11-11)
+
+- Passed: desktop/mobile TypeScript; all 5,392 Vitest tests in 456 files;
+  frontend build.
+- Passed: macOS helper build, all 123 Swift tests, all 18 icon tests, and
+  all-target Clippy with warnings denied.
+- Passed in TerminalX Local VM (Linux ARM64): frontend build and full-default-
+  feature, all-target Clippy with warnings denied.
+- Passed: actionlint 1.7.12; all 19 CI helper/policy tests, including rejection
+  fixtures for mutable actions, unguarded runners, write tokens, privileged
+  triggers, cross-scope cache fallbacks and missing aggregate dependencies.
+- Full macOS and Linux Rust validation is in progress at this checkpoint.
+  Final results will be recorded before opening the PR. Previous November 6
+  passes below are historical and are not presented as passes for this merge.
 
 ## Observed baseline
 
@@ -139,7 +128,7 @@ Samples:
 - [42078411228](https://github.com/terminalx-ai/terminalx/actions/runs/42078411228) · 2026-11-05T17:49:47Z · `78d9293d62a9`
 - [41801072107](https://github.com/terminalx-ai/terminalx/actions/runs/41801072107) · 2026-11-04T08:38:30Z · `6a1c10b41cff`
 
-## Local validation of the Step 1 change (2026-11-06)
+## Historical local validation (2026-11-06, before merging current main)
 
 - Passed: workflow validation with actionlint 1.7.12; 11 coverage-selector/timing
   regression tests; aggregate-gate exercises for success, failure, cancellation
@@ -176,7 +165,7 @@ Samples:
   fit the VM; no test was filtered out. Linux failures led to the portability,
   watcher-lifetime and PTY deadline fixes described in `CI-RUNNERS.md`.
 
-The Linux suite has now passed on a real Linux kernel, in an ARM64 VM. These
+That earlier Linux suite passed on a real Linux kernel, in an ARM64 VM. These
 local checks are correctness evidence, not CI performance measurements: they
 do not substitute for GitHub-hosted AMD64 CI or either post-change ten-run
 comparison. No Hetzner runner has been provisioned, activated or certified by

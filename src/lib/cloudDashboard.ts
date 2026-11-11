@@ -1,3 +1,4 @@
+import type { MessageActivity } from "./messageActivity";
 import { useSyncExternalStore } from "react";
 import type { RuntimeSession } from "@terminalx/portable/workspace";
 import type { DashboardSession, DashboardTab, DashboardTabStatus } from "@terminalx/portable/dashboard";
@@ -46,7 +47,10 @@ export interface CloudDashboardTab extends DashboardTab {
   failure?: boolean;
 }
 
-export interface CloudDashboardSession extends DashboardSession {
+export interface CloudDashboardSession extends DashboardSession, MessageActivity {
+  rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
+  manualStatus?: import("@/types/session").ManualStatus;
+  created: string;
   kind: "cloud";
   /** `cloud:<orgId>:<workspaceId>:<sessionId>`; also `id`. */
   key: string;
@@ -74,6 +78,7 @@ export function isCloudDashboardSession(session: object): session is CloudDashbo
 }
 
 export interface CloudProjectionInput {
+  includeArchived?: boolean;
   orgs: { id: string; name: string }[];
   catalog: Pick<CloudCatalogState, "orgs" | "createMemory">;
   liveSessions: (orgId: string, workspaceId: string) => RuntimeSession[] | null;
@@ -116,6 +121,7 @@ function projectWorkspace(item: CloudWorkspaceListItem, org: { id: string; name:
     cached: input.catalog.orgs[orgId]?.sessions[workspace.id] ?? null,
     live: input.liveSessions(orgId, workspace.id),
     agentTabs,
+    includeArchived: input.includeArchived,
   });
   const repository = repositoryOf(item, input.catalog.createMemory);
   const identity = repository?.identity ?? blankIdentity(workspace.name);
@@ -154,16 +160,17 @@ function projectWorkspace(item: CloudWorkspaceListItem, org: { id: string; name:
         waitingOn: requests[0]?.toolName ?? null,
         from: connected || tab.live ? "live" : "cache",
       };
-      if (fromList && waitingNow) cachedWaiting.push(projected);
-      if (fromList && tab.status === "in_progress") cachedWorking.push(projected);
+      if (!row.archived && fromList && waitingNow) cachedWaiting.push(projected);
+      if (!row.archived && fromList && tab.status === "in_progress") cachedWorking.push(projected);
       return projected;
     });
-    if (tabs.length && row.modified > newest) {
+    if (!row.archived && tabs.length && row.modified > newest) {
       newest = row.modified;
       newestFirstTab = tabs[0];
     }
     return {
       kind: "cloud",
+      rowStatus: connected && !stopped ? row.rowStatus : undefined,
       id: row.key,
       key: row.key,
       orgId,
@@ -181,7 +188,14 @@ function projectWorkspace(item: CloudWorkspaceListItem, org: { id: string; name:
       branch: row.branch ?? workspace.launch?.workBranch ?? null,
       title: row.title,
       modified: row.modified,
+      created: row.created,
+      lastMessageAt: row.lastMessageAt,
+      pinned: row.pinned,
+      manualStatus: row.manualStatus,
+      hasMessages: row.hasMessages,
       archived: row.archived,
+      automation: row.automation,
+      ownerId: workspace.createdBy ?? null,
       connected,
       stopped,
       fresh: connected || listed,
@@ -228,6 +242,7 @@ export function dashboardOrgs(status: AccountStatus): { id: string; name: string
 }
 
 let snapshot: CloudDashboardSession[] = [];
+let allSessions: CloudDashboardSession[] = [];
 let signature = "";
 let dirty = true;
 let unsubscribers: (() => void)[] = [];
@@ -237,6 +252,7 @@ let scheduled = false;
 
 function recompute(): CloudDashboardSession[] {
   return projectCloudSessions({
+    includeArchived: true,
     orgs: dashboardOrgs(getAccount().status),
     catalog: getCloudCatalog(),
     liveSessions: liveCloudSessionList,
@@ -262,7 +278,8 @@ function take(next: CloudDashboardSession[]): boolean {
   const nextSignature = JSON.stringify(next);
   if (nextSignature === signature) return false;
   signature = nextSignature;
-  snapshot = next;
+  allSessions = next;
+  snapshot = next.filter((session) => !session.archived);
   return true;
 }
 
@@ -303,8 +320,14 @@ export function subscribeCloudDashboard(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-export function useCloudDashboard(): CloudDashboardSession[] {
-  return useSyncExternalStore(subscribeCloudDashboard, getCloudDashboard, getCloudDashboard);
+function getAllCloudDashboard(): CloudDashboardSession[] {
+  getCloudDashboard();
+  return allSessions;
+}
+
+export function useCloudDashboard(includeArchived = false): CloudDashboardSession[] {
+  const get = includeArchived ? getAllCloudDashboard : getCloudDashboard;
+  return useSyncExternalStore(subscribeCloudDashboard, get, get);
 }
 
 /** For tests: forget everything and stop following the sources. */
@@ -314,6 +337,7 @@ export function resetCloudDashboard() {
   listeners.clear();
   loaded.clear();
   snapshot = [];
+  allSessions = [];
   signature = "";
   dirty = true;
   scheduled = false;

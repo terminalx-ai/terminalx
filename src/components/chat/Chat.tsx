@@ -2,14 +2,20 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import { COMPACTING_LINE, type Transcript } from "@/lib/transcript";
+import { COMPACTING_LINE, type Transcript, type Turn } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { SendingMessage, TurnBlock } from "./TurnBlock";
 import { PermissionCard, QuestionCard } from "./AskCards";
+import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { RaccoonRunner, RaccoonScene } from "@/components/raccoon/Raccoon";
 import { READER_SCROLL_EVENT, scrollToInOwnScroller } from "@/lib/shellScroll";
 import { elementWithId, SEEK_ANCHOR_EVENT } from "@/lib/chatLinks";
-import { DisclosureMemory, type Disclosures } from "./disclosures";
+import { DisclosureMemory, SearchDisclosures, type Disclosures } from "./disclosures";
+import { useChatFind } from "./ChatFind";
+import { usePrefs } from "@/lib/prefs";
+import { PromptMap } from "./PromptMap";
+import { turnDivider } from "@/lib/turnDivider";
+import { GoalBanner } from "./GoalBanner";
 
 const NEAR_BOTTOM_PX = 40;
 /** How many of the newest turns are drawn before the scroller has a size (a tab not on screen). */
@@ -82,7 +88,9 @@ export function visibleTurns(tops: number[], top: number, viewport: number, tail
  */
 export function Chat({
   sessionId,
+  checkpointTabId,
   transcript,
+  active = true,
   stream,
   cwd,
   live,
@@ -97,9 +105,14 @@ export function Chat({
   onSendQueuedNow,
   sending = null,
   onSendAgain,
+  onSecondOpinion,
+  onReset,
 }: {
   sessionId: string;
+  checkpointTabId?: string;
   transcript: Transcript;
+  /** A kept chat can be hidden behind another workspace view. */
+  active?: boolean;
   stream: StreamBlock[];
   cwd?: string;
   live: boolean;
@@ -120,7 +133,13 @@ export function Chat({
   sending?: { text: string; images: { url: string; name?: string }[]; pressedAt: number } | null;
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
   onSendAgain?: (seq: number) => void;
+  onSecondOpinion?: (turn: Turn) => void;
+  onReset?: (endSeq: number) => void;
 }) {
+  // Guest and workspace chats render requests here, without a TabView banner.
+  // A kept, hidden workspace chat must not defer the visible view's notices.
+  useNoticeDeferral(active && transcript.pendingAsks.length > 0);
+  const root = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
@@ -138,8 +157,11 @@ export function Chat({
   /** The turns this render drew from, for working `tops` out again between renders. */
   const turnList = useRef(turns);
   const [disclosures] = useState<Disclosures>(() => new Map());
-  /** The id a link asked for that no drawn turn holds: every turn is drawn until it has been looked for. */
-  const [seeking, setSeeking] = useState<string | null>(null);
+  /** An off-screen anchor. Search names its turn; ordinary links may need every turn drawn to locate it. */
+  const [seeking, setSeeking] = useState<{ id: string; turnKey?: string } | null>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
+  const [footerHeight, setFooterHeight] = useState(0);
+  const find = useChatFind({ root, scroller, transcript, footerHeight });
 
   const follow = useCallback((on: boolean) => {
     pinned.current = on;
@@ -167,10 +189,13 @@ export function Chat({
   // so is the reader's own message while it is being sent.
   const lastPrompt = `${turns[turns.length - 1]?.prompt?.seq ?? ""}:${sending?.pressedAt ?? ""}`;
   const followedPrompt = useRef(lastPrompt);
-  const tail = pinned.current || followedPrompt.current !== lastPrompt;
+  const tail = pinned.current || (!find.hasMatch && followedPrompt.current !== lastPrompt);
   // Off the bottom, the band the view last asked for; one not worked out yet (or for a list since cut short) is the tail's.
   const known = band.end > band.start && band.end <= turns.length;
-  const { start, end } = seeking != null ? { start: 0, end: turns.length } : tail || !known ? visibleTurns(turnTops, 0, band.height, true) : band;
+  const soughtTurn = seeking?.turnKey ? turns.findIndex((turn) => turn.key === seeking.turnKey) : -1;
+  const { start, end } = seeking != null
+    ? soughtTurn >= 0 ? { start: soughtTurn, end: soughtTurn + 1 } : { start: 0, end: turns.length }
+    : tail || !known ? visibleTurns(turnTops, 0, band.height, true) : band;
 
   /** Which turns the view needs drawn, from where it is over the list now. */
   const readView = useCallback(() => {
@@ -243,7 +268,11 @@ export function Chat({
       if (up && el.scrollTop > 0) follow(false);
     };
     const onReaderScroll = () => follow(false);
-    const onSeek = (e: Event) => setSeeking((e as CustomEvent<string>).detail);
+    const onSeek = (e: Event) => {
+      const detail = (e as CustomEvent<string | { id: string; turnKey: string }>).detail;
+      follow(false);
+      setSeeking(typeof detail === "string" ? { id: detail } : detail);
+    };
     const onPointerDown = () => {
       dragging = true;
     };
@@ -303,35 +332,103 @@ export function Chat({
   });
 
   useLayoutEffect(() => {
+    if (followedPrompt.current === lastPrompt) return;
     followedPrompt.current = lastPrompt;
+    if (find.hasMatch) return;
     follow(true);
     pinToBottom();
-  }, [lastPrompt, follow, pinToBottom]);
+  }, [lastPrompt, follow, pinToBottom, find.hasMatch]);
 
-  // Every turn is drawn and measured now (the effects above ran first, and
-  // measuring worked the tops out again): the place a link asked for is
-  // brought to the top if a turn holds it, and the band is worked out around
-  // it on heights that are all real.
+  // The requested turn(s) are drawn and measured now. Bring the anchor to the
+  // top, then work out the band around it using the updated measurements.
   useLayoutEffect(() => {
     if (seeking == null) return;
     const el = scroller.current;
-    const target = el && elementWithId(el, seeking);
+    const target = el && elementWithId(el, seeking.id);
     if (el && target) {
-      scrollToInOwnScroller(target);
+      if (seeking.turnKey) el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
+      else scrollToInOwnScroller(target);
       lastTop.current = el.scrollTop;
       readView();
     }
     setSeeking(null);
   }, [seeking, readView]);
 
+  /** Where the list of turns starts inside the scroller's content, in scroll coordinates. */
+  const listTop = useCallback((el: HTMLElement) => {
+    const spacer = topSpacer.current;
+    return spacer ? spacer.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop : 0;
+  }, []);
+
+  // A prompt's mark was clicked: its turn's top under the top of the view.
+  // The view goes to where the list has the turn, then settles on it exactly
+  // once it is drawn and measured.
+  const pendingJump = useRef<string | null>(null);
+  const jumpTo = useCallback(
+    (key: string) => {
+      const el = scroller.current;
+      const index = turnList.current.findIndex((t) => t.key === key);
+      if (!el || index < 0) return;
+      follow(false);
+      // Instant, then settled once drawn: turns drawn on the way are measured and shift
+      // scrollTop, which would stop a smooth scroll short and move its destination.
+      pendingJump.current = key;
+      el.scrollTop = listTop(el) + tops.current[index] - 12;
+      lastTop.current = el.scrollTop;
+      readView();
+    },
+    [follow, readView, listTop],
+  );
+  useLayoutEffect(() => {
+    const key = pendingJump.current;
+    const el = scroller.current;
+    const node = key && el?.querySelector<HTMLElement>(`[data-turn="${CSS.escape(key)}"]`);
+    if (!el || !node) return;
+    pendingJump.current = null;
+    el.scrollTop += node.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
+    lastTop.current = el.scrollTop;
+    readView();
+  });
+  /** The turn under the reading line, a third down the view, from the list's tops: most turns are not drawn. */
+  const readingTurn = useCallback(() => {
+    const el = scroller.current;
+    if (!el) return 0;
+    const line = el.scrollTop + el.clientHeight / 3 - listTop(el);
+    return Math.max(0, Math.min(turnList.current.length - 1, firstAfter(tops.current, line) - 1));
+  }, [listTop]);
+  const { promptMap } = usePrefs();
+
+  // The footer floats over the transcript's foot; the transcript ends in a spacer as tall as it.
+  useLayoutEffect(() => {
+    const el = footerRef.current;
+    if (!el) return;
+    const measureFooter = () => setFooterHeight(el.offsetHeight);
+    measureFooter();
+    const ro = new ResizeObserver(measureFooter);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const working = progressing && !!transcript.workingSince && (transcript.modelRequestOpen || !stream.length);
   const streamingTool = stream.find((s) => s.kind === "tool_use" && !s.done);
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div ref={root} data-find-scope="chat" tabIndex={-1} className="relative flex min-h-0 flex-1 flex-col outline-none"
+      onPointerDown={(event) => {
+        // Plain transcript text is not focusable. Clicking it gives this region Cmd+F,
+        // while links, controls and the composer retain their normal focus behavior.
+        if (event.target instanceof Element) {
+          const control = event.target.closest('a, button, input, textarea, select, [contenteditable], [tabindex]');
+          if (!control || control === root.current) root.current?.focus({ preventScroll: true });
+        }
+      }}>
+      {find.bar}
+      {transcript.goal && <GoalBanner goal={transcript.goal} />}
+      <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
           <DisclosureMemory value={disclosures}>
+          <SearchDisclosures value={find.disclosures}>
           {!turns.length && !live && !sending && loading && (
             // Loading is a label alone; the scene is for a conversation that really is empty.
             <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
@@ -354,22 +451,26 @@ export function Chat({
                 turn={t}
                 cwd={cwd}
                 sessionId={sessionId}
+                checkpointTabId={checkpointTabId}
                 stream={isLast && live ? stream : NO_STREAM}
                 working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
                 streamingTool={isLast && live ? streamingTool : undefined}
                 // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
                 onSendAgain={live ? onSendAgain : undefined}
+                onSecondOpinion={onSecondOpinion}
+                onReset={!isLast && !live && !sending ? onReset : undefined}
+                divider={turnDivider(turns[start + i - 1], t)}
               />
             );
           })}
           <div data-spacer aria-hidden style={{ height: turnTops[turns.length] - turnTops[end] }} />
           {sending && <SendingMessage message={sending} cwd={cwd} />}
           {transcript.compacting && (
-            <div className="mb-3 px-1.5 text-[13px] text-shimmer">{COMPACTING_LINE}</div>
+            <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-shimmer">{COMPACTING_LINE}</div>
           )}
           {transcript.retry && progressing && (
-            <div className="mb-3 px-1.5 text-[13px] text-warning">
+            <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-warning">
               Retrying ({transcript.retry.attempt}/{transcript.retry.maxRetries})
               {transcript.retry.reason ? ` · ${transcript.retry.reason}` : ""}
             </div>
@@ -383,10 +484,21 @@ export function Chat({
               )}
             </div>
           ))}
+          {/* Room to scroll the last of the transcript out from under the footer. Inside the content, so growing it re-pins. */}
+          <div aria-hidden style={{ height: footerHeight }} />
+          </SearchDisclosures>
           </DisclosureMemory>
         </div>
       </div>
-      <div className="relative shrink-0">
+      {promptMap && (
+        <div className="pointer-events-none absolute inset-x-0 top-0" style={{ bottom: footerHeight }}>
+          <PromptMap turns={turns} scroller={scroller} onJump={jumpTo} locate={readingTurn} />
+        </div>
+      )}
+      </div>
+      {/* Over the transcript's foot: what scrolls down passes behind the see-through composer, fading into the chat as it goes. */}
+      <div ref={footerRef} className="pointer-events-none absolute inset-x-0 bottom-0 z-10 [&>*]:pointer-events-auto">
+        <div aria-hidden className="pointer-events-none! absolute inset-x-0 -top-6 bottom-0 -z-10 bg-[linear-gradient(to_bottom,transparent,var(--color-chat)_70%)]" />
         {/* Above the composer, never behind it: the composer is see-through. */}
         <div
           className={cn(

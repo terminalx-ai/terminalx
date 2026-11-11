@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { sessionStatus } from "@terminalx/portable/sessionStatus";
 import { api, type CloudWorkspaceListItem } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { getTabLog, lastSeq } from "@/lib/agentEvents";
@@ -30,7 +31,7 @@ import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudControlNative } from "@/lib/cloudControlNative";
 import { getPrefs } from "@/lib/prefs";
-import { DEFAULT_PERMISSION_MODE, pickerMode } from "@/lib/models";
+import { FIRST_RUN_PERMISSION_MODE, pickerMode } from "@/lib/models";
 import { recoveryFromEvents } from "@/lib/recovery";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
 import type { AgentEvent, RecoveryKind } from "@/types/events";
@@ -352,6 +353,8 @@ function sessionView(session: CloudDashboardSession) {
     connected: session.connected,
     // False: only what this desktop saved earlier is known of it.
     fresh: session.fresh,
+    rowStatus: session.rowStatus,
+    detailedStatus: sessionStatus(session.rowStatus ?? session),
     tabs: session.tabs.map((tab) => ({ id: tab.tabId, agent: tab.harness, title: tab.title, status: tab.status })),
   };
 }
@@ -835,7 +838,7 @@ async function sessionsCreate(params: Params) {
     agent,
     model: text(params, "model") ?? prefs.lastModel[agent] ?? "",
     effort: text(params, "effort") ?? prefs.lastEffort[agent] ?? null,
-    mode: mode ?? DEFAULT_PERMISSION_MODE,
+    mode: mode ?? FIRST_RUN_PERMISSION_MODE,
     prompt,
     useWorktree: params.useWorktree !== false,
   };
@@ -846,7 +849,11 @@ async function sessionsCreate(params: Params) {
     request.issue = { ref: issue, body: text(params, "issueBody"), worktreeName: issueWorktreeName(issue.identifier, issue.title), pipeline, settings };
     // As the issue page starts one: the switches at the project's defaults for
     // an issue, said outright so an older runtime does not take its own (#700).
-    if (pipeline) request.pipeline = pipelineLaunchDefaults(settings, true);
+    if (pipeline) request.pipeline = {
+      ...pipelineLaunchDefaults(settings, true),
+      ...(typeof params.resolveConflicts === "boolean" ? { resolveConflicts: params.resolveConflicts } : {}),
+      autoMerge: false,
+    };
   }
   let outcome: CloudIssueOutcome | null = null;
   const plan = planCloudStart(project);

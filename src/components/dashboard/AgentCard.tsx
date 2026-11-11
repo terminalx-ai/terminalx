@@ -1,7 +1,8 @@
+import { sessionStatus as detailedStatus } from "@terminalx/portable/sessionStatus";
+import { StatusBadge, SessionStatus } from "@/components/ui/SessionStatus";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Archive, CircleDot, Cloud, FolderGit2, FolderOpen, GitBranch, MessageCircle, MessageSquare, PanelsTopLeft, Square } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Working } from "@/components/ui/StatusMark";
 import { AgentMark, agentName as agentDisplayName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -10,7 +11,7 @@ import { agent, errorMessage, type SessionSummary } from "@/lib/api";
 import { archiveSession, selectSession } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
-import { workspaceName, type ColumnId } from "@/lib/dashboard";
+import { workspaceName, type DashboardState } from "@/lib/dashboard";
 import { isQuickChat, quickChatPlace, sessionProjectName } from "@/lib/quickChats";
 import type { CloudDashboardSession } from "@/lib/cloudDashboard";
 import type { Project, SessionEntry } from "@/types/session";
@@ -35,7 +36,7 @@ export function AgentCard({
 }: {
   session: SessionEntry;
   summary?: SessionSummary;
-  column: ColumnId;
+  column: DashboardState;
   project?: Project;
   agentName: string;
   focused: boolean;
@@ -83,6 +84,7 @@ export function AgentCard({
             column === "needs" && "bg-warning",
             column === "working" && "bg-info animate-pulse-soft",
             column === "done" && "bg-add",
+            (column === "not-started" || column === "archived") && "bg-faint",
           )}
         />
 
@@ -138,6 +140,7 @@ export function AgentCard({
           )}
         </div>
 
+        <SessionStatus session={session} />
         <Snippet who="You" text={summary?.lastPrompt} icon={<MessageSquare className="size-3" />} />
         {column === "needs" ? (
           <Snippet who={agentName} text={summary?.waitingOn ?? summary?.lastReply} tone="warning" />
@@ -162,8 +165,8 @@ export function AgentCard({
           </DropdownMenuItem>
         )}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void archiveSession(session.id, true)}>
-          <Archive /> Archive
+        <DropdownMenuItem onSelect={() => void archiveSession(session.id, !session.archived)}>
+          <Archive /> {session.archived ? "Unarchive" : "Archive"}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -185,7 +188,7 @@ export function CloudAgentCard({
   onOpen,
 }: {
   session: CloudDashboardSession;
-  column: ColumnId;
+  column: DashboardState;
   agentName: string;
   focused: boolean;
   onFocus: () => void;
@@ -197,9 +200,9 @@ export function CloudAgentCard({
   useEffect(() => {
     if (focused) ref.current?.scrollIntoView({ block: "nearest" });
   }, [focused]);
-  const state = column === "needs"
+  const state = column === "archived" ? "Archived" : column === "needs"
     ? waiting?.failure ? "Workspace needs recovery" : waiting?.waitingOn ? `Wants to use ${waiting.waitingOn}` : "Waiting for your decision"
-    : column === "working" ? "Working" : session.stopped ? "Workspace stopped" : "Finished";
+    : column === "working" ? "Working" : column === "not-started" ? "Not started" : session.stopped ? "Workspace stopped" : "Finished";
 
   return (
     <DropdownMenu>
@@ -228,6 +231,7 @@ export function CloudAgentCard({
             column === "needs" && "bg-warning",
             column === "working" && "bg-info animate-pulse-soft",
             column === "done" && "bg-add",
+            (column === "not-started" || column === "archived") && "bg-faint",
           )}
         />
 
@@ -267,14 +271,9 @@ export function CloudAgentCard({
           </span>
         </div>
 
-        {column === "working" ? (
-          <div className="flex items-center gap-1.5">
-            <Working className="size-3" />
-            <Snippet who={agentName} text={state} />
-          </div>
-        ) : (
-          <Snippet who={agentName} text={state} tone={column === "needs" ? "warning" : undefined} />
-        )}
+        <StatusBadge status={detailedStatus(session.rowStatus ?? session)} />
+        {column === "needs" && <Snippet who={agentName} text={state} tone="warning" />}
+        {session.stopped && <Snippet who={agentName} text="Workspace stopped" />}
 
         <div className="flex min-w-0 items-center gap-1.5 pt-0.5 text-[11px] text-faint">
           <FolderGit2 className="size-3 shrink-0" />

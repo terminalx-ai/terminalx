@@ -17,7 +17,8 @@ const MAX_CALLS: usize = 16;
 
 pub(crate) fn supported(command: &str) -> bool {
     matches!(command,
-        "computer.permissions" | "computer.permissionsStatus" | "computer.permissionsReset" | "computer.capabilities"
+        "computer.selfUi.authorize" | "computer.selfUi.snapshot" | "computer.selfUi.click" | "computer.selfUi.revoke"
+         | "computer.permissions" | "computer.permissionsStatus" | "computer.permissionsReset" | "computer.capabilities"
          | "computer.listApps" | "computer.listWindows" | "computer.getAppState" | "computer.click"
          | "computer.performSecondaryAction" | "computer.scroll" | "computer.drag" | "computer.typeText"
          | "computer.pressKey" | "computer.hotkey" | "computer.pasteText" | "computer.setValue"
@@ -46,7 +47,7 @@ pub(crate) fn supported(command: &str) -> bool {
          | "share.list" | "share.edit" | "share.revoke" | "share.remove"
          | "share.approve" | "share.note" | "share.takeover" | "issues.view"
          | "issues.comment" | "issues.status" | "issues.assign" | "issues.label"
-         | "issues.create" | "floating.show" | "floating.hide" | "floating.toggle"
+         | "floating.show" | "floating.hide" | "floating.toggle"
          | "perf.terminal.start" | "perf.terminal.poll" | "window.terminalCounters"
          | "window.open" | "window.quit" | "window.stopAllAndQuit"
     )
@@ -63,7 +64,7 @@ struct Dispatch { epoch: String, lease: String, command: String, params: Value }
 pub(crate) fn receive(request: &ControlRequest, current: &super::client::AttachmentIdentity) -> Result<(String, Value), ControlError> {
     if request.command != "window.dispatch" { return Err(unavailable("Only registered window dispatch is accepted.")); }
     let dispatch: Dispatch = serde_json::from_value(request.params.clone()).map_err(|_| unavailable("Invalid window dispatch."))?;
-    if dispatch.epoch != current.epoch || dispatch.lease != current.lease || !supported(&dispatch.command) {
+    if dispatch.epoch != current.epoch || dispatch.lease != current.lease || !(supported(&dispatch.command) || dispatch.command == "environment.snapshot") {
         return Err(unavailable("This request does not belong to the current desktop attachment."));
     }
     Ok((dispatch.command,dispatch.params))
@@ -123,8 +124,20 @@ impl Registry {
         self.0.lock().unwrap().as_ref().is_some_and(|service| service.attachment.valid())
     }
 
+    pub(crate) fn environment_snapshot(&self, key: &str, revision: &str) -> anyhow::Result<crate::store::environment::Snapshot> {
+        let value = self.dispatch("environment.snapshot", json!({ "key": key, "revision": revision }))
+            .map_err(|_| anyhow::anyhow!("Environment overrides are unavailable."))?;
+        serde_json::from_value(value).map_err(|_| anyhow::anyhow!("Invalid environment snapshot."))
+    }
+
     pub(crate) fn call(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         if !supported(command) { return Err(unavailable("This operation is not a window service.")); }
+        self.dispatch(command, params)
+    }
+
+    // Internal service responses may carry secrets. They are never proxied by
+    // public control commands and only travel on this private, lease-bound socket.
+    fn dispatch(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         let service = self.0.lock().unwrap().clone().filter(|service| service.attachment.valid())
             .ok_or_else(|| unavailable("This operation needs an attached TerminalX window."))?;
         if !super::permissions::increment_bounded(&service.calls, MAX_CALLS) {
@@ -136,7 +149,7 @@ impl Registry {
         let result = (|| -> anyhow::Result<ControlResponse> {
             let mut socket = UnixStream::connect(&service.socket)?;
             let timeout = command.strip_prefix("cloud.").map(|action| crate::cloud_control::timeout_for(action,&params)+Duration::from_secs(15))
-                .unwrap_or_else(|| if command == "window.terminalCounters" { crate::terminal_perf::COUNTERS_TIMEOUT + Duration::from_secs(1) } else { Duration::from_secs(360) });
+                .unwrap_or_else(|| if command == "environment.snapshot" { Duration::from_secs(10) } else if command == "window.terminalCounters" { crate::terminal_perf::COUNTERS_TIMEOUT + Duration::from_secs(1) } else { Duration::from_secs(360) });
             socket.set_read_timeout(Some(timeout))?;
             socket.set_write_timeout(Some(Duration::from_secs(5)))?;
             let dispatch = service.attachment.enter()?;
@@ -168,6 +181,41 @@ mod tests {
 
     fn registration(attachment: &Value, endpoint: &crate::hooks::ControlEndpoint) -> Value {
         json!({"epoch":attachment["epoch"], "lease":attachment["lease"], "socket":endpoint.socket, "token":endpoint.token})
+    }
+
+    #[test]
+    fn environment_snapshot_is_private_to_the_registered_desktop_and_cannot_be_proxied() {
+        assert!(!supported("environment.snapshot"));
+        let registry = Registry::default();
+        assert!(registry.call("environment.snapshot", json!({"key":"user","revision":"r"})).is_err());
+        let current = super::super::client::AttachmentIdentity { epoch:"owner".into(), lease:"desktop".into() };
+        let mut request = ControlRequest { id:"test".into(), token:"private-window-token".into(), command:"window.dispatch".into(),
+            params: json!({"epoch":"owner","lease":"desktop","command":"environment.snapshot","params":{"key":"user","revision":"r"}}) };
+        assert!(receive(&request, &current).is_ok());
+        request.params["lease"] = json!("another-desktop");
+        assert!(receive(&request, &current).is_err());
+    }
+
+    #[test]
+    fn environment_values_travel_only_in_the_private_response() {
+        let _home = crate::store::temp_home();
+        let lifetime = Lifetime::new(Duration::from_secs(60));
+        let endpoint = prepare_control().unwrap();
+        let attachment = attach(&lifetime);
+        let identity = super::super::client::AttachmentIdentity {
+            epoch: attachment["epoch"].as_str().unwrap().into(), lease: attachment["lease"].as_str().unwrap().into(),
+        };
+        serve_private(endpoint.clone(), |_| HookReply::default(), move |request| {
+            let (command, params) = receive(&request, &identity).unwrap();
+            assert_eq!(command, "environment.snapshot");
+            assert_eq!(params, json!({"key":"user","revision":"revision"}));
+            assert!(!serde_json::to_string(&request).unwrap().contains("private-value"));
+            ControlResponse::success(request.id, json!({"revision":"revision","values":{"KEY":"private-value"}}))
+        }).unwrap();
+        lifetime.window.register(&lifetime, registration(&attachment, &endpoint)).unwrap();
+        let snapshot = lifetime.window.environment_snapshot("user", "revision").unwrap();
+        assert_eq!(serde_json::to_value(snapshot).unwrap()["values"]["KEY"], "private-value");
+        assert!(lifetime.window.call("environment.snapshot", json!({})).is_err());
     }
 
     #[test]

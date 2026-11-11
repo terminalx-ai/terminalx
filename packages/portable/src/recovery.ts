@@ -18,10 +18,31 @@ export const RECOVERY_MESSAGES: Record<RecoveryKind, string> = {
  * the messages above send the reader to a terminal for, it says here instead.
  */
 const NATIVE_RECOVERY_MESSAGES: Partial<Record<RecoveryKind, string>> = {
-  delivery_unconfirmed: "Prompt delivery could not be confirmed. Review the conversation above: if your message is not there, send it again.",
+  delivery_unconfirmed: "Prompt delivery could not be confirmed. The agent may have acted on your message. Check the conversation and the outcome of its work before deciding whether to send it again.",
   permission_expired: "The permission request expired. Send a message to carry on, or stop the session.",
 };
 const NATIVE_WAITING = "Review the conversation above, then send a message or stop the session.";
+
+/**
+ * What native Codex says when a message arrives while its turn runs (#815,
+ * `session_codex_stdio.rs` `Busy`): the request is refused, never the turn.
+ * It is no recovery: the turn goes on, and the message is the sender's again.
+ */
+export const BUSY_REFUSAL = "Codex is still working on this turn, so this message was not sent.";
+/** What the composer says for it, with the message back in the composer. */
+export const BUSY_NOTICE = "Codex is still working on this turn, so your message was not sent. It is back in the composer: send it when the turn ends, or interrupt the turn first.";
+
+export function isBusyRefusal(error: unknown): boolean {
+  return (error instanceof Error ? error.message : String(error)).includes(BUSY_REFUSAL);
+}
+
+/** Request-only refusals preserve the composer without failing the running turn. */
+export function requestRefusalNotice(error: unknown): string | null {
+  if (isBusyRefusal(error)) return BUSY_NOTICE;
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("Codex's follow-up queue is full.")
+    ? "Codex's follow-up queue is full. Your message is back in the composer. Wait for a queued message to be delivered, then send it again." : null;
+}
 
 /** Never echo arbitrary IPC/provider errors in recovery controls. */
 export function classifyRecovery(message: string): RecoveryKind {

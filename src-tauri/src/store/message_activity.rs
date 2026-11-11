@@ -1,5 +1,5 @@
 //! Message chronology, separate from mutable session metadata. The sidecar holds
-//! only verified times and scan progress, never prompt or response contents.
+//! message presence, verified times and scan progress, never message contents.
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 static LOCK: Mutex<()> = Mutex::new(());
 static SCANNING: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 const FIELD: &str = "lastMessageAt";
+const PRESENCE_FIELD: &str = "hasMessages";
 const BATCH: usize = 128;
 // Yield after this many bytes, at a record boundary (never split a message).
 const BATCH_BYTES: u64 = 256 * 1024;
@@ -28,7 +29,14 @@ struct Activity {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TabActivity {
+    #[serde(default)]
+    log_file: Option<String>,
     last_message_at: Option<String>,
+    #[serde(default)]
+    has_messages: bool,
+    // Old sidecars may have scanned the entire log without tracking presence.
+    #[serde(default)]
+    presence_scanned: bool,
     live: Flow,
     history: Flow,
     offset: u64,
@@ -36,6 +44,14 @@ struct TabActivity {
 #[derive(Default, Serialize, Deserialize, PartialEq)]
 struct Flow {
     assistant: bool,
+}
+
+fn select_log(tab: &mut TabActivity, path: &Path) {
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned());
+    let changed = tab.log_file.as_ref().is_some_and(|old| Some(old) != name.as_ref())
+        || (tab.log_file.is_none() && name.as_ref().is_some_and(|name| name.contains(".reset-")));
+    if changed { *tab = TabActivity::default(); }
+    tab.log_file = name;
 }
 
 fn canonical(value: &str) -> Option<String> {
@@ -56,11 +72,11 @@ fn advance(current: &mut Option<String>, incoming: Option<String>) -> bool {
     false
 }
 impl Flow {
-    fn message(&mut self, event: &AgentEvent) -> Option<String> {
+    fn message(&mut self, event: &AgentEvent) -> bool {
         if event.subagent.is_some() {
-            return None;
+            return false;
         }
-        let message = match &event.payload {
+        match &event.payload {
             Payload::TurnStarted { .. } => {
                 self.assistant = false;
                 false
@@ -73,7 +89,7 @@ impl Flow {
             }
             Payload::AssistantText { text, .. } | Payload::Delta(Delta::TextDelta { text, .. }) => {
                 if text.is_empty() {
-                    return None;
+                    return false;
                 }
                 self.assistant = true;
                 true
@@ -87,10 +103,7 @@ impl Flow {
                 message
             }
             _ => false,
-        };
-        message
-            .then(|| event.message_ts.as_deref().and_then(canonical))
-            .flatten()
+        }
     }
 }
 fn activity_path(root: &Path, session: &str) -> PathBuf {
@@ -118,8 +131,32 @@ fn project_at(root: &Path, sessions: &mut [SessionEntry]) -> Result<()> {
     for session in sessions {
         let activity: Activity =
             super::read_json(&activity_path(root, &session.id))?.unwrap_or_default();
-        project_time(&mut session.unknown, activity.last_message_at);
+        let matches = |tab: &index::TabEntry, saved: &TabActivity| {
+            let expected = tab.unknown.get("resetLogId").and_then(serde_json::Value::as_str)
+                .map(|id| format!("{}.reset-{id}.jsonl", tab.id));
+            match &expected {
+                Some(name) => saved.log_file.as_deref() == Some(name.as_str()),
+                None => saved.log_file.as_ref().is_none_or(|name| name == &format!("{}.jsonl", tab.id)),
+            }
+        };
+        // Closed tabs still count as conversation activity. Only a replaced
+        // log's obsolete projection is excluded.
+        let current = |id: &String, saved: &TabActivity| session.tabs.iter().find(|tab| &tab.id == id).is_none_or(|tab| matches(tab, saved));
+        if activity.tabs.iter().any(|(id, saved)| current(id, saved) && saved.has_messages) {
+            session.unknown.insert(PRESENCE_FIELD.into(), true.into());
+        }
+        let latest = activity.tabs.iter().filter(|(id, saved)| current(id, saved))
+            .filter_map(|(_, saved)| saved.last_message_at.clone()).max();
+        project_time(&mut session.unknown, latest);
         for tab in &mut session.tabs {
+            if activity.tabs.get(&tab.id).is_some_and(|saved| !matches(tab, saved)) { continue; }
+            if activity
+                .tabs
+                .get(&tab.id)
+                .is_some_and(|activity| activity.has_messages)
+            {
+                tab.unknown.insert(PRESENCE_FIELD.into(), true.into());
+            }
             if let Some(time) = activity
                 .tabs
                 .get(&tab.id)
@@ -137,7 +174,9 @@ fn project_at(root: &Path, sessions: &mut [SessionEntry]) -> Result<()> {
 /// a session none of whose messages carried a time.
 pub fn last_message_at(session: &SessionEntry) -> Option<chrono::DateTime<chrono::Utc>> {
     let time = session.unknown.get(FIELD)?.as_str()?;
-    chrono::DateTime::parse_from_rfc3339(time).ok().map(|time| time.with_timezone(&chrono::Utc))
+    chrono::DateTime::parse_from_rfc3339(time)
+        .ok()
+        .map(|time| time.with_timezone(&chrono::Utc))
 }
 
 fn project_time(metadata: &mut BTreeMap<String, serde_json::Value>, time: Option<String>) {
@@ -151,7 +190,7 @@ fn project_time(metadata: &mut BTreeMap<String, serde_json::Value>, time: Option
     }
 }
 
-/// Publish only when chronology advances. #600 pins streamed chunks to their
+/// Publish when presence is first established or chronology advances. #600 pins streamed chunks to their
 /// first text time; metadata and repeated chunks never produce list updates.
 pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
     if event.subagent.is_some()
@@ -170,9 +209,16 @@ pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
         let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut activity = read(&event.session_id)?;
         let tab = activity.tabs.entry(event.tab_id.clone()).or_default();
+        let log = super::log_path_in(&super::root()?, &event.session_id, &event.tab_id)?;
+        select_log(tab, &log);
         let before = tab.live.assistant;
-        let time = tab.live.message(event);
-        let tab_changed = advance(&mut tab.last_message_at, time.clone());
+        let message = tab.live.message(event);
+        let time = message
+            .then(|| event.message_ts.as_deref().and_then(canonical))
+            .flatten();
+        let presence_changed = message && !tab.has_messages;
+        tab.has_messages |= message;
+        let tab_changed = advance(&mut tab.last_message_at, time.clone()) || presence_changed;
         let flow_changed = before != tab.live.assistant;
         let changed = advance(&mut activity.last_message_at, time);
         if changed || tab_changed || flow_changed {
@@ -187,6 +233,27 @@ pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
     }
 }
 
+/// A reset selected a complete new log. Rebuild its small projection in one
+/// write; a crash before this completes is detected by the log generation.
+pub(crate) fn replaced(session: &str, tab_id: &str, events: &[AgentEvent]) -> Result<()> {
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut activity = read(session)?;
+    let log = super::log_path(session, tab_id)?;
+    let mut tab = TabActivity::default();
+    select_log(&mut tab, &log);
+    tab.presence_scanned = true;
+    for event in events {
+        if tab.history.message(event) {
+            tab.has_messages = true;
+            advance(&mut tab.last_message_at, event.message_ts.as_deref().and_then(canonical));
+        }
+    }
+    tab.offset = std::fs::metadata(log)?.len();
+    activity.tabs.insert(tab_id.into(), tab);
+    activity.last_message_at = activity.tabs.values().filter_map(|tab| tab.last_message_at.clone()).max();
+    write(session, &activity)
+}
+
 /// One bounded batch per tab; persistent offsets make later launches idempotent.
 /// Read one record at a time, never a whole transcript. A partial trailing line
 /// is retried after the writer finishes it; legacy `ts` is never promoted.
@@ -199,17 +266,24 @@ fn scan_at(root: &Path, session: &str, tab_id: &str) -> Result<(bool, bool)> {
     let sidecar = activity_path(root, session);
     let mut activity: Activity = super::read_json(&sidecar)?.unwrap_or_default();
     let tab = activity.tabs.entry(tab_id.into()).or_default();
-    let log = root
-        .join("sessions")
-        .join(session)
-        .join(format!("{tab_id}.jsonl"));
+    let log = super::log_path_in(root, session, tab_id)?;
+    select_log(tab, &log);
     let file = match File::open(log) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((false, false)),
         Err(error) => return Err(error.into()),
     };
     let length = file.metadata()?.len();
+    let migrate_presence = !tab.presence_scanned;
+    if migrate_presence {
+        tab.offset = 0;
+        tab.history = Flow::default();
+        tab.presence_scanned = true;
+    }
     if tab.offset == length {
+        if migrate_presence {
+            super::write_json(&sidecar, &activity)?;
+        }
         return Ok((false, false));
     }
     if tab.offset > length {
@@ -235,7 +309,12 @@ fn scan_at(root: &Path, session: &str, tab_id: &str) -> Result<(bool, bool)> {
             if event.session_id != session || event.tab_id != tab_id {
                 continue;
             }
-            let time = tab.history.message(&event);
+            let message = tab.history.message(&event);
+            changed |= message && !tab.has_messages;
+            tab.has_messages |= message;
+            let time = message
+                .then(|| event.message_ts.as_deref().and_then(canonical))
+                .flatten();
             changed |= advance(&mut tab.last_message_at, time);
         }
     }
@@ -372,6 +451,98 @@ mod tests {
     }
 
     #[test]
+    fn legacy_message_presence_survives_reading_without_a_verified_time() {
+        let _home = super::super::temp_home();
+        seed();
+        let log = super::super::log_path("synthetic", "tab").unwrap();
+        let legacy = event(
+            1,
+            None,
+            json!({"type":"user_message","text":"Legacy prompt","queued":false}),
+        );
+        super::super::append_line(&log, &serde_json::to_string(&legacy).unwrap()).unwrap();
+        // A pre-upgrade sidecar already scanned this log but could not verify its time.
+        super::super::write_json(&path("synthetic").unwrap(), &json!({
+            "lastMessageAt": null,
+            "tabs": {"tab": {"lastMessageAt": null, "live": {"assistant": false},
+                "history": {"assistant": false}, "offset": std::fs::metadata(&log).unwrap().len()}}
+        })).unwrap();
+        assert_eq!(scan("synthetic", "tab").unwrap(), (true, false));
+        index::update_session("synthetic", |session| {
+            session.tabs[0].status = index::TabStatus::Idle;
+            Ok(())
+        })
+        .unwrap();
+        let read = index::get("synthetic").unwrap();
+        assert_eq!(read.unknown.get("hasMessages"), Some(&json!(true)));
+        assert_eq!(read.tabs[0].unknown.get("hasMessages"), Some(&json!(true)));
+        assert!(!read.unknown.contains_key(FIELD));
+        assert!(!read.tabs[0].unknown.contains_key(FIELD));
+        assert_eq!(scan("synthetic", "tab").unwrap(), (false, false));
+    }
+
+    #[test]
+    fn live_legacy_messages_publish_presence_once_and_ignore_non_messages() {
+        let _home = super::super::temp_home();
+        seed();
+        let mut child = reply(1, 1);
+        child.subagent = Some(crate::events::SubagentRef {
+            id: "child".into(),
+            label: None,
+        });
+        assert!(record(&child).unwrap().is_none());
+        assert!(record(&event(
+            2,
+            None,
+            json!({"type":"turn_completed","status":"ok"})
+        ))
+        .unwrap()
+        .is_none());
+        assert!(
+            record(&event(3, None, json!({"type":"assistant_text","text":""})))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!index::get("synthetic")
+            .unwrap()
+            .unknown
+            .contains_key(PRESENCE_FIELD));
+
+        let message = event(
+            4,
+            None,
+            json!({"type":"user_message","text":"Legacy prompt","queued":false}),
+        );
+        let published = record(&message).unwrap().unwrap();
+        assert_eq!(published.unknown[PRESENCE_FIELD], true);
+        assert_eq!(published.tabs[0].unknown[PRESENCE_FIELD], true);
+        assert!(!published.unknown.contains_key(FIELD));
+        assert!(record(&message).unwrap().is_none());
+        let saved = std::fs::read_to_string(path("synthetic").unwrap()).unwrap();
+        assert!(!saved.contains("Legacy prompt"));
+    }
+
+    #[test]
+    fn reset_log_rebuilds_message_activity_without_later_messages() {
+        let _home = super::super::temp_home();
+        seed();
+        record(&prompt(1, 2)).unwrap();
+        record(&reply(2, 9)).unwrap();
+        let id = "11111111-1111-4111-8111-111111111111";
+        index::update_tab("synthetic", "tab", |tab| {
+            tab.unknown.insert("resetLogId".into(), id.into());
+            Ok(())
+        }).unwrap();
+        assert!(!index::get("synthetic").unwrap().tabs[0].unknown.contains_key(FIELD));
+        let log = super::super::log_path("synthetic", "tab").unwrap();
+        super::super::append_line(&log, &serde_json::to_string(&prompt(1, 2)).unwrap()).unwrap();
+        scan("synthetic", "tab").unwrap();
+        assert_eq!(index::get("synthetic").unwrap().tabs[0].unknown[FIELD], at(2));
+        record(&reply(3, 3)).unwrap();
+        assert_eq!(index::get("synthetic").unwrap().tabs[0].unknown[FIELD], at(3));
+    }
+
+    #[test]
     fn messages_survive_metadata_edits_reload_and_out_of_order_events() {
         let _home = super::super::temp_home();
         seed();
@@ -427,7 +598,10 @@ mod tests {
         // The startup list must retain persisted activity even when naming one
         // tab rewrites the raw index. No new message will repair the snapshot.
         let sessions = super::super::conversation_titles::backfill().unwrap();
-        assert_eq!(sessions[0].tabs[0].title.as_deref(), Some("Synthetic prompt"));
+        assert_eq!(
+            sessions[0].tabs[0].title.as_deref(),
+            Some("Synthetic prompt")
+        );
         assert_eq!(sessions[1].tabs[0].title.as_deref(), Some("Existing title"));
         for (session, day) in sessions.iter().zip([4, 3]) {
             assert_eq!(session.unknown[FIELD], at(day));
@@ -484,7 +658,7 @@ mod tests {
         for _ in 0..BATCH + 1 {
             super::super::append_line(&log, &serde_json::to_string(&legacy).unwrap()).unwrap();
         }
-        assert_eq!(scan("synthetic", "tab").unwrap(), (false, true));
+        assert_eq!(scan("synthetic", "tab").unwrap(), (true, true));
         assert!(!index::get("synthetic").unwrap().unknown.contains_key(FIELD));
         super::super::append_line(&log, &serde_json::to_string(&reply(2, 3)).unwrap()).unwrap();
         super::super::append_line(&log, &serde_json::to_string(&reply(3, 2)).unwrap()).unwrap();
@@ -530,7 +704,7 @@ mod tests {
             json!({"type":"assistant_text","text":"Synthetic"})
         ))
         .unwrap()
-        .is_none());
+        .is_some());
         let mut subagent = reply(2, 3);
         subagent.subagent = Some(crate::events::SubagentRef {
             id: "child".into(),

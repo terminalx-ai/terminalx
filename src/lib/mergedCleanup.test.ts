@@ -160,19 +160,15 @@ describe("with the setting on for this computer", () => {
     expect(mocks.forgetWorkspaceSize).toHaveBeenCalledWith(worktree);
   });
 
-  it("says once why a workspace whose merge it just saw is kept, until that changes (#476)", async () => {
+  it("never pops up a kept workspace, and says it when it is about to go (#476)", async () => {
     const ignored = { phase: "kept" as const, reason: "ignored local files: .env", detail: "1 ignored file or folder may be local data: .env." };
-    passes = [[status({ ...ignored, fresh: true })], [status(ignored)], [status({ ...ignored, fresh: true })], [status({ due: inMinutes(9) })]];
+    passes = [[status({ ...ignored, fresh: true })], [status({ ...ignored, archiveBlocked: true })], [status({ due: inMinutes(9) })]];
     await lib.bootMergedCleanup();
     await flush();
     const key = lib.statusKey(lib.LOCAL_HOST, worktree);
-    expect(lib.getMergedCleanup().notices).toMatchObject([{ id: `kept:${key}`, kind: "kept", status: { reason: "ignored local files: .env" } }]);
-    // It goes by itself after a minute, and the next pass, kept for the same reason, does not bring it back.
-    await vi.advanceTimersByTimeAsync(60_000);
+    // Kept: said in its Branch tab and on its sidebar row, from the status; nothing pops up.
+    expect(lib.getMergedCleanup().statuses[key]).toMatchObject({ phase: "kept", reason: "ignored local files: .env" });
     expect(lib.getMergedCleanup().notices).toEqual([]);
-    await vi.advanceTimersByTimeAsync(lib.SWEEP_MS - 60_000);
-    expect(lib.getMergedCleanup().notices).toEqual([]);
-    // Seen afresh after a gap, for the same reason: already said.
     await vi.advanceTimersByTimeAsync(lib.SWEEP_MS);
     expect(lib.getMergedCleanup().notices).toEqual([]);
     // No longer kept: it is said that it will go.

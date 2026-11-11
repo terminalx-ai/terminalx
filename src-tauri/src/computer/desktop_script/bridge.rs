@@ -147,11 +147,22 @@ fn terminate(child: &mut Child) {
 }
 
 fn execute(
+    command: Command,
+    script: &Path,
+    request: &Value,
+    timeout: Duration,
+    temp_root: Option<&Path>,
+) -> Result<Value, ComputerError> {
+    execute_observed(command, script, request, timeout, temp_root, |_| {})
+}
+
+fn execute_observed(
     mut command: Command,
     script: &Path,
     request: &Value,
     timeout: Duration,
     temp_root: Option<&Path>,
+    spawned: impl FnOnce(&mut Child),
 ) -> Result<Value, ComputerError> {
     let mut builder = tempfile::Builder::new();
     builder.prefix("tx-cu-");
@@ -192,6 +203,9 @@ fn execute(
             .map_err(|error| map_error(&error.to_string()))?,
     );
     let deadline = Instant::now() + timeout;
+    // The observer lets process-lifecycle tests establish child readiness.
+    // The production caller does nothing here; startup counts toward timeout.
+    spawned(&mut child.0);
     let status = loop {
         if std::fs::metadata(&out).map_err(io_error)?.len() > MAX_OUTPUT
             || std::fs::metadata(&err).map_err(io_error)?.len() > MAX_OUTPUT
@@ -322,17 +336,26 @@ mod tests {
     }
 
     fn fake(script: &str, timeout: Duration) -> (Result<Value, ComputerError>, tempfile::TempDir) {
+        fake_observed(script, timeout, |_, _| {})
+    }
+
+    fn fake_observed(
+        script: &str,
+        timeout: Duration,
+        spawned: impl FnOnce(&mut Child, &Path),
+    ) -> (Result<Value, ComputerError>, tempfile::TempDir) {
         let root = tempfile::tempdir().unwrap();
         let script_path = root.path().join("fake.py");
         std::fs::write(&script_path, script).unwrap();
         let operations = root.path().join("operations");
         std::fs::create_dir(&operations).unwrap();
-        let result = execute(
+        let result = execute_observed(
             Command::new(if cfg!(windows) { "python" } else { "python3" }),
             &script_path,
             &json!({"tool": "test", "text": "private payload\n✓"}),
             timeout,
             Some(&operations),
+            |child| spawned(child, root.path()),
         );
         assert_eq!(
             std::fs::read_dir(&operations).unwrap().count(),
@@ -392,30 +415,63 @@ print(json.dumps({'ok': True, 'text': op['text']}))
 
     #[test]
     fn timeout_kills_even_a_child_ignoring_sigterm_and_reaps_before_cleanup() {
-        let (result, root) = fake(
+        let mut pid = None;
+        let (result, _) = fake_observed(
             r#"
 import os, pathlib, signal, sys, time
-pathlib.Path(__file__).with_suffix('.pid').write_text(str(os.getpid()))
 if os.name != 'nt': signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(__file__).with_suffix('.ready').write_text('ready')
 time.sleep(60)
 "#,
             Duration::from_secs(1),
+            |child, root| {
+                pid = Some(child.id());
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !root.join("fake.ready").exists() {
+                    assert!(
+                        child.try_wait().unwrap().is_none(),
+                        "child exited before installing its signal handler"
+                    );
+                    assert!(
+                        Instant::now() < deadline,
+                        "child never installed its signal handler"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            },
         );
         assert_eq!(result.unwrap_err().code, "action_timeout");
+        assert_reaped(pid.unwrap());
+    }
+
+    #[test]
+    fn timeout_reaps_a_child_that_has_not_finished_starting() {
+        let mut pid = None;
+        let (result, root) = fake_observed(
+            "import time, pathlib\ntime.sleep(60)\npathlib.Path(__file__).with_suffix('.ready').touch()\n",
+            Duration::from_millis(100),
+            |child, _| pid = Some(child.id()),
+        );
+        assert_eq!(result.unwrap_err().code, "action_timeout");
+        assert!(!root.path().join("fake.ready").exists());
+        assert_reaped(pid.unwrap());
+    }
+
+    fn assert_reaped(pid: u32) {
         #[cfg(unix)]
         {
-            let pid: i32 = std::fs::read_to_string(root.path().join("fake.pid"))
-                .unwrap()
-                .parse()
-                .unwrap();
             assert_eq!(
-                unsafe { libc::kill(pid, 0) },
+                unsafe { libc::kill(pid as libc::pid_t, 0) },
                 -1,
                 "timed-out child is still alive"
             );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
         }
         #[cfg(not(unix))]
-        drop(root);
+        let _ = pid;
     }
 
     #[test]

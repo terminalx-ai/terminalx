@@ -1,3 +1,5 @@
+import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
+import { MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { openSessionShare } from "@/lib/localSharing";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -23,6 +25,7 @@ import { RowActions } from "@/components/layout/RowActions";
 import {
   AgentTabRow,
   BrowserTabRow,
+  ReviewTabRow,
   DiffStats,
   GroupTitle,
   ItemTitle,
@@ -37,6 +40,7 @@ import {
   TreeToggle,
 } from "@/components/layout/SidebarRows";
 import { Button } from "@/components/ui/button";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -237,6 +241,7 @@ function WorkspaceNode({
   harnessNames: Map<string, string>;
 }) {
   const [renameError, setRenameError] = useState<string | null>(null);
+  const menu = useRowMenu();
   const workspace = group.workspace;
   // Why it is still here after its pull request merged, or when it goes.
   const merged = useMergedStatus(LOCAL_HOST, workspace && !workspace.isMain ? workspace.path : null);
@@ -251,7 +256,7 @@ function WorkspaceNode({
 
   return (
     <TreeNode label={displayName} expanded={expanded}>
-      <TreeRow level="group" selected={active} title={group.path}>
+      <TreeRow level="group" selected={active} title={group.path} {...(workspace ? menu.surface : {})}>
         <TreeToggle expanded={expanded} label={displayName} onToggle={onToggle} className="ml-0.5" />
         {project.kind === "folder" ? <FolderOpen className="size-3 shrink-0" /> : <GitBranch className="size-3 shrink-0" />}
         {workspace ? (
@@ -279,8 +284,8 @@ function WorkspaceNode({
                 <Plus />
               </Button>
             </WithTooltip>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+            <DropdownMenu {...menu.root}>
+              <DropdownMenuTrigger asChild {...menu.trigger}>
                 <Button variant="ghost" size="icon-xs" aria-label={`Workspace menu for ${displayName}`}>
                   <Ellipsis />
                 </Button>
@@ -349,6 +354,7 @@ export function SessionNode({
   harnessNames: Map<string, string>;
 }) {
   const terminals = useTerminals();
+  const menu = useRowMenu();
   // The workspace's one row of tabs, in its saved order; this session lists its own part of it, and the
   // workspace's browser pages. So the sidebar and the title bar strip are two views of one list.
   const row = useTabRow(session);
@@ -361,16 +367,16 @@ export function SessionNode({
   const labelOf = (peer: PeerTab) => peerLabel(peer, row.layout, (id) => harnessNames.get(id));
 
   return (
-    <DropdownMenu>
+    <DropdownMenu {...menu.root}>
       <TreeNode label={session.title} expanded={expanded}>
-        <TreeRow level="item" selected={selected}>
+        <TreeRow level="item" selected={selected} {...menu.surface}>
           <StatusStripe status={sessionStatus(session)} size="row" />
           <TreeToggle expanded={expanded} label={session.title} onToggle={onToggle} />
           <ItemTitle title={session.title} pinned={session.pinned} archived={session.archived} badge={branchBadge} onActivate={() => selectSession(session.id)} />
           <RowTime at={session.modified} />
           <RowActions>
             <NewTabButton session={session} />
-            <DropdownMenuTrigger asChild>
+            <DropdownMenuTrigger asChild {...menu.trigger}>
               <Button variant="ghost" size="icon-xs" aria-label={`Session menu for ${session.title}`}>
                 <Ellipsis />
               </Button>
@@ -409,6 +415,9 @@ export function SessionNode({
                     }}
                     onClose={close(peer)}
                   />
+                ) : peer.kind === "review" ? (
+                  <ReviewTabRow nodeId={tabNodeId(peer)} panelId={tabPanelId(peer)} label={labelOf(peer)} kind={peer.editor.kind}
+                    dirty={peer.editor.dirty} pinned={peer.pinned} selected={isActive(peer)} onOpen={open(peer)} onClose={close(peer)} />
                 ) : peer.kind === "browser" ? (
                   <BrowserTabRow
                     nodeId={tabNodeId(peer)}
@@ -482,12 +491,13 @@ function NewTabButton({ session }: { session: SessionEntry }) {
 
 function SessionMenu({ session }: { session: SessionEntry }) {
   return (
-    <DropdownMenuContent align="end">
+    <DropdownMenuContent align="end" onCloseAutoFocus={keepFocusForNameField}>
       <RenameSessionItem session={session} />
       <DropdownMenuItem onSelect={() => void showFloatingWindow(session.id, session.activeTab)}>
         <PictureInPicture2 /> Open in floating window
       </DropdownMenuItem>
       <QuickChatMenuItems session={session} />
+      <MoveToLocalSectionItems sessionIds={[session.id]} />
       <DropdownMenuItem onSelect={() => openSessionShare(session.id)}>Share session…</DropdownMenuItem>
       <IssueLinkMenuItems session={session} />
       <DropdownMenuSeparator />

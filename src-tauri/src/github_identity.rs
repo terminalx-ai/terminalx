@@ -31,6 +31,9 @@ pub struct GithubIdentity {
     pub email: Option<String>,
     /// The origin remote as `owner/name`, when it is on GitHub.
     pub repo: Option<String>,
+    /// Where the origin remote is hosted: `github`, `gitlab` or `other`;
+    /// `None` for a project with no remote yet, which lives on this computer only.
+    pub remote_host: Option<String>,
 }
 
 /// How long an answer stands before GitHub is asked again.
@@ -60,6 +63,7 @@ fn look_up(cwd: &Path) -> GithubIdentity {
     let remote = crate::git::remote_url(cwd);
     let email = crate::git::run(cwd, &["config", "--get", "user.email"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let repo = remote.as_deref().and_then(crate::issues::github_repo_from_url);
+    let remote_host = remote.as_deref().map(|url| remote_host_kind(url).to_string());
     // Over SSH, the key the folder uses names the account. A remote on a host
     // alias is asked by that alias; anything else by github.com, where the
     // folder's own SSH configuration still applies, since it is asked from there.
@@ -67,11 +71,59 @@ fn look_up(cwd: &Path) -> GithubIdentity {
     let https = remote.as_deref().is_some_and(|url| url.starts_with("http://") || url.starts_with("https://"));
     let greeted = if https { None } else { ssh_greeting(cwd, &host).as_deref().and_then(login_in_greeting) };
     match greeted {
-        Some(login) => GithubIdentity { login: Some(login), source: Some("ssh".into()), email, repo },
+        Some(login) => GithubIdentity { login: Some(login), source: Some("ssh".into()), email, repo, remote_host },
         None => {
             let login = gh_active_login();
-            GithubIdentity { source: login.as_ref().map(|_| "gh".into()), login, email, repo }
+            GithubIdentity { source: login.as_ref().map(|_| "gh".into()), login, email, repo, remote_host }
         }
+    }
+}
+
+/// Where a remote is hosted, by the name of its host: `github` (an SSH alias
+/// such as `github-work` included), `gitlab`, or `other`.
+pub fn remote_host_kind(url: &str) -> &'static str {
+    match classify_remote_host(url) {
+        RemoteHost::Github => "github",
+        RemoteHost::Gitlab => "gitlab",
+        RemoteHost::Other | RemoteHost::Unknown => "other",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteHost {
+    Github,
+    Gitlab,
+    /// A recognized non-GitHub forge or a local path.
+    Other,
+    /// An opaque SSH alias or custom domain; gh may know its forge.
+    Unknown,
+}
+
+pub(crate) fn classify_remote_host(url: &str) -> RemoteHost {
+    let url = url.trim();
+    let host = if url.contains("://") {
+        let Ok(parsed) = url::Url::parse(url) else { return RemoteHost::Unknown; };
+        if parsed.scheme() == "file" { return RemoteHost::Other; }
+        let Some(host) = parsed.host_str() else { return RemoteHost::Unknown; };
+        host.to_string()
+    } else {
+        let Some(host) = ssh_host(url) else { return RemoteHost::Other; };
+        host
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    // Match host labels and conventional single-label SSH aliases, never a
+    // substring in a username, repository path or unrelated hostname.
+    let alias = |name: &str| !host.contains('.') && (host == name || host.strip_prefix(name).is_some_and(|suffix| suffix.starts_with('-') && suffix.len() > 1));
+    let named = |name: &str| host.split('.').any(|label| label == name) || alias(name);
+    // Non-GitHub labels take precedence, e.g. github.gitlab.example.com.
+    if named("gitlab") {
+        RemoteHost::Gitlab
+    } else if named("bitbucket") || named("gitea") || named("gogs") || host == "codeberg.org" || host.ends_with(".codeberg.org") || host == "sr.ht" || host.ends_with(".sr.ht") {
+        RemoteHost::Other
+    } else if host == "github.com" || host.ends_with(".github.com") || alias("github") || (host.starts_with("github.") && !host.starts_with("github.com.")) {
+        RemoteHost::Github
+    } else {
+        RemoteHost::Unknown
     }
 }
 
@@ -178,6 +230,47 @@ mod tests {
         assert_eq!(ssh_host("ssh://git@github.com:22/owner/name.git").as_deref(), Some("github.com"));
         assert_eq!(ssh_host("https://github.com/owner/name.git"), None);
         assert_eq!(ssh_host("/Users/me/bare.git"), None);
+    }
+
+    #[test]
+    fn a_remote_is_placed_on_github_gitlab_or_elsewhere_by_its_host() {
+        assert_eq!(remote_host_kind("git@github.com:owner/name.git"), "github");
+        assert_eq!(remote_host_kind("git@github-work:terminalx-ai/terminalx.git"), "github");
+        assert_eq!(remote_host_kind("https://github.com/owner/name"), "github");
+        assert_eq!(remote_host_kind("git@gitlab.com:group/sub/name.git"), "gitlab");
+        assert_eq!(remote_host_kind("https://gitlab.example.com/group/name.git"), "gitlab");
+        assert_eq!(remote_host_kind("ssh://git@gitlab.com:2222/group/name.git"), "gitlab");
+        assert_eq!(remote_host_kind("https://user@bitbucket.org/team/name.git"), "other");
+        assert_eq!(remote_host_kind("/Users/me/bare.git"), "other");
+    }
+
+    #[test]
+    fn host_classification_matches_labels_and_distinguishes_unknown_hosts() {
+        for (remote, expected) in [
+            ("https://GITHUB.COM./owner/name.git", RemoteHost::Github),
+            ("git@github-work:owner/name.git", RemoteHost::Github),
+            ("https://github.example.com/owner/name.git", RemoteHost::Github),
+            ("https://github.com.evil.test/owner/name.git", RemoteHost::Unknown),
+            ("https://notgithub.com/owner/name.git", RemoteHost::Unknown),
+            ("git@mygithub:owner/name.git", RemoteHost::Unknown),
+            ("https://github.com@code.example.com/owner/name.git", RemoteHost::Unknown),
+            ("https://code.example.com/github.com/name.git", RemoteHost::Unknown),
+            ("https://mirror-of-github.gitlab.example/owner/name.git", RemoteHost::Gitlab),
+            ("https://github.gitlab.example.com/owner/name.git", RemoteHost::Gitlab),
+            ("git@gitlab-work:owner/name.git", RemoteHost::Gitlab),
+            ("https://user@BITBUCKET.ORG:443/owner/name.git", RemoteHost::Other),
+            ("ssh://git@bitbucket.example.com:7999/owner/name.git", RemoteHost::Other),
+            ("https://gitea.example.com/owner/name.git", RemoteHost::Other),
+            ("https://codeberg.org/owner/name.git", RemoteHost::Other),
+            ("git@git.sr.ht:~owner/name", RemoteHost::Other),
+            ("file:///tmp/github.com/name.git", RemoteHost::Other),
+            ("../github.com/name.git", RemoteHost::Other),
+            ("git@work:owner/name.git", RemoteHost::Unknown),
+        ] {
+            assert_eq!(classify_remote_host(remote), expected, "{remote}");
+        }
+        assert_eq!(remote_host_kind("https://github.com.evil.test/owner/name.git"), "other");
+        assert_eq!(remote_host_kind("https://mirror-of-github.gitlab.example/owner/name.git"), "gitlab");
     }
 
     #[test]

@@ -15,6 +15,11 @@ export function getDraft(tabId: string): string {
   return drafts.get(tabId) ?? "";
 }
 
+/** Every unsent tab in this window, including tabs whose composers are unmounted. */
+export function snapshotDrafts(): Map<string, string> {
+  return new Map([...drafts].filter(([, text]) => text.length > 0));
+}
+
 /** Changes on every write, including identical text; forgetting a draft invalidates it. */
 export function getDraftRevision(tabId: string): number | undefined {
   return revisions.get(tabId);
@@ -44,16 +49,26 @@ export function subscribeDrafts(change: (tabId: string, text: string) => void): 
   return () => changes.delete(change);
 }
 
+/** Views can follow several tabs without treating cache eviction as a new write. */
+export function subscribeTabDrafts(tabIds: readonly string[], changed: () => void): () => void {
+  const ids = [...new Set(tabIds)];
+  for (const id of ids) {
+    let set = listeners.get(id);
+    if (!set) listeners.set(id, (set = new Set()));
+    set.add(changed);
+  }
+  return () => {
+    for (const id of ids) {
+      const set = listeners.get(id);
+      set?.delete(changed);
+      if (!set?.size) listeners.delete(id);
+    }
+  };
+}
+
 export function useDraft(tabId: string): string {
   return useSyncExternalStore(
-    (cb) => {
-      let set = listeners.get(tabId);
-      if (!set) listeners.set(tabId, (set = new Set()));
-      set.add(cb);
-      return () => {
-        set!.delete(cb);
-      };
-    },
+    (cb) => subscribeTabDrafts([tabId], cb),
     () => drafts.get(tabId) ?? "",
     () => "",
   );

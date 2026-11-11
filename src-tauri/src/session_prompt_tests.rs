@@ -99,7 +99,7 @@ impl Cli {
 impl Rig {
     fn compose_confirmed(&self, text: &str) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, Vec::new(), self._dir.path().to_str().unwrap(), Some(tx));
         rx
     }
@@ -131,7 +131,7 @@ impl Rig {
     /// The composer's half of a send: everything `send` does short of
     /// starting the CLI and typing. Says whether the prompt was queued.
     fn compose(&self, text: &str, images: usize) -> bool {
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         let images = (0..images).map(|i| ImageRef { url: format!("attachments/s/{i}.png"), media_type: Some("image/png".into()), name: None }).collect();
         let cwd = self._dir.path().to_string_lossy().into_owned();
         let queued = self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, images, &cwd, None).1;
@@ -1959,8 +1959,9 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
             let rig = Rig::of(CliKind::Codex, "");
             rig.compose("active turn", 0);
             rig.cli_takes("active turn");
+            let input = json!({"command":"ls", "workdir":"/workspace/app"});
             let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: event.into(),
-                payload: json!({"notification_type":"permission_prompt", "tool_name":"Bash", "tool_input":{"command":"ls"}, "last_assistant_message": if event == "Stop" { Some("old reply") } else { None }}) };
+                payload: json!({"notification_type":"permission_prompt", "tool_name":"Bash", "tool_input":input, "last_assistant_message": if event == "Stop" { Some("old reply") } else { None }}) };
             let (paused_tx, paused_rx) = std::sync::mpsc::channel();
             let (resume_tx, resume_rx) = std::sync::mpsc::channel();
             let manager = rig.manager.clone();
@@ -1980,7 +1981,6 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
                     p.origin.token = crate::hooks::mint_token();
                 }
                 p.ready = ready.clone();
-                p.answered.insert(tool_key("Bash", &json!({"command":"ls"})), true);
             }
             let receipt = rig.compose_confirmed("still awaiting acceptance");
             rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
@@ -1995,6 +1995,10 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
                 (rt.last_activity, rt.status, rt.seq)
             };
             resume_tx.send(()).unwrap();
+            if event == "PermissionRequest" && !replace {
+                // The launch that asked is still the tab's: its hook asks on a card of its own.
+                rig.manager.respond_permission(SESSION, TAB, &new_card(&rig, "retained"), "allow").unwrap();
+            }
             let reply = worker.join().unwrap();
             if replace {
                 let rt = rig.rt.lock().unwrap();
@@ -2068,12 +2072,25 @@ fn stale_stop_reply_cannot_fabricate_successor_output() {
     assert!(rig.turn_open());
 }
 
+/// The card a hook files after `known`, once it has filed it.
+fn new_card(rig: &Rig, known: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(card) = rig.rt.lock().unwrap().pending.keys().find(|id| *id != known).cloned() { return card; }
+        assert!(Instant::now() < deadline, "the hook must file a card");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A permission hook that waited while its launch was replaced asks for
+/// nothing in the successor: no card is filed for it, and it is not allowed.
 #[test]
-fn delayed_permission_lookup_cannot_reuse_successor_consent() {
+fn a_delayed_permission_hook_asks_only_for_its_own_launch() {
     for replace in [false, true] {
         let rig = Rig::of(CliKind::Codex, "");
+        let input = json!({"command":"ls", "workdir":"/workspace/app"});
         let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
-            payload: json!({"tool_name":"Bash","tool_input":{"command":"ls"}}) };
+            payload: json!({"tool_name":"Bash","tool_input":input}) };
         let (paused_tx, paused_rx) = std::sync::mpsc::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let manager = rig.manager.clone();
@@ -2092,9 +2109,11 @@ fn delayed_permission_lookup_cannot_reuse_successor_consent() {
                 p.generation += 1;
                 p.origin.token = crate::hooks::mint_token();
             }
-            p.answered.insert(tool_key("Bash", &json!({"command":"ls"})), true);
         }
         resume_tx.send(()).unwrap();
+        if !replace {
+            rig.manager.respond_permission(SESSION, TAB, &new_card(&rig, ""), "allow").unwrap();
+        }
         let reply = worker.join().unwrap();
         assert_eq!(reply == reply_for(CliKind::Codex, "PermissionRequest", Decision::Allow), !replace);
         assert!(rig.rt.lock().unwrap().pending.is_empty());
@@ -2330,7 +2349,7 @@ fn failed_restart_wait_blocks_only_its_unchanged_claim() {
         }
         if replaced { assert_eq!(rig.events(), before); }
         if !replaced {
-            let prompt = PromptText { mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
+            let prompt = PromptText { hold_if_busy: None, mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
             let error = rig.manager.send_impl(SESSION, TAB, prompt, vec![], None).expect_err("failed shutdown refuses new work");
             assert!(error.to_string().contains("Stop has not confirmed local process exit"), "unexpected internal refusal: {error:#}");
             assert_eq!(rig.rt.lock().unwrap().recovery, Some(RecoveryKind::Disconnected));
@@ -2394,7 +2413,7 @@ impl Rig {
                 Payload::TurnStarted { prompt_seq: Some(seq), .. } => Some(format!("turn for: {}", text(*seq))),
                 Payload::InputOccupied { prompt_seq, occupied } => Some(format!("{} {}", if *occupied { "waiting:" } else { "typed:" }, text(*prompt_seq))),
                 Payload::PromptJoined { prompt_seq, into_seq } => Some(format!("joined: {} -> {}", text(*prompt_seq), text(*into_seq))),
-                Payload::PromptWithdrawn { prompt_seq } => Some(format!("withdrawn: {}", text(*prompt_seq))),
+                Payload::PromptWithdrawn { prompt_seq, .. } => Some(format!("withdrawn: {}", text(*prompt_seq))),
                 Payload::AssistantText { text, .. } => Some(format!("reply: {text}")),
                 _ => None,
             })

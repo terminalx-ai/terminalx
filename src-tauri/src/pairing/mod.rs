@@ -82,6 +82,7 @@ pub struct PairingManager {
     epoch: AtomicU64,
     sharing_blocked_generation: AtomicU64,
     stopped: AtomicBool,
+    relay_retry: tokio::sync::Notify,
     suspended_account_token: Mutex<Option<String>>,
     connections: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<()>>>>,
     mobile: Arc<mobile::MobileRuntime>,
@@ -115,6 +116,7 @@ impl PairingManager {
             epoch: AtomicU64::new(0),
             sharing_blocked_generation: AtomicU64::new(u64::MAX),
             stopped: AtomicBool::new(false),
+            relay_retry: tokio::sync::Notify::new(),
             suspended_account_token: Mutex::new(None),
             connections: Mutex::new(HashMap::new()),
             mobile: Arc::new(mobile::MobileRuntime::new()),
@@ -148,18 +150,15 @@ impl PairingManager {
             .set(sink.clone())
             .map_err(|_| anyhow!("pairing manager was already configured"))?;
         self.mobile.configure(sink.clone())?;
+        let settings = self.clone();
+        sink.listen("settings_file_changed", Box::new(move |_| {
+            settings.mobile.broadcast_settings_changed();
+        }));
         let events = self.clone();
         sink.listen(
             "agent_event",
             Box::new(move |payload| {
                 events.mobile.capture_agent_event(&events, payload);
-            }),
-        );
-        let statuses = self.clone();
-        sink.listen(
-            "tab_status",
-            Box::new(move |_| {
-                statuses.mobile.broadcast_sessions_changed();
             }),
         );
         if !self.registry.list()?.is_empty() {
@@ -588,12 +587,39 @@ impl PairingManager {
     }
 
     pub(super) fn set_relay_connecting(&self, attempt: u32) {
-        self.inner.lock().unwrap().relay_status = RelayStatus {
+        let mut inner = self.inner.lock().unwrap();
+        // Keep the last failure visible while the next connection is attempted.
+        let message = match inner.relay_status.phase {
+            RelayPhase::Offline | RelayPhase::Connecting => inner.relay_status.message.clone(),
+            _ => None,
+        };
+        inner.relay_status = RelayStatus {
             phase: RelayPhase::Connecting,
-            message: Some("Connecting securely…".into()),
+            message: message.or_else(|| Some("Connecting securely…".into())),
             attempt,
         };
+        drop(inner);
         self.emit();
+    }
+
+    /// Wake the existing supervisor. Never start a second control connection
+    /// or tear down a connection that recovered just before the click arrived.
+    pub fn retry_relay(&self) -> Result<PairingStatus> {
+        let mut inner = self.inner.lock().unwrap();
+        if self.is_stopped() || inner.relay_status.phase == RelayPhase::Off {
+            bail!("Relay is not configured. Check Settings → Account.");
+        }
+        if inner.relay_status.phase == RelayPhase::Offline {
+            inner.relay_status.phase = RelayPhase::Connecting;
+            let attempt = inner.relay_status.attempt;
+            drop(inner);
+            self.record_relay_diagnostic(diagnostics::Event::RetryRequested, attempt, None);
+            self.relay_retry.notify_one();
+            self.emit();
+        } else {
+            drop(inner);
+        }
+        Ok(self.status())
     }
 
     pub(super) fn set_relay_unavailable(&self, message: &str, attempt: u32) {
@@ -1791,6 +1817,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "chat.list",
         "sessions.summaries",
         "session.tail",
+        // A prompt's image, from the session's own attachments.
+        "session.image",
         "session.sync",
         "sync.capabilities",
         "transport.negotiate",
@@ -1804,6 +1832,7 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "terminal.unsubscribe",
         // What a tab runs, the models to pick from, and the context a
         // continuation would carry: reads, as the transcript is.
+        "session.markRead",
         "session.tab",
         "models.list",
         "session.prepareContinuation",
@@ -1842,6 +1871,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "session.setEffort",
         "session.setMode",
         "session.continue",
+        // Closing a tab as the desktop's tab strip does.
+        "session.closeTab",
     ];
     VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
 }
@@ -1874,7 +1905,7 @@ mod tests {
             assert!(allowed_method(DeviceScope::Viewer, read), "{read}");
         }
         for control in ["session.stop", "session.interrupt", "session.resendUnsent", "session.setModel", "session.setEffort",
-            "session.setMode", "session.continue", "terminal.open", "steerLease.queueInput"] {
+            "session.setMode", "session.continue", "session.closeTab", "terminal.open", "steerLease.queueInput"] {
             assert!(allowed_method(DeviceScope::Driver, control), "{control}");
             assert!(!allowed_method(DeviceScope::Viewer, control), "{control} is a driver's");
         }
@@ -2003,6 +2034,8 @@ mod tests {
         let options = ask(&viewer, &tablet, "sessions.options", json!({})).await;
         assert_eq!(options["ok"], true, "{options}");
         assert!(options["result"]["agents"].as_array().unwrap().iter().any(|agent| agent["id"] == "claude" && agent["available"] == true), "{options}");
+        // The phone's form opens in Ask every time, as a fresh profile's New Session does (PRO-162).
+        assert_eq!(options["result"]["defaultMode"], "manual", "{options}");
         assert_eq!(ask(&viewer, &tablet, "mac.settings", json!({})).await["result"], json!({"nativeCodex": false}));
         assert_eq!(refused(&ask(&viewer, &tablet, "sessions.create", create.clone()).await), (json!(false), json!("forbidden")));
         assert_eq!(refused(&ask(&viewer, &tablet, "mac.setSettings", json!({"nativeCodex": true})).await), (json!(false), json!("forbidden")));

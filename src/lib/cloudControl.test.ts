@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
+import type { SessionStatusInput } from "@terminalx/portable/sessionStatus";
+import statusCases from "../../packages/portable/src/sessionStatusCases.json";
 
 // PRO-40: the `terminalx` CLI's cloud commands, run in the window through the
 // real stores. What matters most here: the CLI can do what the signed-in
@@ -263,6 +265,22 @@ describe("discovery", () => {
 });
 
 describe("listing", () => {
+  it("keeps the cloud CLI's detailed status identical to the dashboard without waking compute", async () => {
+    const dashboard = await import("./cloudDashboard");
+    await handleCloudControl("sessions.list");
+    const existing = dashboard.getCloudDashboard().find((entry) => entry.orgId === ORG)!;
+    const read = vi.spyOn(dashboard, "getCloudDashboard");
+    try {
+      for (const test of statusCases.filter((entry) => ["checks_failing", "needs_permission", "needs_answer", "review_plan"].includes(entry.name))) {
+        const rowStatus = test.input as SessionStatusInput;
+        read.mockReturnValue([{ ...existing, branch: rowStatus.branch, rowStatus }]);
+        const result = await handleCloudControl("sessions.list", { org: ORG });
+        expect(result).toMatchObject({ sessions: [{ rowStatus, detailedStatus: { id: test.expected } }] });
+      }
+      expectNoWake();
+    } finally { read.mockRestore(); }
+  });
+
   it("lists cloud projects with their workspaces, from the catalog alone", async () => {
     const { projects } = (await handleCloudControl("projects.list")) as { projects: { key: string; name: string; orgName: string; mayStartSessions: boolean; workspaces: { key: string; state: string; status: string; role: string }[] }[] };
     expect(projects.map((project) => [project.key, project.orgName, project.mayStartSessions])).toEqual([
@@ -648,8 +666,10 @@ describe("creating a session", () => {
       ["accept_edits", "acceptEdits"],
       ["bypass", "bypassPermissions"],
       ["", "bypassPermissions"],
-      ["   ", "bypassPermissions"],
-      ...(source === "saved" ? [["unknown", "bypassPermissions"]] : []),
+      // Blank sent on its own is no mode, which the runtime launches in Bypass. A saved mode the
+      // picker cannot read is no choice either, and starts where a fresh profile does (PRO-162).
+      ["   ", source === "saved" ? "manual" : "bypassPermissions"],
+      ...(source === "saved" ? [["unknown", "manual"]] : []),
       ["plan", "plan"],
       ["manual", "manual"],
       ["auto", "auto"],
@@ -718,6 +738,10 @@ describe("creating a session", () => {
       // With no flag, an issue resolves its conflicts as the issue page starts it (#700); a cloud workspace never merges.
       pipeline: { autoMerge: false, resolveConflicts: true },
     });
+    await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue, resolveConflicts: false });
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[1][1].pipeline).toEqual({ autoMerge: false, resolveConflicts: false });
+    await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue, resolveConflicts: true });
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[2][1].pipeline).toEqual({ autoMerge: false, resolveConflicts: true });
     // --no-pipeline starts it plain; a runtime from before pipelines is said to be one.
     vi.mocked(newSession.startInWorkspace).mockImplementation(async (plan, _request, options) => {
       options?.onIssue?.({ supported: false, pipeline: null, note: null });
@@ -725,8 +749,8 @@ describe("creating a session", () => {
     });
     const older = await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue, noPipeline: true });
     expect(older).toMatchObject({ pipeline: null, pipelineNote: expect.stringContaining("older TerminalX") });
-    expect(vi.mocked(newSession.startInWorkspace).mock.calls[1][1].issue).toMatchObject({ pipeline: false });
-    expect(vi.mocked(newSession.startInWorkspace).mock.calls[1][1].pipeline).toBeUndefined();
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[3][1].issue).toMatchObject({ pipeline: false });
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[3][1].pipeline).toBeUndefined();
     // An issue is never started in a new machine: that one would start without its pipeline.
     await list(ORG, []);
     const { setPrefs, getPrefs } = await import("@/lib/prefs");

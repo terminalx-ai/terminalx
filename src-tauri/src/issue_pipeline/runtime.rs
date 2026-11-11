@@ -52,6 +52,13 @@ impl SessionObserver for RuntimeObserver {
             crate::automations::complete_from_hook(host, session_id, tab_id, final_message.clone());
         }
         let (session, tab) = (session_id.to_string(), tab_id.to_string());
+        if !store::takes_part(session_id, tab_id) {
+            // Not a pipeline's tab: a worker that owes its lead a report is held to that instead.
+            if let Some(host) = self.host.get().cloned().filter(|_| crate::worker_report::expected(session_id, tab_id)) {
+                let _ = std::thread::Builder::new().name("worker-report".into()).spawn(move || host.worker_turn_completed(&session, &tab, final_message.as_deref()));
+            }
+            return;
+        }
         self.off_thread(session_id, tab_id, move |host| engine::turn_completed(host, &session, &tab, final_message.as_deref()));
     }
 

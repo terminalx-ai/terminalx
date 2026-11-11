@@ -63,6 +63,8 @@ pub(crate) struct TabRecord {
     #[serde(default)]
     pub queued: Vec<QueuedMessage>,
     #[serde(default)]
+    pub held_queue: held::Queue,
+    #[serde(default)]
     pub turn_open: bool,
     #[serde(default)]
     pub turn_opener: Option<(String, String)>,
@@ -76,6 +78,8 @@ pub(crate) struct TabRecord {
     pub compact_boundary_at: Option<String>,
     #[serde(default)]
     pub turn_started_ms: Option<u64>,
+    #[serde(default)]
+    pub turn_usage: crate::harness::metrics::CompletedUsage,
     #[serde(default)]
     pub last_activity_ms: u64,
     #[serde(default)]
@@ -94,6 +98,10 @@ pub(crate) struct TabRecord {
     /// The app's own CLI in the tab's terminal, when it is running.
     #[serde(default)]
     pub cli: Option<CliRecord>,
+    /// The tab's open and last warning (#815), so the next runtime goes on
+    /// with the same incident rather than starting a second one for it.
+    #[serde(default)]
+    pub incidents: Option<crate::recovery_log::Handed>,
 }
 
 /// A permission or question card waiting on someone.
@@ -106,6 +114,8 @@ pub(crate) struct AskRecord {
     pub input: Value,
     #[serde(default)]
     pub suggestions: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_command: Option<String>,
 }
 
 /// The app's CLI in a tab, as the tab drives it.
@@ -170,8 +180,6 @@ pub(crate) struct CliRecord {
     pub transcript_turn: Option<String>,
     #[serde(default)]
     pub transcript_end_owed: bool,
-    #[serde(default)]
-    pub answered: HashMap<String, bool>,
     pub command: String,
     /// The secret this launch's hooks show, and where its transcript may be.
     pub token: String,
@@ -192,6 +200,8 @@ pub(crate) struct TailRecord {
     pub began: u64,
     #[serde(default)]
     pub carried: Vec<String>,
+    #[serde(default)]
+    pub usage: crate::harness::metrics::TurnUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,7 +360,9 @@ impl SessionManager {
 
     fn unadoptable_tab(rt: &TabRuntime) -> Option<Work> {
         match &rt.engine {
-            Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) if rt.child_pid.is_some_and(crate::harness::host::is_alive) => {
+            Engine::CodexStdio(_) | Engine::Acp(_) | Engine::OpenCode(_) if rt.child_pid.is_some_and(crate::harness::host::group_or_process_alive) => {
+                // A drained leader can leave descendants behind. These native
+                // process groups are not among the PTYs the record carries.
                 let kind = if rt.turn_open || matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting) { WorkKind::Turn } else { WorkKind::Processes };
                 Some(Work { kind, session_id: Some(rt.session_id.clone()), tab_id: Some(rt.tab_id.clone()), harness: Some(rt.harness.clone()), title: None })
             }
@@ -434,8 +446,14 @@ impl SessionManager {
     /// carry. Fails with [`Unsettled`] while it is about to change.
     fn tab_record(&self, rt: &TabRuntime) -> Result<Option<TabRecord>> {
         let name = || format!("{}/{}", rt.session_id, rt.tab_id);
-        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting || !rt.compaction.is_idle() {
+        if rt.held_queue.sending.is_some() {
+            return Err(Unsettled(format!("A held follow-up in {} is being delivered", name())).into());
+        }
+        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting {
             return Err(Unsettled(format!("The agent in {} is starting or stopping", name())).into());
+        }
+        if !rt.compaction.is_idle() {
+            return Err(Unsettled(format!("The agent in {} has compaction state that cannot be handed over", name())).into());
         }
         let mut record = TabRecord {
             session_id: rt.session_id.clone(),
@@ -445,8 +463,13 @@ impl SessionManager {
             status: rt.status,
             pending: rt.pending.iter().map(|(id, ask)| AskRecord {
                 request_id: id.clone(), tool_use_id: ask.tool_use_id.clone(), tool_name: ask.tool_name.clone(), input: ask.input.clone(), suggestions: ask.suggestions.clone(),
+                session_command: match &rt.engine {
+                    Engine::Cli(p) => p.decisions.get(id).and_then(|d| d.session_command.clone()),
+                    _ => None,
+                },
             }).collect(),
             queued: rt.queued.clone(),
+            held_queue: rt.held_queue.clone(),
             turn_open: rt.turn_open,
             turn_opener: rt.turn_opener.map(|(source, kind)| (source.to_string(), kind.to_string())),
             turn_by_command: rt.turn_by_command,
@@ -454,6 +477,7 @@ impl SessionManager {
             compact_completed: rt.compact_completed,
             compact_boundary_at: rt.compact_boundary_at.map(|at| at.to_rfc3339()),
             turn_started_ms: rt.turn_started_at.map(ago),
+            turn_usage: rt.turn_usage.clone(),
             last_activity_ms: ago(rt.last_activity),
             recovery: rt.recovery,
             stalled_ms: rt.stalled_at.map(ago),
@@ -461,10 +485,11 @@ impl SessionManager {
             message_times: rt.message_times.clone(),
             left_at: rt.left_at.clone(),
             cli: None,
+            incidents: Some(rt.incidents.handed()),
         };
         let Engine::Cli(p) = &rt.engine else {
             // Nothing runs for it: only what is waiting goes over.
-            let waiting = !record.queued.is_empty() || record.left_at.is_some();
+            let waiting = !record.held_queue.items.is_empty() || !record.queued.is_empty() || record.left_at.is_some();
             return Ok(waiting.then_some(record));
         };
         let (path, offset, began, carried) = p.tail.position();
@@ -491,7 +516,7 @@ impl SessionManager {
             announces_start: p.ready.announces_start(),
             ready_ms: p.ready.since().map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX)),
             recorded: p.recorded,
-            tail: TailRecord { path, offset, began, carried: carried.into_iter().collect() },
+            tail: TailRecord { path, offset, began, carried: carried.into_iter().collect(), usage: p.tail.usage() },
             echoed: p.echoed.iter().map(|echo| EchoRecord {
                 text: echo.text.clone(), image_count: echo.image_count, sent_ms: ago(echo.sent_at), typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
@@ -514,7 +539,6 @@ impl SessionManager {
             turn_tail: TurnTailRecord { said, anticipated, closed },
             transcript_turn: p.transcript_turn.map(|mark| mark_name(mark).to_string()),
             transcript_end_owed: p.transcript_end_owed,
-            answered: p.answered.clone(),
             command: p.command.clone(),
             token: p.origin.token.clone(),
             transcript_root: p.origin.transcript_root.clone(),
@@ -536,6 +560,7 @@ impl SessionManager {
             tool_use_id: ask.tool_use_id.clone(), tool_name: ask.tool_name.clone(), input: ask.input.clone(), suggestions: ask.suggestions.clone(),
         })).collect();
         rt.queued = record.queued;
+        rt.held_queue = record.held_queue;
         rt.turn_open = record.turn_open;
         rt.turn_opener = record.turn_opener.as_ref().and_then(|(source, kind)| Some((label(source)?, label(kind)?)));
         rt.turn_by_command = record.turn_by_command;
@@ -543,9 +568,12 @@ impl SessionManager {
         rt.compact_completed = record.compact_completed;
         rt.compact_boundary_at = record.compact_boundary_at.as_deref().and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok());
         rt.turn_started_at = record.turn_started_ms.map(back);
+        rt.turn_usage = record.turn_usage;
         rt.last_activity = back(record.last_activity_ms);
         rt.recovery = record.recovery;
         rt.stalled_at = record.stalled_ms.map(back);
+        let handed = record.incidents.clone();
+        rt.incident(|incidents, ctx| incidents.adopt(ctx, handed));
         rt.reported_mode_to_judge = record.reported_mode_to_judge;
         rt.message_times = record.message_times;
         rt.left_at = record.left_at;
@@ -553,7 +581,7 @@ impl SessionManager {
         let kind = cli_kind(&cli.kind).with_context(|| format!("no CLI called {}", cli.kind))?;
         anyhow::ensure!(self.terminals.is_live(&cli.pane_id), "its terminal {} was not handed over", cli.pane_id);
         let (decode, marker) = follow::decoders(kind);
-        let tail = Arc::new(tui::Tail::resumed(cli.tail.path, cli.tail.offset, cli.tail.began, decode, cli.tail.carried.into_iter().collect::<HashSet<_>>()).marking(marker));
+        let tail = Arc::new(tui::Tail::resumed(cli.tail.path, cli.tail.offset, cli.tail.began, decode, cli.tail.carried.into_iter().collect::<HashSet<_>>()).with_usage(cli.tail.usage).marking(marker));
         // Read on from where its CLI began: what the CLI started in the
         // background since is found again (#696).
         rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
@@ -598,7 +626,6 @@ impl SessionManager {
             turn_tail: tui::TurnTail::from_parts(cli.turn_tail.said, cli.turn_tail.anticipated, cli.turn_tail.closed),
             transcript_turn: cli.transcript_turn.as_deref().and_then(mark_of),
             transcript_end_owed: cli.transcript_end_owed,
-            answered: cli.answered,
             command: cli.command,
             origin: Origin { token: cli.token, transcript_root: cli.transcript_root, conversation: cli.conversation },
             by_hand: None,
@@ -622,7 +649,11 @@ impl SessionManager {
                 Ok(connection) if local_owner => crate::hooks::Caller::of(Arc::new(connection)),
                 _ => crate::hooks::Caller::default(),
             };
-            p.decisions.insert(ask.request_id.clone(), DecisionSender { sender: tx, caller, gate: gate.clone() });
+            let session_command = ask.session_command.clone().filter(|key| {
+                (p.harness != CliKind::Codex || gate == "PreToolUse")
+                    && crate::harness::read_only::session_input(&ask.tool_name, &ask.input, key).is_some()
+            });
+            p.decisions.insert(ask.request_id.clone(), DecisionSender { sender: tx, caller, gate: gate.clone(), session_command });
             (p.harness, p.origin.token.clone(), p.generation)
         };
         let manager = self.clone();
@@ -633,7 +664,7 @@ impl SessionManager {
                     None => return reply_for(kind, &gate, Decision::Deny),
                 }
             } else { None };
-            let waiting = Waiting { kind, gate, request_id: ask.request_id, tool_name: ask.tool_name, input: ask.input, local_owner };
+            let waiting = Waiting { kind, gate, request_id: ask.request_id, local_owner };
             manager.await_decision(&rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.generation == generation && p.origin.token == token))
         });
     }

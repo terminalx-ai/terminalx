@@ -16,6 +16,31 @@ use serde_json::{json, Value};
 
 
 const LINEAR_API: &str = "https://api.linear.app/graphql";
+
+/// Shared by tracker reads and writes so transport tests exercise both paths.
+pub(crate) fn linear_api() -> std::borrow::Cow<'static, str> {
+    #[cfg(test)]
+    if let Some(endpoint) = TEST_LINEAR_API.with(|slot| slot.borrow().clone()) {
+        return endpoint.into();
+    }
+    LINEAR_API.into()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A scoped transport fixture; production always uses Linear's HTTPS API.
+    static TEST_LINEAR_API: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_linear_api<T>(url: String, test: impl FnOnce() -> T) -> T {
+    struct Reset(Option<String>);
+    impl Drop for Reset {
+        fn drop(&mut self) { TEST_LINEAR_API.with(|slot| *slot.borrow_mut() = self.0.take()); }
+    }
+    let _reset = Reset(TEST_LINEAR_API.with(|slot| slot.replace(Some(url))));
+    test()
+}
 const LIMIT: usize = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -515,7 +540,7 @@ pub fn github_comment(cwd: &Path, repo: &str, number: i64, body: &str) -> Result
 fn graphql(key: &str, query: &str, variables: Value) -> Result<Value> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).build();
     let resp = agent
-        .post(LINEAR_API)
+        .post(linear_api().as_ref())
         .set("Authorization", key)
         .set("Content-Type", "application/json")
         .send_json(json!({"query": query, "variables": variables}));

@@ -1,32 +1,48 @@
-import { Loader2, UserRound } from "@/icons";
+import { Loader2, LogOut, Settings, UserRound } from "@/icons";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { Button } from "@/components/ui/button";
-import { signIn, useAccount } from "@/lib/account";
-import { usePairing } from "@/lib/pairing";
+import { openPasteLink, signIn, signOut, useAccount } from "@/lib/account";
 import { AccountAvatar } from "./AccountAvatar";
+import { RelayStatus } from "./RelayStatus";
+import { usePairing } from "@/lib/pairing";
+import { cn } from "@/lib/cn";
 
 export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => void }) {
   const account = useAccount();
-  const pairing = usePairing();
+  // Dropped, or reconnecting after a drop (a retry is counted): the moments the line has something to say.
+  const { relay } = usePairing().status;
+  const relayDropped = relay.phase === "offline" || (relay.phase === "connecting" && relay.attempt > 0);
   const identity = account.status.identity;
   if (account.status.state === "signed-in" && identity) {
     return (
-      <Button
-        variant="ghost"
-        className="h-auto w-full min-w-0 justify-start gap-2 overflow-hidden px-2 py-1.5"
-        onClick={onOpenAccount}
-        title={[identity.email, identity.organization].filter(Boolean).join(" · ")}
-      >
-        <AccountAvatar identity={identity} />
-        <span className="min-w-0 flex-1 text-left">
-          <span className="block truncate">{identity.name ?? identity.email}</span>
-          <span className="mt-0.5 flex items-center gap-1 text-[10px] font-normal text-faint">
-            <span className={pairing.status.relay.phase === "connected" ? "size-1.5 shrink-0 rounded-full bg-add" : "size-1.5 shrink-0 rounded-full bg-faint"} />
-            <span className="min-w-0 truncate">
-              {pairing.status.relay.phase === "connected" ? "Relay connected" : pairing.status.relay.phase === "connecting" ? "Relay connecting" : pairing.status.relay.phase === "offline" ? "Relay unavailable" : "Relay not configured"}
-            </span>
-          </span>
-        </span>
-      </Button>
+      // One line, the picture and the name, opening a menu: the email it is signed in as, Settings, and Log out. Relay's state
+      // shows under it only when the relay has dropped, with its retry; connected, connecting or not configured is the
+      // normal case and lives in Settings → Devices.
+      <div className="relative w-full min-w-0">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              className={cn("w-full min-w-0 justify-start gap-2 overflow-hidden px-2", relayDropped && "h-auto py-1.5")}
+              title={[identity.email, identity.organization].filter(Boolean).join(" · ")}
+            >
+              <AccountAvatar identity={identity} />
+              <span className="min-w-0 flex-1 text-left">
+                <span className="block truncate">{identity.name ?? identity.email}</span>
+                {relayDropped && <span aria-hidden className="mt-0.5 block h-[15px]" />}
+              </span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="start" className="w-60">
+            <div className="truncate px-2 py-1.5 text-xs text-muted-foreground" title={identity.email}>{identity.email}</div>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onOpenAccount}><Settings /> Settings</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void signOut()} disabled={account.busy}><LogOut /> Log out</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {relayDropped && <RelayStatus />}
+      </div>
     );
   }
 
@@ -36,7 +52,9 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
       variant="ghost"
       className="w-full min-w-0 justify-start gap-2 overflow-hidden px-2"
       disabled={!account.ready || account.busy}
-      onClick={() => void signIn()}
+      // In the dev app, a sign-in under way is finished by pasting its link: bring that dialog back rather than start
+      // another sign-in, which would make the link already copied useless.
+      onClick={() => (signingIn && import.meta.env.DEV ? openPasteLink() : void signIn())}
       title={account.status.lastError ?? undefined}
     >
       {signingIn || !account.ready ? <Loader2 className="animate-spin" /> : <UserRound />}

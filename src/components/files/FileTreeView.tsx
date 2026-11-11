@@ -6,6 +6,7 @@ import { getDraft, setDraft } from "@/lib/drafts";
 import { openFile, useEditors } from "@/lib/editors";
 import { fileErrorText, localFileSource, StaleRequestError, type FileSource, type SourceEntry } from "@/lib/workspaceFiles";
 import { cn } from "@/lib/cn";
+import { isContextMenuKey, openContextMenu } from "@/lib/contextMenu";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/menu";
 import type { ChangeStatus } from "@/types/session";
 import { FileTypeIcon } from "./FileTypeIcon";
@@ -216,8 +217,18 @@ function RootedFileTreeView({
   );
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.defaultPrevented) return;
     const i = Math.max(0, rows.findIndex((r) => r.path === focus));
     const row = rows[i];
+    if (isContextMenuKey(e)) {
+      const target = container.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(row.path)}"]`);
+      if (target) {
+        e.preventDefault();
+        e.stopPropagation();
+        openContextMenu(target);
+      }
+      return;
+    }
     const go = (j: number) => {
       const target = rows[Math.max(0, Math.min(rows.length - 1, j))];
       if (target) setFocus(target.path);
@@ -281,7 +292,7 @@ function RootedFileTreeView({
       role="tree"
       tabIndex={0}
       onKeyDown={onKeyDown}
-      className="h-full overflow-auto py-1 outline-none scrollbar-thin focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/40"
+      className="animate-panel-content h-full overflow-auto py-1 outline-none scrollbar-thin focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/40"
     >
       {error && <div className="px-3 py-2 text-xs text-destructive">{error}</div>}
       {rows.map((row) => {

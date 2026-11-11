@@ -51,6 +51,8 @@ export interface RemoteGitStatus {
 export interface RemoteChangedFile {
   path: string;
   oldPath?: string;
+  /** Head blob ID, or deleted:<removed blob ID>. Absent on older runtimes. */
+  blobHash?: string;
   status: "added" | "modified" | "deleted" | "renamed";
   additions: number;
   deletions: number;
@@ -85,10 +87,58 @@ export interface RemotePullRequest {
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  /** Absent on older workspace runtimes. */
+  mergeState?: string;
+  mergeQueueEnabled?: boolean | null;
+  mergeQueueEntry?: { position: number; state: string } | null;
+  autoMergeEnabled?: boolean;
+  requiredChecks?: string[] | null;
+  deployments?: { name: string; state: string; url?: string | null }[];
+  detailsError?: string | null;
   reviewDecision: string | null;
   checks: { name: string; state: string; url?: string | null }[];
   body: string;
   author: string;
+}
+
+/** PR conversation returned by one paginated GraphQL query. */
+export interface PrReviewer {
+  login: string;
+  kind: "user" | "team" | "bot";
+  state: string;
+  requested: boolean;
+}
+export interface PrActivity {
+  id: string;
+  kind: "comment" | "review" | "commit" | "force_push";
+  author: string;
+  body: string;
+  at: string;
+  url: string | null;
+  state: string | null;
+  before: string | null;
+  after: string | null;
+}
+export interface PrConversation {
+  url: string;
+  title: string;
+  body: string;
+  state: string;
+  author: string;
+  viewer: string;
+  canEdit: boolean;
+  reviewers: PrReviewer[];
+  unresolvedThreads: number;
+  activity: PrActivity[];
+}
+export type PrConversationAction =
+  | { kind: "edit"; title: string; body: string; expectedTitle: string; expectedBody: string }
+  | { kind: "request" | "remove"; login: string; team: boolean }
+  | { kind: "approve"; viewer: string };
+export interface PrConversationAccess {
+  read(): Promise<PrConversation>;
+  act(action: PrConversationAction): Promise<void>;
+  search(query: string): Promise<string[]>;
 }
 
 export interface RemotePushResult {
@@ -189,20 +239,24 @@ export class RemoteGit {
     return this.read("git.status");
   }
 
-  workingChanges(): Promise<{ head: string; files: RemoteChangedFile[]; truncated: boolean }> {
-    return this.read("git.workingChanges");
+  workingChanges(hideWhitespace = false): Promise<{ head: string; files: RemoteChangedFile[]; truncated: boolean }> {
+    return this.read("git.workingChanges", hideWhitespace ? { hideWhitespace } : {});
   }
 
   reviewRange(target: string | null, uncommitted: boolean): Promise<{ target: string; base: string; head: string }> {
     return this.read("git.reviewRange", { target, uncommitted });
   }
 
-  changesBetween(base: string, head: string | null): Promise<{ files: RemoteChangedFile[]; truncated?: boolean }> {
-    return this.read("git.changesBetween", head ? { base, head } : { base });
+  changesBetween(base: string, head: string | null, hideWhitespace = false): Promise<{ files: RemoteChangedFile[]; truncated?: boolean }> {
+    return this.read("git.changesBetween", { base, ...(head ? { head } : {}), ...(hideWhitespace ? { hideWhitespace } : {}) });
   }
 
   fileContents(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }> {
     return this.read("git.fileContents", head ? { path, base, head } : { path, base });
+  }
+
+  mediaContent(path: string, tree: string | null): Promise<{ data: string; mime: string } | null> {
+    return this.read("git.mediaContent", { path, ...(tree ? { tree } : {}) });
   }
 
   async log(limit = 60, from?: string | null): Promise<RemoteCommit[]> {
@@ -218,6 +272,14 @@ export class RemoteGit {
    * Older runtimes use `branch`; callers still verify the returned identity. */
   prs(branch?: string, number?: number): Promise<{ branch: string; prs: RemotePullRequest[] }> {
     return this.read("git.prs", { ...(branch ? { branch } : {}), ...(number ? { number } : {}) });
+  }
+
+  prConversation(url: string): PrConversationAccess {
+    return {
+      read: () => this.read("git.prConversation", { url }),
+      act: (action) => this.write("git.prConversationAction", { url, action }),
+      search: (query) => this.read("git.prReviewerSearch", { url, query }),
+    };
   }
 
   prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null }[] }> {
@@ -266,7 +328,7 @@ export class RemoteGit {
     return this.write("git.prReady", { number });
   }
 
-  mergePr(number: number, method: "merge" | "squash" | "rebase"): Promise<unknown> {
+  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<unknown> {
     return this.write("git.prMerge", { number, method });
   }
 }

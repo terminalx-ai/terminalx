@@ -62,7 +62,7 @@ const stripNames = () => within(strip()).getAllByRole("tab").map((tab) => tab.ge
 
 const sidebar = () => screen.getByRole("navigation", { name: "Sidebar" });
 /** A session's own row in the sidebar, by its title (one alone on its branch is named "<branch>, <title>"; others end with when or where). */
-const sessionRow = (title: string) => within(sidebar()).getByRole("button", { name: (name) => name.includes(title) && !name.startsWith("Menu for") });
+const sessionRow = (title: string) => within(sidebar()).getByRole("button", { name: (name, element) => name.includes(title) && element?.parentElement?.hasAttribute("data-row-sessions") === true });
 
 /** The main window: the sidebar, and the slot for the open session as the app shell mounts it, one view per session. */
 function Main() {
@@ -140,6 +140,7 @@ describe("clicking a session with no tabs (#721)", () => {
     expect(screen.getByRole("heading", { name: "No tabs open" })).toBeTruthy();
     // Nothing was opened in it that nobody asked for.
     expect(backend.callsOf("pty_spawn")).toHaveLength(0);
+    expect(backend.callsOf("set_session_archived")).toHaveLength(0);
     // And it stays: no later render takes it elsewhere.
     await flush();
     expect(store().selectedSessionId).toBe("empty");

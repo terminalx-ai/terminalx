@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { closeEditor, getEditors, isReviewEditor, setActiveEditor, setLastFocused, useEditors, type ReviewEditorEntry } from "@/lib/editors";
 import { activateBrowserPage, closeBrowserPage, getBrowserState, pagesFor, useBrowser } from "@/lib/browser";
 import { lastRunning, offerCloseUndo } from "@/lib/closeUndo";
 import type { BrowserPage, TabLayout, TabState } from "@/lib/api";
@@ -6,7 +7,7 @@ import { getPrefs, usePrefs } from "@/lib/prefs";
 import { getSessionStore, openWelcome, removeTab, selectSession, setActiveTab, useSessionStore } from "@/lib/sessions";
 import { followedSelection, isTerminalTab, tabLabel, tabPaneId } from "@/lib/tabFront";
 import { closeTerminal, getTerminalState, setActiveTerminal, useTerminals, type SelectedSessionTab, type TerminalPane } from "@/lib/terminal";
-import { NO_LAYOUT, branchSessionsAsTabs, followedLayout, getTabState, layoutOf, rememberClosed, saveTabLayout, settleLayout, sortByLayout, tabKey, useTabState, workspaceKey, workspaceSessions } from "@/lib/tabLayouts";
+import { NO_LAYOUT, panesOf, selectPaneTab, branchSessionsAsTabs, followedLayout, getTabState, layoutOf, rememberClosed, saveTabLayout, settleLayout, sortByLayout, tabKey, useTabState, workspaceKey, workspaceSessions } from "@/lib/tabLayouts";
 import type { SessionEntry, TabEntry, TabStatus, Workspace } from "@/types/session";
 
 interface PeerBase {
@@ -33,7 +34,8 @@ interface PeerBase {
 export type PeerTab =
   | (PeerBase & { kind: "agent"; sessionId: string; tab: TabEntry; pane: TerminalPane | null; paneAgent: string | null })
   | (PeerBase & { kind: "terminal"; sessionId: string; pane: TerminalPane; paneAgent: string | null })
-  | (PeerBase & { kind: "browser"; sessionId: null; page: BrowserPage });
+  | (PeerBase & { kind: "browser"; sessionId: null; page: BrowserPage })
+  | (PeerBase & { kind: "review"; sessionId: string; editor: ReviewEditorEntry });
 
 /**
  * Every tab of a workspace in one row: the agent tabs and shells of the
@@ -54,6 +56,7 @@ export function workspaceTabs(
   pages: readonly BrowserPage[] = [],
   saved: TabLayout = NO_LAYOUT,
   agents: Readonly<Record<string, string>> = {},
+  reviews: readonly ReviewEditorEntry[] = [],
 ): PeerTab[] {
   const layout = followedLayout(saved, sessions);
   const ids = new Set(sessions.map((session) => session.id));
@@ -73,6 +76,7 @@ export function workspaceTabs(
     ...panes
       .filter((pane) => ids.has(pane.sessionId) && !pane.hidden && !taken.has(pane.id))
       .map((pane): PeerTab => peer({ kind: "terminal", id: pane.id, created: pane.created, sessionId: pane.sessionId, pane, paneAgent: agents[pane.id] ?? null })),
+    ...reviews.filter((entry) => ids.has(entry.sessionId)).map((editor): PeerTab => peer({ kind: "review", id: editor.id, sessionId: editor.sessionId, editor, created: editor.created ?? "9999" })),
     ...pages.map((page): PeerTab => peer({ kind: "browser", id: page.id, created: page.created, sessionId: null, page })),
   ];
   return sortByLayout(tabs, layout);
@@ -95,18 +99,18 @@ export interface TabRow {
  * branch's sessions as tabs); otherwise only the open session's own tabs,
  * and the sidebar lists the others.
  */
-function rowOf(session: SessionEntry, all: readonly SessionEntry[], chatsPath: string | null, workspaces: Record<string, Workspace[]>, shared: boolean, saved: TabState, panes: readonly TerminalPane[], agents: Readonly<Record<string, string>>, pages: BrowserPage[]): TabRow {
+function rowOf(session: SessionEntry, all: readonly SessionEntry[], chatsPath: string | null, workspaces: Record<string, Workspace[]>, shared: boolean, saved: TabState, panes: readonly TerminalPane[], agents: Readonly<Record<string, string>>, pages: BrowserPage[], reviews: readonly ReviewEditorEntry[]): TabRow {
   const workspace = workspaceKey(session, chatsPath);
   const sessions = shared ? workspaceSessions(all, session, chatsPath, workspaces) : [session];
   const layout = followedLayout(layoutOf(saved, workspace), sessions);
-  return { session, sessions, workspace, layout, tabs: workspaceTabs(sessions, panes, pagesFor(pages, session.cwd), layout, agents) };
+  return { session, sessions, workspace, layout, tabs: workspaceTabs(sessions, panes, pagesFor(pages, session.cwd), layout, agents, reviews) };
 }
 
 /** A session's workspace row as the stores have it now, outside React. */
 export function workspaceRow(session: SessionEntry): TabRow {
   const { panes, agents } = getTerminalState();
   const { sessions, chatsPath, workspaces } = getSessionStore();
-  return rowOf(session, sessions, chatsPath, workspaces, branchSessionsAsTabs(getPrefs()), getTabState(), panes, agents, getBrowserState().pages);
+  return rowOf(session, sessions, chatsPath, workspaces, branchSessionsAsTabs(getPrefs()), getTabState(), panes, agents, getBrowserState().pages, getEditors().editors.filter(isReviewEditor));
 }
 
 /** A session's workspace row, kept up to date: what the strip, the tab shortcuts and the tab menus all act on. */
@@ -115,9 +119,18 @@ export function useTabRow(session: SessionEntry): TabRow {
   const { panes, agents } = useTerminals();
   // The store's state, not its list of pages: a new state is what says the pages changed.
   const browser = useBrowser();
+  const editors = useEditors();
   const saved = useTabState();
   const shared = branchSessionsAsTabs(usePrefs());
-  return useMemo(() => rowOf(session, sessions, chatsPath, workspaces, shared, saved, panes, agents, browser.pages), [session, sessions, chatsPath, workspaces, shared, panes, agents, browser, saved]);
+  return useMemo(() => rowOf(session, sessions, chatsPath, workspaces, shared, saved, panes, agents, browser.pages, editors.editors.filter(isReviewEditor)), [editors, session, sessions, chatsPath, workspaces, shared, panes, agents, browser, saved]);
+}
+
+/** The focused pane's row, for tab navigation and bulk actions. */
+export function paneRow(row: TabRow, key?: string | null): TabRow {
+  if (!row.layout.panes?.length) return row;
+  const panes = panesOf(row.layout, row.tabs.map((tab) => tab.key));
+  const pane = panes.find((pane) => key ? pane.tabs.includes(key) : pane.id === row.layout.focusedPane) ?? panes[0];
+  return { ...row, tabs: row.tabs.filter((tab) => pane.tabs.includes(tab.key)) };
 }
 
 /** One session's tabs, in the order its workspace's layout gives them. */
@@ -133,16 +146,12 @@ export function selectedPeer(session: SessionEntry, tabs: PeerTab[], asked?: Sel
     ?? tabs[0];
 }
 
-export function tabNodeId(tab: SelectedSessionTab) {
-  return `session-${tab.kind}-tab-${encodeURIComponent(tab.id)}`;
-}
-
-export function tabPanelId(tab: SelectedSessionTab) {
-  return `session-${tab.kind}-panel-${encodeURIComponent(tab.id)}`;
-}
+export { tabNodeId, tabPanelId } from "@/lib/sessionTabIds";
 
 export function activatePeer(sessionId: string, tab: SelectedSessionTab) {
-  if (tab.kind === "agent") void setActiveTab(sessionId, tab.id);
+  setLastFocused(tab.kind === "review" ? "editor" : "chat");
+  if (tab.kind === "review") setActiveEditor(sessionId, tab.id);
+  else if (tab.kind === "agent") void setActiveTab(sessionId, tab.id);
   else if (tab.kind === "browser") void activateBrowserPage(sessionId, tab.id);
   else setActiveTerminal(sessionId, tab.id);
 }
@@ -158,6 +167,11 @@ export function sessionOfPeer(sessionId: string, tab: PeerTab): string {
  * panel and the session's actions always describe the tab on screen.
  */
 export function openPeer(sessionId: string, tab: PeerTab) {
+  const session = getSessionStore().sessions.find((candidate) => candidate.id === sessionId);
+  if (session) {
+    const row = workspaceRow(session);
+    if (row.layout.panes?.length) saveTabLayout(row.workspace, selectPaneTab(row.layout, row.tabs.map((peer) => peer.key), tab.key));
+  }
   const target = sessionOfPeer(sessionId, tab);
   if (getSessionStore().selectedSessionId !== target) selectSession(target);
   activatePeer(target, tab);
@@ -167,6 +181,7 @@ export function openPeer(sessionId: string, tab: PeerTab) {
 export async function endPeer(sessionId: string, tab: PeerTab) {
   if (tab.kind === "agent") await removeTab(tab.sessionId, tab.id);
   else if (tab.kind === "browser") await closeBrowserPage(sessionId, tab.id);
+  else if (tab.kind === "review") await closeEditor(tab.id);
   else await closeTerminal(tab.id);
 }
 
@@ -175,10 +190,10 @@ export async function endPeer(sessionId: string, tab: PeerTab) {
  * stood in its workspace's row, and a page's address), and their traces
  * taken out of the layout. `sessionId` is a session of that workspace.
  */
-export function noteClosed(sessionId: string, closing: readonly PeerTab[]) {
+export function noteClosed(sessionId: string, closing: readonly PeerTab[], original?: TabRow) {
   const session = getSessionStore().sessions.find((candidate) => candidate.id === sessionId);
   if (!session || !closing.length) return;
-  const { workspace, layout, tabs } = workspaceRow(session);
+  const { workspace, layout, tabs } = original ?? workspaceRow(session);
   const gone = new Set(closing.map((tab) => tab.key));
   const at = Date.now();
   closing.forEach((tab, order) => {
@@ -193,10 +208,11 @@ export function noteClosed(sessionId: string, closing: readonly PeerTab[]) {
       pinned: layout.pinned.includes(tab.key),
       muted: layout.muted.includes(tab.key),
       title: layout.titles[tab.key],
+      review: tab.kind === "review" ? { ...tab.editor, dirty: false } : undefined,
       page: tab.kind === "browser" ? { url: tab.page.url, cwd: session.cwd } : undefined,
     });
   });
-  const mentions = (key: string) => layout.order.includes(key) || layout.pinned.includes(key) || layout.muted.includes(key) || key in layout.titles;
+  const mentions = (key: string) => layout.order.includes(key) || layout.pinned.includes(key) || layout.muted.includes(key) || key in layout.titles || !!layout.panes?.some((pane) => pane.tabs.includes(key));
   if (![...gone].some(mentions)) return;
   saveTabLayout(workspace, settleLayout(layout, tabs.filter((tab) => !gone.has(tab.key)).map((tab) => tab.key), (key) => gone.has(key)));
 }
@@ -229,17 +245,27 @@ export function offerUndoFor(undo: Map<string, TabEntry[]>) {
 export async function closePeer(sessionId: string, tab: PeerTab, tabs: PeerTab[], selected?: SelectedSessionTab | null) {
   const index = tabs.findIndex((candidate) => candidate.kind === tab.kind && candidate.id === tab.id);
   const remaining = tabs.filter((_, i) => i !== index);
-  const next = remaining[Math.min(Math.max(index, 0), remaining.length - 1)];
+  const session = getSessionStore().sessions.find((candidate) => candidate.id === sessionId);
+  const survivors = remaining.length ? remaining : session ? workspaceRow(session).tabs.filter((candidate) => candidate.key !== tab.key) : [];
+  const next = survivors[Math.min(Math.max(index, 0), survivors.length - 1)];
   // Read before it closes: whether this stops the last agent its session has running.
   const undo = offersUndo(agentTabsOf([tab]));
-  noteClosed(sessionId, [tab]);
+  const original = session ? workspaceRow(session) : undefined;
+  // A cancelled dirty review close must not move the selection or add an undo entry.
+  if (tab.kind === "review" && !(await closeEditor(tab.id))) return;
+  noteClosed(sessionId, [tab], original);
   if (selected?.kind === tab.kind && selected.id === tab.id && next) {
     const target = sessionOfPeer(sessionId, next);
     // The neighbour may be another session's tab: the view follows it there, but only when this session is the one on screen.
     if (target !== sessionId && getSessionStore().selectedSessionId === sessionId) selectSession(target);
     activatePeer(target, next);
   }
-  await endPeer(sessionId, tab);
+  if (tab.kind !== "review") await endPeer(sessionId, tab);
+  const owner = getSessionStore().sessions.find((candidate) => candidate.id === sessionId);
+  if (owner) {
+    const now = workspaceRow(owner);
+    saveTabLayout(now.workspace, settleLayout(now.layout, now.tabs.map((peer) => peer.key), (key) => key === tab.key));
+  }
   offerUndoFor(undo);
   const current = getSessionStore().sessions.find((session) => session.id === sessionId);
   if (current && getSessionStore().selectedSessionId === sessionId && !workspaceRow(current).tabs.length) openWelcome(sessionId);
@@ -269,7 +295,7 @@ export function isShellPeer(tab: PeerTab): boolean {
  * for). None for a plain terminal and for a page.
  */
 export function peerAgent(tab: PeerTab): string | null {
-  if (tab.kind === "browser") return null;
+  if (tab.kind === "browser" || tab.kind === "review") return null;
   return tab.kind === "agent" && !isTerminalTab(tab.tab) ? tab.tab.harness : tab.paneAgent;
 }
 
@@ -280,7 +306,7 @@ export function peerPaneId(tab: PeerTab): string | null {
 
 /** The shell of a tab that is a terminal now, when this window has it. */
 export function peerShell(tab: PeerTab): TerminalPane | null {
-  return isShellPeer(tab) && tab.kind !== "browser" ? tab.pane : null;
+  return isShellPeer(tab) && (tab.kind === "terminal" || tab.kind === "agent") ? tab.pane : null;
 }
 
 /** True when the reader gave the tab a title of their own. */
@@ -299,12 +325,13 @@ export function peerLabel(tab: PeerTab, layout: TabLayout, harnessName: (id: str
   if (own) return own;
   if (tab.kind === "agent") return tabLabel(tab.tab, (id) => harnessName(id) || id, tab.paneAgent);
   if (tab.kind === "terminal") return tab.pane.title;
-  return browserPageLabel(tab.page);
+  return tab.kind === "review" ? tab.editor.name : browserPageLabel(tab.page);
 }
 
 /** What kind of tab it is now: its agent's name, "Terminal" (with the agent running in it, if one is) or "Browser page". */
 export function peerKind(tab: PeerTab, harnessName: (id: string) => string | undefined): string {
   if (tab.kind === "browser") return "Browser page";
+  if (tab.kind === "review") return tab.editor.kind === "diff" ? "File diff" : "Pull request";
   const agent = peerAgent(tab);
   const name = agent ? harnessName(agent) || agent : null;
   if (!isShellPeer(tab)) return name ?? "Agent";

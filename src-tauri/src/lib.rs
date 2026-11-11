@@ -8,6 +8,7 @@
 #[cfg(feature = "desktop")]
 mod account;
 mod agent_data;
+mod archive_script;
 mod project_overview;
 #[cfg(feature = "desktop")]
 mod desktop_links;
@@ -40,6 +41,7 @@ mod commands;
 mod cloud_agent_client;
 #[cfg(feature = "desktop")]
 mod cloud_diagnostics;
+pub mod startup;
 #[cfg(feature = "desktop")]
 mod cloud_ports;
 #[cfg(feature = "desktop")]
@@ -74,13 +76,22 @@ mod drag_text;
 mod transcription;
 mod events;
 mod files;
+mod workspace_file;
 mod foreground;
 #[cfg(feature = "desktop")]
 mod floating;
 #[cfg(feature = "desktop")]
 mod media;
 mod media_types;
+mod branch_overview;
+#[cfg(feature = "desktop")]
+mod branch_step;
 mod git;
+#[cfg(feature = "desktop")]
+mod repo_mirror;
+mod checkpoints;
+mod worktree_files;
+mod git_media;
 mod github;
 mod unfinished_merge;
 mod pr_associations;
@@ -88,17 +99,25 @@ mod github_identity;
 mod harness;
 pub mod hooks;
 mod idle_agents;
-#[cfg(feature = "desktop")]
 mod issue_control;
 #[cfg(feature = "desktop")]
 mod issue_confirmation;
+#[cfg(feature = "desktop")]
+mod self_ui;
 mod issue_pipeline;
 mod issue_ops;
 mod issues;
 #[cfg(feature = "desktop")]
 mod installation;
-#[cfg(feature = "desktop")]
 mod keychain;
+#[cfg(feature = "desktop")]
+mod environment_commands;
+#[cfg(feature = "desktop")]
+mod configuration_commands;
+#[cfg(feature = "desktop")]
+mod configuration_watch;
+#[cfg(feature = "desktop")]
+mod secret_clipboard;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
@@ -113,15 +132,23 @@ mod project_start;
 mod pty;
 #[cfg(feature = "desktop")]
 mod quit;
+#[cfg(feature = "desktop")]
+mod native_menu;
+#[cfg(feature = "desktop")]
+mod chat_windows;
 mod relay_e2ee;
 pub mod remote;
 mod session;
+mod sidebar_activity;
 mod session_archive;
 mod session_ops;
+mod workspace_setup;
 mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
+mod reply_block;
+mod recovery_log;
 mod continuation;
 pub mod skills;
 mod store;
@@ -135,14 +162,16 @@ mod summaries;
 mod terminal_perf;
 #[cfg(feature = "desktop")]
 mod work_claims;
+mod worker_report;
 mod workspaces;
+mod workspace_restore;
 mod worktree_cleanup;
 mod worktree_control;
 
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg(feature = "desktop")]
 pub struct AppState {
@@ -283,7 +312,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().with_filter(|label| !chat_windows::is_chat_window(label)).build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -377,6 +406,7 @@ pub fn run() {
             browser.sweep_orphans();
             browser.start_keepalive();
             floating::install(app.handle());
+            store::settings::file::install(app.handle())?;
             let state = app.state::<AppState>();
             state.runtime_supervisor.start(app.handle())?;
             match local_runtime::supervisor::attach(app.handle()) {
@@ -394,6 +424,17 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            configuration_commands::configuration_resolve,
+            configuration_watch::configuration_watch,
+            configuration_commands::configuration_write,
+            configuration_commands::configuration_review,
+            environment_commands::environment_list,
+            environment_commands::environment_reveal,
+            environment_commands::environment_copy,
+            environment_commands::environment_save,
+            environment_commands::environment_delete,
+            environment_commands::environment_read_file,
+            environment_commands::environment_changed,
             local_runtime::ui::local_runtime_status,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
@@ -403,9 +444,11 @@ pub fn run() {
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
+            commands::repository_files_preview,
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,
+            commands::account_paste_callback,
             commands::organization_console_open,
             commands::account_sign_out,
             commands::organization_create,
@@ -511,6 +554,11 @@ pub fn run() {
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,
+            startup::commands::startup_diagnostics_status,
+            startup::commands::startup_diagnostics_policy,
+            startup::commands::startup_diagnostics_probe,
+            startup::commands::startup_diagnostics_preview,
+            startup::commands::startup_diagnostics_export,
             cloud_agent_client::cloud_agent_enqueue,
             cloud_agent_client::cloud_agent_outbox,
             cloud_agent_client::cloud_agent_outbox_sync,
@@ -524,6 +572,7 @@ pub fn run() {
             cloud_catalog::cloud_catalog_load,
             cloud_catalog::cloud_catalog_save,
             commands::pairing_status,
+            commands::pairing_retry_relay,
             commands::session_share_create,
             commands::session_share_status,
             commands::session_share_change,
@@ -545,6 +594,9 @@ pub fn run() {
             commands::project_start_defaults,
             commands::project_create,
             commands::list_sessions,
+            commands::session_row_statuses,
+            commands::local_sections,
+            commands::edit_local_section,
             commands::automations_list,
             commands::automation_runs,
             commands::automation_issue_states,
@@ -558,6 +610,7 @@ pub fn run() {
             commands::app_activity_summary,
             commands::stats_usage_refresh,
             commands::create_session,
+            commands::workspace_setup,
             commands::create_quick_chat,
             commands::set_quick_chat_cwd,
             commands::move_quick_chat_to_project,
@@ -574,6 +627,8 @@ pub fn run() {
             commands::reopen_tab,
             commands::rename_tab,
             commands::tab_state,
+            commands::sidebar_order,
+            commands::set_sidebar_order,
             commands::set_tab_layout,
             commands::tab_resume_conversation,
             commands::pane_agents,
@@ -583,13 +638,20 @@ pub fn run() {
             commands::set_shown_session,
             commands::archive_idle_sessions,
             commands::set_session_pinned,
+            commands::set_session_status,
             commands::set_active_tab,
             commands::delete_session,
             commands::list_harnesses,
             commands::check_agent_readiness,
+            commands::agent_setup_start,
+            commands::agent_setup_running,
             commands::list_skills,
             commands::skill_detail,
             commands::work_status,
+            commands::branch_overview,
+            commands::project_forge,
+            commands::branch_fetch,
+            commands::branch_merge_into,
             commands::list_branches,
             commands::worktree_disposition,
             commands::sessions_sharing_worktree,
@@ -600,22 +662,28 @@ pub fn run() {
             commands::changes_between,
             commands::review_range,
             commands::file_contents_at,
+            commands::review_comments,
+            commands::diff_media_content,
             commands::log_commits,
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
             commands::report_send_shown,
+            commands::report_terminal_view,
+            commands::report_recovery_ui,
             commands::resend_unsent,
             commands::resend_message,
             commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,
+            commands::reset_chat,
             commands::tab_handoff,
             commands::tab_to_terminal,
             commands::ensure_tab_started,
             commands::tab_pane,
             commands::cancel_queued,
             commands::send_queued_now,
+            commands::change_held_queue,
             commands::list_queued,
             commands::respond_permission,
             commands::answer_questions,
@@ -623,6 +691,7 @@ pub fn run() {
             commands::set_tab_permission_mode,
             commands::set_tab_effort,
             commands::mark_tab_read,
+            commands::set_tab_unread,
             commands::tab_status,
             commands::list_models,
             commands::frontend_log,
@@ -646,31 +715,61 @@ pub fn run() {
             commands::cloud_mirror_claim_owner,
             commands::cloud_mirror_note_unreadable,
             commands::git_push,
+            commands::branch_step_refresh,
+            commands::branch_step_account,
+            commands::branch_step_action,
+            commands::git_has_remote,
+            commands::git_add_remote,
+            commands::gh_connection_status,
+            commands::gh_login_start,
+            commands::gh_create_repository,
             commands::git_pull,
             commands::git_discard,
+            commands::turn_checkpoint,
+            commands::keep_turn,
+            commands::undo_turn,
+            commands::restore_undo,
             commands::unfinished_merge,
             commands::commit_merge,
             commands::abort_merge,
             commands::git_checkout,
             commands::working_changes,
             commands::pr_list,
+            commands::pr_search,
+            commands::pr_attach,
             commands::pr_associations,
+            commands::pr_associations_batch,
             commands::pr_details,
+            commands::pr_conversation,
+            commands::pr_conversation_action,
+            commands::pr_reviewer_search,
+            commands::pr_review_threads,
+            commands::pr_review_files,
+            commands::pr_review_resolve,
+            commands::pr_review_reply,
             commands::pr_landed,
             commands::pr_create,
             commands::pr_merge,
             commands::pr_ready,
+            commands::pr_check_log,
+            commands::pr_check_rerun,
+            commands::pr_check_fix_attachment,
             commands::gh_available,
             star_nag::star_nag_ready,
             star_nag::star_nag_input,
             star_nag::star_nag_dismiss,
             star_nag::star_nag_act,
             commands::pty_spawn,
+            commands::pty_local_links,
             commands::pty_shells,
             commands::pty_rename,
+            commands::pty_set_docked,
+            commands::save_terminal_selection,
             commands::pty_busy,
+            commands::listening_sessions,
             commands::pty_write,
             commands::pty_attach,
+            commands::pty_attach_sized,
             commands::pty_detach,
             commands::pty_detach_all,
             commands::pty_ack,
@@ -679,6 +778,12 @@ pub fn run() {
             commands::pty_kill,
             commands::terminal_perf_reply,
             commands::cloud_control_reply,
+            self_ui::self_ui_claim,
+            self_ui::self_ui_validate,
+            self_ui::self_ui_reply,
+            self_ui::self_ui_start,
+            self_ui::self_ui_grants,
+            self_ui::self_ui_revoke,
             issue_confirmation::issue_confirmation_pending,
             issue_confirmation::issue_confirmation_reply,
             commands::cloud_control_setting,
@@ -701,6 +806,9 @@ pub fn run() {
             commands::update_project,
             commands::set_project_logo,
             commands::list_workspaces,
+            commands::repo_mirror_status,
+            commands::repo_mirror_start,
+            commands::repo_mirror_stop,
             commands::preview_workspace_name,
             commands::rename_workspace,
             commands::rename_branch,
@@ -714,6 +822,8 @@ pub fn run() {
             commands::copy_text,
             commands::workspace_disposition,
             commands::remove_workspace,
+            commands::preview_workspace_restore,
+            commands::restore_workspace,
             commands::workspace_size,
             commands::scan_leftovers,
             commands::remove_leftovers,
@@ -730,9 +840,18 @@ pub fn run() {
             commands::set_work_status_settings,
             commands::agent_settings,
             commands::set_agent_idle_stop_minutes,
+            commands::set_read_only_commands,
+            commands::diagnostics_settings,
+            commands::set_recovery_incidents,
+            commands::recovery_incidents_summary,
+            commands::recovery_incidents_export,
+            commands::clear_recovery_incidents,
             commands::conversation_settings,
             commands::set_archive_idle_days,
             commands::experimental_settings,
+            store::settings::file::settings_file_status,
+            store::settings::file::update_user_preferences,
+            store::settings::file::create_settings_file,
             commands::set_experimental_settings,
             commands::organization_work_status,
             commands::set_organization_work_status,
@@ -749,6 +868,7 @@ pub fn run() {
             commands::issues_list,
             commands::issue_pipelines_list,
             commands::issue_pipeline_start,
+            commands::issue_pipeline_attach,
             commands::issue_pipeline_continue,
             commands::issue_pipeline_set_auto_merge,
             commands::issue_pipeline_set_resolve_conflicts,
@@ -797,6 +917,11 @@ pub fn run() {
             commands::status_usage_refresh,
             commands::status_codex_reset,
             commands::status_resource_overview,
+            native_menu::set_native_menu,
+            native_menu::native_window_action,
+            native_menu::forward_menu_action,
+            chat_windows::new_chat_window,
+            chat_windows::chat_window_open_in_main,
             commands::status_resource_sample,
             commands::status_resource_kill,
             browser::ui::browser_pages,
@@ -805,6 +930,7 @@ pub fn run() {
             browser::ui::browser_activate_page,
             browser::ui::browser_navigate,
             browser::ui::browser_screencast,
+            browser::ui::browser_input,
             browser::ui::browser_runtime_status,
             browser::ui::browser_install_browser,
             browser::ui::browser_profiles,
@@ -817,6 +943,7 @@ pub fn run() {
             computer::computer_reset_permissions,
         ])
         .on_menu_event(|app, event| {
+            native_menu::dispatch(app, event.id().as_ref());
             if event.id().as_ref() == status::MENU_ID {
                 status::toggle_from_menu(app);
             }
@@ -847,6 +974,9 @@ pub fn run() {
                 }
             }
             if let tauri::WindowEvent::Destroyed = event {
+                if chat_windows::is_chat_window(window.label()) {
+                    let _ = window.app_handle().emit_to("main", "chat_window_closed", window.label());
+                }
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {
@@ -855,7 +985,9 @@ pub fn run() {
                         let_go_of_unresponsive_runtime(&state);
                         state.pairing.stop();
                         if let Some(runtime) = state.runtime() { runtime.disconnect(); }
-                        if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) { let _ = floating.destroy(); }
+                        for (label, secondary) in window.app_handle().webview_windows() {
+                            if label == floating::LABEL || chat_windows::is_chat_window(&label) { let _ = secondary.destroy(); }
+                        }
                         state.computer.shutdown();
                         state.browser.shutdown();
                     }

@@ -4,10 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const pty = vi.hoisted(() => ({
   spawn: vi.fn().mockResolvedValue(undefined),
   kill: vi.fn().mockResolvedValue(undefined),
+  setDocked: vi.fn(),
   detachAll: vi.fn().mockResolvedValue(undefined),
 }));
+const setups = vi.hoisted(() => ({ runs: [] as import("@/lib/workspaceSetup").WorkspaceSetup[], shown: null }));
+vi.mock("@/lib/workspaceSetup", () => ({ useWorkspaceSetups: () => setups, rerunSetup: vi.fn(), setupLog: vi.fn() }));
 vi.mock("@/lib/api", () => ({ pty, errorMessage: (e: unknown) => String(e) }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+const events = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name: string, callback: (event: { payload: unknown }) => void) => { events.set(name, callback); return () => {}; }) }));
 vi.mock("./TerminalView", () => ({
   TerminalView: ({ id, visible }: { id: string; visible: boolean }) => <div data-testid="terminal-view" data-id={id} data-visible={visible} />,
 }));
@@ -15,7 +19,7 @@ vi.mock("./TerminalView", () => ({
 import { TerminalDock as Dock } from "./TerminalDock";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { setPrefs } from "@/lib/prefs";
-import { dropSessionTerminals } from "@/lib/terminal";
+import { dropSessionTerminals, openTerminal, moveTerminal } from "@/lib/terminal";
 
 const TerminalDock = (props: { sessionId: string; cwd: string }) => (
   <TooltipProvider>
@@ -28,11 +32,23 @@ beforeEach(() => {
   dropSessionTerminals(["s1"]);
   vi.clearAllMocks();
   setPrefs({ panelTerminalOpen: false });
+  setups.runs = [];
 });
 
 afterEach(cleanup);
 
 describe("the right panel's terminal dock", () => {
+  it("has no Setup tab without a configured run, and keeps a completed setup tab", () => {
+    const view = render(<TerminalDock sessionId="s1" cwd="/repo" />);
+    expect(screen.queryByRole("tab", { name: /Setup/ })).toBeNull();
+    setups.runs = [{ sessionId: "s1", paneId: "s1:workspace-setup-test", command: "bun install", status: "succeeded", exitCode: 0, error: null, hasPane: true }];
+    view.rerender(<TerminalDock sessionId="s1" cwd="/repo" />);
+    fireEvent.click(screen.getByRole("tab", { name: /Setup/ }));
+    expect(screen.getByRole("status").textContent).toContain("Setup succeeded");
+    expect(shown()).toEqual(["s1:workspace-setup-test"]);
+    expect(pty.spawn).not.toHaveBeenCalled();
+    expect(pty.kill).not.toHaveBeenCalled();
+  });
   it("starts folded and opens a shell in the session's folder when shown", async () => {
     render(<TerminalDock sessionId="s1" cwd="/repo" />);
     expect(screen.queryByTestId("terminal-view")).toBeNull();
@@ -73,4 +89,20 @@ describe("the right panel's terminal dock", () => {
     expect(pty.spawn).toHaveBeenCalledTimes(1);
     expect(shown()).toHaveLength(1);
   });
+});
+
+it("shows the terminal moved into a populated dock and keeps its exited history", async () => {
+  render(<TerminalDock sessionId="s1" cwd="/repo" />);
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "New terminal" })));
+  let tab!: Awaited<ReturnType<typeof openTerminal>>;
+  await act(async () => { tab = await openTerminal("s1", "/repo"); });
+  pty.setDocked.mockResolvedValue({ id: tab.id, sessionId: "s1", title: tab.title, cwd: "/repo", exited: true, docked: true });
+  await act(async () => { await moveTerminal(tab.id, true); });
+  expect(shown()).toEqual([tab.id]);
+  act(() => events.get("pty_exit")!({ payload: { id: tab.id, code: 1 } }));
+  expect(screen.getByText("Process exited (1).")).toBeTruthy();
+  expect(shown()).toEqual([tab.id]);
+  expect(pty.kill).not.toHaveBeenCalled();
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "New terminal" })));
+  expect(shown()).toEqual([pty.spawn.mock.calls.at(-1)![0]]);
 });

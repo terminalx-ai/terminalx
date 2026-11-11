@@ -559,7 +559,7 @@ where
             }
             retry = RetryState::default();
             manager.set_relay_unavailable(failure.message(), 0);
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            wait_for_retry(&manager, Duration::from_secs(30)).await;
             continue;
         }
         entitlement_reported = false;
@@ -586,7 +586,14 @@ where
         if manager.is_stopped() {
             return;
         }
-        tokio::time::sleep(backoff(retry.attempts)).await;
+        wait_for_retry(&manager, backoff(retry.attempts)).await;
+    }
+}
+
+async fn wait_for_retry(manager: &PairingManager, delay: Duration) {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => {},
+        _ = manager.relay_retry.notified() => {},
     }
 }
 
@@ -755,14 +762,18 @@ async fn open_control(
 }
 
 async fn next_control_json(socket: &mut ControlSocket) -> Result<serde_json::Value> {
-    let message = tokio::time::timeout(CONNECT_TIMEOUT, socket.next())
-        .await
-        .context(Category::Timeout)?
-        .ok_or_else(|| anyhow!(Category::Network))??;
-    match message {
-        Message::Text(text) => serde_json::from_str(&text).context("decode relay control message"),
-        _ => bail!("relay sent a non-text control message"),
-    }
+    tokio::time::timeout(CONNECT_TIMEOUT, async {
+        loop {
+            match socket.next().await.ok_or_else(|| anyhow!(Category::Network))?? {
+                Message::Text(text) => return serde_json::from_str(&text).context("decode relay control message"),
+                Message::Ping(_) | Message::Pong(_) => socket.flush().await?,
+                Message::Close(frame) => return Err(anyhow!(close_category(frame.as_ref().map(|frame| u16::from(frame.code))))),
+                _ => return Err(anyhow!(Category::Protocol)),
+            }
+        }
+    })
+    .await
+    .context(Category::Timeout)?
 }
 
 async fn control_loop(
@@ -854,8 +865,16 @@ async fn control_loop(
                 liveness.frame(Instant::now());
                 live.signals.frame_received(now_ms());
                 let Message::Text(text) = incoming else {
-                    if matches!(incoming, Message::Close(_)) { return Err(anyhow!(Category::Network)); }
-                    bail!("relay sent a non-text control message");
+                    if let Message::Close(frame) = incoming {
+                        return Err(anyhow!(close_category(frame.as_ref().map(|frame| u16::from(frame.code)))));
+                    }
+                    // WebSocket control pings are legal independently of the
+                    // relay's JSON heartbeat. Tungstenite queues the pong.
+                    if matches!(incoming, Message::Ping(_) | Message::Pong(_)) {
+                        socket.flush().await?;
+                        continue;
+                    }
+                    return Err(anyhow!(Category::Protocol));
                 };
                 let value: serde_json::Value = serde_json::from_str(&text)?;
                 match value.get("type").and_then(serde_json::Value::as_str) {
@@ -924,7 +943,7 @@ async fn control_loop(
                             }
                         });
                     }
-                    Some("drain") => return Err(anyhow!(Category::ServiceUnavailable)),
+                    Some("drain") => return Err(anyhow!(Category::ServiceRestart)),
                     Some("control-error") => {
                         let error: ControlError = serde_json::from_value(value)?;
                         if error.kind != "control-error" || error.code.is_empty() || error.code.len() > 128 {
@@ -946,7 +965,7 @@ async fn control_loop(
                             bail!("relay rejected an unknown control request");
                         }
                     }
-                    _ => bail!("relay sent an unknown control message"),
+                    _ => return Err(anyhow!(Category::Protocol)),
                 }
             }
             _ = tick.tick() => {
@@ -958,6 +977,22 @@ async fn control_loop(
                 }
             }
         }
+    }
+}
+
+// Interpret only documented numeric codes, never remote close-reason text
+// (which can contain identifiers or credentials).
+fn close_category(code: Option<u16>) -> Category {
+    match code {
+        Some(1000 | 1001) => Category::RemoteClosed,
+        Some(1002 | 1003 | 1007 | 1009) => Category::Protocol,
+        Some(1008) => Category::AccessDenied,
+        Some(4401) => Category::Authentication,
+        Some(4429) => Category::RateLimited,
+        Some(1012 | 1013 | 4503) => Category::ServiceRestart,
+        Some(4408) => Category::Timeout,
+        Some(4409) => Category::AssignmentChanged,
+        _ => Category::Network,
     }
 }
 

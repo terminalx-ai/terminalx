@@ -291,6 +291,28 @@ fn bound_pane(pane: &PaneInfo, sessions: &[index::SessionEntry], project_names: 
         };
     }
 
+    // An agent's install or sign-in (PRO-152): no session's, and no orphan.
+    if let Some(harness) = crate::harness::setup::pane_harness(&pane.id) {
+        return ProcSample {
+            pane_id: pane.id.clone(),
+            tab_id: None,
+            tab_title: format!("{} setup", crate::harness::display_name(harness)),
+            session_id: None,
+            session_title: None,
+            project_path: None,
+            project_name: None,
+            cwd: pane.cwd.clone(),
+            kind: "shell".into(),
+            harness: Some(harness.to_string()),
+            orphaned: false,
+            pid: pane.pid,
+            cpu_percent: aggregate.map(|sample| sample.cpu_percent),
+            rss_bytes: aggregate.map(|sample| sample.rss_bytes),
+            child_count: aggregate.map(|sample| sample.child_count),
+            kill_rule: KillRule::Confirm,
+        };
+    }
+
     let session = sessions
         .iter()
         .find(|session| pane.id.starts_with(&format!("{}:", session.id)))
@@ -512,7 +534,7 @@ mod tests {
     fn only_an_idle_bound_agent_can_be_stopped() {
         let pane = PaneInfo { id: "tab:t1".into(), pid: Some(400), running: true, cwd: "/work".into() };
         let rule = |status: index::TabStatus| {
-            let tab = index::TabEntry { transport: Default::default(),
+            let tab = index::TabEntry { marked_unread: false, transport: Default::default(),
                 id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
                 permission_mode: "auto".into(), provider_session_id: None, status,
                 created: String::new(), modified: String::new(), context_used: None, context_max: None,
@@ -524,9 +546,10 @@ mod tests {
                 kind: crate::store::index::SessionKind::Project,
                 branch: None, base_ref: None, worktree_base: None, worktree_removed: false, removed_workspace: None, issue: None, issue_work: Default::default(), automation: None,
                 title: "Safe session".into(),
-                created: String::new(), modified: String::new(), archived: false, archive: Default::default(), pinned: false, tabs: vec![tab],
+                created: String::new(), modified: String::new(), archived: false, archive: Default::default(), pinned: false, manual_status: Default::default(), tabs: vec![tab],
                 active_tab: Some("t1".into()), unknown: Default::default(),
                 link: None,
+                parent: None,
             };
             bound_pane(&pane, &[session], &HashMap::new(), Some(Aggregate::default())).kill_rule
         };

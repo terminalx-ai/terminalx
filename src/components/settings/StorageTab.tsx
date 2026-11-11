@@ -1,11 +1,14 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, RefreshCw, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogScrollArea, DialogTitle } from "@/components/ui/dialog";
 import { api, errorMessage } from "@/lib/api";
-import { openWorktreeCleanup } from "@/lib/dialogs";
+import { openWorkspaceRemove, openWorktreeCleanup } from "@/lib/dialogs";
 import { leftoverTotals, startLeftoverRun, useLeftoverRun, watchLeftoverRun } from "@/lib/leftoverRun";
 import { formatSize } from "@/lib/workspaceSizes";
+import { ArchiveTerminal } from "@/components/terminal/ArchiveTerminal";
+import { archiveFailure, archiveFailureMessage, useArchiveTerminal } from "@/lib/archiveScript";
 import type { Leftover } from "@/types/session";
 
 const KIND_LABEL: Record<Leftover["kind"], string> = {
@@ -37,6 +40,7 @@ export function StorageTab() {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const run = useLeftoverRun();
   const removing = run?.status === "running";
+  const archivePane = useArchiveTerminal(removing ? run.items.find((item) => item.id === run.current)?.path ?? null : null);
   const busy = scanning || removing;
   const done = run?.status === "done" ? run : null;
 
@@ -106,7 +110,7 @@ export function StorageTab() {
   }, [items]);
 
   return (
-    <div className="flex flex-col gap-4">
+    <RegisteredSetting setting="storage.leftovers"><div className="flex flex-col gap-4">
       <p className="text-xs leading-relaxed text-muted-foreground">
         Deleting a session or workspace can leave things behind: a workspace no session uses, an agent's conversations for a workspace that is gone, a
         branch with no workspace. They are listed here with what they take on disk. Only what is clean and merged into the default branch can be
@@ -173,6 +177,7 @@ export function StorageTab() {
         </div>
       )}
 
+      {removing && archivePane && <ArchiveTerminal pane={archivePane} />}
       {error && (
         <div role="alert" className="text-xs text-destructive">
           {error}
@@ -194,6 +199,7 @@ export function StorageTab() {
           <ul className="mt-1 flex flex-col divide-y divide-hairline rounded-lg bg-well">
             {group.items.map((item) => {
               const reason = failures[item.id] ?? item.keptBecause;
+              const failure = reason ? archiveFailure(reason) : null;
               const inputId = `leftover-${item.id}`;
               return (
                 <li key={item.id} className="flex items-start gap-3 px-3 py-2">
@@ -214,8 +220,9 @@ export function StorageTab() {
                         {item.paths.length > 1 ? ` and ${item.paths.length - 1} more` : ""}
                       </span>
                     )}
-                    {reason && <span className="block text-[11px] text-warning">Kept: {reason}</span>}
+                    {reason && <span className="block text-[11px] text-warning">Kept: {failure ? archiveFailureMessage(failure) : reason}</span>}
                   </label>
+                  {failure && item.kind === "worktree" && item.paths[0] && <Button size="xs" variant="outline" onClick={() => openWorkspaceRemove({ projectPath: item.projectPath, path: item.paths[0], name: item.name, mode: "settle", archiveFailure: failure })}>Review removal / Open log</Button>}
                   <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{item.kind === "branch" ? "" : formatSize(item.sizeBytes)}</span>
                 </li>
               );
@@ -269,6 +276,6 @@ export function StorageTab() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </div></RegisteredSetting>
   );
 }
