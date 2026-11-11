@@ -24,6 +24,50 @@ export function checkSummary(checks: PrCheck[]): string {
   return [result, c.running && `${c.running} running`, c.skipped && `${c.skipped} skipped`, c.unknown && `${c.unknown} unknown`].filter(Boolean).join(" · ");
 }
 
+/** A check's state in the words the pipeline panel says it in. */
+export function checkStateLabel(state: string): string {
+  if (state === "in_progress" || state === "pending") return "Running";
+  if (RUNNING_CHECKS.includes(state)) return "Queued";
+  if (state === "success") return "Passed";
+  if (state === "cancelled") return "Cancelled";
+  if (state === "neutral" || state === "skipped") return "Skipped";
+  if (FAILING_CHECKS.includes(state)) return "Failed";
+  return state ? state[0].toUpperCase() + state.slice(1).replace(/_/g, " ") : "Unknown";
+}
+
+/**
+ * Whole minutes a check has been in its state: running since it started, or
+ * how long it ran once finished. Null where GitHub gave no start, as it does
+ * not for a check still queued.
+ */
+export function checkMinutes(check: PrCheck, now: number): number | null {
+  const started = check.startedAt ? Date.parse(check.startedAt) : NaN;
+  if (Number.isNaN(started)) return null;
+  const ended = check.completedAt ? Date.parse(check.completedAt) : NaN;
+  const until = checkBucket(check.state) === "running" || Number.isNaN(ended) ? now : ended;
+  return Math.max(0, Math.floor((until - started) / 60_000));
+}
+
+export function minutesLabel(minutes: number): string {
+  return minutes < 1 ? "<1 min" : `${minutes} min`;
+}
+
+/**
+ * Where the checks a merge waits on stand, as the merge gate counts them: by
+ * name, with a check run more than once on the commit counted by its worst run.
+ * Checks outside `required` never change it.
+ */
+export function requiredCheckCounts(checks: PrCheck[], required: string[]) {
+  const counts = { total: required.length, passed: 0, failed: [] as string[], waiting: 0 };
+  for (const name of required) {
+    const buckets = checks.filter((check) => check.name === name).map((check) => checkBucket(check.state));
+    if (buckets.includes("failed")) counts.failed.push(name);
+    else if (buckets.length && buckets.every((bucket) => bucket === "passed" || bucket === "skipped")) counts.passed++;
+    else counts.waiting++;
+  }
+  return counts;
+}
+
 export function actionsRuns(pr: PullRequest, failedOnly = false): PrCheck[] {
   const runs = new Map<number, PrCheck>();
   for (const check of pr.checks) {

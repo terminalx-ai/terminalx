@@ -2134,6 +2134,11 @@ export interface PrCheck {
   state: string;
   url?: string | null;
   actions?: { runId: number; jobId: number | null } | null;
+  /** When it started and finished, as GitHub gave them with the check (RFC 3339). */
+  startedAt?: string | null;
+  completedAt?: string | null;
+  /** The line GitHub carries with it: a check run's output title, a status's description. */
+  summary?: string | null;
 }
 
 export interface CheckLog {

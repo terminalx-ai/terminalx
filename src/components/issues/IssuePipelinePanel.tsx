@@ -1,15 +1,18 @@
 import { setCloudPipelineResolveConflicts } from "@/lib/cloudPipelines";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
-import { Check, ChevronRight, CircleAlert, Cloud, ExternalLink, GitMerge, GitPullRequest, Loader2, MessageSquare, Pause } from "@/icons";
+import { Check, ChevronRight, CircleAlert, Cloud, CornerUpLeft, ExternalLink, GitMerge, GitPullRequest, Loader2, MessageSquare, Pause, RotateCw } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
-import { errorMessage } from "@/lib/api";
+import { PipelineCheckList, webUrl } from "@/components/changes/PrChecks";
+import { errorMessage, gh } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { openCloudSession } from "@/lib/cloudDashboard";
 import { lookAtCloudPipeline } from "@/lib/cloudPipelines";
-import { actOnAnyPipeline, actOnPipeline, countOf, pipelineActions, pipelineHeadline, pipelineSettings, pipelineSteps, reviewChecksLine, setPipelineAutoMerge, setPipelineResolveConflicts, type PipelineStep, type PipelineTone } from "@/lib/issuePipeline";
+import { sendFailedChecks } from "@/lib/fixCheckErrors";
+import { actOnAnyPipeline, actOnPipeline, countOf, pipelineActions, pipelineChecksView, pipelineHeadline, pipelineSettings, pipelineSteps, requiredChecksLine, reviewChecksLine, setPipelineAutoMerge, setPipelineResolveConflicts, type PipelineChecksView, type PipelineStep, type PipelineTone } from "@/lib/issuePipeline";
+import { usePrefs } from "@/lib/prefs";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import type { FindingSeverity, IssuePipeline, PipelineAction, PipelineFinding } from "@/types/issuePipeline";
@@ -20,6 +23,7 @@ const TONE_DOT: Record<PipelineTone, string> = {
   info: "bg-info animate-pulse-soft",
   merged: "bg-merged",
   faint: "bg-faint",
+  failed: "bg-destructive",
 };
 
 const TONE_TEXT: Record<PipelineTone, string> = {
@@ -28,6 +32,7 @@ const TONE_TEXT: Record<PipelineTone, string> = {
   info: "text-foreground",
   merged: "text-merged",
   faint: "text-muted-foreground",
+  failed: "text-foreground",
 };
 
 /** Where a pipeline stands: a dot in the state's colour and two or three words, small enough for a header or a list row. */
@@ -37,6 +42,7 @@ export function PipelineStatus({
   dotClassName,
   labelClassName,
   lead,
+  headline: given,
 }: {
   pipeline: IssuePipeline;
   className?: string;
@@ -45,8 +51,10 @@ export function PipelineStatus({
   labelClassName?: string;
   /** Words before the status inside that label, such as the session's part in the pipeline. */
   lead?: ReactNode;
+  /** Said instead of the pipeline's own headline, where the page knows more. */
+  headline?: { label: string; tone: PipelineTone };
 }) {
-  const headline = pipelineHeadline(pipeline);
+  const headline = given ?? pipelineHeadline(pipeline);
   return (
     <span className={cn("flex items-center gap-1.5 text-[11px] font-medium", TONE_TEXT[headline.tone], className)}>
       <span className={cn("size-1.5 shrink-0 rounded-full", TONE_DOT[headline.tone], dotClassName)} />
@@ -65,10 +73,10 @@ function readWhen(at: number): string {
   return /^\d+[mhd]$/.test(when) ? `${when} ago` : `on ${when}`;
 }
 
-function StepGlyph({ status }: { status: PipelineStep["status"] }) {
+function StepGlyph({ status, failed }: { status: PipelineStep["status"]; failed?: boolean }) {
   if (status === "done") return <Check className="size-3 text-add" aria-label="done" />;
   if (status === "current") return <Loader2 className="size-3 animate-spin text-info" aria-label="in progress" />;
-  if (status === "attention") return <CircleAlert className="size-3 text-warning" aria-label="needs you" />;
+  if (status === "attention") return <CircleAlert className={cn("size-3", failed ? "text-destructive" : "text-warning")} aria-label="needs you" />;
   if (status === "stopped") return <Pause className="size-3 text-faint" aria-label="stopped" />;
   return <span aria-hidden>·</span>;
 }
@@ -100,6 +108,32 @@ function Finding({ finding }: { finding: PipelineFinding }) {
   );
 }
 
+/** The time, again each half minute while `ticking`: the check list's clocks move without asking GitHub anything. */
+function useNow(ticking: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    if (!ticking) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [ticking]);
+  return now;
+}
+
+/** The headline while the merge waits on checks or stopped on one: what the check list adds to the pipeline's own. */
+function checksHeadline(view: PipelineChecksView | null): { label: string; tone: PipelineTone } | undefined {
+  if (view?.outcome !== "failed") return undefined;
+  return { label: view.counts.failed.length === 1 ? "A required check failed" : "Required checks failed", tone: "failed" };
+}
+
+/**
+ * The failed required checks' names, said once: "check", "check and lint".
+ */
+function namesOf(checks: { name: string }[]): string {
+  const names = checks.map((check) => check.name);
+  return names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
 /**
  * One issue's pipeline on the issue page: the stage it is at and why, the
  * switch that lets it merge by itself, the reviewer's open findings, and the
@@ -110,8 +144,10 @@ function Finding({ finding }: { finding: PipelineFinding }) {
 export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
   const store = useSessionStore();
   const catalog = useCloudCatalog();
-  const [busy, setBusy] = useState<PipelineAction | "autoMerge" | "resolveConflicts" | null>(null);
+  const [busy, setBusy] = useState<PipelineAction | "autoMerge" | "resolveConflicts" | "sendFailure" | "rerun" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const prefs = usePrefs();
   const [recordOpen, setRecordOpen] = useState(false);
 
   const place = pipeline.place ?? null;
@@ -129,13 +165,24 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
   const findings = [...(pipeline.verdict?.findings ?? [])].sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity));
   const checksLine = reviewChecksLine(pipeline.verdict);
   const done = pipeline.state === "merged";
+  const now = useNow(pipeline.checks != null && pipeline.state === "waiting");
+  const checks = pipelineChecksView(pipeline, now);
+  const failedChecks = checks?.outcome === "failed" ? checks.failing : [];
+  // Each failed Actions run once, as the pull request panel re-runs them.
+  const failedRuns = [...new Map(failedChecks.filter((check) => check.actions && check.url).map((check) => [check.actions!.runId, check])).values()];
+  const runUrl = failedChecks.map((check) => webUrl(check.url)).find(Boolean) ?? null;
+  const authorCwd = store.sessions.find((session) => session.id === pipeline.author.sessionId)?.cwd ?? null;
+  // The words stay where there is no list, and where the list cannot say what is awaited (workflow evidence).
+  const showNote = pipeline.note && (!checks || (checks.outcome === "waiting" ? checks.counts.waiting === 0 : checks.outcome === "stalled"));
 
   const run = useCallback(
-    async (what: PipelineAction | "autoMerge" | "resolveConflicts", work: () => Promise<unknown>) => {
+    async (what: PipelineAction | "autoMerge" | "resolveConflicts" | "sendFailure" | "rerun", work: () => Promise<unknown>) => {
       setBusy(what);
       setError(null);
+      setNotice(null);
       try {
-        await work();
+        const said = await work();
+        if (typeof said === "string") setNotice(said);
       } catch (cause) {
         setError(errorMessage(cause));
       } finally {
@@ -157,7 +204,10 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
   return (
     <section aria-label="Pipeline" className="flex shrink-0 flex-col gap-2.5 border-b border-hairline px-5 py-3" data-testid="issue-pipeline">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <PipelineStatus pipeline={pipeline} className="text-xs" />
+        <span className="flex items-baseline gap-1.5">
+          <PipelineStatus pipeline={pipeline} headline={checksHeadline(checks)} className="text-xs" />
+          {checks && checks.counts.total > 0 && <span data-testid="pipeline-checks-count" className="text-xs text-muted-foreground">· {requiredChecksLine(checks)}</span>}
+        </span>
         {pipeline.pr && (
           <button type="button" onClick={() => void openUrl(pipeline.pr!.url)} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
             {done ? <GitMerge className="size-3 text-merged" /> : <GitPullRequest className="size-3" />}
@@ -186,7 +236,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
         </p>
       )}
 
-      {pipeline.note && (
+      {showNote && (
         <p role="status" className={cn("text-xs leading-relaxed", pipeline.state === "needsYou" ? "text-foreground" : "text-muted-foreground")}>
           {pipeline.note}
         </p>
@@ -200,13 +250,27 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
             className={cn("flex items-center gap-1", step.status === "pending" || step.status === "skipped" ? "text-faint" : step.status === "done" ? "text-muted-foreground" : "text-foreground")}
           >
             <span className="inline-flex w-3.5 justify-center">
-              <StepGlyph status={step.status} />
+              <StepGlyph status={step.status} failed={step.stage === "merge" && checks?.outcome === "failed"} />
             </span>
             {step.label}
             {step.detail && <span className="text-faint">{step.detail}</span>}
           </li>
         ))}
       </ol>
+
+      {checks?.outcome === "failed" && (
+        <p role="status" data-testid="pipeline-check-failed" className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+          <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+          <span className="min-w-0">
+            <span className="font-medium text-foreground">
+              {namesOf(failedChecks)} failed on {checks.commit.slice(0, 7)}.
+            </span>{" "}
+            Nothing is merged. {place ? "Open the run to see why." : "The failure goes back to the author session, or you can run the check again."}
+          </span>
+        </p>
+      )}
+
+      {checks && <PipelineCheckList view={checks} now={now} />}
 
       {!done && place && (
         <p className="rounded-lg bg-well px-3 py-2 text-xs text-muted-foreground" data-testid="pipeline-cloud-merge">
@@ -241,12 +305,49 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
         </label>
       )}
 
-      {(primary || secondary.length > 0) && (
+      {(primary || secondary.length > 0 || failedChecks.length > 0) && (
         <div className="flex flex-wrap items-center gap-1.5">
+          {failedChecks.length > 0 && (
+            <>
+              {!place && (
+                <Button
+                  size="sm"
+                  variant="accent"
+                  disabled={busy != null || !authorHere || failedRuns.length === 0}
+                  title={!authorHere ? "The author session is not on this computer." : failedRuns.length === 0 ? "Only a GitHub Actions run's logs can be sent." : "Send the failed check logs to the author session"}
+                  onClick={() => void run("sendFailure", () => sendFailedChecks(pipeline.author.sessionId, pipeline.author.tabId, pipeline.pr!.url, prefs.fixErrorsInstructions).then((said) => said && "Sent the failure to the author session."))}
+                >
+                  {busy === "sendFailure" ? <Loader2 className="animate-spin" /> : <CornerUpLeft />}
+                  Send the failure to the author
+                </Button>
+              )}
+              {!place && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy != null || !authorCwd || failedRuns.length === 0}
+                  title={failedRuns.length === 0 ? "Only a GitHub Actions run can be re-run from here." : undefined}
+                  onClick={() =>
+                    void run("rerun", async () => {
+                      for (const check of failedRuns) await gh.rerunCheck(authorCwd!, pipeline.pr!.url, check.url!, true);
+                      return `Re-run requested for ${countOf(failedRuns.length, "Actions run")}. The pipeline waits on ${failedRuns.length === 1 ? "it" : "them"} once GitHub starts ${failedRuns.length === 1 ? "it" : "them"}.`;
+                    })
+                  }
+                >
+                  {busy === "rerun" ? <Loader2 className="animate-spin" /> : <RotateCw />}
+                  Re-run check
+                </Button>
+              )}
+              <Button size="sm" variant="outline" disabled={!runUrl} onClick={() => void openUrl(runUrl!)}>
+                <ExternalLink />
+                Open the run
+              </Button>
+            </>
+          )}
           {primary && (
             <Button
               size="sm"
-              variant={primary.action === "merge" ? "default" : "secondary"}
+              variant={failedChecks.length > 0 ? "ghost" : primary.action === "merge" ? "default" : "secondary"}
               className={cn(primary.action === "merge" && "bg-merge text-merge-foreground hover:opacity-90")}
               disabled={busy != null}
               onClick={() => void run(primary.action, () => actOnAnyPipeline(pipeline, primary.action))}
@@ -265,6 +366,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
       )}
 
       {error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
+      {notice && <p role="status" className="text-[11px] text-muted-foreground">{notice}</p>}
 
       {checksLine && (
         <p data-testid="pipeline-review-checks" className={cn("text-[11px] leading-relaxed", pipeline.verdict?.checks === "failed" ? "text-foreground" : "text-muted-foreground")}>
