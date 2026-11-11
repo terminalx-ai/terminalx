@@ -727,33 +727,55 @@ pub(crate) fn desktop_snapshot(harness: &str, revision: &str) -> Result<serde_js
     Ok(serde_json::json!({ "revision": revision, "key": key.as_str() }))
 }
 
+/// The keys a runtime holds in memory, by agent, with their revision.
 #[derive(Default)]
-struct Cache {
-    keys: HashMap<Agent, (String, Zeroizing<String>)>,
+struct Keys {
+    held: Mutex<HashMap<Agent, (String, Zeroizing<String>)>>,
+    filled: Condvar,
 }
 
-fn cache() -> &'static (Mutex<Cache>, Condvar) {
-    static CACHE: OnceLock<(Mutex<Cache>, Condvar)> = OnceLock::new();
-    CACHE.get_or_init(Default::default)
+/// This runtime's keys.
+fn keys() -> &'static Keys {
+    static KEYS: OnceLock<Keys> = OnceLock::new();
+    KEYS.get_or_init(Default::default)
 }
 
-/// Bring the runtime's keys in line with the index: drop what is no longer
-/// current, fetch what is missing. No lock is held while fetching.
-fn refresh_cache(index: &Index, fetch: impl Fn(Agent, &str) -> Result<Zeroizing<String>>) {
-    let wanted: Vec<(Agent, String)> = Agent::ALL.into_iter()
-        .filter_map(|agent| index.get(agent.id()).and_then(|entry| entry.key.as_ref()).map(|saved| (agent, saved.revision.clone())))
-        .collect();
-    let missing: Vec<(Agent, String)> = {
-        let mut cache = cache().0.lock().unwrap();
-        cache.keys.retain(|agent, (revision, _)| wanted.iter().any(|(want, current)| want == agent && current == revision));
-        wanted.into_iter().filter(|(agent, _)| !cache.keys.contains_key(agent)).collect()
-    };
-    for (agent, revision) in missing {
-        if let Ok(key) = fetch(agent, &revision) {
-            if validate_key(&key).is_ok() {
-                cache().0.lock().unwrap().keys.insert(agent, (revision, key));
-                cache().1.notify_all();
+impl Keys {
+    /// Bring the keys in line with the index: drop what is no longer current
+    /// or no longer used, fetch what is missing. Only a key new tabs use is
+    /// held: one kept for later while the subscription is chosen stays in
+    /// the Keychain alone. No lock is held while fetching.
+    fn refresh(&self, index: &Index, fetch: impl Fn(Agent, &str) -> Result<Zeroizing<String>>) {
+        let wanted: Vec<(Agent, String)> = Agent::ALL.into_iter()
+            .filter_map(|agent| index.get(agent.id()).filter(|entry| entry.mode == Mode::ApiKey).and_then(|entry| entry.key.as_ref()).map(|saved| (agent, saved.revision.clone())))
+            .collect();
+        let missing: Vec<(Agent, String)> = {
+            let mut held = self.held.lock().unwrap();
+            held.retain(|agent, (revision, _)| wanted.iter().any(|(want, current)| want == agent && current == revision));
+            wanted.into_iter().filter(|(agent, _)| !held.contains_key(agent)).collect()
+        };
+        for (agent, revision) in missing {
+            if let Ok(key) = fetch(agent, &revision) {
+                if validate_key(&key).is_ok() {
+                    self.held.lock().unwrap().insert(agent, (revision, key));
+                    self.filled.notify_all();
+                }
             }
+        }
+    }
+
+    /// `agent`'s key of `revision`, waiting up to `wait` for it to arrive.
+    fn get(&self, agent: Agent, revision: &str, wait: Duration) -> Option<Zeroizing<String>> {
+        let deadline = Instant::now() + wait;
+        let mut held = self.held.lock().unwrap();
+        loop {
+            if let Some((current, key)) = held.get(&agent) {
+                if current == revision {
+                    return Some(key.clone());
+                }
+            }
+            let left = deadline.checked_duration_since(Instant::now())?;
+            held = self.filled.wait_timeout(held, left).unwrap().0;
         }
     }
 }
@@ -773,7 +795,7 @@ pub(crate) fn start(lifetime: &std::sync::Arc<crate::local_runtime::Lifetime>) -
                 if let Ok(index) = store().and_then(|store| store.index()) {
                     failures.retain(|revision, _| index.values().any(|entry| entry.key.as_ref().is_some_and(|key| &key.revision == revision)));
                     let failed = Mutex::new(Vec::new());
-                    refresh_cache(&index, |agent, revision| {
+                    keys().refresh(&index, |agent, revision| {
                         if failures.get(revision).is_some_and(|(after, _)| Instant::now() < *after) {
                             bail!("waiting to try again");
                         }
@@ -794,23 +816,6 @@ pub(crate) fn start(lifetime: &std::sync::Arc<crate::local_runtime::Lifetime>) -
         }
     })?;
     Ok(())
-}
-
-/// The runtime's copy of `agent`'s key of `revision`, waiting up to `wait`
-/// for it to arrive.
-fn cached(agent: Agent, revision: &str, wait: Duration) -> Option<Zeroizing<String>> {
-    let deadline = Instant::now() + wait;
-    let (lock, filled) = cache();
-    let mut cache = lock.lock().unwrap();
-    loop {
-        if let Some((current, key)) = cache.keys.get(&agent) {
-            if current == revision {
-                return Some(key.clone());
-            }
-        }
-        let left = deadline.checked_duration_since(Instant::now())?;
-        cache = filled.wait_timeout(cache, left).unwrap().0;
-    }
 }
 
 fn shell_quote(text: &str) -> String {
@@ -857,7 +862,7 @@ fn grant_for(agent: Agent, entry: &Entry, key: Option<Zeroizing<String>>) -> cra
     }
 }
 
-fn launch_from(store: &Store<'_>, agent: Agent, wait: Duration) -> Result<crate::cloud_grants::LaunchGrant> {
+fn launch_from(store: &Store<'_>, keys: &Keys, agent: Agent, wait: Duration) -> Result<crate::cloud_grants::LaunchGrant> {
     let entry = match store.entry(agent) {
         Ok(entry) => entry,
         Err(error) => {
@@ -869,7 +874,7 @@ fn launch_from(store: &Store<'_>, agent: Agent, wait: Duration) -> Result<crate:
         return Ok(grant_for(agent, &entry, None));
     }
     let revision = entry.key.as_ref().map(|saved| saved.revision.clone()).unwrap_or_default();
-    let key = cached(agent, &revision, wait).with_context(|| format!(
+    let key = keys.get(agent, &revision, wait).with_context(|| format!(
         "{} is set to use an API key, but TerminalX could not read it from the Keychain. Open TerminalX on this Mac (and unlock the Keychain if it asks), then start the tab again, or choose the subscription login in Settings → Agents.",
         agent.label()
     ))?;
@@ -885,7 +890,7 @@ pub fn launch_grant(harness: &str, cwd: &Path) -> Result<crate::cloud_grants::La
         return Ok(crate::cloud_grants::launch_grant(harness, cwd));
     }
     let Some(agent) = Agent::of(harness) else { return Ok(Default::default()) };
-    launch_from(&store()?, agent, LAUNCH_WAIT)
+    launch_from(&store()?, keys(), agent, LAUNCH_WAIT)
 }
 
 /// What a running agent was launched with.
@@ -945,7 +950,7 @@ pub fn running(harness: &str) -> Vec<RunningTab> {
 pub(crate) fn save_for_test(harness: &str, key: &str, secrets: &crate::keychain::testing::MemorySecrets) {
     let store = Store { root: crate::store::root().unwrap(), secrets };
     store.save_key(Agent::of(harness).unwrap(), key, None).unwrap();
-    refresh_cache(&store.index().unwrap(), |agent, revision| store.snapshot(agent, revision));
+    keys().refresh(&store.index().unwrap(), |agent, revision| store.snapshot(agent, revision));
 }
 
 #[cfg(test)]
@@ -1147,13 +1152,14 @@ mod tests {
         store.save_key(Agent::Codex, OTHER, None).unwrap();
         let revision = store.entry(Agent::Codex).unwrap().key.unwrap().revision;
 
-        let error = launch_from(&store, Agent::Codex, Duration::from_millis(10)).err().unwrap().to_string();
+        let keys = Keys::default();
+        let error = launch_from(&store, &keys, Agent::Codex, Duration::from_millis(10)).err().unwrap().to_string();
         assert!(error.starts_with("Codex is set to use an API key, but TerminalX could not read it from the Keychain."), "{error}");
         assert!(!error.contains(OTHER));
 
         // The runtime's memory, filled from the desktop's answer.
-        refresh_cache(&store.index().unwrap(), |agent, wanted| store.snapshot(agent, wanted));
-        let grant = launch_from(&store, Agent::Codex, Duration::from_millis(10)).unwrap();
+        keys.refresh(&store.index().unwrap(), |agent, wanted| store.snapshot(agent, wanted));
+        let grant = launch_from(&store, &keys, Agent::Codex, Duration::from_millis(10)).unwrap();
         assert_eq!(env_of(&grant).0, vec![(KEY_ENV.to_string(), OTHER.to_string())]);
 
         // A launch waiting on the key gets it as soon as it arrives.
@@ -1161,16 +1167,40 @@ mod tests {
         let newer = store.entry(Agent::Codex).unwrap().key.unwrap().revision;
         assert_ne!(newer, revision);
         std::thread::scope(|scope| {
-            let waiting = scope.spawn(|| launch_from(&store, Agent::Codex, Duration::from_secs(5)));
+            let waiting = scope.spawn(|| launch_from(&store, &keys, Agent::Codex, Duration::from_secs(5)));
             std::thread::sleep(Duration::from_millis(50));
-            refresh_cache(&store.index().unwrap(), |agent, wanted| store.snapshot(agent, wanted));
+            keys.refresh(&store.index().unwrap(), |agent, wanted| store.snapshot(agent, wanted));
             let grant = waiting.join().unwrap().unwrap();
             assert_eq!(env_of(&grant).0[0].1, "sk-proj-a-newer-key-000000000000000000000000");
         });
         // Removing the key drops it from memory at the next refresh.
         store.remove_key(Agent::Codex).unwrap();
-        refresh_cache(&store.index().unwrap(), |_, _| bail!("no key"));
-        assert!(cached(Agent::Codex, &newer, Duration::ZERO).is_none());
+        keys.refresh(&store.index().unwrap(), |_, _| bail!("no key"));
+        assert!(keys.get(Agent::Codex, &newer, Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn a_key_kept_while_the_subscription_is_chosen_is_not_held_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = MemorySecrets::default();
+        let store = store(dir.path(), &secrets);
+        let keys = Keys::default();
+        store.save_key(Agent::Claude, KEY, None).unwrap();
+        let revision = store.entry(Agent::Claude).unwrap().key.unwrap().revision;
+        keys.refresh(&store.index().unwrap(), |agent, wanted| store.snapshot(agent, wanted));
+        assert_eq!(keys.get(Agent::Claude, &revision, Duration::ZERO).as_deref().map(String::as_str), Some(KEY));
+
+        store.set_mode(Agent::Claude, Mode::Subscription).unwrap();
+        keys.refresh(&store.index().unwrap(), |agent, wanted| store.snapshot(agent, wanted));
+        assert!(keys.get(Agent::Claude, &revision, Duration::ZERO).is_none(), "the runtime let go of it");
+        assert_eq!(store.read(Agent::Claude).unwrap().unwrap().1.as_str(), KEY, "the Keychain keeps it");
+        let grant = launch_from(&store, &keys, Agent::Claude, Duration::ZERO).unwrap();
+        assert!(env_of(&grant).0.is_empty() && grant.route.is_none());
+
+        // Chosen again: fetched again, and new tabs get it.
+        store.set_mode(Agent::Claude, Mode::ApiKey).unwrap();
+        keys.refresh(&store.index().unwrap(), |agent, wanted| store.snapshot(agent, wanted));
+        assert_eq!(env_of(&launch_from(&store, &keys, Agent::Claude, Duration::ZERO).unwrap()).0, vec![(KEY_ENV.to_string(), KEY.to_string())]);
     }
 
     #[test]
@@ -1386,12 +1416,13 @@ mod tests {
         let store = Store { root: root.clone(), secrets: &secrets };
         store.save_key(Agent::Claude, KEY, Some(ShellSource { file: Some("~/.zshrc".into()) })).unwrap();
         store.save_key(Agent::Codex, OTHER, None).unwrap();
-        refresh_cache(&store.index().unwrap(), |agent, revision| store.snapshot(agent, revision));
+        let keys = Keys::default();
+        keys.refresh(&store.index().unwrap(), |agent, revision| store.snapshot(agent, revision));
         // A launch, a refused one, a status, a removal: everything a key passes through.
-        let _ = launch_from(&store, Agent::Claude, Duration::from_millis(10)).unwrap();
-        let _ = launch_from(&store, Agent::Codex, Duration::from_millis(10)).unwrap();
+        let _ = launch_from(&store, &keys, Agent::Claude, Duration::from_millis(10)).unwrap();
+        let _ = launch_from(&store, &keys, Agent::Codex, Duration::from_millis(10)).unwrap();
         store.save_key(Agent::Codex, "sk-proj-not-in-memory-yet-000000000000000000000", None).unwrap();
-        let refused = launch_from(&store, Agent::Codex, Duration::from_millis(10)).err().unwrap();
+        let refused = launch_from(&store, &keys, Agent::Codex, Duration::from_millis(10)).err().unwrap();
         // As a refused launch's error reaches a tab's recovery diagnostics.
         crate::recovery::append_diagnostic(&root.join("diagnostics.jsonl"), &format!("{refused:#}"));
         let _ = status_of(&store, Agent::Claude).unwrap();

@@ -177,14 +177,16 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
   }, []);
-  // The login shell is asked once the page knows there is no key saved here.
+  // The login shell is asked once the page knows there is no key saved here,
+  // not again at every later status (it starts the person's shell).
   const saved = status?.saved;
+  const askShell = !!status && !saved;
   useEffect(() => {
-    if (!status || saved) { setOffer(null); return; }
+    if (!askShell) { setOffer(null); return; }
     let live = true;
     agentLogins.shellOffer(harness.id).then((found) => live && setOffer(found)).catch(() => live && setOffer(null));
     return () => { live = false; };
-  }, [harness.id, status, saved]);
+  }, [harness.id, askShell]);
   const chosen = choice ?? (status?.mode === "api_key" && saved ? "api_key" : "subscription");
   const usingKey = status?.mode === "api_key" && !!saved;
   const subscription = SUBSCRIPTION[harness.id];
