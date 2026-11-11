@@ -13,6 +13,27 @@
   repository — it is supplied to a build through
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, out of whatever password manager or
   CI secret holds it.
+- Release builds are signed with a **Developer ID Application** certificate,
+  whose private key is in the login keychain. The release scripts use
+  `APPLE_SIGNING_IDENTITY` when it is set, and otherwise the one Developer ID
+  Application identity `security find-identity -v -p codesigning` lists; with
+  none or several they stop and say so. No identity or team ID is written in
+  the repository.
+- Notarization uses an **App Store Connect API key** (Users and Access →
+  Integrations → Team Keys, role Developer). Its `.p8` file stays where it was
+  downloaded; `~/.appstoreconnect/terminalx-notary.json` (or the file named by
+  `TERMINALX_NOTARY_CONFIG`) says where it is:
+
+  ```json
+  { "keyPath": "<path to AuthKey_<key ID>.p8>", "keyId": "<key ID>", "issuerId": "<issuer ID>" }
+  ```
+
+  The scripts read the key file's path, ID and issuer from there at run time.
+  The key, its ID and the issuer never go in the repository, which is public.
+- `scripts/release/` reads the updater key from `~/.tauri/raccoon.key` (or
+  `TERMINALX_UPDATER_KEY`) and its password from
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Every step stops with a message naming
+  the missing file or variable when a credential is absent.
 - `plugins.updater.endpoints` in `tauri.conf.json` points at
   `https://github.com/terminalx-ai/raccoon/releases/latest/download/latest.json`
   — the `latest.json` below, attached to whichever GitHub Release is marked
@@ -173,6 +194,9 @@ Pillow before using it. The development `ios` command still uses its D badge.
 
 ## Build
 
+A release is built, notarized and published by the release pipeline below.
+A plain local build, signed ad hoc and not notarized, is:
+
 ```sh
 export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/raccoon.key)"
 read -rs TAURI_SIGNING_PRIVATE_KEY_PASSWORD  # the password set at key generation
@@ -187,7 +211,7 @@ to `src-tauri/target/release/bundle/`:
 
 | Path | What |
 | --- | --- |
-| `macos/TerminalX.app` | The app, ad-hoc signed (`signingIdentity: "-"`) |
+| `macos/TerminalX.app` | The app, signed ad hoc (`signingIdentity: "-"`); a release build signs it with the Developer ID and notarizes it |
 | `macos/TerminalX.app/Contents/MacOS/terminalx` | A tiny launcher for the app's built-in CLI command family |
 | `macos/TerminalX.app/Contents/Resources/TerminalX Computer Use Helper.app` | The signed computer-use helper that owns the Accessibility and Screen Recording grants |
 | `dmg/TerminalX_<version>_aarch64.dmg` | Disk image for distribution |
@@ -210,15 +234,119 @@ undisturbed: prefix the command with
    `tauri.conf.json`; `terminalx --version`, the pairing handshake and the
    agent client hellos read `CARGO_PKG_VERSION` from `Cargo.toml`.
 2. Add a section to `CHANGELOG.md`; the About tab renders it in the app.
-3. Commit, tag `v<version>`, build as above.
+3. Commit on `main` and run the release pipeline (next section). It tags
+   `v<version>` itself, after every check has passed.
+
+## The release pipeline
+
+`scripts/release/release.py` builds, notarizes, verifies, scans and publishes
+a release. Run it from the repository root on `main`, on the version and
+changelog commit. Its working directory is the git-ignored
+`.raccoon/release-<version>/`, and the Cargo target directory is
+`~/Library/Caches/terminalx-release-<version>` (`TERMINALX_RELEASE_TARGET_DIR`
+moves it):
+
+```sh
+python3 -I scripts/release/release.py prepare
+$EDITOR .raccoon/release-<version>/notes.md      # the GitHub release notes
+python3 -I scripts/release/release.py publish --dry-run   # after the steps below
+python3 -I scripts/release/release.py all        # check through verify-live
+```
+
+`all` runs the steps in this order and stops at the first failure. Each step
+can also be run by name. Each one writes a record, and a later step refuses to
+run on a record that is missing, failed, or for another commit:
+
+| Step | What it does | Record |
+| --- | --- | --- |
+| `prepare` | Requires a clean `main` that contains `origin/main`, equal versions in the three files and a `## <version>` changelog section; pins the source commit | `release-context.json` |
+| `check` | The project's checks on that commit: TypeScript, frontend and mobile tests, these scripts' tests, icons, the frontend build, WebKit layout, Swift, Clippy, desktop Rust tests and the runtime (serve) tests | `release-checks.json`, `<check>.log` |
+| `build` | `pnpm tauri build --bundles app,dmg` with the Developer ID identity, the updater key and the App Store Connect key. Tauri notarizes and staples the app before it packages the DMG and the updater archive. A rejected notarization fails the build | `build-metadata.json`, `build.log` |
+| `notarize` | Requires the app to be stapled and rated `Notarized Developer ID`, submits the DMG with `notarytool --wait`, staples it and checks it with `stapler validate` and `spctl`; records the stapled DMG's SHA-256 | `notarization.json`, `notarization-dmg-log.json` |
+| `verify` | Extracts the updater archive and mounts the DMG: Developer ID signatures on the app, helper, runtime, launcher and DMG; stapled tickets on the DMG, on the app inside it and on the app inside the updater archive; version, bundle ID, icons, entitlements, runtime self-test, updater signature; and the same files in the DMG as in the archive | `artifact-verification.json` |
+| `assemble` | Collects the six assets (below) and checks them | `assets/` |
+| `scan` | The secret scan (below) | `secret-scan.json` |
+| `publish` | Checks every record again, then tags, pushes `main` and the tag atomically, uploads a draft release, downloads it back and compares it byte for byte, and only then marks it Latest | `upload-verification.json`, `release-result.json` |
+| `verify-live` | Downloads what users and installed apps now get: the update feed, its archive and signature, and the stable DMG link. Each must match the published file, and the downloaded DMG must still be stapled and rated `Notarized Developer ID` | `live-verification.json` |
+
+Nothing is pushed or uploaded unless the checks, the build, notarization and
+stapling of the app and the DMG, artifact verification and the secret scan
+have all passed on the pinned commit. The published DMG must also be the one
+whose SHA-256 the notarize step recorded. `publish --dry-run` runs all of
+those gates and prints the tag, push and `gh release` commands without running
+them; `--dry-run` applies to no other step, since building and notarizing
+submit to Apple.
+
+`python3 -I scripts/release/release.py check-dmg <path>` is read-only. It
+validates the stapled tickets on any DMG and on the app inside it, and runs
+Gatekeeper's assessment of both. Run it on a downloaded release to confirm
+what a new Mac will see.
+
+The scripts' tests use a fake command runner, so they run anywhere, macOS or
+not. The `check` step runs them before every release; run them after changing
+`scripts/release/`:
+
+```sh
+python3 -m unittest discover -s scripts/release -p 'test_*.py'
+```
+
+### Release assets and the stable download link
+
+Every release uploads six files:
+
+| Asset | What |
+| --- | --- |
+| `TerminalX_<version>_aarch64.dmg` | The notarized, stapled disk image |
+| `TerminalX-latest-aarch64.dmg` | The same DMG, byte for byte, under a name that never changes |
+| `TerminalX.app.tar.gz` | The updater archive (the same notarized, stapled app) |
+| `TerminalX.app.tar.gz.sig` | Its updater signature |
+| `latest.json` | The update feed document (next section) |
+| `SHA256SUMS` | SHA-256 of the other five |
+
+Because the fixed-name copy is attached to every release, this link always
+downloads the newest notarized build. The website and the README link to it:
+
+<https://github.com/terminalx-ai/terminalx/releases/latest/download/TerminalX-latest-aarch64.dmg>
+
+`assemble`, `publish` and `verify-live` each require the two DMGs to be
+identical and listed in `SHA256SUMS`. The in-app updater installs the app
+from `TerminalX.app.tar.gz`. `verify` checks that this is the same stapled app
+the DMG holds, so the download link and the updater ship the same notarized
+build.
+
+### The secret scan
+
+The repository and its releases are public. `scan` looks through everything a
+release publishes: the diffs and messages of the commits on top of the
+`origin/main` that `prepare` recorded, the release notes, every asset, every
+file inside the extracted updater archive, and every file in the mounted DMG.
+It searches for:
+
+- this machine's own secrets, read at run time and never printed: the App
+  Store Connect key body, key ID and issuer ID, the updater signing key and
+  its password, the `gh` token, and the Linear API key in
+  `~/.raccoon/settings.json`;
+- the current user's home directory path, in commits and notes only (built
+  binaries legitimately embed build paths);
+- private key blocks and GitHub, Linear, Anthropic/OpenAI, AWS and Slack
+  token patterns.
+
+It records only where a match is and which kind it is, never the value.
+`publish` refuses a scan that found anything, that did not include the assets,
+that ran on another commit, or that is older than any asset or the notes. To
+check a branch before a release, scan only its commits:
+
+```sh
+python3 -I scripts/release/release.py scan --commits-only --base origin/main
+```
 
 ## Publish the update feed
 
 The updater fetches one JSON document and compares `version` with the
-running app. Attach it to the GitHub Release as `latest.json`, alongside
-`TerminalX.app.tar.gz` and the `.dmg`, and mark that release latest — the
-endpoint's `/releases/latest/download/` resolves to whichever release that
-is:
+running app. The `assemble` step writes it as `latest.json`, and `publish`
+attaches it to the GitHub Release alongside the other assets and marks that
+release latest. The endpoint's `/releases/latest/download/` resolves to
+whichever release that is:
 
 ```json
 {
@@ -367,9 +495,12 @@ Check its glibc floor before running it on an older host
   dictation comes back empty. The usage strings above are necessary but not
   sufficient once the runtime is hardened.
 
-- Ad-hoc signing means Gatekeeper will ask the first time the app opens on
-  another Mac. A Developer ID identity and notarization replace `"-"` in
-  `bundle.macOS.signingIdentity` when that matters.
+- `bundle.macOS.signingIdentity` stays `"-"` (ad hoc) in `tauri.conf.json`, so
+  local builds need no certificate. Gatekeeper asks before opening such a build
+  on another Mac. The `build` step overrides the identity with the Developer
+  ID, and release builds are notarized and stapled, so they open without a
+  warning. Releases have been notarized since 0.2.27; 0.2.25 and earlier were
+  only signed.
 - The `demo.html` page is dev-only; the production build ships `index.html`.
 
 ### Native CLI launcher

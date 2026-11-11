@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Each release also uploads its notarized DMG as `TerminalX-latest-aarch64.dmg`
+  and lists it in `SHA256SUMS`, so
+  [one link](https://github.com/terminalx-ai/terminalx/releases/latest/download/TerminalX-latest-aarch64.dmg)
+  always downloads the newest build.
+  The release pipeline (`scripts/release/`, described in docs/RELEASING.md) is
+  now in the repository. It publishes nothing unless notarization, stapling and
+  the secret scan pass. (PRO-148)
+
 - Branch prefixes and local launch environment can now inherit shared repository
   configuration, local overrides and managed locks. Settings → General → Layered
   configuration shows sources and offers explicit repository saves. Shared values
