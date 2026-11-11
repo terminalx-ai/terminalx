@@ -100,7 +100,8 @@ pub struct Revision {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+// The desktop invokes these; every field is one word, so camelCase changes no name today.
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Action {
     List,
     Save {
