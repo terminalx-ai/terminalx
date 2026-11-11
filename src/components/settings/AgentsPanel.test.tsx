@@ -254,7 +254,7 @@ describe("Agents · API key (PRO-306)", () => {
     offers.claude = { variable: "ANTHROPIC_API_KEY" };
     show();
     expect((await screen.findByText(/in your login shell/)).textContent).toBe("Found ANTHROPIC_API_KEY in your login shell. Copy it to the Keychain so new tabs use it without that file?");
-    fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+    fireEvent.click(screen.getByRole("button", { name: "Don't import" }));
     await waitFor(() => expect(screen.queryByText(/in your login shell/)).toBeNull());
     expect(calls("agent_login_dismiss_shell")).toEqual([{ harness: "claude" }]);
     expect(calls("agent_login_import_shell")).toHaveLength(0);
@@ -273,6 +273,33 @@ describe("Agents · API key (PRO-306)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Use OpenAI" }));
     await waitFor(() => expect(calls("agent_login_set_base_url")).toHaveLength(2));
     expect(calls("agent_login_set_base_url")[1]).toEqual({ harness: "codex", baseUrl: null });
+  });
+
+  it("does not let a custom provider be set for the ChatGPT login, which never uses one", async () => {
+    show([codex]);
+    fireEvent.click(await screen.findByRole("button", { name: /Custom provider/ }));
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://llm.example.com/v1" } });
+    expect(screen.getByRole("note").textContent).toBe("A custom provider is used only with an API key: ChatGPT always signs in at OpenAI. Choose API key above to set one.");
+    expect(within(screen.getByRole("button", { name: /Custom provider/ }).parentElement!).getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+    // One saved earlier, while a key was in use, says it is idle now.
+    cleanup();
+    logins.codex = { ...logins.codex, mode: "subscription", baseUrl: "https://llm.example.com/v1", saved: { masked: `sk-proj-${"•".repeat(24)}9Qx1`, savedAt: "2026-11-11T09:00:00Z" } };
+    show([codex]);
+    expect(await screen.findByRole("button", { name: /Custom provider\s*https:\/\/llm.example.com\/v1 · not in use with ChatGPT/ })).toBeTruthy();
+    expect(calls("agent_login_set_base_url")).toHaveLength(0);
+  });
+
+  it("asks readiness again when the login changes, so New Session and the agent menu hear it", async () => {
+    show();
+    await waitFor(() => expect(statusLine().textContent).toBe("Signed in"));
+    const asked = () => calls("check_agent_readiness").filter((args) => (args as { harness: string }).harness === "claude").length;
+    const before = asked();
+    fireEvent.click(screen.getByRole("radio", { name: /API key/ }));
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), { target: { value: KEY } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(asked()).toBe(before + 1));
+    fireEvent.click(screen.getByRole("radio", { name: /Claude subscription/ }));
+    await waitFor(() => expect(asked()).toBe(before + 2));
   });
 
   it("switches between a saved key and the subscription without forgetting the key", async () => {

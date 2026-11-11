@@ -210,6 +210,52 @@ mod tests {
         assert!(receive(&request, &current).is_err());
     }
 
+    /// PRO-306: an agent's API key is fetched like an environment snapshot,
+    /// and no more reachable: never a window service another command can
+    /// ask for, and only from the current desktop attachment.
+    #[test]
+    fn agent_key_snapshot_is_private_to_the_registered_desktop_and_cannot_be_proxied() {
+        assert!(!supported("agentKey.snapshot"));
+        let registry = Registry::default();
+        assert!(registry.call("agentKey.snapshot", json!({"harness":"claude","revision":"r"})).is_err());
+        let current = super::super::client::AttachmentIdentity { epoch:"owner".into(), lease:"desktop".into() };
+        let mut request = ControlRequest { id:"test".into(), token:"private-window-token".into(), command:"window.dispatch".into(),
+            params: json!({"epoch":"owner","lease":"desktop","command":"agentKey.snapshot","params":{"harness":"claude","revision":"r"}}) };
+        assert!(receive(&request, &current).is_ok());
+        request.params["lease"] = json!("another-desktop");
+        assert!(receive(&request, &current).is_err());
+        request.params["lease"] = json!("desktop");
+        request.params["epoch"] = json!("old-owner");
+        assert!(receive(&request, &current).is_err());
+        // Only by way of the registered window's dispatch, never as a command of its own.
+        request.params["epoch"] = json!("owner");
+        request.command = "agentKey.snapshot".into();
+        assert!(receive(&request, &current).is_err());
+    }
+
+    #[test]
+    fn agent_key_travels_only_in_the_private_response_for_the_revision_asked() {
+        let _home = crate::store::temp_home();
+        let lifetime = Lifetime::new(Duration::from_secs(60));
+        let endpoint = prepare_control().unwrap();
+        let attachment = attach(&lifetime);
+        let identity = super::super::client::AttachmentIdentity {
+            epoch: attachment["epoch"].as_str().unwrap().into(), lease: attachment["lease"].as_str().unwrap().into(),
+        };
+        serve_private(endpoint.clone(), |_| HookReply::default(), move |request| {
+            let (command, params) = receive(&request, &identity).unwrap();
+            assert_eq!(command, "agentKey.snapshot");
+            assert!(!serde_json::to_string(&request).unwrap().contains("sk-ant-private"));
+            // A desktop that answers for another revision is not believed.
+            let revision = if params["revision"] == "stale" { "current" } else { params["revision"].as_str().unwrap() };
+            ControlResponse::success(request.id, json!({"revision":revision,"key":"sk-ant-private-0123456789abcdef"}))
+        }).unwrap();
+        lifetime.window.register(&lifetime, registration(&attachment, &endpoint)).unwrap();
+        assert_eq!(lifetime.window.agent_key_snapshot("claude", "r1").unwrap().as_str(), "sk-ant-private-0123456789abcdef");
+        assert!(lifetime.window.agent_key_snapshot("claude", "stale").is_err());
+        assert!(lifetime.window.call("agentKey.snapshot", json!({"harness":"claude","revision":"r1"})).is_err());
+    }
+
     #[test]
     fn environment_values_travel_only_in_the_private_response() {
         let _home = crate::store::temp_home();

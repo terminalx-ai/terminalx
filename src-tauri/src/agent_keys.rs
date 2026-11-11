@@ -38,6 +38,15 @@
 //!   built-in `openai` provider is refused), pointed at OpenAI or at the
 //!   person's own OpenAI-compatible endpoint ("Custom provider").
 //!
+//! What can read it there: the agent's process and everything it starts
+//! inherit [`KEY_ENV`], as they would an exported `ANTHROPIC_API_KEY` or
+//! `OPENAI_API_KEY` (the setup this replaces). Codex leaves variables named
+//! like `*KEY*` out of the environment of the commands it runs, by default;
+//! Claude Code's Bash tool, hooks and MCP servers see it. It cannot simply
+//! be taken away from them: Claude Code runs the helper again whenever its
+//! cached key lapses, and a helper that asked the runtime for the key would
+//! need the tab's control token, which every child inherits just the same.
+//!
 //! A tab keeps the login it started with until it is restarted: what each
 //! running agent launched with is recorded ([`record_launch`]) so Settings can
 //! say how many keep an older one and restart exactly those.
@@ -904,6 +913,14 @@ struct Launched {
 fn launches() -> &'static Mutex<HashMap<String, Launched>> {
     static LAUNCHES: OnceLock<Mutex<HashMap<String, Launched>>> = OnceLock::new();
     LAUNCHES.get_or_init(Default::default)
+}
+
+/// Whether new tabs of `harness` use a key saved here: the agent is then
+/// signed in, whatever its own login says. From the index alone, so it
+/// needs no Keychain and works in the runtime as in the desktop.
+pub fn uses_saved_key(harness: &str) -> bool {
+    let Some(agent) = Agent::of(harness) else { return false };
+    store().and_then(|store| store.entry(agent)).is_ok_and(|entry| entry.mode == Mode::ApiKey && entry.key.is_some())
 }
 
 fn current_stamp(agent: Agent) -> String {

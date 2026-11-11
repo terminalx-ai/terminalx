@@ -213,6 +213,8 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
       title: "API key saved to the Keychain",
       body: [`New ${harness.name} tabs use it.`, keepLine(stale.length)].filter(Boolean).join(" "),
     });
+    // Readiness counts a key in use (PRO-306): every view that asks it hears the change.
+    void refresh?.();
     void verify();
     return true;
   };
@@ -227,6 +229,7 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
       title: `Imported ${next.variable} from your shell environment`,
       body: [`${harness.name} uses it in new tabs. Switch back to ${subscription.short} any time.`, keepLine(stale.length)].filter(Boolean).join(" "),
     });
+    void refresh?.();
     void verify();
   };
   const removeKey = async () => {
@@ -253,7 +256,7 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     if (mode === "api_key" && !saved) { setChoice("api_key"); return; }
     setChoice(null);
     const next = await act("mode", () => agentLogins.setMode(harness.id, mode));
-    if (next) login.take(next);
+    if (next) { login.take(next); void refresh?.(); }
   };
   const dismissOffer = async () => {
     await act("import", () => agentLogins.dismissShell(harness.id));
@@ -271,7 +274,7 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
       <Button size="xs" variant="outline" className="shrink-0 whitespace-nowrap" disabled={!!busy} onClick={() => void importKey()}>
         {busy === "import" ? <Loader2 className="animate-spin" /> : null} Import to the Keychain
       </Button>
-      <Button size="xs" variant="ghost" className="shrink-0 whitespace-nowrap" disabled={!!busy} onClick={() => void dismissOffer()}>Not now</Button>
+      <Button size="xs" variant="ghost" className="shrink-0 whitespace-nowrap" disabled={!!busy} onClick={() => void dismissOffer()}>Don&apos;t import</Button>
     </span>
   </div> : null;
 
@@ -288,7 +291,7 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
 
   return <div>
     {harness.id === "codex"
-      ? <CodexChoice harness={harness} status={status} readiness={readiness} chosen={chosen} onChoose={(mode) => void choose(mode)} busy={busy}
+      ? <CodexChoice harness={harness} status={status} readiness={readiness} chosen={chosen} usingKey={usingKey} onChoose={(mode) => void choose(mode)} busy={busy}
           keyArea={<>{keyField}{shellNote}</>} onBaseUrl={async (url) => { const next = await act("mode", () => agentLogins.setBaseUrl(harness.id, url)); if (next) { login.take(next); if (next.saved) void verify(); } return !!next; }} />
       : <>
         <div className="mt-4 text-[12.5px] font-medium" id={`${harness.id}-sign-in`}>Sign-in</div>
@@ -382,11 +385,13 @@ function ChoiceCard({ selected, icon, title, hint, disabled, onSelect }: { selec
 }
 
 /** Codex: ChatGPT, an API key, or an OpenAI-compatible endpoint of one's own, in one list. */
-function CodexChoice({ harness, status, readiness, chosen, onChoose, busy, keyArea, onBaseUrl }: {
+function CodexChoice({ harness, status, readiness, chosen, usingKey, onChoose, busy, keyArea, onBaseUrl }: {
   harness: HarnessInfo;
   status: AgentLoginStatus | null;
   readiness: AgentReadiness | null;
   chosen: "subscription" | "api_key";
+  /** New tabs use the saved key: the only login a custom provider applies to. */
+  usingKey: boolean;
   onChoose: (mode: "subscription" | "api_key") => void;
   busy: string | null;
   keyArea: ReactNode;
@@ -422,7 +427,7 @@ function CodexChoice({ harness, status, readiness, chosen, onChoose, busy, keyAr
       className="flex h-11 w-full items-center gap-2.5 px-3.5 text-left text-[13px] outline-none focus-visible:bg-veil-card">
       <ServerCog aria-hidden className="size-3.5 text-muted-foreground" />
       <span className="shrink-0 font-medium">Custom provider</span>
-      <span className="min-w-0 truncate text-[12px] text-faint">{status?.baseUrl ? status.baseUrl : "Any OpenAI-compatible endpoint, set with OPENAI_BASE_URL"}</span>
+      <span className="min-w-0 truncate text-[12px] text-faint">{status?.baseUrl ? (usingKey ? status.baseUrl : `${status.baseUrl} · not in use with ChatGPT`) : "Any OpenAI-compatible endpoint, set with OPENAI_BASE_URL"}</span>
       <ChevronRight aria-hidden className={cn("ml-auto size-3.5 shrink-0 text-faint transition-transform", custom && "rotate-90")} />
     </button>
     {custom && <div className="border-t border-hairline px-3.5 pb-3 pt-2.5">
@@ -431,10 +436,12 @@ function CodexChoice({ harness, status, readiness, chosen, onChoose, busy, keyAr
         <div className="flex gap-2">
           <input id="codex-base-url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://llm.example.com/v1" spellCheck={false}
             className="h-8 min-w-0 flex-1 rounded-md border border-hairline bg-card px-2.5 font-mono text-[12px] outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/40" />
-          <Button size="sm" variant="outline" className="shrink-0 whitespace-nowrap" disabled={!!busy || !url.trim() || url.trim() === status?.baseUrl} onClick={() => void onBaseUrl(url)}>Save</Button>
+          <Button size="sm" variant="outline" className="shrink-0 whitespace-nowrap" disabled={!!busy || chosen !== "api_key" || !url.trim() || url.trim() === status?.baseUrl} onClick={() => void onBaseUrl(url)}>Save</Button>
           {status?.baseUrl && <Button size="sm" variant="ghost" className="shrink-0 whitespace-nowrap text-muted-foreground" disabled={!!busy} onClick={() => void onBaseUrl(null)}>Use OpenAI</Button>}
         </div>
-        <p className="text-[11.5px] text-faint">Codex sends the API key above to this address instead of OpenAI&apos;s, as it would with OPENAI_BASE_URL.</p>
+        {chosen === "api_key"
+          ? <p className="text-[11.5px] text-faint">Codex sends the API key above to this address instead of OpenAI&apos;s, as it would with OPENAI_BASE_URL.</p>
+          : <p role="note" className="text-[11.5px] text-warning">A custom provider is used only with an API key: ChatGPT always signs in at OpenAI. Choose API key above to set one.</p>}
       </div>
     </div>}
   </div>;

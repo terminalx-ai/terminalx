@@ -139,6 +139,15 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
             _ => State::Unknown,
         };
     } else { result.state = State::Missing; }
+    // An API key saved in Settings → Agents that new tabs use (PRO-306) signs
+    // an installed agent in: what New Session, the agent menu and the start
+    // screen read must say so, or a person with a key and no subscription
+    // could never start one. Its own login is not what tabs will use.
+    if result.state != State::Missing && crate::agent_keys::uses_saved_key(id) {
+        result.state = State::Ready;
+        result.login_method = Some("API key".into());
+        (result.plan, result.account, result.organization) = (None, None, None);
+    }
     result.checked_at = chrono::Utc::now().to_rfc3339();
     result
 }
@@ -153,6 +162,35 @@ mod tests {
         assert_eq!(account_details("codex", &json!({"requiresOpenaiAuth":true,"account":{"type":"chatgpt","planType":"plus","accessToken":"secret"}})), (Some("ChatGPT account".into()), Some("plus".into())));
         assert_eq!(account_details("claude", &json!({"loggedIn":false,"authMethod":"claude.ai","subscriptionType":"max"})), (None, None));
         assert_eq!(account_details("codex", &json!({"requiresOpenaiAuth":false,"account":{"type":"chatgpt","planType":"plus"}})), (None, None));
+    }
+
+    /// PRO-306: a person with a company key and no subscription. Every view
+    /// that refuses a signed-out agent (New Session, the agent menu, the
+    /// start screen) reads this check, not Settings.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_key_in_use_makes_an_installed_agent_ready_everywhere() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        std::fs::write(&claude, "#!/bin/sh\ncase \"$1\" in\n  --version) echo '2.3.41 (Claude Code)' ;;\n  auth) echo '{\"loggedIn\":false}' ;;\nesac\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = Some(claude.to_string_lossy().into_owned());
+        assert_eq!(check_binary("claude", path.clone()).state, State::SignedOut);
+
+        let secrets = crate::keychain::testing::MemorySecrets::default();
+        crate::agent_keys::save_for_test("claude", "sk-ant-api03-ReadinessKey0123456789abcdefghijklmnop-test", &secrets);
+        let ready = check_binary("claude", path.clone());
+        assert_eq!((ready.state, ready.login_method.as_deref(), ready.version.as_deref()), (State::Ready, Some("API key"), Some("2.3.41")));
+        // Not installed stays not installed: a key does not run a CLI.
+        assert_eq!(check_binary("claude", None).state, State::Missing);
+        // Another agent's key signs nothing in.
+        assert!(!crate::agent_keys::uses_saved_key("codex"));
+
+        // Back on the subscription (the key kept, or removed): its own login again.
+        crate::agent_keys::set_mode("claude", crate::agent_keys::Mode::Subscription).unwrap();
+        assert_eq!(check_binary("claude", path).state, State::SignedOut);
     }
 
     #[test]
