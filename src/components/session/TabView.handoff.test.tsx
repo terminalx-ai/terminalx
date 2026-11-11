@@ -9,9 +9,11 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set<string>() }));
 vi.mock("@/lib/changes", () => ({ changeRange: () => ({}), useChanges: () => ({ files: [] }) }));
-vi.mock("@/lib/tabViews", () => ({
-  useTabViews: () => ({ views: {}, errors: {}, info: {}, switching: {} }), isPtyFirst: () => true, startTabAgent: vi.fn(),
-  clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
+// The real module's exports with its state held empty, so new tab-view fields arrive with their defaults.
+vi.mock("@/lib/tabViews", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/tabViews")>()),
+  useTabViews: () => ({ views: {}, errors: {}, info: {}, switching: {}, waiting: {} }), isPtyFirst: () => true, startTabAgent: vi.fn(),
+  clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(), enterTerminalView: vi.fn(), cancelTerminalView: vi.fn(),
 }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => null }));
 vi.mock("@/components/chat/Composer", () => ({ Composer: ({ agentHandoff }: { agentHandoff?: { name: string; run: () => void } }) => agentHandoff ? <button onClick={agentHandoff.run}>Hand off to {agentHandoff.name}</button> : null }));
