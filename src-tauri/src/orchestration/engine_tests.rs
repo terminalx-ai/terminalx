@@ -714,7 +714,9 @@ fn each_try_records_its_model_effort_cost_and_outcome() {
     engine::worker_turn_ended(&host, "w3-cli");
 
     let run = store::get(id).unwrap();
-    let history: Vec<(Step, &str, Option<&str>, Option<f64>, Option<Outcome>)> = run.piece("cli").unwrap().tries.iter().map(|attempt| (attempt.step, attempt.model.as_str(), attempt.effort.as_deref(), attempt.cost_usd, attempt.outcome)).collect();
+    /// A try as the Run view lists it: why it was made, what it ran on, what it cost, how it ended.
+    type Listed<'a> = (Step, &'a str, Option<&'a str>, Option<f64>, Option<Outcome>);
+    let history: Vec<Listed> = run.piece("cli").unwrap().tries.iter().map(|attempt| (attempt.step, attempt.model.as_str(), attempt.effort.as_deref(), attempt.cost_usd, attempt.outcome)).collect();
     assert_eq!(history, vec![
         (Step::First, "sonnet", Some("medium"), Some(0.61), Some(Outcome::Failed)),
         (Step::Effort, "sonnet", Some("high"), Some(0.92), Some(Outcome::Partial)),

@@ -439,6 +439,9 @@ try {
         const follows = await ownCell("Claude Code model for code").evaluate((select) => select.selectedOptions[0]?.textContent);
         await ownCell("Claude Code model for code").selectOption("top");
         await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 7);
+        await own.locator('[data-kind="verify"]').scrollIntoViewIfNeeded();
+        const ownLayout = await layoutOf(own.getByTestId("routing-table"));
+        checks["a repository's routing table fits its page"] = !ownLayout.scrolls && ownLayout.outside === 0 && !ownLayout.overlaps;
         await shot(page, "settings-repository-routing");
         await ownCell("Claude Code model for code").selectOption("");
         await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 8);
@@ -450,6 +453,7 @@ try {
         await cell("Codex model for code").selectOption("mid");
         await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 9);
         const moved = [await chosen("Codex model for code"), await chosen("Claude Code model for code")].join();
+        await routing.locator('[data-kind="verify"]').scrollIntoViewIfNeeded();
         await shot(page, "settings-routing-changed");
         await tab.getByRole("button", { name: "Reset to defaults", exact: true }).click();
         await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 10);

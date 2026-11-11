@@ -12,6 +12,8 @@ const box = "inline-flex h-7 min-w-0 items-center gap-1.5 rounded-md border bord
 const bare = "min-w-0 flex-1 appearance-none bg-transparent outline-none disabled:opacity-60";
 // Kind and both agents always. What a kind is used for has a column of its own where there is room, and sits under the kind where there is not.
 const columns = "grid-cols-[minmax(6.25rem,1fr)_minmax(0,15.75rem)_minmax(0,15.75rem)] @[860px]/routing:grid-cols-[6.75rem_minmax(0,1fr)_16rem_16rem]";
+// A repository's cells also say what they follow ("Default (GPT-6.1 Terra)"), so they are wider and the kind stands alone.
+const ownColumns = "grid-cols-[minmax(6.25rem,1fr)_minmax(0,17.5rem)_minmax(0,17.5rem)] @[860px]/routing:grid-cols-[6.75rem_minmax(0,1fr)_17.5rem_17.5rem]";
 
 /** The model each tier runs on today, read once: the table names tiers, and shows what a tier means here. */
 function useTierModels(): TierModels | null {
@@ -59,7 +61,7 @@ function RouteCell({ kind, agent, agentName, route, inherited, models, disabled,
   const missing = !!models && !model;
   return (
     <div role="cell" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 @[860px]/routing:gap-x-3">
-      <span className={cn(box, "w-[9.25rem]")}>
+      <span className={cn(box, inherited ? "min-w-[9.25rem] flex-1" : "w-[9.25rem]")}>
         <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full bg-current", TIER_DOT[shown.tier])} />
         <select
           aria-label={`${agentName} model for ${kind}`}
@@ -117,6 +119,7 @@ export function RoutingTableSettings({ settings, project, save }: {
   const own = project ? settings?.projects[project.path]?.routing : settings?.routing;
   const changed = !!own && Object.values(own).some((row) => row && Object.keys(row).length > 0);
   const scope = project ? { project: project.path } : {};
+  const grid = project ? ownColumns : columns;
   return (
     <section aria-label={project ? `Starting model by kind of piece in ${project.name}` : "Starting model by kind of piece"} className="@container/routing mt-5 min-w-0" data-testid="routing-table">
       <div className="mb-2 flex items-center gap-2">
@@ -126,16 +129,16 @@ export function RoutingTableSettings({ settings, project, save }: {
         </Button>
       </div>
       <div role="table" aria-label="Routing table" className="rounded-lg bg-well hairline">
-        <div role="row" className={cn("grid items-center gap-x-3 border-b border-hairline px-4 py-2", columns)}>
+        <div role="row" className={cn("grid items-center gap-x-3 border-b border-hairline px-4 py-2", grid)}>
           <div role="columnheader" className={kicker}>Kind</div>
           <div role="columnheader" className={cn(kicker, "hidden @[860px]/routing:block")}>Used for</div>
           {ROUTED_AGENTS.map(({ agent, name }) => <div key={agent} role="columnheader" className={kicker}>{name} workers</div>)}
         </div>
         {PIECE_KINDS.map(({ kind, usedFor }) => (
-          <div key={kind} role="row" data-kind={kind} className={cn("grid items-center gap-x-3 border-b border-hairline px-4 py-1.5 last:border-b-0", columns)}>
-            <div role="cell" className="min-w-0">
+          <div key={kind} role="row" data-kind={kind} className={cn("grid items-center gap-x-3 border-b border-hairline px-4 py-1.5 last:border-b-0", grid)}>
+            <div role="cell" className="min-w-0" title={usedFor}>
               <span className="inline-flex h-5 items-center rounded-[5px] bg-veil-raised px-1.5 font-mono text-[11px] text-muted-foreground">{kind}</span>
-              <span className="mt-0.5 block text-[11.5px] leading-4 text-faint @[860px]/routing:hidden">{usedFor}</span>
+              {!project && <span className="mt-0.5 block text-[11.5px] leading-4 text-faint @[860px]/routing:hidden">{usedFor}</span>}
             </div>
             <div role="cell" className="hidden truncate text-[12.5px] text-muted-foreground @[860px]/routing:block">{usedFor}</div>
             {ROUTED_AGENTS.map(({ agent, name }) => {
