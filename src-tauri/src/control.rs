@@ -332,6 +332,11 @@ impl WindowControl {
             return crate::store::environment::desktop_snapshot(key, revision)
                 .and_then(|snapshot| Ok(serde_json::to_value(snapshot)?)).map_err(|_| ControlError::internal("Environment overrides are unavailable."));
         }
+        if command == "agentKey.snapshot" {
+            let harness = params["harness"].as_str().ok_or_else(|| ControlError::invalid("Agent required."))?;
+            let revision = params["revision"].as_str().ok_or_else(|| ControlError::invalid("Key revision required."))?;
+            return crate::agent_keys::desktop_snapshot(harness, revision).map_err(|_| ControlError::internal("The agent's API key is unavailable."));
+        }
         if let Some(action) = command.strip_prefix("share.") {
             let pairing = self.pairing.as_ref().ok_or_else(|| ControlError::internal("Sharing is unavailable."))?;
             let session = params["sessionId"].as_str().ok_or_else(|| ControlError::internal("Session id required."))?;
