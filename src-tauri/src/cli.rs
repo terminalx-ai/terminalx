@@ -1221,7 +1221,12 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let project = tokens.option("--project")?;
             let pipeline = tokens.required_front("pipeline")?;
             tokens.finish()?;
-            Ok(Action::Rpc { command: "pipelines.act".into(), params: json!({"pipeline": pipeline, "project": project, "action": command}), timeout: PIPELINE_TIMEOUT })
+            let mut params = json!({"pipeline": pipeline, "project": project, "action": command});
+            // Who asks, when it is asked from inside a session: a run's worker steers no pipeline.
+            if let Some(caller) = calling_session() {
+                params["caller"] = caller;
+            }
+            Ok(Action::Rpc { command: "pipelines.act".into(), params, timeout: PIPELINE_TIMEOUT })
         }
         other => Err(invalid(format!("Unknown pipelines command {other}."))),
     }
@@ -1487,7 +1492,7 @@ mod tests {
     fn runs_are_created_from_a_plan_file_and_driven_by_id_or_from_inside_their_lead() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plan.json");
-        let plan = json!({"goal": "Move settings reads", "pieces": [{"id": "a", "title": "A", "doneCheck": "cargo t"}]});
+        let plan = json!({"goal": "Move settings reads", "pieces": [{"id": "a", "title": "A", "doneChecks": [{"type": "command", "run": "cargo t"}]}]});
         std::fs::write(&path, plan.to_string()).unwrap();
         let path = path.to_str().unwrap();
 
@@ -1535,7 +1540,7 @@ mod tests {
         for said in ["terminalx runs create --from PLAN.json|- [--lead SESSION]", "terminalx runs start|show|stop [RUN]", "terminalx runs list [--lead SESSION] [--all]"] {
             assert!(help_text().contains(said), "{said}");
         }
-        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneCheck`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8"] {
+        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneChecks`", "{\"type\": \"command\", \"run\":", "{\"type\": \"review\", \"text\":", "`no_command_check`", "`review_only_without_reason`", "\"reviewOnly\": true", "`owns_outside_repository`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8"] {
             assert!(GUIDE.contains(said), "the guide does not say {said:?}");
         }
     }

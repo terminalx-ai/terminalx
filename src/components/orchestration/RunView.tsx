@@ -2,14 +2,14 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import {
-  Check, CircleAlert, CircleCheck, CircleDashed, CircleX, FileJson, FolderOpen, Gauge, Info, Layers, LoaderCircle, Network, Pencil, Play,
+  Check, CircleAlert, CircleCheck, CircleDashed, CircleX, FileJson, FolderOpen, Gauge, Info, Layers, LoaderCircle, Network, Pencil, Play, ScanSearch,
   Settings, ShieldAlert, ShieldOff, Sparkles, Square, SquareArrowOutUpRight, Terminal, Trash2, UserRoundCheck, X,
 } from "@/icons";
 import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { EFFORT_LABEL, effortChoices, modeLabel, modelForTab, modelLabel, modelOptionText, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
-  budgetText, estimateText, noteRun, PIECE_STATE_LABEL, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf, requestOrchestratorSettings,
+  budgetText, checksFrom, checkText, estimateText, noteRun, PIECE_STATE_LABEL, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf, requestOrchestratorSettings,
   RUN_STATE_LABEL, useRun, withoutPiece,
 } from "@/lib/orchestration";
 import { selectSession } from "@/lib/sessions";
@@ -233,6 +233,18 @@ function PieceStateMark({ state }: { state: PieceState }) {
   return <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap text-[13px]", className)}><Icon aria-hidden className="size-3.5 shrink-0" />{PIECE_STATE_LABEL[state]}</span>;
 }
 
+/** A piece's first check, and how many more it has: a command by its terminal mark, a review point by its own. */
+function DoneWhenCell({ piece }: { piece: RunPiece }) {
+  const first = piece.doneChecks[0];
+  if (!first) return <span className="text-faint">–</span>;
+  const Icon = first.type === "command" ? Terminal : ScanSearch;
+  return <>
+    <Icon aria-label={first.type === "command" ? "Command" : first.type === "vote" ? "Vote" : "Review"} className="size-3.5 shrink-0 text-faint" />
+    <span className="truncate">{checkText(first)}</span>
+    {piece.doneChecks.length > 1 && <span className="shrink-0 text-faint">+{piece.doneChecks.length - 1}</span>}
+  </>;
+}
+
 /** Where a piece's worker will act without being asked, when that needs saying. */
 function modeWarning(run: Run, piece: RunPiece): { short: string; full: string } | null {
   const mode = pieceMode(run, piece);
@@ -293,7 +305,7 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, onSelect,
               <div role="cell" className={cn("min-w-0 truncate text-[13px]", wide)}><ModelName piece={piece} /></div>
             )}
             {editable ? <>
-              <div role="cell" className={cn("flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground", wide, "@[760px]/run:flex")}><Terminal aria-hidden className="size-3.5 shrink-0 text-faint" /><span className="truncate">{piece.doneCheck}</span></div>
+              <div role="cell" className={cn("flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground", wide, "@[760px]/run:flex")}><DoneWhenCell piece={piece} /></div>
               <div role="cell" className={cn("font-mono text-xs text-muted-foreground", wide)}>{after || "–"}</div>
               <div role="cell" className={cn("font-mono text-xs", wide)}>{estimateText(piece.estimate) ?? <span className="text-faint">–</span>}</div>
             </> : <>
@@ -428,7 +440,18 @@ function PieceDetail({ run, piece, number, editable, busy, onClose, onSave, onRe
           </Section>
           <Section title="Known"><Lines lines={brief.known} empty="Nothing was established for the worker." /></Section>
           <Section title="Read first">{brief.readFirst.length ? <div className="flex flex-wrap gap-1.5">{brief.readFirst.map((path) => <code key={path} className={code}>{path}</code>)}</div> : <span className="text-faint">No files were named.</span>}</Section>
-          <Section title="Done when"><code className={code}>{piece.doneCheck}</code></Section>
+          <Section title="Done when">
+            <ul className="flex flex-col gap-1.5" data-testid="done-checks">
+              {piece.doneChecks.map((check, index) => (
+                <li key={index} className="flex items-start gap-2">
+                  {check.type === "command"
+                    ? <><Terminal aria-label="Command" className="mt-1 size-3.5 shrink-0 text-faint" /><code className={cn(code, "break-all")}>{check.run}</code></>
+                    : <><ScanSearch aria-label={check.type === "vote" ? "Vote" : "Review"} className="mt-1 size-3.5 shrink-0 text-faint" /><span>{check.text}{check.type === "vote" && <span className="text-faint"> · vote{check.threshold && check.voters ? `, ${check.threshold} of ${check.voters}` : ""}</span>}</span></>}
+                </li>
+              ))}
+            </ul>
+            {piece.reviewOnly && <p className="mt-1.5 text-faint">Review only, no command: {piece.reviewOnlyReason}</p>}
+          </Section>
           <Section title="Permissions">
             <span className="inline-flex items-center gap-1.5"><ShieldOff aria-hidden className="size-3.5 text-accent" />{modeLabel(mode)}</span>
             <span className="text-faint"> · {piece.readsUntrusted ? "reads text from outside the repository" : "reads no text from outside the repository"}</span>
@@ -460,10 +483,13 @@ function BriefForm({ run, piece, busy, onCancel, onSave }: { run: Run; piece: Ru
   const [draft, setDraft] = useState(() => ({
     title: piece.title, goal: piece.brief.goal, why: piece.brief.why, scope: piece.brief.scope, outOfScope: piece.brief.outOfScope,
     known: piece.brief.known.join("\n"), readFirst: piece.brief.readFirst.join("\n"), limits: piece.brief.limits.join("\n"), owns: piece.owns.join("\n"),
-    doneCheck: piece.doneCheck, permissionMode: piece.permissionMode ?? "", readsUntrusted: piece.readsUntrusted,
+    commands: piece.doneChecks.filter((check) => check.type === "command").map(checkText).join("\n"),
+    reviews: piece.doneChecks.filter((check) => check.type === "review").map(checkText).join("\n"),
+    reviewOnly: !!piece.reviewOnly, reviewOnlyReason: piece.reviewOnlyReason ?? "",
+    permissionMode: piece.permissionMode ?? "", readsUntrusted: piece.readsUntrusted,
   }));
   const set = <K extends keyof typeof draft>(key: K, value: (typeof draft)[K]) => setDraft((before) => ({ ...before, [key]: value }));
-  const text = (key: "title" | "goal" | "why" | "scope" | "outOfScope" | "known" | "readFirst" | "limits" | "owns" | "doneCheck", label: string, hint?: string, rows = 2) => (
+  const text = (key: "title" | "goal" | "why" | "scope" | "outOfScope" | "known" | "readFirst" | "limits" | "owns" | "commands" | "reviews" | "reviewOnlyReason", label: string, hint?: string, rows = 2) => (
     <label className="flex flex-col gap-1 text-xs text-muted-foreground">{label}
       {rows === 1
         ? <input className={cn(field, "text-foreground")} value={draft[key]} onChange={(event) => set(key, event.target.value)} />
@@ -476,7 +502,9 @@ function BriefForm({ run, piece, busy, onCancel, onSave }: { run: Run; piece: Ru
       event.preventDefault();
       onSave({
         title: draft.title, goal: draft.goal, why: draft.why, scope: draft.scope, outOfScope: draft.outOfScope, known: split(draft.known), readFirst: split(draft.readFirst),
-        limits: split(draft.limits), owns: split(draft.owns), doneCheck: draft.doneCheck, permissionMode: draft.permissionMode || undefined, readsUntrusted: draft.readsUntrusted,
+        limits: split(draft.limits), owns: split(draft.owns),
+        doneChecks: checksFrom(draft.commands, draft.reviews, piece.doneChecks), reviewOnly: draft.reviewOnly || undefined, reviewOnlyReason: draft.reviewOnly ? draft.reviewOnlyReason : undefined,
+        permissionMode: draft.permissionMode || undefined, readsUntrusted: draft.readsUntrusted,
       });
     }}>
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-4 scrollbar-thin">
@@ -488,7 +516,13 @@ function BriefForm({ run, piece, busy, onCancel, onSave }: { run: Run; piece: Ru
         {text("outOfScope", "Out of scope")}
         {text("known", "Known", "One fact a line.", 3)}
         {text("readFirst", "Read first", "One path a line.")}
-        {text("doneCheck", "Done when", "The command or condition that proves it done. A piece without one is refused.", 1)}
+        {text("commands", "Done when: commands", "One a line. Each is run in the worker's worktree and must exit 0; checking by command uses no model.")}
+        {text("reviews", "Done when: review points", "One a line. What a reviewer must confirm from the diff.")}
+        <label className="flex items-start gap-2 text-xs text-muted-foreground">
+          <input type="checkbox" className="mt-0.5" checked={draft.reviewOnly} onChange={(event) => set("reviewOnly", event.target.checked)} />
+          <span>No command can prove this piece: check it by review alone</span>
+        </label>
+        {draft.reviewOnly && text("reviewOnlyReason", "Why no command can", "A piece with no command and no reason is refused.", 1)}
         {text("limits", "Limits of this piece", "One a line. Push, merge and deploy are denied whatever is written here.")}
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">Permission mode
           <select className={cn(field, "text-foreground")} value={draft.permissionMode} onChange={(event) => set("permissionMode", event.target.value)}>

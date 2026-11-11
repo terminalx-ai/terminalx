@@ -31,19 +31,19 @@ function setup({ mode, scene, enabled }) {
     brief: { goal: title, why: "", scope: "", outOfScope: "", known: [], readFirst: [], limits: [] }, ...extra,
   });
   const pieces = [
-    piece("map", "Map every settings read", { kind: "search", model: "haiku", effort: undefined, doneCheck: "the list covers every `settings::get` call", estimate: { low: 0.05, high: 0.05 } }),
-    piece("store", "Typed store module and migration", { kind: "code", model: "opus", owns: ["src-tauri/src/store/settings/"], dependsOn: ["map"], doneCheck: "cargo t store::settings", estimate: { low: 1.6, high: 2.4 } }),
+    piece("map", "Map every settings read", { kind: "search", model: "haiku", effort: undefined, reviewOnly: true, reviewOnlyReason: "A list to read: no command can say it is complete.", doneChecks: [{ type: "review", text: "the list covers every `settings::get` call" }], estimate: { low: 0.05, high: 0.05 } }),
+    piece("store", "Typed store module and migration", { kind: "code", model: "opus", owns: ["src-tauri/src/store/settings/"], dependsOn: ["map"], doneChecks: [{ type: "command", run: "cargo t store::settings" }, { type: "review", text: "Unknown keys in an existing file survive a save." }], estimate: { low: 1.6, high: 2.4 } }),
     piece("session", "Move session code to the store", {
-      owns: ["src-tauri/src/session.rs", "src-tauri/src/session_ops.rs"], dependsOn: ["store"], doneCheck: "cargo t session exits 0 and no settings::get call remains in scope", estimate: { low: 0.5, high: 0.9 },
+      owns: ["src-tauri/src/session.rs", "src-tauri/src/session_ops.rs"], dependsOn: ["store"], doneChecks: [{ type: "command", run: "cargo t session" }, { type: "command", run: "! rg -q 'settings::get' src-tauri/src/session.rs src-tauri/src/session_ops.rs" }], estimate: { low: 0.5, high: 0.9 },
       brief: {
         goal: "Every settings read in the session code goes through the typed store.", why: "Piece 6 documents the keys; it needs the final names from this piece.",
         scope: "The session code.", outOfScope: "the store itself, pipeline and CLI code.", known: ["The store API from piece 2.", "The 17 call sites listed by piece 1 for these files."],
         readFirst: ["store/settings/mod.rs", "docs/SETTINGS.md"], limits: [],
       },
     }),
-    piece("pipeline", "Move pipeline code to the store", { owns: ["src-tauri/src/issue_pipeline/"], dependsOn: ["store"], doneCheck: "no direct settings reads remain", estimate: { low: 0.5, high: 0.9 } }),
-    piece("cli", "Move CLI code to the store", { owns: ["src-tauri/src/cli.rs", "src-tauri/src/control.rs"], dependsOn: ["store"], doneCheck: "cargo t control", estimate: { low: 0.5, high: 0.9 } }),
-    piece("docs", "Update the docs and the CLI guide from the linked issue thread", { owns: ["docs/", "skill-guides/"], dependsOn: ["session", "pipeline", "cli"], doneCheck: "every documented key exists", readsUntrusted: true }),
+    piece("pipeline", "Move pipeline code to the store", { owns: ["src-tauri/src/issue_pipeline/"], dependsOn: ["store"], doneChecks: [{ type: "command", run: "! rg -q 'settings::get' src-tauri/src/issue_pipeline" }], estimate: { low: 0.5, high: 0.9 } }),
+    piece("cli", "Move CLI code to the store", { owns: ["src-tauri/src/cli.rs", "src-tauri/src/control.rs"], dependsOn: ["store"], doneChecks: [{ type: "command", run: "cargo t control" }], estimate: { low: 0.5, high: 0.9 } }),
+    piece("docs", "Update the docs and the CLI guide from the linked issue thread", { owns: ["docs/", "skill-guides/"], dependsOn: ["session", "pipeline", "cli"], reviewOnly: true, reviewOnlyReason: "Prose: nothing to run.", doneChecks: [{ type: "review", text: "every documented key exists" }, { type: "vote", text: "No key's meaning changed in the rewrite.", voters: 3, threshold: 2 }], readsUntrusted: true }),
   ];
   const shown = (run) => {
     const known = run.pieces.filter((piece) => piece.estimate);
@@ -95,8 +95,8 @@ function setup({ mode, scene, enabled }) {
     orchestration_update_plan: (args) => {
       called("updatePlan", args);
       // The engine's own answer to a piece with no done-check, in the form the window receives it.
-      const blank = args.plan.pieces.find((piece) => !piece.doneCheck.trim());
-      if (blank) throw `{"code":"no_done_check","message":"Piece ${blank.id} has no done-check. Say in \`doneCheck\` which command or condition proves it is done.","details":{"piece":"${blank.id}"}}`;
+      const blank = args.plan.pieces.find((piece) => !piece.doneChecks.some((check) => check.type === "command") && !piece.reviewOnly);
+      if (blank) throw `{"code":"no_command_check","message":"Piece ${blank.id} has no \`command\` done-check. Add a command that exits 0 when the piece is done, or set \`reviewOnly: true\` and say why in \`reviewOnlyReason\`.","details":{"piece":"${blank.id}"}}`;
       state.run = {
         ...state.run, goal: args.plan.goal, budget: args.plan.budget, planEdited: true,
         pieces: args.plan.pieces.map((plan) => {
@@ -185,7 +185,8 @@ try {
           "the budget, the workers' mode and that no file is shared are stated": (await view.getByRole("region", { name: "Plan summary" }).textContent()).includes("Budget25 pointsWorkers run inBypass permissionsNo shared files"),
           "six pieces, each on one row, with what it waits on": layout.rows.length === 6 && layout.rows.every((row) => row.height <= 56) && (size.width < 1200 || layout.rows[5].text.includes("3, 4, 5")),
           "a piece that reads outside text says it will run in bypass, in its row and in its brief": layout.rows[5].text.includes("outside text · bypass") && warned === "Reads text from outside the repository, and will run in bypass" && untrusted.includes("reads text from outside the repository") && untrusted.includes("It will run in bypass: nothing asks before it acts on what it reads."),
-          "a piece's brief states its goal, scope, done-check, limits and report": ["GoalEvery settings read in the session code goes through the typed store.", "WhyPiece 6 documents the keys", "src-tauri/src/session.rs", "Out of scope: the store itself, pipeline and CLI code.", "The 17 call sites listed by piece 1 for these files.", "docs/SETTINGS.md", "cargo t session exits 0", "reads no text from outside the repository", "Push, merge and deploy are denied at launch, not left to the brief.", "terminalx-report"].every((said) => brief.includes(said)),
+          "a piece's brief states its goal, scope, done-check, limits and report": ["GoalEvery settings read in the session code goes through the typed store.", "WhyPiece 6 documents the keys", "src-tauri/src/session.rs", "Out of scope: the store itself, pipeline and CLI code.", "The 17 call sites listed by piece 1 for these files.", "docs/SETTINGS.md", "cargo t session", "! rg -q 'settings::get' src-tauri/src/session.rs src-tauri/src/session_ops.rs", "reads no text from outside the repository", "Push, merge and deploy are denied at launch, not left to the brief.", "terminalx-report"].every((said) => brief.includes(said)),
+          "a piece checked by review alone says so, with its reason and its vote": untrusted.includes("Review only, no command: Prose: nothing to run.") && untrusted.includes("No key's meaning changed in the rewrite. · vote, 2 of 3"),
           "the footnote says what bypass means and what stays blocked": (await view.getByText("In bypass, workers are not asked before edits or commands. Push, merge and deploy stay blocked by deny rules.").count()) === 1,
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
           "no text is smaller than 10.5px": layout.smallest >= 10.5,
@@ -199,15 +200,16 @@ try {
         await pick("cli");
         await detail.getByRole("button", { name: "Edit brief", exact: true }).click();
         const form = detail.getByRole("form", { name: "Edit the brief of Move CLI code to the store" });
-        await form.getByLabel("Done when").fill("");
+        await form.getByLabel("Done when: commands").fill("");
         await form.getByRole("button", { name: "Save brief", exact: true }).click();
         await view.getByRole("alert").waitFor();
-        checks["an edit the engine refuses is shown with its reason, and the brief stays open"] = (await view.getByRole("alert").textContent()).includes("Piece cli has no done-check.") && (await form.count()) === 1;
+        checks["an edit the engine refuses is shown with its reason, and the brief stays open"] = (await view.getByRole("alert").textContent()).includes("Piece cli has no `command` done-check.") && (await form.count()) === 1;
         await shot(page, "approval-edit");
-        await form.getByLabel("Done when").fill("cargo t control exits 0");
+        await form.getByLabel("Done when: commands").fill("cargo t control\ncargo clippy -- -D warnings");
+        await form.getByLabel("Done when: review points").fill("No public name changed.");
         await form.getByRole("button", { name: "Save brief", exact: true }).click();
         await form.waitFor({ state: "detached" });
-        checks["a saved brief is the piece's new brief"] = (await detail.textContent()).includes("cargo t control exits 0");
+        checks["a saved brief is the piece's new brief: its commands and its review point, each by its kind"] = JSON.stringify(await detail.getByTestId("done-checks").getByRole("listitem").allTextContents()) === JSON.stringify(["cargo t control", "cargo clippy -- -D warnings", "No public name changed."]) && (await detail.getByTestId("done-checks").getByLabel("Command").count()) === 2 && (await detail.getByTestId("done-checks").getByLabel("Review").count()) === 1;
         // Remove a piece: the others no longer wait on it.
         await detail.getByRole("button", { name: "Remove piece", exact: true }).click();
         await page.waitForFunction(() => document.querySelectorAll('[data-testid="run-view"] [role=row][data-piece]').length === 5);
