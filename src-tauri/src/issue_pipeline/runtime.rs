@@ -153,6 +153,7 @@ mod tests {
             summary: None,
             reminded: false,
             waiting_since: None,
+            checks: None,
             merge_requested: None,
             merge_refused: None,
             merged: None,

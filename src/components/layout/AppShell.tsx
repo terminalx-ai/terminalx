@@ -5,6 +5,8 @@ import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
 import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
+import { onProjectSettingsRequest } from "@/lib/projectAdded";
+import { ProjectAddedNotice } from "@/components/ui/ProjectAddedNotice";
 import { PanelLeft, PanelRight } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -112,6 +114,8 @@ export function AppShell() {
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
+  // The repository Settings opens on, for a request that names one; every other way in names none.
+  const [settingsProjectPath, setSettingsProjectPath] = useState<string | undefined>(undefined);
   // Every request for Settings, so asking again with it open still lands on the section asked for.
   const [settingsRequest, setSettingsRequest] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -167,9 +171,17 @@ export function AppShell() {
   // name opens Account too, never a blank page.
   const openSettings = useCallback((tab?: unknown) => {
     setSettingsTab(typeof tab === "string" ? (tab as SettingsTab) : GENERAL_SETTINGS_TAB);
+    setSettingsProjectPath(undefined);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
+  // A project's own settings, from the "Project added" notice: its Scripts, where the setup script lives.
+  useEffect(() => onProjectSettingsRequest((projectPath) => {
+    setSettingsTab("repositories.scripts");
+    setSettingsProjectPath(projectPath);
+    setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
+  }), []);
   const openAccountSettings = useCallback(() => {
     setSettingsTab("account");
     setSettingsOpen(true);
@@ -254,6 +266,7 @@ export function AppShell() {
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <CloseUndoNotices />
         <Toasts />
+        <ProjectAddedNotice />
         <WorktreeCopyNotices />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
         <CleanupIndicator onOpenStorage={openStorageSettings} />
@@ -276,6 +289,7 @@ export function AppShell() {
           <Suspense fallback={viewFallback}>
             <SettingsPage
               initialTab={settingsTab}
+              initialProjectPath={settingsProjectPath}
               openRequest={settingsRequest}
               onBack={() => setSettingsOpen(false)}
               onOpenSkills={() => {

@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render as renderView, renderHook, screen, wait
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CheckAuthority, PullRequest } from "@/lib/api";
 import { PRIVACY_MESSAGE, refreshDataPrivacy, setDataPrivacy } from "@/lib/dataPrivacy";
-import { useFixCheckErrors } from "@/lib/fixCheckErrors";
+import { sendFailedChecks, useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { PrPanel } from "./PrPanel";
 
 const render = (node: ReactNode) => renderView(<TooltipProvider>{node}</TooltipProvider>);
@@ -22,7 +22,7 @@ const pr: PullRequest = { number: 1, url: "https://github.com/owner/repo/pull/1"
 const input = { sessionId: "s", tabId: "agent", cwd: "/repo-privacy", branch: "feature", enabled: true };
 let policy: { enabled: boolean; managed: boolean; epoch: number };
 let writes: number[], collections: number, prompts: number;
-let hold: "rerun" | "discovery" | "associated" | undefined;
+let hold: "rerun" | "discovery" | "associated" | "authority" | undefined;
 let release: (() => void) | undefined;
 let associatedOnly: boolean;
 let current: PullRequest;
@@ -49,7 +49,7 @@ beforeEach(async () => {
     if (command === "git_has_remote") return true;
     if (command === "workspace_disposition") return { exists: true, checked: true, branch: "feature", isMain: true };
     if (command === "work_status") return { branch: "feature", defaultBranch: "main", aheadOfBase: 1 };
-    if (command === "pr_check_authority") { admit(); return { owner: "native", epoch: policy.epoch }; }
+    if (command === "pr_check_authority") { admit(); return complete("authority", { owner: "native", epoch: policy.epoch }); }
     if (command === "pr_conversation") { admit(); return { ...current, viewer: "reviewer", canEdit: false, reviewers: [], unresolvedThreads: 0, activity: [] }; }
     if (command === "pr_list") { admit(); return complete("discovery", associatedOnly ? [] : [current]); }
     if (command === "pr_associations") return [{ url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd: input.cwd } }];
@@ -84,6 +84,24 @@ const cases = [
   { managed: false, cycle: false }, { managed: false, cycle: true },
   { managed: true, cycle: false }, { managed: true, cycle: true },
 ];
+
+it.each(cases)("retains direct failed-log delivery authority across a delayed reply: %o", async ({ managed, cycle }) => {
+  hold = "authority";
+  const pending = sendFailedChecks("s", "agent", pr.url, "").catch((error: unknown) => error);
+  await waitFor(() => expect(release).toBeTypeOf("function"));
+  await act(async () => { await revoke(managed, cycle); release!(); });
+  expect(String(await pending)).toContain(PRIVACY_MESSAGE);
+  expect(collections).toBe(0); expect(prompts).toBe(0);
+  expect(mocks.invoke).toHaveBeenCalledWith("pr_check_fix_attachment", {
+    sessionId: "s", tabId: "agent", prUrl: pr.url, authority: { owner: "native", epoch: 0 },
+  });
+  expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_check_authority")).toHaveLength(1);
+  await act(async () => { policy.enabled = false; policy.managed = false; await refreshDataPrivacy(); });
+  expect(collections).toBe(0); expect(prompts).toBe(0);
+  expect(await sendFailedChecks("s", "agent", pr.url, "")).toContain("Sent");
+  expect(collections).toBe(1); expect(prompts).toBe(1);
+  expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_check_fix_attachment").at(-1)![1].authority).toEqual({ owner: "native", epoch: 1 });
+});
 
 it.each(cases)("keeps the completed workflow and refuses the later batch continuation: %o", async ({ managed, cycle }) => {
   const view = render(<PrPanel cwd={input.cwd} branch="feature" active busy={false} />);

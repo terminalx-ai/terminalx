@@ -47,7 +47,7 @@ fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrCheck {
     pub name: String,
@@ -57,6 +57,32 @@ pub struct PrCheck {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<checks::ActionsCheck>,
+    /// When the check started and finished, as GitHub gave them with the
+    /// check itself (RFC 3339). Absent when GitHub did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    /// The line GitHub carries with the check: a check run's output title,
+    /// a commit status's description. Untrusted text, shown as such.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// A time GitHub gave, unless it is its stand-in for none (`0001-01-01…`).
+fn github_time(value: &Value) -> Option<String> {
+    value.as_str().filter(|at| !at.is_empty() && !at.starts_with("0001-")).map(String::from)
+}
+
+/// A line of provider text, on one line and not too long a one.
+fn check_summary(value: &Value) -> Option<String> {
+    let words = value.as_str()?.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = words.chars().collect();
+    match chars.len() {
+        0 => None,
+        n if n > 120 => Some(format!("{}…", chars[..120].iter().collect::<String>().trim_end())),
+        _ => Some(words),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,7 +146,10 @@ pub(crate) fn parse_pr(v: &Value) -> PullRequest {
                     .to_ascii_lowercase();
                     let url = c["detailsUrl"].as_str().or_else(|| c["targetUrl"].as_str()).map(String::from);
                     let actions = url.as_deref().and_then(|url| checks::map_check(v["url"].as_str()?, url));
-                    PrCheck { name, state, url, actions }
+                    // A commit status's time is when its latest state was posted, not when it ran.
+                    let timed = c["__typename"] != "StatusContext";
+                    let time = |key: &str| timed.then(|| github_time(&c[key])).flatten();
+                    PrCheck { name, state, url, actions, started_at: time("startedAt"), completed_at: time("completedAt"), summary: None }
                 })
                 .collect()
         })
@@ -789,20 +818,36 @@ fn validation_with(cwd: &Path, pr: &PrSnapshot, run: &mut impl FnMut(&Path, &[&s
     if !attempt_consistent || workflows != workflows_after || suite_records != suites_after || children != children_after || statuses != statuses_after {
         // A normal race is pending, not a successful validation or a terminal
         // error. The pipeline's next poll collects a fresh complete snapshot.
-        return Ok((vec![PrCheck { name: "validation changed during collection; waiting for a consistent attempt".into(), state: "pending".into(), url: None, actions: None }], Vec::new()));
+        return Ok((vec![PrCheck { name: "validation changed during collection; waiting for a consistent attempt".into(), state: "pending".into(), url: None, actions: None, ..Default::default() }], Vec::new()));
     }
     let mut checks = Vec::new();
     for child in &children {
         if child["head_sha"].as_str() != Some(&pr.head_sha) { bail!("GitHub returned a check for a different commit"); }
+        // What the gate decides on is the name and state; the rest is what the
+        // pipeline panel shows of them, from the same records (#881).
+        let url = child["details_url"].as_str().or_else(|| child["html_url"].as_str()).filter(|url| !url.is_empty()).map(String::from);
         checks.push(PrCheck {
             name: child["name"].as_str().context("GitHub omitted a check name")?.into(),
-            state: validation_state(child)?.into(), url: None, actions: None,
+            state: validation_state(child)?.into(),
+            actions: url.as_deref().and_then(|url| self::checks::map_check(&pr.url, url)),
+            url,
+            started_at: github_time(&child["started_at"]),
+            completed_at: github_time(&child["completed_at"]),
+            summary: check_summary(&child["output"]["title"]),
         });
     }
     for status in statuses {
+        let state = status["state"].as_str().context("GitHub omitted a status state")?;
         checks.push(PrCheck {
             name: status["context"].as_str().context("GitHub omitted a status context")?.into(),
-            state: status["state"].as_str().context("GitHub omitted a status state")?.into(), url: None, actions: None,
+            state: state.into(),
+            url: status["target_url"].as_str().filter(|url| !url.is_empty()).map(String::from),
+            actions: None,
+            // The combined status holds only each context's latest status,
+            // posted when it took that state: neither its start nor its end.
+            started_at: None,
+            completed_at: None,
+            summary: check_summary(&status["description"]),
         });
     }
     let mut validation = Vec::new();
@@ -831,14 +876,14 @@ fn validation_with(cwd: &Path, pr: &PrSnapshot, run: &mut impl FnMut(&Path, &[&s
                 state = "success";
             }
             let name = item["name"].as_str().or_else(|| item["app"]["slug"].as_str()).unwrap_or(key);
-            validation.push(PrCheck { name: format!("{name} ({key} #{id})"), state: state.into(), url: None, actions: None });
+            validation.push(PrCheck { name: format!("{name} ({key} #{id})"), state: state.into(), url: None, actions: None, ..Default::default() });
         }
     }
     // Missing suites are incomplete evidence even when another producer has
     // already published successful checks.
     for suite in workflow_suites.into_iter().chain(children.iter().map(|child| child["check_suite"]["id"].as_u64().unwrap_or(0))) {
         if !suites.contains(&suite) {
-            validation.push(PrCheck { name: format!("check suite #{suite}"), state: "pending".into(), url: None, actions: None });
+            validation.push(PrCheck { name: format!("check suite #{suite}"), state: "pending".into(), url: None, actions: None, ..Default::default() });
         }
     }
     Ok((validation, checks))
@@ -2322,6 +2367,46 @@ mod tests {
         ] {
             assert!(validation_with(Path::new("/repo"), &pr, &mut |_, _| Ok(response.into())).is_err());
         }
+    }
+
+    #[test]
+    fn checks_carry_their_times_link_and_line_from_the_records_already_read() {
+        // The rollup the pull request is read with.
+        let rollup = parse_pr(&serde_json::json!({"url":"https://github.com/o/r/pull/7","statusCheckRollup":[
+            {"__typename":"CheckRun","name":"check","status":"IN_PROGRESS","conclusion":"","startedAt":"2026-11-11T10:00:00Z","completedAt":"0001-01-01T00:00:00Z","detailsUrl":"https://github.com/o/r/actions/runs/9/job/8"},
+            {"__typename":"StatusContext","context":"deploy/preview","state":"SUCCESS","startedAt":"2026-11-11T10:01:00Z","targetUrl":"https://example.com/p"}
+        ]}));
+        assert_eq!((rollup.checks[0].started_at.as_deref(), rollup.checks[0].completed_at.as_deref()), (Some("2026-11-11T10:00:00Z"), None), "GitHub's year-one stand-in is no time");
+        assert_eq!(rollup.checks[1].started_at, None, "a status's time is when its latest state was posted");
+        // The merge gate's check runs and statuses: the same requests as before, more of each record kept.
+        let pr = parse_snapshot(&serde_json::from_str(OPEN_PR).unwrap());
+        let mut requests = 0;
+        let (_, checks) = validation_with(Path::new("/repo"), &pr, &mut |_, args| {
+            requests += 1;
+            let key = validation_key(args[1]);
+            Ok(match key {
+                "check_runs" => serde_json::json!([{"total_count":2,"check_runs":[
+                    {"id":1,"name":"check","head_sha":pr.head_sha,"status":"completed","conclusion":"failure","started_at":"2026-11-11T10:00:00Z","completed_at":"2026-11-11T10:41:00Z",
+                     "details_url":"https://github.com/o/r/actions/runs/9/job/8","html_url":"https://github.com/o/r/runs/8","output":{"title":"cargo test\n  · exit 101"}},
+                    {"id":2,"name":"lint","head_sha":pr.head_sha,"status":"queued","started_at":null,"completed_at":null,"html_url":"https://github.com/o/r/runs/2","output":{"title":null}}
+                ]}]),
+                "statuses" => serde_json::json!([{"total_count":1,"statuses":[
+                    {"id":3,"context":"ci/legacy","state":"pending","created_at":"2026-11-11T10:02:00Z","updated_at":"2026-11-11T10:03:00Z","target_url":"https://ci.example.com/3","description":"Build started"}
+                ]}]),
+                _ => serde_json::json!([{ "total_count": 0, key: [] }]),
+            }.to_string())
+        }).unwrap();
+        assert_eq!(requests, 8, "four records read twice, as before");
+        let failed = &checks[0];
+        assert_eq!((failed.state.as_str(), failed.url.as_deref()), ("failure", Some("https://github.com/o/r/actions/runs/9/job/8")));
+        assert_eq!((failed.started_at.as_deref(), failed.completed_at.as_deref()), (Some("2026-11-11T10:00:00Z"), Some("2026-11-11T10:41:00Z")));
+        assert_eq!(failed.summary.as_deref(), Some("cargo test · exit 101"), "on one line");
+        assert_eq!(failed.actions.as_ref().map(|actions| actions.run_id), Some(9));
+        let queued = &checks[1];
+        assert_eq!((queued.state.as_str(), queued.url.as_deref(), queued.started_at.as_deref(), queued.summary.as_deref()), ("queued", Some("https://github.com/o/r/runs/2"), None, None));
+        let status = &checks[2];
+        assert_eq!((status.name.as_str(), status.url.as_deref(), status.started_at.as_deref(), status.completed_at.as_deref(), status.summary.as_deref()),
+            ("ci/legacy", Some("https://ci.example.com/3"), None, None, Some("Build started")), "a status's times are when its latest state was posted, not when it ran");
     }
 
     #[test]
