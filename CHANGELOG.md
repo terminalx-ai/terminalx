@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.2.30
+
+- Open local diffs and pull requests in full-width centre tabs, alongside
+  files and terminals. (#826)
+- Show Codex goals and token budgets in the chat while keeping chat search
+  available. (#856)
+- Configure repository startup behavior and files to copy into new
+  workspaces from Settings. (#804)
+- Wait on several agent sessions at once and read structured worker reports
+  with the TerminalX CLI. (#878, #879)
+- Preserve each tab's activity state across background runtime handovers.
+  (#873)
+- Keep private paths and configured model filenames out of recovery
+  diagnostics, summaries, and exports. (#875, #884)
+
 - Connect GitHub from the PR tab or Settings → Integrations in an embedded
   sign-in terminal. Pushing a repository without a remote now offers a URL
   field, or creation of a GitHub repository when signed in. Git failures show
