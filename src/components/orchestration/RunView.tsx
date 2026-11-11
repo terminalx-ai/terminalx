@@ -260,7 +260,7 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, onSelect,
   // The plan's columns before it starts; the run's once it has.
   const columns = editable
     ? "grid-cols-[minmax(0,1fr)_13.5rem] @[760px]/run:grid-cols-[minmax(0,1.4fr)_13.5rem_minmax(0,1fr)_3.5rem_5.5rem]"
-    : "grid-cols-[minmax(0,1.5fr)_6.5rem] @[760px]/run:grid-cols-[minmax(0,1.5fr)_minmax(0,0.9fr)_6.5rem_2.5rem_3.75rem_minmax(0,1.2fr)]";
+    : "grid-cols-[minmax(0,1.5fr)_6.5rem] @[760px]/run:grid-cols-[minmax(0,1.3fr)_minmax(8.75rem,1fr)_6rem_2.5rem_3.5rem_minmax(0,1fr)]";
   const wide = "hidden @[760px]/run:block";
   const heads = editable ? [["Piece", ""], ["Model and effort", ""], ["Done when", wide], ["After", wide], ["Estimate", wide]] : [["Piece", ""], ["Model", wide], ["State", ""], ["Tries", wide], ["Cost", wide], ["Report", wide]];
   return (
@@ -358,14 +358,12 @@ function Tries({ piece }: { piece: RunPiece }) {
             <div className="min-w-0 flex-1 pb-3">
               <div className="flex items-center gap-2 text-xs">
                 <span className="min-w-0 truncate"><ModelName piece={{ agent: piece.agent, model: attempt.model, effort: attempt.effort, tier: attempt.tier }} /></span>
-                <span className="ml-auto shrink-0 font-mono text-[11.5px] text-faint" title={attempt.costUnpricedModels?.length ? `Without ${attempt.costUnpricedModels.join(", ")}: no price is known for it` : "At API list prices"}>{cost ?? "–"}</span>
+                {attempt.worker && <button type="button" className="ml-auto shrink-0 text-[11.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:underline" onClick={() => selectSession(attempt.worker!.sessionId)}>Open worker</button>}
+                <span className={cn("shrink-0 font-mono text-[11.5px] text-faint", !attempt.worker && "ml-auto")} title={attempt.costUnpricedModels?.length ? `Without ${attempt.costUnpricedModels.join(", ")}: no price is known for it` : "At API list prices"}>{cost ?? "–"}</span>
               </div>
-              <div className="mt-0.5 flex items-center gap-2 text-[11.5px] text-faint">
-                <span className="min-w-0 truncate">{TRY_STEP_LABEL[attempt.step]}</span>
-                {attempt.worker && <button type="button" className="ml-auto shrink-0 text-muted-foreground outline-none hover:text-foreground focus-visible:underline" onClick={() => selectSession(attempt.worker!.sessionId)}>Open worker</button>}
-              </div>
-              <div className={cn("mt-1 break-words text-[12.5px] leading-[18px]", result.tone)}>
-                {result.label}{result.text ? <>: <span className="line-clamp-3" title={result.text}>{result.text}</span></> : null}
+              <div className="mt-0.5 text-[11.5px] leading-4 text-faint">{TRY_STEP_LABEL[attempt.step]}</div>
+              <div className={cn("mt-1 line-clamp-3 break-words text-[12.5px] leading-[18px]", result.tone)} title={result.text || undefined}>
+                {result.label}{result.text ? `: ${result.text}` : ""}
               </div>
               {result.output.length > 0 && <pre className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1.5 font-mono text-[11.5px] leading-[17px] text-muted-foreground hairline scrollbar-thin">{result.output.join("\n")}</pre>}
             </div>

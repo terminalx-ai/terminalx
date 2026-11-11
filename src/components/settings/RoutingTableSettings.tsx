@@ -10,8 +10,8 @@ import type { OrchestratorPatch, OrchestratorSettings, PieceKind, Route, RoutedA
 const kicker = "text-[10.5px] font-medium uppercase tracking-[.08em] text-faint";
 const box = "inline-flex h-7 min-w-0 items-center gap-1.5 rounded-md border border-hairline bg-background px-2 text-xs focus-within:ring-2 focus-within:ring-ring/40";
 const bare = "min-w-0 flex-1 appearance-none bg-transparent outline-none disabled:opacity-60";
-// Kind and both agents always; what the kind is used for where there is room for it.
-const columns = "grid-cols-[6.25rem_minmax(0,1fr)_minmax(0,1fr)] @[760px]/routing:grid-cols-[6.75rem_minmax(0,1fr)_16rem_16rem]";
+// Kind and both agents always. What a kind is used for has a column of its own where there is room, and sits under the kind where there is not.
+const columns = "grid-cols-[minmax(6.25rem,1fr)_minmax(0,15.75rem)_minmax(0,15.75rem)] @[860px]/routing:grid-cols-[6.75rem_minmax(0,1fr)_16rem_16rem]";
 
 /** The model each tier runs on today, read once: the table names tiers, and shows what a tier means here. */
 function useTierModels(): TierModels | null {
@@ -58,7 +58,7 @@ function RouteCell({ kind, agent, agentName, route, inherited, models, disabled,
   const follows = route === undefined;
   const missing = !!models && !model;
   return (
-    <div role="cell" className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+    <div role="cell" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 @[860px]/routing:gap-x-3">
       <span className={cn(box, "w-[9.25rem]")}>
         <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full bg-current", TIER_DOT[shown.tier])} />
         <select
@@ -128,13 +128,16 @@ export function RoutingTableSettings({ settings, project, save }: {
       <div role="table" aria-label="Routing table" className="rounded-lg bg-well hairline">
         <div role="row" className={cn("grid items-center gap-x-3 border-b border-hairline px-4 py-2", columns)}>
           <div role="columnheader" className={kicker}>Kind</div>
-          <div role="columnheader" className={cn(kicker, "hidden @[760px]/routing:block")}>Used for</div>
+          <div role="columnheader" className={cn(kicker, "hidden @[860px]/routing:block")}>Used for</div>
           {ROUTED_AGENTS.map(({ agent, name }) => <div key={agent} role="columnheader" className={kicker}>{name} workers</div>)}
         </div>
         {PIECE_KINDS.map(({ kind, usedFor }) => (
           <div key={kind} role="row" data-kind={kind} className={cn("grid items-center gap-x-3 border-b border-hairline px-4 py-1.5 last:border-b-0", columns)}>
-            <div role="cell" title={usedFor}><span className="inline-flex h-5 items-center rounded-[5px] bg-veil-raised px-1.5 font-mono text-[11px] text-muted-foreground">{kind}</span></div>
-            <div role="cell" className="hidden truncate text-[12.5px] text-muted-foreground @[760px]/routing:block">{usedFor}</div>
+            <div role="cell" className="min-w-0">
+              <span className="inline-flex h-5 items-center rounded-[5px] bg-veil-raised px-1.5 font-mono text-[11px] text-muted-foreground">{kind}</span>
+              <span className="mt-0.5 block text-[11.5px] leading-4 text-faint @[860px]/routing:hidden">{usedFor}</span>
+            </div>
+            <div role="cell" className="hidden truncate text-[12.5px] text-muted-foreground @[860px]/routing:block">{usedFor}</div>
             {ROUTED_AGENTS.map(({ agent, name }) => {
               const cell = own?.[kind]?.[agent];
               return (
