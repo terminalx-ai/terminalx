@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { setPrefs } from "@/lib/prefs";
+import { announceProjectAdded } from "@/lib/projectAdded";
 import { addProject, startSessionIn } from "@/lib/sessions";
 import type { Project } from "@/types/session";
 
@@ -99,6 +100,7 @@ export async function attachProject(path: string): Promise<Project> {
   const project = await addProject(path);
   setPrefs({ lastProject: project.path });
   startSessionIn(project.path, null);
+  announceProjectAdded(project);
   focusComposer();
   return project;
 }
