@@ -39,16 +39,24 @@ export function noteExperimental(settings: Partial<ExperimentalSettings> | null 
   set(settings);
 }
 
-export function useExperimental(): ExperimentalSettings {
-  return useSyncExternalStore(
+/** `wanted: false` reads nothing and answers "all off": for a view no switch could change (a cloud session, a quick chat). */
+export function useExperimental(wanted = true): ExperimentalSettings {
+  const current = useSyncExternalStore(
     (listener) => {
-      boot();
+      if (wanted) boot();
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
     () => state,
     () => state,
   );
+  return wanted ? current : OFF;
+}
+
+/** The switches as last read, outside a component. The first call starts reading them. */
+export function getExperimental(): ExperimentalSettings {
+  boot();
+  return state;
 }
 
 /** Tests start from a store that has read nothing. */

@@ -429,7 +429,8 @@ export function SessionView({
   const quick = isQuickChat(session);
   const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
   // Orchestration runs (PRO-274), behind Settings → Experimental: a session of a git project on this computer can lead one.
-  const runOffered = useExperimental().orchestratorRuns && local && !cloud && !compact && !quick && isGit;
+  const canLead = local && !cloud && !compact && !quick;
+  const runOffered = useExperimental(canLead).orchestratorRuns && canLead && isGit;
   const run = useRun(session.id, runOffered);
   const runShown = useRunViewShown(session.id) && runOffered;
   const prefs = usePrefs();

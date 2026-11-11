@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Experimental: a session can lead an orchestration run. The lead writes a plan
+  of pieces (`terminalx runs create --from plan.json`), each with a brief, the
+  files it owns, what it depends on and the check that proves it done, and
+  `terminalx runs start` starts a worker session for every piece whose
+  dependencies are done: its own worktree and branch cut from the lead's, the
+  piece's model and effort, and a brief built from the piece. A plan is refused,
+  naming the piece, when two pieces own the same file, a dependency loops, a piece
+  has no done-check or there are more pieces than the limit (8 by default). By
+  default a run waits until you approve its plan in the session's new Run view,
+  where you can also edit or discard it; no command approves one. Workers start
+  in bypass unless the repository or the plan says otherwise, and never push,
+  merge or deploy: deny rules are handed to the agent at launch, TerminalX checks
+  every tool call, and the worker's git sends a push nowhere. Turn it on under
+  Settings → Experimental → Orchestration runs; the limits are in Settings →
+  Orchestrator and per repository. (PRO-274)
+
 - Each release also uploads its notarized DMG as `TerminalX-latest-aarch64.dmg`
   and lists it in `SHA256SUMS`, so
   [one link](https://github.com/terminalx-ai/terminalx/releases/latest/download/TerminalX-latest-aarch64.dmg)
