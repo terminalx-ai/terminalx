@@ -10,6 +10,10 @@ export interface AgentReadiness {
   version: string | null;
   loginMethod?: string | null;
   plan?: string | null;
+  /** The signed-in account's address, display only. */
+  account?: string | null;
+  /** Claude Code's organization name, display only. */
+  organization?: string | null;
 }
 
 export const READINESS_LABELS: Record<AgentReadiness["state"], string> = {

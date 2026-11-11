@@ -165,9 +165,9 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "agents.setup", section: "agents", title: "Installed agents",
-    description: "Install, sign in to, and re-check local agents.",
-    searchTerms: ["agents", "installed", "agents"], scope: "user",
-    storage: { kind: "system", location: "Agent CLI installations and credentials" }, layout: "content",
+    description: "Install, sign in to, and re-check local agents, and choose between an agent's subscription login and an API key kept in the Keychain.",
+    searchTerms: ["agents", "installed", "sign in", "login", "api key", "keychain", "anthropic_api_key", "openai_api_key", "custom provider"], scope: "user",
+    storage: { kind: "system", location: "Agent CLI installations and credentials; API keys in the macOS Keychain, $TERMINALX_HOME/agent-logins.json names which login each agent uses" }, layout: "content",
   }),
   defineSetting({
     id: "appearance.theme", hideDescription: true, section: "appearance", title: "Theme",

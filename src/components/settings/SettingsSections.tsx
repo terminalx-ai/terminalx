@@ -11,7 +11,7 @@ import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
 import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { LocalGitHubConnection } from "@/components/changes/GitRecovery";
-import { AgentSetupCard } from "./AgentSetupCard";
+import { AgentsPanel } from "./AgentsPanel";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
@@ -392,8 +392,23 @@ export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
       setSkillBusy(false);
     }
   };
+  const recheck = async () => {
+    setBusy(true);
+    try {
+      await refreshHarnesses();
+      setCheckRun((run) => run + 1);
+    } catch {
+      setSkillError("Could not re-check installed agents. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div className="flex flex-col gap-3">
+      <p className="-mt-4 text-[13px] text-muted-foreground">The agent CLIs TerminalX runs on this Mac. Each keeps its own login; local work needs no TerminalX account.</p>
+      <RegisteredSetting setting="agents.setup"><div>
+        <AgentsPanel harnesses={store.harnesses} checkRun={checkRun} busy={busy} onRecheck={() => void recheck()} />
+      </div></RegisteredSetting>
       {onOpenSkills && (
         <RegisteredSetting setting="agents.skills"
           control={
@@ -416,33 +431,6 @@ export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
           {skill?.installed ? "Installed" : "Install skill"}
         </Button>
       </div></RegisteredSetting>
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">Set up an agent on this computer. Local work does not require a TerminalX account.</p>
-        <Button
-          size="xs"
-          variant="ghost"
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true);
-            try {
-              await refreshHarnesses();
-              setCheckRun((run) => run + 1);
-            } catch {
-              setSkillError("Could not re-check installed agents. Try again.");
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />} Re-check
-        </Button>
-      </div>
-      <RegisteredSetting setting="agents.setup"><ul className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
-        {store.harnesses.map((h) => (
-          <AgentSetupCard key={`${h.id}:${checkRun}`} harness={h} />
-        ))}
-        {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
-      </ul></RegisteredSetting>
       <RegisteredSetting setting="agents.followUps" control={
         <select aria-label="Follow-ups while the agent works" value={prefs.followUps} onChange={e => setPrefs({ followUps: e.target.value as "now" | "hold" })} className="rounded-md border border-hairline bg-background px-2 py-1 text-xs">
           <option value="now">Send to the agent now</option>

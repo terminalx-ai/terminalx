@@ -95,10 +95,11 @@ struct NativeLaunch {
 }
 
 /// The workspace's grant snapshot and configuration for a launch under `key`.
-fn cloud_launch(key: &str, cwd: &str) -> (crate::cloud_grants::LaunchGrant, crate::cloud_config::LaunchConfig) {
+fn cloud_launch(key: &str, cwd: &str) -> Result<(crate::cloud_grants::LaunchGrant, crate::cloud_config::LaunchConfig)> {
     #[cfg(test)]
-    if let Some(stand_in) = tests::cloud_stand_in() { return stand_in; }
-    (crate::cloud_grants::launch_grant("codex", Path::new(cwd)), crate::cloud_config::launch_config("codex", key))
+    if let Some(stand_in) = tests::cloud_stand_in() { return Ok(stand_in); }
+    // On a Mac, the API key saved for Codex in Settings, if it uses one (PRO-306).
+    Ok((crate::agent_keys::launch_grant("codex", Path::new(cwd))?, crate::cloud_config::launch_config("codex", key)))
 }
 
 fn native_launch(grant: &crate::cloud_grants::LaunchGrant, config: &crate::cloud_config::LaunchConfig, computer: &str) -> NativeLaunch {
@@ -476,7 +477,7 @@ impl SessionManager {
         // grant snapshot like a terminal launch's; read here, off every lock,
         // because the first grant sync may still be on its way.
         let key = key_of(session, tab);
-        let (grant, config) = cloud_launch(&key, cwd);
+        let (grant, config) = cloud_launch(&key, cwd)?;
         let mut native = native_launch(&grant, &config, &crate::local_vm::launch_args("codex", false));
         // In a workspace Codex signs in with the workspace's credential, in a
         // home of its own with no Raccoon hooks; on a Mac, the reader's home.
@@ -495,6 +496,7 @@ impl SessionManager {
             if let (Some(model), Engine::CodexStdio(engine)) = (native.model, &mut rt.engine) { engine.route_model(model); }
         }
         crate::cloud_grants::record_launch(&key, &grant);
+        crate::agent_keys::record_launch(&key, "codex", session, tab);
         let sink = Arc::new(StdioSink { manager: self.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
         let child = self.host.spawn(&key, SpawnSpec { program: &program, args: &native.args, cwd: Path::new(cwd), env: &env, unset: &native.unset }, sink)?;
         let cancelled = {

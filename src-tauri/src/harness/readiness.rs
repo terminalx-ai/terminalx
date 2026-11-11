@@ -18,6 +18,10 @@ pub struct Readiness {
     pub version: Option<String>,
     pub login_method: Option<String>,
     pub plan: Option<String>,
+    /// The signed-in account's address, display only (PRO-306).
+    pub account: Option<String>,
+    /// Claude Code's organization name, display only (PRO-306).
+    pub organization: Option<String>,
 }
 
 /// A local login is evidence of configuration, not proof of entitlement or
@@ -59,6 +63,27 @@ fn account_details(agent: &str, value: &Value) -> (Option<String>, Option<String
     (method, plan)
 }
 
+/// An address fit to name an account on the page: one token with an `@`.
+fn display_address(raw: &str) -> Option<String> {
+    let address = raw.trim();
+    (address.len() <= 120 && address.contains('@') && !address.chars().any(|c| c.is_control() || c.is_whitespace())).then(|| address.to_string())
+}
+
+/// Whose login it is, for "Signed in" and the Login row: the account's
+/// address and Claude Code's organization name, each checked to be a plain
+/// display string, of a login that is in use. Nothing else of the document.
+fn account_identity(agent: &str, value: &Value) -> (Option<String>, Option<String>) {
+    let (address, organization) = if agent == "claude" && claude_state(value) == State::Ready {
+        (value["email"].as_str(), value["orgName"].as_str())
+    } else if agent == "codex" && codex_state(value) == State::Ready {
+        (value["account"]["email"].as_str(), None)
+    } else { return (None, None); };
+    let organization = organization.map(str::trim)
+        .filter(|name| !name.is_empty() && name.chars().count() <= 120 && !name.chars().any(char::is_control))
+        .map(str::to_owned);
+    (address.and_then(display_address), organization)
+}
+
 /// `home::prepare` links the user's auth file when one exists, and otherwise
 /// preserves a login completed in the managed terminal. Inspect that same
 /// effective account without creating a home or reading credential contents.
@@ -72,7 +97,7 @@ fn codex_home_for_check(user: Option<PathBuf>, managed: Option<PathBuf>) -> Opti
 pub fn check(id: &str) -> Readiness {
     match super::offered().into_iter().find(|h| h.id == id) {
         Some(agent) => check_binary(id, agent.path),
-        None => Readiness { state: State::Unknown, checked_at: chrono::Utc::now().to_rfc3339(), version: None, login_method: None, plan: None },
+        None => Readiness { state: State::Unknown, checked_at: chrono::Utc::now().to_rfc3339(), version: None, login_method: None, plan: None, account: None, organization: None },
     }
 }
 
@@ -88,7 +113,7 @@ pub fn check(id: &str) -> Readiness {
 pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    let mut result = Readiness { state: State::Unknown, checked_at: String::new(), version: None, login_method: None, plan: None };
+    let mut result = Readiness { state: State::Unknown, checked_at: String::new(), version: None, login_method: None, plan: None, account: None, organization: None };
     if let Some(path) = path {
         let mut version = std::process::Command::new(&path);
         version.arg("--version").env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
@@ -102,14 +127,14 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
                 super::codex::appserver::ask_with_timeout(
                     super::codex::appserver::Where { codex_home: home.as_deref(), cwd: None },
                     "account/read", json!({ "refreshToken": false }), Duration::from_secs(5),
-                ).map(|value| { (result.login_method, result.plan) = account_details("codex", &value); codex_state(&value) }).unwrap_or(State::Unknown)
+                ).map(|value| { (result.login_method, result.plan) = account_details("codex", &value); (result.account, result.organization) = account_identity("codex", &value); codex_state(&value) }).unwrap_or(State::Unknown)
             }
             "claude" => {
                 let mut command = std::process::Command::new(path);
                 command.args(["auth", "status", "--json"]).env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
                 crate::git::capture_within(command, Duration::from_secs(5)).ok()
                     .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-                    .map(|value| { (result.login_method, result.plan) = account_details("claude", &value); claude_state(&value) }).unwrap_or(State::Unknown)
+                    .map(|value| { (result.login_method, result.plan) = account_details("claude", &value); (result.account, result.organization) = account_identity("claude", &value); claude_state(&value) }).unwrap_or(State::Unknown)
             }
             _ => State::Unknown,
         };
@@ -128,6 +153,17 @@ mod tests {
         assert_eq!(account_details("codex", &json!({"requiresOpenaiAuth":true,"account":{"type":"chatgpt","planType":"plus","accessToken":"secret"}})), (Some("ChatGPT account".into()), Some("plus".into())));
         assert_eq!(account_details("claude", &json!({"loggedIn":false,"authMethod":"claude.ai","subscriptionType":"max"})), (None, None));
         assert_eq!(account_details("codex", &json!({"requiresOpenaiAuth":false,"account":{"type":"chatgpt","planType":"plus"}})), (None, None));
+    }
+
+    #[test]
+    fn the_account_and_organization_are_kept_only_as_display_strings_of_a_login_in_use() {
+        let claude = json!({"loggedIn":true,"authMethod":"claude.ai","email":"ada@example.com","orgName":"Procyon Labs","orgId":"secret-org-id","accessToken":"secret"});
+        assert_eq!(account_identity("claude", &claude), (Some("ada@example.com".into()), Some("Procyon Labs".into())));
+        assert_eq!(account_identity("claude", &json!({"loggedIn":false,"email":"ada@example.com","orgName":"Procyon Labs"})), (None, None));
+        assert_eq!(account_identity("claude", &json!({"loggedIn":true,"email":"not an address","orgName":"Two\nlines"})), (None, None));
+        let codex = json!({"requiresOpenaiAuth":true,"account":{"type":"chatgpt","email":"ada@example.com","planType":"pro"}});
+        assert_eq!(account_identity("codex", &codex), (Some("ada@example.com".into()), None));
+        assert_eq!(account_identity("codex", &json!({"requiresOpenaiAuth":true,"account":null})), (None, None));
     }
 
     #[test]

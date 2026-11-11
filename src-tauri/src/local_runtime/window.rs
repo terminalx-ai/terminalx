@@ -64,7 +64,7 @@ struct Dispatch { epoch: String, lease: String, command: String, params: Value }
 pub(crate) fn receive(request: &ControlRequest, current: &super::client::AttachmentIdentity) -> Result<(String, Value), ControlError> {
     if request.command != "window.dispatch" { return Err(unavailable("Only registered window dispatch is accepted.")); }
     let dispatch: Dispatch = serde_json::from_value(request.params.clone()).map_err(|_| unavailable("Invalid window dispatch."))?;
-    if dispatch.epoch != current.epoch || dispatch.lease != current.lease || !(supported(&dispatch.command) || dispatch.command == "environment.snapshot") {
+    if dispatch.epoch != current.epoch || dispatch.lease != current.lease || !(supported(&dispatch.command) || matches!(dispatch.command.as_str(), "environment.snapshot" | "agentKey.snapshot")) {
         return Err(unavailable("This request does not belong to the current desktop attachment."));
     }
     Ok((dispatch.command,dispatch.params))
@@ -130,6 +130,20 @@ impl Registry {
         serde_json::from_value(value).map_err(|_| anyhow::anyhow!("Invalid environment snapshot."))
     }
 
+    /// An agent's saved API key (PRO-306), from the desktop's Keychain, for
+    /// this runtime's memory only. Like an environment snapshot it travels
+    /// only in the private response, and no public command can ask for it.
+    pub(crate) fn agent_key_snapshot(&self, harness: &str, revision: &str) -> anyhow::Result<zeroize::Zeroizing<String>> {
+        let mut value = self.dispatch("agentKey.snapshot", json!({ "harness": harness, "revision": revision }))
+            .map_err(|_| anyhow::anyhow!("The agent's API key is unavailable."))?;
+        anyhow::ensure!(value["revision"] == revision, "The agent's API key changed.");
+        // Moved out, not copied: the response holds no other copy of it.
+        match value.get_mut("key").map(Value::take) {
+            Some(Value::String(key)) => Ok(zeroize::Zeroizing::new(key)),
+            _ => anyhow::bail!("Invalid agent key snapshot."),
+        }
+    }
+
     pub(crate) fn call(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         if !supported(command) { return Err(unavailable("This operation is not a window service.")); }
         self.dispatch(command, params)
@@ -149,7 +163,7 @@ impl Registry {
         let result = (|| -> anyhow::Result<ControlResponse> {
             let mut socket = UnixStream::connect(&service.socket)?;
             let timeout = command.strip_prefix("cloud.").map(|action| crate::cloud_control::timeout_for(action,&params)+Duration::from_secs(15))
-                .unwrap_or_else(|| if command == "environment.snapshot" { Duration::from_secs(10) } else if command == "window.terminalCounters" { crate::terminal_perf::COUNTERS_TIMEOUT + Duration::from_secs(1) } else { Duration::from_secs(360) });
+                .unwrap_or_else(|| if matches!(command, "environment.snapshot" | "agentKey.snapshot") { Duration::from_secs(10) } else if command == "window.terminalCounters" { crate::terminal_perf::COUNTERS_TIMEOUT + Duration::from_secs(1) } else { Duration::from_secs(360) });
             socket.set_read_timeout(Some(timeout))?;
             socket.set_write_timeout(Some(Duration::from_secs(5)))?;
             let dispatch = service.attachment.enter()?;
