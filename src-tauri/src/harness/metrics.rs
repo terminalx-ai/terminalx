@@ -12,6 +12,12 @@ pub struct TurnUsage {
     requests: BTreeMap<String, ClaudeRequest>,
     total: Usage,
     previous: Option<stats::RawUsage>,
+    /// The turn opened and has had no new counter reading yet. Its first
+    /// reading is measured by its own `last` (Codex may start its total
+    /// again for a turn), unless it repeats the last turn's total: Codex
+    /// often opens a turn that way, and that is no request.
+    #[serde(default)]
+    opened: bool,
     model: Option<String>,
     unpriced_tier: bool,
     started: Option<i64>,
@@ -44,7 +50,7 @@ impl TurnUsage {
         if mark == Some(TurnMark::Opened) {
             self.requests.clear();
             self.total = Usage::default();
-            self.previous = None;
+            self.opened = true;
             self.started = timestamp(record);
         }
         let payload = &record["payload"];
@@ -127,8 +133,14 @@ impl TurnUsage {
         if record["type"] == "event_msg" && payload["type"] == "token_count" {
             let info = &payload["info"];
             let last = stats::raw_usage(&info["last_token_usage"]);
+            let total = stats::raw_usage(&info["total_token_usage"]);
+            let repeated = total.zip(self.previous).is_some_and(|(total, previous)| stats::same_counts(total, previous));
+            // Only a reading with counts settles the turn's opening.
+            if (last.is_some() || total.is_some()) && std::mem::take(&mut self.opened) && last.is_some() && total.is_some() && !repeated {
+                self.previous = None;
+            }
             if let Some(stats::Delta::Event(delta, next)) = stats::codex_delta(
-                stats::raw_usage(&info["total_token_usage"]),
+                total,
                 last,
                 self.previous,
             ) {
@@ -364,6 +376,28 @@ mod tests {
             );
             assert!(usage.model.is_some());
         }
+    }
+
+    #[test]
+    fn a_turn_opening_with_the_last_total_again_counts_only_its_own_requests() {
+        let mut mapper = TurnUsage { model: Some("gpt-5.6-sol".into()), ..Default::default() };
+        let reading = |total: (u64, u64), last: (u64, u64)| serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{
+            "total_token_usage":{"input_tokens":total.0,"output_tokens":total.1,"cached_input_tokens":0},
+            "last_token_usage":{"input_tokens":last.0,"output_tokens":last.1,"cached_input_tokens":0}
+        }}});
+        let opened = serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5.6-sol"}});
+        mapper.record(&opened, Some(TurnMark::Opened), &mut Vec::new());
+        mapper.record(&reading((100, 20), (100, 20)), None, &mut Vec::new());
+        assert_eq!(mapper.total.input_tokens, Some(100));
+        mapper.record(&opened, Some(TurnMark::Opened), &mut Vec::new());
+        mapper.record(&reading((100, 20), (100, 20)), None, &mut Vec::new());
+        assert_eq!(mapper.total.input_tokens, None, "the repeated total is no request of this turn");
+        mapper.record(&reading((160, 30), (60, 10)), None, &mut Vec::new());
+        assert_eq!((mapper.total.input_tokens, mapper.total.output_tokens), (Some(60), Some(10)));
+        // A counter Codex started again for the turn still counts its first request.
+        mapper.record(&opened, Some(TurnMark::Opened), &mut Vec::new());
+        mapper.record(&reading((170, 5), (170, 5)), None, &mut Vec::new());
+        assert_eq!(mapper.total.input_tokens, Some(170));
     }
 
     #[test]

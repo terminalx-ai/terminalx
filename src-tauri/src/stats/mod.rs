@@ -5,6 +5,7 @@
 //! by path, mtime and size so unchanged multi-gigabyte histories cost only a
 //! metadata read on later visits.
 
+mod followed;
 pub(crate) mod pricing;
 #[cfg(test)]
 mod reconciliation;
@@ -472,45 +473,52 @@ fn priced(events: Vec<UsageEvent>) -> Vec<PricedRequest> {
         .collect()
 }
 
-/// The requests in one Claude transcript file, leaving out the records whose
-/// uuid is in `skip`: a fork's copy of its parent, which the parent counts.
-pub(crate) fn claude_requests(path: &Path, skip: &HashSet<String>) -> Result<Vec<PricedRequest>> {
-    parse_claude(path, skip).map(priced)
-}
+// A tab's own transcripts, read on from where the last read stopped.
+pub(crate) use followed::{claude_requests, claude_uuids, codex_requests};
+#[cfg(test)]
+pub(crate) use followed::offset as followed_offset;
 
-/// The requests in one Codex rollout file.
-pub(crate) fn codex_requests(path: &Path) -> Result<Vec<PricedRequest>> {
+/// A rollout read whole, as Stats reads it, to check a followed read by.
+#[cfg(test)]
+pub(crate) fn codex_requests_whole(path: &Path) -> Result<Vec<PricedRequest>> {
     parse_codex(path).map(priced)
 }
 
-fn parse_claude(path: &Path, skip: &HashSet<String>) -> Result<Vec<UsageEvent>> {
-    let file = File::open(path)?;
-    let fallback_session = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown");
-    let mut events = Vec::<UsageEvent>::new();
-    let mut by_key = HashMap::<String, usize>::new();
+/// Claude's usage records, one transcript line at a time: whole files for
+/// Stats, and the lines appended since the last read for a tab's totals
+/// (`followed`). Streamed content blocks of one request are one event.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ClaudeParser {
+    fallback_session: String,
+    events: Vec<UsageEvent>,
+    by_key: HashMap<String, usize>,
+}
 
-    for line in BufReader::new(file).lines() {
-        let line = line.with_context(|| format!("read usage transcript {}", path.display()))?;
+impl ClaudeParser {
+    fn new(path: &Path) -> Self {
+        let fallback_session = path.file_stem().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
+        Self { fallback_session, ..Default::default() }
+    }
+
+    /// Take one line. Records whose uuid is in `skip` are left out.
+    fn line(&mut self, line: &str, skip: &HashSet<String>) {
         if !line.contains("assistant") || !line.contains("usage") {
-            continue;
+            return;
         }
-        let Ok(record) = serde_json::from_str::<Value>(&line) else {
-            continue;
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            return;
         };
         if record.get("type").and_then(Value::as_str) != Some("assistant") {
-            continue;
+            return;
         }
         if record["uuid"].as_str().is_some_and(|uuid| skip.contains(uuid)) {
-            continue;
+            return;
         }
         let Some(timestamp) = record.get("timestamp").and_then(Value::as_str) else {
-            continue;
+            return;
         };
         let Some((timestamp_ms, day)) = time_parts(timestamp) else {
-            continue;
+            return;
         };
         let usage = &record["message"]["usage"];
         let input = number(&usage["input_tokens"]);
@@ -523,13 +531,13 @@ fn parse_claude(path: &Path, skip: &HashSet<String>) -> Result<Vec<UsageEvent>> 
             .saturating_add(cache_write)
             == 0
         {
-            continue;
+            return;
         }
         let session_id = record
             .get("sessionId")
             .or_else(|| record.get("session_id"))
             .and_then(Value::as_str)
-            .unwrap_or(fallback_session)
+            .unwrap_or(self.fallback_session.as_str())
             .to_string();
         let model = record["message"]["model"].as_str().map(str::to_string);
         let cwd = record.get("cwd").and_then(Value::as_str);
@@ -584,8 +592,8 @@ fn parse_claude(path: &Path, skip: &HashSet<String>) -> Result<Vec<UsageEvent>> 
         };
 
         if let Some(key) = event_key {
-            if let Some(index) = by_key.get(&key).copied() {
-                let prior = &mut events[index];
+            if let Some(index) = self.by_key.get(&key).copied() {
+                let prior = &mut self.events[index];
                 prior.new_input_tokens = prior.new_input_tokens.max(event.new_input_tokens);
                 prior.output_tokens = prior.output_tokens.max(event.output_tokens);
                 prior.cache_read_tokens = prior.cache_read_tokens.max(event.cache_read_tokens);
@@ -601,13 +609,22 @@ fn parse_claude(path: &Path, skip: &HashSet<String>) -> Result<Vec<UsageEvent>> 
                     .new_input_tokens
                     .saturating_add(prior.output_tokens)
                     .saturating_add(prior.cache_tokens);
-                continue;
+                return;
             }
-            by_key.insert(key, events.len());
+            self.by_key.insert(key, self.events.len());
         }
-        events.push(event);
+        self.events.push(event);
     }
-    Ok(events)
+}
+
+fn parse_claude(path: &Path, skip: &HashSet<String>) -> Result<Vec<UsageEvent>> {
+    let file = File::open(path)?;
+    let mut parser = ClaudeParser::new(path);
+    for line in BufReader::new(file).lines() {
+        let line = line.with_context(|| format!("read usage transcript {}", path.display()))?;
+        parser.line(&line, skip);
+    }
+    Ok(parser.events)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -737,37 +754,41 @@ fn usage_tuple(usage: Option<RawUsage>) -> String {
         .unwrap_or_default()
 }
 
-fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
-    let file = File::open(path)?;
-    let mut session_id = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let mut session_cwd: Option<String> = None;
-    let mut current_cwd: Option<String> = None;
-    let mut current_model: Option<String> = None;
-    let mut unpriced_tier = false;
-    let mut previous_totals: Option<RawUsage> = None;
-    // A turn just opened: its first reading is measured by its own `last`,
-    // as the turn mapper does (`harness::metrics`). Codex may start its
-    // cumulative counter again for a turn, and a restarted total that is
-    // still larger than the previous turn's would otherwise read as a small
-    // increase and lose a whole request.
-    let mut turn_opened = false;
-    let mut seen_records = HashSet::new();
-    let mut events = Vec::new();
+/// Codex's usage records, one rollout line at a time (see [`ClaudeParser`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CodexParser {
+    session_id: String,
+    session_cwd: Option<String>,
+    current_cwd: Option<String>,
+    current_model: Option<String>,
+    unpriced_tier: bool,
+    previous_totals: Option<RawUsage>,
+    /// A turn just opened. Codex may start its cumulative counter again for
+    /// a turn, and a restarted total that is still above the last turn's
+    /// would read as a small increase and lose a whole request; so the
+    /// turn's first new total is measured by its own `last`, as the turn
+    /// mapper does (`harness::metrics`). A turn often opens by repeating the
+    /// last turn's total, which is no request at all and stays skipped.
+    turn_opened: bool,
+    seen_records: HashSet<String>,
+    events: Vec<UsageEvent>,
+}
 
-    for line in BufReader::new(file).lines() {
-        let line = line.with_context(|| format!("read usage transcript {}", path.display()))?;
+impl CodexParser {
+    fn new(path: &Path) -> Self {
+        let session_id = path.file_stem().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
+        Self { session_id, ..Default::default() }
+    }
+
+    fn line(&mut self, line: &str) {
         let interesting = line.contains("session_meta")
             || line.contains("turn_context")
             || line.contains("token_count");
         if !interesting {
-            continue;
+            return;
         }
-        let Ok(record) = serde_json::from_str::<Value>(&line) else {
-            continue;
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            return;
         };
         let payload = &record["payload"];
         match record.get("type").and_then(Value::as_str) {
@@ -777,55 +798,56 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
                     .or_else(|| payload.get("session_id"))
                     .and_then(Value::as_str)
                 {
-                    session_id = id.to_string();
+                    self.session_id = id.to_string();
                 }
-                session_cwd = payload
+                self.session_cwd = payload
                     .get("cwd")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                if current_cwd.is_none() {
-                    current_cwd.clone_from(&session_cwd);
+                if self.current_cwd.is_none() {
+                    self.current_cwd.clone_from(&self.session_cwd);
                 }
             }
             Some("turn_context") => {
-                turn_opened = true;
-                unpriced_tier = nonstandard_tier(payload);
+                self.turn_opened = true;
+                self.unpriced_tier = nonstandard_tier(payload);
                 if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
-                    current_cwd = Some(cwd.to_string());
+                    self.current_cwd = Some(cwd.to_string());
                 }
                 if let Some(model) = extract_model(payload) {
-                    current_model = Some(model);
+                    self.current_model = Some(model);
                 }
             }
             Some("event_msg")
                 if payload.get("type").and_then(Value::as_str) == Some("token_count") =>
             {
                 let Some(timestamp) = record.get("timestamp").and_then(Value::as_str) else {
-                    continue;
+                    return;
                 };
                 let Some((timestamp_ms, day)) = time_parts(timestamp) else {
-                    continue;
+                    return;
                 };
                 let Some(info) = payload.get("info").and_then(Value::as_object) else {
-                    continue;
+                    return;
                 };
                 let total = info.get("total_token_usage").and_then(raw_usage);
                 let last = info.get("last_token_usage").and_then(raw_usage);
                 let event_key =
                     format!("{}|{}|{}", timestamp, usage_tuple(total), usage_tuple(last));
                 // Replayed records must not rewind the cumulative baseline.
-                if !seen_records.insert(event_key.clone()) {
-                    continue;
+                if !self.seen_records.insert(event_key.clone()) {
+                    return;
                 }
-                if std::mem::take(&mut turn_opened) && last.is_some() {
-                    previous_totals = None;
+                let repeated = total.zip(self.previous_totals).is_some_and(|(total, previous)| same_counts(total, previous));
+                if std::mem::take(&mut self.turn_opened) && last.is_some() && total.is_some() && !repeated {
+                    self.previous_totals = None;
                 }
-                let Some(resolved) = codex_delta(total, last, previous_totals) else {
-                    continue;
+                let Some(resolved) = codex_delta(total, last, self.previous_totals) else {
+                    return;
                 };
                 let Delta::Event(mut delta, next) = resolved;
                 // A zero-valued reset still advances the cumulative baseline.
-                previous_totals = next;
+                self.previous_totals = next;
                 delta.cached_input = delta.cached_input.min(delta.input);
                 if delta.input == 0
                     && delta.cached_input == 0
@@ -833,14 +855,14 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
                     && delta.reasoning == 0
                     && delta.total == 0
                 {
-                    continue;
+                    return;
                 }
-                let model = extract_model(payload).or_else(|| current_model.clone());
-                let cwd = current_cwd.clone().or_else(|| session_cwd.clone());
+                let model = extract_model(payload).or_else(|| self.current_model.clone());
+                let cwd = self.current_cwd.clone().or_else(|| self.session_cwd.clone());
                 let project = project_label(cwd.as_deref());
-                events.push(UsageEvent {
+                self.events.push(UsageEvent {
                     provider: Provider::Codex,
-                    session_id: session_id.clone(),
+                    session_id: self.session_id.clone(),
                     timestamp: timestamp.to_string(),
                     timestamp_ms,
                     day,
@@ -853,7 +875,7 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
                     cache_read_tokens: delta.cached_input,
                     cache_write_tokens: 0,
                     cache_write_hour_tokens: 0,
-                    unpriced: unpriced_tier
+                    unpriced: self.unpriced_tier
                         || nonstandard_tier(payload)
                         || nonstandard_tier(&payload["info"])
                         || last.is_none_or(|last| !same_counts(last, delta))
@@ -869,7 +891,16 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
             _ => {}
         }
     }
-    Ok(events)
+}
+
+fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
+    let file = File::open(path)?;
+    let mut parser = CodexParser::new(path);
+    for line in BufReader::new(file).lines() {
+        let line = line.with_context(|| format!("read usage transcript {}", path.display()))?;
+        parser.line(&line);
+    }
+    Ok(parser.events)
 }
 
 // Unknown/fast/flex tiers must not silently receive standard prices.
@@ -1627,6 +1658,32 @@ mod tests {
         assert_eq!(events[0].total_tokens, 34);
         assert_eq!(events[0].day, "2026-09-02");
         assert_eq!(events[0].cwd.as_deref(), Some("/code/raccoon/0"));
+    }
+
+    #[test]
+    fn a_turn_that_opens_by_repeating_the_last_total_counts_nothing_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let reading = |at: &str, total: (u64, u64, u64), last: (u64, u64, u64)| serde_json::json!({
+            "timestamp": at, "type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": total.0, "cached_input_tokens": total.1, "output_tokens": total.2},
+                "last_token_usage": {"input_tokens": last.0, "cached_input_tokens": last.1, "output_tokens": last.2}}}
+        }).to_string();
+        let turn = serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}}).to_string();
+        let lines = [
+            turn.clone(),
+            reading("2026-11-11T10:00:00Z", (1000, 800, 50), (1000, 800, 50)),
+            turn,
+            // The refresh a turn opens with: the last total again, at a new time.
+            reading("2026-11-11T10:05:00Z", (1000, 800, 50), (1000, 800, 50)),
+            reading("2026-11-11T10:05:09Z", (2200, 1700, 90), (1200, 900, 40)),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let events = parse_codex(&path).unwrap();
+        assert_eq!(events.len(), 2, "{events:?}");
+        let sum = |field: fn(&UsageEvent) -> u64| events.iter().map(field).sum::<u64>();
+        assert_eq!((sum(|e| e.new_input_tokens + e.cache_read_tokens), sum(|e| e.cache_read_tokens), sum(|e| e.output_tokens)), (2200, 1700, 90));
+        assert!(events.iter().all(|e| !e.unpriced));
     }
 
     #[test]

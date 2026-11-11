@@ -1,7 +1,8 @@
 //! Tokens and estimated cost per tab and per session (PRO-273).
 //!
 //! A tab's totals are read again from its agents' own transcripts at each
-//! turn end, not added up turn by turn: a count kept by addition drifts when a
+//! turn end (only what was appended since the last read is parsed:
+//! `stats::followed`), not added up turn by turn: a count kept by addition drifts when a
 //! conversation is read from its start again (#437) or runs while the app is
 //! closed, and the reader's acceptance is that the totals *are* the sum of the
 //! agent's usage records. The records are counted and priced by the same code
@@ -180,18 +181,6 @@ impl Transcripts for AgentHomes {
     }
 }
 
-fn uuids_in(files: &[PathBuf]) -> HashSet<String> {
-    files
-        .iter()
-        .filter_map(|file| std::fs::read_to_string(file).ok())
-        .flat_map(|text| {
-            text.lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .filter_map(|record| record["uuid"].as_str().map(String::from))
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
 
 /// Read a tab's usage from every conversation it holds or has held. `None`
 /// when none of them is an agent's whose usage can be read (a terminal, an
@@ -208,7 +197,7 @@ pub fn read_tab(cwd: &str, tab: &TabEntry, homes: &dyn Transcripts) -> Option<Ta
                 // A fork's file opens with its parent's records, uuids and
                 // all: the parent counts them.
                 let skip = match (tab.provider_session_id.as_deref() == Some(id), tab.fork_from.as_deref()) {
-                    (true, Some(parent)) => homes.claude(cwd, parent).map(|path| uuids_in(&[path])).unwrap_or_default(),
+                    (true, Some(parent)) => homes.claude(cwd, parent).and_then(|path| stats::claude_uuids(&path).ok()).unwrap_or_default(),
                     _ => HashSet::new(),
                 };
                 for file in claude_files(&transcript) {
@@ -304,14 +293,15 @@ fn store(session_id: &str, tab_id: &str, usage: TabUsage) -> anyhow::Result<Opti
     })
 }
 
-/// A session's estimated cost: its tabs' priced models summed (`None` when
-/// it has tokens and none of them is priced, or nothing was read yet).
-pub fn estimated_cost(session: &SessionEntry) -> Option<f64> {
-    let rows: Vec<&ModelUsage> = session.tabs.iter().filter_map(|tab| tab.usage.as_ref()).flat_map(|usage| &usage.models).collect();
+/// A session's estimated cost, as `sessions list` gives it: its tabs' priced
+/// models summed, and the models that sum leaves out. The cost is `None`
+/// before anything was read, or when there are tokens and nothing is priced.
+pub fn estimated_cost(session: &SessionEntry) -> (Option<f64>, Vec<String>) {
     if session.tabs.iter().all(|tab| tab.usage.is_none()) {
-        return None;
+        return (None, Vec::new());
     }
-    total(rows).cost_usd
+    let sum = total(session.tabs.iter().filter_map(|tab| tab.usage.as_ref()).flat_map(|usage| &usage.models));
+    (sum.cost_usd, sum.unpriced_models)
 }
 
 /// `sessions usage <session> --json`: each tab's models and total, the
@@ -343,12 +333,16 @@ pub fn session_json(session: &SessionEntry) -> Value {
     })
 }
 
-/// Add `estimatedCostUsd` to a session entry as `sessions list` and
-/// `sessions show` return it.
+/// Add `estimatedCostUsd` and `estimatedCostUnpricedModels` to a session
+/// entry as `sessions list` and `sessions show` return it.
 pub fn with_cost(session: &SessionEntry) -> Value {
     let mut value = serde_json::to_value(session).unwrap_or(Value::Null);
     if let Value::Object(map) = &mut value {
-        map.insert("estimatedCostUsd".into(), json!(estimated_cost(session)));
+        let (cost, unpriced) = estimated_cost(session);
+        map.insert("estimatedCostUsd".into(), json!(cost));
+        // The models whose tokens the cost leaves out: a cost with names here
+        // is partial.
+        map.insert("estimatedCostUnpricedModels".into(), json!(unpriced));
     }
     value
 }

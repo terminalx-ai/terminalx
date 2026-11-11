@@ -2530,6 +2530,74 @@ mod tests {
         }
     }
 
+    /// PRO-273: a lead's own usage, a row per worker, and the grand total;
+    /// and once the lead is gone, its workers alone.
+    #[test]
+    fn sessions_usage_reports_a_lead_its_workers_and_their_total() {
+        use crate::session_usage::{ModelUsage, TabUsage};
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let create = |lead: Option<&SessionEntry>, harness: &str| crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "title": "worker",
+            "parent": lead.map(|lead| json!({"sessionId": lead.id, "tabId": lead.tabs[0].id})).unwrap_or(Value::Null),
+            "tab": {"harness": harness},
+        })).unwrap()).unwrap();
+        // Totals as a turn end left them; these tabs have no transcript to read again.
+        let used = |session: &SessionEntry, model: &str, input: u64, cost: Option<f64>| {
+            index::update_tab(&session.id, &session.tabs[0].id, |tab| {
+                tab.usage = Some(TabUsage { models: vec![ModelUsage { model: model.into(), input_tokens: input, output_tokens: 10, cost_usd: cost, ..Default::default() }], updated: "t".into() });
+                Ok(())
+            }).unwrap();
+        };
+        let lead = create(None, "claude");
+        let codex = create(Some(&lead), "codex");
+        let claude = create(Some(&lead), "claude");
+        let unpriced = create(Some(&lead), "claude");
+        let unrelated = create(None, "codex");
+        used(&lead, "claude-opus-5-5", 100, Some(1.0));
+        used(&codex, "gpt-5.6-sol", 200, Some(0.5));
+        used(&claude, "claude-opus-5-5", 300, Some(0.25));
+        used(&unpriced, "claude-new-9", 400, None);
+        used(&unrelated, "gpt-5.6-sol", 9999, Some(9.0));
+        let (service, _sink) = headless_service();
+
+        let report = service.execute("sessions.usage", json!({"childrenOf": lead.id}), "r").unwrap();
+        assert_eq!(report["parent"], json!({"sessionId": lead.id, "title": lead.title, "exists": true}));
+        assert_eq!(report["lead"]["sessionId"], json!(lead.id));
+        assert_eq!(report["lead"]["total"]["costUsd"], json!(1.0));
+        let workers = report["workers"].as_array().unwrap();
+        let mut rows: Vec<(String, Value)> = workers.iter().map(|w| (w["sessionId"].as_str().unwrap().to_string(), w["total"]["costUsd"].clone())).collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut expected = vec![(codex.id.clone(), json!(0.5)), (claude.id.clone(), json!(0.25)), (unpriced.id.clone(), Value::Null)];
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(rows, expected, "a row per worker, the unrelated session left out");
+        assert_eq!(report["total"]["inputTokens"], json!(1000));
+        assert_eq!(report["total"]["costUsd"], json!(1.75));
+        assert_eq!(report["total"]["unpricedModels"], json!(["claude-new-9"]));
+        let opus = report["models"].as_array().unwrap().iter().find(|m| m["model"] == "claude-opus-5-5").unwrap().clone();
+        assert_eq!((opus["inputTokens"].clone(), opus["costUsd"].clone()), (json!(400), json!(1.25)), "the lead's and a worker's rows of one model merged");
+
+        // One session, and the cost `sessions list` carries.
+        let one = service.execute("sessions.usage", json!({"session": codex.id}), "r").unwrap();
+        assert_eq!((one["tabs"].as_array().unwrap().len(), one["total"]["costUsd"].clone()), (1, json!(0.5)));
+        let listed = service.execute("sessions.list", json!({}), "r").unwrap();
+        let entry = |id: &str| listed["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap().clone();
+        assert_eq!(entry(&codex.id)["estimatedCostUsd"], json!(0.5));
+        assert_eq!((entry(&unpriced.id)["estimatedCostUsd"].clone(), entry(&unpriced.id)["estimatedCostUnpricedModels"].clone()), (Value::Null, json!(["claude-new-9"])));
+        assert_eq!(service.execute("sessions.show", json!({"session": lead.id}), "r").unwrap()["estimatedCostUsd"], json!(1.0));
+
+        // The lead deleted: named by its full id, its workers still answer.
+        index::save(&index::load().unwrap().into_iter().filter(|s| s.id != lead.id).collect::<Vec<_>>()).unwrap();
+        let orphaned = service.execute("sessions.usage", json!({"childrenOf": lead.id}), "r").unwrap();
+        assert_eq!((orphaned["parent"]["exists"].clone(), orphaned["lead"].clone()), (json!(false), Value::Null));
+        assert_eq!(orphaned["workers"].as_array().unwrap().len(), 3);
+        assert_eq!(orphaned["total"]["costUsd"], json!(0.75));
+        for (params, code) in [(json!({}), "invalid_arguments"), (json!({"childrenOf": "no-such-session"}), "not_found"), (json!({"session": "no-such-session"}), "not_found")] {
+            assert_eq!(service.execute("sessions.usage", params, "r").unwrap_err().code, code);
+        }
+    }
+
     /// PRO-270: exactly the sessions a lead started, wherever they are.
     #[test]
     fn a_leads_workers_are_listed_across_projects_and_worktrees_and_outlive_it() {

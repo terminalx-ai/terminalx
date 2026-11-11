@@ -199,7 +199,8 @@ fn a_session_with_two_tabs_on_different_models_reports_both_and_their_sum() {
     assert_eq!(report["models"].as_array().unwrap().len(), 2);
     assert_eq!(report["total"]["inputTokens"], json!(20 + 7402 + 973 + 8543));
     assert!(close(report["total"]["costUsd"].as_f64().unwrap(), claude_cost + codex_cost));
-    assert!(close(estimated_cost(&entry).unwrap(), claude_cost + codex_cost));
+    assert!(close(estimated_cost(&entry).0.unwrap(), claude_cost + codex_cost));
+    assert_eq!(with_cost(&entry)["estimatedCostUnpricedModels"], json!([]));
     assert!(close(with_cost(&entry)["estimatedCostUsd"].as_f64().unwrap(), claude_cost + codex_cost));
     for row in report["tabs"].as_array().unwrap() {
         assert!(row["total"]["costUsd"].as_f64().unwrap() > 0.0);
@@ -210,6 +211,7 @@ fn a_session_with_two_tabs_on_different_models_reports_both_and_their_sum() {
 fn a_session_nothing_was_read_for_has_a_null_estimate() {
     let entry = session(vec![tab("claude", "c1")]);
     assert_eq!(with_cost(&entry)["estimatedCostUsd"], Value::Null);
+    assert_eq!(with_cost(&entry)["estimatedCostUnpricedModels"], json!([]));
     assert_eq!(session_json(&entry)["tabs"], json!([]));
 }
 
@@ -224,4 +226,53 @@ fn stored_usage_round_trips_through_the_index_entry() {
     // An entry written before it has none, and writes none.
     let plain = tab("claude", "c2");
     assert!(serde_json::to_value(&plain).unwrap().get("usage").is_none());
+}
+
+#[test]
+fn a_partial_estimate_names_the_models_it_leaves_out() {
+    let mut priced = tab("claude", "c1");
+    priced.usage = Some(TabUsage { models: vec![ModelUsage { model: "claude-opus-5-5".into(), input_tokens: 10, cost_usd: Some(0.5), ..Default::default() }], updated: "t".into() });
+    let mut unknown = tab("claude", "c2");
+    unknown.usage = Some(TabUsage { models: vec![ModelUsage { model: "claude-new-9".into(), input_tokens: 10, cost_usd: None, ..Default::default() }], updated: "t".into() });
+    let entry = with_cost(&session(vec![priced, unknown]));
+    assert_eq!(entry["estimatedCostUsd"], json!(0.5));
+    assert_eq!(entry["estimatedCostUnpricedModels"], json!(["claude-new-9"]));
+}
+
+#[test]
+fn a_followed_transcript_is_parsed_on_from_where_the_last_read_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollout.jsonl");
+    let lines: Vec<&str> = CODEX.lines().collect();
+    let cut = lines.iter().position(|line| line.contains("11:51:40")).unwrap();
+    // The first turns, and half of a line still being written.
+    let mut start = lines[..cut].join("\n") + "\n";
+    start.push_str(&lines[cut][..20]);
+    std::fs::write(&path, &start).unwrap();
+    let before = stats::codex_requests(&path).unwrap();
+    let read_to = stats::followed_offset(&path).unwrap();
+    assert_eq!(read_to as usize, start.len() - 20, "the unfinished line waits");
+    std::fs::write(&path, CODEX).unwrap();
+    let after = stats::codex_requests(&path).unwrap();
+    assert!(after.len() > before.len());
+    assert_eq!(after, stats::codex_requests_whole(&path).unwrap(), "the same as reading it whole");
+    assert_eq!(stats::followed_offset(&path).unwrap() as usize, CODEX.len());
+    // Rewritten from its start (a reset): read again from scratch.
+    // Same length, so only its first bytes tell it apart; its first turn's reading is gone.
+    let rewritten = CODEX.replacen("01a061f1-16d4", "11a061f1-16d4", 1).replace("\"type\": \"token_count\", \"info\": {\"total_token_usage\": {\"input_tokens\": 18282", "\"type\": \"token_cuont\", \"info\": {\"total_token_usage\": {\"input_tokens\": 18282");
+    assert_eq!(rewritten.len(), CODEX.len());
+    std::fs::write(&path, &rewritten).unwrap();
+    let again = stats::codex_requests(&path).unwrap();
+    assert_eq!(again, stats::codex_requests_whole(&path).unwrap());
+    assert_ne!(again, after);
+    // Claude: streamed blocks of one request split across reads are still one request.
+    let claude = dir.path().join("c.jsonl");
+    let records: Vec<&str> = CLAUDE.lines().collect();
+    let half = records.len() / 2;
+    std::fs::write(&claude, records[..half].join("\n") + "\n").unwrap();
+    stats::claude_requests(&claude, &HashSet::new()).unwrap();
+    std::fs::write(&claude, CLAUDE).unwrap();
+    let requests = stats::claude_requests(&claude, &HashSet::new()).unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.iter().map(|r| r.output).sum::<u64>(), 78);
 }

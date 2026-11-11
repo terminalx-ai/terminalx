@@ -209,13 +209,16 @@ export function SessionCost({ session, className }: { session: SessionEntry; cla
     if (open) void refresh(session.id);
   }, [open, session.id]);
   if (!enabled || !models.length) return null;
-  const label = total.costUsd == null ? "≈ —" : `≈ ${formatCost(total.costUsd)}`;
+  // A cost that leaves models out says so: "+" for the tokens it could not price.
+  const partial = total.costUsd != null && total.unpricedModels.length > 0;
+  const label = total.costUsd == null ? "≈ —" : `≈ ${formatCost(total.costUsd)}${partial ? "+" : ""}`;
+  const unpricedNote = `no price for ${total.unpricedModels.join(", ")}`;
   return <Popover.Root open={open} onOpenChange={setOpen}>
     <Popover.Trigger asChild>
       <button
         type="button"
-        aria-label={total.costUsd == null ? "Session usage: no price for its models" : `Session usage: estimated ${formatCost(total.costUsd)}`}
-        title="Estimated session cost"
+        aria-label={total.costUsd == null ? "Session usage: no price for its models" : `Session usage: estimated ${formatCost(total.costUsd)}${partial ? ` and more: ${unpricedNote}` : ""}`}
+        title={partial ? `Estimated session cost, without the models that have no price (${total.unpricedModels.join(", ")})` : "Estimated session cost"}
         className={cn("flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-veil-raised px-2 font-mono text-[12px] text-foreground hover:bg-veil-strong focus-visible:outline focus-visible:outline-ring", className)}
         data-testid="session-cost"
       >

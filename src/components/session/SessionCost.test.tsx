@@ -110,7 +110,10 @@ describe("Session cost in the header (PRO-273)", () => {
 
   it("shows an unpriced model's tokens with no cost, never zero", async () => {
     render(<SessionCost session={session([tab("t1", "One", "claude", [row("claude-sonnet-5-5", 9_000, 6_000, 88_000, 0.13), row("claude-new-9", 500, 70, 0, null)])])} />);
-    await waitFor(() => expect(chip().textContent).toBe("≈ $0.13"));
+    // Partial: the chip says so before the popover is opened.
+    await waitFor(() => expect(chip().textContent).toBe("≈ $0.13+"));
+    expect(chip().getAttribute("aria-label")).toBe("Session usage: estimated $0.13 and more: no price for claude-new-9");
+    expect(chip().getAttribute("title")).toContain("without the models that have no price (claude-new-9)");
     fireEvent.click(chip());
     const popover = await screen.findByRole("dialog", { name: "Session usage" });
     const unpriced = within(popover).getAllByTestId("session-usage-model")[1];

@@ -566,7 +566,8 @@ terminalx sessions usage --children-of <session> --json
 Each agent tab keeps running totals of what its agents used: input (uncached), output,
 cache-read and cache-write tokens, and an estimated cost, **per model**, because a tab can
 change model mid-conversation. The totals are read from the agent's own usage records (Claude's
-transcript and its subagents' transcripts, Codex's rollout) at each turn end, and cover every
+transcript and its subagents' transcripts, Codex's rollout) at each turn end, parsing only what
+was appended since the last read, and cover every
 conversation the tab holds or has held. A fork does not count the records it copied from its
 parent. Costs use the same price table as Stats & Usage, each request at its own rates (cache
 reads at the cache-read rate). Everything is computed on this computer.
@@ -604,7 +605,9 @@ list --children-of` finds them: `parent` (as there), `lead` (the lead's own repo
 merged) and `total`, the grand total of the lead and its workers.
 
 `sessions list` (every form) and `sessions show` carry `estimatedCostUsd` on each session: its
-total `costUsd` as of each tab's last turn end, or `null` before any was read. Each tab entry
+total `costUsd` as of each tab's last turn end, or `null` before any was read. Beside it,
+`estimatedCostUnpricedModels` names the models that cost leaves out; when it is not empty the
+cost is partial (the header shows it as "≈ $0.13+"). Each tab entry
 carries the stored totals as `usage` (`models`, `updated`). The session header shows the cost
 when Settings → Experimental → Session cost is on.
 
