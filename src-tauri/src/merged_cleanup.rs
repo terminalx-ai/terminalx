@@ -793,7 +793,8 @@ pub(crate) fn with_workspace_restore<T>(path: &str, project: &str, commit: &str,
                 saved.restored_at = Some(now.clone());
             }
         }
-        ledger.seen.insert(path.into(), Seen { project_path: record.project_path, pr: record.pr, first_seen: now, held: true });
+        let archive_pause = ledger.seen.get(path).and_then(|seen| seen.archive_pause.clone());
+        ledger.seen.insert(path.into(), Seen { project_path: record.project_path, pr: record.pr, first_seen: now, held: true, archive_pause });
     } else if let Some(seen) = ledger.seen.get_mut(path) {
         seen.held = true;
     }

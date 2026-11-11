@@ -33,6 +33,10 @@ fn fixture() -> (tempfile::TempDir, SessionEntry, RemovedWorkspace) {
         direct: git::DirectDelete::Allowed,
         fetch: crate::landed::Fetch::Skip,
         guard: None,
+        archive: None,
+        archive_failure: None,
+        archive_retry: None,
+        archive_started: None,
     };
     session_ops::remove_workspace(&BroadcastSink::new(16), &request, &|_| {}).unwrap();
     (repo, index::get(&session.id).unwrap(), removed)
