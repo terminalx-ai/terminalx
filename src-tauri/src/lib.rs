@@ -153,6 +153,7 @@ mod terminal_perf;
 mod work_claims;
 mod worker_report;
 mod workspaces;
+mod workspace_restore;
 mod worktree_cleanup;
 mod worktree_control;
 
@@ -789,6 +790,8 @@ pub fn run() {
             commands::copy_text,
             commands::workspace_disposition,
             commands::remove_workspace,
+            commands::preview_workspace_restore,
+            commands::restore_workspace,
             commands::workspace_size,
             commands::scan_leftovers,
             commands::remove_leftovers,

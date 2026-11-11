@@ -47,7 +47,7 @@ import { openRenameSession, openWorktreeCleanup } from "@/lib/dialogs";
 import { LOCAL_HOST, mergedNote, useMergedCleanup, useMergedStatus, type HostedStatus } from "@/lib/mergedCleanup";
 import { copyShareLink } from "@/lib/localSharing";
 import { ContinuationDialog } from "@/components/session/ContinuationDialog";
-import { openSettle } from "@/lib/dialogs";
+import { openSettle, openWorkspaceRestore } from "@/lib/dialogs";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import type { Project, TabEntry, Workspace } from "@/types/session";
@@ -1070,6 +1070,11 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
       </Item>
       <IssueItems session={session} />
       <Separator />
+      {session.worktreeRemoved && (
+        <Item onSelect={() => openWorkspaceRestore(session.id)}>
+          <FolderInput /> Restore workspace…
+        </Item>
+      )}
       {session.worktreeName && !session.worktreeRemoved && (
         <Item onSelect={() => openSettle(session)}>
           <Folder /> Remove workspace, keep conversations…
