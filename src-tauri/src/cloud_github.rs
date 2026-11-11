@@ -1285,12 +1285,16 @@ mod tests {
         assert!(installed.gh.is_none());
         let late = home.path().join("late-bin");
         fs::create_dir_all(&late).unwrap();
-        let path = |extra: &Path| format!("{}:{}:/usr/bin:/bin", installed.bin_dir.display(), extra.display());
-        let output = std::process::Command::new(installed.bin_dir.join("gh")).env("PATH", path(&home.path().join("nothing"))).output().unwrap();
+        // Search only fixture directories: CI's system PATH can already contain gh.
+        let path = std::env::join_paths([&installed.bin_dir, &late]).unwrap();
+        let output = std::process::Command::new(installed.bin_dir.join("gh")).env("PATH", &path).output().unwrap();
         assert_eq!(output.status.code(), Some(127));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("the GitHub CLI is not installed"));
+        assert!(output.stdout.is_empty());
         // Installed after boot: found on PATH, past the shim itself.
         write_script(&late.join("gh"), "#!/bin/sh\necho \"late token=$GH_TOKEN\"\n").unwrap();
-        let output = std::process::Command::new(installed.bin_dir.join("gh")).env("PATH", path(&late)).output().unwrap();
+        let output = std::process::Command::new(installed.bin_dir.join("gh")).env("PATH", &path).output().unwrap();
+        assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "late token=ghs_late");
     }
 
