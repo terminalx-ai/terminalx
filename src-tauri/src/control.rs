@@ -746,7 +746,10 @@ impl ControlService {
                 None::<String>,
             )),
             "pipelines.start" | "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" => self.runs(command, params),
+            // A run's workers are sessions of a project on this computer, each in a worktree of its own:
+            // the desktop's runtime has those. A cloud workspace's runtime has one checkout, and says so.
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),

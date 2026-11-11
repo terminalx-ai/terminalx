@@ -311,10 +311,12 @@ fn orchestration_run_child() {
     let _home = crate::store::temp_home();
     let bin = crate::store::root().unwrap().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    // It records how it was launched and then sits there, as an agent waiting
-    // for its first prompt does: what a worker is started with is what is checked.
-    let launches = bin.join("launches.log");
-    std::fs::write(bin.join("claude"), format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *--settings*) stty -icanon; exec cat ;; esac\nexit 0\n", launches.display())).unwrap();
+    // It records how it was launched and then sits there, as an agent waiting for its first
+    // prompt does: what a worker is started with is what is checked. One file a launch, moved
+    // into place when it is whole: the lead and a worker may start at the same moment.
+    let launches = crate::store::root().unwrap().join("launches");
+    std::fs::create_dir_all(&launches).unwrap();
+    std::fs::write(bin.join("claude"), format!("#!/bin/sh\ncase \"$*\" in *--settings*) printf '%s' \"$*\" > \"{0}/.$$\" && mv \"{0}/.$$\" \"{0}/launch.$$\"; stty -icanon; exec cat ;; esac\nexit 0\n", launches.display())).unwrap();
     std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(crate::binpath::set_priority_dir(&bin));
     let repo = super::tests::git_repo();
@@ -401,19 +403,23 @@ fn orchestration_run_child() {
     assert!(crate::orchestration::guard::limited(&worker));
     assert!(!crate::orchestration::guard::limited(&index::get(lead_id).unwrap()));
 
-    // The agent was launched in bypass with the deny rules in its settings, and sent its brief.
+    // The worker's agent was launched in bypass with the deny rules in its settings; the lead's
+    // own launch carries none.
     let until = Instant::now() + Duration::from_secs(20);
-    let launch = loop {
-        let logged = std::fs::read_to_string(&launches).unwrap_or_default();
-        if let Some(line) = logged.lines().find(|line| line.contains("--dangerously-skip-permissions") && line.contains("Bash(git push:*)")) { break line.to_string(); }
-        assert!(Instant::now() < until, "no worker launch with deny rules in:\n{logged}");
+    let (launch, leads) = loop {
+        let started: Vec<String> = std::fs::read_dir(&launches).unwrap().filter_map(|entry| entry.ok()).filter(|entry| entry.file_name().to_string_lossy().starts_with("launch.")).filter_map(|entry| std::fs::read_to_string(entry.path()).ok()).collect();
+        let (limited, free): (Vec<&String>, Vec<&String>) = started.iter().partition(|launch| launch.contains("Bash(git push:*)"));
+        if let (Some(worker), Some(lead)) = (limited.first(), free.first()) {
+            assert_eq!((limited.len(), free.len()), (1, 1), "one worker and one lead were launched");
+            break (worker.to_string(), lead.to_string());
+        }
+        assert!(Instant::now() < until, "no launch of the worker with deny rules and of the lead without, in: {started:?}");
         std::thread::sleep(Duration::from_millis(50));
     };
-    for rule in ["Bash(git merge:*)", "Bash(gh pr merge:*)", "Bash(npm publish:*)", "--model sonnet"] {
-        assert!(launch.contains(rule), "{rule} is missing from the worker's launch: {launch}");
+    for said in ["--dangerously-skip-permissions", "Bash(git merge:*)", "Bash(gh pr merge:*)", "Bash(npm publish:*)", "--model sonnet"] {
+        assert!(launch.contains(said), "{said} is missing from the worker's launch: {launch}");
     }
-    // The lead's own launch carries no such rule.
-    assert!(std::fs::read_to_string(&launches).unwrap().lines().filter(|line| line.contains("--settings")).any(|line| !line.contains("Bash(git push:*)")));
+    assert!(!leads.contains("\"deny\"") && !leads.contains("--model sonnet"), "{leads}");
 
     // Called again while `store` works, `runs start` starts nothing; `docs` still waits.
     let again = service.execute("runs.start", json!({"run": run_id}), "start").unwrap();

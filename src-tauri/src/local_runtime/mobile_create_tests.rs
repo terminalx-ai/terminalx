@@ -133,7 +133,9 @@ fn phone_create_child() {
             assert!(store::settings::load().experimental.native_codex);
             // The desktop's Settings → Experimental follows it while open.
             let published = std::iter::from_fn(|| events.try_recv().ok()).find(|published| &*published.event == "experimental_settings_changed").unwrap();
-            assert_eq!(&*published.payload, r#"{"nativeCodex":true}"#);
+            // The event carries the whole section, as the settings watcher sends it: the phone's
+            // change, and the switches a phone does not have, as they are.
+            assert_eq!(&*published.payload, r#"{"nativeCodex":true,"orchestratorRuns":false}"#);
             assert_eq!(call("tablet", "settings", json!({})).unwrap(), json!({"nativeCodex":true}));
             assert!(call("phone", "setSettings", json!({"nativeCodex":"yes"})).is_err());
         }
