@@ -40,9 +40,12 @@ describe("the phone's terminal screen", () => {
 
   it("reports what the program asked for, which decides what keys and pastes send", async () => {
     const screen = new TerminalScreen(10, 2);
-    expect(screen.modes()).toEqual({ bracketedPaste: false, applicationCursorKeys: false });
+    expect(screen.modes()).toEqual({ bracketedPaste: false, applicationCursorKeys: false, mouse: false, alternate: false });
     await screen.write("\x1b[?2004h\x1b[?1h");
-    expect(screen.modes()).toEqual({ bracketedPaste: true, applicationCursorKeys: true });
+    expect(screen.modes()).toMatchObject({ bracketedPaste: true, applicationCursorKeys: true });
+    // A full-screen program that takes the wheel: its swipes go to it.
+    await screen.write("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+    expect(screen.modes()).toMatchObject({ mouse: true, alternate: true });
     screen.dispose();
   });
 

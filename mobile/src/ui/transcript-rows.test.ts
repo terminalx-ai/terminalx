@@ -111,6 +111,7 @@ describe("what became of a message on its way to the agent (#722)", () => {
     expect(deliveryNote({ inputOccupied: true, sent: "x" })).toMatch(/input box already has text in it/);
     expect(deliveryNote({ replaced: true, inputOccupied: true })).toMatch(/^Not answered/);
     expect(deliveryNote({ withdrawn: true })).toMatch(/^Not sent/);
+    expect(deliveryNote({ withdrawn: true, unconfirmed: true })).toMatch(/^Delivery was not confirmed/);
   });
 
   it("gives a running compaction no row (the conversation's running line stands for it), and every other one its row (#644)", () => {
@@ -118,5 +119,18 @@ describe("what became of a message on its way to the agent (#722)", () => {
       ({ kind: "compaction" as const, key: `k-${state}`, seq: 2, lifecycle: { turnId: "turn", itemId: state, state, generation: 1, retrying: false } });
     const rows = turnRows({ ...turn, work: [compaction("item_started"), compaction("unknown"), compaction("completed"), compaction("stopped")] });
     expect(rows.map((row) => row.key)).toEqual(["prompt:1:0", "k-unknown", "k-completed", "k-stopped"]);
+  });
+});
+
+describe("a prompt's images", () => {
+  it("ride on the first of its rows, and only there", () => {
+    const images = [{ url: "/Users/me/.terminalx/attachments/s/shot.png", name: "shot.png" }];
+    const rows = turnRows({ ...turn, prompt: { text: `${"word ".repeat(4000)}`, seq: 1, ts: "", images } });
+    const prompts = rows.filter((row) => row.kind === "prompt");
+    expect(prompts.length).toBeGreaterThan(1);
+    expect(prompts[0]).toMatchObject({ images });
+    expect(prompts.slice(1).some((row) => row.kind === "prompt" && row.images)).toBe(false);
+    // An image sent with no words is still a row.
+    expect(turnRows({ ...turn, prompt: { text: "", seq: 1, ts: "", images } })[0]).toMatchObject({ kind: "prompt", images });
   });
 });

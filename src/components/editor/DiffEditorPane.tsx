@@ -1,16 +1,17 @@
 import { selectSessionTab } from "@/lib/terminal";
-import { FileDiff } from "@/components/changes/FileDiff";
-import { DiffOptions } from "@/components/changes/DiffOptions";
 import { ReviewCommentsProvider } from "@/components/changes/ReviewComments";
-import { diffFileKey, useDiffOptions } from "@/lib/diffOptions";
 import { useSessionStore } from "@/lib/sessions";
 import { useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "@/icons";
 import { DiffPane } from "@/components/changes/DiffPane";
+import { DiffOptions } from "@/components/changes/DiffOptions";
+import { diffMediaKind, FileDiff } from "@/components/changes/FileDiff";
+import { DiscardDialog } from "@/components/changes/DiscardDialog";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { cn } from "@/lib/cn";
+import { diffFileKey, useDiffOptions } from "@/lib/diffOptions";
 import { editorLinkContext, fileKind, isMarkdown, setDiffMode, updateDiffRange, type DiffEditorEntry, type DiffMode, type FileEditorEntry } from "@/lib/editors";
 import { localGitSource } from "@/lib/gitSource";
 import { changedSince, useFileSource } from "@/lib/workspaceFiles";
@@ -29,19 +30,38 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
   const source = useMemo(() => localGitSource(entry.root), [entry.root]);
   const files = useFileSource(undefined, entry.root);
   const kind = fileKind(entry.rel);
-  const media = kind !== "text";
-  const [pair, setPair] = useState<{ before: string; after: string; deleted: boolean; originalPath?: string } | null>(null);
+  const media = kind !== "text" || diffMediaKind(entry.rel) === "pdf";
   const options = useDiffOptions(diffFileKey(source.key, entry.rel));
+  const [pair, setPair] = useState<{ before: string; after: string; deleted: boolean; originalPath?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [changed, setChanged] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
   const [entire, setEntire] = useState(mode === "entire");
   const [editing, setEditing] = useState(mode === "edit");
   const [previewed, setPreviewed] = useState(mode === "preview");
   useEffect(() => { if (mode === "entire") setEntire(true); if (mode === "edit") setEditing(true); if (mode === "preview") setPreviewed(true); }, [mode]);
   const fileEntry: FileEditorEntry = { ...entry, kind, name: entry.rel.split("/").pop() ?? entry.rel, viewMode: "source" };
 
-  useEffect(() => { setPair(null); }, [entry.rel, range?.base, range?.head, oldPath]);
+  useEffect(() => {
+    if (!range || media) return;
+    let cancelled = false;
+    setPair(null);
+    setError(null);
+    void (async () => {
+      const next = await source.fileContentsAt(entry.rel, range.base, range.head);
+      // Turn chips carry a path, not Git's rename metadata. Recover the old
+      // name when the destination did not exist at the start of the turn.
+      const previousPath = oldPath ?? (next.before === null && next.after !== null
+        ? (await source.changesBetween(range.base, range.head)).find((file) => file.path === entry.rel)?.oldPath
+        : undefined);
+      const before = previousPath ? (await source.fileContentsAt(previousPath, range.base, range.head)).before : next.before;
+      if (before === null && next.after === null) throw new Error("This file is not present in either snapshot.");
+      // Comments made on the before side are keyed by the path they were read from.
+      if (!cancelled) setPair({ before: before ?? "", after: next.after ?? "", deleted: next.after === null, originalPath: previousPath });
+    })().catch((e) => { if (!cancelled) setError(source.errorMessage(e)); });
+    return () => { cancelled = true; };
+  }, [source, entry.rel, range?.base, range?.head, oldPath, media]);
 
   // Warn as soon as a snapshot differs from the working file, and when it moves on later.
   useEffect(() => {
@@ -85,10 +105,12 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
     } catch (e) { setError(source.errorMessage(e)); }
     finally { setRefreshing(false); }
   };
+  // Like the Changes panel: only a live comparison can be discarded, never a turn or commit snapshot.
+  const canDiscard = scope === "all" && !!range && !!source.discard && source.canWrite;
   const binary = pair?.before.includes("\0") || pair?.after.includes("\0");
   const canEdit = !media && !binary && !!pair && !pair.deleted;
   const modes: { value: DiffMode; label: string }[] = [{ value: "diff", label: "Diff" }, { value: "entire", label: "Entire file" }];
-  if (media || isMarkdown(entry.rel)) modes.push({ value: "preview", label: "Preview" });
+  if (kind !== "text" || isMarkdown(entry.rel)) modes.push({ value: "preview", label: "Preview" });
   if (canEdit) modes.push({ value: "edit", label: "Edit" });
 
   return <div className="flex h-full min-h-0 flex-col" data-testid="diff-editor">
@@ -98,15 +120,16 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
       {scope === "all" && <Button variant="ghost" size="icon-xs" aria-label="Refresh diff" disabled={refreshing} onClick={() => void refresh()}><RefreshCw className={cn(refreshing && "animate-spin")} /></Button>}
     </div>
     {mode === "diff" && <DiffOptions />}
+    {canDiscard && <DiscardDialog source={source} file={discarding ? { path: entry.rel, oldPath } : null} base={uncommitted ? undefined : range?.base}
+      onClose={() => setDiscarding(false)} onDiscarded={() => void refresh()} />}
     {changed && <div role="status" className="shrink-0 bg-warning/10 px-3 py-2 text-xs">This file changed on disk or differs from this snapshot. Edit and media preview use the current file.</div>}
     {error && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}</div>}
     <div className="relative min-h-0 flex-1">
       {(["diff", ...(entire ? ["entire" as const] : [])] as const).map((surface) => <div key={surface} className={cn("absolute inset-0", mode !== surface && "hidden")}>
         {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Open All changes in the Changes panel to review the workspace.</p>
-          : surface === "diff" ? <FileDiff source={source} path={entry.rel} oldPath={oldPath} base={range.base} head={range.head} recoverRename onText={setPair} />
-          : media || binary ? <p className="p-4 text-sm text-muted-foreground">Binary file changed.{media && " Choose Preview to view the current file."}</p>
-          : pair?.before === "<file too large to show>" || pair?.after === "<file too large to show>" ? <p className="p-4 text-sm text-muted-foreground">This file exceeds the text preview limit. Choose Edit to open the workspace file.</p>
-          : pair ? <DiffPane path={entry.rel} before={pair.before} after={pair.after} base={range.base} originalPath={pair.originalPath} mode="entire" wrap={options.wrap} hideWhitespace={options.hideWhitespace} />
+          : surface === "diff" && !binary && (pair || (media && diffMediaKind(entry.rel))) ? <FileDiff source={source} path={entry.rel} oldPath={oldPath ?? pair?.originalPath} base={range.base} head={range.head} text={pair ?? undefined} onDiscard={canDiscard ? () => setDiscarding(true) : undefined} />
+          : media || binary ? <p className="p-4 text-sm text-muted-foreground">Binary file changed.{kind !== "text" && " Choose Preview to view the current file."}</p>
+          : pair ? <DiffPane path={entry.rel} before={pair.before} after={pair.after} base={range.base} originalPath={oldPath ?? pair.originalPath} mode="entire" wrap={options.wrap} hideWhitespace={options.hideWhitespace} />
           : !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading file diff…</p>}
       </div>)}
       {previewed && <div className={cn("absolute inset-0", mode !== "preview" && "hidden")}>

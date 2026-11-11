@@ -22,9 +22,26 @@ async function loadTerminalStore() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Module resets restore saved selections; each test starts with a fresh desktop.
-  localStorage.removeItem("terminalx:selected-tabs:v1");
+  localStorage.clear();
   listen.mockResolvedValue(() => {});
+});
+
+describe("persisted tab selection", () => {
+  it.each(["agent", "terminal", "browser", "review"] as const)("restores a %s selection and forgets only the deleted session on the next reload", async (kind) => {
+    const terminal = await loadTerminalStore();
+    terminal.selectSessionTab("s1", { kind, id: "selected-tab" });
+    terminal.setSelectedBrowser("s2", "other-tab");
+
+    const restored = await loadTerminalStore();
+    expect(restored.getTerminalState().selected).toEqual({
+      s1: { kind, id: "selected-tab" },
+      s2: { kind: "browser", id: "other-tab" },
+    });
+    restored.dropSessionTerminals(["s1"]);
+
+    const reloaded = await loadTerminalStore();
+    expect(reloaded.getTerminalState().selected).toEqual({ s2: { kind: "browser", id: "other-tab" } });
+  });
 });
 
 describe("session shell tabs", () => {

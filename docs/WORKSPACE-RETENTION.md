@@ -4,13 +4,36 @@ Workspace removal defaults to **Remove workspace, keep conversations**, through
 the existing settle transition. The dialog names the destination project folder
 before confirmation. It stops agents, removes the checkout, and retains session
 entries, TerminalX logs/attachments, provider-native resume files, and original
-workspace name/path/branch. These entries remain grouped as removed workspaces,
+workspace name/path/branch and HEAD commit. These entries remain grouped as removed workspaces,
 folded under "Removed workspaces" apart from live work (#696); they are not
 silently relabeled as conversations originally started on main. Opening a kept
 tab shows its conversation without starting its agent; its next message resumes
 it in the named project folder. Cancel cleanup if that is not the desired
 destination. The original checkout and its uncommitted files are not restored
 by resuming a conversation.
+
+**Restore workspace…** is available on removed local conversations in the sidebar
+menu and conversation header. It previews the original path and commit, then
+recreates the worktree and reopens the retained conversations there. Their agents
+stop before moving and resume in that checkout on the next message. If the branch
+is gone, moved, checked out elsewhere, or was detached, the dialog requires a new
+branch and suggests an available name. The original branch is never reset.
+Unarchive alone still only changes conversation visibility.
+
+An occupied path (including a dangling symlink), missing commit, or stale preview
+blocks restoration. Checkout or session-index failure rolls back the worktree and
+any branch this attempt created. Previously merged-cleanup workspaces are held
+against another automatic removal. Restoration does not push a remote branch.
+Older removal records without a commit can use an existing branch's current tip,
+with an explicit warning; a missing branch and missing commit cannot be recovered
+automatically. The parent directory must exist and be reachable.
+
+Restoration recovers committed files only. It cannot recover uncommitted or
+untracked data. The dialog explicitly warns that checkout can recreate tracked
+files deliberately deleted by an archive script. It neither reruns nor reverses
+the script's external effects. PRO-149 (#808) is not yet on main; this flow does
+not depend on its script receipts or paused-cleanup records. Cloud restoration
+continues to use its existing merged-cleanup Undo contract.
 
 Claude Code resolves the conversation by identity across its project transcript
 folders. Codex resumes the same identity from its managed rollout history.

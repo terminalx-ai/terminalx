@@ -79,9 +79,12 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
       })}
     </section>;
   }
-  return <section aria-label="Session recovery" role="status" className={placement === "composer"
-    ? "mx-auto mb-2 max-h-[50vh] w-[calc(100%-2rem)] max-w-3xl shrink-0 overflow-auto rounded-xl border border-warning/30 bg-warning/10 p-3 text-xs"
-    : "max-h-[50vh] shrink-0 overflow-auto border-b border-warning/30 bg-warning/10 p-3 text-xs"}>
+  // Above the composer it floats over the transcript's foot, so its ground is solid (the warning tint mixed into the
+  // chat's own colour, not laid over what scrolls behind), and it is exactly as wide as the composer under it.
+  const card = (
+    <section aria-label="Session recovery" role="status" className={placement === "composer"
+      ? "max-h-[50vh] overflow-auto rounded-xl border border-warning/30 bg-[color-mix(in_oklab,var(--color-warning)_10%,var(--color-chat))] p-3 text-xs shadow-surface"
+      : "max-h-[50vh] shrink-0 overflow-auto border-b border-warning/30 bg-warning/10 p-3 text-xs"}>
     <p className="font-medium">{offer.title}</p>
     <p className="mt-1">{offer.message}</p>
     {reset && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
@@ -100,5 +103,8 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
       <Button size="sm" variant="outline" disabled={busy} onClick={pressed(onStop)}>Stop session</Button>
       {offer.continueInNewSession && <Button size="sm" variant="ghost" disabled={busy} onClick={pressed(onContinue)}>Continue in new session</Button>}
     </div>
-  </section>;
+  </section>
+  );
+  // The space under it is the wrapper's, on the chat's colour: a margin there was a gap the transcript showed through.
+  return placement === "composer" ? <div className="mx-auto w-full max-w-3xl shrink-0 bg-chat px-6 pb-2">{card}</div> : card;
 }

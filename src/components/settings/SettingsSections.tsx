@@ -1,3 +1,7 @@
+import { SettingsFileRow } from "./SettingsFile";
+import { useSettingsFile } from "@/lib/settingsFile";
+import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
+import { SidebarOrderError } from "@/components/layout/SidebarSort";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "@/icons";
@@ -6,6 +10,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
 import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
+import { LocalGitHubConnection } from "@/components/changes/GitRecovery";
 import { AgentSetupCard } from "./AgentSetupCard";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
@@ -14,7 +19,7 @@ import { CLOUD_CONTROL_HAS_SETTING, CLOUD_CONTROL_POLICY, CLOUD_CONTROL_SETTING,
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { repoFile } from "@/lib/repo";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
-import { api, errorMessage, gh, issues, USAGE_REFRESH_MINUTES, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
+import { api, errorMessage, issues, USAGE_REFRESH_MINUTES, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
 import { forgetIssueViewers } from "@/lib/issueViewer";
 import { ComputerUseRows } from "./ComputerUseSettings";
 import changelog from "../../../CHANGELOG.md?raw";
@@ -23,6 +28,7 @@ import { AgentIdleSettings } from "./AgentIdleSettings";
 import { CommandApprovalSettings } from "./CommandApprovalSettings";
 import { ArchiveIdleSettings } from "./ArchiveIdleSettings";
 import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
+import { openStartupDiagnostics } from "@/lib/startupDiagnostics";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 
 export function GeneralTab() {
@@ -52,6 +58,7 @@ export function GeneralTab() {
   };
   return (
     <div className="flex flex-col">
+      <SettingsFileRow />
       <RegisteredSetting setting="general.websiteLinks" control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v, linkBrowserChosen: true })} options={[{ value: "ask", label: "Ask every time" }, { value: "system", label: "System Browser" }, { value: "terminalx", label: "TerminalX Browser" }]} />} />
       <RegisteredSetting setting="general.linkActions" control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
       {/* PRO-40: unless the app ships the in-window confirmation alone. */}
@@ -108,6 +115,12 @@ export function GeneralTab() {
       <RegisteredSetting setting="general.promptMap"
         control={<Switch aria-label="Prompt map" checked={prefs.promptMap} onCheckedChange={(v) => setPrefs({ promptMap: v })} />}
       />
+      <RegisteredSetting setting="general.fixErrorsInstructions" stacked
+        control={<textarea aria-label="Fix errors instructions" value={prefs.fixErrorsInstructions} maxLength={8000} rows={3}
+          onChange={(event) => setPrefs({ fixErrorsInstructions: event.target.value })}
+          placeholder="For example: run the affected tests before committing."
+          className="w-full resize-y rounded-md border border-border bg-well px-2 py-1.5 text-xs outline-none focus:border-ring" />}
+      />
       <RegisteredSetting setting="general.autocorrect"
         control={<Switch aria-label="Autocorrect" checked={prefs.autocorrect} onCheckedChange={(v) => setPrefs({ autocorrect: v })} />}
       />
@@ -116,11 +129,13 @@ export function GeneralTab() {
       />
       <QuickChatSettings />
       <LocalRuntimeSettings />
+      <RegisteredSetting setting="general.startupDiagnostics" control={<Button variant="outline" size="sm" onClick={openStartupDiagnostics}>Inspect startup</Button>} />
     </div>
   );
 }
 
 export function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
+  const order = useSidebarOrder();
   const { theme, mode, resolvedMode } = useTheme();
   const prefs = usePrefs();
   const light = hasLightMode(theme);
@@ -213,6 +228,10 @@ export function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
           />
         }
       />
+      <RegisteredSetting setting="appearance.customOrder"
+        control={<Switch aria-label="Custom order" checked={order.custom} disabled={!order.loaded || order.pending} onCheckedChange={(custom) => void saveSidebarOrder({ custom })} />}
+      />
+      <SidebarOrderError />
       <RegisteredSetting setting="appearance.tabBar"
         control={<Switch aria-label="Tab bar" checked={prefs.tabStrip} onCheckedChange={(v) => setPrefs({ tabStrip: v })} />}
       />
@@ -347,6 +366,7 @@ function BrowserRuntimeRow() {
 
 /** What is installed, where, and how to get the rest. Nothing is installed by the app. */
 export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
+  const prefs = usePrefs();
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
   const [checkRun, setCheckRun] = useState(0);
@@ -418,6 +438,12 @@ export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
         ))}
         {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
       </ul></RegisteredSetting>
+      <RegisteredSetting setting="agents.followUps" control={
+        <select aria-label="Follow-ups while the agent works" value={prefs.followUps} onChange={e => setPrefs({ followUps: e.target.value as "now" | "hold" })} className="rounded-md border border-hairline bg-background px-2 py-1 text-xs">
+          <option value="now">Send to the agent now</option>
+          <option value="hold">Hold until the turn ends</option>
+        </select>
+      } />
       <AgentIdleSettings />
       <CommandApprovalSettings />
       <ArchiveIdleSettings />
@@ -427,15 +453,16 @@ export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
 
 /** Trackers the issues view can read. Keys live in the app's own settings file. */
 export function IntegrationsTab() {
+  const { revision } = useSettingsFile();
   const [linear, setLinear] = useState<LinearStatus | null>(null);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [ghOk, setGhOk] = useState<boolean | null>(null);
   useEffect(() => {
-    issues.linearStatus().then(setLinear).catch(() => setLinear({ connected: false }));
-    gh.available().then(setGhOk).catch(() => setGhOk(false));
-  }, []);
+    let live = true;
+    issues.linearStatus().then((value) => live && setLinear(value)).catch(() => live && setLinear({ connected: false }));
+    return () => { live = false; };
+  }, [revision]);
   const save = async (value: string) => {
     setBusy(true);
     setError(null);
@@ -455,19 +482,7 @@ export function IntegrationsTab() {
       <RegisteredSetting setting="integrations.github"><div>
         <div className="text-sm font-medium">GitHub</div>
         <p className="mt-0.5 text-xs text-muted-foreground">Issues and pull requests go through the GitHub CLI, which holds its own login.</p>
-        <div className="mt-2 flex items-center gap-2 text-xs">
-          {ghOk == null ? (
-            <Loader2 className="size-3.5 animate-spin text-faint" />
-          ) : ghOk ? (
-            <span className="flex items-center gap-1 text-add">
-              <Check className="size-3.5" /> gh is installed and signed in
-            </span>
-          ) : (
-            <span className="flex items-center gap-1 text-warning">
-              <CircleAlert className="size-3.5" /> Install gh and run <code className="font-mono">gh auth login</code>
-            </span>
-          )}
-        </div>
+        <LocalGitHubConnection />
       </div></RegisteredSetting>
       <RegisteredSetting setting="integrations.linear"><div>
         <div className="text-sm font-medium">Linear</div>
@@ -572,10 +587,35 @@ export function AboutTab() {
 
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">What's new</div>
-        <RegisteredSetting setting="about.changelog"><div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
-          <Markdown text={changelog.replace(/^# TerminalX changelog\s*/m, "")} />
-        </div></RegisteredSetting>
+        <RegisteredSetting setting="about.changelog"><Changelog /></RegisteredSetting>
       </div>
+    </div>
+  );
+}
+
+/** The changelog, split at its releases (`## 0.2.25`), newest first. */
+const RELEASES = changelog.replace(/^# TerminalX changelog\s*/m, "").split(/\n(?=## )/).filter((part) => part.trim());
+/** Unreleased (when there is one) and the newest release open the page; the rest wait to be asked for. */
+const FIRST_SHOWN = RELEASES[0]?.startsWith("## Unreleased") ? 2 : 1;
+
+/**
+ * What's new: the latest notes, then the earlier releases on request. The
+ * whole file is 28 releases of Markdown, which took About two thirds of a
+ * second to draw every time it opened.
+ */
+function Changelog() {
+  const [all, setAll] = useState(false);
+  const earlier = RELEASES.length - FIRST_SHOWN;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
+        <Markdown text={(all ? RELEASES : RELEASES.slice(0, FIRST_SHOWN)).join("\n")} />
+      </div>
+      {!all && earlier > 0 && (
+        <Button variant="ghost" size="sm" className="self-start" onClick={() => setAll(true)}>
+          Show earlier releases ({earlier})
+        </Button>
+      )}
     </div>
   );
 }

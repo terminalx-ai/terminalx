@@ -259,3 +259,14 @@ it("reads missed history and status again over a new live connection, as on resu
   expect(mocks.patchTab).toHaveBeenCalledWith("synthetic", "tab", { status: "completed" });
   hook.unmount();
 });
+
+it("replaces the cached log after a reset missed while the window was suspended", async () => {
+  const store = await import("./agentEvents");
+  mocks.loadEvents.mockResolvedValueOnce([event("kept", 1), event("removed", 2)]);
+  await store.loadTab("synthetic", "tab");
+  mocks.listSessions.mockResolvedValue([{ id: "synthetic", tabs: [{ id: "tab", status: "idle", resetLogId: "new-generation", resetBackupId: "backup" }] }]);
+  mocks.loadEvents.mockResolvedValue([event("kept", 1)]);
+  await store.reconcileAgentEvents();
+  expect(store.getTabLog("synthetic", "tab").events.map((e) => e.id)).toEqual(["kept"]);
+  expect(mocks.patchTab).toHaveBeenCalledWith("synthetic", "tab", { resetLogId: "new-generation", resetBackupId: "backup" });
+});

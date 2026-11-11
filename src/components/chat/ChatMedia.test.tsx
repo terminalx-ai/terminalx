@@ -3,8 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-const { openChatLink } = vi.hoisted(() => ({ openChatLink: vi.fn(async () => undefined) }));
-vi.mock("@/lib/chatLinks", async (importOriginal) => ({ ...(await importOriginal<object>()), openChatLink }));
+const { openImageViewer } = vi.hoisted(() => ({ openImageViewer: vi.fn() }));
+vi.mock("@/lib/imageViewer", () => ({ openImageViewer }));
 
 const { ChatMedia } = await import("./ChatMedia");
 
@@ -36,8 +36,9 @@ describe("media in the chat", () => {
     await vi.waitFor(() => expect(document.querySelector("video")?.getAttribute("src")).toBe("http://127.0.0.1:9/t-clip.mp4"));
     expect(screen.getAllByTestId("chat-media-item")).toHaveLength(3);
 
-    fireEvent.click(screen.getByRole("button", { name: "Open shot.png" }));
-    expect(openChatLink).toHaveBeenCalledWith(expect.objectContaining({ kind: "local", path: "/gen/shot.png" }), context);
+    // A picture opens in the image viewer, with its file for Open in default app.
+    fireEvent.click(screen.getByRole("button", { name: "View shot.png" }));
+    expect(openImageViewer).toHaveBeenCalledWith([expect.objectContaining({ name: "shot.png", path: "/gen/shot.png" })]);
 
     // The files it opened are let go with the message.
     unmount();
