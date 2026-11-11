@@ -1,3 +1,4 @@
+import { OrchestratorTab } from "./OrchestratorSettings";
 import type { ReactNode } from "react";
 import type { SettingId, SettingsSection } from "./settingsRegistry";
 import { AccountTab } from "./AccountTab";
@@ -30,6 +31,7 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   appearance: ({ onOpenUsage }) => <AppearanceTab onOpenUsage={onOpenUsage} />,
   organizations: ({ row, openRequest }) => <OrganizationsTab initialRow={row} openRequest={openRequest} />,
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} />,
+  orchestrator: () => <OrchestratorTab />,
   environment: () => <EnvironmentSettings />,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
