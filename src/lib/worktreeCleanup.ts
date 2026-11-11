@@ -1,3 +1,4 @@
+import { listenForArchiveScripts } from "@/lib/archiveScript";
 import type { CleanupCandidate, CleanupProgress, CleanupProject, CleanupRemoveItem, CleanupResult, CleanupStep, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { api, errorMessage } from "@/lib/api";
 import type { CloudCatalogState } from "@/lib/cloudCatalog";
@@ -63,6 +64,7 @@ export interface CleanupOutcome extends Omit<CleanupResult, "outcome"> {
 }
 
 export interface CleanupSelection {
+  archiveFailure?: string;
   hostId: string;
   candidate: CleanupCandidate;
   deleteSessions: boolean;
@@ -98,6 +100,7 @@ export const localHost: CleanupHost = {
   // One call for all of them: the backend says how far it is in events named
   // for this call, and is told by the same name to leave what it has not started.
   remove: async (items, options = {}) => {
+    await listenForArchiveScripts();
     const run = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     const unlisten = options.onProgress ? await api.onWorktreeCleanupProgress(run, options.onProgress) : () => undefined;
     const stop = () => void api.worktreeCleanupStop(run).catch(() => undefined);
@@ -242,7 +245,8 @@ export async function runCleanup(
   for (const host of hosts) {
     const chosen = selections.filter((selection) => selection.hostId === host.id);
     if (!chosen.length) continue;
-    const items: CleanupRemoveItem[] = chosen.map(({ candidate, deleteSessions, estimatedBytes }) => ({
+    const items: CleanupRemoveItem[] = chosen.map(({ candidate, deleteSessions, estimatedBytes, archiveFailure }) => ({
+      ...(archiveFailure ? { archiveFailure } : {}),
       projectPath: candidate.projectPath,
       path: candidate.path,
       token: candidate.token,

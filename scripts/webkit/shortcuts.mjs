@@ -122,16 +122,18 @@ const fits = (layout) => ({
   await page.keyboard.press("Meta+Shift+V");
   await page.getByTestId("shortcut-editor").getByRole("button", { name: "Save", exact: true }).click();
   const shown = await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').textContent();
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
   await sidebar(page);
+  // Since #847 the sidebar slides out (320 ms) and stays on screen until it has, so
+  // wait out the motion: longer than a slide before saying the old keys did nothing,
+  // and for the slide to end after the new ones.
   await page.keyboard.press("Meta+B");
-  await page.waitForTimeout(150);
-  const afterOld = await sidebarShown();
+  await page.waitForTimeout(600);
+  const afterOld = await sidebarShown() && await page.locator('[data-testid="panel-presence"][data-side="left"]').getAttribute("data-state") === "open";
   await page.keyboard.press("Meta+Shift+V");
-  await page.waitForTimeout(150);
-  const afterNew = await sidebarShown();
+  const afterNew = await page.locator('[data-testid="sidebar-rail"]').waitFor({ state: "hidden", timeout: 2000 }).then(() => false, () => true);
   await page.keyboard.press("Meta+Shift+V");
-  await sidebar(page);
+  await page.locator('[data-testid="panel-presence"][data-side="left"][data-state="open"]').waitFor();
   // The command palette shows the keys in force.
   await page.keyboard.press("Meta+K");
   await page.getByRole("dialog").locator("input").fill("Toggle sidebar");

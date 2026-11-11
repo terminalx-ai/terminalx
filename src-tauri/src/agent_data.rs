@@ -277,7 +277,7 @@ mod tests {
     const CONV_C: &str = "33333333-3333-4333-8333-333333333333";
 
     fn tab(harness: &str, conversation: Option<&str>) -> TabEntry {
-        TabEntry { transport: Default::default(),
+        TabEntry { marked_unread: false, transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: harness.into(),
             title: None,
@@ -317,8 +317,10 @@ mod tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             active_tab: None,
             link: None,
+            parent: None,
             tabs,
             unknown: BTreeMap::new(),
         }
@@ -546,7 +548,7 @@ mod tests {
         let theirs = f.transcript(&gone, CONV_B);
         let doomed = session(&f.project(), &gone, vec![tab("claude", Some(CONV_A))]);
         let mut settled = session(&f.project(), &f.project(), vec![tab("claude", Some(CONV_B))]);
-        settled.removed_workspace = Some(RemovedWorkspace { path: gone.to_string_lossy().into_owned(), name: "gone".into(), branch: None });
+        settled.removed_workspace = Some(RemovedWorkspace { path: gone.to_string_lossy().into_owned(), name: "gone".into(), branch: None, ..Default::default() });
         remove_claude_data(&f.root, &[doomed], &[settled]);
         assert!(!mine.exists());
         assert!(theirs.exists());

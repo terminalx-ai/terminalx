@@ -212,6 +212,32 @@ fn working_changes_and_file_contents_mirror_the_desktop_commands() {
 }
 
 #[test]
+fn review_options_and_media_reads_use_the_selected_repository() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "app");
+    std::fs::write(repo.join("README.md"), "  hello \n").unwrap();
+    let changes = f.call("git.workingChanges", json!({ "repo": "app", "hideWhitespace": true })).unwrap();
+    assert_eq!(changes["files"][0]["additions"], 0);
+    assert_eq!(changes["files"][0]["deletions"], 0);
+    std::fs::write(repo.join("image.png"), b"\0\xffPNG").unwrap();
+    let live = f.call("git.mediaContent", json!({ "repo": "app", "path": "image.png" })).unwrap();
+    assert_eq!(live, json!({ "data": "AP9QTkc=", "mime": "image/png" }));
+    let base = crate::git::snapshot_tree(&repo).unwrap();
+    std::fs::write(repo.join("image.png"), b"updated").unwrap();
+    assert_eq!(f.call("git.mediaContent", json!({ "repo": "app", "path": "image.png", "tree": base })).unwrap(), live);
+    assert!(f.call("git.mediaContent", json!({ "repo": "app", "path": "missing.pdf", "tree": base })).unwrap().is_null());
+    assert_eq!(f.code("git.mediaContent", json!({ "repo": "app", "path": "../escape.png" })), "path_forbidden");
+    std::fs::write(repo.join("large.pdf"), vec![0; 512 * 1024 + 1]).unwrap();
+    assert!(f.call("git.mediaContent", json!({ "repo": "app", "path": "large.pdf" })).is_err());
+    #[cfg(unix)] {
+        std::fs::write(f.base.join("secret.png"), "secret").unwrap();
+        std::os::unix::fs::symlink(f.base.join("secret.png"), repo.join("leak.png")).unwrap();
+        assert_eq!(f.code("git.mediaContent", json!({ "repo": "app", "path": "leak.png" })), "path_forbidden");
+    }
+}
+
+#[test]
 fn push_publishes_a_new_branch_and_a_repeat_is_reconciled_without_pushing_again() {
     let f = fixture();
     let remote = f.remote("origin");
@@ -646,4 +672,39 @@ fn remote_landed_verification_recognizes_rewritten_merges_but_not_new_work() {
         git(&repo, &["remote", "set-url", "origin", "http://127.0.0.1:9/acme/repo.git"]);
         assert!(f.call("git.prLanded", json!({"repo":"app"})).is_err());
     }
+}
+
+#[test]
+fn conversation_uses_workspace_credentials_and_rejects_unrelated_repositories() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    std::fs::write(f.state.join("repo-url"), "https://github.com/acme/widgets").unwrap();
+    std::fs::write(f.state.join("conversation.json"), include_str!("../fixtures/github_pr_conversation.json")).unwrap();
+    let params = json!({ "repo": "app", "url": "https://github.com/acme/widgets/pull/799" });
+    let result = f.call("git.prConversation", params).unwrap();
+    assert_eq!(result["activity"].as_array().unwrap().len(), 11);
+    assert!(f.gh_calls().contains("graphql"));
+    let calls = f.gh_calls().lines().count();
+    for method in ["git.prConversation", "git.prReviewerSearch", "git.prConversationAction"] {
+        assert_eq!(f.code(method, json!({ "repo": "app", "url": "https://github.com/other/private/pull/799", "query": "ada", "action": {"kind":"request","login":"ada","team":false} })), "invalid_params");
+    }
+    // Only the repository identity lookup ran; no query, search or write did.
+    assert_eq!(f.gh_calls().lines().count(), calls + 3);
+}
+
+#[test]
+fn cloud_approval_is_refused_before_running_gh_even_with_a_personal_viewer_claim() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    for viewer in ["author", "reviewer", "organisation-app[bot]"] {
+        let error = f.call("git.prConversationAction", json!({
+            "repo":"app", "url":"https://github.com/acme/widgets/pull/799",
+            "action":{"kind":"approve","viewer":viewer}
+        })).unwrap_err();
+        assert_eq!(error.code, "forbidden");
+        assert!(error.message.contains("personal account"));
+    }
+    assert!(f.gh_calls().is_empty(), "approval must never use the App token");
 }

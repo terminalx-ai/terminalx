@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { ChevronDown, Globe, Lock, Terminal, TerminalSquare, X } from "@/icons";
+import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Terminal, TerminalSquare, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { StatusStripe } from "@/components/layout/SidebarRows";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,7 @@ const STATUS_DOT: Partial<Record<TabStatus, string>> = {
 
 /** What a tab is now, at a glance: the mark of the agent in it, a terminal, a page. */
 export function TabIcon({ tab, className = "size-3.5 shrink-0" }: { tab: PeerTab; className?: string }) {
+  if (tab.kind === "review") return tab.editor.kind === "diff" ? <FileDiff className={className} /> : <GitPullRequest className={className} />;
   const agent = peerAgent(tab);
   if (agent) return <AgentMark id={agent} className={className} decorative />;
   return tab.kind === "browser" ? <Globe className={className} /> : <TerminalSquare className={className} />;
@@ -85,6 +86,8 @@ export function WorkspaceTabStrip({
   hideSingle = false,
   trailing,
   className,
+  paneRow,
+  paneDrag,
 }: {
   session: SessionEntry;
   /** The tab on screen in `session`. */
@@ -96,8 +99,15 @@ export function WorkspaceTabStrip({
   /** What ends the row of tabs: the "+" that opens one. */
   trailing?: ReactNode;
   className?: string;
+  paneRow?: TabRow;
+  paneDrag?: {
+    move: (tab: PeerTab, x: number, y: number) => boolean;
+    drop: (tab: PeerTab) => boolean;
+    cancel: () => void;
+  };
 }) {
-  const row = useTabRow(session);
+  const wholeRow = useTabRow(session);
+  const row = paneRow ?? wholeRow;
   const store = useSessionStore();
   const tabViews = useTabViews();
   const mobileDriven = useMobileDrivenTabs();
@@ -156,6 +166,7 @@ export function WorkspaceTabStrip({
   const beginDrag = (event: ReactPointerEvent<HTMLElement>, tab: PeerTab) => {
     if (event.button !== 0 || readOnlyReason || (event.target as Element).closest("[data-tab-close]")) return;
     const startX = event.clientX;
+    const startY = event.clientY;
     let moving = false;
     let to = -1;
     const place = (x: number) => {
@@ -173,11 +184,22 @@ export function WorkspaceTabStrip({
     };
     let unbindEscape: (() => void) | null = null;
     const onMove = (move: PointerEvent) => {
-      if (!moving && Math.abs(move.clientX - startX) < DRAG_THRESHOLD) return;
+      if (!moving && Math.hypot(move.clientX - startX, move.clientY - startY) < DRAG_THRESHOLD) return;
       if (!moving) {
         moving = true;
         // Escape puts the tab back; it is not a key for anything else while a tab is in the hand.
         unbindEscape = registerHotkey("escape", () => end(false, true), { global: true, priority: 1000 });
+      }
+      if (paneDrag?.move(tab, move.clientX, move.clientY)) {
+        to = -1;
+        setDrag({ key: tab.key, to, x: null });
+        return;
+      }
+      const box = scroller.current?.getBoundingClientRect();
+      if (!box || move.clientY < box.top || move.clientY > box.bottom) {
+        to = -1;
+        setDrag({ key: tab.key, to, x: null });
+        return;
       }
       place(move.clientX);
     };
@@ -190,7 +212,7 @@ export function WorkspaceTabStrip({
       unbindEscape?.();
       dropHeld.current = null;
       setDrag(null);
-      if (!moving) return;
+      if (!moving) { paneDrag?.cancel(); return; }
       // The click that ends this press belongs to the drag, not to the tab under the pointer.
       const release = () => window.setTimeout(() => (dragged.current = false), 0);
       if (commit || held) dragged.current = true;
@@ -198,7 +220,9 @@ export function WorkspaceTabStrip({
       else if (held) window.addEventListener("pointerup", release, { once: true });
       const now = latest.current;
       const current = now.tabs.find((candidate) => candidate.key === tab.key);
-      if (commit && current && to >= 0) moveTab(now, current, to);
+      const transferred = commit && current ? paneDrag?.drop(current) : false;
+      paneDrag?.cancel();
+      if (commit && current && !transferred && to >= 0) moveTab(now, current, to);
     };
     const onUp = () => end(true);
     const onCancel = () => end(false);
@@ -273,7 +297,7 @@ export function WorkspaceTabStrip({
                       : "text-muted-foreground hover:text-foreground",
                     drag?.key === tab.key && "opacity-60",
                   )}
-                  // The open tab's close button is always there, so it keeps that much more for its title.
+                  // The open tab keeps room for its close button, shown on hover, so it allows that much more.
                   style={tab.pinned ? undefined : { width: `${TAB_MAX_REM}rem`, minWidth: `${TAB_MIN_REM + (isActive ? 1 : 0)}rem` }}
                 >
                   <Tooltip delayDuration={400}>
@@ -296,6 +320,7 @@ export function WorkspaceTabStrip({
                           tab.pinned ? "justify-center px-0" : "pl-3 pr-1",
                         )}
                       >
+                        {tab.kind === "review" && tab.editor.dirty ? <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-label="Unsaved" /> : null}
                         {status ? <StatusStripe status={status} size="tab" /> : null}
                         <TabIcon tab={tab} />
                         {tab.pinned ? null : <span className={cn("min-w-0 flex-1 truncate text-left", exited && "text-faint line-through")}>{label}</span>}
@@ -317,11 +342,12 @@ export function WorkspaceTabStrip({
                       data-tab-close
                       aria-label={`Close ${label}`}
                       onClick={() => void closePeer(session.id, tab, tabs, selected)}
-                      // The open tab always has it. Another tab takes no room for it until it is pointed at or has the
-                      // focus, so a narrow tab shows its title instead.
+                      // Shown only while the tab is pointed at or has the focus. The open tab keeps its room for it,
+                      // invisible, so its title does not shift as it appears; another tab takes no room until then, so a
+                      // narrow tab shows its title instead.
                       className={cn(
-                        "mr-2 size-4 shrink-0 items-center justify-center rounded-sm opacity-70 outline-none hover:bg-veil-strong hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40",
-                        isActive ? "flex" : "hidden group-focus-within/tab:flex group-hover/tab:flex",
+                        "mr-2 size-4 shrink-0 items-center justify-center rounded-sm outline-none transition-opacity hover:bg-veil-strong hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40",
+                        isActive ? "flex opacity-0 group-hover/tab:opacity-70 group-focus-within/tab:opacity-70" : "hidden opacity-70 group-focus-within/tab:flex group-hover/tab:flex",
                       )}
                     >
                       <X className="size-3" />

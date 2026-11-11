@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { RECOVERY_MESSAGES, recoveryOffer } from "./recovery";
 
 describe("the recovery offer the desktop and the phone share", () => {
+  it("preserves native delivery uncertainty without inviting an automatic resend", () => {
+    const offer = recoveryOffer("delivery_unconfirmed", { asks: 0, native: true, canResend: true, canSendContinue: true });
+    expect(offer).toMatchObject({ resend: false, retry: null, sendContinue: false });
+    expect(offer.message).toContain("may have acted");
+    expect(offer.message).not.toContain("if your message is not there");
+  });
   it("retries a failed turn safely, continues it, or carries it into a new session", () => {
     const offer = recoveryOffer("failed", { asks: 0, canResend: true, canSendContinue: true });
     expect(offer).toMatchObject({ title: "Needs attention", retry: "Retry safely", sendContinue: true, resend: false, chooseModel: false, continueInNewSession: true });

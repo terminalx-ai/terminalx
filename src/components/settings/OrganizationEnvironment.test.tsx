@@ -247,14 +247,21 @@ it("shows a failed build as failed, with where it failed, and asks before buildi
   const failed = version({ id: "version-3", number: 3, state: "failed", stage: "install", failurePhase: "install", errorCode: "cloud_environment_install_failed", publication: null });
   environment.status.mockResolvedValue(status({ versions: [failed, version()] }));
   environment.retry.mockResolvedValue(version());
-  environment.version.mockResolvedValue({ ...failed, logs: [{ phase: "install", content: "E: Unable to locate package", occurredAt: 1 }] });
+  let finishLog!: (detail: EnvironmentVersion) => void;
+  environment.version.mockReturnValueOnce(new Promise<EnvironmentVersion>((resolve) => {
+    finishLog = resolve;
+  }));
   mount();
   await settled();
   const row = screen.getByLabelText("Version 3");
   expect(row.textContent).toMatch(/Failed while running the machine install script/);
   expect(row.textContent).toMatch(/cloud_environment_install_failed/);
   fireEvent.click(within(row).getByRole("button", { name: "Show log" }));
-  expect((await within(row).findByLabelText("Build log of version 3")).textContent).toMatch(/\[install\] E: Unable to locate package/);
+  expect(environment.version).toHaveBeenCalledWith("version-3");
+  expect(within(row).getByLabelText("Build log of version 3").textContent).toBe("Loading the log…");
+  finishLog({ ...failed, logs: [{ phase: "install", content: "E: Unable to locate package", occurredAt: 1 }] });
+  // The labeled region exists while loading; wait for its contents, not its presence.
+  await waitFor(() => expect(within(row).getByLabelText("Build log of version 3").textContent).toMatch(/\[install\] E: Unable to locate package/));
   fireEvent.click(within(row).getByRole("button", { name: "Build again…" }));
   expect(environment.retry).not.toHaveBeenCalled();
   fireEvent.click(within(row).getByRole("button", { name: "Start build" }));

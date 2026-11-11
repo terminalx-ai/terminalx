@@ -304,6 +304,8 @@ describe("a crowded strip", () => {
 });
 
 describe("dragging a tab", () => {
+  // These are mouse drags. An unspecified pointer type starts Radix's touch
+  // long-press timer, which can open a context menu during a slow test run.
   it("works out where a tab lands from where the pointer is", () => {
     const rects = [0, 100, 200, 300].map((left) => ({ left, width: 100 }));
     // Dragged left over the first tab's first half: it becomes the first.

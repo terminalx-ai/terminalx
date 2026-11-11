@@ -534,7 +534,7 @@ mod tests {
     fn only_an_idle_bound_agent_can_be_stopped() {
         let pane = PaneInfo { id: "tab:t1".into(), pid: Some(400), running: true, cwd: "/work".into() };
         let rule = |status: index::TabStatus| {
-            let tab = index::TabEntry { transport: Default::default(),
+            let tab = index::TabEntry { marked_unread: false, transport: Default::default(),
                 id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
                 permission_mode: "auto".into(), provider_session_id: None, status,
                 created: String::new(), modified: String::new(), context_used: None, context_max: None,
@@ -546,9 +546,10 @@ mod tests {
                 kind: crate::store::index::SessionKind::Project,
                 branch: None, base_ref: None, worktree_base: None, worktree_removed: false, removed_workspace: None, issue: None, issue_work: Default::default(), automation: None,
                 title: "Safe session".into(),
-                created: String::new(), modified: String::new(), archived: false, archive: Default::default(), pinned: false, tabs: vec![tab],
+                created: String::new(), modified: String::new(), archived: false, archive: Default::default(), pinned: false, manual_status: Default::default(), tabs: vec![tab],
                 active_tab: Some("t1".into()), unknown: Default::default(),
                 link: None,
+                parent: None,
             };
             bound_pane(&pane, &[session], &HashMap::new(), Some(Aggregate::default())).kill_rule
         };

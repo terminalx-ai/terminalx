@@ -109,7 +109,7 @@ printf '%s' "$TEXT" | terminalx computer set-value --app <app> --element-index <
 - Prefer `set-value` for text fields that expose values; it can report verified value writes when the provider can read the refreshed value.
 - Coordinates are window-local; use coordinates from the latest screenshot/state for the same target window.
 - Password managers are blocked (`app_blocked`); secure text fields are never read.
-- TerminalX's own windows are the person's to operate. Every action (click, type, key, hotkey, paste, set-value, scroll, drag, secondary action) aimed at the TerminalX app you are running in answers `own_app_protected`, always; so does a key that would land on a TerminalX window that has the focus, and any action aimed at the released TerminalX app from another instance. Nothing of its windows is read either: no screenshot (`screenshotStatus` is `skipped`, reason `own_app_protected`), no accessibility tree (`treeText` says it is withheld, and there are no element indexes), and `--restore-window` leaves them alone. Use the `terminalx` CLI for what TerminalX itself can tell you. Another running TerminalX Dev build can be driven by `pid:<n>` as before.
+- Raw computer use protects TerminalX's own windows: `get-app-state` withholds the AX tree and screenshot, and raw clicks, keys, typing, coordinates, scroll, drag and secondary actions return `own_app_protected`. `--restore-window` does not lift this. Explicitly authorized session controls are available through the scoped semantic `computer self-ui` route below. Other sessions, pairing codes, tokens, Settings and person-only decisions are never included in that view. Another running TerminalX Dev build can still be driven by `pid:<n>` as before.
 - TerminalX's own confirmations are the person's to answer. While one is open, every action on any app answers `confirmation_pending`; reading state still works. Never answer one, and never turn on a TerminalX setting that grants an agent more power.
   What this protects: `terminalx computer` and this version's computer-use helper will not operate TerminalX's confirmations or settings, and on macOS this helper serves only the TerminalX app itself, not an agent that connects to it or starts its own copy of it. What it does not: a helper from an older TerminalX (0.2.8 or earlier) serves whoever starts it for as long as "TerminalX Computer Use" (the old name; the current helper is "TerminalX Computer Use Helper") has Accessibility in System Settings. TerminalX tries to remove that permission each time it starts and says so in `capabilities` (`warning`) when it could not; it can be put back before the next start; `osascript` / System Events; and any program at all when TerminalX itself has been granted Accessibility. Do not look for such a way around; ask the person.
 
@@ -152,7 +152,7 @@ Slack: the accessibility tree may be shallow while the screenshot contains usefu
 - `app_not_found`: run `list-apps` and retry with the returned app name or `pid:<n>` (or a bundle ID on macOS). If the target is a web app such as Gmail, choose the desktop browser app/window that contains it; do not retry `terminalx computer ... --app Gmail` unchanged because `terminalx computer` app selectors refer to desktop apps, not website names.
 - `app_not_running`: the targeted instance quit, and computer use never launches apps. Ask the reader to start it (or start it yourself only if asked), then run `list-apps` and retry with the new `pid:<n>`.
 - `app_blocked`: stop; the target is intentionally blocked from computer-use.
-- `own_app_protected`: stop; computer use never operates TerminalX's own windows. Ask the person to do it themselves, and do not try another route.
+- `own_app_protected`: raw self-app access stays protected. For approved session controls, use `computer self-ui authorize` and the resulting grant; for existing-session Autopilot, prefer `pipelines start <session-or-tab> [--adopt-pr]`. A missing, revoked, expired, wrong-window or insufficient self-UI grant requires a new explicit approval or a narrower command. Never use alternative raw-input or private-state routes.
 - `confirmation_pending`: stop and wait for the person; only they can answer a TerminalX confirmation. Do not retry in a loop.
 - `window_not_found` / `window_stale`: run `list-windows`, choose a current selector, then rerun `get-app-state`.
 - `window_not_focused`: retry once with `--restore-window`; if the message says restore was already requested, stop retrying restore and bring the app forward manually or check permissions. For editable fields prefer `set-value`, then inspect before assuming keyboard input worked.
@@ -172,3 +172,68 @@ Slack: the accessibility tree may be shallow while the screenshot contains usefu
 ## Next Action
 
 Confirm TerminalX status unless already checked, then run `terminalx computer capabilities --json`. For website or web-app targets such as Gmail, identify the desktop browser app/window that contains the page, then get that target app state with `terminalx computer get-app-state --app <app> --json`.
+
+
+## Authorized TerminalX session controls
+
+The supported self-UI route uses named semantic controls in the main window. It does not relax
+the native provider's raw own-app protection. `capabilities` reports both `ownAppProtection`
+and `supports.safety.selfUi`. No Accessibility or Screen Recording permission is needed for
+this semantic route. It is supported by the desktop, including its background local owner;
+a cloud-only/headless runtime has no session UI to operate.
+
+Use the original session and author tab ids from `sessions show`/`tabs list`. When the user
+has authorized this workflow, request one bounded grant; the person approves it in TerminalX:
+
+```text
+terminalx computer self-ui authorize --session <exact-session-id> --tab <exact-author-tab-id> \
+  --window main --actions open-autopilot,toggle-merge,toggle-conflicts,start-autopilot,adopt-pr \
+  --seconds 300 --json
+```
+
+`--actions` is a comma-separated subset of those five controls. Inspection of the permitted
+session is included. The duration is 1–900 seconds (default 300). The response's `grant.id`
+is an opaque handle; use it only for this task. Grants live in memory, expire without renewal,
+and are lost on app restart. Refusal, dismissal and timeout grant nothing. Computer actions
+and self-UI requests are suspended while a human-only confirmation is pending. Do not answer
+that confirmation for the person or attempt to grant access through a file edit.
+
+```text
+terminalx computer self-ui click <grant-id> --window main --control open-autopilot --json
+terminalx computer self-ui snapshot <grant-id> --window main --json
+terminalx computer self-ui click <grant-id> --window main --control toggle-merge --json
+terminalx computer self-ui click <grant-id> --window main --control start-autopilot --json
+terminalx computer self-ui revoke <grant-id> --json
+```
+
+`open-autopilot` selects only the authorized session/tab and opens Branch > Autopilot. The
+snapshot contains only that panel's control IDs, enabled/checked state, pipeline ID and pipeline state.
+`toggle-merge` is **Merge when green**, `toggle-conflicts` is **Resolve conflicts automatically**,
+`start-autopilot` is **Turn on autopilot**, and `adopt-pr` is **Adopt existing PR**. For an already
+open reviewed PR, use `adopt-pr` instead of `start-autopilot`, or use the simpler direct command:
+
+```text
+terminalx pipelines start <original-author-tab-id> --adopt-pr --json
+```
+
+Adoption keeps the original session, branch and PR, waits for the author to become idle and
+runs TerminalX's independent review on the exact head. No new author, duplicate PR or history
+rewrite is involved. Existing TerminalX review history is retained; an external review alone
+does not grant a TerminalX merge verdict. See the CLI guide for launch switches and recovery.
+
+A successful self-UI action returns `actor: agent`, `verified: true` and the observed state.
+The screenshot status is `skipped` with reason `scoped_semantic_ui`. No full-window pixels,
+DOM/AX text, transcript, title, pairing code, token or unrelated private session is captured.
+Clicks invoke the scoped control handler with agent attribution; pipeline history records
+`selfUi`, not `person`. Unsupported controls are refused, including merge overrides,
+review-round extensions, Settings and every confirmation/approval button. A modal blocks
+session controls. A hidden panel or different visible session/tab returns `window_stale`;
+re-open the authorized panel or inspect before continuing. A timeout does not prove that an
+action failed: inspect the pipeline before retrying activation.
+
+The access banner lets the person revoke all grants immediately; `revoke` removes the named
+grant and cancels pending requests. Expiry/revocation/wrong-window/action-scope failures return
+`own_app_protected` with this supported recovery. Native code revalidates a grant before an
+activation; late UI replies cannot revive it. Revocation stops future actions; it does not
+undo an action already admitted or stop a pipeline that has already started. To halt that
+pipeline, use its ordinary Stop control or `pipelines stop`.

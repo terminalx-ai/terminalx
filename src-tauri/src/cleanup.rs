@@ -30,7 +30,7 @@ use std::collections::HashSet;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agent_data;
 use crate::git;
@@ -69,14 +69,14 @@ pub struct Leftover {
     pub kept_because: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Failed {
     pub id: String,
     pub error: String,
 }
 
-#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Removal {
     pub removed: Vec<String>,
@@ -176,7 +176,7 @@ fn worktree_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry],
 
 fn branch_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
     let project_path = Path::new(&project.path);
-    let prefix = crate::store::settings::load().branch_prefix;
+    let Ok(prefix) = crate::store::configuration::branch_prefix(project_path) else { return };
     // Without a prefix every branch would look like one of Raccoon's.
     if prefix.is_empty() {
         return;
@@ -383,7 +383,7 @@ pub(crate) fn scan_sources(sources: &Sources<'_>) -> Vec<Leftover> {
     out
 }
 
-fn remove_one(leftover: &Leftover, sources: &Sources<'_>) -> std::result::Result<u64, String> {
+fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::archive_script::Runner<'_>>) -> std::result::Result<u64, String> {
     let project = Path::new(&leftover.project_path);
     match leftover.kind {
         LeftoverKind::Worktree => {
@@ -394,16 +394,30 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>) -> std::result::Result
             // a moment ago, for the commit it is safe at. Git is then not
             // forced (it refuses if a file appeared since) and the branch is
             // deleted only while it is still at that commit.
+            let _lease = crate::archive_script::RemovalLease::acquire(&path).map_err(|e| e.to_string())?;
+            let _fence = crate::issue_pipeline::admission::fence(crate::issue_pipeline::admission::Kind::Refuse(crate::issue_pipeline::admission::WORKSPACE_REMOVED), [crate::issue_pipeline::admission::Scope::checkout(&path)]);
+            let unused = || -> Result<(), String> {
+                let current = crate::store::index::load().map_err(|e| e.to_string())?;
+                if used_by_a_session(sources.sessions, &path) || used_by_a_session(&current, &path) {
+                    return Err("A session now uses this workspace; it was not deleted.".into());
+                }
+                Ok(())
+            };
+            unused()?;
+            let before = landed::check(project, &path, Fetch::JustFetched);
+            if !before.safe { return Err("It is no longer clean and merged; it was not deleted.".into()) }
+            crate::archive_script::before_removal(project, &path, &[], None, None, runner, &|| {}).map_err(|e| e.to_string())?;
+            unused()?;
             let state = landed::check(project, &path, Fetch::JustFetched);
-            let Some(head) = state.head.as_deref().filter(|_| state.safe) else {
-                return Err("It is no longer clean and merged; it was not deleted.".into());
+            let Some(head) = state.head.as_deref().filter(|_| state.safe && state.head == before.head && state.branch == before.branch) else {
+                return Err("It is no longer clean and merged, or changed during its archive script; it was not deleted.".into());
             };
             let options = crate::workspaces::DeleteOptions { delete_branch: true, direct: git::DirectDelete::Never, verified_head: Some(head) };
             crate::workspaces::delete(project, &path, options).map_err(|e| format!("{e:#}"))?;
             Ok(leftover.size_bytes)
         }
         LeftoverKind::Branch => {
-            let prefix = crate::store::settings::load().branch_prefix;
+            let prefix = crate::store::configuration::branch_prefix(project).map_err(|e| e.to_string())?;
             let plain = leftover.name.strip_prefix(&prefix).is_some_and(|name| !prefix.is_empty() && !name.is_empty() && !name.contains("..") && !name.starts_with('-'));
             if !plain || leftover.name.starts_with('-') {
                 return Err("refusing to delete: not one of Raccoon's branches".into());
@@ -451,7 +465,12 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>) -> std::result::Result
 /// one that is no longer a leftover, or that the scan would keep, is
 /// reported as failed and left alone. `report` hears about each as it goes;
 /// what is returned is what happened.
+#[cfg(test)]
 pub(crate) fn remove_from_sources(sources: &Sources<'_>, ids: &[String], report: &dyn Fn(&Progress)) -> Removal {
+    remove_from_sources_with_runner(sources, ids, report, None)
+}
+
+fn remove_from_sources_with_runner(sources: &Sources<'_>, ids: &[String], report: &dyn Fn(&Progress), runner: Option<crate::archive_script::Runner<'_>>) -> Removal {
     // Worktrees first: removing one also removes its branch when it can.
     let mut wanted: Vec<&String> = ids.iter().collect();
     wanted.sort_by_key(|id| !id.starts_with("worktree:"));
@@ -465,7 +484,7 @@ pub(crate) fn remove_from_sources(sources: &Sources<'_>, ids: &[String], report:
         let outcome = match fresh.iter().find(|leftover| &leftover.id == id) {
             None => Err("This is no longer a leftover; it was not deleted.".to_string()),
             Some(Leftover { kept_because: Some(reason), .. }) => Err(reason.clone()),
-            Some(leftover) => remove_one(leftover, sources),
+            Some(leftover) => remove_one(leftover, sources, runner),
         };
         report(&Progress::Finished { index, total, id: id.clone(), freed_bytes: *outcome.as_ref().unwrap_or(&0), error: outcome.as_ref().err().cloned() });
         match outcome {
@@ -492,9 +511,14 @@ pub fn scan() -> anyhow::Result<Vec<Leftover>> {
     with_sources(scan_sources)
 }
 
-/// Delete the confirmed leftovers. See [`remove_from_sources`].
+/// Delete confirmed leftovers without an archive runner, for refusal tests.
+#[cfg(test)]
 pub fn remove(ids: &[String], report: &dyn Fn(&Progress)) -> anyhow::Result<Removal> {
     with_sources(|sources| remove_from_sources(sources, ids, report))
+}
+
+pub fn remove_with_runner(ids: &[String], report: &dyn Fn(&Progress), runner: crate::archive_script::Runner<'_>) -> anyhow::Result<Removal> {
+    with_sources(|sources| remove_from_sources_with_runner(sources, ids, report, Some(runner)))
 }
 
 #[cfg(test)]
@@ -599,8 +623,10 @@ mod tests {
                 archived: false,
                 archive: Default::default(),
                 pinned: false,
+                manual_status: Default::default(),
                 active_tab: None,
                 link: None,
+                parent: None,
                 tabs,
                 unknown: BTreeMap::new(),
             }
@@ -624,7 +650,7 @@ mod tests {
     }
 
     fn tab(harness: &str, conversation: &str) -> TabEntry {
-        TabEntry { transport: Default::default(),
+        TabEntry { marked_unread: false, transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: harness.into(),
             title: None,
@@ -645,6 +671,39 @@ mod tests {
 
     fn find<'a>(leftovers: &'a [Leftover], kind: LeftoverKind, name: &str) -> Option<&'a Leftover> {
         leftovers.iter().find(|leftover| leftover.kind == kind && leftover.name == name)
+    }
+
+    #[test]
+    fn leftovers_run_archive_and_keep_failures_or_post_script_changes() {
+        use std::sync::Arc;
+        let f = Fixture::new();
+        let project = crate::store::projects::add(f.project.path.as_str()).unwrap();
+        let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+        }).unwrap();
+        save("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; case $TERMINALX_BRANCH in *fails*) echo cleanup-failed; exit 7;; esac");
+        let success = f.worktree("success");
+        let fails = f.worktree("fails");
+        let ids: Vec<String> = ["success", "fails"].iter().map(|name| format!("worktree:{}:{name}", f.project.path)).collect();
+        // A path with no runner must refuse, never silently delete.
+        let refused = remove_from_sources(&f.sources(std::slice::from_ref(&f.project), &[]), &ids, &|_| {});
+        assert_eq!(refused.failed.len(), 2);
+        assert!(success.exists() && fails.exists() && !f.path().join("runs").exists());
+        let terminals = Arc::new(crate::pty::Terminals::new());
+        let sink: Arc<dyn crate::sink::EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let runner = crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false };
+        let result = remove_from_sources_with_runner(&f.sources(std::slice::from_ref(&f.project), &[]), &ids, &|_| {}, Some(runner));
+        assert_eq!(result.removed, vec![ids[0].clone()]);
+        assert!(!success.exists() && fails.exists());
+        let failure = crate::archive_script::Failure::from_error(&result.failed[0].error).unwrap();
+        assert_eq!(failure.code, Some(7));
+        assert!(String::from_utf8_lossy(&terminals.read_output(&failure.pane).unwrap()).contains("cleanup-failed"));
+        assert_eq!(std::fs::read_to_string(f.path().join("runs")).unwrap().lines().count(), 2);
+        save("echo keep > new-file");
+        let result = remove_from_sources_with_runner(&f.sources(std::slice::from_ref(&f.project), &[]), &ids[1..], &|_| {}, Some(runner));
+        assert!(result.removed.is_empty());
+        assert!(fails.join("new-file").exists());
+        terminals.kill_all();
     }
 
     #[test]
@@ -1022,7 +1081,7 @@ mod tests {
 
         // A session settled out of the worktree still resumes from the old folder.
         let mut settled = f.session(f.path(), vec![tab("claude", CONV_A)]);
-        settled.removed_workspace = Some(index::RemovedWorkspace { path: gone.to_string_lossy().into_owned(), name: "gone".into(), branch: None });
+        settled.removed_workspace = Some(index::RemovedWorkspace { path: gone.to_string_lossy().into_owned(), name: "gone".into(), branch: None, ..Default::default() });
         assert_eq!(f.scan(&[settled]), vec![]);
 
         // A session elsewhere that holds one of the Codex conversations keeps that one.
