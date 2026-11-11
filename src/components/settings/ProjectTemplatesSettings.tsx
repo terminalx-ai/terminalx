@@ -71,7 +71,7 @@ export function ProjectTemplatesSettings() {
           <div className="min-w-0 flex-1">
             <h3 id="project-templates-title" className="text-[13px] font-medium">Project templates</h3>
             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              Create a project starts a new project from one of these: it copies the template's files into the new folder and commits them as the first commit on main. A folder you add is read each time, so changing it changes what the next project gets. In a Git repository, only the files Git would commit are copied.
+              Create a project starts a new project from one of these: it copies the template's files into the new folder and commits them as the first commit on main. A folder you add is read each time, so changing it changes what the next project gets. From a folder in a Git repository, only the files Git would commit there are copied, without submodules or nested repositories; from any other folder, everything except .git, node_modules, .venv, target and dist. Secret files such as .env, .npmrc, .netrc and private keys are never copied.
             </p>
           </div>
           <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void add()}>

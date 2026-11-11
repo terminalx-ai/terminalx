@@ -481,19 +481,27 @@ fn create_from(parent: &str, name: &str, prepare: impl FnOnce() -> Result<crate:
     let parent = resolve_parent(parent)?;
     let path = parent.join(name);
     let shown = path.to_string_lossy().into_owned();
-    let existed = path.exists();
-    if existed && !is_empty_dir(&path) {
-        return Err(Failure::new(DESTINATION_EXISTS, format!("{shown} already exists. Choose another name.")));
+    let in_use = || (path.exists() && !is_empty_dir(&path)).then(|| Failure::new(DESTINATION_EXISTS, format!("{shown} already exists. Choose another name.")));
+    if let Some(failure) = in_use() {
+        return Err(failure);
     }
     // Read before anything is made: a template that cannot be used leaves no folder to clean up.
     let prepared = prepare()?;
+    // Reading a folder template can take a while: the folder is checked again just before it is written to.
+    if let Some(failure) = in_use() {
+        return Err(failure);
+    }
+    let existed = path.exists();
     let made = create_dirs(&path).map_err(|error| Failure::new(INVALID_DESTINATION, format!("Could not create {shown}: {error}")))?;
     let filled = crate::project_templates::write(&prepared, &path, name)
         .and_then(|()| init_repository(&path, &prepared.name).map_err(|error| Failure::new(FAILED, format!("Could not set up Git in {shown}: {error}"))));
     if let Err(failure) = filled {
-        // Only what this call made is removed: a folder that was there stays, emptied again.
+        // Only what this call made is removed: a folder that was there stays, with anything
+        // else put in it meanwhile.
         if existed {
-            empty_dir(&path);
+            let mut written = prepared.top_level();
+            written.insert(".git".into());
+            remove_entries(&path, &written);
         } else {
             let _ = std::fs::remove_dir_all(&path);
         }
@@ -503,11 +511,12 @@ fn create_from(parent: &str, name: &str, prepare: impl FnOnce() -> Result<crate:
     Ok(shown)
 }
 
-/// Remove everything inside `dir`, which was empty before this call wrote into it.
-fn empty_dir(dir: &Path) {
-    for entry in std::fs::read_dir(dir).into_iter().flatten().filter_map(Result::ok) {
-        let path = entry.path();
-        let _ = if entry.file_type().is_ok_and(|kind| kind.is_dir()) { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+/// Remove the entries named `names` from `dir`: the ones this call wrote there.
+fn remove_entries(dir: &Path, names: &std::collections::BTreeSet<std::ffi::OsString>) {
+    for name in names {
+        let path = dir.join(name);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        let _ = if meta.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
     }
 }
 
@@ -902,6 +911,35 @@ mod tests {
         create_from(&parent.to_string_lossy(), "kept", || Ok(ready)).unwrap_err();
         assert!(parent.join("kept").is_dir());
         assert!(is_empty_dir(&parent.join("kept")));
+
+        // Something put there while the template was read: the create stops, and it is left alone.
+        let ready = prepared().unwrap();
+        let kept = parent.join("kept");
+        let failure = create_from(&parent.to_string_lossy(), "kept", || {
+            std::fs::write(kept.join("notes.txt"), "mine").unwrap();
+            Ok(ready)
+        })
+        .unwrap_err();
+        assert_eq!(failure.code, DESTINATION_EXISTS);
+        assert_eq!(std::fs::read_to_string(parent.join("kept/notes.txt")).unwrap(), "mine");
+    }
+
+    #[test]
+    fn cleanup_takes_away_only_what_the_template_wrote() {
+        let prepared = crate::project_templates::prepare(crate::project_templates::AGENT_STARTER).unwrap();
+        let top: Vec<String> = prepared.top_level().iter().map(|name| name.to_string_lossy().into_owned()).collect();
+        assert_eq!(top, [".gitignore", "AGENTS.md", "CLAUDE.md", "README.md", "scripts"]);
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
+        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+        std::fs::write(dir.path().join("theirs.txt"), "written by someone else meanwhile").unwrap();
+        let mut written = prepared.top_level();
+        written.insert(".git".into());
+        remove_entries(dir.path(), &written);
+        let left: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, ["theirs.txt"]);
     }
 
     #[test]

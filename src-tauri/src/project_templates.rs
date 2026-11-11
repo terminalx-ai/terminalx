@@ -26,6 +26,18 @@ const USER_TEMPLATE_BYTE_LIMIT: u64 = 200 * 1024 * 1024;
 /// would ignore anyway, and the folder's own history.
 const SKIPPED_DIRS: [&str; 5] = [".git", "node_modules", ".venv", "target", "dist"];
 
+/// Never copied from any template, Git or not: files that usually hold
+/// credentials. The first commit is made without hooks, so a secret scanner
+/// the reader relies on would not see them.
+fn is_secret(relative: &Path) -> bool {
+    let Some(name) = relative.file_name().map(|name| name.to_string_lossy().to_lowercase()) else { return false };
+    let env = name == ".env" || (name.starts_with(".env.") && !matches!(name.as_str(), ".env.example" | ".env.sample" | ".env.template"));
+    let keys = name.ends_with(".pem") || name.ends_with(".key") || name.ends_with(".p12") || name.ends_with(".pfx") || name.starts_with("id_rsa") || name.starts_with("id_ed25519") || name.starts_with("id_ecdsa") || name.starts_with("id_dsa");
+    let credentials = matches!(name.as_str(), ".npmrc" | ".pypirc" | ".netrc" | ".git-credentials" | "credentials.json" | ".dockercfg");
+    let in_secret_dir = relative.components().any(|part| matches!(part.as_os_str().to_str(), Some(".aws" | ".ssh" | ".gnupg" | ".docker")));
+    env || keys || credentials || in_secret_dir
+}
+
 /// How the project's name is written into a file, so a name with quotes or
 /// angle brackets cannot break the file it lands in.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -235,6 +247,21 @@ enum PreparedFile {
     Copied { relative: PathBuf, source: PathBuf },
 }
 
+impl Prepared {
+    /// The names this template writes at the top of the project, so a create
+    /// that fails can take away exactly those and nothing else.
+    pub fn top_level(&self) -> BTreeSet<std::ffi::OsString> {
+        self.files
+            .iter()
+            .filter_map(|file| match file {
+                PreparedFile::Embedded(file) => Path::new(file.path).components().next(),
+                PreparedFile::Copied { relative, .. } => relative.components().next(),
+            })
+            .map(|first| first.as_os_str().to_os_string())
+            .collect()
+    }
+}
+
 pub fn prepare_in(file: &Path, id: &str) -> Result<Prepared, Failure> {
     if let Some(built_in) = BUILT_INS.iter().find(|template| template.id == id) {
         return Ok(Prepared { name: built_in.name.into(), files: built_in.files.iter().map(PreparedFile::Embedded).collect() });
@@ -262,9 +289,12 @@ pub fn prepare(id: &str) -> Result<Prepared, Failure> {
     prepare_in(&store_file()?, id)
 }
 
-/// The files a folder template makes, relative to it. A Git repository gives
-/// what Git would commit there (tracked files and new ones it does not
-/// ignore); any other folder gives everything except `SKIPPED_DIRS`.
+/// The files a folder template makes, relative to it. A folder in a Git
+/// repository (its top or any folder below) gives what Git would commit
+/// there: tracked files and new ones it does not ignore. Any other folder
+/// gives everything except `SKIPPED_DIRS`. Neither gives secret files
+/// (`is_secret`), nor submodules or nested repositories: those are other
+/// repositories, not files of this one.
 fn files_of(folder: &Path) -> Result<Vec<PathBuf>, Failure> {
     let listed = if crate::git::is_repo(folder) { git_files(folder) } else { None };
     let files = match listed {
@@ -275,6 +305,7 @@ fn files_of(folder: &Path) -> Result<Vec<PathBuf>, Failure> {
             files
         }
     };
+    let files: Vec<PathBuf> = files.into_iter().filter(|relative| !is_secret(relative)).collect();
     if files.len() > USER_TEMPLATE_FILE_LIMIT {
         return Err(Failure::new(INVALID_TEMPLATE, format!("{} has more than {USER_TEMPLATE_FILE_LIMIT} files, too many for a template.", folder.display())));
     }
@@ -285,17 +316,24 @@ fn files_of(folder: &Path) -> Result<Vec<PathBuf>, Failure> {
     Ok(files)
 }
 
-/// `None` when the folder is inside a repository but is not its top, or Git
-/// cannot list it: the folder is then read like any other.
+/// What Git would commit in `folder`, relative to it: run from a folder below
+/// the top, `ls-files` lists only that folder, relative to it. `None` when
+/// Git cannot list it; the folder is then read like any other.
 fn git_files(folder: &Path) -> Option<Vec<PathBuf>> {
-    let top = crate::git::run(folder, &["rev-parse", "--show-toplevel"]).ok()?;
-    if Path::new(top.trim()).canonicalize().ok()? != folder.canonicalize().ok()? {
-        return None;
-    }
     let out = crate::git::run(folder, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"]).ok()?;
     let unique: BTreeSet<&str> = out.split('\0').filter(|entry| !entry.is_empty()).collect();
-    // A tracked file deleted from the working tree is not part of the template.
-    Some(unique.into_iter().map(PathBuf::from).filter(|relative| std::fs::symlink_metadata(folder.join(relative)).is_ok()).collect())
+    Some(
+        unique
+            .into_iter()
+            .map(PathBuf::from)
+            // A tracked file deleted from the working tree is not part of the template. A submodule
+            // (a gitlink) and an untracked nested repository (`nested/`) are listed as directories:
+            // they are other repositories, left out.
+            .filter(|relative| std::fs::symlink_metadata(folder.join(relative)).is_ok_and(|meta| !meta.is_dir()))
+            // Without the submodules, their list would name folders the new project does not have.
+            .filter(|relative| relative != Path::new(".gitmodules"))
+            .collect(),
+    )
 }
 
 fn walk(root: &Path, relative: &Path, files: &mut Vec<PathBuf>) -> Result<(), Failure> {
@@ -519,5 +557,81 @@ mod tests {
         // A folder with a stray `.git` that is not a repository is read like any other.
         let files: Vec<PathBuf> = files_of(&plain).unwrap();
         assert_eq!(files, [PathBuf::from("a.txt")]);
+    }
+
+    fn listed(folder: &Path) -> BTreeSet<String> {
+        files_of(folder).unwrap().iter().map(|p| p.to_string_lossy().into_owned()).collect()
+    }
+
+    fn commit_all(repo: &Path) {
+        crate::git::run(repo, &["add", "-A"]).unwrap();
+        crate::git::run(repo, &["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "x"]).unwrap();
+    }
+
+    #[test]
+    fn a_folder_below_the_top_of_a_repository_follows_that_repositorys_ignores() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let folder = repo.join("templates/web");
+        std::fs::create_dir_all(folder.join("build")).unwrap();
+        crate::git::run(&repo, &["init", "-q"]).unwrap();
+        std::fs::write(repo.join(".gitignore"), "build/\nlocal.json\n").unwrap();
+        std::fs::write(repo.join("outside.txt"), "").unwrap();
+        std::fs::write(folder.join("index.html"), "").unwrap();
+        std::fs::write(folder.join("local.json"), "{}").unwrap();
+        std::fs::write(folder.join("build/out.js"), "").unwrap();
+        assert_eq!(listed(&folder), BTreeSet::from(["index.html".to_string()]));
+    }
+
+    #[test]
+    fn secret_files_are_never_copied_from_any_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(plain.join(".aws")).unwrap();
+        std::fs::create_dir_all(plain.join("certs")).unwrap();
+        for file in [".env", ".env.local", ".env.example", ".npmrc", ".netrc", "certs/server.pem", "certs/README.md", "id_ed25519", ".aws/credentials", "app.js"] {
+            std::fs::write(plain.join(file), "x").unwrap();
+        }
+        assert_eq!(listed(&plain), BTreeSet::from([".env.example".to_string(), "app.js".to_string(), "certs/README.md".to_string()]));
+
+        // Tracked in a template's own repository, they are still left out.
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::git::run(&repo, &["init", "-q"]).unwrap();
+        std::fs::write(repo.join(".env"), "TOKEN=1").unwrap();
+        std::fs::write(repo.join("app.js"), "").unwrap();
+        commit_all(&repo);
+        assert_eq!(listed(&repo), BTreeSet::from(["app.js".to_string()]));
+    }
+
+    #[test]
+    fn submodules_and_nested_repositories_are_left_out_and_the_rest_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        crate::git::run(&library, &["init", "-q"]).unwrap();
+        std::fs::write(library.join("lib.txt"), "").unwrap();
+        commit_all(&library);
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::git::run(&repo, &["init", "-q"]).unwrap();
+        std::fs::write(repo.join("README.md"), "").unwrap();
+        crate::git::run(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &library.to_string_lossy(), "vendor/library"]).unwrap();
+        commit_all(&repo);
+        // An untracked repository inside it, listed by Git as `nested/`.
+        std::fs::create_dir_all(repo.join("nested")).unwrap();
+        crate::git::run(&repo.join("nested"), &["init", "-q"]).unwrap();
+        std::fs::write(repo.join("nested/x.txt"), "").unwrap();
+
+        assert_eq!(listed(&repo), BTreeSet::from(["README.md".to_string()]));
+        let file = dir.path().join("project-templates.json");
+        let template = add_in(&file, &repo.to_string_lossy()).unwrap();
+        let prepared = prepare_in(&file, &template.id).unwrap();
+        let dest = dir.path().join("made");
+        std::fs::create_dir_all(&dest).unwrap();
+        write(&prepared, &dest, "made").unwrap();
+        assert!(dest.join("README.md").is_file());
+        assert!(!dest.join("vendor").exists() && !dest.join("nested").exists());
     }
 }
