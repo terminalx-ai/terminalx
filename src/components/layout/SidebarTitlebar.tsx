@@ -1,3 +1,4 @@
+import { selectSidebarSort, useSidebarOrder } from "@/lib/sidebarOrder";
 import { useRef, useState, type PointerEvent } from "react";
 import { useCloudProjectChoices } from "@/components/session/CloudNewSession";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
@@ -97,6 +98,9 @@ function ViewMenu({ grouped }: { grouped: boolean }) {
   const prefs = usePrefs();
   const statusGrouped = prefs.sidebarLayout === "status";
   const { showArchived } = useSessionStore();
+  const order = useSidebarOrder();
+  const sort = order.custom ? "custom" : prefs.sidebarSort === "created" ? "created" : "updated";
+  const sortLabels = { updated: "Updated", created: "Created", custom: "Custom" };
   const menu = useRowMenu();
   const showing = SIDEBAR_FILTERS.find((entry) => entry.id === filter.filter)!.label;
   const label = filter.filter !== "all" ? `View: showing ${showing}` : prefs.sidebarProject ? "View: filtered by project" : showArchived ? "View: showing archived" : "View";
@@ -132,10 +136,10 @@ function ViewMenu({ grouped }: { grouped: boolean }) {
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuSub>
-          <DropdownMenuSubTrigger>Sort by: {prefs.sidebarSort === "created" ? "Created" : "Updated"}</DropdownMenuSubTrigger>
+          <DropdownMenuSubTrigger>Sort by: {sortLabels[sort]}</DropdownMenuSubTrigger>
           <DropdownMenuSubContent>
-            {(["updated", "created"] as const).map((sort) => <DropdownMenuItem key={sort} role="menuitemradio" aria-checked={prefs.sidebarSort === sort} onSelect={() => setPrefs({ sidebarSort: sort })}>
-              {sort === prefs.sidebarSort ? <Check /> : <span className="size-4" />}{sort === "created" ? "Created" : "Updated"}
+            {(["updated", "created", "custom"] as const).map((choice) => <DropdownMenuItem key={choice} role="menuitemradio" aria-checked={sort === choice} disabled={!order.loaded || order.pending} onSelect={() => void selectSidebarSort(choice)}>
+              {sort === choice ? <Check /> : <span className="size-4" />}{sortLabels[choice]}
             </DropdownMenuItem>)}
           </DropdownMenuSubContent>
         </DropdownMenuSub>

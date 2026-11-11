@@ -1963,6 +1963,18 @@ pub fn tab_state() -> CmdResult<index::TabState> {
     index::tab_state().map_err(err)
 }
 
+#[tauri::command]
+pub async fn sidebar_order() -> CmdResult<index::SidebarOrder> {
+    tauri::async_runtime::spawn_blocking(index::sidebar_order).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_sidebar_order(app: AppHandle, patch: index::SidebarOrderPatch) -> CmdResult<index::SidebarOrder> {
+    let saved = tauri::async_runtime::spawn_blocking(move || index::set_sidebar_order(patch)).await.map_err(err)?.map_err(err)?;
+    let _ = app.emit("sidebar_order_changed", &saved);
+    Ok(saved)
+}
+
 /// Save one workspace's tab order, pins, mutes and titles, for every window and every device.
 #[tauri::command]
 pub fn set_tab_layout(app: AppHandle, workspace: String, layout: index::TabLayout) -> CmdResult<()> {
@@ -2686,6 +2698,13 @@ pub async fn ensure_tab_started(state: State<'_, AppState>, session_id: String, 
 pub async fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.stop(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+}
+
+/// Change a reader-owned follow-up queue, persisting before acknowledging.
+#[tauri::command]
+pub async fn change_held_queue(state: State<'_, AppState>, session_id: String, tab_id: String, change: crate::session::held::Change) -> CmdResult<SendOutcome> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.change_held(&session_id, &tab_id, change).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -4968,6 +4987,20 @@ pub async fn remove_workspace(app: AppHandle, project_path: String, path: String
         let removed = state.sessions().map_err(err)?.workspace("removeWorkspace", params).map_err(err)?;
         state.browser.forget_workspace(&crate::browser::control::canonical(&path));
         Ok(removed)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn preview_workspace_restore(app: AppHandle, session_id: String) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("previewRestore", serde_json::json!({ "sessionId": session_id })).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch })).map_err(err)
     }).await.map_err(err)?
 }
 

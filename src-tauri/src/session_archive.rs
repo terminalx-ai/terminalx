@@ -303,6 +303,11 @@ pub fn busy(manager: &crate::session::SessionManager, session: &SessionEntry, li
     if let Some(why) = taken_up(manager, session) {
         return Some(why);
     }
+    // A queue survives its runtime. Before the tab is opened after a restart,
+    // wait_view has no runtime to report it from. Keep that session visible.
+    if session.tabs.iter().any(|tab| manager.has_held_queue(&session.id, &tab.id).unwrap_or(true)) {
+        return Some(Kept::Queued);
+    }
     // Work a turn left running: a file to read, and the process table.
     if session.tabs.iter().any(|tab| manager.background_work(&session.id, &tab.id).is_some()) {
         return Some(Kept::Working);

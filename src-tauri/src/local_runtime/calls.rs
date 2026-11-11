@@ -191,6 +191,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "interrupt" => json!(manager.interrupt(session, tab)?),
         "stop" => { manager.stop(session, tab)?; Value::Null }
         "closeTab" => { manager.close_tab(session, tab)?; Value::Null }
+        "heldQueue" => serde_json::to_value(manager.change_held(session, tab, serde_json::from_value(params["change"].clone())?)?)?,
         "sendQueuedNow" => { manager.send_queued_now(session, tab, params["seq"].as_u64().context("seq is required")?)?; Value::Null }
         "cancelQueued" => serde_json::to_value(manager.cancel_queued(session, tab, string(&params, "messageId")?)?)?,
         "permission" => { manager.respond_permission(session, tab, string(&params, "requestId")?, string(&params, "optionId")?)?; Value::Null }

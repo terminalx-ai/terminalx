@@ -289,11 +289,13 @@ impl Rig {
             }),
             pending: HashMap::new(),
             queued: Vec::new(),
+            held_queue: Default::default(),
             turn_open: false,
             turn_opener: None,
             compact_completed: false,
             compact_boundary_at: None,
             turn_started_at: None,
+            turn_usage: Default::default(),
             turn_by_command: false,
             signed_out_in_turn: false,
             last_activity: now,
@@ -928,7 +930,7 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         let old = Instant::now() - PATIENCE.stall - MOMENT;
         rig.rt.lock().unwrap().last_activity = old;
         rig.drew.set(Some(old));
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
         // The production send path, up to dispatching the input thread. Do
         // not use `stamp`: the send itself must refresh the activity clock.
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
@@ -1206,7 +1208,7 @@ fn a_queued_compact_echo_preserves_command_classification() {
     for completed in [false, true] {
         let rig = Rig::new();
         rig.start_turn();
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
         let (sent, queued) = rig.manager.record_composer_prompt(
             &mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None,
         );

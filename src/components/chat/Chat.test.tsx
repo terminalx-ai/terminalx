@@ -125,6 +125,25 @@ function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
 }
 
 describe("chat scroll follow", () => {
+  it("shows a reported goal above the scroller before the first turn and hides a cleared goal", () => {
+    const event: AgentEvent = { id: "goal", seq: 1, sessionId: "s", tabId: "t", harness: "codex", ts: "",
+      payload: { type: "goal_updated", goal: { objective: "Finish the migration", status: "active", tokenBudget: 1000, tokensUsed: 0 } } };
+    const props = { sessionId: "s", live: false, progressing: false, answering: false, stream: [], onAnswerPermission: () => {}, onAnswerQuestions: () => {}, footer: null };
+    const view = render(<Chat {...props} transcript={buildTranscript([event], false)} />, { wrapper: TooltipProvider });
+    const banner = screen.getByRole("region", { name: "Codex goal" });
+    expect(banner.textContent).toContain("Finish the migration");
+    expect(view.container.querySelector("[data-chat-scroller]")?.contains(banner)).toBe(false);
+    // The banner shares main's focusable chat root; it must not replace search.
+    fireEvent.pointerDown(banner);
+    const region = view.container.querySelector('[data-find-scope="chat"]');
+    expect(document.activeElement).toBe(region);
+    fireEvent.keyDown(document.activeElement!, { key: "f", ctrlKey: true });
+    expect(screen.getByRole("textbox", { name: "Find in chat" })).toBeDefined();
+    expect(screen.getByRole("region", { name: "Codex goal" })).toBe(banner);
+    view.rerender(<Chat {...props} transcript={buildTranscript([event, { ...event, id: "clear", seq: 2, payload: { type: "goal_cleared" } }], false)} />);
+    expect(screen.queryByRole("region", { name: "Codex goal" })).toBeNull();
+  });
+
   it("shows confirmed compaction while ordinary work is idle", () => {
     const scope = { sessionId: "s", tabId: "t", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
     const events: AgentEvent[] = [
