@@ -6,11 +6,12 @@ const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
   setNativeCodex: vi.fn(),
   setOrchestratorRuns: vi.fn(),
+  setSessionCost: vi.fn(),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@/lib/api", () => ({
-  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setOrchestratorRuns: mocks.setOrchestratorRuns },
+  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setOrchestratorRuns: mocks.setOrchestratorRuns, setSessionCost: mocks.setSessionCost },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
 
@@ -27,10 +28,27 @@ beforeEach(() => {
   mocks.settings.mockReset().mockResolvedValue({ nativeCodex: false });
   mocks.setNativeCodex.mockReset();
   mocks.setOrchestratorRuns.mockReset();
+  mocks.setSessionCost.mockReset();
 });
 afterEach(cleanup);
 
 const toggle = () => screen.getByRole("switch", { name: "Native Codex" });
+
+describe("Settings → Experimental: session cost (PRO-273)", () => {
+  const cost = () => screen.getByRole("switch", { name: "Session cost" });
+
+  it("is off by default, says the figure is not a bill, and saves only its own switch", async () => {
+    mocks.setSessionCost.mockResolvedValue({ nativeCodex: false, sessionCost: true });
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(cost().hasAttribute("disabled")).toBe(false));
+    expect(cost().getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByTestId("experimental-settings").textContent).toContain("not what you are billed");
+    fireEvent.click(cost());
+    await waitFor(() => expect(mocks.setSessionCost).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(cost().getAttribute("aria-checked")).toBe("true"));
+    expect(mocks.setNativeCodex).not.toHaveBeenCalled();
+  });
+});
 
 describe("Settings → Experimental (#644)", () => {
   it("offers Native Codex off by default and says what it changes in plain words", async () => {

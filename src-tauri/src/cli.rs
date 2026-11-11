@@ -67,6 +67,8 @@ Usage:
   terminalx sessions show SESSION [--json]
   terminalx sessions report SESSION_OR_TAB [--json]
   terminalx sessions report --children-of SESSION [--json]
+  terminalx sessions usage SESSION [--json]
+  terminalx sessions usage --children-of SESSION [--json]
   terminalx share create SESSION [--can-drive|--read-only] [--people EMAIL,EMAIL]
       [--expires-in SECONDS] [--no-approve|--approve] [--can-approve] [--max-people COUNT]
       [--single-use] [--local-only] [--json]
@@ -670,6 +672,21 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 return Err(invalid("sessions report reads a session on this computer; read a cloud session's transcript with `terminalx read`."));
             }
             rpc("sessions.report", json!({"session": session}), tokens)
+        }
+        // Tokens and estimated cost per tab and model (PRO-273); with
+        // --children-of, the lead and each worker it started, and their total.
+        "usage" => {
+            if let Some(lead) = children_of(tokens)? {
+                if let Some(extra) = tokens.take_front() {
+                    return Err(invalid(format!("--children-of reads the usage of that session and the sessions it started; it cannot be combined with a named session ({extra}).")));
+                }
+                return rpc("sessions.usage", json!({"childrenOf": lead}), tokens);
+            }
+            let session = tokens.required_front("session")?;
+            if is_cloud_key(&session) {
+                return Err(invalid("sessions usage reads a session on this computer."));
+            }
+            rpc("sessions.usage", json!({"session": session}), tokens)
         }
         // Every running agent of the sessions a lead started (PRO-270).
         "stop" => {
@@ -1544,6 +1561,15 @@ mod tests {
         match parse(&args(values)).unwrap().action {
             Action::Rpc { command, params, timeout } => (command, params, timeout),
             other => panic!("expected rpc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sessions_usage_reads_one_session_or_a_lead_and_its_workers() {
+        assert_eq!(rpc_of(&["sessions", "usage", "0198a", "--json"]), ("sessions.usage".into(), json!({"session": "0198a"}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["sessions", "usage", "--children-of", "0198c", "--json"]), ("sessions.usage".into(), json!({"childrenOf": "0198c"}), Duration::from_secs(30)));
+        for refused in [vec!["sessions", "usage"], vec!["sessions", "usage", "--children-of", "0198c", "0198a"], vec!["sessions", "usage", "--children-of", ""]] {
+            assert_eq!(parse(&args(&refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
         }
     }
 
