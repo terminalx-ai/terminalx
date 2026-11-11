@@ -2,7 +2,7 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
-pub(super) fn run(root: &Path, managed: bool) {
+pub(super) fn clone_context(root: &Path, managed: bool) {
     let _environment = Environment::new(root);
     policy(false, managed);
     let f = Fixture::new(root, "native3-config");
@@ -39,6 +39,11 @@ pub(super) fn run(root: &Path, managed: bool) {
     assert_eq!(std::fs::read_to_string(&records).unwrap().lines().collect::<Vec<_>>(), ["global", "global", "clone-option", "command-line"]);
     if let Some(value) = saved { std::env::set_var("GIT_CONFIG_GLOBAL", value); } else { std::env::remove_var("GIT_CONFIG_GLOBAL"); }
 
+}
+
+pub(super) fn run(root: &Path, managed: bool) {
+    let _environment = Environment::new(root);
+    policy(false, managed);
     let f = Fixture::new(root, "native3-reference-lock");
     let hook = f.cwd.join(".git/hooks/reference-transaction");
     let entered = f.cwd.parent().unwrap().join("prepared");

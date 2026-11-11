@@ -353,7 +353,8 @@ mod native3;
 pub(super) fn native3_regressions(root: &Path, managed: bool, case: &str) {
     match case {
         "strict-wrapper" => openssh::strict_wrapper(root, managed),
-        "clone-and-locks" => native3::run(root, managed),
+        "clone-context" => native3::clone_context(root, managed),
+        "reference-lock" => native3::run(root, managed),
         _ => panic!("unknown native review regression {case}"),
     }
 }

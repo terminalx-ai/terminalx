@@ -869,8 +869,13 @@ fn privacy_review3_high_strict_wrappers_cannot_leave_connections() {
 }
 
 #[test]
-fn privacy_native3_clone_and_reference_transaction() {
-    native3_git_case("clone-and-locks");
+fn privacy_review3_clone_uses_destination_configuration() {
+    native3_git_case("clone-context");
+}
+
+#[test]
+fn privacy_native3_reference_transaction() {
+    native3_git_case("reference-lock");
 }
 
 fn native3_git_case(case: &str) {
@@ -888,7 +893,7 @@ fn native3_git_case(case: &str) {
 fn privacy_native3_git_child() {
     let Ok(kind) = std::env::var("TERMINALX_TEST_GITHUB_ENTRIES") else { return };
     let root = store::root().unwrap(); fixture(&root);
-    let case = std::env::var("TERMINALX_TEST_NATIVE3_GIT").unwrap_or_else(|_| "clone-and-locks".into());
+    let case = std::env::var("TERMINALX_TEST_NATIVE3_GIT").unwrap_or_else(|_| "reference-lock".into());
     pull::native3_regressions(&root, kind == "managed", &case);
 }
 
