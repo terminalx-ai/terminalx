@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, GripVertical, Pencil, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import type { HeldQueue } from "@/types/events";
@@ -21,7 +21,9 @@ export function HeldQueueTray({ queue, onChange, disabled, busy }: {
   const editButton = useRef<HTMLButtonElement | null>(null);
   const editor = useRef<HTMLTextAreaElement | null>(null);
   const changing = useRef(false);
-  useEffect(() => {
+  // In the commit that adds or removes the editor: an effect can run a task
+  // later (when the edit closes after an await), leaving focus on <body>.
+  useLayoutEffect(() => {
     if (editing) editor.current?.focus();
     else editButton.current?.focus();
   }, [editing?.id]);
