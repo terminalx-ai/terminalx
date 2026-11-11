@@ -115,22 +115,18 @@ fn background_jobs(jobs: Vec<(String, Option<u32>, bool)>, scan: impl FnOnce() -
 
 impl SessionManager {
     /// Only authorized session IDs enter here. Project paths come from the index.
-    /// Other sessions on the same branches are read too, never returned: which
-    /// of them carries the branch's PR decides what the requested ones show.
-    pub(crate) fn row_statuses(&self, sessions: &[index::SessionEntry]) -> BTreeMap<String, Value> {
-        let requested: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
-        let stored = index::load().unwrap_or_default();
+    /// `stored` is the index the caller just read (archived sessions included or
+    /// not; they never carry a branch a live session is on). Other
+    /// sessions on the requested branches are read from it, never returned:
+    /// which of them carries the branch's PR decides what the requested ones show.
+    pub(crate) fn row_statuses_among(&self, sessions: &[index::SessionEntry], stored: &[index::SessionEntry]) -> BTreeMap<String, Value> {
         let excluded: BTreeSet<_> = store::projects::list().map(|(projects, _)| projects.into_iter().filter(|p| p.archived || p.kind == store::projects::ProjectKind::Folder).map(|p| project_key(&p.path)).collect()).unwrap_or_default();
         let mut keys: HashMap<String, String> = HashMap::new();
         let mut key = |path: &str| keys.entry(path.to_string()).or_insert_with(|| project_key(path)).clone();
-        // A session whose branch facts mean anything: in a Git project, its workspace still there.
-        let eligible = |s: &index::SessionEntry, key: &str| !s.is_quick() && !s.worktree_removed && !excluded.contains(key);
         let mine: Vec<(&index::SessionEntry, String)> = sessions.iter().map(|s| (s, key(&s.project_path))).collect();
-        let branches: HashSet<(String, String)> = mine.iter().filter(|(s, k)| eligible(s, k)).filter_map(|(s, k)| s.branch.clone().map(|b| (k.clone(), b))).collect();
-        let peers: Vec<(&index::SessionEntry, String)> = stored.iter().filter(|s| !s.archived && !requested.contains(s.id.as_str())).map(|s| (s, key(&s.project_path)))
-            .filter(|(s, k)| eligible(s, k) && s.branch.as_ref().is_some_and(|b| branches.contains(&(k.clone(), b.clone())))).collect();
-        let members: Vec<_> = mine.iter().chain(&peers).filter(|(s, k)| eligible(s, k)).map(|(s, k)| (s, k, active_at(s))).collect();
-        let shared = shared_branch_sessions(members.iter().map(|(s, k, at)| (s.id.as_str(), k.as_str(), s.branch.as_deref(), at.as_str())));
+        let others: Vec<(&index::SessionEntry, String)> = stored.iter().map(|s| (s, key(&s.project_path))).collect();
+        let eligible = |s: &index::SessionEntry, key: &str| branch_eligible(s, key, &excluded);
+        let (shared, peers) = branch_sharing(&mine, &others, &eligible);
         let mut projects: BTreeMap<String, Rows> = BTreeMap::new();
         let mut folders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for (session, key) in mine.iter().chain(&peers).filter(|(s, k)| eligible(s, k)) {
@@ -149,17 +145,20 @@ impl SessionManager {
                 let activity = activity.or_else(|| (!matches!(status, TabStatus::InProgress | TabStatus::Waiting) && self.row_prs.background(&key)).then_some("background"));
                 json!({"status":status,"activity":activity})
             }).collect();
-            let started = session.unknown.get("hasMessages").is_some_and(|v| v == true) || tabs.iter().any(|tab| tab["status"] != json!(TabStatus::Idle));
-            let sharing = shared.contains(&session.id);
-            let (branch_status, work) = if !eligible(session, key) || sharing { (Value::Null, Value::Null) } else {
-                (session.branch.as_ref().map(|branch| self.row_prs.read(key, &session.id, branch)).unwrap_or(Value::Null), self.row_prs.read_work(key, &session.cwd))
-            };
-            (session.id.clone(), json!({"tabs":tabs,"branch":session.branch,"branchStatus":branch_status,"work":work,"started":started,"sharedBranch":sharing}))
+            let carries = eligible(session, key) && !shared.contains(&session.id);
+            let read = || (session.branch.as_ref().map(|branch| self.row_prs.read(key, &session.id, branch)).unwrap_or(Value::Null), self.row_prs.read_work(key, &session.cwd));
+            (session.id.clone(), row_input(session, tabs, shared.contains(&session.id), carries.then(read)))
         }).collect()
     }
 
     pub(crate) fn annotate_row_statuses(&self, sessions: &mut [index::SessionEntry]) {
-        let facts = self.row_statuses(sessions);
+        let stored = index::load().unwrap_or_default();
+        self.annotate_row_statuses_among(sessions, &stored);
+    }
+
+    /// As [`Self::annotate_row_statuses`], with the index the caller just read.
+    pub(crate) fn annotate_row_statuses_among(&self, sessions: &mut [index::SessionEntry], stored: &[index::SessionEntry]) {
+        let facts = self.row_statuses_among(sessions, stored);
         for session in sessions {
             if let Some(input) = facts.get(&session.id) {
                 session.unknown.insert("rowStatus".into(), input.clone());
@@ -332,6 +331,50 @@ pub(crate) fn shared_branch_sessions<'a>(members: impl IntoIterator<Item = (&'a 
     }
     let carrying: HashSet<&str> = carriers.values().map(|(id, _)| *id).collect();
     members.into_iter().filter(|(id, ..)| !carrying.contains(id)).map(|(id, ..)| id.to_string()).collect()
+}
+
+/// A session whose branch facts mean anything: in a Git project that is not
+/// archived, with its workspace still there.
+fn branch_eligible(session: &index::SessionEntry, key: &str, excluded: &BTreeSet<String>) -> bool {
+    !session.is_quick() && !session.worktree_removed && !excluded.contains(key)
+}
+
+/// Which requested sessions do not carry their branch, and the other live
+/// sessions on those branches. Only live sessions take part in the choice:
+/// whether archived sessions were asked for or not, every surface picks the
+/// same carrier. An archived session carries a branch only when no live
+/// session is on it (it is then chosen among the archived ones asked for).
+fn branch_sharing<'a>(mine: &[(&'a index::SessionEntry, String)], stored: &[(&'a index::SessionEntry, String)], eligible: &dyn Fn(&index::SessionEntry, &str) -> bool) -> (HashSet<String>, Vec<(&'a index::SessionEntry, String)>) {
+    let requested: HashSet<&str> = mine.iter().map(|(s, _)| s.id.as_str()).collect();
+    let branches: HashSet<(&str, &str)> = mine.iter().filter(|(s, k)| eligible(s, k)).filter_map(|(s, k)| s.branch.as_deref().map(|b| (k.as_str(), b))).collect();
+    let on_branch = |s: &index::SessionEntry, k: &str| eligible(s, k) && s.branch.as_deref().is_some_and(|b| branches.contains(&(k, b)));
+    let peers: Vec<_> = stored.iter().filter(|(s, k)| !s.archived && !requested.contains(s.id.as_str()) && on_branch(s, k)).map(|(s, k)| (*s, k.clone())).collect();
+    let live: Vec<_> = mine.iter().filter(|(s, k)| !s.archived && on_branch(s, k)).chain(&peers).map(|(s, k)| (*s, k.as_str(), active_at(s))).collect();
+    let mut shared = shared_branch_sessions(live.iter().map(|(s, k, at)| (s.id.as_str(), *k, s.branch.as_deref(), at.as_str())));
+    let lived: HashSet<(&str, &str)> = live.iter().filter_map(|(s, k, _)| s.branch.as_deref().map(|b| (*k, b))).collect();
+    let archived: Vec<_> = mine.iter().filter(|(s, k)| s.archived && on_branch(s, k)).map(|(s, k)| (*s, k.as_str(), active_at(s))).collect();
+    shared.extend(shared_branch_sessions(archived.iter().map(|(s, k, at)| (s.id.as_str(), *k, s.branch.as_deref(), at.as_str()))));
+    shared.extend(archived.iter().filter(|(s, k, _)| s.branch.as_deref().is_some_and(|b| lived.contains(&(*k, b)))).map(|(s, ..)| s.id.clone()));
+    (shared, peers)
+}
+
+/// The facts one row is decided from. A session that does not carry its branch
+/// (`sharing`) shows only its agent state: no PR and no workspace facts, even
+/// when they were read. `carried` is (branch status, work) for the carrier.
+fn row_input(session: &index::SessionEntry, tabs: Vec<Value>, sharing: bool, carried: Option<(Value, Value)>) -> Value {
+    let (branch_status, work) = carried.filter(|_| !sharing).unwrap_or((Value::Null, Value::Null));
+    let started = started(session, &tabs);
+    json!({"tabs":tabs,"branch":session.branch,"branchStatus":branch_status,"work":work,"started":started,"sharedBranch":sharing})
+}
+
+/// False only when nothing has ever been sent: no message, no agent conversation
+/// on any tab, and no tab doing anything. A session from before message
+/// tracking has a provider conversation even while its messages are being counted.
+fn started(session: &index::SessionEntry, tabs: &[Value]) -> bool {
+    session.unknown.get("hasMessages").is_some_and(|v| v == true)
+        || session.unknown.get("lastMessageAt").is_some_and(|v| !v.is_null())
+        || session.tabs.iter().any(|tab| tab.provider_session_id.as_deref().is_some_and(|id| !id.is_empty()) || tab.unknown.get("hasMessages").is_some_and(|v| v == true))
+        || tabs.iter().any(|tab| tab["status"] != json!(TabStatus::Idle))
 }
 
 fn active_at(session: &index::SessionEntry) -> String {
@@ -537,6 +580,60 @@ mod tests {
         assert!(failing.get("showsPr").is_none() && failing.get("when").is_none());
         assert_eq!(select(&pr("MERGED"))["pr"], Value::Null);
         assert_eq!(select(&json!({"tabs":[{"status":"waiting","activity":"needs_answer"}]}))["label"], "Needs approval");
+    }
+    fn entry(id: &str, branch: &str, at: &str, archived: bool) -> index::SessionEntry {
+        serde_json::from_value(json!({"id":id,"projectPath":"/r","cwd":format!("/r/{id}"),"branch":branch,"title":id,"created":at,"modified":at,
+            "lastMessageAt":at,"hasMessages":true,"worktreeRemoved":false,"archived":archived,"pinned":false,
+            "tabs":[{"id":"t","harness":"claude","model":"","permissionMode":"auto","status":"idle","created":at,"modified":at}]})).unwrap()
+    }
+    fn sharing(mine: &[&index::SessionEntry], stored: &[&index::SessionEntry]) -> Vec<String> {
+        fn keyed<'a>(list: &[&'a index::SessionEntry]) -> Vec<(&'a index::SessionEntry, String)> { list.iter().map(|s| (*s, "/r".to_string())).collect() }
+        let (shared, _) = branch_sharing(&keyed(mine), &keyed(stored), &|_: &index::SessionEntry, _: &str| true);
+        let mut shared: Vec<_> = shared.into_iter().collect();
+        shared.sort();
+        shared
+    }
+    #[test]
+    fn archived_sessions_never_carry_a_branch_a_live_session_is_on_whoever_asks() {
+        let live = entry("live", "f", "2026-11-10T10:00:00Z", false);
+        let reviewer = entry("reviewer", "f", "2026-11-11T10:00:00Z", true);
+        let stored = [&live, &reviewer];
+        // The phone and the default list ask for live sessions only; Show archived and `--worktree` ask for both.
+        assert_eq!(sharing(&[&live], &stored), Vec::<String>::new());
+        assert_eq!(sharing(&[&live, &reviewer], &stored), ["reviewer"]);
+        assert_eq!(sharing(&[&reviewer], &stored), ["reviewer"]);
+        // The choice is the index's, not the request's: a later live peer carries the branch even when not asked for.
+        let newer = entry("newer", "f", "2026-11-11T12:00:00Z", false);
+        assert_eq!(sharing(&[&live], &[&live, &newer]), ["live"]);
+        // With no live session on the branch, the latest archived one asked for carries it.
+        let older = entry("older", "f", "2026-11-09T10:00:00Z", true);
+        assert_eq!(sharing(&[&reviewer, &older], &[&reviewer, &older]), ["older"]);
+    }
+    #[test]
+    fn a_session_that_does_not_carry_its_branch_loses_its_pr_and_workspace_facts() {
+        let session = entry("s", "f", "2026-11-10T10:00:00Z", false);
+        let pr = json!({"branch":"f","checked":true,"headMatches":true,"pr":{"number":9,"state":"OPEN","draft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","checks":"FAILURE","inMergeQueue":false}});
+        let idle = || vec![json!({"status":"idle","activity":null})];
+        let carrier = row_input(&session, idle(), false, Some((pr.clone(), json!("uncommitted"))));
+        assert_eq!((select(&carrier)["id"].as_str(), select(&carrier)["pr"].as_u64()), (Some("checks_failing"), Some(9)));
+        let other = row_input(&session, idle(), true, Some((pr.clone(), json!("uncommitted"))));
+        assert_eq!((&other["branchStatus"], &other["work"], &other["sharedBranch"]), (&Value::Null, &Value::Null, &json!(true)));
+        assert_eq!(select(&other)["id"], "shares_branch");
+        let asking = row_input(&session, vec![json!({"status":"waiting","activity":"review_plan"})], true, Some((pr, Value::Null)));
+        assert_eq!(select(&asking)["label"], "Needs approval");
+    }
+    #[test]
+    fn a_session_with_a_conversation_has_started_before_its_messages_are_counted() {
+        let mut fresh = entry("s", "f", "2026-11-10T10:00:00Z", false);
+        fresh.unknown.remove("hasMessages");
+        fresh.unknown.remove("lastMessageAt");
+        let idle = || vec![json!({"status":"idle"})];
+        assert!(!started(&fresh, &idle()));
+        assert!(started(&fresh, &[json!({"status":"in_progress"})]));
+        let mut old = fresh.clone();
+        old.tabs[0].provider_session_id = Some("conversation".into());
+        assert!(started(&old, &idle()));
+        assert!(started(&entry("m", "f", "2026-11-10T10:00:00Z", false), &idle()));
     }
     #[test]
     fn a_panicked_worker_restarts_and_a_poisoned_cache_does_not_disable_it() {

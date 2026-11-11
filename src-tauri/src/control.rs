@@ -786,6 +786,8 @@ impl ControlService {
 
     fn sessions_list(&self, params: Value) -> Result<Value, ControlError> {
         let mut sessions = index::load().map_err(ControlError::internal)?;
+        // Read once: which session on a branch carries its PR is chosen among all of them.
+        let stored = sessions.clone();
         let quick = params.get("quick").and_then(Value::as_bool).unwrap_or(false);
         // What the sidebar lists, or with `archived` what it lists under Show archived (#718).
         let archived = params.get("archived").and_then(Value::as_bool).unwrap_or(false);
@@ -798,7 +800,7 @@ impl ControlService {
             }
             let (project, worktree) = resolve_worktree(&params)?;
             let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
-            self.manager.annotate_row_statuses(&mut held);
+            self.manager.annotate_row_statuses_among(&mut held, &stored);
             return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
         }
         if let Some(selector) = optional_string(&params, "project") {
@@ -814,7 +816,7 @@ impl ControlService {
             sessions.retain(SessionEntry::is_quick);
         }
         sessions.retain(|session| session.archived == archived);
-        self.manager.annotate_row_statuses(&mut sessions);
+        self.manager.annotate_row_statuses_among(&mut sessions, &stored);
         Ok(json!({"sessions": sessions}))
     }
 

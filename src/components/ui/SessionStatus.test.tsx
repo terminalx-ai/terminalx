@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { rowMeta, SessionStatus, SessionStatusMark } from "./SessionStatus";
+import { rowMeta, SessionStatus, SessionStatusMark, StatusBadge } from "./SessionStatus";
 import { api } from "@/lib/api";
 import type { SessionEntry } from "@/types/session";
 import { useSessionRowStatus } from "@/lib/sessionRowStatus";
@@ -73,6 +73,15 @@ describe("visible session rows", () => {
     expect(mark.getAttribute("data-session-status")).toBe("checks_failing");
     expect(mark.title).toMatch(/failing\. PR #781\.$/);
     expect(container.textContent).toBe("");
+  });
+
+  it("names the state behind the label where a session's detail shows", () => {
+    const plan = { id: "review_plan", label: "Needs approval", detail: "Review plan", icon: "approval", color: "accent", tooltip: "t", pr: null };
+    const queued = { id: "in_merge_queue", label: "Ready to merge", detail: "In merge queue", icon: "ready", color: "add", tooltip: "t", pr: 779 };
+    const { container } = render(<><StatusBadge status={plan} detail /><StatusBadge status={queued} detail /><StatusBadge status={queued} /><StatusBadge status={{ ...plan, detail: "Needs approval" }} detail /></>);
+    expect([...container.querySelectorAll("[data-session-status]")].map((badge) => badge.textContent)).toEqual([
+      "Needs approval — Review plan", "Ready to merge · PR #779 — In merge queue", "Ready to merge · PR #779", "Needs approval",
+    ]);
   });
 
   it.each([

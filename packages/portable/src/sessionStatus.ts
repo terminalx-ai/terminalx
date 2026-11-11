@@ -121,7 +121,15 @@ export interface BranchMember {
   activeAt: string;
 }
 
+/** RFC 3339 only, as the runtime's chrono parser reads it; anything else counts as the epoch. */
+const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+const activeTime = (time: string) => (RFC3339.test(time) && Date.parse(time.replace(" ", "T"))) || 0;
+
 /**
+ * The reference statement of the shared-branch rule. The runtime applies its
+ * Rust twin (`shared_branch_sessions`); both are checked against
+ * `sharedBranchCases.json`, so the two cannot drift.
+ *
  * Sessions on one branch share its PR and workspace: the most recently active
  * one carries them, the others show only their agent state. Ties go to the
  * smaller id so every reader picks the same session. Returns the ids that do
@@ -133,8 +141,8 @@ export function sharedBranchSessions(members: readonly BranchMember[]): Set<stri
     if (!member.branch) continue;
     const key = `${member.project}\u0000${member.branch}`;
     const held = carriers.get(key);
-    const time = Date.parse(member.activeAt) || 0;
-    const heldTime = held ? Date.parse(held.activeAt) || 0 : -Infinity;
+    const time = activeTime(member.activeAt);
+    const heldTime = held ? activeTime(held.activeAt) : -Infinity;
     if (!held || time > heldTime || (time === heldTime && member.id < held.id)) carriers.set(key, member);
   }
   const carrying = new Set([...carriers.values()].map((member) => member.id));

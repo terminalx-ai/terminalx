@@ -2368,7 +2368,8 @@ impl WorkspaceRpc {
     fn workspace_sessions(&self) -> Result<Vec<SessionEntry>, RpcError> {
         crate::store::message_activity::backfill(self.sink.clone());
         let mut sessions: Vec<_> = index::load().map_err(RpcError::internal)?.into_iter().filter(|session| super::session_target::owns_project(&self.root, &session.project_path)).collect();
-        if let Ok(manager) = self.manager() { manager.annotate_row_statuses(&mut sessions); }
+        // Sessions on one branch are in one project, so this workspace's sessions are every peer that matters.
+        if let Ok(manager) = self.manager() { let stored = sessions.clone(); manager.annotate_row_statuses_among(&mut sessions, &stored); }
         Ok(sessions)
     }
 

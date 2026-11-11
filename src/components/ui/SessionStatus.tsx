@@ -28,19 +28,23 @@ export function StatusMarkIcon({ status, className, decorative = false }: { stat
   </span>;
 }
 
-/** The mark with its full label, as the overview shows it: 'Checks failing · PR #781'. */
-export function StatusBadge({ status, className }: { status: StatusDescription; className?: string }) {
+/**
+ * The mark with its full label, as the overview shows it: 'Checks failing · PR #781'.
+ * With `detail`, a session's own view also names the state behind the label
+ * ('Needs approval — Review plan', 'Ready to merge · PR #779 — In merge queue').
+ */
+export function StatusBadge({ status, className, detail = false }: { status: StatusDescription; className?: string; detail?: boolean }) {
   const { animations } = usePrefs();
   const Icon = icons[status.icon] ?? Circle;
   return <span title={statusTooltip(status)} data-session-status={status.id} data-status-label={status.label} data-testid={`status-${status.label.toLowerCase().replaceAll(" ", "-")}`} className={cn("inline-flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground", className)}>
     <Icon aria-hidden className={cn("size-3.5 shrink-0", STATUS_COLORS[status.color], status.icon === "working" && animations && "animate-spin")} />
-    <span className="truncate">{statusText(status)}</span>
+    <span className="truncate">{statusText(status)}{detail && status.detail !== status.label && <span data-status-detail className="text-faint"> — {status.detail}</span>}</span>
   </span>;
 }
 
 /** Full label for one session, or a collapsed row's sessions. */
-export function SessionStatus({ session, peers, className }: { session: StatusSession; peers?: readonly StatusSession[]; className?: string }) {
-  return <StatusBadge status={useSessionRowStatus(peers ?? [session])} className={className} />;
+export function SessionStatus({ session, peers, className, detail }: { session: StatusSession; peers?: readonly StatusSession[]; className?: string; detail?: boolean }) {
+  return <StatusBadge status={useSessionRowStatus(peers ?? [session])} className={className} detail={detail} />;
 }
 
 /** Mark only, for sidebar rows. */
