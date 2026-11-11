@@ -133,7 +133,7 @@ const fits = (layout) => ({
   await page.keyboard.press("Meta+Shift+Y");
   const afterNew = await page.locator('[data-testid="sidebar-rail"]').waitFor({ state: "hidden", timeout: 2000 }).then(() => false, () => true);
   await page.keyboard.press("Meta+Shift+Y");
-  await sidebar(page);
+  await page.locator('[data-testid="panel-presence"][data-side="left"][data-state="open"]').waitFor();
   // The command palette shows the keys in force.
   await page.keyboard.press("Meta+K");
   await page.getByRole("dialog").locator("input").fill("Toggle sidebar");
