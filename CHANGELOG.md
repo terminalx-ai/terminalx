@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Keep sidebar New chat conversations in Chats with ordinary retention and
+  project linking, while using the shared composer and saved agent settings.
+  Branch drafts retain their requested project and advertised source branch.
+  Chat Git panels follow the working folder's actual repository status;
+  linked chats keep their repository account indicator and refresh control.
+  (PRO-173 follow-up)
 - A session started with `terminalx sessions create` from inside another
   session records it as its `parent` (`--parent`, `--no-parent`).
   `sessions list --children-of` lists the sessions a session started, and
