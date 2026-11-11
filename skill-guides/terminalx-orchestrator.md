@@ -61,17 +61,20 @@ A worker starts cold. The plan's piece fields become its brief, so write each on
 - `known`: facts you have, and what has already been ruled out, so it does not walk the same
   path again.
 - `readFirst`: the files to read first. Name paths; do not paste their contents.
-- `doneCheck`: below.
+- `doneChecks`: below.
 - `limits`: what it must not do or change.
 - The report format is added for you; workers end with a `terminalx-report` block.
 
 Keep a brief short: a few lines a field, and no field restating another. A long brief is read
 once and half-forgotten.
 
-**Write the done-check as a command wherever a test, build, linter or type check exists** (for
-example `cargo t store::settings exits 0`). A command is checked by running it, which costs no
-model call, and the result is a fact in the report's `evidence`. Use a condition in words only
-for a piece nothing can run against (a search, a review), and say what a reader would look at.
+**Write a `command` done-check wherever a test, build, linter, type check or search exists**
+(`{"type": "command", "run": "cd src-tauri && cargo t store::settings"}`). TerminalX runs it
+itself from the root of the worker's worktree and passes on exit code 0, so it costs no model
+call. Every piece needs one, or `"reviewOnly": true` with a `reviewOnlyReason` saying why no
+command can prove it (a search, a review). Add a `review` check only for what no command shows,
+such as a property of the diff; the reviewer sees the diff and your words, not the worker's
+reasoning. A `vote` check (several reviewers judging separately) is for a high-cost claim only.
 
 **A verifier gets the material, not your conclusion.** To check a claim, hand the verifier the
 claim's inputs (the files, the logs, the commands) and ask what is true. A verifier told "confirm
@@ -99,7 +102,7 @@ the store.
       "limits": ["Do not change the settings file format."],
       "owns": ["src-tauri/src/store/settings/"],
       "dependsOn": [],
-      "doneCheck": "cargo t store::settings exits 0",
+      "doneChecks": [{"type": "command", "run": "cd src-tauri && cargo t store::settings"}],
       "kind": "code"
     },
     {
@@ -112,7 +115,10 @@ the store.
       "readFirst": ["src-tauri/src/store/settings/mod.rs"],
       "owns": ["src-tauri/src/session/"],
       "dependsOn": ["store"],
-      "doneCheck": "cargo t session:: exits 0, and grep -rn read_settings src-tauri/src/session finds nothing",
+      "doneChecks": [
+        {"type": "command", "run": "cd src-tauri && cargo t session::"},
+        {"type": "command", "run": "! grep -rq read_settings src-tauri/src/session"}
+      ],
       "kind": "code"
     },
     {
@@ -124,7 +130,7 @@ the store.
       "readFirst": ["src-tauri/src/store/settings/mod.rs"],
       "owns": ["src/lib/"],
       "dependsOn": ["store"],
-      "doneCheck": "pnpm vitest run src/lib exits 0",
+      "doneChecks": [{"type": "command", "run": "pnpm vitest run src/lib"}],
       "kind": "code"
     },
     {
@@ -134,7 +140,9 @@ the store.
       "why": "Decides whether a second run is needed.",
       "scope": "Read-only search of the repository.",
       "dependsOn": [],
-      "doneCheck": "The report lists each read as file:line, and says which directories it searched.",
+      "doneChecks": [{"type": "review", "text": "The report lists each read as file:line and says which directories it searched."}],
+      "reviewOnly": true,
+      "reviewOnlyReason": "A read-only search: no command proves it found everything.",
       "kind": "search"
     }
   ]
@@ -213,7 +221,7 @@ its worktree and name the file in `evidence`.
 ## Checklist
 
 Before `runs create`: the gate holds and is said in a line; no two pieces own a path; every piece
-has a command done-check unless nothing can run against it; briefs are short and name files to
+has a `command` done-check, or `reviewOnly` with a reason; briefs are short and name files to
 read; the piece count is within the usual ceiling.
 
 After the workers report: every `done` was checked; every `couldNotRead` was followed up;

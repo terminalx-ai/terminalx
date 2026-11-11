@@ -2504,7 +2504,7 @@ mod tests {
         let json = ORCHESTRATOR_GUIDE.split("```json\n").nth(1).and_then(|rest| rest.split("\n```").next()).expect("the guide has a plan example");
         let plan = plan::parse(&serde_json::from_str(json).expect("the example is JSON")).unwrap_or_else(|error| panic!("the example is refused: {error:?}"));
         let agents = ["claude".to_string(), "codex".to_string()];
-        let rules = |piece_limit, approval| plan::Rules { piece_limit, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval };
+        let rules = |piece_limit, approval| plan::Rules { piece_limit, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval, checkout: None };
         // Valid under the default limit with a person approving it, and still valid where nobody does.
         let pieces = plan::validate(&plan, &rules(8, true)).unwrap_or_else(|error| panic!("the example is refused: {error:?}"));
         plan::validate(&plan, &rules(8, false)).unwrap();
@@ -2513,7 +2513,14 @@ mod tests {
         // a read-only piece that owns nothing, and every piece checkable.
         assert!(plan.pieces.iter().any(|piece| piece.depends_on == ["store"]));
         assert!(plan.pieces.iter().any(|piece| piece.owns.is_empty()));
-        assert!(plan.pieces.iter().all(|piece| !piece.done_check.trim().is_empty() && piece.model.is_empty() && piece.effort.is_none()));
+        // Every piece is checkable by a command, or says why none can be: the rule `runs create` holds it to.
+        assert!(plan.pieces.iter().all(|piece| {
+            let command = piece.done_checks.iter().any(|check| matches!(check, crate::orchestration::Check::Command { .. }));
+            (command || (piece.review_only && !piece.review_only_reason.trim().is_empty())) && piece.model.is_empty() && piece.effort.is_none()
+        }));
+        // The code pieces carry a command; the read-only survey is the one that is review-only.
+        let review_only: Vec<&str> = plan.pieces.iter().filter(|piece| piece.review_only).map(|piece| piece.id.as_str()).collect();
+        assert_eq!(review_only, ["survey"]);
         // The words that make the example a lesson rather than a template: the guide says why.
         assert!(ORCHESTRATOR_GUIDE.contains("A piece that reads text from outside the repository"));
     }
@@ -2526,7 +2533,7 @@ mod tests {
             // How many, how to cut.
             "Three to five workers", "One owner per file", "competing hypothesis",
             // The brief, field by field, and the verifier rule.
-            "`goal`", "`why`", "`scope`", "`known`", "`readFirst`", "`doneCheck`", "`limits`", "`terminalx-report`", "the material, not your conclusion",
+            "`goal`", "`why`", "`scope`", "`known`", "`readFirst`", "`doneChecks`", "`reviewOnly`", "`limits`", "`terminalx-report`", "the material, not your conclusion",
             // Reading reports and disagreement.
             "Route on the `status` line", "Check the evidence", "`couldNotRead`", "as a gap", "the one\nobservable fact", "Do not pick the more confident",
             // What stays, and context.
