@@ -321,6 +321,14 @@ export interface TabState {
   closed: ClosedTab[];
 }
 
+/** One local repository's mirror; source stays set when cleanup is needed. */
+export interface RepoMirrorStatus {
+  root: string;
+  source: string | null;
+  active: boolean;
+  error: string | null;
+}
+
 /** How a workspace is removed. */
 export interface WorkspaceRemoveOptions {
   /** Receipt for the failed archive run the person explicitly chose to bypass. */
@@ -561,6 +569,9 @@ export const api = {
   updateProject: (path: string, patch: ProjectPatch) => invoke<Project>("update_project", { path, patch }),
   setProjectLogo: (path: string, source: string | null) => invoke<Project>("set_project_logo", { path, source }),
   listWorkspaces: (projectPath: string) => invoke<Workspace[]>("list_workspaces", { projectPath }),
+  repoMirrorStatus: (sessionId: string) => invoke<RepoMirrorStatus>("repo_mirror_status", { sessionId }),
+  repoMirrorStart: (sessionId: string, confirmed: boolean) => invoke<RepoMirrorStatus>("repo_mirror_start", { sessionId, confirmed }),
+  repoMirrorStop: (sessionId: string) => invoke<RepoMirrorStatus>("repo_mirror_stop", { sessionId }),
   previewWorkspaceName: (projectPath: string, requested?: string | null) =>
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
@@ -602,6 +613,7 @@ export const api = {
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
+  sessionRowStatuses: (ids: string[]) => invoke<Record<string, import("@terminalx/portable/sessionStatus").SessionStatusInput>>("session_row_statuses", { ids }),
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
   statsUsageSnapshot: () => invoke<StatsUsageState>("stats_usage_snapshot"),
@@ -687,10 +699,11 @@ export const api = {
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
   /** `base`: the ref the session's worktree was made from, read against instead of the default branch. */
-  branchOverview: (cwd: string, base?: string | null) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null }),
+  branchOverview: (cwd: string, base?: string | null, localOnly = false) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null, localOnly }),
+  projectForge: (cwd: string) => invoke<ProjectForge>("project_forge", { cwd }),
   /** Brings the remote's branches up to date; false when it could not (offline, no remote). */
   branchFetch: (cwd: string) => invoke<boolean>("branch_fetch", { cwd }),
-  /** Merges the checked-out branch into the local branch `into`; says what it did. */
+  /** Retained for command clients; the Branch panel sends an agent prompt instead. */
   branchMergeInto: (cwd: string, into: string) => invoke<string>("branch_merge_into", { cwd, into }),
   // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
   // None of these takes a local path: the native side derives the mirror's
@@ -2112,6 +2125,8 @@ export interface BranchContributor {
   last: string;
 }
 
+export type ProjectForge = "github" | "githubUnavailable" | "localOnly";
+
 /** A checkout's branch against the branch it merges into, read from refs already here. */
 export interface BranchOverview {
   /** Resolved by the same native function as the session header. */
@@ -2120,6 +2135,10 @@ export interface BranchOverview {
   /** `origin/main`, else the local default branch; null outside a repository or without one. */
   base: string | null;
   onBase: boolean;
+  /** Main checkout path reported by Git. */
+  mainCheckout: string | null;
+  /** Compared using canonical checkout roots, including sessions reached through symlinks. */
+  inMainCheckout: boolean;
   forkPoint: CommitInfo | null;
   /** Commits only on the branch, and on the base since the fork. */
   ahead: number;

@@ -3,6 +3,7 @@ import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { shortTime, type ChatRow } from "@mobile/data/session-list";
 import { BotFace } from "./BotFace";
 import { StateMark } from "./MacIcon";
+import { SessionStatus } from "./SessionStatus";
 import { useTheme } from "./theme";
 
 const STATE_WORDS = { needs: "needs you", working: "working", done: "" } as const;
@@ -32,6 +33,8 @@ export function ChatListRow({ row, onPress }: { row: ChatRow; onPress(): void })
         <Text numberOfLines={1} style={[styles.preview, { color: palette.muted }]}>{[manualStatus, unread].filter(Boolean).join(" · ")}{row.preview ? ` · ${row.preview}` : ""}</Text>
         <StateMark state={row.state} info={palette.info} warning={palette.warning} />
       </View>
+      {/* The one detailed status the Mac decides for this session: agent attention first, then its PR. */}
+      <SessionStatus input={row.session.rowStatus ?? row.session} />
     </View>
   </Pressable>;
 }

@@ -1,12 +1,15 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { Project } from "@/types/session";
-const state = vi.hoisted(() => ({ projects: [] as Project[], update: vi.fn() }));
+import type { Project, SessionEntry } from "@/types/session";
+const state = vi.hoisted(() => ({ projects: [] as Project[], sessions: [] as SessionEntry[], update: vi.fn(), rerun: vi.fn() }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => state, updateProject: state.update }));
+vi.mock("@/lib/workspaceSetup", () => ({ useWorkspaceSetups: () => ({ runs: [] }), rerunSetup: state.rerun }));
 import { RepositoryScriptsTab } from "./RepositoryScriptsTab";
 afterEach(cleanup);
 beforeEach(() => {
   state.projects = [{ path: "/a", name: "a", scripts: { setup: "npm ci", archive: "" } }, { path: "/b", name: "b" }];
+  state.sessions = [];
+  state.rerun.mockReset().mockResolvedValue(undefined);
   state.update.mockReset().mockResolvedValue(undefined);
 });
 it("loads and saves both scripts for the selected repository", async () => {
@@ -19,7 +22,7 @@ it("loads and saves both scripts for the selected repository", async () => {
   view.rerender(<RepositoryScriptsTab projectPath="/b" />);
   expect((screen.getByLabelText("Archive script") as HTMLTextAreaElement).value).toBe("");
   expect((screen.getByLabelText("Setup script") as HTMLTextAreaElement).value).toBe("");
-  expect(screen.getByText(/not available in this version/)).toBeTruthy();
+  expect(screen.getByText(/At most two setups run at once/)).toBeTruthy();
 });
 it("preserves the draft and offers retry when saving fails", async () => {
   state.update.mockRejectedValueOnce(new Error("Disk unavailable"));
@@ -44,4 +47,18 @@ it("does not fall back to another repository when the requested project is unava
   expect(screen.queryByLabelText("Archive script")).toBeNull();
   view.rerender(<RepositoryScriptsTab projectPath="/missing" />);
   expect(screen.queryByLabelText("Archive script")).toBeNull();
+});
+
+it("runs the saved local command in the chosen workspace, and requires saving edits first", async () => {
+  state.sessions = [
+    { id: "archived", projectPath: "/a", cwd: "/a/worktree", worktreeName: "feature", archived: true, tabs: [] },
+    { id: "s1", projectPath: "/a", cwd: "/a/worktree", worktreeName: "feature", tabs: [] },
+  ] as unknown as SessionEntry[];
+  render(<RepositoryScriptsTab projectPath="/a" />);
+  fireEvent.click(screen.getByRole("button", { name: "Run setup now" }));
+  await screen.findByText(/Setup queued/);
+  expect(state.rerun).toHaveBeenCalledWith("s1");
+  fireEvent.change(screen.getByLabelText("Setup script"), { target: { value: "npm install" } });
+  expect((screen.getByRole("button", { name: "Run setup now" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByText(/Commands are never read from repository files/)).toBeTruthy();
 });

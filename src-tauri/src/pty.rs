@@ -690,7 +690,7 @@ impl Terminals {
         // Lifecycle hooks must not perform cleanup with missing credentials
         // or endpoints. Check the exact snapshot that this process receives.
         if executable.is_some() {
-            environment.require_available().context("Archive script was not started")?;
+            environment.require_available().context("Lifecycle script was not started")?;
         }
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
@@ -701,7 +701,9 @@ impl Terminals {
         if let Some(program) = executable {
             for arg in program.args { cmd.arg(arg); }
             // A lifecycle hook is not a provider/CLI call on behalf of an agent.
-            cmd.env_remove("RACCOON_SESSION_ID");
+            for (name, _) in std::env::vars_os() {
+                if name.to_string_lossy().starts_with("RACCOON_") { cmd.env_remove(name); }
+            }
             cmd.env_remove("TERMINALX_SESSION_ID");
         } else { match command {
             Some(c) if known_shell => {

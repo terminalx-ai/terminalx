@@ -11,7 +11,6 @@ use crate::store::projects::{self, Project};
 use crate::{git, harness, names, store};
 
 pub use crate::session_ops::{NewSession, NewTab};
-pub(crate) use crate::session_ops::create_session_blocking;
 use crate::session_ops::{available_worktree_name, rename_workspace_entries};
 
 type CmdResult<T> = Result<T, String>;
@@ -1780,6 +1779,12 @@ pub fn list_sessions(app: tauri::AppHandle) -> CmdResult<Vec<SessionEntry>> {
     store::conversation_titles::backfill().map_err(err)
 }
 
+#[tauri::command]
+pub async fn session_row_statuses(state: State<'_, AppState>, ids: Vec<String>) -> CmdResult<serde_json::Value> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.row_statuses(ids).map_err(err)).await.map_err(err)?
+}
+
 /// Personal local section metadata, read independently of agent processes.
 #[tauri::command]
 pub async fn local_sections() -> CmdResult<index::local_sections::SectionState> {
@@ -1895,17 +1900,24 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// fail after it, so a session whose agent never starts is still visible and
 /// deletable.
 #[tauri::command]
-pub async fn create_session(app: AppHandle, mut req: NewSession) -> CmdResult<SessionEntry> {
+pub async fn create_session(app: AppHandle, state: State<'_, AppState>, mut req: NewSession) -> CmdResult<SessionEntry> {
     if !req.project_path.starts_with("cloud:") && crate::git::is_repo(std::path::Path::new(&req.project_path))
         && !crate::configuration_commands::review(&app, &req.project_path).await? {
         return Err("Repository configuration was not trusted. No workspace was created.".into());
     }
+    let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::session_ops::prefer_native_codex_session(&mut req);
-        create_session_blocking(&app, req)
+        sessions.create(&req).map_err(err)
     })
         .await
         .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn workspace_setup(state: State<'_, AppState>, operation: String, session_id: Option<String>, pane_id: Option<String>) -> CmdResult<serde_json::Value> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.workspace_setup(&operation, session_id.as_deref(), pane_id.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 /// Tell every window what a session is now. The window that made a change
@@ -2283,8 +2295,14 @@ pub async fn skill_detail(dir_path: String) -> CmdResult<crate::skills::SkillDet
 
 /// The branch against its base, for the side panel's Branch tab.
 #[tauri::command]
-pub async fn branch_overview(cwd: String, base: Option<String>) -> CmdResult<crate::branch_overview::BranchOverview> {
-    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::overview(Path::new(&cwd), base.as_deref())).await.map_err(err)
+pub async fn branch_overview(cwd: String, base: Option<String>, local_only: Option<bool>) -> CmdResult<crate::branch_overview::BranchOverview> {
+    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::overview(Path::new(&cwd), base.as_deref(), local_only.unwrap_or(false))).await.map_err(err)
+}
+
+/// Whether this project can use GitHub pull requests.
+#[tauri::command]
+pub async fn project_forge(cwd: String) -> CmdResult<crate::github::ProjectForge> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::project_forge(Path::new(&cwd))).await.map_err(err)
 }
 
 /// Merges the checked-out branch into a local branch, for a project with no remote.
@@ -5149,6 +5167,34 @@ pub async fn remove_workspace(app: AppHandle, project_path: String, path: String
         let removed = state.sessions().map_err(err)?.workspace("removeWorkspace", params).map_err(err)?;
         state.browser.forget_workspace(&crate::browser::control::canonical(&path));
         Ok(removed)
+    }).await.map_err(err)?
+}
+
+// Local session ids are resolved here; cloud/guest paths cannot select a root.
+#[tauri::command]
+pub async fn repo_mirror_status(session_id: String) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::repo_mirror::status(Path::new(&session.project_path)).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn repo_mirror_start(session_id: String, confirmed: bool) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        if session.worktree_name.is_none() || session.worktree_removed || session.is_quick() {
+            return Err("Choose a local worktree session to mirror.".into());
+        }
+        crate::repo_mirror::start(Path::new(&session.project_path), Path::new(&session.cwd), confirmed).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn repo_mirror_stop(session_id: String) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::repo_mirror::stop(Path::new(&session.project_path)).map_err(err)
     }).await.map_err(err)?
 }
 

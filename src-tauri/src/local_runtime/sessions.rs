@@ -20,6 +20,14 @@ pub struct Sessions(Arc<Client>);
 impl Sessions {
     pub fn new(client: Arc<Client>) -> Self { Self(client) }
 
+    pub fn create(&self, req: &crate::session_ops::NewSession) -> Result<crate::store::index::SessionEntry> {
+        self.call("runtime.session.create", json!({"req": req}))
+    }
+
+    pub fn workspace_setup(&self, operation: &str, session: Option<&str>, pane: Option<&str>) -> Result<Value> {
+        self.call("runtime.session.workspaceSetup", json!({"operation": operation, "sessionId": session, "paneId": pane}))
+    }
+
     fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
         self.0.call(command,params)
     }
@@ -144,6 +152,10 @@ impl Sessions {
 
     pub fn resume_conversation(&self, session: &str, tab: &str, harness: &str, provider_session_id: &str) -> Result<()> {
         self.tab("resumeConversation", session, tab, json!({"harness":harness,"providerSessionId":provider_session_id}))
+    }
+
+    pub fn row_statuses(&self, ids: Vec<String>) -> Result<Value> {
+        self.quick("runtime.session.rowStatuses", json!({"ids":ids}))
     }
 
     pub fn running_tabs(&self) -> Result<Vec<RunningTab>> {

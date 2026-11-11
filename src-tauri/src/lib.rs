@@ -87,6 +87,8 @@ mod branch_overview;
 #[cfg(feature = "desktop")]
 mod branch_step;
 mod git;
+#[cfg(feature = "desktop")]
+mod repo_mirror;
 mod checkpoints;
 mod worktree_files;
 mod git_media;
@@ -140,6 +142,7 @@ mod session;
 mod sidebar_activity;
 mod session_archive;
 mod session_ops;
+mod workspace_setup;
 mod stray_processes;
 pub mod serve;
 pub mod sink;
@@ -591,6 +594,7 @@ pub fn run() {
             commands::project_start_defaults,
             commands::project_create,
             commands::list_sessions,
+            commands::session_row_statuses,
             commands::local_sections,
             commands::edit_local_section,
             commands::automations_list,
@@ -606,6 +610,7 @@ pub fn run() {
             commands::app_activity_summary,
             commands::stats_usage_refresh,
             commands::create_session,
+            commands::workspace_setup,
             commands::create_quick_chat,
             commands::set_quick_chat_cwd,
             commands::move_quick_chat_to_project,
@@ -644,6 +649,7 @@ pub fn run() {
             commands::skill_detail,
             commands::work_status,
             commands::branch_overview,
+            commands::project_forge,
             commands::branch_fetch,
             commands::branch_merge_into,
             commands::list_branches,
@@ -800,6 +806,9 @@ pub fn run() {
             commands::update_project,
             commands::set_project_logo,
             commands::list_workspaces,
+            commands::repo_mirror_status,
+            commands::repo_mirror_start,
+            commands::repo_mirror_stop,
             commands::preview_workspace_name,
             commands::rename_workspace,
             commands::rename_branch,

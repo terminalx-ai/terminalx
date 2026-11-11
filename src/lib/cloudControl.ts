@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { sessionStatus } from "@terminalx/portable/sessionStatus";
 import { api, type CloudWorkspaceListItem } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { getTabLog, lastSeq } from "@/lib/agentEvents";
@@ -352,6 +353,8 @@ function sessionView(session: CloudDashboardSession) {
     connected: session.connected,
     // False: only what this desktop saved earlier is known of it.
     fresh: session.fresh,
+    rowStatus: session.rowStatus,
+    detailedStatus: sessionStatus(session.rowStatus ?? session),
     tabs: session.tabs.map((tab) => ({ id: tab.tabId, agent: tab.harness, title: tab.title, status: tab.status })),
   };
 }

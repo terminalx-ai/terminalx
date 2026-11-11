@@ -658,6 +658,13 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         _ => {}
     }
     let grant = manager.mobile.grant(&actor, string("connection")?)?;
+    if method == "rowStatuses" {
+        drop(grant.enter()?);
+        let sessions: Vec<_> = crate::store::index::load()?.into_iter().filter(|s| !s.archived).collect();
+        let rows = serde_json::to_value(manager.row_statuses(&sessions))?;
+        drop(grant.enter()?);
+        return Ok(rows);
+    }
     if method == "release" {
         manager.mobile.release_driver(&actor,string("connection")?,string("sessionId")?,string("tabId")?)?;
         manager.mobile.publish_drivers(manager);

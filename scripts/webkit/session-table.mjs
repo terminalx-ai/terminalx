@@ -30,9 +30,9 @@ try {
     assert.ok(await rows.count() < 40, "large lists render only a window of rows");
     assert.equal(await search.inputValue(), "Local working");
     await table.getByRole("button", { name: "Name", exact: true }).click();
-    assert.equal(await rows.first().locator("td").nth(1).textContent(), "Local working session 01");
+    assert.equal(await rows.first().locator("[data-session-title]").textContent(), "Local working session 01");
     await table.getByRole("button", { name: "Name", exact: true }).click();
-    assert.equal(await rows.first().locator("td").nth(1).textContent(), "Local working session 120");
+    assert.equal(await rows.first().locator("[data-session-title]").textContent(), "Local working session 120");
     await rows.first().focus();
     await page.keyboard.press("ArrowDown");
     assert.equal(await rows.nth(1).getAttribute("data-focused"), "true");

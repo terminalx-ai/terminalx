@@ -141,6 +141,7 @@ export function AgentDashboard() {
     const deletions = workspace ? workspace.branchDeletions ?? workspace.deletions : null;
     return {
       id: session.id,
+      session,
       status: DASHBOARD_STATES.find((state) => state.id === (session.archived ? "archived" : sessionColumn(session)))!.label,
       name: session.title,
       project: projectName(session.projectPath),

@@ -99,7 +99,7 @@ describe("the chat list", () => {
     await act(async () => {});
     const [asks, said, alone, quiet] = rows();
     expect(within(asks!).getByTestId("chat-preview").textContent).toBe("web · raccoon/fix-login");
-    expect(within(asks!).getByRole("img", { name: "Needs you" })).toBeTruthy();
+    expect(within(asks!).getByText("Needs attention")).toBeTruthy();
     // What it waits on is still there, on hover.
     expect(asks!.querySelector("[title]")?.getAttribute("title")).toBe("fix login\nweb · raccoon/fix-login\nAllow rm -rf dist?");
     expect(within(said!).getByTestId("chat-preview").textContent).toBe("Done: the tests pass and the build is green.");

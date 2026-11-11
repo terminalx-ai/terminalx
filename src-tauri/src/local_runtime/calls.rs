@@ -157,9 +157,25 @@ fn setup_panes(terminals: &crate::pty::Terminals, harness: &str) -> Vec<String> 
 }
 
 pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> Result<Value> {
+    if method == "rowStatuses" {
+        let ids: Vec<String> = serde_json::from_value(params["ids"].clone())?;
+        let sessions: Vec<_> = crate::store::index::load()?.into_iter().filter(|s| ids.contains(&s.id)).collect();
+        return Ok(serde_json::to_value(manager.row_statuses(&sessions))?);
+    }
     if method == "running" { return Ok(serde_json::to_value(manager.running_tabs())?); }
     if method == "permissions" { return Ok(serde_json::to_value(manager.pending_permissions())?); }
     match method {
+        "create" => {
+            manager.accepting_work()?;
+            return Ok(serde_json::to_value(crate::session_ops::create_session_blocking(manager.sink().as_ref(), serde_json::from_value(params["req"].clone())?).map_err(anyhow::Error::msg)?)?);
+        }
+        "workspaceSetup" => return match string(&params, "operation")? {
+            "list" => Ok(serde_json::to_value(crate::workspace_setup::list(manager)?)?),
+            "rerun" => Ok(serde_json::to_value(crate::workspace_setup::start(manager, string(&params, "sessionId")?, true)?)?),
+            "stop" => Ok(serde_json::to_value(crate::workspace_setup::stop(manager, string(&params, "sessionId")?, string(&params, "paneId")?)?)?),
+            "log" => Ok(json!(crate::workspace_setup::log(manager, string(&params, "sessionId")?, string(&params, "paneId")?)?)),
+            _ => bail!("Unknown workspace setup operation"),
+        },
         "manualStatus" => {
             let patch = crate::session_ops::SessionPatch { manual_status: Some(serde_json::from_value(params["status"].clone())?), ..Default::default() };
             let session = crate::session_ops::update_session_meta(string(&params, "sessionId")?, &patch).map_err(anyhow::Error::msg)?;
