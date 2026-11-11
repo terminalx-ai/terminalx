@@ -92,6 +92,10 @@ fn awaiting_cli_delivery_without_recovery_waits_for_the_next_finished_turn() {
     assert_eq!(queue(&rig), expected);
     assert!(!rig.typed().contains("after CLI acceptance"));
     hook(&rig, "UserPromptSubmit", json!({"prompt":"earlier CLI input"}));
+    // Input typed into the CLI reaches the chat through its transcript, which
+    // also opens the turn's close again (TurnTail::opened) for the Stop below.
+    rig.cli_takes("earlier CLI input", "CLI reply");
+    rig.wait("the CLI input's transcript record", || rig.said().iter().any(|line| line == "claude: CLI reply"));
     hook(&rig, "Stop", json!({}));
     prompt(&rig, "after CLI acceptance");
     rig.wait("held item delivered after acceptance", || queue(&rig).items.is_empty() && queue(&rig).sending.is_none());
@@ -119,6 +123,10 @@ fn cli_input_appearing_after_a_claim_releases_the_claim_without_pausing() {
     assert_eq!(Queue::restore(&store::log_path(SESSION, TAB).unwrap()).unwrap(), expected);
     assert!(!rig.typed().contains("after the raced CLI input"));
     hook(&rig, "UserPromptSubmit", json!({"prompt":"raced CLI input"}));
+    // Input typed into the CLI reaches the chat through its transcript, which
+    // also opens the turn's close again (TurnTail::opened) for the Stop below.
+    rig.cli_takes("raced CLI input", "CLI reply");
+    rig.wait("the CLI input's transcript record", || rig.said().iter().any(|line| line == "claude: CLI reply"));
     hook(&rig, "Stop", json!({}));
     prompt(&rig, "after the raced CLI input");
     rig.wait("held item delivered after the race", || queue(&rig).items.is_empty() && queue(&rig).sending.is_none());
