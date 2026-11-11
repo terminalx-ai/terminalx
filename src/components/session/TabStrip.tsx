@@ -1,11 +1,11 @@
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { Globe, Plus, TerminalSquare } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { closeEditor, useEditors } from "@/lib/editors";
+import { closeEditor, isReviewEditor, setLastFocused, useEditors } from "@/lib/editors";
 import { useShortcut } from "@/lib/hotkeys";
 import { useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
@@ -71,8 +71,9 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
   // The whole workspace's row: the shortcuts count and step through the tabs the strip shows, in its order.
   const row = useTabRow(session);
   const editors = useEditors();
-  const hasEditors = editors.editors.some((editor) => editor.sessionId === session.id);
-  const activeEditor = editors.active[session.id] ?? null;
+  const hasEditors = editors.editors.some((editor) => editor.sessionId === session.id && !isReviewEditor(editor));
+  const activeEditor = editors.editors.find((e) => e.id === editors.active[session.id] && !isReviewEditor(e))?.id ?? null;
+  useEffect(() => { if (selected?.kind !== "review") setLastFocused("chat"); }, [selected?.kind, selected?.id]);
   const picker = useRowMenu();
   // Read when a key is pressed, so the bindings are made once and not on every render.
   const now = useRef({ row, selected, hasEditors, activeEditor, lastFocused: editors.lastFocused });
@@ -81,7 +82,7 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
   const openMenu = useCallback(() => picker.setOpen(true), [picker.setOpen]);
   const closeActive = useCallback(() => {
     const { row, selected, hasEditors, activeEditor, lastFocused } = now.current;
-    if (lastFocused === "editor" && hasEditors && activeEditor) {
+    if (selected?.kind !== "review" && lastFocused === "editor" && hasEditors && activeEditor) {
       void closeEditor(activeEditor);
       return;
     }
