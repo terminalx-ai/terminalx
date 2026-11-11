@@ -14,9 +14,10 @@ use super::{Brief, Budget, Estimate, Piece, PieceState};
 /// The modes a worker may be started in: the ones `sessions create --mode` takes.
 pub const MODES: [&str; 5] = ["plan", "manual", "auto", "acceptEdits", "bypassPermissions"];
 
-/// A plan as `runs create --from` reads it.
+/// A plan as `runs create --from` reads it. A key it does not know is refused, not
+/// ignored: a mode written as `mode` would otherwise run in the project's default.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Plan {
     pub goal: String,
     #[serde(default)]
@@ -28,7 +29,7 @@ pub struct Plan {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlanPiece {
     pub id: String,
     pub title: String,
@@ -91,6 +92,33 @@ impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
+}
+
+/// The keys a piece may have, as a plan writes them.
+const PIECE_KEYS: [&str; 19] = [
+    "id", "title", "goal", "why", "scope", "outOfScope", "known", "readFirst", "limits", "owns", "dependsOn", "doneCheck", "kind", "agent", "model", "effort", "permissionMode", "readsUntrusted", "estimate",
+];
+const PLAN_KEYS: [&str; 4] = ["goal", "budget", "agent", "pieces"];
+
+/// Read a plan from JSON. A key the plan format does not have is refused with the piece
+/// it is in and the key it was probably meant to be: silently dropping `"mode": "manual"`
+/// would start that piece in the project's mode instead.
+pub fn parse(value: &Value) -> Result<Plan, PlanError> {
+    let unknown = |keys: &[&str], object: &Value, piece: Option<&str>| -> Result<(), PlanError> {
+        let Some(found) = object.as_object().and_then(|object| object.keys().find(|key| !keys.contains(&key.as_str()))) else { return Ok(()) };
+        // The same word in another spelling (`depends_on`), or a known key's last word (`mode`).
+        let plain = |key: &str| key.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_lowercase();
+        let meant = keys.iter().find(|key| plain(key) == plain(found)).or_else(|| keys.iter().find(|key| plain(key).ends_with(&plain(found)) && plain(found).len() >= 4));
+        let hint = meant.map(|key| format!(" Did you mean `{key}`?")).unwrap_or_default();
+        let place = piece.map(|id| format!("Piece {id}")).unwrap_or_else(|| "The plan".into());
+        Err(PlanError::new("unknown_key", piece, format!("{place} has the key `{found}`, which a plan does not have.{hint} Nothing in a plan is ignored, so correct or remove it."), json!({"key": found, "meant": meant})))
+    };
+    unknown(&PLAN_KEYS, value, None)?;
+    for (index, piece) in value["pieces"].as_array().into_iter().flatten().enumerate() {
+        let id = piece["id"].as_str().map(str::trim).filter(|id| !id.is_empty()).map(str::to_owned).unwrap_or_else(|| (index + 1).to_string());
+        unknown(&PIECE_KEYS, piece, Some(&id))?;
+    }
+    serde_json::from_value(value.clone()).map_err(|error| PlanError::new("plan_invalid", None, format!("The plan cannot be read: {error}. A plan is a JSON object with `goal` and `pieces`; each piece has `id`, `title` and `doneCheck`."), Value::Null))
 }
 
 /// What a plan is checked against: the project's settings and the agents on offer.
@@ -253,6 +281,7 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
             attempts: 0,
             worker: None,
             branch: None,
+            held: None,
             started_mode: None,
             state: PieceState::Queued,
             note: None,
@@ -566,6 +595,32 @@ mod tests {
         }
         // A person who approves the plan sees the mode of every piece, and may let it stand.
         assert_eq!(validate(&asking("bypassPermissions"), &rules("manual", true)).unwrap()[0].permission_mode.as_deref(), Some("bypassPermissions"));
+    }
+
+    #[test]
+    fn a_key_a_plan_does_not_have_is_refused_naming_the_piece_and_what_was_meant() {
+        let read = |pieces: Value| parse(&json!({"goal": "g", "pieces": pieces}));
+        // The mistake that matters most: a mode under another name would run in the project's default.
+        for (written, meant) in [("mode", "permissionMode"), ("permission_mode", "permissionMode"), ("depends_on", "dependsOn"), ("done_check", "doneCheck"), ("DoneCheck", "doneCheck"), ("reads_untrusted", "readsUntrusted")] {
+            let error = read(json!([{"id": "a", "title": "A", "doneCheck": "x"}, {"id": "b", "title": "B", "doneCheck": "x", written: "manual"}])).unwrap_err();
+            assert_eq!((error.code, error.piece.as_deref()), ("unknown_key", Some("b")), "{written}");
+            assert_eq!(error.details, json!({"key": written, "meant": meant}));
+            assert!(error.message.contains(&format!("Piece b has the key `{written}`")) && error.message.contains(&format!("Did you mean `{meant}`?")), "{}", error.message);
+        }
+        // A key that resembles none is still refused, and a piece with no id is named by its place.
+        let error = read(json!([{"title": "A", "doneCheck": "x", "priority": 1}])).unwrap_err();
+        assert_eq!((error.code, error.piece.as_deref(), &error.details), ("unknown_key", Some("1"), &json!({"key": "priority", "meant": null})));
+        let error = parse(&json!({"goal": "g", "pieces": [], "approve": true})).unwrap_err();
+        assert_eq!((error.code, error.piece.as_deref()), ("unknown_key", None));
+        assert!(error.message.starts_with("The plan has the key `approve`"), "{}", error.message);
+        // Every key the format has is read, and a plan of the wrong shape says so.
+        let whole = parse(&json!({"goal": "g", "budget": {"points": 5}, "agent": "claude", "pieces": [{
+            "id": "a", "title": "A", "goal": "g", "why": "w", "scope": "s", "outOfScope": "o", "known": ["k"], "readFirst": ["r"], "limits": ["l"], "owns": ["src/"],
+            "dependsOn": [], "doneCheck": "x", "kind": "code", "agent": "codex", "model": "m", "effort": "high", "permissionMode": "manual", "readsUntrusted": true, "estimate": {"low": 1.0, "high": 2.0},
+        }]})).unwrap();
+        assert_eq!((whole.pieces[0].permission_mode.as_deref(), whole.pieces[0].reads_untrusted, whole.budget.points), (Some("manual"), true, Some(5.0)));
+        assert_eq!(parse(&json!({"goal": "g", "pieces": "none"})).unwrap_err().code, "plan_invalid");
+        assert_eq!(parse(&json!({"pieces": []})).unwrap_err().code, "plan_invalid");
     }
 
     #[test]

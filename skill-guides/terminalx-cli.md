@@ -657,6 +657,10 @@ piece in `details.piece`, and nothing is stored:
 - `mode_not_allowed`: a piece asks for a mode that allows more than the project's workers
   run in, in a project that starts runs without approval. Use the project's mode or a
   stricter one.
+- `unknown_key`: the plan, or a piece, has a key the format does not have (`details.key`,
+  and `details.meant` when it resembles one: `mode` for `permissionMode`, `depends_on` for
+  `dependsOn`). Nothing in a plan is ignored, so a misspelt key is refused rather than
+  dropped.
 - `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`: as named.
 
 It returns `run` and `approvalRequired`.
@@ -680,7 +684,9 @@ starts it at once.
 `started` (piece ids), `waiting` (each queued piece with the pieces it waits `on`) and
 `failed` (pieces whose worker could not be started, with the `error`). Call it again
 whenever a piece is done: it starts the pieces that waited on it, and tries again a piece
-whose worker could not be started. Calling it when nothing new is ready starts nothing.
+whose worker could not be started. Calling it when nothing new is ready starts nothing. A
+piece whose session was made but could not be made safe to brief keeps that session (`held`
+says why) and is tried again with it, never with a second one.
 
 Each worker is a session you started (`sessions list --children-of` lists them), in a
 worktree of its own on a branch cut from your branch as it is committed when the piece
@@ -710,7 +716,8 @@ many pieces carry none). Each piece has its plan fields and `state`, `attempts`,
 - Piece `state` follows its worker's last report, each time the run is read: `queued` (no
   worker yet), `running`, `done` (it reported `done`), `blocked` (it reported `partial` or
   `blocked`, sent no report, waits on a person, or its session was deleted; `note` says
-  which), `failed` (it reported `failed`, or could not be started), `stopped`.
+  which), `failed` (it reported `failed`, or could not be started), `stopped`. A `done`
+  piece stays done when its worker's session is deleted afterwards.
 
 A `done` piece is a worker's claim. Read its report and check the evidence before you build
 on it. To get a `blocked` or `failed` piece moving, `send` its worker what it needs: the
@@ -731,7 +738,9 @@ outside the worker's judgment: deny rules handed to its agent at launch, Termina
 check of every tool call, a git configuration in which every push goes nowhere, and a branch
 with no upstream. A refused command tells the worker to stop and report what is ready.
 Collect a worker's branch from the shared repository yourself (`git merge <its branch>` in
-your worktree); do not ask a worker to push or to merge.
+your worktree); do not ask a worker to push or to merge. A worker gets no issue pipeline
+(`pipelines start` is refused for it: a pipeline would push and merge on its behalf), and a
+session a worker starts has the same limits as the worker.
 
 ### Permissions
 
@@ -1253,7 +1262,7 @@ JSON failures have this shape:
   Nothing was created; use an id from `sessions list`, or `--no-parent` to record none.
 - `invalid_arguments`: correct the named flag or missing value; do not invent a substitute.
 - `shared_file`, `dependency_cycle`, `unknown_dependency`, `no_done_check`, `too_many_pieces`,
-  `mode_not_allowed`, `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`:
+  `mode_not_allowed`, `unknown_key`, `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`:
   `runs create` refused the plan. `details` names the piece and the rule's particulars;
   nothing was stored. Correct the plan and create the run again.
 - `awaiting_approval`: the run waits for the person to approve its plan in the app. Tell

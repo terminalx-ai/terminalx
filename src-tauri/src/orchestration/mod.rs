@@ -91,7 +91,7 @@ pub struct SessionRef {
 
 /// What a run may use. Recorded with the run and shown with the plan.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Budget {
     /// Points of a subscription's usage window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,7 +103,7 @@ pub struct Budget {
 
 /// What the lead expects a piece to cost, in API-equivalent dollars.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Estimate {
     pub low: f64,
     pub high: f64,
@@ -176,6 +176,10 @@ pub struct Piece {
     /// The worker's branch, cut from the lead's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Why its worker has a session but was not sent its brief: the session could not be
+    /// made safe to start. The next `runs start` tries that again, with the same session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
     /// The mode its worker was started in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_mode: Option<String>,

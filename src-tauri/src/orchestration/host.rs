@@ -81,17 +81,25 @@ impl Host for ManagerHost {
         )
         .map_err(|error| anyhow!("{error}"))?;
         let tab = entry.tabs.first().ok_or_else(|| anyhow!("the new session has no tab"))?;
-        // Marked on its own entry before anything is sent to it: its limits do not depend on the runs file.
-        index::update_session(&entry.id, |session| {
-            session.mark_run_worker();
-            Ok(())
-        })
-        .with_context(|| format!("session {} was created, but could not be marked as a run's worker", entry.id))?;
-        if let Some(branch) = entry.branch.as_deref() {
-            // The session stays if this fails; its piece says why it did not start.
-            guard::no_upstream(Path::new(&entry.cwd), branch).with_context(|| format!("session {} was created, but its branch {branch} could not be left without an upstream", entry.id))?;
-        }
+        // It is marked a worker as it is made (`session_ops::inherit_run_limits`), while this
+        // lead's start is under way; `secure_worker` checks that before it is briefed.
         Ok(Started { session_id: entry.id.clone(), tab_id: tab.id.clone(), branch: entry.branch.clone() })
+    }
+
+    fn secure_worker(&self, worker: &SessionRef, branch: Option<&str>) -> anyhow::Result<()> {
+        let session = index::get(&worker.session_id).context("the worker's session is gone")?;
+        // On its own entry, so its limits do not depend on the runs file.
+        if !session.run_worker() {
+            index::update_session(&session.id, |session| {
+                session.mark_run_worker();
+                Ok(())
+            })
+            .context("the session could not be marked as a run's worker")?;
+        }
+        if let Some(branch) = branch {
+            guard::no_upstream(Path::new(&session.cwd), branch).with_context(|| format!("its branch {branch} could not be left without an upstream"))?;
+        }
+        Ok(())
     }
 
     fn brief_worker(&self, worker: &SessionRef, brief: &str) -> anyhow::Result<()> {

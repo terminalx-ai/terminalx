@@ -52,6 +52,8 @@ export interface RunPiece {
   worker?: RunSessionRef;
   branch?: string;
   startedMode?: string;
+  /** Why its worker has a session but was not sent its brief; the next start tries again. */
+  held?: string;
   state: PieceState;
   note?: string;
 }

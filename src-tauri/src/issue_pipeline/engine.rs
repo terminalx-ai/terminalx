@@ -1888,8 +1888,18 @@ pub fn start_with_switches(host: &dyn Host, session_id: &str, tab_id: &str, auto
     start_locked(host, session_id, tab_id, auto_merge, resolve_conflicts, issue_body)
 }
 
+/// A run's worker never gets a pipeline: one would push its branch, open a pull request
+/// and may merge it, which is what the worker itself is kept from (`orchestration::guard`).
+fn refuse_run_worker(session: &crate::store::index::SessionEntry) -> Result<()> {
+    if crate::orchestration::guard::limited(session) {
+        bail!("This session is a worker of an orchestration run: it does not push, open a pull request or merge. Its lead collects its branch.");
+    }
+    Ok(())
+}
+
 fn start_locked(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
     let session = host.session(session_id)?;
+    refuse_run_worker(&session)?;
     if session.tab(tab_id).is_none() {
         bail!("tab {tab_id} not found in session {session_id}");
     }
@@ -2029,6 +2039,7 @@ pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merg
         }
     }
     let session = host.session(session_id)?;
+    refuse_run_worker(&session)?;
     let tab = session.tab(tab_id).context("The author tab is no longer in this session.")?;
     if tab.transport == crate::store::index::AgentTransport::ExperimentalCodexStdio {
         bail!("Autopilot requires a PTY author conversation.");

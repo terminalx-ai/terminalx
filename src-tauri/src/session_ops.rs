@@ -117,6 +117,15 @@ pub struct NewSession {
     pub parent: Option<index::ParentRef>,
 }
 
+/// A session started by an orchestration run's worker, or for a run's piece, has the
+/// worker's limits from its first moment (`orchestration::guard`): what a worker may not
+/// do itself it may not do through a session it starts.
+fn inherit_run_limits(entry: &mut SessionEntry) {
+    if crate::orchestration::guard::limited(entry) {
+        entry.mark_run_worker();
+    }
+}
+
 pub(crate) fn validate_session_target(req: &NewSession) -> Result<()> {
     if let Some(tab) = &req.tab { validate_transport(tab)?; }
     if let Some(number) = req.checkout_pr {
@@ -298,6 +307,7 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         tabs: first_tab.into_iter().collect(),
         unknown: BTreeMap::new(),
     };
+    inherit_run_limits(&mut entry);
 
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
         let cwd = projects::canonical_directory(cwd).map_err(err)?;
@@ -428,6 +438,8 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
             tabs: first_tab.into_iter().collect(),
             unknown: BTreeMap::new(),
         };
+        let mut entry = entry;
+        inherit_run_limits(&mut entry);
         index::local_sections::insert_session(&entry, req.section_id.as_deref()).map_err(err)?;
         Ok(entry)
     })();

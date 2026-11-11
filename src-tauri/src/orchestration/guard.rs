@@ -75,6 +75,14 @@ pub const RULES: &[Rule] = &[
     rule(&["git"], &["merge"], Limit::Merge),
     rule(&["gh"], &["pr", "merge"], Limit::Merge),
     rule(&["terminalx", "tnx"], &["pipelines", "merge"], Limit::Merge),
+    // A pipeline pushes the branch, opens a pull request and may merge it: the app would
+    // do for the worker what the worker may not do. The engine refuses one for a worker
+    // as well (`issue_pipeline::engine`); these stop the command where it is typed.
+    rule(&["terminalx", "tnx"], &["pipelines", "start"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["pipelines", "attach"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["pipelines", "advance"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["pipelines", "resume"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["pipelines", "auto-merge"], Limit::Merge),
     rule(&["gh"], &["workflow", "run"], Limit::Deploy),
     rule(&["gh"], &["release", "create"], Limit::Deploy),
     rule(&["npm", "pnpm", "yarn", "bun"], &["publish"], Limit::Deploy),
@@ -138,6 +146,11 @@ pub fn limited(session: &SessionEntry) -> bool {
     if session.run_worker() {
         return true;
     }
+    // A session a worker started is the worker's own hands: it has the worker's limits. It is
+    // marked when it is made (`session_ops`); this covers one made before its parent was marked.
+    if started_by_worker(session, 0) {
+        return true;
+    }
     let being_started = session.parent.as_ref().is_some_and(|parent| STARTING.lock().unwrap_or_else(|error| error.into_inner()).as_ref().is_some_and(|leads| leads.contains(&parent.session_id)));
     being_started
         || match super::store::for_worker(&session.id) {
@@ -147,6 +160,12 @@ pub fn limited(session: &SessionEntry) -> bool {
                 session.parent.is_some()
             }
         }
+}
+
+/// Whether some session up the chain of who started whom is a run's worker.
+fn started_by_worker(session: &SessionEntry, depth: usize) -> bool {
+    let Some(parent) = session.parent.as_ref().filter(|_| depth < 8).and_then(|parent| crate::store::index::get(&parent.session_id).ok()) else { return false };
+    parent.run_worker() || super::store::for_worker(&parent.id).is_ok_and(|found| found.is_some()) || started_by_worker(&parent, depth + 1)
 }
 
 /// Where a push by a run's worker is sent instead of its remote. No such
@@ -305,40 +324,38 @@ fn refused_at(command: &str, depth: usize) -> Option<(&'static Rule, String)> {
     if depth > 4 {
         return None;
     }
-    for simple in simple_commands(command) {
-        let mut words: &[String] = &simple;
-        // `A=b git push`, `env A=b git push`, `sudo -n git push`.
-        loop {
-            match words.first() {
-                Some(word) if is_assignment(word) => words = &words[1..],
-                Some(word) if WRAPPERS.contains(&base(word)) => {
-                    words = &words[1..];
-                    while words.first().is_some_and(|word| word.starts_with('-') || is_assignment(word) || word.parse::<f64>().is_ok()) {
-                        words = &words[1..];
-                    }
-                }
-                _ => break,
-            }
-        }
-        let Some((program, args)) = words.split_first() else { continue };
-        let program = base(program);
-        if SHELLS.contains(&program) || program == "eval" {
-            // `sh -c 'git push'`, `bash -lc "…"`, `eval "git push"`.
-            let script = if program == "eval" { Some(args.join(" ")) } else { args.iter().position(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')).and_then(|at| args.get(at + 1)).cloned() };
-            if let Some(found) = script.and_then(|script| refused_at(&script, depth + 1)) {
-                return Some(found);
-            }
-            continue;
-        }
-        let args: Vec<&str> = if program == "git" { git_arguments(args) } else { args.iter().map(String::as_str).collect() };
-        let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
-        for rule in RULES.iter().filter(|rule| rule.programs.contains(&program)) {
-            if args.starts_with(rule.words) || plain.starts_with(rule.words) {
-                return Some((rule, format!("{program} {}", rule.words.join(" "))));
-            }
-        }
+    simple_commands(command).iter().find_map(|words| refused_words(words, depth))
+}
+
+/// The rule one simple command breaks, as its words.
+fn refused_words(mut words: &[String], depth: usize) -> Option<(&'static Rule, String)> {
+    // `A=b git push`.
+    while words.first().is_some_and(|word| is_assignment(word)) {
+        words = &words[1..];
     }
-    None
+    let (program, args) = words.split_first()?;
+    let program = base(program);
+    if WRAPPERS.contains(&program) {
+        // `env A=b git push`, `sudo -u root git merge x`, `timeout -s KILL 30 npm publish`: which
+        // of a wrapper's words are its own options, and which of those take a value, differs by
+        // wrapper and by system. So every word after it that names a command a rule is about is
+        // read as the start of that command. `sudo echo git push` is refused too: the price of
+        // not guessing.
+        return (0..args.len())
+            .filter(|at| {
+                let word = base(&args[*at]);
+                RULES.iter().any(|rule| rule.programs.contains(&word)) || SHELLS.contains(&word) || WRAPPERS.contains(&word) || word == "eval"
+            })
+            .find_map(|at| refused_words(&args[at..], depth));
+    }
+    if SHELLS.contains(&program) || program == "eval" {
+        // `sh -c 'git push'`, `bash -lc "…"`, `eval "git push"`.
+        let script = if program == "eval" { Some(args.join(" ")) } else { args.iter().position(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')).and_then(|at| args.get(at + 1)).cloned() };
+        return script.and_then(|script| refused_at(&script, depth + 1));
+    }
+    let args: Vec<&str> = if program == "git" { git_arguments(args) } else { args.iter().map(String::as_str).collect() };
+    let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
+    RULES.iter().filter(|rule| rule.programs.contains(&program)).find(|rule| args.starts_with(rule.words) || plain.starts_with(rule.words)).map(|rule| (rule, format!("{program} {}", rule.words.join(" "))))
 }
 
 fn is_assignment(word: &str) -> bool {
@@ -508,16 +525,26 @@ mod tests {
             "echo `git push`",
             "if cargo test; then git push; fi",
             "timeout 30 git push",
+            "sudo -u root git push",
+            "env -u GIT_CONFIG_GLOBAL git push origin main",
+            "timeout -s KILL 30 git push",
+            "nice -n 5 xargs -I {} git push {}",
             "git send-pack origin main",
             "gh pr create --fill",
             "gh repo sync",
         ] {
             assert_eq!(limit_of(command), Some(Limit::Push), "{command}");
         }
-        for command in ["git merge main", "git merge --no-ff origin/main", "gh pr merge 12 --squash", "gh pr merge --auto 12","terminalx pipelines merge abc", "tnx pipelines merge abc"] {
+        for command in [
+            "git merge main", "git merge --no-ff origin/main", "gh pr merge 12 --squash", "gh pr merge --auto 12", "terminalx pipelines merge abc", "tnx pipelines merge abc",
+            // A wrapper's own options, with or without a value, do not hide what it runs.
+            "sudo -u root git merge x", "env -u X gh pr merge 1", "timeout -k 5 -s KILL 30 git merge main", "sudo -u root env A=b sh -c 'git merge x'",
+            // A pipeline of its own would push and merge for it.
+            "terminalx pipelines start 0198c", "tnx pipelines attach 0198c --auto-merge", "terminalx pipelines advance abc", "terminalx pipelines auto-merge abc on",
+        ] {
             assert_eq!(limit_of(command), Some(Limit::Merge), "{command}");
         }
-        for command in ["npm publish", "pnpm publish --access public", "cargo publish", "vercel deploy", "vercel --prod", "vercel deploy --prod", "gh workflow run release.yml", "gh release create v1", "docker push org/image", "kubectl apply -f k8s/", "terraform apply -auto-approve", "fly deploy", "helm upgrade app ./chart"] {
+        for command in ["npm publish", "pnpm publish --access public", "cargo publish", "vercel deploy", "vercel --prod", "vercel deploy --prod", "gh workflow run release.yml", "gh release create v1", "docker push org/image", "kubectl apply -f k8s/", "terraform apply -auto-approve", "fly deploy", "helm upgrade app ./chart", "timeout -s KILL 30 npm publish", "sudo -E -u deploy kubectl apply -f k8s/"] {
             assert_eq!(limit_of(command), Some(Limit::Deploy), "{command}");
         }
     }
@@ -551,6 +578,12 @@ mod tests {
             "vercel env ls",
             "helm template ./chart",
             "terminalx sessions report abc --json",
+            "terminalx pipelines list --json",
+            "terminalx pipelines show abc",
+            "sudo -u root ls",
+            "env -u X cargo test",
+            "timeout -s KILL 30 cargo test push",
+            "xargs -n 1 grep merge",
             "",
         ] {
             assert_eq!(limit_of(command), None, "{command}");
@@ -715,6 +748,11 @@ mod tests {
             assert!(limited(&session("child", Some("lead"))));
             assert!(!limited(&session("child", Some("another-lead"))));
         }
+        assert!(!limited(&session("child", Some("lead"))));
+        // A session a worker starts, and one that session starts, have the worker's limits.
+        crate::store::index::save(&[marked.clone(), session("child-of-worker", Some("worker")), session("grandchild", Some("child-of-worker"))]).unwrap();
+        assert!(limited(&session("child-of-worker", Some("worker"))));
+        assert!(limited(&session("grandchild", Some("child-of-worker"))));
         assert!(!limited(&session("child", Some("lead"))));
         // A runs file that cannot be read lifts nothing from a session a lead started.
         std::fs::write(crate::store::root().unwrap().join("orchestration-runs.json"), "{ not json").unwrap();

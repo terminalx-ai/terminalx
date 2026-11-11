@@ -36,6 +36,9 @@ struct World {
     no_worker: BTreeSet<String>,
     no_brief: BTreeSet<String>,
     no_stop: BTreeSet<String>,
+    /// Pieces whose new session cannot be made safe to brief, and how often that was tried.
+    no_secure: BTreeSet<String>,
+    secured: Vec<String>,
 }
 
 struct Fake {
@@ -94,6 +97,15 @@ impl Host for Fake {
         let session = format!("w{}-{}", world.made.len() + 1, piece.id);
         world.made.push(Made { piece: piece.id.clone(), agent: piece.agent.clone(), model: piece.model.clone(), effort: piece.effort.clone(), mode: mode.into(), session: session.clone() });
         Ok(Started { session_id: session.clone(), tab_id: format!("{session}-tab"), branch: Some(format!("raccoon/{}", piece.id)) })
+    }
+
+    fn secure_worker(&self, worker: &SessionRef, branch: Option<&str>) -> anyhow::Result<()> {
+        let mut world = self.world();
+        world.secured.push(worker.session_id.clone());
+        if world.no_secure.iter().any(|piece| worker.session_id.ends_with(&format!("-{piece}"))) {
+            anyhow::bail!("its branch {} could not be left without an upstream", branch.unwrap_or("?"));
+        }
+        Ok(())
     }
 
     fn brief_worker(&self, worker: &SessionRef, brief: &str) -> anyhow::Result<()> {
@@ -488,6 +500,66 @@ fn a_worker_that_cannot_be_started_fails_its_piece_and_the_next_start_tries_agai
     let again = engine::start(&host, &run.id).unwrap();
     assert_eq!(again.started, vec!["a"]);
     assert_eq!(host.made(), vec!["b", "c", "a"]);
+}
+
+#[test]
+fn a_session_that_cannot_be_made_safe_is_kept_and_tried_again_never_made_twice() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    host.settings.lock().unwrap().require_approval = false;
+    let plan: Plan = serde_json::from_value(json!({"goal": "Two", "pieces": [
+        {"id": "a", "title": "A", "doneCheck": "x"},
+        {"id": "b", "title": "B", "doneCheck": "x"},
+    ]}))
+    .unwrap();
+    let run = engine::create(&host, &plan, "lead", None).unwrap();
+    host.world().no_secure.insert("a".into());
+    let start = engine::start(&host, &run.id).unwrap();
+    assert_eq!(start.started, vec!["b"]);
+    assert_eq!(start.failed, vec![engine::NotStarted { piece: "a".into(), error: "its branch raccoon/a could not be left without an upstream".into() }]);
+    // The session exists and the run knows it: it was not briefed, and the piece says why.
+    let a = start.run.piece("a").unwrap().clone();
+    assert_eq!((a.state, a.worker.as_ref().map(|worker| worker.session_id.as_str()), a.attempts), (PieceState::Blocked, Some("w1-a"), 1));
+    assert_eq!(a.held.as_deref(), Some("its branch raccoon/a could not be left without an upstream"));
+    assert_eq!(a.note.as_deref(), Some("Its worker has a session but was not briefed: its branch raccoon/a could not be left without an upstream"));
+    assert!(!host.world().briefs.contains_key("w1-a"));
+    // Reading the run does not make something else of it, and it is found as that run's worker.
+    assert_eq!(engine::refreshed(&host, &run.id).unwrap().piece("a"), Some(&a));
+    assert_eq!(store::for_worker("w1-a").unwrap().unwrap().1, "a");
+
+    // Each later start tries the same session again: no second session, no second worktree.
+    let again = engine::start(&host, &run.id).unwrap();
+    assert_eq!((again.started.len(), again.failed.len()), (0, 1));
+    assert_eq!(host.made(), vec!["a", "b"]);
+    host.world().no_secure.clear();
+    let third = engine::start(&host, &run.id).unwrap();
+    assert_eq!(third.started, vec!["a"]);
+    assert_eq!(host.made(), vec!["a", "b"], "the piece kept the one session it had");
+    let a = third.run.piece("a").unwrap();
+    assert_eq!((a.state, a.held.clone(), a.note.clone(), a.attempts), (PieceState::Running, None, None, 1));
+    assert!(host.world().briefs.contains_key("w1-a"));
+    assert_eq!(host.world().secured.iter().filter(|session| *session == "w1-a").count(), 3);
+}
+
+#[test]
+fn what_a_worker_reported_stands_when_its_session_is_deleted_afterwards() {
+    let _home = crate::store::temp_home();
+    let (host, run) = started_free();
+    let id = run.id.as_str();
+    engine::start(&host, id).unwrap();
+    host.reports("map", Status::Done, "41 call sites in 9 files.");
+    engine::start(&host, id).unwrap();
+    // The person tidies the finished worker's session away while the run goes on.
+    host.world().now.remove("w1-map");
+    let after = engine::refreshed(&host, id).unwrap();
+    let map = after.piece("map").unwrap();
+    assert_eq!((map.state, map.note.as_deref()), (PieceState::Done, Some("41 call sites in 9 files.")));
+    // What waited on it still starts.
+    host.reports("store", Status::Done, "Store added.");
+    assert_eq!(engine::start(&host, id).unwrap().started, vec!["session", "pipeline", "cli"]);
+    // A worker deleted before it finished is another matter: its piece is blocked.
+    host.world().now.remove("w3-session");
+    assert_eq!(engine::refreshed(&host, id).unwrap().piece("session").unwrap().state, PieceState::Blocked);
 }
 
 #[test]

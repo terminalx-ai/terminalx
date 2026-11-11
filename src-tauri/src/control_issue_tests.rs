@@ -350,6 +350,9 @@ fn orchestration_run_child() {
     let error = refused(&|plan| plan["pieces"][0]["dependsOn"] = json!(["docs"]));
     assert_eq!((error.code.as_str(), error.details.as_ref().unwrap()["piece"].as_str()), ("dependency_cycle", Some("store")));
     assert_eq!(refused(&|plan| *plan = json!({"pieces": "none"})).code, "plan_invalid");
+    // A key the plan format does not have is refused, not dropped: this mode would have run as bypass.
+    let error = refused(&|plan| plan["pieces"][1]["mode"] = json!("manual"));
+    assert_eq!((error.code.as_str(), error.details.clone().unwrap()), ("unknown_key", json!({"key": "mode", "meant": "permissionMode", "piece": "docs"})));
     // The piece limit is the setting: one piece allowed refuses this plan of two, and names the limit.
     let mut settings = crate::store::settings::load();
     settings.orchestrator.projects.entry(project.path.clone()).or_default().piece_limit = Some(1);
@@ -420,6 +423,26 @@ fn orchestration_run_child() {
         assert!(launch.contains(said), "{said} is missing from the worker's launch: {launch}");
     }
     assert!(!leads.contains("\"deny\"") && !leads.contains("--model sonnet"), "{leads}");
+
+    // A worker gets no pipeline: one would push its branch and merge it for it.
+    for (command, params) in [("pipelines.start", json!({"target": worker.id})), ("pipelines.start", json!({"target": tab.id, "autoMerge": true, "adoptPr": true}))] {
+        let error = service.execute(command, params, "pipeline").unwrap_err();
+        assert!(error.message.contains("worker of an orchestration run"), "{}", error.message);
+    }
+    assert!(crate::issue_pipeline::store::for_session(&worker.id).unwrap().is_none());
+    // The lead may still have one, as any session.
+    assert!(service.execute("pipelines.start", json!({"target": lead_id}), "pipeline").is_ok());
+    // A session the worker starts has the worker's limits, and so has one that session starts.
+    let from = |session: &str, tab: &str| service.execute("sessions.create", json!({"project": project.path, "agent": "claude", "prompt": "help", "useWorktree": true, "noPipeline": true, "caller": {"session": session, "tab": tab}}), "child").unwrap();
+    let child = from(&worker.id, &tab.id);
+    let grandchild = from(child["sessionId"].as_str().unwrap(), child["tabId"].as_str().unwrap());
+    for started in [&child, &grandchild] {
+        let entry = index::get(started["sessionId"].as_str().unwrap()).unwrap();
+        assert!(entry.run_worker() && crate::orchestration::guard::limited(&entry));
+        assert!(service.execute("pipelines.start", json!({"target": entry.id}), "pipeline").unwrap_err().message.contains("worker of an orchestration run"));
+    }
+    // One the lead starts by hand is an ordinary session.
+    assert!(!index::get(from(lead_id, lead["tabId"].as_str().unwrap())["sessionId"].as_str().unwrap()).unwrap().run_worker());
 
     // Called again while `store` works, `runs start` starts nothing; `docs` still waits.
     let again = service.execute("runs.start", json!({"run": run_id}), "start").unwrap();

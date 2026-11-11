@@ -1818,7 +1818,7 @@ impl SessionManager {
             },
             "list" => serde_json::Value::Array(store::list()?.iter().map(engine::shown).collect()),
             // A plan file a person chose in the session's Run view: checked and stored as the CLI's would be.
-            "create" => engine::shown(&engine::create(&host, &serde_json::from_value(params["plan"].clone()).map_err(|error| refused(engine::EngineError::new("plan_invalid", format!("The plan cannot be read: {error}."), Some("A plan is a JSON object with `goal` and `pieces`; each piece has `id`, `title` and `doneCheck`."))))?, string("sessionId")?, None).map_err(refused)?),
+            "create" => engine::shown(&engine::create(&host, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?, string("sessionId")?, None).map_err(refused)?),
             "approve" => {
                 self.accepting_work()?;
                 serde_json::to_value(engine::approve(&host, string("id")?).map_err(refused)?)?
@@ -1828,7 +1828,7 @@ impl SessionManager {
                 serde_json::to_value(engine::start(&host, string("id")?).map_err(refused)?)?
             }
             "stop" => serde_json::to_value(engine::stop(&host, string("id")?, engine::By::Person).map_err(refused)?)?,
-            "updatePlan" => engine::shown(&engine::update_plan(&host, string("id")?, &serde_json::from_value(params["plan"].clone()).context("the plan is not one")?).map_err(refused)?),
+            "updatePlan" => engine::shown(&engine::update_plan(&host, string("id")?, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?).map_err(refused)?),
             _ => anyhow::bail!("unsupported orchestration operation"),
         })
     }

@@ -61,6 +61,9 @@ pub trait Host: Send + Sync {
     /// own on a branch cut from the lead's, with the piece's agent, model and
     /// effort, in `mode`. Nothing is sent to it yet.
     fn create_worker(&self, run: &Run, piece: &Piece, mode: &str) -> anyhow::Result<Started>;
+    /// Make a new worker safe to brief: its branch pushes nowhere by itself. Asked again
+    /// for the same session when it failed, so it must be safe to repeat.
+    fn secure_worker(&self, worker: &SessionRef, branch: Option<&str>) -> anyhow::Result<()>;
     /// Send a worker its brief, and hold it to a report.
     fn brief_worker(&self, worker: &SessionRef, brief: &str) -> anyhow::Result<()>;
     fn worker(&self, worker: &SessionRef) -> WorkerNow;
@@ -271,32 +274,55 @@ fn launch_ready(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     let run = stored(id)?;
     // Until its piece is stored, a worker is known as one by who started it.
     let _limited = guard::starting(&run.lead.session_id);
-    let ready: Vec<String> = run.ready().iter().map(|piece| piece.id.clone()).collect();
+    // Pieces with no worker yet, and pieces whose worker has a session it was never briefed in.
+    let ready: Vec<String> = run.pieces.iter().filter(|piece| piece.held.is_some() && piece.worker.is_some()).chain(run.ready()).map(|piece| piece.id.clone()).collect();
     let (mut started, mut failed) = (Vec::new(), Vec::new());
     for piece_id in ready {
         // Read again each time: the brief of a later piece names what earlier ones reported.
         let run = stored(id)?;
         let Some(piece) = run.piece(&piece_id) else { continue };
         let mode = piece.mode(&run.worker_mode).to_string();
-        let worker = match host.create_worker(&run, piece, &mode) {
-            Ok(worker) => worker,
-            Err(error) => {
-                let error = format!("{error:#}");
+        let (reference, branch) = match piece.worker.clone().filter(|_| piece.held.is_some()) {
+            // The session it already has: never a second one for the same piece.
+            Some(worker) => (worker, piece.branch.clone()),
+            None => {
+                let worker = match host.create_worker(&run, piece, &mode) {
+                    Ok(worker) => worker,
+                    Err(error) => {
+                        let error = format!("{error:#}");
+                        set_piece(id, &piece_id, |piece| {
+                            piece.state = PieceState::Failed;
+                            piece.note = Some(format!("Its worker could not be started: {error}"));
+                        })?;
+                        failed.push(NotStarted { piece: piece_id, error });
+                        continue;
+                    }
+                };
+                let reference = SessionRef { session_id: worker.session_id, tab_id: Some(worker.tab_id) };
+                // Stored as soon as it exists, before anything else can fail: a session the run
+                // does not know of would be made again by the next start, and left behind.
                 set_piece(id, &piece_id, |piece| {
-                    piece.state = PieceState::Failed;
-                    piece.note = Some(format!("Its worker could not be started: {error}"));
+                    piece.worker = Some(reference.clone());
+                    piece.branch = worker.branch.clone();
+                    piece.started_mode = Some(mode.clone());
+                    piece.attempts += 1;
                 })?;
-                failed.push(NotStarted { piece: piece_id, error });
-                continue;
+                (reference, worker.branch)
             }
         };
-        let reference = SessionRef { session_id: worker.session_id, tab_id: Some(worker.tab_id) };
-        // Stored before the brief goes: the turn it starts may end first.
+        if let Err(error) = host.secure_worker(&reference, branch.as_deref()) {
+            let error = format!("{error:#}");
+            set_piece(id, &piece_id, |piece| {
+                piece.state = PieceState::Blocked;
+                piece.held = Some(error.clone());
+                piece.note = Some(format!("Its worker has a session but was not briefed: {error}"));
+            })?;
+            failed.push(NotStarted { piece: piece_id, error });
+            continue;
+        }
+        // Running before the brief goes: the turn it starts may end first.
         let run = set_piece(id, &piece_id, |piece| {
-            piece.worker = Some(reference.clone());
-            piece.branch = worker.branch.clone();
-            piece.started_mode = Some(mode.clone());
-            piece.attempts += 1;
+            piece.held = None;
             piece.state = PieceState::Running;
             piece.note = None;
         })?;
@@ -356,7 +382,8 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     let seen: Vec<(String, SessionRef, WorkerNow)> = run
         .pieces
         .iter()
-        .filter(|piece| piece.state != PieceState::Stopped)
+        // A piece whose worker was never briefed says why until it is; there is nothing to read from it.
+        .filter(|piece| piece.state != PieceState::Stopped && piece.held.is_none())
         .filter_map(|piece| piece.worker.clone().map(|worker| (piece.id.clone(), worker.clone(), host.worker(&worker))))
         .collect();
     let (after, ()) = store::update(id, |run| {
@@ -365,7 +392,12 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         }
         for (piece_id, worker, now) in seen {
             // A piece whose worker was replaced meanwhile is not this worker's to decide.
-            let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.worker.as_ref() == Some(&worker) && piece.state != PieceState::Stopped) else { continue };
+            let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.worker.as_ref() == Some(&worker) && piece.state != PieceState::Stopped && piece.held.is_none()) else { continue };
+            // What a worker reported stands when its session is deleted afterwards: the report
+            // was read, and its branch is still in the repository.
+            if piece.state == PieceState::Done && now == WorkerNow::Gone {
+                continue;
+            }
             let (state, note) = follows(now);
             piece.state = state;
             // A worker back at work keeps the line it last reported until it reports again.

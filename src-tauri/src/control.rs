@@ -784,9 +784,7 @@ impl ControlService {
             };
             // The tab is the caller's own: `--lead` naming another session says nothing of which of its tabs leads.
             let tab = caller.filter(|caller| caller.id == lead.id).and_then(|_| params["caller"]["tab"].as_str()).filter(|tab| lead.tab(tab).is_some()).map(str::to_owned);
-            let plan: Plan = serde_json::from_value(params["plan"].clone()).map_err(|error| {
-                ControlError::new("plan_invalid", format!("The plan cannot be read: {error}."), Some("A plan is a JSON object with `goal` and `pieces`; each piece has `id`, `title` and `doneCheck`. See `terminalx skills get terminalx-cli`.".into()))
-            })?;
+            let plan: Plan = crate::orchestration::plan::parse(&params["plan"]).map_err(|error| ControlError::of_run(error.into()))?;
             let run = engine::create(&host, &plan, &lead.id, tab).map_err(ControlError::of_run)?;
             return Ok(json!({"run": engine::shown(&run), "approvalRequired": run.state == crate::orchestration::RunState::AwaitingApproval}));
         }
