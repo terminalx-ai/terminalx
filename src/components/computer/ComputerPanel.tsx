@@ -27,7 +27,7 @@ export function ComputerPanel({ active }: { active: boolean }) {
   const [place, setPlace] = useState<Place>("local");
   return (
     <div className="flex h-full flex-col" data-testid="panel-computer">
-      <div role="radiogroup" aria-label="Computer" className="flex h-9 shrink-0 items-stretch gap-1 border-b border-hairline px-2 text-xs">
+      <div role="radiogroup" aria-label="Computer" className="flex h-[37px] shrink-0 items-stretch gap-1 border-b border-hairline px-2 text-xs">
         {(["local", "cloud"] as const).map((id) => (
           <button
             key={id}

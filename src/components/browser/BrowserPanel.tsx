@@ -39,7 +39,7 @@ export function BrowserPanel({ sessionId, cwd, active }: { sessionId: string; cw
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="panel-browser">
       {pages.length > 0 && (
-        <div role="tablist" aria-label="Pages" className="flex h-9 shrink-0 items-stretch gap-1 overflow-x-auto scrollbar-none border-b border-hairline px-2">
+        <div role="tablist" aria-label="Pages" className="flex h-[37px] shrink-0 items-stretch gap-1 overflow-x-auto scrollbar-none border-b border-hairline px-2">
           {pages.map((p) => {
             const selected = !showStart && p.id === page?.id;
             return (

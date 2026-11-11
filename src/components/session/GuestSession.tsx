@@ -11,6 +11,7 @@ import { SessionGuestClient } from "@/lib/sessionGuest";
 import type { SharePerson, ShareRole, ShareState } from "@/lib/localSharing";
 import { errorMessage } from "@/lib/api";
 import { usePromptTextProps } from "@/lib/autocorrect";
+import { NoticeForeground } from "@/lib/noticeDeferral";
 
 interface GuestStatus {
   admitted: boolean;
@@ -92,14 +93,15 @@ export function GuestSessionHost() {
   }, []);
   if (!link) return null;
   return (
-    <GuestSession
-      key={link}
-      link={link}
-      leave={() => {
-        setLink(null);
-        void invoke("session_guest_leave");
-      }}
-    />
+    <NoticeForeground key={link}>
+      <GuestSession
+        link={link}
+        leave={() => {
+          setLink(null);
+          void invoke("session_guest_leave");
+        }}
+      />
+    </NoticeForeground>
   );
 }
 

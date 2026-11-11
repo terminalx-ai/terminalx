@@ -85,6 +85,9 @@ fn a_session_quiet_past_the_limit_is_let_go_and_each_exclusion_keeps_one() {
         stored.tabs[0].status = status;
         assert_eq!(facts.kept(&stored, 7), Some(why), "{status:?}");
     }
+    let mut reminder = session("reminder", Some(30), now());
+    reminder.tabs[0].marked_unread = true;
+    assert_eq!(facts.kept(&reminder, 7), Some(Kept::Unread));
     for why in [Kept::Working, Kept::WaitingForYou, Kept::Queued, Kept::Unread] {
         facts.busy.insert("live".into(), why);
         assert_eq!(facts.kept(&session("live", Some(30), now()), 7), Some(why));

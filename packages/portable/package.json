@@ -5,7 +5,10 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./manualStatus": "./src/manualStatus.ts",
+    "./agentMarks": "./src/agentMarks.ts",
     "./agentSettings": "./src/agentSettings.ts",
+    "./botFace": "./src/botFace.ts",
     "./codexCitations": "./src/codexCitations.ts",
     "./continuation": "./src/continuation.ts",
     "./dashboard": "./src/dashboard.ts",
@@ -16,6 +19,7 @@
     "./rpc": "./src/rpc.ts",
     "./transcript": "./src/transcript.ts",
     "./workspace": "./src/workspace.ts",
+    "./worktreeNames": "./src/worktreeNames.ts",
     "./workspaceCollab": "./src/workspaceCollab.ts",
     "./workspaceFiles": "./src/workspaceFiles.ts",
     "./workspaceGit": "./src/workspaceGit.ts",

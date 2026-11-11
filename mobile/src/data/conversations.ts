@@ -1,5 +1,5 @@
 import type { ColumnId } from "@terminalx/portable/dashboard";
-import type { SessionStatus, SessionSummary } from "./host-api";
+import type { SessionSummary } from "./host-api";
 
 export type ConversationTab = SessionSummary["tabs"][number];
 export interface ConversationRow {
@@ -12,7 +12,6 @@ export interface ConversationRow {
 
 export const conversationKey = (hostId: string, sessionId: string, tabId: string) => JSON.stringify([hostId, sessionId, tabId]);
 export const providerName = (harness: string) => ({ claude: "Claude Code", codex: "Codex" })[harness] ?? harness;
-export const statusLabel = (status: SessionStatus) => ({ idle: "Idle", in_progress: "Working", completed: "Completed", waiting: "Needs you" })[status];
 
 export function conversationLabel(tab: ConversationTab, tabs: ConversationTab[]): string {
   const provider = providerName(tab.harness);

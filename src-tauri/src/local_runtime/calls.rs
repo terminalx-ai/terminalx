@@ -50,6 +50,20 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
             Ok((cols, rows))
         };
         match method {
+            "githubLogin" => {
+                let _admission = crate::issue_pipeline::admission::lock();
+                manager.accepting_work()?;
+                // The sole sessionless setup command. Neither a caller-supplied
+                // shell command nor an agent pane id can enter through it.
+                crate::github::validate_login_pane(id)?;
+                let command = crate::github::login_command(string(&params, "hostname")?)?;
+                let cwd = dirs::home_dir().context("home directory is unavailable")?;
+                terminals.spawn(sink.clone(), id, crate::pty::PaneSpec {
+                    cwd: cwd.to_str().context("home directory is not UTF-8")?, cols: 80, rows: 20,
+                    command: Some(&command), env: &[],
+                })?;
+                Ok(Value::Null)
+            }
             "spawn" => {
                 let _admission = crate::issue_pipeline::admission::lock();
                 manager.accepting_work()?;
@@ -102,6 +116,19 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 if let Some(shell) = terminals.shell(id) { sink.emit("pty_renamed", &shell); }
                 Ok(Value::Null)
             }
+            "setDocked" => {
+                let _admission = crate::issue_pipeline::admission::lock();
+                manager.accepting_work()?;
+                let session = crate::pty::shell_session(id).context("only shell terminals can be moved")?;
+                crate::issue_pipeline::admission::open(session, None)?;
+                let entry = crate::store::index::get(session)?;
+                if entry.tabs.iter().any(|tab| tab.follow.pane.as_deref() == Some(id)) {
+                    bail!("an agent tab owns this terminal");
+                }
+                let shell = terminals.set_docked(id, params["docked"].as_bool().context("docked must be a boolean")?)?;
+                sink.emit("pty_renamed", &shell);
+                Ok(serde_json::to_value(shell)?)
+            }
             "kill" => {
                 terminals.kill(id);
                 if crate::pty::is_shell_id(id) { sink.emit("pty_closed", id); }
@@ -128,6 +155,12 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     if method == "running" { return Ok(serde_json::to_value(manager.running_tabs())?); }
     if method == "permissions" { return Ok(serde_json::to_value(manager.pending_permissions())?); }
     match method {
+        "manualStatus" => {
+            let patch = crate::session_ops::SessionPatch { manual_status: Some(serde_json::from_value(params["status"].clone())?), ..Default::default() };
+            let session = crate::session_ops::update_session_meta(string(&params, "sessionId")?, &patch).map_err(anyhow::Error::msg)?;
+            manager.sink().emit("session_updated", &session);
+            return Ok(Value::Null);
+        }
         "pipeline" => return manager.pipeline(string(&params, "operation")?, params["params"].clone()),
         "workspace" => return manager.workspace(string(&params, "operation")?, params["params"].clone()),
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
@@ -151,6 +184,8 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     let session = string(&params, "sessionId")?;
     let tab = string(&params, "tabId")?;
     let value = match method {
+        "resetChat" => serde_json::to_value(manager.reset_chat(session, tab, serde_json::from_value(params.get("endSeq").context("endSeq is required (null for Undo)")?.clone())?, params["resetFiles"].as_bool().context("resetFiles is required")?)?)?,
+        "saveTerminalSelection" => json!(save_terminal_selection(session, tab, string(&params, "text")?)?),
         "resumeConversation" => { manager.resume_conversation(session, tab, string(&params, "harness")?, string(&params, "providerSessionId")?)?; Value::Null }
         // `opened`: only shown, which does not start an agent nobody is about to use.
         "ensureStarted" if params["opened"].as_bool() == Some(true) => { manager.start_on_open(session, tab)?; Value::Null }
@@ -169,11 +204,13 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
         "send" => serde_json::to_value(manager.send_pressed(session, tab, string(&params, "text")?.into(),
             serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64())?)?,
+        "terminalViewReport" => { manager.note_terminal_view(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "incidentUi" => { manager.note_incident_ui(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "sendShown" => { manager.note_shown(session, tab, params["seq"].as_u64().context("seq is required")?, &serde_json::from_value(params["timings"].clone())?)?; Value::Null }
         "interrupt" => json!(manager.interrupt(session, tab)?),
         "stop" => { manager.stop(session, tab)?; Value::Null }
         "closeTab" => { manager.close_tab(session, tab)?; Value::Null }
+        "heldQueue" => serde_json::to_value(manager.change_held(session, tab, serde_json::from_value(params["change"].clone())?)?)?,
         "sendQueuedNow" => { manager.send_queued_now(session, tab, params["seq"].as_u64().context("seq is required")?)?; Value::Null }
         "cancelQueued" => serde_json::to_value(manager.cancel_queued(session, tab, string(&params, "messageId")?)?)?,
         "permission" => { manager.respond_permission(session, tab, string(&params, "requestId")?, string(&params, "optionId")?)?; Value::Null }
@@ -181,10 +218,63 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "model" => { manager.set_model(session, tab, string(&params, "model")?)?; Value::Null }
         "mode" => { manager.set_permission_mode(session, tab, string(&params, "mode")?)?; Value::Null }
         "effort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }
+        "setUnread" => { manager.set_tab_unread(session, tab, params["unread"].as_bool().context("unread must be a boolean")?)?; Value::Null }
         "markRead" => { manager.mark_read(session, tab)?; Value::Null }
         "handoff" => serde_json::to_value(manager.handoff(session, tab)?)?,
-        "toTerminal" => { manager.codex_stdio_to_terminal(session, tab)?; Value::Null }
+        "toTerminal" => {
+            let ready = manager.codex_stdio_to_terminal_reported(session, tab, serde_json::from_value(params["transitionId"].clone())?)?;
+            if params["deferUntilIdle"] == true { json!(ready) } else {
+                // Protocol 1 callers decode success as (). Only callers that
+                // explicitly opt in understand a deferred boolean response.
+                anyhow::ensure!(ready, "Codex is still working. Wait or interrupt before opening Terminal view.");
+                Value::Null
+            }
+        }
         _ => bail!("unsupported local session operation"),
     };
     Ok(value)
+}
+
+/// Attachment writes use the same owner and admission lock as session deletion.
+fn save_terminal_selection(session: &str, tab: &str, text: &str) -> Result<String> {
+    uuid::Uuid::parse_str(session)?;
+    if text.is_empty() || text.len() > 4 * 1024 * 1024 { bail!("Terminal selection must be between 1 byte and 4 MB."); }
+    let _admission = crate::issue_pipeline::admission::lock();
+    crate::issue_pipeline::admission::open(session, Some(tab))?;
+    let entry = crate::store::index::get(session)?;
+    if !entry.tabs.iter().any(|entry| entry.id == tab) { bail!("The destination agent tab is closed."); }
+    let path = crate::store::attachments_dir(session)?.join(format!("terminal-{}.txt", uuid::Uuid::now_v7()));
+    crate::store::write_atomic(&path, text.as_bytes())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn saves_private_session_text_and_refuses_invalid_destinations_and_oversize_output() {
+        let _home = crate::store::temp_home();
+        let id = uuid::Uuid::now_v7().to_string();
+        let entry = serde_json::from_value(json!({
+            "id": id, "projectPath": "/fixture", "cwd": "/fixture", "title": "selection",
+            "created": "now", "modified": "now", "tabs": [{ "id": "agent", "harness": "claude", "created": "now", "modified": "now" }],
+        })).unwrap();
+        crate::store::index::save(&[entry]).unwrap();
+        let text = "error: 漢字\n```\n".repeat(500);
+        let path = std::path::PathBuf::from(save_terminal_selection(&id, "agent", &text).unwrap());
+        assert!(path.starts_with(crate::store::attachments_dir(&id).unwrap()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert!(save_terminal_selection("../escape", "agent", "output").is_err());
+        assert!(save_terminal_selection(&id, "closed", "output").is_err());
+        assert!(save_terminal_selection(&id, "agent", "").is_err());
+        assert!(save_terminal_selection(&id, "agent", &"x".repeat(4 * 1024 * 1024 + 1)).is_err());
+        crate::store::index::save(&[]).unwrap();
+        assert!(save_terminal_selection(&id, "agent", "output").is_err());
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
 }

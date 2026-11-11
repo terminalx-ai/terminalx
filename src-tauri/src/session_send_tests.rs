@@ -156,8 +156,9 @@ fn hold() -> (Hold, impl Fn() + Send + 'static) {
 fn a_prompt_is_answered_while_a_merged_sweep_waits_on_github() {
     let rig = Rig::new();
     let (held, at) = hold();
+    let project = rig.project.clone();
     *crate::local_runtime::workspaces::PULL_REQUESTS.lock().unwrap() = Some(Box::new(move |_, branches| {
-        assert_eq!(branches, [git::worktree_branch("feature")]);
+        assert_eq!(branches, [git::worktree_branch_for(&project, "feature").unwrap()]);
         at();
         Ok(HashMap::new())
     }));
@@ -193,7 +194,7 @@ fn a_checkout_reserved_for_conflict_resolution_still_refuses_a_prompt() {
     let mut pipeline: Pipeline = serde_json::from_str(include_str!("fixtures/issue_pipeline.json")).unwrap();
     pipeline.author = SessionRef { session_id: IN_WORKTREE.into(), tab_id: TAB.into() };
     pipeline.resolver = Some(SessionRef { session_id: IN_WORKTREE.into(), tab_id: "resolver".into() });
-    pipeline.resolution = Some(Resolution { head: "head".into(), remote_head: None, base: "main".into(), base_commit: "base".into(), return_stage: Stage::Work, waiting_since: None });
+    pipeline.resolution = Some(Resolution { head: "head".into(), remote_head: None, target: None, base: "main".into(), base_commit: "base".into(), return_stage: Stage::Work, waiting_since: None });
     crate::issue_pipeline::store::insert(&pipeline).unwrap();
     assert!(rig.send_within(IN_WORKTREE, "edit the conflicted file", None).expect("answered").is_err());
     // The composer's send says why in the tab, as it does for any refusal.

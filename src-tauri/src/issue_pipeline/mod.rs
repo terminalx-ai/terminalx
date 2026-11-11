@@ -127,6 +127,7 @@ pub struct MergeRecord {
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SwitchActor {
     Person,
+    SelfUi { session_id: Option<String>, tab_id: Option<String> },
     Cli { session_id: Option<String>, tab_id: Option<String> },
     System,
 }
@@ -278,12 +279,24 @@ pub struct LaunchOptions {
     pub resolve_conflicts: bool,
 }
 
+/// One verified push destination. Store a digest rather than a URL that may
+/// contain credentials; a changed destination invalidates the resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolutionTarget {
+    pub remote: String,
+    pub repository: Option<String>,
+    pub url_hash: String,
+}
+
 /// The exact inputs of a resolution. A remote writer moving the head invalidates it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Resolution {
     pub head: String,
     pub remote_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ResolutionTarget>,
     pub base: String,
     pub base_commit: String,
     pub return_stage: Stage,

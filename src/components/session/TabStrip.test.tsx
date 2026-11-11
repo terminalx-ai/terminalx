@@ -14,6 +14,13 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn(async () =>
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCount: async () => undefined, label: "main" }) }));
 
+vi.mock("@/components/editor/DiffEditorPane", () => ({ DiffEditorPane: () => <div>Review diff</div> }));
+vi.mock("@/components/changes/PrPanel", () => ({ PrPanel: () => <div>Review PR</div> }));
+const { dropEditors, getEditors, openDiff, openPr, setEditorDirty } = await import("@/lib/editors");
+const { ask } = await import("@tauri-apps/plugin-dialog");
+const { getTerminalState, restoreSessionTabSelection, selectSessionTab } = await import("@/lib/terminal");
+const { newTab } = await import("@/lib/tabActions");
+const { workspaceRow } = await import("@/lib/sessionTabs");
 const { backend, FEATURE } = await import("@/test/tabsBackend");
 const { TabsHarness } = await import("@/test/TabsHarness");
 const { bootSessions, refreshSessions, selectSession, getSessionStore } = await import("@/lib/sessions");
@@ -58,7 +65,7 @@ beforeEach(async () => {
   backend.calls = [];
 });
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); dropEditors(() => true); });
 
 describe("the new-tab button", () => {
   it("ends the row of tabs and opens the same menu as before", async () => {
@@ -210,5 +217,118 @@ describe("the cloud new-tab menu's disabled hint", () => {
     const hint = screen.getByRole("note");
     expect(hint.className).toContain("normal-case");
     expect(hint.className).not.toMatch(/(^| )uppercase( |$)/);
+  });
+});
+
+
+describe("review tabs in the workspace row", () => {
+  const openReview = (kind: "diff" | "pr") => kind === "diff"
+    ? openDiff("a", FEATURE, "app.ts", { scope: "all", range: { base: "base", head: null } })
+    : openPr("a", FEATURE, { url: "https://github.com/org/repo/pull/12", number: 12, head: "feature", scope: { kind: "local", cwd: FEATURE } });
+  const review = () => screen.queryByRole("tabpanel", { name: /app.ts|PR #12/ });
+  const label = (kind: "diff" | "pr") => kind === "diff" ? "app.ts · All changes" : "PR #12";
+  const chooseReview = (kind: "diff" | "pr") => fireEvent.click(within(strip()).getByRole("tab", { name: label(kind) }));
+
+  it.each(["diff", "pr"] as const)("clicks select agent, terminal and browser tabs while a %s stays open", async (kind) => {
+    render(<TabsHarness reviews />);
+    let id = "";
+    act(() => { id = openReview(kind); });
+    expect(review()).not.toBeNull();
+    const targets = [LONG, "Terminal 1", "Preview"];
+    // Get the browser's actual label from the row, independently of its fixture title.
+    targets[2] = within(strip()).getAllByRole("tab").find((t) => t.getAttribute("aria-description") === "Browser page")!.getAttribute("aria-label")!;
+    for (const name of targets) {
+      fireEvent.click(within(strip()).getByRole("tab", { name }));
+      await flush();
+      expect(review()).toBeNull();
+      expect(shown()).toBe(name);
+      expect(getEditors().editors.some((e) => e.id === id)).toBe(true);
+      chooseReview(kind);
+      expect(review()).not.toBeNull();
+    }
+  });
+
+  it.each(["diff", "pr"] as const)("includes %s in numbered, next and previous shortcuts and closes only the selected tab", async (kind) => {
+    render(<TabsHarness reviews />);
+    let id = "";
+    act(() => { id = openReview(kind); });
+    press(review()!, digit(2));
+    expect(review()).toBeNull();
+    expect(shown()).toBe("Fix flaky test");
+    press(composer(), { key: "w", code: "KeyW" });
+    await flush();
+    expect(backend.callsOf("remove_tab")).toEqual([{ sessionId: "a", tabId: "a2" }]);
+    expect(getEditors().editors.some((e) => e.id === id)).toBe(true);
+    chooseReview(kind);
+    press(review()!, { key: "}", code: "BracketRight", shiftKey: true });
+    expect(review()).toBeNull();
+    expect(shown()).toBe(LONG);
+    press(composer(), { key: "{", code: "BracketLeft", shiftKey: true });
+    expect(review()).not.toBeNull();
+    press(review()!, digit(1));
+    press(composer(), digit(9));
+    expect(review()).not.toBeNull();
+    press(review()!, { key: "w", code: "KeyW" });
+    await flush();
+    expect(getEditors().editors.some((e) => e.id === id)).toBe(false);
+    expect(shown()).toBe("Terminal 1");
+    press(terminal(), { key: "T", code: "KeyT", altKey: true, shiftKey: true });
+    await flush();
+    expect(review()).not.toBeNull();
+    expect(shown()).toBe(label(kind));
+  });
+
+  it.each(["agent", "terminal", "browser"] as const)("a new %s tab replaces the review, and reopening an agent selects its transcript", async (kind) => {
+    render(<TabsHarness reviews />);
+    act(() => { openReview("diff"); });
+    const row = workspaceRow(getSessionStore().sessions.find((s) => s.id === "a")!);
+    await act(() => newTab(row, kind === "agent" ? { kind, harness: "claude", mode: "bypassPermissions" } : { kind }));
+    expect(review()).toBeNull();
+    expect(getTerminalState().selected.a.kind).toBe(kind);
+    // Close an agent, open a review, then reopen the agent via its real shortcut.
+    press(composer(), digit(2));
+    press(composer(), { key: "w", code: "KeyW" });
+    await flush();
+    chooseReview("diff");
+    press(review()!, { key: "T", code: "KeyT", altKey: true, shiftKey: true });
+    await flush();
+    expect(review()).toBeNull();
+    expect(shown()).toBe("Fix flaky test");
+  });
+
+  it.each(["terminal", "browser"] as const)("closes the selected %s after leaving a review", async (kind) => {
+    render(<TabsHarness reviews />);
+    act(() => { openReview("diff"); });
+    const target = kind === "terminal" ? within(strip()).getByRole("tab", { name: "Terminal 1" })
+      : within(strip()).getAllByRole("tab").find((t) => t.getAttribute("aria-description") === "Browser page")!;
+    fireEvent.click(target);
+    await flush();
+    press(composer(), { key: "w", code: "KeyW" });
+    await flush();
+    expect(backend.callsOf(kind === "terminal" ? "pty_kill" : "browser_close_page")).toHaveLength(1);
+    expect(getEditors().editors).toHaveLength(1);
+  });
+
+  it("keeps a dirty review selected when closing is cancelled", async () => {
+    render(<TabsHarness reviews />);
+    act(() => { setEditorDirty(openReview("diff"), true); });
+    vi.mocked(ask).mockResolvedValueOnce(false);
+    press(review()!, { key: "w", code: "KeyW" });
+    await flush();
+    expect(review()).not.toBeNull();
+    expect(shown()).toBe(label("diff"));
+  });
+
+  it.each(["agent", "terminal", "browser", "review"] as const)("restores a saved %s selection without putting another review on top", (kind) => {
+    render(<TabsHarness reviews />);
+    let id = "";
+    act(() => { id = openReview("pr"); });
+    const selected = { kind, id: kind === "agent" ? "a2" : kind === "terminal" ? shell : kind === "browser" ? "page-feature" : id };
+    act(() => selectSessionTab("a", selected));
+    const saved = localStorage.getItem("terminalx:selected-tabs:v1");
+    act(() => selectSessionTab("a", { kind: "review", id }));
+    act(() => selectSessionTab("a", restoreSessionTabSelection(saved).a));
+    expect(getTerminalState().selected.a).toEqual(selected);
+    expect(review() !== null).toBe(kind === "review");
   });
 });

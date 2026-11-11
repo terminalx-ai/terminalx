@@ -8,7 +8,16 @@ import type { HostConnection } from "../transport/connection";
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
 export interface SessionSummary {
   rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
+  manualStatus?: import("@terminalx/portable/manualStatus").ManualStatus | null;
   id: string;
+  /** `quick`: a quick chat, filed under "Quick chats" rather than a project. */
+  kind?: "quick" | "project";
+  /**
+   * What the Mac's project list names the row by: the branch, by its label when
+   * the reader gave one; `null` when the branch is only a drawn worktree name,
+   * so the title stands instead. Absent from older Macs.
+   */
+  branch?: string | null;
   title: string;
   project: string;
   worktree: string;
@@ -16,7 +25,7 @@ export interface SessionSummary {
   lastPrompt?: string;
   lastReply?: string;
   issueRef?: string;
-  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus }[];
+  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus; markedUnread?: boolean }[];
 }
 
 /** A note promoted to a tab's agent: the `seq` of the user message it became (#541). */
@@ -30,8 +39,10 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
  * `sessionControls`: stop, interrupt, recovery, settings and continuing in a new tab, as on the desktop.
  * `sessionCreate`: it starts sessions as its new-session view does. `macSettings`: it shows and changes its settings.
  * `terminal`: `terminal.open`, and terminal output that says the pane's size, which the terminal view needs.
+ * `closeTab`: `session.closeTab` closes a tab as the desktop's tab strip does.
+ * `promptImages`: `session.image` hands over an image a prompt carried, from the session's attachments.
  */
-export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number }
+export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 /** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
@@ -54,7 +65,7 @@ export type ControlResult = { done: true } | { done: false; message: string };
 export type ContinueResult = { started: true; tabId: string; delivered: boolean; inInput: boolean; message?: string } | { started: false; message: string };
 
 /** A project on the Mac, named by an id that is not its path. */
-export interface NewSessionProject { id: string; name: string; git: boolean; lastUsed: boolean }
+export interface NewSessionProject { id: string; name: string; git: boolean; lastUsed: boolean; repositorySettings?: { filesToCopy: string[] } }
 export interface NewSessionModel { id: string; label: string; isDefault: boolean; efforts: string[]; defaultEffort?: string | null }
 export interface NewSessionAgent { id: string; name: string; available: boolean; installHint: string; effort: boolean; permissionModes: boolean; models: NewSessionModel[] }
 /** What the Mac's new-session view lets a person choose. */
@@ -82,13 +93,22 @@ export class HostApi {
 
   private capabilities?: Promise<HostFeatures>;
   private featureListeners = new Set<() => void>();
+  private settingsListeners = new Set<() => void>();
   private lists = new Map<string, { version: string; value: unknown }>();
   private pendingLists = new Map<string, Promise<unknown>>();
 
   constructor(private readonly connection: HostConnection) {
     // What the Mac offers comes from its background runtime, which an update
     // replaces while the phone stays connected (#730).
-    connection.onEvent((event) => { if (event.method === "sync.capabilitiesChanged") this.featuresChanged(); });
+    connection.onEvent((event) => {
+      if (event.method === "sync.capabilitiesChanged") this.featuresChanged();
+      if (event.method === "settings.changed") for (const listener of this.settingsListeners) listener();
+    });
+  }
+
+  onSettingsChanged(listener: () => void): () => void {
+    this.settingsListeners.add(listener);
+    return () => { this.settingsListeners.delete(listener); };
   }
 
   resetConnection(hostChanged = false): void {
@@ -192,6 +212,11 @@ export class HostApi {
     return { events: value.events, hasMore: value.hasMore };
   }
 
+  async markRead(sessionId: string, tabId: string): Promise<void> {
+    const result = await this.connection.request("session.markRead", { sessionId, tabId });
+    if (!result.ok) throw new Error(result.refusal.message);
+  }
+
   subscribeSession(tabId: string, listener: (event: AgentEvent) => void, ready?: () => void): () => void {
     return this.connection.subscribe("session.subscribe", { tabId }, (result) => {
       if (result && typeof result === "object" && "subscriptionId" in result) ready?.();
@@ -257,6 +282,19 @@ export class HostApi {
   }
 
   /** Escape, as the agent takes it: the running turn ends and the agent stays. */
+  /** An image a prompt in this session carried, as a data URI; the message says why the Mac would not send it (`promptImages`). */
+  async promptImage(sessionId: string, tabId: string, path: string): Promise<{ uri: string } | { error: string }> {
+    const result = await this.connection.request<{ mediaType?: unknown; data?: unknown }>("session.image", { sessionId, tabId, path });
+    if (!result.ok) return { error: result.refusal.message };
+    const { mediaType, data } = result.value ?? {};
+    return typeof mediaType === "string" && typeof data === "string" ? { uri: `data:${mediaType};base64,${data}` } : { error: "The Mac sent no image." };
+  }
+
+  /** Closes a tab as the desktop's tab strip does: its agent stops, its history stays on the Mac (`closeTab`). */
+  async closeTab(sessionId: string, tabId: string): Promise<ControlResult> {
+    return this.control("session.closeTab", { sessionId, tabId });
+  }
+
   async interrupt(sessionId: string, tabId: string): Promise<ControlResult> {
     return this.control("session.interrupt", { sessionId, tabId });
   }
@@ -377,6 +415,13 @@ export class HostApi {
       ...(sent && typeof sent.queued === "boolean" ? { queued: sent.queued } : {}),
       ...(typeof value.sendError === "string" ? { sendError: value.sendError } : !sent ? { sendError: "The Mac did not say whether it sent the first message." } : {}),
     };
+  }
+
+  async configuration(projectId?: string): Promise<import("../../../src/types/configuration").Configuration | null> {
+    if ((await this.features()).layeredConfiguration !== 1) return null;
+    const result = await this.connection.request<import("../../../src/types/configuration").Configuration>("configuration.resolve", { projectId: projectId ?? null });
+    if (!result.ok) throw new Error(result.refusal.message);
+    return result.value;
   }
 
   /** This Mac's settings; null from a Mac that does not offer them to a phone. */

@@ -231,13 +231,26 @@ pub fn adopt_rollout(managed: &Path, user: &Path, session_id: &str) -> Result<bo
     if find_rollout(managed, session_id).is_some() {
         return Ok(false);
     }
+    copy_rollout(managed, user, session_id)
+}
+
+/// Refresh a native conversation after its owner exits. A failed earlier
+/// handoff may have left an older copy in the managed home; replace it only
+/// after the complete file has been copied, leaving the original untouched.
+pub fn copy_rollout(managed: &Path, user: &Path, session_id: &str) -> Result<bool> {
     let Some(source) = find_rollout(user, session_id) else { return Ok(false) };
     let relative = source.strip_prefix(user).unwrap_or(&source);
     let target = managed.join(relative);
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    std::fs::copy(&source, &target).with_context(|| format!("copy {} into the managed Codex home", source.display()))?;
+    let temporary = target.with_extension(format!("{}.tmp", uuid::Uuid::now_v7()));
+    let copied = (|| -> std::io::Result<()> {
+        std::fs::copy(&source, &temporary)?;
+        std::fs::rename(&temporary, &target)
+    })();
+    if copied.is_err() { let _ = std::fs::remove_file(&temporary); }
+    copied.with_context(|| format!("copy {} into the managed Codex home", source.display()))?;
     Ok(true)
 }
 
@@ -588,6 +601,18 @@ url = "https://example.test/mcp"
         assert!(!adopt_rollout(managed.path(), user.path(), id).unwrap());
         assert_eq!(std::fs::read_to_string(&copied).unwrap(), "grown\n");
         assert!(!adopt_rollout(managed.path(), user.path(), "never-existed").unwrap());
+        // A native owner, in contrast, keeps writing the original until it
+        // exits. Its latest work replaces an earlier handoff's saved copy.
+        std::fs::write(&source, "new native work\n").unwrap();
+        assert!(copy_rollout(managed.path(), user.path(), id).unwrap());
+        assert_eq!(std::fs::read_to_string(&copied).unwrap(), "new native work\n");
+        // A source that cannot be copied leaves the previous complete file
+        // intact, without a partial rollout that a retry might resume.
+        std::fs::remove_file(&source).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        assert!(copy_rollout(managed.path(), user.path(), id).is_err());
+        assert_eq!(std::fs::read_to_string(&copied).unwrap(), "new native work\n");
+        assert_eq!(std::fs::read_dir(copied.parent().unwrap()).unwrap().count(), 1);
     }
 
     /// Against the installed `codex`: a home built from nothing ends up with

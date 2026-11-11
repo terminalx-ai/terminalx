@@ -177,3 +177,19 @@ describe("session controls on the phone", () => {
     expect(container.textContent).toContain("This paired device is read-only.");
   });
 });
+
+describe("the controls handed to a composer", () => {
+  it("say when the mode lets the agent act without asking, even before the change lands", async () => {
+    const seen: boolean[] = [];
+    // A setting applied arrives as an event, and the controls read the tab again.
+    const draw = async (events: AgentEvent[]) => {
+      await act(async () => { root.render(<SessionControls sessionId="s" tabId="t" events={events} asks={0} connected onOpenTab={openTab}>{(parts) => { if (parts) seen.push(parts.settings.mode.bypass); return null; }}</SessionControls>); });
+      await act(async () => { await Promise.resolve(); });
+    };
+    await draw([]);
+    expect(seen.at(-1)).toBe(false);
+    mocks.app.api.tabControls.mockResolvedValue({ harness: "claude", model: "opus", effort: "high", permissionMode: "auto", requestedPermissionMode: "bypassPermissions", status: "idle" });
+    await draw([recovery("none")]);
+    expect(seen.at(-1)).toBe(true);
+  });
+});

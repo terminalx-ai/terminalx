@@ -1,3 +1,4 @@
+import { useSettingsFile } from "@/lib/settingsFile";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
 import { Segmented } from "@/components/ui/controls";
@@ -17,6 +18,7 @@ export function idleLimitLabel(minutes: number): string {
  * the limit itself, at its next look; what this shows is what it was told.
  */
 export function AgentIdleSettings() {
+  const { revision } = useSettingsFile();
   const [minutes, setMinutes] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -29,7 +31,7 @@ export function AgentIdleSettings() {
     return () => {
       live = false;
     };
-  }, []);
+  }, [revision]);
 
   const change = async (next: number) => {
     const before = minutes;

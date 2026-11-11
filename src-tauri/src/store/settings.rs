@@ -1,5 +1,6 @@
-//! Settings the Rust side needs before the webview exists. Anything the
-//! frontend can read for itself lives in localStorage instead.
+//! User settings shared by the runtime and every window.
+
+pub mod file;
 
 use std::path::PathBuf;
 
@@ -9,6 +10,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    /// User-facing webview preferences. Missing keys inherit app defaults.
+    pub preferences: std::collections::BTreeMap<String, serde_json::Value>,
+    /// The first window copied the legacy localStorage choices successfully.
+    pub preferences_migrated: bool,
+    // Keep layered keys written/reset by another window while an unrelated
+    // settings control holds a previously loaded snapshot. Not persisted.
+    #[serde(skip)]
+    pub(crate) loaded_configuration: Option<(String, String)>,
     /// Where new worktrees go, relative to the project root.
     pub worktree_dir: String,
     /// Branch prefix for session worktrees.
@@ -318,6 +327,9 @@ impl Default for StatusBarSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            preferences: Default::default(),
+            preferences_migrated: false,
+            loaded_configuration: None,
             worktree_dir: ".raccoon/worktrees".into(),
             branch_prefix: "raccoon/".into(),
             extra_bin_dirs: Vec::new(),
@@ -341,29 +353,18 @@ impl Default for Settings {
     }
 }
 
-fn file_path() -> Result<PathBuf> {
+pub(super) fn file_path() -> Result<PathBuf> {
     Ok(super::root()?.join("settings.json"))
 }
 
 pub fn load() -> Settings {
-    file_path()
-        .ok()
-        .and_then(|p| super::read_json::<Settings>(&p).ok().flatten())
-        .unwrap_or_default()
+    let mut settings = file::load();
+    settings.loaded_configuration = Some((settings.branch_prefix.clone(), settings.worktree_dir.clone()));
+    settings
 }
 
 pub fn save(s: &Settings) -> Result<()> {
-    let path = file_path()?;
-    super::write_json(&path, s)?;
-    // A new file is already owner-only; this is what tightens one left loose
-    // by an older build, which matters because the file can hold a tracker
-    // API key. Raccoon owns this file, so narrowing it is ours to do.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    file::save(s)
 }
 
 #[cfg(test)]

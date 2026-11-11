@@ -76,11 +76,16 @@ pub struct Stdio {
     /// Each piece is only a preview; an item is committed once, whole, when
     /// it completes or, failing that, when its turn ends.
     streams: Vec<Stream>,
+    usage: crate::harness::metrics::TurnUsage,
     /// Items of this turn already committed: a late piece or a repeated
     /// completion adds nothing.
     committed: HashSet<String>,
     cwd: String,
     model: String,
+    /// The thread's resolved model, then the override used by its latest
+    /// turn. A null model in turn/start preserves the thread's selection.
+    usage_model: Option<String>,
+    prompt_model: Option<String>,
     effort: Option<String>,
     mode: String,
     /// Only the initial, explicitly submitted local input. Never replayed.
@@ -117,6 +122,7 @@ impl Stdio {
 
     pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String, resume: Option<String>) -> Self {
         Self { launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
+            usage: Default::default(), usage_model: None, prompt_model: None,
             turn: None, manual_compact: false, next_id: 0, pending: HashMap::new(), asks: HashMap::new(), turn_epoch: 0, answers: HashMap::new(),
             streams: Vec::new(), committed: HashSet::new(), cwd, model, effort, mode, first: None, resume, awaiting: false, failed: false, routed: false }
     }
@@ -166,8 +172,11 @@ impl Stdio {
         let mut input = vec![json!({"type": "text", "text": text})];
         input.extend(images.into_iter().map(|(mime, data)| json!({"type": "image", "url": format!("data:{mime};base64,{data}")})));
         let model = if self.model.is_empty() { None } else { Some(&self.model) };
+        self.prompt_model = model.cloned();
         Ok(vec![self.request("turn/start", json!({"threadId": thread, "input": input, "model": model, "effort": self.effort}), Request::Turn)?])
     }
+
+    pub(crate) fn can_interrupt(&self) -> bool { self.turn.is_some() && !self.exited && !self.blocked }
 
     pub(crate) fn interrupt(&mut self) -> Result<Vec<Action>> {
         // Before thread/turn acceptance there is no safe interrupt target. Fence
@@ -239,7 +248,7 @@ impl Stdio {
     /// It is settled as stopped, not awaited as one Codex has yet to take.
     pub(crate) fn withdraw(&mut self, frame: &Outbound) {
         self.retire_write(frame, false);
-        if frame.delivers_prompt() { self.manual_compact = false; self.awaiting = false; }
+        if frame.delivers_prompt() { self.manual_compact = false; self.awaiting = false; self.prompt_model = None; }
     }
 
     pub(crate) fn is_manual_compact(&self) -> bool { self.manual_compact || self.first.as_ref().is_some_and(|(text, _)| text.trim() == "/compact") }
@@ -295,6 +304,7 @@ impl Stdio {
                     let id = required(&result["thread"], "id")?;
                     ensure!(self.thread.is_none(), "Codex changed thread during initialization");
                     ensure!(self.resume.as_ref().is_none_or(|thread| *thread == id), "Codex resumed a different thread");
+                    self.usage_model = result["model"].as_str().filter(|model| !model.is_empty()).map(str::to_owned);
                     self.thread = Some(id.clone());
                     self.ready = true;
                     let mut actions = vec![Action::ThreadReady(id)];
@@ -325,9 +335,11 @@ impl Stdio {
                 self.turn = Some(required(&p["turn"], "id")?);
                 self.streams.clear();
                 self.committed.clear();
+                if let Some(model) = self.prompt_model.take() { self.usage_model = Some(model); }
+                self.usage.record(&json!({"type":"turn_context", "payload":{"model": self.usage_model}}), Some(crate::harness::tui::TurnMark::Opened), &mut Vec::new());
                 if !self.manual_compact {
                     out.extend(self.accepted());
-                    out.push(Action::Emit(Payload::TurnStarted { model: None, provider_session_id: self.thread.clone(), prompt_seq: None, started_by: None, initiating_prompt: None }));
+                    out.push(Action::Emit(Payload::TurnStarted { model: self.usage_model.clone(), provider_session_id: self.thread.clone(), prompt_seq: None, started_by: None, initiating_prompt: None }));
                 }
             }
             "turn/completed" => {
@@ -390,8 +402,18 @@ impl Stdio {
                 }
             }
             "thread/tokenUsage/updated" => {
+                if self.turn.is_none() || self.manual_compact || p["turnId"].as_str().is_some_and(|id| Some(id) != self.turn.as_deref()) { return Ok(out); }
                 let usage = &p["tokenUsage"];
-                out.push(Action::Emit(Payload::UsageUpdate(Usage { input_tokens: usage["total"]["inputTokens"].as_u64(), output_tokens: usage["total"]["outputTokens"].as_u64(), context_used: usage["last"]["totalTokens"].as_u64(), context_max: usage["modelContextWindow"].as_u64(), ..Default::default() })));
+                let counts = |value: &Value| if value.is_object() { json!({
+                    "input_tokens": value["inputTokens"], "cached_input_tokens": value["cachedInputTokens"],
+                    "output_tokens": value["outputTokens"], "reasoning_output_tokens": value["reasoningOutputTokens"], "total_tokens": value["totalTokens"],
+                }) } else { Value::Null };
+                let record = json!({"type":"event_msg", "payload":{"type":"token_count", "info":{
+                    "total_token_usage": counts(&usage["total"]), "last_token_usage": counts(&usage["last"]),
+                }}});
+                let mut mapped = vec![Payload::UsageUpdate(Usage { context_used: usage["last"]["totalTokens"].as_u64(), context_max: usage["modelContextWindow"].as_u64(), ..Default::default() })];
+                self.usage.record(&record, None, &mut mapped);
+                out.extend(mapped.into_iter().map(Action::Emit));
             }
             "serverRequest/resolved" => {
                 let key = p["requestId"].to_string();

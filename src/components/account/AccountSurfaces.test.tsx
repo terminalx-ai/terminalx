@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountStatus } from "@/lib/api";
 
@@ -33,6 +33,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 const { bootAccount } = await import("@/lib/account");
 const { AccountSidebarEntry } = await import("./AccountSidebarEntry");
 const { AccountTab } = await import("@/components/settings/AccountTab");
+const { SignInLinkDialog } = await import("@/components/account/PasteSignInLink");
 
 afterEach(cleanup);
 
@@ -62,12 +63,54 @@ describe("TerminalX account surfaces", () => {
     expect(screen.getByText("owner@terminalx.ai")).toBeTruthy();
     expect(screen.getByText("TerminalX")).toBeTruthy();
 
-    fireEvent.click(screen.getAllByText("Paresh")[0]);
+    // The sidebar's name opens a menu: the email it is signed in as, Settings, and Log out.
+    fireEvent.keyDown(screen.getAllByText("Paresh")[0].closest("button")!, { key: "Enter" });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByText("owner@terminalx.ai")).toBeTruthy();
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Settings", "Log out"]);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Settings" }));
     expect(openAccount).toHaveBeenCalledOnce();
 
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     expect(screen.getByText(/QR and code pairings keep working/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Confirm sign out" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("account_sign_out"));
+  });
+
+  it("finishes a sign-in from a pasted link when the browser's button cannot open the app", async () => {
+    mocks.invoke.mockClear();
+    let refuse = true;
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "account_status") return signedOut;
+      if (command === "account_sign_in") return signingIn;
+      if (command === "account_paste_callback") { if (refuse) throw "That link belongs to another sign-in. Start signing in again, then paste the new link."; return null; }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    await act(async () => bootAccount());
+    render(<><AccountSidebarEntry onOpenAccount={() => {}} /><SignInLinkDialog /></>);
+    expect(screen.queryByTestId("paste-sign-in-link")).toBeNull();
+    // In the dev app, Sign in opens the browser and, with it, a dialog asking for the browser's link.
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    const dialog = await screen.findByRole("dialog", { name: "Finish signing in" });
+    const field = within(dialog).getByLabelText("Sign-in link");
+    // Put away, the sidebar brings it back for the same sign-in rather than starting another.
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Finish signing in" }));
+    await screen.findByRole("dialog", { name: "Finish signing in" });
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "account_sign_in")).toHaveLength(1);
+    void field;
+    const link = "terminalx-dev://auth/callback?code=abc&state=xyz";
+
+    fireEvent.change(screen.getByLabelText("Sign-in link"), { target: { value: link } });
+    fireEvent.click(screen.getByRole("button", { name: "Finish sign-in" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "That link belongs to another sign-in. Start signing in again, then paste the new link.");
+
+    refuse = false;
+    fireEvent.click(screen.getByRole("button", { name: "Finish sign-in" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenLastCalledWith("account_paste_callback", { link }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await act(async () => mocks.onStatus?.({ payload: signedIn }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });

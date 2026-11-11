@@ -9,7 +9,15 @@ pnpm install
 pnpm --dir mobile ios
 ```
 
-Use a development build rather than Expo Go because pairing credentials require device-only SecureStore storage. `eas.json` includes a simulator development profile; it does not configure a store submission.
+Use a development build rather than Expo Go because pairing credentials require device-only SecureStore storage.
+
+To build for your own iPhone with a free personal Apple team, which cannot sign push notifications or the shared bundle id, give the build a bundle id of your own:
+
+```sh
+TERMINALX_PERSONAL_TEAM_BUNDLE_ID=com.example.terminalx.dev pnpm --dir mobile ios
+```
+
+That build leaves out the push entitlement, so notifications do not reach it. Unset, nothing changes. `eas.json` includes a simulator development profile; it does not configure a store submission.
 
 Local `ios` builds and the EAS development profile use the orange D icon.
 Preview/default builds use the unbadged Legacy artwork. The `ios` command runs
