@@ -21,6 +21,8 @@ export interface ChatRow {
   /** What was last said in it, on one line; else where it is. */
   preview: string;
   state: ChatState;
+  /** Whether a conversation in it is unread: a finished turn not yet opened, or one marked unread on the Mac. */
+  unread: boolean;
   /** Last activity, in ms; 0 when unknown. */
   time: number;
   /** The face's colour: its project's, or none for a quick chat, which takes its own. */
@@ -36,6 +38,11 @@ export function chatState(session: SessionSummary): ChatState {
   if (session.tabs.some((tab) => tab.status === "in_progress")) return "working";
   return "done";
 }
+
+type SummaryTab = SessionSummary["tabs"][number];
+
+/** A conversation the reader has not seen since it finished, or one they marked unread on the Mac (PRO-179). */
+export const tabUnread = (tab: SummaryTab) => !!tab.markedUnread || tab.status === "completed";
 
 const isQuick = (session: SessionSummary) => session.kind === "quick" || session.project === QUICK_CHATS;
 
@@ -62,6 +69,7 @@ function chatRow(session: SessionSummary): ChatRow {
     ...rowName(session, title),
     preview: said ?? place ?? "",
     state,
+    unread: session.tabs.some(tabUnread),
     time: Number.isFinite(time) ? time : 0,
     color: isQuick(session) ? null : projectHueByName(session.project),
   };
@@ -110,7 +118,7 @@ export function shortTime(time: number, now = Date.now()): string {
 }
 
 /** One of the chats a branch holds: a tab on the Mac. */
-export interface BranchChat { id: string; name: string; harness: string; state: ChatState }
+export interface BranchChat { id: string; name: string; harness: string; state: ChatState; unread: boolean }
 
 /** The chats a branch holds, as the Mac's tab strip lists them: each by its own title, else its agent's name. */
 export function branchChats(session: SessionSummary): BranchChat[] {
@@ -122,6 +130,7 @@ export function branchChats(session: SessionSummary): BranchChat[] {
       name: own ? title : conversationLabel(tab, session.tabs),
       harness: tab.harness,
       state: tab.status === "waiting" ? "needs" : tab.status === "in_progress" ? "working" : "done",
+      unread: tabUnread(tab),
     };
   });
 }

@@ -18,9 +18,10 @@ export function ChatListRow({ row, onPress }: { row: ChatRow; onPress(): void })
   const { palette } = useTheme();
   const state = STATE_WORDS[row.state];
   const manualStatus = manualStatusLabel(row.session.manualStatus);
+  const unread = row.unread ? "Unread" : "";
   // Which project, then which branch: a quick chat has no project to name.
   const project = row.session.kind === "quick" || !row.session.project ? null : shortProject(row.session.project);
-  return <Pressable accessibilityRole="button" accessibilityLabel={[row.name, row.session.kind === "quick" ? "" : row.session.project, manualStatus, state, row.preview].filter(Boolean).join(", ")} onPress={onPress} style={({ pressed }) => [styles.chat, pressed && { backgroundColor: palette.raised }]}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={[row.name, row.session.kind === "quick" ? "" : row.session.project, manualStatus, state, unread, row.preview].filter(Boolean).join(", ")} onPress={onPress} style={({ pressed }) => [styles.chat, pressed && { backgroundColor: palette.raised }]}>
     <BotFace seed={row.session.id} color={row.color} size={48} />
     <View style={styles.body}>
       <View style={styles.line}>
@@ -28,7 +29,7 @@ export function ChatListRow({ row, onPress }: { row: ChatRow; onPress(): void })
         <Text style={[styles.time, { color: palette.faint }]}>{shortTime(row.time)}</Text>
       </View>
       <View style={styles.line}>
-        <Text numberOfLines={1} style={[styles.preview, { color: palette.muted }]}>{manualStatus}{row.preview ? ` · ${row.preview}` : ""}</Text>
+        <Text numberOfLines={1} style={[styles.preview, { color: palette.muted }]}>{[manualStatus, unread].filter(Boolean).join(" · ")}{row.preview ? ` · ${row.preview}` : ""}</Text>
         <StateMark state={row.state} info={palette.info} warning={palette.warning} />
       </View>
     </View>
