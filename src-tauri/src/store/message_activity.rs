@@ -29,6 +29,8 @@ struct Activity {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TabActivity {
+    #[serde(default)]
+    log_file: Option<String>,
     last_message_at: Option<String>,
     #[serde(default)]
     has_messages: bool,
@@ -42,6 +44,14 @@ struct TabActivity {
 #[derive(Default, Serialize, Deserialize, PartialEq)]
 struct Flow {
     assistant: bool,
+}
+
+fn select_log(tab: &mut TabActivity, path: &Path) {
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned());
+    let changed = tab.log_file.as_ref().is_some_and(|old| Some(old) != name.as_ref())
+        || (tab.log_file.is_none() && name.as_ref().is_some_and(|name| name.contains(".reset-")));
+    if changed { *tab = TabActivity::default(); }
+    tab.log_file = name;
 }
 
 fn canonical(value: &str) -> Option<String> {
@@ -121,11 +131,25 @@ fn project_at(root: &Path, sessions: &mut [SessionEntry]) -> Result<()> {
     for session in sessions {
         let activity: Activity =
             super::read_json(&activity_path(root, &session.id))?.unwrap_or_default();
-        if activity.tabs.values().any(|tab| tab.has_messages) {
+        let matches = |tab: &index::TabEntry, saved: &TabActivity| {
+            let expected = tab.unknown.get("resetLogId").and_then(serde_json::Value::as_str)
+                .map(|id| format!("{}.reset-{id}.jsonl", tab.id));
+            match &expected {
+                Some(name) => saved.log_file.as_deref() == Some(name.as_str()),
+                None => saved.log_file.as_ref().is_none_or(|name| name == &format!("{}.jsonl", tab.id)),
+            }
+        };
+        // Closed tabs still count as conversation activity. Only a replaced
+        // log's obsolete projection is excluded.
+        let current = |id: &String, saved: &TabActivity| session.tabs.iter().find(|tab| &tab.id == id).is_none_or(|tab| matches(tab, saved));
+        if activity.tabs.iter().any(|(id, saved)| current(id, saved) && saved.has_messages) {
             session.unknown.insert(PRESENCE_FIELD.into(), true.into());
         }
-        project_time(&mut session.unknown, activity.last_message_at);
+        let latest = activity.tabs.iter().filter(|(id, saved)| current(id, saved))
+            .filter_map(|(_, saved)| saved.last_message_at.clone()).max();
+        project_time(&mut session.unknown, latest);
         for tab in &mut session.tabs {
+            if activity.tabs.get(&tab.id).is_some_and(|saved| !matches(tab, saved)) { continue; }
             if activity
                 .tabs
                 .get(&tab.id)
@@ -185,6 +209,8 @@ pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
         let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut activity = read(&event.session_id)?;
         let tab = activity.tabs.entry(event.tab_id.clone()).or_default();
+        let log = super::log_path_in(&super::root()?, &event.session_id, &event.tab_id)?;
+        select_log(tab, &log);
         let before = tab.live.assistant;
         let message = tab.live.message(event);
         let time = message
@@ -207,6 +233,27 @@ pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
     }
 }
 
+/// A reset selected a complete new log. Rebuild its small projection in one
+/// write; a crash before this completes is detected by the log generation.
+pub(crate) fn replaced(session: &str, tab_id: &str, events: &[AgentEvent]) -> Result<()> {
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut activity = read(session)?;
+    let log = super::log_path(session, tab_id)?;
+    let mut tab = TabActivity::default();
+    select_log(&mut tab, &log);
+    tab.presence_scanned = true;
+    for event in events {
+        if tab.history.message(event) {
+            tab.has_messages = true;
+            advance(&mut tab.last_message_at, event.message_ts.as_deref().and_then(canonical));
+        }
+    }
+    tab.offset = std::fs::metadata(log)?.len();
+    activity.tabs.insert(tab_id.into(), tab);
+    activity.last_message_at = activity.tabs.values().filter_map(|tab| tab.last_message_at.clone()).max();
+    write(session, &activity)
+}
+
 /// One bounded batch per tab; persistent offsets make later launches idempotent.
 /// Read one record at a time, never a whole transcript. A partial trailing line
 /// is retried after the writer finishes it; legacy `ts` is never promoted.
@@ -219,10 +266,8 @@ fn scan_at(root: &Path, session: &str, tab_id: &str) -> Result<(bool, bool)> {
     let sidecar = activity_path(root, session);
     let mut activity: Activity = super::read_json(&sidecar)?.unwrap_or_default();
     let tab = activity.tabs.entry(tab_id.into()).or_default();
-    let log = root
-        .join("sessions")
-        .join(session)
-        .join(format!("{tab_id}.jsonl"));
+    let log = super::log_path_in(root, session, tab_id)?;
+    select_log(tab, &log);
     let file = match File::open(log) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((false, false)),
@@ -475,6 +520,26 @@ mod tests {
         assert!(record(&message).unwrap().is_none());
         let saved = std::fs::read_to_string(path("synthetic").unwrap()).unwrap();
         assert!(!saved.contains("Legacy prompt"));
+    }
+
+    #[test]
+    fn reset_log_rebuilds_message_activity_without_later_messages() {
+        let _home = super::super::temp_home();
+        seed();
+        record(&prompt(1, 2)).unwrap();
+        record(&reply(2, 9)).unwrap();
+        let id = "11111111-1111-4111-8111-111111111111";
+        index::update_tab("synthetic", "tab", |tab| {
+            tab.unknown.insert("resetLogId".into(), id.into());
+            Ok(())
+        }).unwrap();
+        assert!(!index::get("synthetic").unwrap().tabs[0].unknown.contains_key(FIELD));
+        let log = super::super::log_path("synthetic", "tab").unwrap();
+        super::super::append_line(&log, &serde_json::to_string(&prompt(1, 2)).unwrap()).unwrap();
+        scan("synthetic", "tab").unwrap();
+        assert_eq!(index::get("synthetic").unwrap().tabs[0].unknown[FIELD], at(2));
+        record(&reply(3, 3)).unwrap();
+        assert_eq!(index::get("synthetic").unwrap().tabs[0].unknown[FIELD], at(3));
     }
 
     #[test]

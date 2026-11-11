@@ -403,6 +403,7 @@ const FLOW_STALL: Duration = Duration::from_secs(2);
 const EXIT_AFTER_OUTPUT: Duration = Duration::from_millis(500);
 
 pub struct Terminals {
+    startup: Mutex<Option<Arc<crate::startup::Monitor>>>,
     panes: Mutex<HashMap<String, Pane>>,
     groups: Mutex<Vec<Arc<OwnedGroup>>>,
     retained: Mutex<HashMap<String, crate::local_runtime::scrollback::History>>,
@@ -421,6 +422,8 @@ pub struct Terminals {
     /// N" each is opened with. A chosen name is kept whatever the tab goes
     /// on to run (#437).
     renamed: Mutex<std::collections::HashSet<String>>,
+    /// Explicit placement overrides the legacy dock marker in a pane id.
+    docked: Mutex<HashMap<String, bool>>,
     /// Every pane is being handed to the runtime that replaces this one
     /// (#765): none is opened meanwhile.
     frozen: Mutex<bool>,
@@ -438,6 +441,8 @@ pub struct ShellPane {
     pub title: Option<String>,
     /// The reader named this tab; `title` is otherwise the one it was opened with.
     pub renamed: bool,
+    #[serde(default)]
+    pub docked: Option<bool>,
     pub cwd: String,
     pub exited: bool,
     /// When it was opened, so every window lists it in the same place.
@@ -470,7 +475,7 @@ pub fn is_shell_id(id: &str) -> bool {
 
 pub fn shell_session(id: &str) -> Option<&str> {
     let (session, _) = id.split_once(':')?;
-    (session != "tab" && session != crate::harness::setup::PANE_NAMESPACE && !session.is_empty()).then_some(session)
+    (session != "tab" && session != "archive" && session != crate::harness::setup::PANE_NAMESPACE && !session.is_empty()).then_some(session)
 }
 
 #[derive(Default)]
@@ -481,7 +486,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), frozen: Mutex::new(false) }
+        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), docked: Mutex::default(), frozen: Mutex::new(false) }
     }
 }
 
@@ -523,6 +528,13 @@ pub struct PtyData {
 pub struct PtyExit {
     pub id: String,
     pub code: Option<i32>,
+}
+
+#[derive(Clone, Copy)]
+struct PaneProgram<'a> {
+    executable: &'a std::ffi::OsStr,
+    args: &'a [&'a std::ffi::OsStr],
+    started: &'a dyn Fn(),
 }
 
 /// What a pane runs and where.
@@ -602,6 +614,16 @@ fn push_scrollback(scrollback: &mut VecDeque<u8>, bytes: &[u8]) {
 }
 
 impl Terminals {
+    pub(crate) fn set_startup_monitor(&self, monitor: Arc<crate::startup::Monitor>) {
+        *self.startup.lock().unwrap() = Some(monitor);
+    }
+
+    fn startup_ticket(&self, id: &str, created: &str, pid: Option<u32>) -> Option<crate::startup::Ticket> {
+        self.startup.lock().unwrap().as_ref().and_then(|monitor| match monitor.begin(id, created, pid) {
+            Ok(ticket) => Some(ticket),
+            Err(error) => { log::warn!("track child startup: {error:#}"); None }
+        })
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -621,7 +643,7 @@ impl Terminals {
     /// grandchild of this shell — which tab it belongs to.
     pub fn spawn(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
         let printed = self.retained.lock().unwrap().get(id).map(|history| history.data.clone()).unwrap_or_default();
-        let result = self.spawn_after(sink, id, spec, printed);
+        let result = self.spawn_after(sink, id, spec, printed, None);
         if result.is_ok() { self.retained.lock().unwrap().remove(id); }
         result
     }
@@ -635,12 +657,17 @@ impl Terminals {
         if let Some(pane) = self.panes.lock().unwrap().remove(id) {
             pane.group.terminate();
         }
-        let result = self.spawn_after(sink, id, spec, printed);
+        let result = self.spawn_after(sink, id, spec, printed, None);
         if result.is_ok() { self.retained.lock().unwrap().remove(id); }
         result
     }
 
-    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>) -> Result<()> {
+    /// A program with literal argv, independent of the user's shell syntax.
+    pub(crate) fn spawn_program(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, program: &std::ffi::OsStr, args: &[&std::ffi::OsStr], started: &dyn Fn()) -> Result<()> {
+        self.spawn_after(sink, id, spec, Vec::new(), Some(PaneProgram { executable: program, args, started }))
+    }
+
+    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>, executable: Option<PaneProgram<'_>>) -> Result<()> {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
@@ -652,19 +679,29 @@ impl Terminals {
         let PaneSpec { cwd, cols, rows, command, env } = spec;
         // A bare shell is still an interactive shell (also used by disposable
         // PTY fixtures). Shell scripts/arguments are work until the pane exits.
-        let explicit_command = command.is_some_and(|command| {
+        let explicit_command = executable.is_some() || command.is_some_and(|command| {
             let command = command.trim();
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
         });
-        let environment = crate::store::environment::launch(cwd);
+        let environment = crate::store::environment::launch(cwd)?;
+        // Lifecycle hooks must not perform cleanup with missing credentials
+        // or endpoints. Check the exact snapshot that this process receives.
+        if executable.is_some() {
+            environment.require_available().context("Archive script was not started")?;
+        }
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
-        let mut cmd = CommandBuilder::new(&sh);
+        let mut cmd = CommandBuilder::new(executable.map_or(std::ffi::OsStr::new(&sh), |program| program.executable));
         // A login shell so PATH and prompts match the reader's own terminal.
         let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh") && !sh.ends_with("pwsh");
-        match command {
+        if let Some(program) = executable {
+            for arg in program.args { cmd.arg(arg); }
+            // A lifecycle hook is not a provider/CLI call on behalf of an agent.
+            cmd.env_remove("RACCOON_SESSION_ID");
+            cmd.env_remove("TERMINALX_SESSION_ID");
+        } else { match command {
             Some(c) if known_shell => {
                 cmd.arg("-l");
                 cmd.arg("-c");
@@ -678,7 +715,7 @@ impl Terminals {
                 cmd.arg("-l");
             }
             None => {}
-        }
+        } }
         cmd.cwd(cwd);
         environment.inject(&mut cmd);
         cmd.env("TERM", "xterm-256color");
@@ -696,9 +733,18 @@ impl Terminals {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("spawn shell: {e}"))?;
+        let created = crate::store::index::now();
+        let startup = self.startup_ticket(id, &created, None);
+        let child = pair.slave.spawn_command(cmd).map_err(|e| {
+            if let Some(startup) = &startup { startup.exited(None); }
+            anyhow!("spawn shell: {e}")
+        })?;
+        // Report actual execution even if setting up the reader or writer
+        // subsequently fails. Lifecycle callers must not repeat its effects.
+        if let Some(program) = executable { (program.started)(); }
         drop(pair.slave);
         let pid = child.process_id();
+        if let Some(startup) = &startup { startup.spawned(pid); }
         let mut screen = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
         screen.process(&printed);
         let mut scrollback = VecDeque::with_capacity(SCROLLBACK_BYTES);
@@ -713,7 +759,7 @@ impl Terminals {
             explicit_command,
             environment: environment.stamp,
             cwd: cwd.to_string(),
-            created: crate::store::index::now(),
+            created,
             scrollback,
             printed: 0,
             screen,
@@ -725,6 +771,8 @@ impl Terminals {
     /// or one handed over by the runtime this one replaced (#765).
     fn start(&self, sink: Arc<dyn EventSink>, id: &str, parts: Parts) -> Result<()> {
         let Parts { master, reader, writer, mut waiter, pid, group, explicit_command, environment, cwd, created, scrollback, printed, screen, last_output } = parts;
+        let startup = self.startup_ticket(id, &created, pid);
+        if last_output.is_some() { if let Some(startup) = &startup { startup.ready(); } }
         #[cfg(unix)]
         let reader = Arc::new(Mutex::new(reader));
         #[cfg(not(unix))]
@@ -915,6 +963,7 @@ impl Terminals {
             let hold = hold.clone();
             std::thread::Builder::new().name(format!("pty-wait-{id}")).spawn(move || {
                 let code = waiter.wait(pid, &hold);
+                if let Some(startup) = &startup { startup.exited(code.and_then(|code| code.try_into().ok())); }
                 let _ = group.pid();
                 // Let the emitter go if it is holding the pane for its view, then
                 // give it a moment to send the tail, so the exit is not announced
@@ -1213,6 +1262,14 @@ impl Terminals {
         self.changed();
     }
 
+    /// Stop a lifecycle script's entire process group, retaining its terminal log.
+    pub(crate) fn stop_keep_output(&self, id: &str, timeout: Duration) -> bool {
+        let group = self.panes.lock().unwrap().get(id).map(|pane| pane.group.clone());
+        let Some(group) = group else { return true };
+        group.signal(false);
+        StoppingPane { id: id.to_string(), group }.wait(timeout)
+    }
+
     /// Kill the pane and wait for its process to really be gone.
     ///
     /// An agent CLI holds its conversation for as long as it runs, and refuses
@@ -1289,6 +1346,14 @@ impl Terminals {
         }
     }
 
+    /// Reposition a shell without changing its PTY, identity or output.
+    pub fn set_docked(&self, id: &str, docked: bool) -> Result<ShellPane> {
+        let mut shell = self.shell(id).context("shell terminal no longer exists")?;
+        self.docked.lock().unwrap().insert(id.to_string(), docked);
+        shell.docked = Some(docked);
+        Ok(shell)
+    }
+
     /// What each running pane's terminal has in front, as the terminal itself
     /// reports it: two calls on the PTY per pane, and no process is looked at.
     /// Empty where a PTY cannot be asked.
@@ -1345,7 +1410,7 @@ impl Terminals {
         };
         let title = self.titles.lock().unwrap().get(id).cloned();
         let renamed = self.renamed.lock().unwrap().contains(id);
-        Some(ShellPane { id: id.to_string(), session_id, title, renamed, cwd, exited, created })
+        Some(ShellPane { id: id.to_string(), session_id, title, renamed, docked: self.docked.lock().unwrap().get(id).copied(), cwd, exited, created })
     }
 
     /// Whether the shell in `id` is running something: the terminal's
@@ -1462,12 +1527,13 @@ impl Terminals {
         for (id, pane) in panes.iter() {
             let printed = pane.scrollback.lock().unwrap();
             history.insert(id.clone(), History { id: id.clone(), cwd: pane.cwd.clone(), created: pane.created.clone(),
-                title: titles.get(id).cloned(), renamed: renamed.contains(id),
+                title: titles.get(id).cloned(), renamed: renamed.contains(id), docked: self.docked.lock().unwrap().get(id).copied(),
                 data: printed.iter().skip(printed.len().saturating_sub(each)).copied().collect() });
         }
         for pane in history.values_mut() {
             pane.title = titles.get(&pane.id).cloned();
             pane.renamed = renamed.contains(&pane.id);
+            pane.docked = self.docked.lock().unwrap().get(&pane.id).copied();
             if pane.data.len() > each {
                 pane.data.drain(..pane.data.len() - each);
             }
@@ -1486,6 +1552,7 @@ impl Terminals {
         for pane in &history {
             if let Some(title) = &pane.title { titles.insert(pane.id.clone(), title.clone()); }
             if pane.renamed { renamed.insert(pane.id.clone()); }
+            if let Some(docked) = pane.docked { self.docked.lock().unwrap().insert(pane.id.clone(), docked); }
         }
         drop(renamed);
         drop(titles);
@@ -1519,6 +1586,7 @@ impl Terminals {
             let retained = self.retained.lock().unwrap();
             self.titles.lock().unwrap().retain(|id, _| panes.contains_key(id) || retained.contains_key(id));
             self.renamed.lock().unwrap().retain(|id| panes.contains_key(id) || retained.contains_key(id));
+            self.docked.lock().unwrap().retain(|id, _| panes.contains_key(id) || retained.contains_key(id));
         }
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.emit(crate::status::resources::CHANGED_EVENT, &());
@@ -2231,6 +2299,33 @@ mod tests {
         // A pane whose program has gone has nothing in front.
         terminals.kill_all();
         assert!(terminals.fronts().is_empty());
+    }
+
+    #[test]
+    fn moving_a_shell_keeps_its_process_output_and_input() {
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(8));
+        let dir = tempfile::tempdir().unwrap();
+        let id = "session-a:dock-move";
+        pane(&terminals, &sink, &dir, id, "cat");
+        let (view, output) = collector();
+        terminals.attach("main", id, "moving", view);
+        terminals.write(id, b"before-move\n").unwrap();
+        read_until(&output, "before-move");
+        let pid = terminals.pid(id);
+        assert!(pid.is_some());
+        let before = terminals.read_output(id).unwrap();
+        for docked in [false, true] {
+            assert_eq!(terminals.set_docked(id, docked).unwrap().docked, Some(docked));
+            assert_eq!(terminals.pid(id), pid);
+            assert!(terminals.is_running(id));
+            assert!(terminals.read_output(id).unwrap().starts_with(&before));
+        }
+        terminals.write(id, b"after-move\n").unwrap();
+        read_until(&output, "after-move");
+        terminals.kill_all();
+        assert!(terminals.docked.lock().unwrap().is_empty());
+        assert!(terminals.set_docked(id, true).is_err());
     }
 
     #[test]

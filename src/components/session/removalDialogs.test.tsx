@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   relocateSession: vi.fn(),
 }));
 
+vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="archive-log">{id}</div> }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask, message: mocks.message }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/lib/api", () => ({
@@ -279,4 +280,68 @@ describe("WorkspaceRemoveDialog", () => {
     expect(mocks.workspaceDisposition).toHaveBeenCalledTimes(2);
     expect(removeButton().textContent).toContain("Remove anyway…");
   });
+});
+
+it.each(["", "internal: "])("holds removal after an archive timeout (%s), opens its terminal and requires separate consent", async (prefix) => {
+  mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+  mocks.removeWorkspace.mockRejectedValueOnce(`${prefix}ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "receipt", pane: "archive:run", code: 124, timedOut: true })}`);
+  render(<WorkspaceRemoveDialog />);
+  openDelete();
+  await screen.findByText("Clean and merged: safe to remove.");
+  fireEvent.click(removeButton());
+  await screen.findByText(/Archive script failed \(exit 124\). Remove anyway/);
+  expect(mocks.removeWorkspace).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", { name: "Open log" }));
+  expect(screen.getByTestId("archive-log").textContent).toBe("archive:run");
+  fireEvent.click(screen.getByRole("button", { name: "Remove anyway" }));
+  await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledTimes(2));
+  expect(mocks.removeWorkspace.mock.calls[1][2]).toMatchObject({ archiveFailure: "receipt", keepSessions: true, expectedSessions: ["s1", "s9"] });
+});
+
+it("keeps the workspace when archive-failure consent is declined", async () => {
+  mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+  mocks.removeWorkspace.mockRejectedValueOnce(`ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "receipt", pane: "archive:run", code: 7, timedOut: false })}`);
+  render(<WorkspaceRemoveDialog />);
+  openDelete();
+  await screen.findByText("Clean and merged: safe to remove.");
+  fireEvent.click(removeButton());
+  await screen.findByText(/Archive script failed/);
+  fireEvent.click(screen.getByRole("button", { name: "Keep as is" }));
+  expect(mocks.removeWorkspace).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("offers consent for a recorded unattended failure and shows its saved log", async () => {
+  mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+  mocks.removeWorkspace.mockRejectedValueOnce(`internal: ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "saved-receipt", pane: "archive:closed", code: 17, timedOut: false, log: "saved output", sessionsStopped: true })}`);
+  render(<WorkspaceRemoveDialog />);
+  openDelete();
+  await screen.findByText("Clean and merged: safe to remove.");
+  fireEvent.click(removeButton());
+  await screen.findByText(/Its sessions are stopped/);
+  fireEvent.click(screen.getByRole("button", { name: "Open log" }));
+  expect(screen.getByTestId("archive-log").textContent).toBe("log:archive:closed");
+  fireEvent.click(screen.getByRole("button", { name: "Remove anyway" }));
+  await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledTimes(2));
+  expect(mocks.removeWorkspace.mock.calls[1][2].archiveFailure).toBe("saved-receipt");
+});
+
+it("explicitly retries a saved failure and requires new consent if the retry fails", async () => {
+  mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+  mocks.removeWorkspace
+    .mockRejectedValueOnce(`ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "saved", pane: "archive:old", code: 17, timedOut: false, log: "saved output" })}`)
+    .mockRejectedValueOnce(`ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "new", pane: "archive:retry", code: 9, timedOut: false })}`);
+  render(<WorkspaceRemoveDialog />);
+  openDelete();
+  await screen.findByText("Clean and merged: safe to remove.");
+  fireEvent.click(removeButton());
+  fireEvent.click(await screen.findByRole("button", { name: "Run archive script again" }));
+  await screen.findByText(/Archive script failed \(exit 9\)/);
+  expect(mocks.removeWorkspace.mock.calls[1][2]).toMatchObject({ archiveRetry: "saved" });
+  expect(mocks.removeWorkspace.mock.calls[1][2]).not.toHaveProperty("archiveFailure");
+  fireEvent.click(screen.getByRole("button", { name: "Open log" }));
+  expect(screen.getByTestId("archive-log").textContent).toBe("archive:retry");
+  fireEvent.click(screen.getByRole("button", { name: "Remove anyway" }));
+  await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledTimes(3));
+  expect(mocks.removeWorkspace.mock.calls[2][2].archiveFailure).toBe("new");
 });

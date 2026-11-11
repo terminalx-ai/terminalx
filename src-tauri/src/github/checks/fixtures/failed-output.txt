@@ -1,0 +1,26 @@
+check	UNKNOWN STEP	2026-11-06T21:20:21.2274900Z ^[[41m^[[1m FAIL ^[[22m^[[49m src/components/settings/settingsRegistry.test.tsx^[[2m > ^[[22mkeeps standard settings rows in the registry; organization internals register as sections
+check	UNKNOWN STEP	2026-11-06T21:20:21.2280670Z ^[[31m^[[1mAssertionError^[[22m: ./RepositoryActionsSettings.tsx: expected 'import { useId, useState } from "reac…' not to match /<SettingRow\b/^[[39m
+check	UNKNOWN STEP	2026-11-06T21:20:21.2281510Z
+check	UNKNOWN STEP	2026-11-06T21:20:21.2281660Z ^[[32m- Expected:^[[39m
+check	UNKNOWN STEP	2026-11-06T21:20:21.2282400Z /<SettingRow\b/
+check	UNKNOWN STEP	2026-11-06T21:20:21.2282520Z
+check	UNKNOWN STEP	2026-11-06T21:20:21.2282640Z ^[[31m+ Received:^[[39m
+check	UNKNOWN STEP	2026-11-06T21:20:21.2282960Z "import { useId, useState } from \"react\";
+check	UNKNOWN STEP	2026-11-06T21:20:21.2283300Z import { Plus, Trash2 } from \"@/icons\";
+check	UNKNOWN STEP	2026-11-06T21:20:21.2283760Z import { Button } from \"@/components/ui/button\";
+check	UNKNOWN STEP	2026-11-06T21:20:21.2284240Z import { SettingRow, Switch } from \"@/components/ui/controls\";
+check	UNKNOWN STEP	2026-11-06T21:20:21.2284970Z import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from \"@/components/ui/dialog\";
+check	UNKNOWN STEP	2026-11-06T21:20:21.2285660Z import { IconPicker, RepositoryIcon } from \"@/components/ui/IconPicker\";
+check	UNKNOWN STEP	2026-11-06T21:20:21.2286380Z import { moveRepositoryEntry, validateAction, type RepositoryAction } from \"@/lib/repositoryActions\";
+check	UNKNOWN STEP	2026-11-06T21:20:21.2287270Z import { RepositoryFieldError, RepositoryOrderButtons, repositoryInputClass, useRepositoryMutation } from \"./repositoryEditor\";
+check	UNKNOWN STEP	2026-11-06T21:20:21.2287700Z
+check	UNKNOWN STEP	2026-11-06T21:20:21.2288100Z /** Controlled editor: its parent owns persistence and publishes a successful save through `actions`. */
+check	UNKNOWN STEP	2026-11-06T21:20:21.2288730Z export function RepositoryActionsSettings({ actions, onChange, onReset }: {
+check	UNKNOWN STEP	2026-11-06T21:20:21.2289110Z   actions: readonly RepositoryAction[];
+check	UNKNOWN STEP	2026-11-06T21:20:21.2289450Z   onChange: (actions: RepositoryAction[]) => Promise<void>;
+check	UNKNOWN STEP	2026-11-06T21:20:21.2289970Z   /** Clear local overrides, then reread the repository file. Absent until that source is available. */
+check	UNKNOWN STEP	2026-11-06T21:20:21.2290400Z   onReset?: () => Promise<void>;
+check	UNKNOWN STEP	2026-11-06T21:20:21.2290590Z }) {
+check	UNKNOWN STEP	2026-11-06T21:20:21.2290980Z   const [editing, setEditing] = useState<{ action: RepositoryAction; isNew: boolean } | null>(null);
+check	UNKNOWN STEP	2026-11-06T21:20:21.2291420Z   const mutation = useRepositoryMutation();
+check	UNKNOWN STEP	2026-11-06T21:20:21.2291700Z   const errorId = useId();

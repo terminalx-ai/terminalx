@@ -3,6 +3,7 @@ import { BYPASS_MODE } from "./models";
 import { getPrefs } from "./prefs";
 import type { BulkClose } from "./tabActions";
 import type { WorkspaceHost } from "./workspaceRemoval";
+import type { SessionEntry, TabEntry } from "@/types/session";
 
 /** App-level dialogs opened from anywhere (menus, panels, hotkeys). */
 /**
@@ -11,6 +12,8 @@ import type { WorkspaceHost } from "./workspaceRemoval";
  * Permanent deletion is chosen separately in the dialog.
  */
 export interface WorkspaceRemoveRequest {
+  archiveFailure?: import("@terminalx/portable/workspace").ArchiveFailure;
+  archiveNotice?: string;
   projectPath: string;
   path: string;
   name: string;
@@ -22,6 +25,8 @@ export interface WorkspaceRemoveRequest {
 }
 
 interface State {
+  agentHandoff: { session: SessionEntry; source: TabEntry; harness: string; reviewPrompt?: string } | null;
+  workspaceRestore: string | null;
   workspaceRemove: WorkspaceRemoveRequest | null;
   bypass: { harness: string; confirm: () => void } | null;
   /** The session being renamed. */
@@ -45,7 +50,7 @@ export interface TabRequest {
   tab: string | null;
 }
 
-let state: State = { workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, linkIssue: null, worktreeCleanup: false, renameTab: null, closeTabs: null };
+let state: State = { agentHandoff: null, workspaceRestore: null, workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, linkIssue: null, worktreeCleanup: false, renameTab: null, closeTabs: null };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -61,6 +66,15 @@ export function useDialogs(): State {
     () => state,
     () => state,
   );
+}
+
+/** Pin the source while creating/selecting the destination; repeated clicks open one flow. */
+export function openAgentHandoff(session: SessionEntry, source: TabEntry, harness: string, reviewPrompt?: string) {
+  if (!state.agentHandoff) set({ agentHandoff: { session, source, harness, reviewPrompt } });
+}
+
+export function closeAgentHandoff() {
+  set({ agentHandoff: null });
 }
 
 /** Every way of removing a workspace opens this one dialog. */
@@ -155,4 +169,12 @@ export function openWorktreeCleanup() {
 
 export function closeWorktreeCleanup() {
   set({ worktreeCleanup: false });
+}
+
+export function openWorkspaceRestore(sessionId: string) {
+  set({ workspaceRestore: sessionId });
+}
+
+export function closeWorkspaceRestore() {
+  set({ workspaceRestore: null });
 }

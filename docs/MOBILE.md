@@ -250,6 +250,13 @@ read/subscription methods, and the session-scoped steering methods documented
 in [MULTIPLAYER.md](./MULTIPLAYER.md). Refusals are protocol data and render as
 unavailable/forbidden states instead of falling through to broader RPC.
 
+Opening a local tab acknowledges its read state through `session.markRead`.
+Both viewer and driver pairings may acknowledge a tab: this clears its
+`markedUnread` reminder and changes Completed to Idle, without starting an
+agent, changing a working/waiting status, or updating activity time. The
+reminder is shared with the desktop; a viewer reading it clears it there too.
+The live device grant is checked for every acknowledgement.
+
 ### What the phone is offered (#730)
 
 `sync.capabilities` names what the Mac can do beyond the first phone

@@ -1,7 +1,12 @@
-import { Archive, Check, FolderPlus, FolderTree, LayoutList, PanelLeft, Plus, Search, SquarePen } from "@/icons";
+import { selectSidebarSort, useSidebarOrder } from "@/lib/sidebarOrder";
+import { useRef, useState, type PointerEvent } from "react";
+import { useCloudProjectChoices } from "@/components/session/CloudNewSession";
+import { useOrganizationVisibility } from "@/lib/organizationVisibility";
+import { canonicalProject, sidebarProjectOf } from "@/lib/sidebarView";
+import { Archive, Check, CircleDot, FolderPlus, FolderTree, LayoutList, PanelLeft, Plus, Search, SquarePen } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { cn } from "@/lib/cn";
 import { SIDEBAR_FILTERS, setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
@@ -32,7 +37,7 @@ export function SidebarTitlebar({
   /** The projects a new chat may start in, as the menu lists them. */
   projects: Project[];
 }) {
-  const grouped = usePrefs().sidebarLayout !== "list";
+  const grouped = usePrefs().sidebarLayout === "simple";
   return (
     <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 pr-2" style={{ paddingLeft: TITLEBAR_INSET }} data-testid="sidebar-titlebar">
       <WithTooltip label="Hide sidebar" shortcut="app.toggleSidebar">
@@ -90,11 +95,16 @@ export function SidebarTitlebar({
  */
 function ViewMenu({ grouped }: { grouped: boolean }) {
   const filter = useSidebarFilter();
+  const prefs = usePrefs();
+  const statusGrouped = prefs.sidebarLayout === "status";
   const { showArchived } = useSessionStore();
+  const order = useSidebarOrder();
+  const sort = order.custom ? "custom" : prefs.sidebarSort === "created" ? "created" : "updated";
+  const sortLabels = { updated: "Updated", created: "Created", custom: "Custom" };
   const menu = useRowMenu();
   const showing = SIDEBAR_FILTERS.find((entry) => entry.id === filter.filter)!.label;
-  const label = filter.active ? `View: showing ${showing}` : showArchived ? "View: showing archived" : "View";
-  const tooltip = filter.active ? `Showing: ${showing}` : showArchived ? "Showing archived" : grouped ? "Grouped by project" : "One list of chats";
+  const label = filter.filter !== "all" ? `View: showing ${showing}` : prefs.sidebarProject ? "View: filtered by project" : showArchived ? "View: showing archived" : "View";
+  const tooltip = filter.filter !== "all" ? `Showing: ${showing}` : prefs.sidebarProject ? "Filtered by project" : showArchived ? "Showing archived" : statusGrouped ? "Grouped by status" : grouped ? "Grouped by project" : "One list of chats";
   return (
     <DropdownMenu {...menu.root}>
       <WithTooltip label={tooltip}>
@@ -107,7 +117,7 @@ function ViewMenu({ grouped }: { grouped: boolean }) {
             data-testid="sidebar-filter"
             data-filter={filter.filter}
           >
-            {grouped ? <FolderTree /> : <LayoutList />}
+            {statusGrouped ? <CircleDot /> : grouped ? <FolderTree /> : <LayoutList />}
           </Button>
         </DropdownMenuTrigger>
       </WithTooltip>
@@ -116,10 +126,24 @@ function ViewMenu({ grouped }: { grouped: boolean }) {
           <FolderTree /> Group by project
           {grouped && <Check className="ml-auto" />}
         </DropdownMenuItem>
-        <DropdownMenuItem role="menuitemradio" aria-checked={!grouped} onSelect={() => setPrefs({ sidebarLayout: "list" })}>
+        <DropdownMenuItem role="menuitemradio" aria-checked={!grouped && !statusGrouped} onSelect={() => setPrefs({ sidebarLayout: "list" })}>
           <LayoutList /> One list of chats
-          {!grouped && <Check className="ml-auto" />}
+          {!grouped && !statusGrouped && <Check className="ml-auto" />}
         </DropdownMenuItem>
+        <DropdownMenuItem role="menuitemradio" aria-checked={statusGrouped} onSelect={() => setPrefs({ sidebarLayout: "status" })}>
+          <CircleDot /> Group by status
+          {statusGrouped && <Check className="ml-auto" />}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>Sort by: {sortLabels[sort]}</DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            {(["updated", "created", "custom"] as const).map((choice) => <DropdownMenuItem key={choice} role="menuitemradio" aria-checked={sort === choice} disabled={!order.loaded || order.pending} onSelect={() => void selectSidebarSort(choice)}>
+              {sort === choice ? <Check /> : <span className="size-4" />}{sortLabels[choice]}
+            </DropdownMenuItem>)}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <ProjectFilterMenu />
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Show</DropdownMenuLabel>
         {SIDEBAR_FILTERS.map((entry) => (
@@ -135,4 +159,64 @@ function ViewMenu({ grouped }: { grouped: boolean }) {
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/** Project names and paths are searchable; looking at cloud projects never starts them. */
+function ProjectFilterMenu() {
+  const [query, setQuery] = useState("");
+  const search = useRef<HTMLInputElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const { sidebarProject } = usePrefs();
+  const store = useSessionStore();
+  const cloud = useCloudProjectChoices();
+  const { visibleIds } = useOrganizationVisibility();
+  const choices = new Map<string, string>();
+  for (const project of store.projects) {
+    if (canonicalProject(project.path) !== (store.chatsPath && canonicalProject(store.chatsPath))) choices.set(canonicalProject(project.path), project.name);
+  }
+  for (const session of store.sessions) {
+    const path = sidebarProjectOf(session, store.chatsPath);
+    if (path && !choices.has(path)) choices.set(path, path.split("/").pop() || path);
+  }
+  for (const org of cloud) if (visibleIds.has(org.orgId)) {
+    for (const project of org.projects) choices.set(project.key, `${project.fullName} · ${org.orgName}`);
+  }
+  if (sidebarProject && !choices.has(sidebarProject)) choices.set(sidebarProject, sidebarProject.split("/").pop() || sidebarProject);
+  const matching = [...choices].filter(([path, name]) => `${name} ${path}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())).sort((a, b) => a[1].localeCompare(b[1]));
+  const keepSearchFocus = (event: PointerEvent) => {
+    // A pointer leaving a formerly hovered result also moves Radix focus.
+    // Protect both leave and move while typing; clicking a result still selects it.
+    if (query && document.activeElement === search.current) event.preventDefault();
+  };
+  return <DropdownMenuSub onOpenChange={(open) => {
+    setQuery("");
+    // Radix's submenu autofocus runs during mount; focus the editable field afterwards.
+    if (open) window.setTimeout(() => search.current?.focus(), 0);
+  }}>
+    <DropdownMenuSubTrigger><Search /> Filter by project{sidebarProject && <Check className="ml-auto" />}</DropdownMenuSubTrigger>
+    <DropdownMenuSubContent ref={content} className="w-64" onPointerMoveCapture={keepSearchFocus} onKeyDown={(event) => {
+      if (event.key === "ArrowUp" && event.target === content.current?.querySelector('[role="menuitemradio"]')) {
+        event.preventDefault(); search.current?.focus();
+      }
+    }}>
+      <input ref={search} aria-label="Search projects" placeholder="Search projects…" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
+        if (event.key === "Escape") return;
+        event.stopPropagation();
+        if (event.key === "ArrowDown" || event.key === "Tab") {
+          event.preventDefault();
+          const items = content.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]');
+          items?.[event.shiftKey ? items.length - 1 : 0]?.focus();
+        }
+      }} className="mb-1 w-full rounded-md bg-well px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-ring" />
+      <DropdownMenuItem role="menuitemradio" aria-checked={!sidebarProject} onPointerLeave={keepSearchFocus} onSelect={() => setPrefs({ sidebarProject: null })}>
+        {!sidebarProject ? <Check /> : <span className="size-4" />}All projects
+      </DropdownMenuItem>
+      <div className="max-h-64 overflow-y-auto">
+        {matching.map(([path, name]) => <DropdownMenuItem key={path} role="menuitemradio" aria-checked={sidebarProject === path} onPointerLeave={keepSearchFocus} onSelect={() => setPrefs({ sidebarProject: path })} title={path}>
+          {sidebarProject === path ? <Check /> : <span className="size-4" />}<span className="truncate">{name}</span>
+        </DropdownMenuItem>)}
+        {!matching.length && <p className="px-2 py-2 text-xs text-muted-foreground">No matching projects.</p>}
+      </div>
+    </DropdownMenuSubContent>
+  </DropdownMenuSub>;
 }

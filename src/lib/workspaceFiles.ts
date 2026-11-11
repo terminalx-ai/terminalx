@@ -323,8 +323,8 @@ export interface StashedBuffer {
 const stashed = new Map<string, StashedBuffer>();
 
 /**
- * Keep a cloud editor's unsaved text when its view unmounts (the workspace
- * page closed or the connection went away), to restore it when the editor
+ * Keep a cloud or review editor's unsaved text when its view unmounts
+ * (another session opened, or the connection went away), to restore it when the editor
  * shows again. Nothing is written anywhere; the text lives in memory only.
  */
 export function stashBuffer(editorId: string, buffer: StashedBuffer): void {

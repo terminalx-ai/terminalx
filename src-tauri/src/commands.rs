@@ -53,6 +53,19 @@ pub async fn account_sign_in(
     tauri::async_runtime::spawn_blocking(move || account.begin_sign_in(&app)).await.map_err(err)?.map_err(err)
 }
 
+/// A sign-in link pasted in place of the browser's button opening the app
+/// (a development build has no URL scheme for it to open): checked as a
+/// delivered link is, then exchanged.
+#[tauri::command]
+pub async fn account_paste_callback(
+    app: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+    link: String,
+) -> CmdResult<()> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.paste_callback(&app, &link)).await.map_err(err)?.map_err(err)
+}
+
 /// Opens an organization's page in the web console in the system browser
 /// (PRO-40: API keys and webhooks are managed there).
 #[tauri::command]
@@ -1673,6 +1686,13 @@ pub fn list_projects() -> CmdResult<ProjectsResponse> {
     Ok(ProjectsResponse { projects, last_selected })
 }
 
+/// Preview effective copy patterns, including unsaved edits. No file contents leave Rust.
+#[tauri::command]
+pub async fn repository_files_preview(path: String, patterns: Option<Vec<String>>, snapshot: Option<String>) -> CmdResult<crate::worktree_files::Preview> {
+    tauri::async_runtime::spawn_blocking(move || crate::worktree_files::preview(Path::new(&path), patterns.as_deref(), snapshot.as_deref()).map_err(err))
+        .await.map_err(err)?
+}
+
 /// The project list changed: a window that did not make the change reads it again.
 pub(crate) const PROJECTS_CHANGED_EVENT: &str = "projects_changed";
 
@@ -1876,6 +1896,10 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// deletable.
 #[tauri::command]
 pub async fn create_session(app: AppHandle, mut req: NewSession) -> CmdResult<SessionEntry> {
+    if !req.project_path.starts_with("cloud:") && crate::git::is_repo(std::path::Path::new(&req.project_path))
+        && !crate::configuration_commands::review(&app, &req.project_path).await? {
+        return Err("Repository configuration was not trusted. No workspace was created.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         crate::session_ops::prefer_native_codex_session(&mut req);
         create_session_blocking(&app, req)
@@ -1941,6 +1965,18 @@ pub fn rename_tab(app: AppHandle, session_id: String, tab_id: String, title: Opt
 #[tauri::command]
 pub fn tab_state() -> CmdResult<index::TabState> {
     index::tab_state().map_err(err)
+}
+
+#[tauri::command]
+pub async fn sidebar_order() -> CmdResult<index::SidebarOrder> {
+    tauri::async_runtime::spawn_blocking(index::sidebar_order).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_sidebar_order(app: AppHandle, patch: index::SidebarOrderPatch) -> CmdResult<index::SidebarOrder> {
+    let saved = tauri::async_runtime::spawn_blocking(move || index::set_sidebar_order(patch)).await.map_err(err)?.map_err(err)?;
+    let _ = app.emit("sidebar_order_changed", &saved);
+    Ok(saved)
 }
 
 /// Save one workspace's tab order, pins, mutes and titles, for every window and every device.
@@ -2103,6 +2139,12 @@ pub fn set_archive_idle_days(days: u32) -> CmdResult<crate::store::settings::Con
 #[tauri::command]
 pub fn set_session_pinned(app: AppHandle, session_id: String, pinned: bool) -> CmdResult<()> {
     patch_session(&app, &session_id, crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() })
+}
+
+#[tauri::command]
+pub async fn set_session_status(state: State<'_, crate::AppState>, session_id: String, status: index::ManualStatus) -> CmdResult<()> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.set_manual_status(&session_id, status).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2321,6 +2363,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
         // Claude can fork a conversation; Codex starts a new thread over the copied log.
         new_tab.fork_from = if tab.harness == "claude" { tab.provider_session_id.clone() } else { None };
         new_tab.provider_session_id = None;
+        for key in ["resetLogId", "resetBackupId", "resetSeq"] { new_tab.unknown.remove(key); }
         // A quick chat's fork is a quick chat with a scratch directory of its
         // own: sharing the parent's would have either one's deletion take the
         // other's files. What the parent had there is copied, since the
@@ -2355,9 +2398,11 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: vec![new_tab.clone()],
             active_tab: Some(new_tab.id.clone()),
             link: None,
+            parent: None,
             unknown: BTreeMap::new(),
         };
         if src.worktree_name.is_some() && !src.worktree_removed {
@@ -2373,7 +2418,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
         }
         // Copy the log, re-stamping envelopes so the new tab owns them.
         if let Ok(dir) = store::sessions_dir() {
-            let from = dir.join(&src.id).join(format!("{}.jsonl", tab.id));
+            let from = store::log_path(&src.id, &tab.id).map_err(err)?;
             if let Ok(text) = std::fs::read_to_string(&from) {
                 let to_dir = dir.join(&id);
                 let _ = std::fs::create_dir_all(&to_dir);
@@ -2564,6 +2609,13 @@ pub async fn report_send_shown(state: State<'_, AppState>, session_id: String, t
     tauri::async_runtime::spawn_blocking(move || m.note_shown(&session_id, &tab_id, seq, &timings).map_err(err)).await.map_err(err)?
 }
 
+/// Content-free view transition evidence, kept beside the tab's diagnostics.
+#[tauri::command]
+pub async fn report_terminal_view(state: State<'_, AppState>, session_id: String, tab_id: String, report: crate::session::TerminalViewReport) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.note_terminal_view(&session_id, &tab_id, &report).map_err(err)).await.map_err(err)?
+}
+
 /// What the window showed of a tab's warning, or what was done in it (#815).
 /// The report is labels and numbers only (`recovery_log::UiReport` refuses
 /// anything else); the app's own build is put on it here. Recording is best
@@ -2617,9 +2669,9 @@ pub async fn tab_handoff(state: State<'_, AppState>, session_id: String, tab_id:
 /// its own terminal interface on the same thread, and the tab stays there.
 /// It waits for admission and a confirmed exit, so never on the main thread.
 #[tauri::command]
-pub async fn tab_to_terminal(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+pub async fn tab_to_terminal(state: State<'_, AppState>, session_id: String, tab_id: String, transition_id: Option<uuid::Uuid>) -> CmdResult<bool> {
     let m = state.sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || m.to_terminal(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || m.to_terminal(&session_id, &tab_id, transition_id).map_err(err)).await.map_err(err)?
 }
 
 /// The terminal pane a tab's CLI is running in, or nothing if it is not.
@@ -2650,6 +2702,19 @@ pub async fn ensure_tab_started(state: State<'_, AppState>, session_id: String, 
 pub async fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.stop(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+}
+
+/// Change a reader-owned follow-up queue, persisting before acknowledging.
+#[tauri::command]
+pub async fn change_held_queue(state: State<'_, AppState>, session_id: String, tab_id: String, change: crate::session::held::Change) -> CmdResult<SendOutcome> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.change_held(&session_id, &tab_id, change).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn reset_chat(state: State<'_, AppState>, session_id: String, tab_id: String, end_seq: Option<u64>, reset_files: bool) -> CmdResult<Option<String>> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.reset_chat(&session_id, &tab_id, end_seq, reset_files).map_err(err)).await.map_err(err)?
 }
 
 /// Send a message the CLI holds behind its running turn now: interrupt, then type it.
@@ -2705,6 +2770,12 @@ pub async fn set_tab_permission_mode(state: State<'_, AppState>, session_id: Str
 pub async fn set_tab_effort(state: State<'_, AppState>, session_id: String, tab_id: String, effort: Option<String>) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.set_effort(&session_id, &tab_id, effort.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn set_tab_unread(state: State<'_, AppState>, session_id: String, tab_id: String, unread: bool) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.set_tab_unread(&session_id, &tab_id, unread).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2912,13 +2983,39 @@ pub async fn git_push(cwd: String) -> CmdResult<String> {
 }
 
 #[tauri::command]
+pub async fn git_has_remote(cwd: String) -> CmdResult<bool> {
+    tauri::async_runtime::spawn_blocking(move || git::has_remote(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_add_remote(cwd: String, url: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || git::add_remote(Path::new(&cwd), &url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn gh_connection_status(cwd: Option<String>) -> CmdResult<crate::github::ConnectionStatus> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::connection_status(cwd.as_deref().map(Path::new))).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn gh_login_start(state: State<'_, AppState>, id: String, hostname: String) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.github_login(&id, &hostname)).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn gh_create_repository(cwd: String, name: String, private: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::create_repository(Path::new(&cwd), &name, private).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn git_pull(cwd: String) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || git::pull(Path::new(&cwd)).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub async fn git_discard(cwd: String, path: String) -> CmdResult<()> {
-    tauri::async_runtime::spawn_blocking(move || git::discard_file(Path::new(&cwd), &path).map_err(err)).await.map_err(err)?
+pub async fn git_discard(cwd: String, path: String, base: Option<String>, old_path: Option<String>) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::discard(&cwd, &path, base.as_deref(), old_path.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 /// The merge left in progress in a checkout, with what each of its
@@ -2966,6 +3063,16 @@ pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_assoc
 }
 
 #[tauri::command]
+pub async fn pr_search(cwd: String, query: String) -> CmdResult<Vec<crate::github::PullRequest>> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::search_prs(Path::new(&cwd), &query).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_attach(cwd: String, number: u64) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::attach_pr(Path::new(&cwd), number).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn pr_associations_batch(session_keys: Vec<String>) -> CmdResult<std::collections::BTreeMap<String, Vec<crate::pr_associations::Association>>> {
     tauri::async_runtime::spawn_blocking(move || crate::pr_associations::for_sessions(&session_keys).map_err(err)).await.map_err(err)?
 }
@@ -2983,6 +3090,56 @@ pub async fn pr_landed(cwd: String) -> CmdResult<crate::landed::Landed> {
 #[tauri::command]
 pub async fn pr_details(cwd: String, number: u64, url: Option<String>) -> CmdResult<crate::github::PullRequest> {
     tauri::async_runtime::spawn_blocking(move || crate::github::panel_pr_details(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_conversation(url: String) -> CmdResult<crate::github::conversation::Conversation> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::pr_conversation(&url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_conversation_action(url: String, action: crate::github::conversation::Action) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::pr_conversation_action(&url, action).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_reviewer_search(url: String, query: String) -> CmdResult<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::pr_reviewer_search(&url, &query).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_check_log(cwd: String, pr_url: String, check_url: String, failed: bool) -> CmdResult<crate::github::checks::CheckLog> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::checks::log(Path::new(&cwd), &pr_url, &check_url, failed).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_check_rerun(cwd: String, pr_url: String, check_url: String, failed: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::checks::rerun(Path::new(&cwd), &pr_url, &check_url, failed).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_check_fix_attachment(session_id: String, tab_id: String, pr_url: String) -> CmdResult<crate::github::checks::FixAttachment> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::checks::prepare_fix(&session_id, &tab_id, &pr_url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_threads(url: String) -> CmdResult<crate::github::reviews::ReviewThreads> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::list(&url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_files(url: String, head: String, base: String) -> CmdResult<Vec<crate::github::reviews::ReviewFile>> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::files(&url, &head, &base).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_resolve(url: String, thread_id: String, resolved: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::resolve(&url, &thread_id, resolved).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_review_reply(url: String, thread_id: String, body: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::reviews::reply(&url, &thread_id, &body).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -3024,6 +3181,11 @@ pub async fn pty_spawn(state: State<'_, AppState>, id: String, cwd: String, cols
 }
 
 
+#[tauri::command]
+pub async fn listening_sessions(sessions: Vec<crate::sidebar_activity::SessionDirectory>) -> CmdResult<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || crate::sidebar_activity::listening_sessions(sessions)).await.map_err(err)
+}
+
 /// Which of these shell tabs are running a command now, for a close that would end it.
 #[tauri::command]
 pub async fn pty_busy(state: State<'_, AppState>, ids: Vec<String>) -> CmdResult<Vec<String>> {
@@ -3059,6 +3221,20 @@ pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id:
 pub async fn pty_rename(state: State<'_, AppState>, id: String, title: String) -> CmdResult<()> {
     let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
     tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.rename(&id, &title)).await.map_err(err)?.map_err(err)
+}
+
+/// Move an existing shell between the dock and tabs in every window.
+#[tauri::command]
+pub async fn pty_set_docked(state: State<'_, AppState>, id: String, docked: bool) -> CmdResult<crate::pty::ShellPane> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.set_docked(&id, docked)).await.map_err(err)?.map_err(err)
+}
+
+/// Save selected terminal output privately alongside this session's attachments.
+#[tauri::command]
+pub async fn save_terminal_selection(state: State<'_, AppState>, session_id: String, tab_id: String, text: String) -> CmdResult<String> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.save_terminal_selection(&session_id, &tab_id, &text)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
@@ -3206,6 +3382,12 @@ pub async fn cloud_control_confirm(app: tauri::AppHandle, what: String, ok_label
 ///
 /// [`QUESTION_TTL`]: crate::cloud_control::QUESTION_TTL
 pub(crate) async fn cloud_control_question(app: tauri::AppHandle, title: String, message: String, ok_label: String) -> crate::cloud_control::Answer {
+    cloud_control_question_with_details(app, title, message, None, ok_label).await
+}
+
+/// Optional reveal stays inside the native consent boundary. It never grants
+/// consent or extends the deadline; only the explicit agreement button does.
+pub(crate) async fn cloud_control_question_with_details(app: tauri::AppHandle, title: String, message: String, revealed: Option<String>, ok_label: String) -> crate::cloud_control::Answer {
     use crate::cloud_control::{question_answered, question_begin, question_closed, question_expired, Confirming, QUESTION_TTL};
     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     // Kept short and on one line: the label comes from this app, but never trust its length.
@@ -3214,17 +3396,28 @@ pub(crate) async fn cloud_control_question(app: tauri::AppHandle, title: String,
         return answer;
     }
     let message = format!("{message}\n\nIf this is not answered within {} seconds the request is dropped, and answering later does nothing.", QUESTION_TTL.as_secs());
+    let revealed = revealed.map(|text| format!("{text}\n\nThis request expires after {} seconds, including time spent reviewing values.", QUESTION_TTL.as_secs()));
+    let deadline = std::time::Instant::now() + QUESTION_TTL;
     let agree = ok_label.clone();
     let mut dialog = tauri::async_runtime::spawn_blocking(move || {
         let _open = Confirming::begin();
-        let pressed = app
-            .dialog()
-            .message(message)
-            .title(title)
-            .kind(MessageDialogKind::Warning)
-            .buttons(cloud_control_buttons(&ok_label))
-            .blocking_show_with_result();
-        cloud_control_agreed(&pressed, &agree)
+        let mut show_values = false;
+        loop {
+            if std::time::Instant::now() >= deadline { return false; }
+            let toggle = if show_values { "Hide values" } else { "Reveal values" };
+            let buttons = if revealed.is_some() {
+                cloud_control_review_buttons(toggle, &ok_label)
+            } else { cloud_control_buttons(&ok_label) };
+            let pressed = app.dialog()
+                .message(if show_values { revealed.as_ref().unwrap_or(&message) } else { &message })
+                .title(&title).kind(MessageDialogKind::Warning).buttons(buttons)
+                .blocking_show_with_result();
+            if revealed.is_some() && matches!(&pressed, tauri_plugin_dialog::MessageDialogResult::Custom(label) if label == toggle) {
+                show_values = !show_values;
+                continue;
+            }
+            return cloud_control_agreed(&pressed, &agree);
+        }
     });
     match tokio::time::timeout(QUESTION_TTL, &mut dialog).await {
         Ok(pressed) => question_answered(pressed.unwrap_or(false), std::time::Instant::now()),
@@ -3256,6 +3449,12 @@ const CLOUD_CONTROL_CLOSE: &str = "Close";
 /// every dismissal would come back as agreement.
 fn cloud_control_buttons(agree: &str) -> tauri_plugin_dialog::MessageDialogButtons {
     tauri_plugin_dialog::MessageDialogButtons::YesNoCancelCustom(CLOUD_CONTROL_REFUSE.to_string(), agree.to_string(), CLOUD_CONTROL_CLOSE.to_string())
+}
+
+/// The review uses the default slot to toggle visibility, with the same
+/// explicit agreement and dismissal slots as ordinary native questions.
+fn cloud_control_review_buttons(toggle: &str, agree: &str) -> tauri_plugin_dialog::MessageDialogButtons {
+    tauri_plugin_dialog::MessageDialogButtons::YesNoCancelCustom(toggle.into(), agree.into(), CLOUD_CONTROL_CLOSE.into())
 }
 
 /// Whether the dialog's result is the explicit agree button, and nothing else.
@@ -3622,6 +3821,12 @@ pub async fn issue_pipeline_start(app: AppHandle, session_id: String, tab_id: St
 }
 
 #[tauri::command]
+pub async fn issue_pipeline_attach(app: AppHandle, session_id: String, tab_id: String, auto_merge: bool, resolve_conflicts: bool) -> CmdResult<StartedIssuePipeline> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("attach", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"autoMerge":auto_merge,"resolveConflicts":resolve_conflicts})).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn issue_pipeline_continue(app: AppHandle, session_id: String, tab_id: String, options: crate::issue_pipeline::LaunchOptions) -> CmdResult<Option<StartedIssuePipeline>> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.pipeline("continue", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"options":options})).map_err(err)).await.map_err(err)?
@@ -3678,6 +3883,25 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    #[test]
+    fn revealing_configuration_never_grants_consent() {
+        use tauri_plugin_dialog::MessageDialogResult;
+        for toggle in ["Reveal values", "Hide values"] {
+            let buttons = super::cloud_control_review_buttons(toggle, "Trust settings");
+            let agreed = |native| super::cloud_control_agreed(&as_the_dialog_layer_reports(native, &buttons), "Trust settings");
+            assert!(!agreed(Native::Yes), "Return toggles visibility, never approves");
+            assert!(!agreed(Native::Cancel), "Dismissal cannot approve");
+            assert!(agreed(Native::No), "Only explicit Trust settings approves");
+        }
+        for label in ["Reveal values", "Hide values", "Close", "Refuse"] {
+            assert!(!super::cloud_control_agreed(&MessageDialogResult::Custom(label.into()), "Trust settings"));
+        }
+        for result in [MessageDialogResult::Yes, MessageDialogResult::No, MessageDialogResult::Cancel, MessageDialogResult::Ok] {
+            assert!(!super::cloud_control_agreed(&result, "Trust settings"));
+        }
+        assert!(super::cloud_control_agreed(&MessageDialogResult::Custom("Trust settings".into()), "Trust settings"));
+    }
+
     /// The idle sweep spares what a reader can see (#718): not what a closed
     /// window last showed, nor the floating window's session while it is put away.
     #[test]
@@ -3945,12 +4169,14 @@ mod command_tests {
         let before = git(&project, &["worktree", "list", "--porcelain"]);
 
         let session = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: None,
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -3984,12 +4210,14 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let first = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: Some("old-workspace".into()),
             issue: None,
@@ -4004,12 +4232,14 @@ mod command_tests {
         })
         .unwrap();
         let second = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Second".into()),
             use_worktree: false,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4052,12 +4282,14 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let session = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: Some("calm-ember".into()),
             issue: None,
@@ -4103,12 +4335,14 @@ mod command_tests {
         git(&project, &["worktree", "add", "-q", "-b", "feature/attached", worktree.to_str().unwrap()]);
 
         let created = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Attached session".into()),
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4129,12 +4363,14 @@ mod command_tests {
         })
         .unwrap();
         let companion = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Companion session".into()),
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4144,12 +4380,14 @@ mod command_tests {
         })
         .unwrap();
         let bystander = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Session on main".into()),
             use_worktree: false,
             on_main: true,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4196,7 +4434,7 @@ mod command_tests {
             expected_sessions: None,
             direct: crate::git::DirectDelete::Allowed,
             fetch: crate::landed::Fetch::Skip,
-            guard: None,
+            guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
         };
         crate::session_ops::remove_workspace(&sink, &request, &|_| {}).unwrap().sessions
     }
@@ -4264,8 +4502,10 @@ mod command_tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: Vec::new(),
             link: None,
+            parent: None,
             active_tab: None,
             unknown: Default::default(),
         };
@@ -4296,6 +4536,9 @@ mod command_tests {
 
 #[tauri::command]
 pub fn update_project(app: AppHandle, path: String, patch: projects::ProjectPatch) -> CmdResult<Project> {
+    if patch.scripts.is_some() {
+        app.state::<crate::AppState>().sessions().map_err(err)?.require_archive_support().map_err(err)?;
+    }
     let project = projects::update(&path, patch).map_err(err)?;
     let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
     Ok(project)
@@ -4350,10 +4593,9 @@ pub async fn scan_leftovers() -> CmdResult<Vec<crate::cleanup::Leftover>> {
 pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>, run: Option<String>) -> CmdResult<crate::cleanup::Removal> {
     tauri::async_runtime::spawn_blocking(move || {
         let run = run.unwrap_or_default();
-        let report = |progress: &crate::cleanup::Progress| {
-            let _ = app.emit(crate::cleanup::PROGRESS_EVENT, crate::worktree_cleanup::OfRun { run: &run, progress });
-        };
-        let removal = crate::cleanup::remove(&ids, &report).map_err(err)?;
+        let state = app.state::<crate::AppState>();
+        state.sessions().map_err(err)?.require_archive_support().map_err(err)?;
+        let removal: crate::cleanup::Removal = state.sessions().map_err(err)?.workspace("removeLeftovers", serde_json::json!({"ids":ids,"run":run})).map_err(err)?;
         let projects: std::collections::BTreeSet<&str> =
             removal.removed.iter().filter_map(|id| id.strip_prefix("worktree:")).filter_map(|rest| rest.rsplit_once(':')).map(|(project, _)| project).collect();
         for project in projects {
@@ -4403,10 +4645,8 @@ pub async fn worktree_cleanup_cancel_sizes(app: AppHandle, prefix: String) -> Cm
 pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>, run: Option<String>) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let items: Vec<_> = items.into_iter().map(|item| serde_json::json!({
-            "projectPath":item.project_path,"path":item.path,"token":item.token,"deleteSessions":item.delete_sessions,
-            "acceptIgnored":item.accept_ignored,"estimatedBytes":item.estimated_bytes
-        })).collect();
+        require_archive_runtime(&state, items.iter().map(|item| item.project_path.as_str()))?;
+        let items = serde_json::to_value(items).map_err(err)?;
         let results: serde_json::Value = state.sessions().map_err(err)?.workspace("remove", serde_json::json!({"items":items,"run":run})).map_err(err)?;
         for done in results.as_array().into_iter().flatten() {
             if matches!(done["outcome"].as_str(), Some("removed" | "alreadyRemoved")) {
@@ -4649,6 +4889,8 @@ pub fn session_set_work_private(app: AppHandle, session_id: String, private: boo
 pub async fn merged_cleanup_sweep(app: AppHandle) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
+        let (projects, _) = projects::list().map_err(err)?;
+        require_archive_runtime(&state, projects.iter().map(|project| project.path.as_str()))?;
         let result: serde_json::Value = state.sessions().map_err(err)?.workspace("mergedSweep", serde_json::json!({})).map_err(err)?;
         for status in result["statuses"].as_array().into_iter().flatten() {
             if status["phase"] == "removed" {
@@ -4795,6 +5037,15 @@ pub async fn workspace_disposition(project_path: String, path: String, fetch: Op
     .map_err(err)?
 }
 
+fn require_archive_runtime<'a>(state: &crate::AppState, paths: impl Iterator<Item = &'a str>) -> CmdResult<()> {
+    for path in paths {
+        if !projects::scripts(Path::new(path)).map_err(err)?.archive.trim().is_empty() {
+            return state.sessions().map_err(err)?.require_archive_support().map_err(err);
+        }
+    }
+    Ok(())
+}
+
 /// Remove a workspace: the one command behind the workspace menu, the right
 /// panel, settling, and the session delete that takes its workspace along.
 ///
@@ -4807,15 +5058,21 @@ pub async fn workspace_disposition(project_path: String, path: String, fetch: Op
 /// is removed only with `confirmed_digest`: the digest of the check the
 /// person saw when they gave the second confirmation. If the workspace has
 /// changed since, it no longer matches and nothing is removed.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn remove_workspace(app: AppHandle, project_path: String, path: String, keep_sessions: bool,
-    delete_branch: bool, confirmed_digest: Option<String>, expected_sessions: Vec<String>) -> CmdResult<WorkspaceRemoveReport> {
+    delete_branch: bool, confirmed_digest: Option<String>, expected_sessions: Vec<String>, archive_failure: Option<String>, archive_retry: Option<String>) -> CmdResult<WorkspaceRemoveReport> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let removed = state.sessions().map_err(err)?.workspace("removeWorkspace", serde_json::json!({
+        require_archive_runtime(&state, std::iter::once(project_path.as_str()))?;
+        let mut params = serde_json::json!({
             "projectPath":project_path,"path":path,"keepSessions":keep_sessions,"deleteBranch":delete_branch,
             "confirmedDigest":confirmed_digest,"expectedSessions":expected_sessions
-        })).map_err(err)?;
+        });
+        // Older owners deny unknown fields, even when null.
+        if let Some(failure) = archive_failure { params["archiveFailure"] = failure.into(); }
+        if let Some(retry) = archive_retry { params["archiveRetry"] = retry.into(); }
+        let removed = state.sessions().map_err(err)?.workspace("removeWorkspace", params).map_err(err)?;
         state.browser.forget_workspace(&crate::browser::control::canonical(&path));
         Ok(removed)
     }).await.map_err(err)?
@@ -4846,6 +5103,20 @@ pub async fn repo_mirror_stop(session_id: String) -> CmdResult<crate::repo_mirro
     tauri::async_runtime::spawn_blocking(move || {
         let session = index::get(&session_id).map_err(err)?;
         crate::repo_mirror::stop(Path::new(&session.project_path)).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn preview_workspace_restore(app: AppHandle, session_id: String) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("previewRestore", serde_json::json!({ "sessionId": session_id })).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch })).map_err(err)
     }).await.map_err(err)?
 }
 
@@ -4973,4 +5244,31 @@ pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -
 #[tauri::command]
 pub async fn cloud_mirror_claim_owner(account: String, legacy_email: Option<String>) -> CmdResult<usize> {
     tauri::async_runtime::spawn_blocking(move || crate::cloud_mirror::claim_owner(&store::root().map_err(err)?, &account, legacy_email.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn review_comments(workspace: String, action: crate::store::review_comments::Action) -> CmdResult<Vec<crate::store::review_comments::Comment>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::store::review_comments::apply(&crate::store::root().map_err(err)?, &workspace, action).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn turn_checkpoint(session_id: String, tab_id: String, seq: u64) -> CmdResult<Option<crate::checkpoints::Checkpoint>> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::get(&session_id, &tab_id, seq).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn keep_turn(session_id: String, tab_id: String, seq: u64) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::keep(&session_id, &tab_id, seq).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn undo_turn(session_id: String, tab_id: String, seq: u64, confirmed: Option<String>) -> CmdResult<crate::checkpoints::UndoResult> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::undo(&session_id, &tab_id, seq, confirmed.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn restore_undo(session_id: String, tab_id: String, seq: u64, confirmed: Option<String>) -> CmdResult<crate::checkpoints::UndoResult> {
+    tauri::async_runtime::spawn_blocking(move || crate::checkpoints::restore_undo(&session_id, &tab_id, seq, confirmed.as_deref()).map_err(err)).await.map_err(err)?
 }

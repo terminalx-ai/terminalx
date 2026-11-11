@@ -147,9 +147,11 @@ async fn a_terminal_open_in_a_worktree_keeps_it() {
 /// A session in the index, in a worktree of its own or in the main directory.
 fn session(f: &Fixture, title: &str, worktree: Option<&str>) -> crate::store::index::SessionEntry {
     crate::session_ops::create_session_entry(crate::session_ops::NewSession {
+        parent: None,
         section_id: None,
         project_path: f.root.to_string_lossy().into_owned(),
         checkout_branch: None,
+        checkout_pr: None,
         title: Some(title.into()),
         use_worktree: worktree.is_some(),
         base_ref: worktree.map(|_| "main".into()),

@@ -1,3 +1,4 @@
+import { PROJECT_HUES } from "@terminalx/portable/botFace";
 import { cn } from "@/lib/cn";
 
 /**
@@ -20,17 +21,7 @@ const MASKS: Record<string, string[]> = {
 export const MASCOTS = Object.keys(MASKS);
 
 /** Named accents; each maps to a token so it follows the theme. */
-export const PROJECT_COLORS: { id: string; css: string }[] = [
-  { id: "slate", css: "var(--ink-muted)" },
-  { id: "blue", css: "#5b8def" },
-  { id: "orange", css: "#e0703a" },
-  { id: "yellow", css: "#e2b53b" },
-  { id: "green", css: "#5cb85c" },
-  { id: "pink", css: "#d85fa5" },
-  { id: "purple", css: "#9b6fe0" },
-  { id: "teal", css: "#3fb5a9" },
-  { id: "amber", css: "#e8913a" },
-];
+export const PROJECT_COLORS: { id: string; css: string }[] = [{ id: "slate", css: "var(--ink-muted)" }, ...PROJECT_HUES];
 
 export function colorCss(id: string | null | undefined): string {
   return PROJECT_COLORS.find((c) => c.id === id)?.css ?? "var(--ink-muted)";

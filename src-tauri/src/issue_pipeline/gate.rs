@@ -408,7 +408,7 @@ pub(crate) mod tests {
     pub(crate) const NEXT: &str = "2222222222222222222222222222222222222222";
 
     pub(crate) fn check(name: &str, state: &str) -> PrCheck {
-        PrCheck { name: name.into(), state: state.into(), url: None }
+        PrCheck { name: name.into(), state: state.into(), url: None, actions: None }
     }
 
     pub(crate) fn clean_pr() -> PrSnapshot {
@@ -422,6 +422,7 @@ pub(crate) mod tests {
             base: "main".into(),
             head: "raccoon/11-fix-login-timeout".into(),
             head_sha: HEAD.into(),
+            head_repository: Some("acme/widgets".into()),
             mergeable: "MERGEABLE".into(),
             merge_state: "CLEAN".into(),
             review_decision: None,

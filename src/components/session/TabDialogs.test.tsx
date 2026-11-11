@@ -22,7 +22,7 @@ const { dropSessionTerminals, openTerminal, setSelectedAgent } = await import("@
 const { resetTabLayouts } = await import("@/lib/tabLayouts");
 const { closeCloseTabs, closeRenameTab, openCloseTabs, openRenameTab } = await import("@/lib/dialogs");
 const { setDraft } = await import("@/lib/drafts");
-const { setTabPinned, workspaceRow } = await import("@/lib/tabActions");
+const { moveTabToPane, setTabPinned, workspaceRow } = await import("@/lib/tabActions");
 
 const LONG = "Refactor the authentication middleware to use the new token service";
 const flush = () => act(async () => void (await new Promise((resolve) => setTimeout(resolve, 0))));
@@ -184,4 +184,16 @@ describe("renaming a tab", () => {
     expect(backend.callsOf("set_tab_layout")).toEqual([]);
     expect(screen.queryByRole("dialog")).toBeNull();
   });
+});
+
+
+it("confirms only the tabs in the menu's pane", async () => {
+  const current = row();
+  moveTabToPane(current, current.tabs.find((tab) => tab.key === "agent:a3")!, "right", { kind: "agent", id: "a1" });
+  render(<TabsHarness />);
+  await ask("all", "agent:a3");
+  expect(within(dialog()).getByText("Close 1 tab?")).toBeTruthy();
+  fireEvent.click(within(dialog()).getByRole("button", { name: "Close 1 tab" }));
+  await flush();
+  expect(closed()).toEqual(["agent:a3"]);
 });
