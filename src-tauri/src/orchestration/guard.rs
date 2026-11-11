@@ -96,6 +96,7 @@ pub const RULES: &[Rule] = &[
     rule(&["terminalx", "tnx"], &["sessions", "create"], Limit::Delegate),
     rule(&["terminalx", "tnx"], &["runs", "create"], Limit::Delegate),
     rule(&["terminalx", "tnx"], &["runs", "start"], Limit::Delegate),
+    rule(&["terminalx", "tnx"], &["runs", "stop"], Limit::Delegate),
     rule(&["gh"], &["workflow", "run"], Limit::Deploy),
     rule(&["gh"], &["release", "create"], Limit::Deploy),
     rule(&["npm", "pnpm", "yarn", "bun"], &["publish"], Limit::Deploy),
@@ -580,6 +581,8 @@ mod tests {
             "/Applications/TerminalX.app/Contents/MacOS/terminalx sessions create --quick --agent claude --prompt go",
             "terminalx runs create --from plan.json",
             "terminalx runs start",
+            "terminalx runs stop 01a1",
+            "env -u RACCOON_SESSION_ID tnx runs stop",
         ] {
             assert_eq!(limit_of(command), Some(Limit::Delegate), "{command}");
         }

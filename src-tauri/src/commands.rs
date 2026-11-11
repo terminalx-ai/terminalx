@@ -4961,7 +4961,7 @@ pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
 /// Each switch is optional: the one the reader flipped is changed and the
 /// others are left as they are.
 #[tauri::command]
-pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Option<bool>) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Option<bool>, orchestrator_runs: Option<bool>) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
     if let Some(on) = native_codex {
         settings.experimental.native_codex = on;
@@ -4969,16 +4969,9 @@ pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Optio
     if let Some(on) = session_cost {
         settings.experimental.session_cost = on;
     }
-    store::settings::save(&settings).map_err(err)?;
-    Ok(settings.experimental)
-}
-
-/// Its own command: `set_experimental_settings` takes what a paired phone sends
-/// (Native Codex) and the session cost switch; a phone has no Run view to switch on.
-#[tauri::command]
-pub fn set_experimental_orchestrator_runs(on: bool) -> CmdResult<crate::store::settings::ExperimentalSettings> {
-    let mut settings = store::settings::load();
-    settings.experimental.orchestrator_runs = on;
+    if let Some(on) = orchestrator_runs {
+        settings.experimental.orchestrator_runs = on;
+    }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.experimental)
 }

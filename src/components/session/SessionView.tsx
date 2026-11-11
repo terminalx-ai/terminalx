@@ -1,6 +1,6 @@
 import { RunStrip } from "@/components/orchestration/RunStrip";
 import { RunView } from "@/components/orchestration/RunView";
-import { useExperimental } from "@/lib/experimental";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { showRunView, useRun, useRunViewShown } from "@/lib/orchestration";
 import { openWorkspaceRestore } from "@/lib/dialogs";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
@@ -431,7 +431,7 @@ export function SessionView({
   const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
   // Orchestration runs (PRO-274), behind Settings → Experimental: a session of a git project on this computer can lead one.
   const canLead = local && !cloud && !compact && !quick;
-  const runOffered = useExperimental(canLead).orchestratorRuns && canLead && isGit;
+  const runOffered = useExperimentalSettings(canLead)?.orchestratorRuns === true && canLead && isGit;
   const run = useRun(session.id, runOffered);
   const runShown = useRunViewShown(session.id) && runOffered;
   const prefs = usePrefs();

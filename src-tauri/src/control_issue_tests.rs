@@ -519,6 +519,13 @@ fn orchestration_run_child() {
     }
     assert!(service.execute("pipelines.show", json!({"pipeline": leads, "caller": as_worker}), "show").unwrap().to_string().contains(leads.as_str()));
     assert!(!crate::issue_pipeline::store::get(&leads).unwrap().stopped);
+    // Nor a run: it leads none, and does not start or stop the one it works for.
+    for (command, params) in [("runs.create", json!({"plan": plan})), ("runs.start", json!({"run": run_id})), ("runs.stop", json!({"run": run_id})), ("runs.create", json!({"plan": plan, "lead": lead_id}))] {
+        let mut params = params;
+        params["caller"] = as_worker.clone();
+        assert_eq!(service.execute(command, params, "run").unwrap_err().code, "forbidden", "{command}");
+    }
+    assert_eq!(service.execute("runs.show", json!({"run": run_id, "caller": as_worker}), "show").unwrap()["state"], "running");
     // One the lead starts by hand is an ordinary session.
     assert!(!index::get(from(lead_id, lead["tabId"].as_str().unwrap())["sessionId"].as_str().unwrap()).unwrap().run_worker());
 
