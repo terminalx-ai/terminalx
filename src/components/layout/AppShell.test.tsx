@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
+import { announceProjectAdded } from "@/lib/projectAdded";
 
 vi.mock("@/components/session/LocalSectionDialogs", () => ({ LocalSectionDialogs: () => null }));
 vi.mock("@/components/session/GuestSession", () => ({ GuestSessionHost: () => null }));
@@ -129,8 +130,8 @@ vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,
 }));
 vi.mock("@/components/settings/SettingsPage", () => ({
-  SettingsPage: ({ onBack, initialTab, openRequest }: { onBack: () => void; initialTab?: unknown; openRequest?: number }) => (
-    <div data-testid="settings-page" data-initial-tab={typeof initialTab === "string" ? initialTab : "not-a-section"} data-open-request={openRequest}>
+  SettingsPage: ({ onBack, initialTab, initialProjectPath, openRequest }: { onBack: () => void; initialTab?: unknown; initialProjectPath?: string; openRequest?: number }) => (
+    <div data-testid="settings-page" data-initial-tab={typeof initialTab === "string" ? initialTab : "not-a-section"} data-project-path={initialProjectPath ?? ""} data-open-request={openRequest}>
       <button type="button" onClick={onBack}>Back to previous page</button>
     </div>
   ),
@@ -291,6 +292,18 @@ describe("start screen", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Agent settings from start" }));
     expect((await screen.findByTestId("settings-page")).getAttribute("data-initial-tab")).toBe("agents");
+  });
+
+  it("opens the added project's scripts from the Project added notice, and no project for other ways in (PRO-285)", async () => {
+    render(<AppShell />);
+    act(() => announceProjectAdded({ path: "/repo", name: "Raccoon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Project settings" }));
+    const page = await screen.findByTestId("settings-page");
+    expect(page.getAttribute("data-initial-tab")).toBe("repositories.scripts");
+    expect(page.getAttribute("data-project-path")).toBe("/repo");
+    fireEvent.click(screen.getByRole("button", { name: "Back to previous page" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    expect((await screen.findByTestId("settings-page")).getAttribute("data-project-path")).toBe("");
   });
 });
 

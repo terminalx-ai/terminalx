@@ -1,6 +1,7 @@
 import "@testing-library/dom";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PrCheck } from "@/lib/api";
 import type { IssuePipeline, IssuePipelineSettings } from "@/types/issuePipeline";
 import type { Project } from "@/types/session";
 
@@ -8,7 +9,7 @@ const { invoke, openUrl, selectSession, sessionStore } = vi.hoisted(() => ({
   invoke: vi.fn(),
   openUrl: vi.fn(),
   selectSession: vi.fn(),
-  sessionStore: { projects: [] as Project[], sessions: [] as { id: string }[] },
+  sessionStore: { projects: [] as Project[], sessions: [] as { id: string; cwd?: string }[] },
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -196,5 +197,150 @@ describe("an issue's pipeline on its page", () => {
     render(<IssuePipelinePanel pipeline={pipeline({ stage: "work", state: "working", pr: null, verdict: null, round: 0 })} />);
     render(<IssuePipelinePanel pipeline={pipeline({ state: "stopped", stopped: true })} />);
     expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("the checks a merge waits on (#881)", () => {
+  const NOW = Date.parse("2026-11-11T10:23:30.000Z");
+  const RUN = (job: number) => `https://github.com/acme/widgets/actions/runs/90/job/${job}`;
+  const check = (name: string, state: string, patch: Partial<PrCheck> = {}): PrCheck => ({ name, state, url: RUN(name.length), ...patch });
+  const waiting = (checks: PrCheck[], required: string[], patch: Partial<IssuePipeline> = {}) => pipeline({
+    state: "waiting", reason: null, note: `Waiting for checks on 1111111111: ${required.join(" and ")}.`,
+    waitingSince: "2026-11-11T10:00:00.000Z",
+    checks: { commit: C1, checks, required, since: "2026-11-11T10:00:00.000Z", limitMinutes: 60 },
+    ...patch,
+  });
+  const rows = (list: string) => within(screen.getByRole("list", { name: list })).getAllByRole("listitem").map((item) => item.textContent);
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    vi.setSystemTime(NOW);
+    sessionStore.sessions = [{ id: "author", cwd: "/repo/.worktrees/433" }, { id: "reviewer" }];
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("reads a queued check as queued and a running one as running, with its time and its run", () => {
+    render(<IssuePipelinePanel pipeline={waiting([
+      check("check", "in_progress", { startedAt: "2026-11-11T10:00:00Z", summary: "macOS · tests, clippy, Swift", actions: { runId: 90, jobId: 5 } }),
+      check("desktop-platforms", "queued", { startedAt: null }),
+    ], ["check", "desktop-platforms"])} />);
+    const panel = within(screen.getByTestId("issue-pipeline"));
+    expect(panel.getByText("Waiting for checks")).toBeTruthy();
+    expect(panel.getByTestId("pipeline-checks-count").textContent).toBe("· 0 of 2 passed");
+    expect(rows("Required")).toEqual(["checkmacOS · tests, clippy, SwiftRunning23 min", "desktop-platformsQueued"]);
+    expect(panel.getByTestId("pipeline-checks-clock").textContent).toBe("Waiting 23 min · asks you at 60 min");
+    expect(panel.getByRole("list", { name: "Stages" }).textContent).toContain("Mergewaiting for checks");
+    // The list says it: the sentence is not said again.
+    expect(panel.queryByText(/Waiting for checks on/)).toBeNull();
+    fireEvent.click(panel.getByRole("button", { name: "Open the run: check" }));
+    expect(openUrl).toHaveBeenCalledWith(RUN(5));
+    // The clocks move with the time, without a read of GitHub.
+    invoke.mockClear();
+    act(() => { vi.advanceTimersByTime(4 * 60_000); });
+    expect(panel.getByTestId("pipeline-checks-clock").textContent).toBe("Waiting 27 min · asks you at 60 min");
+    expect(rows("Required")[0]).toContain("27 min");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("counts only required checks, folding the optional ones away", () => {
+    render(<IssuePipelinePanel pipeline={waiting([
+      check("check", "in_progress", { startedAt: "2026-11-11T10:00:00Z" }),
+      check("headless-serve", "success", { startedAt: "2026-11-11T10:00:00Z", completedAt: "2026-11-11T10:04:10Z" }),
+      check("desktop-platforms", "success", { startedAt: "2026-11-11T10:00:00Z", completedAt: "2026-11-11T10:09:00Z", summary: "instabox-medium" }),
+      check("lint", "failure", { startedAt: "2026-11-11T10:00:00Z", completedAt: "2026-11-11T10:01:00Z" }),
+      check("docs", "success"),
+    ], ["check", "desktop-platforms", "headless-serve"])} />);
+    const panel = within(screen.getByTestId("issue-pipeline"));
+    // A failing optional check changes neither the headline nor the count.
+    expect(panel.getByText("Waiting for checks")).toBeTruthy();
+    expect(panel.getByTestId("pipeline-checks-count").textContent).toBe("· 2 of 3 passed");
+    expect(rows("Required")).toEqual(["checkRunning23 min", "headless-servePassed4 min", "desktop-platformsinstabox-mediumPassed9 min"]);
+    expect(panel.queryByRole("list", { name: "Optional" })).toBeNull();
+    const fold = panel.getByRole("button", { name: /Optional/ });
+    expect(fold.textContent).toBe("Optional1 of 2 failed");
+    fireEvent.click(fold);
+    expect(rows("Optional")).toEqual(["lintFailed1 min", "docsPassed"]);
+  });
+
+  it("names and links a failed required check, and offers to send it to the author, run it again, or open it", async () => {
+    const failed = waiting([
+      check("check", "failure", { startedAt: "2026-11-11T10:00:00Z", completedAt: "2026-11-11T10:41:00Z", summary: "cargo test · exit 101", actions: { runId: 90, jobId: 5 } }),
+      check("headless-serve", "success", { startedAt: "2026-11-11T10:00:00Z", completedAt: "2026-11-11T10:04:00Z" }),
+      check("desktop-platforms", "success", { startedAt: "2026-11-11T10:00:00Z", completedAt: "2026-11-11T10:09:00Z" }),
+    ], ["check", "desktop-platforms", "headless-serve"], {
+      state: "needsYou", reason: { kind: "checksFailed", names: ["check"] }, note: "A check failed on the reviewed commit: check.", waitingSince: null,
+    });
+    failed.checks!.until = "2026-11-11T10:41:00.000Z";
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "pr_check_fix_attachment") return { path: "/tmp/logs/check.log", truncated: false };
+      if (command === "send_message") return { queued: false, events: [] };
+      if (command === "pr_check_rerun") return undefined;
+      return failed;
+    });
+    render(<IssuePipelinePanel pipeline={failed} />);
+    const panel = within(screen.getByTestId("issue-pipeline"));
+    expect(panel.getByText("A required check failed")).toBeTruthy();
+    expect(panel.getByTestId("pipeline-checks-count").textContent).toBe("· 2 of 3 passed");
+    expect(panel.getByTestId("pipeline-check-failed").textContent).toBe("check failed on 1111111. Nothing is merged. The failure goes back to the author session, or you can run the check again.");
+    expect(panel.getByTestId("pipeline-checks-clock").textContent).toBe("Waited 41 min");
+    expect(rows("Required")[0]).toBe("checkcargo test · exit 101Failed41 min");
+    expect(panel.getByRole("list", { name: "Stages" }).textContent).toContain("Mergea required check failed");
+
+    fireEvent.click(panel.getByRole("button", { name: "Open the run" }));
+    expect(openUrl).toHaveBeenCalledWith(RUN(5));
+
+    fireEvent.click(panel.getByRole("button", { name: "Send the failure to the author" }));
+    await waitFor(() => expect(panel.getByText("Sent the failure to the author session.")).toBeTruthy());
+    expect(invoke).toHaveBeenCalledWith("pr_check_fix_attachment", { sessionId: "author", tabId: "t1", prUrl: "https://github.com/acme/widgets/pull/7" });
+    const sent = invoke.mock.calls.find(([command]) => command === "send_message")![1] as { sessionId: string; tabId: string; text: string };
+    expect([sent.sessionId, sent.tabId]).toEqual(["author", "t1"]);
+    expect(sent.text).toContain("/tmp/logs/check.log");
+
+    fireEvent.click(panel.getByRole("button", { name: "Re-run check" }));
+    await waitFor(() => expect(panel.getByText(/Re-run requested for 1 Actions run\./)).toBeTruthy());
+    expect(invoke).toHaveBeenCalledWith("pr_check_rerun", { cwd: "/repo/.worktrees/433", prUrl: "https://github.com/acme/widgets/pull/7", checkUrl: RUN(5), failed: true });
+  });
+
+  it("offers only the run where the author session is not here, or the failure is not an Actions run", () => {
+    sessionStore.sessions = [];
+    const failed = waiting([check("ci/legacy", "failure", { url: "https://ci.example.com/3" })], ["ci/legacy"], { state: "needsYou", reason: { kind: "checksFailed", names: ["ci/legacy"] } });
+    render(<IssuePipelinePanel pipeline={failed} />);
+    const panel = within(screen.getByTestId("issue-pipeline"));
+    expect((panel.getByRole("button", { name: "Send the failure to the author" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((panel.getByRole("button", { name: "Re-run check" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(panel.getByRole("button", { name: "Open the run" }));
+    expect(openUrl).toHaveBeenCalledWith("https://ci.example.com/3");
+  });
+
+  it("says the note, not an empty failure, when what failed is a workflow behind passing checks", () => {
+    render(<IssuePipelinePanel pipeline={waiting([check("check", "success")], ["check"], {
+      state: "needsYou", reason: { kind: "checksFailed", names: ["CI (check_suites #9)"] }, note: "A check failed on the reviewed commit: CI (check_suites #9).",
+    })} />);
+    const panel = within(screen.getByTestId("issue-pipeline"));
+    expect(panel.getByText("Needs you")).toBeTruthy();
+    expect(panel.getByText("A check failed on the reviewed commit: CI (check_suites #9).")).toBeTruthy();
+    expect(panel.queryByTestId("pipeline-check-failed")).toBeNull();
+    expect(panel.queryByTestId("pipeline-checks")).toBeNull();
+  });
+
+  it("keeps the sentence beside the list once the wait ran out", () => {
+    const stalled = waiting([check("check", "queued")], ["check"], {
+      state: "needsYou", reason: { kind: "checksStalled", names: ["check"], minutes: 60 }, note: "Checks have not finished after 60 minutes: check.",
+    });
+    stalled.checks!.until = "2026-11-11T11:00:00.000Z";
+    render(<IssuePipelinePanel pipeline={stalled} />);
+    const panel = within(screen.getByTestId("issue-pipeline"));
+    expect(panel.getByText("Needs you")).toBeTruthy();
+    expect(panel.getByTestId("pipeline-checks-clock").textContent).toBe("Waited 60 min");
+    expect(panel.getByText("Checks have not finished after 60 minutes: check.")).toBeTruthy();
+  });
+
+  it("says today's sentence when the checks could not be read", () => {
+    render(<IssuePipelinePanel pipeline={waiting([], [], { checks: null, note: "Waiting for checks on 1111111111: check." })} />);
+    const panel = within(screen.getByTestId("issue-pipeline"));
+    expect(panel.getByText("Waiting for checks")).toBeTruthy();
+    expect(panel.getByRole("status").textContent).toBe("Waiting for checks on 1111111111: check.");
+    expect(panel.queryByTestId("pipeline-checks")).toBeNull();
+    expect(panel.queryByTestId("pipeline-checks-count")).toBeNull();
   });
 });

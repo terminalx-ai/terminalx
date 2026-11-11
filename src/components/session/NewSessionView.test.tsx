@@ -612,3 +612,42 @@ describe("new sessions in a personal section", () => {
     else expect(invoke).toHaveBeenCalledWith("create_session", expect.objectContaining({ req: expect.objectContaining({ sectionId: "release" }) }));
   });
 });
+
+describe("what the new-session view says about the project and the agents (PRO-285)", () => {
+  afterEach(() => { delete project.scripts; });
+
+  it("shows the saved setup script's command, true to what runs: by itself, in a new worktree", async () => {
+    project.scripts = { setup: "\n  pnpm install\npnpm build\n", archive: "" };
+    renderView();
+    const line = await screen.findByTestId("setup-script-line");
+    expect(line.textContent).toContain("Setup script found");
+    expect(line.textContent).toContain("pnpm install …");
+    expect(line.textContent).toContain("runs by itself in each new worktree, without asking");
+    expect(line.textContent).not.toContain("asks before");
+  });
+
+  it("shows no setup line when no setup script is saved", async () => {
+    project.scripts = { setup: "  \n", archive: "echo bye" };
+    const { rerender } = renderView();
+    await screen.findByText(/Nothing starts until you press Create/);
+    expect(screen.queryByTestId("setup-script-line")).toBeNull();
+    delete project.scripts;
+    rerender(<NewSessionView onCreated={vi.fn()} useWorktree={false} onUseWorktreeChange={vi.fn()} />);
+    expect(screen.queryByTestId("setup-script-line")).toBeNull();
+  });
+
+  it("lists only the agents that are installed and signed in, beside the Create note", async () => {
+    const codex = { id: "codex", name: "Codex", available: true, installHint: "" } as HarnessInfo;
+    const gemini = { id: "gemini", name: "Gemini", available: true, installHint: "" } as HarnessInfo;
+    const aider = { id: "aider", name: "Aider", available: false, installHint: "" } as HarnessInfo;
+    store.harnesses = [harness, codex, gemini, aider];
+    invoke.mockImplementation(async (cmd: string, args?: { harness?: string }) => {
+      if (cmd === "check_agent_readiness") return { state: ({ claude: "ready", codex: "signed_out", gemini: "unknown", aider: "missing" } as Record<string, string>)[args?.harness ?? ""], checkedAt: null, version: null };
+      if (cmd === "work_status") return { branch: "main", defaultBranch: "main" };
+      return null;
+    });
+    renderView();
+    await waitFor(() => expect(screen.getAllByTestId("agent-signed-in").map((node) => node.textContent)).toEqual(["Claude signed in"]));
+    expect(screen.getByText("Nothing starts until you press Create.")).toBeTruthy();
+  });
+});
