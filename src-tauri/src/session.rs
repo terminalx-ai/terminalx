@@ -6722,10 +6722,16 @@ impl SessionManager {
                 }
                 let unconfined = || {
                     let Some(cwd) = cwd else { return false };
-                    let sources = crate::harness::provider_sandbox::Sources::from_env();
+                    // The command's directory and the tab's launch
+                    // directories: the CLI loaded project settings from
+                    // where it started, whatever `cd` the model ran since.
+                    let Ok(session) = index::get(&rt.session_id) else { return false };
+                    let dirs = [Path::new(cwd), Path::new(&session.cwd), Path::new(&session.project_path)];
+                    let dirs: Vec<&Path> = dirs.into_iter().filter(|dir| dir.is_absolute()).collect();
+                    let sources = crate::harness::provider_sandbox::Sources::from_env(frame.payload["transcript_path"].as_str());
                     !match kind {
-                        CliKind::Claude => crate::harness::provider_sandbox::claude_may_restrict(Path::new(cwd), &sources),
-                        CliKind::Codex => crate::harness::provider_sandbox::codex_may_restrict(Path::new(cwd), &sources),
+                        CliKind::Claude => crate::harness::provider_sandbox::claude_may_restrict(&dirs, &sources),
+                        CliKind::Codex => crate::harness::provider_sandbox::codex_may_restrict(&dirs, &sources),
                     }
                 };
                 match (store::settings::load().agents.read_only_commands && unconfined())
