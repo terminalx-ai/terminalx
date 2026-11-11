@@ -19,8 +19,9 @@
 //   window, the Notes drawer included;
 // - the permission mode at 960 px with the side panel open, and at every
 //   width from 960 to 1400 px: the More options button that holds it stays in
-//   the toolbar and wide enough to press, and its menu shows the mode's
-//   shield and names the mode whole;
+//   the toolbar and wide enough to press, carries no dot (since #838 the mode
+//   is in its tooltip), and its menu names the mode whole, behind the mode's
+//   shield: red for an unguarded mode, blue for plan;
 // - a tab whose agent cannot sign in (PRO-110): its notice and the Agent
 //   logins button sit above the transcript, inside the window.
 //
@@ -524,7 +525,7 @@ for (const { viewport, collapsed, terminalSwitch = false } of [
   // The side panel is the one `aside` inside the main slot, next to the header.
   if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.locator("main aside").first().waitFor();
-  await page.waitForTimeout(300);
+  await page.locator('main [data-testid="panel-presence"][data-side="right"][data-state="open"]').waitFor();
   const measured = await headerLayout(page);
   failed += report(name, { "the side panel is open": measured.panel, ...headerChecks(measured, { collapsed, terminalSwitch }) }, measured);
   if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/cloud-header-${viewport.width}${terminalSwitch ? "-terminal-switch" : ""}.png` });
@@ -535,13 +536,15 @@ for (const { viewport, collapsed, terminalSwitch = false } of [
 // toolbar whose label was cut to "B" at 960 px with the side panel open; since
 // #584 it is a submenu of More options, so what must hold at every width is
 // that the button stays in the toolbar and pressable, and that its menu names
-// the mode in full beside the shield that represents it.
+// the mode in full. Since #838 the button carries no dot: its tooltip names the
+// mode, and the menu's Permissions row wears the mode's shield.
 const permissionButton = (page) =>
   page.evaluate(() => {
     const button = document.querySelector('main [data-composer-toolbar] [data-testid="composer-options"]');
     if (!button) return null;
     const rect = button.getBoundingClientRect();
     const toolbar = button.closest("[data-composer-toolbar]").getBoundingClientRect();
+    const dot = button.querySelector('[data-testid="permission-mode-dot"]')?.getBoundingClientRect();
     const icon = button.querySelector("svg")?.getBoundingClientRect();
     const inside = (part) => !!part && part.width > 0 && part.left >= rect.left - 0.5 && part.right <= rect.right + 0.5 && part.top >= rect.top - 0.5 && part.bottom <= rect.bottom + 0.5;
     return {
@@ -549,6 +552,7 @@ const permissionButton = (page) =>
       panel: !!document.querySelector("main aside"),
       width: Math.round(rect.width * 10) / 10,
       icon: inside(icon),
+      dot: dot ? inside(dot) : null,
       inToolbar: rect.left >= toolbar.left - 1 && rect.right <= toolbar.right + 1 && rect.top >= toolbar.top - 1 && rect.bottom <= toolbar.bottom + 1,
     };
   });
@@ -558,15 +562,15 @@ const permissionMenuItem = (page) =>
     const item = document.querySelector('[role="menu"] [data-testid="permission-mode"]');
     const label = item?.querySelector('[data-testid="permission-mode-label"]');
     if (!item || !label) return null;
-    const shield = item.querySelector('[data-testid="permission-mode-icon"]');
-    const icon = shield?.getBoundingClientRect();
+    const icon = item.querySelector('[data-testid="permission-mode-icon"]');
     const rect = item.getBoundingClientRect();
+    const shield = icon?.getBoundingClientRect();
+    const iconInside = !!shield && shield.width > 0 && shield.height > 0 && shield.left >= rect.left && shield.right <= rect.right && shield.top >= rect.top && shield.bottom <= rect.bottom;
+    const tint = !icon ? null : icon.classList.contains("text-destructive") ? "danger" : icon.classList.contains("text-info") ? "plan" : "plain";
     return {
-      name: item.getAttribute("aria-label"),
-      label: label.textContent,
-      whole: label.scrollWidth <= label.clientWidth + 1,
-      shield: !!icon && icon.width > 0 && icon.height > 0 && icon.left >= rect.left && icon.right <= rect.right && icon.top >= rect.top && icon.bottom <= rect.bottom,
-      tone: shield?.classList.contains("text-destructive") ? "danger" : shield?.classList.contains("text-info") ? "plan" : "guarded",
+      tint, name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1,
+      iconInside,
+      tone: icon?.classList.contains("text-destructive") ? "danger" : icon?.classList.contains("text-info") ? "plan" : "guarded",
     };
   });
 
@@ -575,11 +579,13 @@ function permissionChecks(measured) {
   return {
     "the More options button is inside the composer toolbar": measured.inToolbar,
     "it keeps its icon and is wide enough to press": measured.icon && measured.width >= 20,
+    "it carries no dot: the mode is named in its tooltip": measured.dot === null,
   };
 }
 
-const MODE_LABEL = { bypassPermissions: "Bypass permissions", manual: "Ask every time", plan: "Plan" };
 const MODE_TONE = { bypassPermissions: "danger", manual: "guarded", plan: "plan" };
+const MODE_LABEL = { bypassPermissions: "Bypass permissions", manual: "Ask every time", plan: "Plan" };
+const MODE_TINT = { bypassPermissions: "danger", manual: "plain", plan: "plan" };
 for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "manager", lines: 4, permissionMode } }, { width: 960, height: 700 });
   await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
@@ -587,9 +593,35 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.locator("main aside").first().waitFor();
   await page.locator('main [data-composer-toolbar] [data-testid="composer-options"]').waitFor();
-  await page.waitForTimeout(300);
+  await page.locator('main [data-testid="panel-presence"][data-side="right"][data-state="open"]').waitFor();
   let measured = await permissionButton(page);
-  await page.locator('main [data-composer-toolbar] [data-testid="composer-options"]').click();
+  const options = page.locator('main [data-composer-toolbar] [data-testid="composer-options"]');
+  // Pin the scheduling case where opening the panel leaves Refresh's tooltip
+  // open under the pointer. Start from a fresh pointer entry, not a second
+  // hover over a trigger whose tooltip was already dismissed.
+  await page.mouse.move(0, 0);
+  await page.keyboard.press("Escape");
+  await page.getByRole("tooltip").waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "Refresh", exact: true }).hover();
+  await page.getByRole("tooltip", { name: "Refresh", exact: true }).waitFor();
+  // A synthetic jump from any open tooltip can leave Radix in pointer transit.
+  // Dismiss and observe its closure before entering the next trigger.
+  await page.keyboard.press("Escape");
+  await page.getByRole("tooltip").waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "Toggle panel" }).hover();
+  await page.getByRole("tooltip", { name: /^Hide panel/ }).waitFor();
+  await page.keyboard.press("Escape");
+  await page.getByRole("tooltip").waitFor({ state: "hidden" });
+  await options.hover();
+  // Wait for this trigger's tooltip, independently of the text we assert below.
+  const tooltip = page.locator('xpath=//*[@role="tooltip"][@id=//main//*[@data-testid="composer-options"]/@aria-describedby]');
+  await tooltip.waitFor();
+  const tooltipText = await tooltip.textContent();
+  const tooltipState = await tooltip.evaluate((node) => {
+    const trigger = document.querySelector('main [data-testid="composer-options"]');
+    return { id: node.id, describedBy: trigger?.getAttribute("aria-describedby"), hovered: trigger?.matches(":hover"), focused: document.activeElement === trigger };
+  });
+  await options.click();
   await page.locator('[role="menu"] [data-testid="permission-mode"]').waitFor();
   const item = await permissionMenuItem(page);
   await page.keyboard.press("Escape");
@@ -598,11 +630,13 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
     {
       "the side panel is open": !!measured?.panel,
       ...permissionChecks(measured),
+      "the permission shield is visible inside the menu with the mode's tone": !!item && item.iconInside && item.tone === MODE_TONE[permissionMode],
+      "the options tooltip names the mode in force": tooltipText === `More options · ${MODE_LABEL[permissionMode]}`,
       "the More options menu names the mode, whole": !!item && item.label === MODE_LABEL[permissionMode] && item.whole,
       "the menu item's accessible name says which mode is in force": !!item && item.name === `Permission mode: ${MODE_LABEL[permissionMode]}`,
-      "the mode's shield is visible inside the menu item with the right tone": !!item && item.shield && item.tone === MODE_TONE[permissionMode],
+      [`the menu item wears the mode's shield (${MODE_TINT[permissionMode]})`]: !!item && item.iconInside && item.tint === MODE_TINT[permissionMode],
     },
-    { button: measured, item },
+    { button: measured, item, tooltip: { expected: `More options · ${MODE_LABEL[permissionMode]}`, actual: tooltipText, ...tooltipState } },
   );
   if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/permission-mode-960-${permissionMode}.png` });
 

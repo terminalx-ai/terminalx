@@ -102,6 +102,22 @@ describe("the shortcut registry", () => {
 });
 
 describe("the mapping store", () => {
+  it("keeps a saved Send binding when the alternate action introduces the same default", () => {
+    for (const mac of [true, false]) {
+      const keymap = resolveKeymap({ "composer.send": ["mod+enter"] }, mac);
+      expect(keymap["composer.send"]).toEqual(["mod+enter"]);
+      expect(keymap["composer.sendAlternate"]).toEqual([]);
+      expect(conflictOf("mod+enter", "composer.sendAlternate", keymap)?.id).toBe("composer.send");
+    }
+  });
+
+  it("detects alternate Send conflicts and saves a replacement binding", () => {
+    expect(saveShortcut("composer.send", ["mod+enter"])).toMatchObject({ ok: false, conflict: { id: "composer.sendAlternate" } });
+    expect(saveShortcut("composer.sendAlternate", ["mod+shift+enter"])).toEqual({ ok: true });
+    expect(bindingsOf("composer.sendAlternate")).toEqual(["mod+shift+enter"]);
+    expect(saveShortcut("composer.send", ["mod+enter"])).toEqual({ ok: true });
+  });
+
   it("saves a custom chord in the preferences and resolves it at once", () => {
     expect(saveShortcut("app.toggleSidebar", ["mod+shift+b"])).toEqual({ ok: true });
     expect(getPrefs().shortcuts).toEqual({ "app.toggleSidebar": ["mod+shift+b"] });
@@ -269,7 +285,7 @@ describe("matching a key event to an action", () => {
     expect(matchesShortcut(enter, "composer.send")).toBe(true);
     expect(matchesShortcut(key({ key: "Enter", shiftKey: true }), "composer.send")).toBe(false);
     expect(matchesShortcut(key({ key: "Enter", shiftKey: true }), "composer.newLine")).toBe(true);
-    saveShortcut("composer.send", ["mod+enter"]);
+    expect(saveShortcut("composer.send", ["mod+enter"], { replace: true })).toEqual({ ok: true });
     expect(matchesShortcut(enter, "composer.send")).toBe(false);
     expect(matchesShortcut(modEnter, "composer.send")).toBe(true);
   });

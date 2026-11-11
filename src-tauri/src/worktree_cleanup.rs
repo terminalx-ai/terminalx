@@ -146,7 +146,7 @@ pub struct ProjectScan {
     pub candidates: Vec<Candidate>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveItem {
     pub project_path: String,
@@ -163,6 +163,8 @@ pub struct RemoveItem {
     /// second time and this is what the result reports, marked as an estimate.
     #[serde(default)]
     pub estimated_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -178,6 +180,8 @@ pub enum Outcome {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_failure: Option<crate::archive_script::Failure>,
     pub project_path: String,
     pub path: String,
     pub outcome: Outcome,
@@ -215,6 +219,7 @@ pub const PROGRESS_EVENT: &str = "worktree_cleanup_progress";
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum Step {
+    Archiving,
     /// Walking the tree to see what removing it frees.
     Measuring,
     /// Reading it again, to compare with what was reviewed.
@@ -333,6 +338,7 @@ pub struct Host<'a> {
     /// finished after its worktree went ([`reconcile`]). `None` where this
     /// host runs no agents.
     pub stop_agents: Option<StopAgents<'a>>,
+    pub archive: Option<crate::archive_script::Runner<'a>>,
 }
 
 /// Stops a session's agents, waiting for them to be gone; why not, if not.
@@ -894,6 +900,7 @@ pub fn scan(host: &Host<'_>, scope: Option<&[String]>) -> anyhow::Result<Vec<Pro
 
 fn result(item: &RemoveItem, outcome: Outcome, reason: impl Into<Option<String>>) -> ItemResult {
     ItemResult {
+        archive_failure: None,
         project_path: item.project_path.clone(),
         path: item.path.clone(),
         outcome,
@@ -954,7 +961,7 @@ fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>,
             return result(item, Outcome::Failed, format!("It was already removed, but its sessions' agents could not be stopped, so its sessions were left as they were. {}", failed.join("; ")));
         }
     }
-    match session_ops::mark_workspace_sessions_removed(&repository.root, &left) {
+    match session_ops::mark_workspace_sessions_removed(&repository.root, &left, None) {
         Ok(moved) => {
             let mut done = result(item, Outcome::AlreadyRemoved, "It was already removed; its conversations are now filed under the project.".to_string());
             done.sessions_kept = moved.iter().map(|session| session.id.clone()).collect();
@@ -972,6 +979,10 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         return result(item, Outcome::Skipped, "That project is not open on this host.".to_string());
     };
     let target = Path::new(&item.path);
+    let _lease = match crate::archive_script::RemovalLease::acquire(target) {
+        Ok(lease) => lease,
+        Err(error) => return result(item, Outcome::Skipped, error.to_string()),
+    };
     if !target.is_absolute() {
         return result(item, Outcome::Skipped, "Not a path on this host.".to_string());
     }
@@ -1022,6 +1033,44 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         return result(item, Outcome::Skipped, "It has no commit checked out.".to_string());
     };
     let affected = session_ops::sessions_within(sessions, &target);
+    let ran = match crate::archive_script::before_removal(&repository.root, &target, &affected, item.archive_failure.as_deref(), None, host.archive, &|| step(Step::Archiving)) {
+        Ok(ran) => ran,
+        Err(error) => {
+            let failure = crate::archive_script::Failure::from_error(&error.to_string());
+            let mut failed = result(item, Outcome::Failed, failure.as_ref().map_or_else(|| error.to_string(), |failure| failure.message()));
+            failed.archive_failure = failure;
+            return failed;
+        }
+    };
+    if ran {
+        // A hook may modify files or start processes: reapply the full review,
+        // including ignored data and sessions, after it has finished.
+        let sessions = match index::load() {
+            Ok(sessions) => sessions,
+            Err(error) => return result(item, Outcome::Failed, error.to_string()),
+        };
+        let roots = Roots::of(host, &sessions);
+        let live = (host.live)(&sessions);
+        let refreshed = match Repository::open(repository.project, repository.fetch) {
+            Ok(repository) => repository,
+            Err(error) => return result(item, Outcome::Skipped, error),
+        };
+        let Some(entry) = refreshed.listed.iter().find(|entry| !entry.prunable && same_dir(&canonical(Path::new(&entry.path)), &target)) else {
+            return result(item, Outcome::Skipped, "The worktree listing changed during its archive script.".to_string());
+        };
+        let after = inspect(host, &roots, &refreshed, entry, &sessions, &live, Activity::Anything);
+        // Removing ignored data that was already reviewed is the point of many
+        // cleanup scripts. New ignored data still needs a separate review.
+        let allowed = matches!(after.verdict, Verdict::Eligible | Verdict::IgnoredData)
+            && after.ignored_data.iter().all(|name| now.ignored_data.contains(name));
+        let mut comparable = after.clone();
+        comparable.verdict = now.verdict;
+        comparable.ignored_data.clone_from(&now.ignored_data);
+        if !allowed || token(&comparable, "") != now.token {
+            return result(item, Outcome::Skipped, "It changed during its archive script. Review it again before removing it.".to_string());
+        }
+    }
+    let removed_workspace = crate::workspace_restore::removal_record(&repository.root, &target);
     step(Step::Removing);
     // Never forced, never deleted directly: git removes it or says why not.
     let options = crate::workspaces::DeleteOptions { delete_branch: false, direct: git::DirectDelete::Never, verified_head: Some(head) };
@@ -1042,7 +1091,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         session_ops::notify_workspace_deleted(sink, &repository.project.path, &affected);
         done.sessions_deleted = affected.iter().map(|session| session.id.clone()).collect();
     } else {
-        match session_ops::mark_workspace_sessions_removed(&repository.root, &affected) {
+        match session_ops::mark_workspace_sessions_removed(&repository.root, &affected, Some(&removed_workspace)) {
             Ok(moved) => {
                 session_ops::notify_workspace_settled(sink, &repository.project.path, &moved);
                 done.sessions_kept = moved.iter().map(|session| session.id.clone()).collect();

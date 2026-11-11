@@ -50,6 +50,42 @@ pub struct Project {
     /// branch with none goes by its own name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branch_labels: BTreeMap<String, String>,
+    /// Local scripts only; repository files require the layered-config trust flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<RepositoryScripts>,
+    /// Local repository choices; file-based layers are resolved separately.
+    #[serde(default)]
+    pub repository_settings: RepositorySettings,
+}
+
+/// Script fields shared by the Scripts page and workspace lifecycle hooks.
+/// Setup is stored for PRO-240; this build only executes the archive hook.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RepositoryScripts {
+    pub setup: String,
+    pub archive: String,
+}
+
+/// Nothing is read from the checkout itself: committed commands are not trusted yet.
+pub fn scripts(path: &Path) -> Result<RepositoryScripts> {
+    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    Ok(load()?.projects.into_iter().find(|project| canonical(Path::new(&project.path)) == canonical(path))
+        .and_then(|project| project.scripts).unwrap_or_default())
+}
+
+/// Repository choices stored with the project, keyed by its canonical path.
+/// Keep this layer separate from effective settings supplied by repository files.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RepositorySettings {
+    pub files_to_copy: Vec<String>,
+}
+
+pub fn repository_settings(path: &Path) -> Result<RepositorySettings> {
+    let canonical = canonical_directory(&path.to_string_lossy())?;
+    Ok(load()?.projects.into_iter().find(|p| p.path == canonical)
+        .map(|p| p.repository_settings).unwrap_or_default())
 }
 
 /// The kinds of change a project marks as always needing a person to merge.
@@ -199,6 +235,10 @@ pub struct ProjectPatch {
     pub agent_issue_updates: Option<bool>,
     #[serde(default)]
     pub branch_label: Option<BranchLabel>,
+    #[serde(default)]
+    pub scripts: Option<RepositoryScripts>,
+    #[serde(default)]
+    pub repository_settings: Option<RepositorySettings>,
 }
 
 /// One branch's sidebar label; none, or a blank one, clears it.
@@ -215,6 +255,11 @@ fn double_option<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<
 }
 
 pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
+    if let Some(settings) = &patch.repository_settings {
+        crate::worktree_files::validate_patterns(&settings.files_to_copy)?;
+        anyhow::ensure!(!crate::worktree_files::has_include_file(Path::new(path))?,
+            "Patterns come from this repository's .worktreeinclude");
+    }
     let mut f = load()?;
     let p = f.projects.iter_mut().find(|p| p.path == path).with_context(|| format!("project {path} is not attached"))?;
     if let Some(n) = patch.name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
@@ -240,6 +285,9 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
         // follows the defaults of whichever build reads it.
         p.issue_pipeline = (v != IssuePipelineSettings::default()).then_some(v);
     }
+    if let Some(v) = patch.repository_settings {
+        p.repository_settings = v;
+    }
     if let Some(v) = patch.agent_issue_updates {
         p.agent_issue_updates = v;
     }
@@ -248,6 +296,10 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
             Some(label) => p.branch_labels.insert(branch, label),
             None => p.branch_labels.remove(&branch),
         };
+    }
+    if let Some(scripts) = patch.scripts {
+        anyhow::ensure!(scripts.setup.len() <= 65_536 && scripts.archive.len() <= 65_536, "Scripts must be at most 64 KiB each.");
+        p.scripts = (scripts != RepositoryScripts::default()).then_some(scripts);
     }
     let out = p.clone();
     save(&f)?;
@@ -419,7 +471,7 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, repository_settings: RepositorySettings::default() };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
@@ -447,7 +499,7 @@ fn ensure_as(path: &str, kind: Option<ProjectKind>) -> Result<Project> {
         return Ok(existing.clone());
     }
     let kind = kind.unwrap_or(if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder });
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, repository_settings: RepositorySettings::default() };
     f.projects.push(p.clone());
     save(&f)?;
     Ok(p)

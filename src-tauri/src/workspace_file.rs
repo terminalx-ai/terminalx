@@ -22,7 +22,7 @@ pub(crate) fn open(root: &Path, path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(unix)]
-fn open_relative(mut directory: std::fs::File, relative: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_relative(mut directory: std::fs::File, relative: &Path) -> std::io::Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
     let mut components = relative.components().peekable();

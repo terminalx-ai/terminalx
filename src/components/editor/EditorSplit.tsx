@@ -34,7 +34,14 @@ const MIN_W = 320;
  * be closed to see the conversation again. In narrow columns, the editor
  * fills the column until hidden or closed, keeping both surfaces usable.
  */
-export function EditorSplit({ sessionId, active, fill = false, selectedTab }: { sessionId: string; active: boolean; fill?: boolean; selectedTab?: SelectedSessionTab | null }) {
+export function EditorSplit({ sessionId, active, fill = false, selectedTab, reviewsInPanes = false }: {
+  sessionId: string;
+  active: boolean;
+  fill?: boolean;
+  selectedTab?: SelectedSessionTab | null;
+  /** The workspace panes draw review tabs in their own pane (PRO-263); this split still steps aside for one. */
+  reviewsInPanes?: boolean;
+}) {
   const prefs = usePrefs();
   const ed = useEditors();
   const requested = useTerminals().selected[sessionId];
@@ -95,7 +102,7 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab }: { 
   );
   useShortcut("files.closeAll", () => void closeAllEditors(sessionId, !standalone), { enabled: active });
 
-  const reviewPanes = reviews.map((entry) => <ReviewTab key={entry.id} entry={entry} visible={active && selected?.kind === "review" && selected.id === entry.id} />);
+  const reviewPanes = reviewsInPanes ? null : reviews.map((entry) => <ReviewTab key={entry.id} entry={entry} visible={active && selected?.kind === "review" && selected.id === entry.id} />);
 
   return <>
     {reviewPanes}
@@ -191,14 +198,18 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab }: { 
   </>;
 }
 
-/** Review surfaces share the workspace selection and retain their buffers while hidden. */
-function ReviewTab({ entry, visible }: { entry: ReviewEditorEntry; visible: boolean }) {
+/**
+ * Review surfaces share the workspace selection and retain their buffers while hidden.
+ * In a workspace pane (`embedded`) the pane's cell is the tab panel, and two panes can
+ * both show a tab: only the focused pane's takes the keyboard focus.
+ */
+export function ReviewTab({ entry, visible, focused = visible, embedded = false }: { entry: ReviewEditorEntry; visible: boolean; focused?: boolean; embedded?: boolean }) {
   const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (visible) root.current?.focus({ preventScroll: true });
-  }, [visible]);
-  return <div ref={root} role="tabpanel" id={tabPanelId({ kind: "review", id: entry.id })}
-    aria-label={entry.name} aria-hidden={!visible} tabIndex={-1}
+    if (visible && focused) root.current?.focus({ preventScroll: true });
+  }, [visible, focused]);
+  return <div ref={root} role={embedded ? undefined : "tabpanel"} id={embedded ? undefined : tabPanelId({ kind: "review", id: entry.id })}
+    aria-label={embedded ? undefined : entry.name} aria-hidden={embedded ? undefined : !visible} tabIndex={-1}
     className={cn("absolute inset-0 z-10 flex min-h-0 flex-col bg-background outline-none", !visible && "hidden")}
     onPointerDownCapture={() => setLastFocused("editor")} onFocusCapture={() => setLastFocused("editor")}>
     {entry.kind === "diff" ? <DiffEditorPane entry={entry} visible={visible} />

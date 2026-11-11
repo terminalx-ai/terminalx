@@ -54,9 +54,9 @@ const tab: TabEntry = {
   modified: "2026-09-04T00:00:00Z",
 };
 
-function TestComposer({ onSend }: { onSend: (text: string, images: { mediaType: string; data: string; name?: string }[]) => Promise<void> | void }) {
+function TestComposer({ onSend, cwd }: { cwd?: string; onSend: (text: string, images: { mediaType: string; data: string; name?: string }[]) => Promise<void> | void }) {
   const [draft, setDraft] = useState("");
-  return <Composer tab={tab} busy={false} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+  return <Composer cwd={cwd} tab={tab} busy={false} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
 }
 
 beforeEach(() => {
@@ -272,6 +272,26 @@ describe("composer attachments", () => {
 describe("composer pickers", () => {
   // hidden: an open modal menu hides the rest of the page from the accessibility tree.
   const picker = (name: RegExp) => screen.getByRole("button", { name, hidden: true });
+
+  it("offers handoff as a new tab and warns about the cache before a mid-chat setting change", async () => {
+    const run = vi.fn();
+    const onSetModel = vi.fn();
+    const props = { tab, busy: false, draft: "", onDraftChange: vi.fn(), onSend: vi.fn(), onStop: vi.fn(), onSetModel, onSetEffort: vi.fn(), onSetMode: vi.fn() };
+    const { rerender } = render(<Composer {...props} hasConversation agentHandoff={{ id: "claude", name: "Claude Code", run }} />);
+    mouseClick(screen.getByTestId("model-picker"));
+    const handoff = await screen.findByRole("menuitem", { name: /Hand off to Claude Code/ });
+    expect(handoff.textContent).toContain("Opens in a new tab");
+    expect(screen.getByRole("note").textContent).toContain("rebuild the prompt cache");
+    expect(onSetModel).not.toHaveBeenCalled();
+    fireEvent.click(handoff);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(onSetModel).not.toHaveBeenCalled();
+    rerender(<Composer {...props} />);
+    mouseClick(screen.getByTestId("model-picker"));
+    await screen.findByRole("menu");
+    expect(screen.queryByRole("menuitem", { name: /Hand off/ })).toBeNull();
+    expect(screen.queryByRole("note")).toBeNull();
+  });
 
   it("the model picker opens on a real mouse click and closes on a second one", async () => {
     const models = await import("@/lib/models");
@@ -592,13 +612,13 @@ describe("composer history (PRO-85)", () => {
   // The draft lives outside the composer, as a tab's does, so it outlasts a remount.
   const drafts = new Map<string, string>();
 
-  function HistoryComposer({ history = SENT, cwd, onSend = vi.fn(), id = "tab-history" }: { history?: string[]; cwd?: string; onSend?: (text: string) => Promise<void> | void; id?: string }) {
+  function HistoryComposer({ history = SENT, cwd, onSend = vi.fn(), id = "tab-history", followUps }: { history?: string[]; cwd?: string; onSend?: (text: string) => Promise<void> | void; id?: string; followUps?: "now" | "hold" }) {
     const [draft, setDraft] = useState(drafts.get(id) ?? "");
     const change = (text: string) => {
       drafts.set(id, text);
       setDraft(text);
     };
-    return <Composer tab={{ ...tab, id }} cwd={cwd} busy={false} draft={draft} onDraftChange={change} onSend={onSend} history={history} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    return <Composer tab={{ ...tab, id }} followUps={followUps} cwd={cwd} busy={!!followUps} draft={draft} onDraftChange={change} onSend={onSend} history={history} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
   }
 
   const field = () => document.querySelector("textarea") as HTMLTextAreaElement;
@@ -762,13 +782,32 @@ describe("composer history (PRO-85)", () => {
       // `mod` is Ctrl in jsdom, which is not a Mac.
       setPrefs({ shortcuts: { "composer.send": ["mod+enter"] } });
       const onSend = vi.fn();
-      render(<HistoryComposer onSend={onSend} />);
+      render(<HistoryComposer onSend={onSend} followUps="now" />);
       type("a new message");
       // Not taken by the composer: the textarea breaks the line itself.
       expect(press("Enter")).toBe(false);
       expect(onSend).not.toHaveBeenCalled();
       expect(press("Enter", { ctrlKey: true })).toBe(true);
       await waitFor(() => expect(onSend).toHaveBeenCalledWith("a new message", []));
+    });
+
+    it.each(["now", "hold"] as const)("uses a rebound alternate shortcut with %s and releases the old key", async followUps => {
+      setPrefs({ shortcuts: { "composer.sendAlternate": ["mod+shift+enter"] } });
+      const onSend = vi.fn();
+      render(<HistoryComposer onSend={onSend} followUps={followUps} />);
+      type("a new message");
+      expect(press("Enter", { ctrlKey: true })).toBe(false);
+      expect(onSend).not.toHaveBeenCalled();
+      expect(press("Enter", { ctrlKey: true, shiftKey: true })).toBe(true);
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith("a new message", [], true));
+    });
+
+    it("does not claim the alternate key in a composer without held follow-ups", () => {
+      const onSend = vi.fn();
+      render(<HistoryComposer onSend={onSend} />);
+      type("a new message");
+      expect(press("Enter", { ctrlKey: true })).toBe(false);
+      expect(onSend).not.toHaveBeenCalled();
     });
 
     it("does not send at all when Send has no key", () => {
@@ -1095,6 +1134,15 @@ describe("autocorrect in the composer (#525)", () => {
 // #637: hold the delivery promise independently of any agent response.
 // #727: the message leaves the composer as Send is pressed; the chat draws it as sending.
 describe("pending send acknowledgment", () => {
+  it.each(["/goal Reduce p95 latency below 120 ms", "/goal", "/goal pause", "/goal resume", "/goal clear"])("passes %s through to Codex unchanged", async (command) => {
+    const onSend = vi.fn();
+    render(<TestComposer onSend={onSend} />);
+    const field = screen.getByRole("textbox");
+    fireEvent.change(field, { target: { value: command } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() => expect(onSend).toHaveBeenCalledExactlyOnceWith(command, []));
+  });
+
   it.each(["click", "keyboard"])("hands the message on at once from a %s, and submits once until acceptance", async (action) => {
     let accept!: () => void;
     const onSend = vi.fn(() => new Promise<void>((resolve) => { accept = resolve; }));
@@ -1217,4 +1265,105 @@ describe("review comment delivery", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0][1]).toMatchObject({ workspace: "workspace", action: { type: "sent", comments: [{ id: "note", revision: 7 }] } });
   });
+});
+
+describe.each([
+  { scenario: "search is loading", draft: "Review #12", query: "12", state: "loading" },
+  { scenario: "search has no match", draft: "use #fff", query: "fff", state: "empty" },
+  { scenario: "GitHub returns an error", draft: "Review #12", query: "12", state: "error" },
+  { scenario: "the number belongs to an issue", draft: "fix #45", query: "45", state: "empty" },
+])("PR mention fallback when $scenario", ({ draft, query, state }) => {
+  it.each(["Enter", "Tab"])("leaves %s to the composer or browser when no suggestion is highlighted", async (key) => {
+    Element.prototype.scrollIntoView = vi.fn();
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "pr_search") {
+        if (state === "loading") return new Promise(() => {});
+        if (state === "error") throw new Error("GitHub unavailable");
+      }
+      return [];
+    });
+    const onSend = vi.fn();
+    render(<TestComposer cwd="/repo" onSend={onSend} />);
+    const field = screen.getByRole("textbox");
+    fireEvent.change(field, { target: { value: draft } });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("pr_search", { cwd: "/repo", query }));
+    await screen.findByText(state === "loading" ? "Searching pull requests…" : state === "error" ? "GitHub unavailable" : "No matching pull requests");
+    expect(screen.queryByRole("option")).toBeNull();
+
+    const allowedDefault = fireEvent.keyDown(field, { key });
+    if (key === "Enter") {
+      await waitFor(() => expect(onSend).toHaveBeenCalledExactlyOnceWith(draft, []));
+      expect((field as HTMLTextAreaElement).value).toBe("");
+    } else {
+      expect(allowedDefault).toBe(true);
+      expect(onSend).not.toHaveBeenCalled();
+      expect((field as HTMLTextAreaElement).value).toBe(draft);
+    }
+    expect(invoke.mock.calls.some(([command]) => command === "pr_attach")).toBe(false);
+  });
+});
+
+it.each([false, true])("sends a new unmatched token while a canceled attachment request is still pending (Escape=%s)", async (escape) => {
+  Element.prototype.scrollIntoView = vi.fn();
+  let finish!: (path: string) => void;
+  invoke.mockImplementation(async (command: string, args: { query?: string }) => {
+    if (command === "pr_search" && args.query === "12") return [{ number: 12, title: "Fix parser", author: "alice", state: "OPEN" }];
+    if (command === "pr_attach") return new Promise<string>((resolve) => { finish = resolve; });
+    return [];
+  });
+  const onSend = vi.fn();
+  render(<TestComposer cwd="/repo" onSend={onSend} />);
+  const field = screen.getByRole("textbox");
+  fireEvent.change(field, { target: { value: "Review #12" } });
+  fireEvent.mouseDown(await screen.findByRole("option", { name: /#12 Fix parser/ }));
+  if (escape) fireEvent.keyDown(field, { key: "Escape" });
+  fireEvent.change(field, { target: { value: "fix #45" } });
+  await screen.findByText("No matching pull requests");
+  expect(fireEvent.keyDown(field, { key: "Tab" })).toBe(true);
+  fireEvent.keyDown(field, { key: "Enter" });
+  await waitFor(() => expect(onSend).toHaveBeenCalledExactlyOnceWith("fix #45", []));
+  await act(async () => finish("/context/pr-12.md"));
+  expect((field as HTMLTextAreaElement).value).toBe("");
+});
+
+it.each([false, true])("waits for PR context before sending, unless Escape cancels it (cancel=%s)", async (cancel) => {
+  Element.prototype.scrollIntoView = vi.fn();
+  let finish!: (path: string) => void;
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "pr_search") return [{ number: 12, title: "Fix parser", author: "alice", state: "OPEN" }];
+    if (command === "pr_attach") return new Promise<string>((resolve) => { finish = resolve; });
+    return [];
+  });
+  const onSend = vi.fn();
+  render(<TestComposer cwd="/repo" onSend={onSend} />);
+  const field = screen.getByRole("textbox");
+  fireEvent.change(field, { target: { value: "Review #12" } });
+  fireEvent.mouseDown(await screen.findByRole("option", { name: /#12 Fix parser/ }));
+  expect(invoke).toHaveBeenCalledWith("pr_attach", expect.objectContaining({ number: 12 }));
+  const send = screen.getByRole("button", { name: "Send" });
+  expect(send.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(send);
+  expect(fireEvent.keyDown(field, { key: "Tab" })).toBe(true);
+  fireEvent.keyDown(field, { key: "Enter" });
+  expect(onSend).not.toHaveBeenCalled();
+  if (cancel) fireEvent.keyDown(field, { key: "Escape" });
+  else await act(async () => finish("/context/pr-12.md"));
+  await waitFor(() => expect(send.hasAttribute("disabled")).toBe(false));
+  fireEvent.click(send);
+  await waitFor(() => expect(onSend).toHaveBeenCalledWith(cancel ? "Review #12" : "Review @/context/pr-12.md", []));
+  if (cancel) await act(async () => finish("/context/pr-12.md"));
+});
+
+it("compacts from the ring through the CLI send path while keeping the draft", async () => {
+  const send = vi.fn();
+  const change = vi.fn();
+  const props = { tab, busy: false, draft: "keep this draft", onDraftChange: change, onSend: send, onStop: vi.fn(), onSetModel: vi.fn(), onSetEffort: vi.fn(), onSetMode: vi.fn(), contextUsed: 90000, contextMax: 100000 };
+  const view = render(<Composer {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "Context 90% used" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Compact now" }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith("/compact", []));
+  expect(change).not.toHaveBeenCalled();
+  view.rerender(<Composer {...props} busy />);
+  fireEvent.click(screen.getByRole("button", { name: "Context 90% used" }));
+  expect((await screen.findByRole("button", { name: "Compact now" }) as HTMLButtonElement).disabled).toBe(true);
 });

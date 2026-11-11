@@ -1,4 +1,6 @@
 import { captureReviewSend, markReviewsSent, restoreReviewSend } from "@/lib/reviewComments";
+import { ContextPopover } from "./UsagePopovers";
+import type { Turn } from "@/lib/transcript";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, AtSign, ChevronDown, FileText, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -35,6 +37,7 @@ import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
 import { beginComposerSend, finishComposerSend, returnToDraft, useComposerSend, withReturned } from "@/lib/composerSends";
 import { useComposerHistory } from "./useComposerHistory";
+import { usePrMention } from "./usePrMention";
 import { tokenAtCaret } from "@/lib/pickers";
 import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
 
@@ -109,17 +112,22 @@ export function Composer({
   draft,
   onDraftChange,
   onSend,
+  followUps,
   sentAfter,
   history = NO_HISTORY,
   onStop,
   onSetModel,
   onSetEffort,
   onSetMode,
+  agentHandoff,
+  hasConversation = false,
   contextUsed,
   reportedModel,
   modelsAreLocal = true,
   modelClient,
   contextMax,
+  turns = NO_TURNS,
+  compacting = false,
   handoffs,
   disabledReason,
   disabled = false,
@@ -145,7 +153,8 @@ export function Composer({
   busy: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
-  onSend: (text: string, images: ImageInput[]) => Promise<void> | void;
+  onSend: (text: string, images: ImageInput[], alternate?: boolean) => Promise<void> | void;
+  followUps?: "now" | "hold";
   /** The tab's newest event, read as Send is pressed: the sent message's own event comes after it (#727). */
   sentAfter?: () => number;
   /** The messages already sent in this tab, oldest first, for Up and Down to recall (`sentMessages`). */
@@ -154,6 +163,8 @@ export function Composer({
   onSetModel: (id: string) => void;
   onSetEffort: (e: string | null) => void;
   onSetMode: (m: string) => void;
+  agentHandoff?: { name: string; id: string; run: () => void };
+  hasConversation?: boolean;
   contextUsed?: number;
   /** The full model id the session last said it ran (an alias like `opus` resolved). */
   reportedModel?: string | null;
@@ -162,6 +173,8 @@ export function Composer({
   /** The workspace that supplies cloud model choices, while connected. */
   modelClient?: WorkspaceRpcClient | null;
   contextMax?: number;
+  turns?: readonly Turn[];
+  compacting?: boolean;
   /** One-click next steps above the input: a prompt put in the composer for the reader to send, or (`run`) something the app does itself. */
   handoffs?: Handoff[];
   disabledReason?: string | null;
@@ -339,7 +352,8 @@ export function Composer({
       setDismissedToken(recalled ? `${recalled.kind}:${recalled.start}` : null);
     },
   });
-  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
+  const prMention = usePrMention(!remote && !disabled && dismissedToken !== tokenKey ? cwd ?? null : null, draft, caret, onDraftChange, ref, setCaret);
+  const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
   useEffect(() => {
@@ -406,9 +420,9 @@ export function Composer({
   );
 
   const [reviewReceiptError, setReviewReceiptError] = useState<{ message: string; retry: () => Promise<void> } | null>(null);
-  const send = useCallback(async () => {
+  const send = useCallback(async (alternate = false) => {
     const text = draft.trim();
-    if ((!text && !attachments.length) || disabled) return;
+    if ((!text && !attachments.length) || disabled || prMention.attaching) return;
     const previews = attachments.map((a) => ({ url: a.previewUrl, name: a.name }));
     const operation = beginComposerSend(sendScope, { text, images: previews, pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
     if (!operation) return;
@@ -423,7 +437,8 @@ export function Composer({
     const images = attach.setAside();
     ref.current?.focus({ preventScroll: true });
     try {
-      await onSend(text, images.images);
+      if (alternate) await onSend(text, images.images, true);
+      else await onSend(text, images.images);
     } catch (error) {
       // Back in the composer; into the tab's saved draft once this one has gone.
       if (mounted.current) {
@@ -443,9 +458,11 @@ export function Composer({
     // Learning belongs to this accepted send even if a newer draft is visible.
     learnOnSuccess();
     finishComposerSend(sendScope, operation);
-  }, [draft, attachments, attach, disabled, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
+  }, [draft, attachments, attach, disabled, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing) return;
+    if (prMention.onKeyDown(e)) return;
     if (pickerOpen && items.length) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -469,11 +486,15 @@ export function Composer({
       }
     }
     // An open menu owns the arrows (the pickers above, the model and permission menus); dictation owns the draft.
-    if (!pickerOpen && !modelMenu.open && !optionsOpen && !dictation.dictating && recall.onKeyDown(e)) return;
-    if (e.nativeEvent.isComposing) return;
+    if (!pickerOpen && !prMention.open && !modelMenu.open && !optionsOpen && !dictation.dictating && recall.onKeyDown(e)) return;
     if (matchesShortcut(e.nativeEvent, "composer.send")) {
       e.preventDefault();
       void send();
+      return;
+    }
+    if (followUps && matchesShortcut(e.nativeEvent, "composer.sendAlternate")) {
+      e.preventDefault();
+      void send(true);
       return;
     }
     // Enter that is not Send already breaks the line; any other key for New line has to do it itself.
@@ -483,7 +504,12 @@ export function Composer({
     }
   };
 
-  const placeholder = busy ? "Send a follow-up (it queues until the agent pauses)" : "Ask, build, or describe the next step";
+  const alternateKeys = keysOf("composer.sendAlternate").join("+");
+  const sendLabel = busy && followUps === "hold" ? "Hold until the turn ends" : "Send";
+  const sendHint = busy && followUps && alternateKeys
+    ? `${sendLabel} · ${alternateKeys} ${followUps === "hold" ? "interrupts and sends" : "holds until the turn ends"}`
+    : sendLabel;
+  const placeholder = busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up to the agent") : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
   // An alias reads as the version it is running, once someone has said which.
   const modelName = model ? runningModelName(model, reportedModel) : tab.model ? prettyModelId(tab.model) : "Model";
@@ -499,7 +525,6 @@ export function Composer({
   const modeLock = settingsLockedReason ?? modeLockedReason;
   // The picker's own id for the tab's mode; none when the agent reported one the picker does not offer (#417).
   const pickedMode = pickerMode(tab.permissionMode)?.id;
-  const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
   return (
     <div className="mx-auto w-full max-w-3xl px-6 pb-4 pt-2">
@@ -526,6 +551,7 @@ export function Composer({
             note={token?.kind === "slash" ? commandList.note : null}
           />
         )}
+        {prMention.menu}
         <DropHint dragging={attach.dragging} mentionFiles={mentionDropped} />
         {!busy && !draft && handoffs && handoffs.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="Next steps">
@@ -584,6 +610,11 @@ export function Composer({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="min-w-[14rem]">
+              {(hasConversation || history.length > 0 || busy) && (
+                <p className="max-w-72 px-2 py-1.5 text-xs text-muted-foreground" role="note">
+                  Changing model or effort can rebuild the prompt cache. The next response may take longer and use more tokens.
+                </p>
+              )}
               <DropdownMenuLabel>Model</DropdownMenuLabel>
               <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={onSetModel}>
                 {modelGroups(models).map((group) => (
@@ -616,6 +647,15 @@ export function Composer({
                   </DropdownMenuRadioGroup>
                 </>
               ) : null}
+              {agentHandoff && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={agentHandoff.run}>
+                    <AgentMark id={agentHandoff.id} decorative />
+                    <span>Hand off to {agentHandoff.name}<span className="block text-xs text-faint">Opens in a new tab</span></span>
+                  </DropdownMenuItem>
+                </>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
 
@@ -647,25 +687,9 @@ export function Composer({
                 onChoose: (mode) => chooseMode(tab.harness, mode, onSetMode),
               }}
             />
-            {pct != null && (
-              <WithTooltip label={`Context ${pct}% used (${Math.round((contextUsed ?? 0) / 1000)}k of ${Math.round((contextMax ?? 0) / 1000)}k)`}>
-                <div className="relative size-4" aria-label={`Context ${pct}%`}>
-                  <svg viewBox="0 0 16 16" className="size-4 -rotate-90">
-                    <circle cx="8" cy="8" r="6" fill="none" stroke="var(--hairline-strong)" strokeWidth="2" />
-                    <circle
-                      cx="8"
-                      cy="8"
-                      r="6"
-                      fill="none"
-                      stroke={pct > 85 ? "var(--destructive)" : pct > 65 ? "var(--warning)" : "var(--ink-muted)"}
-                      strokeWidth="2"
-                      strokeDasharray={`${(pct / 100) * 37.7} 37.7`}
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                </div>
-              </WithTooltip>
-            )}
+            <ContextPopover tab={tab} used={contextUsed} max={contextMax} reportedModel={reportedModel} local={modelsAreLocal && !remote}
+              turns={turns} compacting={compacting} compactDisabled={disabled || busy || sending}
+              onCompact={() => onSend("/compact", [])} />
             {/* One button: Stop while the agent works and nothing is typed, Send (a queued message while it works) once something is. Stop's shortcut works either way. */}
             {/* What is on its way is drawn in the chat, as sending (#727); the button waits for it. */}
             {!sending && busy && canStop && !draft.trim() && !attachments.length ? (
@@ -681,14 +705,14 @@ export function Composer({
                 </Button>
               </WithTooltip>
             ) : (
-              <WithTooltip label={sending ? "Sending…" : busy ? "Queue" : "Send"} keys={keysOf("composer.send")}>
+              <WithTooltip label={sending ? "Sending…" : sendHint} keys={keysOf("composer.send")}>
                 <Button
                   size="icon-sm"
                   className={CORNER}
                   variant={draft.trim() || attachments.length ? "accent" : "secondary"}
                   aria-label={sending ? "Sending" : "Send"}
                   aria-busy={sending}
-                  disabled={disabled || sending || (!draft.trim() && !attachments.length)}
+                  disabled={disabled || sending || prMention.attaching || (!draft.trim() && !attachments.length)}
                   onClick={() => void send()}
                 >
                   <ArrowUp />
@@ -809,3 +833,5 @@ function PermissionSubmenu({ permissions: p }: { permissions: PermissionChoice }
     </DropdownMenuSub>
   );
 }
+
+const NO_TURNS: readonly Turn[] = [];

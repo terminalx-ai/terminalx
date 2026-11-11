@@ -20,7 +20,9 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 it("hides whitespace highlights without changing the displayed or copied new text", async () => {
   const { container } = render(<><DiffOptions /><FileDiff {...props} /></>);
   await screen.findByRole("button", { name: "Copy file" });
-  expect(container.querySelector(".cm-changedLine")).not.toBeNull();
+  // The header and the editor are not drawn in the same step: the button is
+  // there once the file is read, the editor once its effect has run.
+  await waitFor(() => expect(container.querySelector(".cm-changedLine")).not.toBeNull());
   fireEvent.click(screen.getByLabelText("Hide whitespace changes"));
   expect(container.querySelector(".cm-changedLine")).toBeNull();
   expect(container.querySelector(".cm-content")?.textContent).toContain("const x=1;");
@@ -35,12 +37,12 @@ it("hides whitespace highlights without changing the displayed or copied new tex
 it("applies file wrap overrides independently of the global default", async () => {
   const { container, rerender } = render(<><DiffOptions /><FileDiff {...props} /></>);
   const select = await screen.findByLabelText("Wrap lines for this file");
-  expect(container.querySelector(".cm-lineWrapping")).not.toBeNull();
+  await waitFor(() => expect(container.querySelector(".cm-lineWrapping")).not.toBeNull());
   fireEvent.change(select, { target: { value: "false" } });
   expect(container.querySelector(".cm-lineWrapping")).toBeNull();
   rerender(<><DiffOptions /><FileDiff {...props} path="other.ts" /></>);
   await screen.findByLabelText("Wrap lines for this file");
-  expect(container.querySelector(".cm-lineWrapping")).not.toBeNull();
+  await waitFor(() => expect(container.querySelector(".cm-lineWrapping")).not.toBeNull());
   fireEvent.click(screen.getByLabelText("Wrap lines by default"));
   expect(container.querySelector(".cm-lineWrapping")).toBeNull();
   fireEvent.change(screen.getByLabelText("Wrap lines for this file"), { target: { value: "true" } });
@@ -104,12 +106,12 @@ it("does not copy a truncation marker as file contents", async () => {
   expect(screen.queryByRole("button", { name: "Copy file" })).toBeNull();
 });
 
-it("recovers a turn rename and passes the original path and base through to comments", async () => {
-  const onText = vi.fn();
-  const renamed = { ...source, changesBetween: vi.fn(async () => [{ path: "new.ts", oldPath: "old.ts", status: "renamed" as const, additions: 1, deletions: 1 }]) };
-  vi.mocked(source.fileContentsAt).mockImplementation(async (path) => ({ before: path === "old.ts" ? "original" : null, after: "updated" }));
-  render(<FileDiff source={renamed} path="new.ts" base="base" head="head" recoverRename onText={onText} />);
-  await screen.findByRole("button", { name: "Copy file" });
-  expect(source.fileContentsAt).toHaveBeenCalledWith("old.ts", "base", "head");
-  expect(onText).toHaveBeenCalledWith({ before: "original", after: "updated", deleted: false, originalPath: "old.ts" });
+it.each(["file.ts", "image.png"])("keeps Discard in the %s diff header alongside its viewer", async (path) => {
+  vi.mocked(source.mediaContentAt!).mockResolvedValue({ data: btoa("image"), mime: "image/png" });
+  const onDiscard = vi.fn();
+  render(<FileDiff {...props} path={path} onDiscard={onDiscard} />);
+  if (path.endsWith(".ts")) await screen.findByRole("button", { name: "Copy file" });
+  else await screen.findByRole("region", { name: "After" });
+  fireEvent.click(screen.getByRole("button", { name: `Discard changes to ${path}` }));
+  expect(onDiscard).toHaveBeenCalledTimes(1);
 });

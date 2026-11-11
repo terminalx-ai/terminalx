@@ -112,12 +112,25 @@ export interface TerminalInstance {
   release?: () => void;
   /** Attach again over a new connection, the screen redrawn from the backend's scrollback. */
   reattach?: () => void;
+  /** Resolves only after output attachment succeeds; retries a failed attachment. */
+  ensureAttached?: () => Promise<void>;
   /** Whether it is attached now under `token`, the name of one attachment of its pane's output. */
   attachedAs?: (token: string) => boolean;
   /** May be rebuilt from the backend's bounded scrollback without ending the process. */
   restorable?: boolean;
 }
 const instances = new Map<string, TerminalInstance>();
+const instanceFactories = new Map<string, Set<() => TerminalInstance>>();
+/** Mounted views can recreate a parser evicted while their Chat was visible. */
+export function registerTerminalFactory(id: string, create: () => TerminalInstance): () => void {
+  const factories = instanceFactories.get(id) ?? new Set();
+  instanceFactories.set(id, factories);
+  factories.add(create);
+  return () => {
+    factories.delete(create);
+    if (!factories.size && instanceFactories.get(id) === factories) instanceFactories.delete(id);
+  };
+}
 const sizes = new Map<string, { cols: number; rows: number }>();
 /** Recently used, hidden local terminals. Visible and remote terminals are not evicted. */
 export const IDLE_TERMINAL_LIMIT = 8;
@@ -145,6 +158,15 @@ export function setArchivedTerminalSessions(ids: readonly string[]) {
 /** The live instance of a pane, if it has one. Never makes one: a view that is on its way out must not bring a closed terminal back. */
 export function peekInstance(id: string): TerminalInstance | undefined {
   return instances.get(id);
+}
+
+/** Pane registration alone does not establish the window's PTY stream. */
+export async function ensureTerminalAttached(id: string, fallback?: () => TerminalInstance): Promise<void> {
+  const create = instanceFactories.get(id)?.values().next().value ?? fallback;
+  const inst = peekInstance(id) ?? (create ? getInstance(id, create) : undefined);
+  if (!inst?.ensureAttached) throw new Error("The terminal view is not ready to attach. Keep using Chat and try again.");
+  await inst.ensureAttached();
+  if (peekInstance(id) !== inst) throw new Error("The terminal connection changed while opening. Keep using Chat and try again.");
 }
 
 /** Mount before trimming when a view is acquiring a visible terminal. */
@@ -284,10 +306,15 @@ function adoptShell(shell: ShellPane) {
     // the shell becomes an agent's (#437), and that place is the backend's time for it.
     const title = shell.title || known.title;
     const created = shell.created || known.created;
-    if (known.title !== title || known.created !== created) set({ panes: state.panes.map((pane) => (pane.id === shell.id ? { ...pane, title, created } : pane)) });
+    const docked = shell.docked ?? isDockPane(shell.id);
+    // Agent-owned panes are never repositioned by a late shell notification.
+    if (known.owned || (known.hidden && !known.docked)) return;
+    if (known.title !== title || known.created !== created || !!known.docked !== docked) {
+      set({ panes: state.panes.map((pane) => (pane.id === shell.id ? { ...pane, title, created, docked, hidden: docked } : pane)) });
+    }
     return;
   }
-  if (isDockPane(shell.id)) {
+  if (shell.docked ?? isDockPane(shell.id)) {
     // The right panel's terminal: listed in its dock in every window, never as a tab.
     const pane: TerminalPane = {
       id: shell.id,
@@ -547,7 +574,7 @@ export function isAgentPane(id: string): boolean {
 /**
  * A shell in the right panel's terminal dock. Its id names its session like
  * any shell's, so the backend closes it with the session, and marks it as the
- * dock's so no window lists it as a tab.
+ * dock's as its initial placement. A move keeps this id and overrides that mark.
  */
 export function isDockPane(id: string): boolean {
   const [, rest] = id.split(":", 2);
@@ -566,6 +593,23 @@ export async function openDockTerminal(sessionId: string, cwd: string, cols = 80
   counter++;
   const id = `${sessionId}:dock-${Date.now().toString(36)}${counter}${windowMark}`;
   return openTerminal(sessionId, cwd, cols, rows, { id, title, docked: true });
+}
+
+/** Move the same shell and cached xterm; only its view's parent changes. */
+export async function moveTerminal(id: string, docked: boolean) {
+  const pane = state.panes.find((pane) => pane.id === id);
+  if (!pane || pane.owned || (pane.hidden && !pane.docked) || isAgentPane(id)) throw new Error("Only shell terminals can be moved.");
+  const shell = await pty.setDocked(id, docked);
+  // It may have closed while the request was in flight; never resurrect it.
+  if (!state.panes.some((pane) => pane.id === id)) return;
+  adoptShell(shell);
+  const selected = { ...state.selected };
+  if (docked) {
+    if (selected[pane.sessionId]?.kind === "terminal" && selected[pane.sessionId].id === id) delete selected[pane.sessionId];
+  } else {
+    selected[pane.sessionId] = { kind: "terminal", id };
+  }
+  set({ selected, active: { ...state.active, [pane.sessionId]: id } });
 }
 
 /**

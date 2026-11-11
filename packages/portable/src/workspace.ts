@@ -58,7 +58,7 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -141,6 +141,7 @@ export const MUTATING_METHODS = new Set([
   "git.pull",
   "git.fetch",
   "git.prCreate",
+  "git.prConversationAction",
   "git.prReady",
   "git.prMerge",
   "notes.post",
@@ -313,6 +314,7 @@ export type MergedPhase = "scheduled" | "kept" | "held" | "removed";
 
 /** Where one workspace whose pull request merged stands after a pass. */
 export interface MergedStatus {
+  archiveBlocked?: boolean;
   projectPath: string;
   path: string;
   name: string;
@@ -385,7 +387,17 @@ export interface CleanupProject {
   candidates: CleanupCandidate[];
 }
 
+export interface ArchiveFailure {
+  log?: string | null;
+  sessionsStopped?: boolean;
+  token: string;
+  pane: string;
+  code: number | null;
+  timedOut: boolean;
+}
+
 export interface CleanupRemoveItem {
+  archiveFailure?: string;
   projectPath: string;
   path: string;
   token: string;
@@ -398,6 +410,7 @@ export interface CleanupRemoveItem {
 }
 
 export interface CleanupResult {
+  archiveFailure?: ArchiveFailure;
   projectPath: string;
   path: string;
   outcome: "removed" | "alreadyRemoved" | "skipped" | "failed";
@@ -411,7 +424,7 @@ export interface CleanupResult {
 }
 
 /** What a removal is doing to the worktree it is on. */
-export type CleanupStep = "measuring" | "checking" | "removing" | "sessions";
+export type CleanupStep = "measuring" | "checking" | "archiving" | "removing" | "sessions";
 
 /**
  * How far one removal call is, as its host reports it while it runs
@@ -430,6 +443,7 @@ export type CleanupProgress =
  * `cwd` and `projectPath` are paths on the VM: never hand them to a local command.
  */
 export interface RuntimeSession {
+  manualStatus?: import("./manualStatus").ManualStatus;
   automation?: { id: string } | null;
   id: string;
   projectPath: string;
@@ -452,6 +466,7 @@ export interface RuntimeSession {
 
 /** `session.update`: `undefined` leaves a field as it is. Archiving only hides the session. */
 export interface RuntimeSessionPatch {
+  manualStatus?: import("./manualStatus").ManualStatus;
   title?: string;
   pinned?: boolean;
   archived?: boolean;
@@ -1070,10 +1085,11 @@ export class WorkspaceRpcClient {
   /**
    * Native Codex's terminal view (#644): move the tab to Codex's own terminal
    * on the same thread, for good, and start it there. The runtime refuses it
-   * mid-turn and to anyone who may not start the agent's terminal.
+   * to anyone who may not start the agent's terminal. Only a caller that
+   * handles waitingForTurn and polls again may opt into deferred completion.
    */
-  moveAgentTabToTerminal(sessionId: string, tabId: string): Promise<{ sessionId: string; tabId: string }> {
-    return this.mutate("session.toTerminal", { sessionId, tabId });
+  moveAgentTabToTerminal(sessionId: string, tabId: string, options: { transitionId?: string; deferUntilIdle?: boolean } = {}): Promise<{ sessionId: string; tabId: string; waitingForTurn?: boolean }> {
+    return this.mutate("session.toTerminal", { sessionId, tabId, ...options });
   }
 
   /** The sessions this connection may see (`session.list`). */
@@ -1084,6 +1100,7 @@ export class WorkspaceRpcClient {
 
   /** Rename, pin or archive a session (`session/2`, manage only). */
   async updateSession(sessionId: string, patch: RuntimeSessionPatch): Promise<RuntimeSession> {
+    if (patch.manualStatus !== undefined) this.assertCapability("session-status/1", "session.update");
     const defined = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
     const result = await this.mutate<{ session: RuntimeSession }>("session.update", { sessionId, ...defined });
     return result.session;
