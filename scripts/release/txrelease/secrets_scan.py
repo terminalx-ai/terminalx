@@ -139,6 +139,9 @@ def require_clean_scan(release: Release, source: str, published: list[Path]) -> 
     require(result.get('clean') is True, 'the secret scan found something: ' + ', '.join(f'{f["what"]} in {f["where"]}' for f in result.get('findings', [])))
     require(result.get('assetsScanned') is True, 'the secret scan did not cover the release assets; run the scan step after assemble')
     require(result.get('head') == source, 'the secret scan ran on a different commit; run the scan step again')
+    # The scan must cover every commit this release pushes: from the main commit prepare recorded.
+    base = read_record(release.record('release-context.json'), 'prepare')['baseMainCommit']
+    require(result.get('base') == base, f'the secret scan did not start at {base[:8]}, the origin/main prepare recorded; run the scan step without --base')
     stale = [p.name for p in published if p.stat().st_mtime >= record.stat().st_mtime]
     require(not stale, f'the secret scan is older than {", ".join(stale)}; run the scan step again')
     return result

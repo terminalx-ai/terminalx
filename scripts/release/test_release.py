@@ -112,7 +112,7 @@ class Fixture:
     def scan_clean(self, **overrides) -> None:
         time.sleep(0.01)  # the scan record must be newer than the assets and notes it covers
         write_json(self.release.record('secret-scan.json'),
-                   {'clean': True, 'findings': [], 'assetsScanned': True, 'head': HEAD, 'scanned': {'files': 9, 'bytes': 1}, **overrides})
+                   {'clean': True, 'findings': [], 'assetsScanned': True, 'head': HEAD, 'base': BASE, 'scanned': {'files': 9, 'bytes': 1}, **overrides})
 
     def runner(self, dry_run=True, tag_exists=False) -> FakeRunner:
         return FakeRunner([
@@ -370,6 +370,10 @@ class PublishGateTests(TempCase):
         time.sleep(0.01)
         self.release.record('notes.md').write_text('Edited after the scan.\n')
         self.refused('the secret scan is older than notes.md')
+
+    def test_refuses_a_scan_that_skipped_commits_on_top_of_main(self):
+        self.fixture.scan_clean(base=HEAD)
+        self.refused('the secret scan did not start at bbbbbbbb')
 
     def test_refuses_a_missing_scan(self):
         self.release.record('secret-scan.json').unlink()
