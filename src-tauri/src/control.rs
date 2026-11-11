@@ -1178,6 +1178,9 @@ impl ControlService {
     }
 
     fn wait(&self, params: Value) -> Result<Value, ControlError> {
+        if params.get("childrenOf").is_some() {
+            return self.wait_children(params);
+        }
         if params.get("targets").is_some() {
             return self.wait_many(params);
         }
@@ -1210,6 +1213,22 @@ impl ControlService {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// `wait --children-of` (PRO-328): `wait_many` on the sessions a lead
+    /// started, as `sessions list --children-of` finds them (archived ones and
+    /// quick chats included). They are found once, when the call begins; a
+    /// session the lead starts later is not waited on. A lead with none has
+    /// nothing to wait for, which is an answer, not an error.
+    fn wait_children(&self, mut params: Value) -> Result<Value, ControlError> {
+        let mode = optional_string(&params, "mode").unwrap_or_else(|| "any".into());
+        let listed = self.sessions_children(json!({"childrenOf": required_string(&params, "childrenOf")?}))?;
+        let workers: Vec<Value> = listed["sessions"].as_array().into_iter().flatten().map(|session| session["id"].clone()).collect();
+        if workers.is_empty() {
+            return Ok(json!({"mode": mode, "timedOut": false, "targets": [], "reason": "nothing to wait for: that session started no sessions"}));
+        }
+        params["targets"] = json!(workers);
+        self.wait_many(params)
     }
 
     /// `wait` on several tabs at once (PRO-271). `any` returns as soon as one
