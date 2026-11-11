@@ -312,6 +312,17 @@ describe("the checks a merge waits on (#881)", () => {
     expect(openUrl).toHaveBeenCalledWith("https://ci.example.com/3");
   });
 
+  it("says the note, not an empty failure, when what failed is a workflow behind passing checks", () => {
+    render(<IssuePipelinePanel pipeline={waiting([check("check", "success")], ["check"], {
+      state: "needsYou", reason: { kind: "checksFailed", names: ["CI (check_suites #9)"] }, note: "A check failed on the reviewed commit: CI (check_suites #9).",
+    })} />);
+    const panel = within(screen.getByTestId("issue-pipeline"));
+    expect(panel.getByText("Needs you")).toBeTruthy();
+    expect(panel.getByText("A check failed on the reviewed commit: CI (check_suites #9).")).toBeTruthy();
+    expect(panel.queryByTestId("pipeline-check-failed")).toBeNull();
+    expect(panel.queryByTestId("pipeline-checks")).toBeNull();
+  });
+
   it("keeps the sentence beside the list once the wait ran out", () => {
     const stalled = waiting([check("check", "queued")], ["check"], {
       state: "needsYou", reason: { kind: "checksStalled", names: ["check"], minutes: 60 }, note: "Checks have not finished after 60 minutes: check.",

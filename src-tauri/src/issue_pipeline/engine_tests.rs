@@ -967,6 +967,19 @@ fn a_failed_required_check_is_listed_with_the_wait_it_ended_and_a_rerun_starts_a
 }
 
 #[test]
+fn a_failed_workflow_behind_passing_checks_is_said_by_the_note_not_listed() {
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![check("build", "success")];
+    let run = Run::start_in(host, true);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().validation = Some(vec![check("CI (check_suites #9)", "failure")]);
+    let stopped = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(stopped.reason, Some(StopReason::ChecksFailed { names: vec!["CI (check_suites #9)".into()] }));
+    assert_eq!(stopped.checks, None, "no check in the list failed, so there is no list to name it in");
+    assert!(stopped.note.as_deref().is_some_and(|note| note.contains("CI (check_suites #9)")), "{:?}", stopped.note);
+}
+
+#[test]
 fn checks_are_carried_only_while_the_merge_waits_on_them_or_stops_on_them() {
     // Unreadable: no list, and the note says what it can.
     let host = FakeHost::new(&github_issue());

@@ -425,6 +425,9 @@ describe("the checks a merge waits on, as the app stores them (#881)", () => {
     expect(pipelineChecksView({ ...fixture, checks: null })).toBeNull();
     expect(pipelineChecksView({ ...fixture, state: "readyToMerge", reason: { kind: "autoMergeOff" } })).toBeNull();
     expect(pipelineChecksView({ ...fixture, state: "needsYou", reason: { kind: "conflicts" } })).toBeNull();
+    // A failed workflow or check suite behind checks that all passed: the note names it, not the list.
+    const passed = fixture.checks!.checks.map((check) => ({ ...check, state: "success" }));
+    expect(pipelineChecksView({ ...fixture, state: "needsYou", reason: { kind: "checksFailed", names: ["CI (check_suites #9)"] }, checks: { ...fixture.checks!, checks: passed } })).toBeNull();
   });
 });
 

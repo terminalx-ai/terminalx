@@ -307,6 +307,8 @@ export function pipelineChecksView(pipeline: IssuePipeline, now = Date.now()): P
   const since = carried.since ? Date.parse(carried.since) : NaN;
   const until = carried.until ? Date.parse(carried.until) : now;
   const counts = requiredCheckCounts(carried.checks, carried.required);
+  // A stop on a failure the list cannot name (a workflow or check suite) is said by the note.
+  if (outcome === "failed" && counts.failed.length === 0) return null;
   return {
     outcome,
     commit: carried.commit,

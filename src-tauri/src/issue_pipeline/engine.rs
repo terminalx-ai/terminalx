@@ -1658,8 +1658,14 @@ impl Step<'_> {
                 self.settle(State::ReadyToMerge, Some(reason), note);
             }
             Gate::NeedsYou(reason) => {
-                if matches!(reason, StopReason::ChecksFailed { .. }) {
-                    self.note_checks(&pr, previous_checks, waited_since, false);
+                // Listed only when what failed is a check the list names: a
+                // failed workflow or check suite behind passing checks is said
+                // in the note alone, which names it.
+                if let StopReason::ChecksFailed { names } = &reason {
+                    let required = gate::gating_names(&pr, &self.settings.ignored_checks);
+                    if names.iter().any(|name| required.contains(name)) {
+                        self.note_checks(&pr, previous_checks, waited_since, false);
+                    }
                 }
                 self.needs_you(reason);
             }

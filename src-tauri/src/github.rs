@@ -169,7 +169,10 @@ pub(crate) fn parse_pr(v: &Value) -> PullRequest {
                     .to_ascii_lowercase();
                     let url = c["detailsUrl"].as_str().or_else(|| c["targetUrl"].as_str()).map(String::from);
                     let actions = url.as_deref().and_then(|url| checks::map_check(v["url"].as_str()?, url));
-                    PrCheck { name, state, url, actions, started_at: github_time(&c["startedAt"]), completed_at: github_time(&c["completedAt"]), summary: None }
+                    // A commit status's time is when its latest state was posted, not when it ran.
+                    let timed = c["__typename"] != "StatusContext";
+                    let time = |key: &str| timed.then(|| github_time(&c[key])).flatten();
+                    PrCheck { name, state, url, actions, started_at: time("startedAt"), completed_at: time("completedAt"), summary: None }
                 })
                 .collect()
         })
@@ -848,9 +851,10 @@ fn validation_with(cwd: &Path, pr: &PrSnapshot, run: &mut impl FnMut(&Path, &[&s
             state: state.into(),
             url: status["target_url"].as_str().filter(|url| !url.is_empty()).map(String::from),
             actions: None,
-            started_at: github_time(&status["created_at"]),
-            // A status is updated when it settles; while pending it has not finished.
-            completed_at: (state != "pending").then(|| github_time(&status["updated_at"])).flatten(),
+            // The combined status holds only each context's latest status,
+            // posted when it took that state: neither its start nor its end.
+            started_at: None,
+            completed_at: None,
             summary: check_summary(&status["description"]),
         });
     }
@@ -2307,7 +2311,7 @@ mod tests {
             {"__typename":"StatusContext","context":"deploy/preview","state":"SUCCESS","startedAt":"2026-11-11T10:01:00Z","targetUrl":"https://example.com/p"}
         ]}));
         assert_eq!((rollup.checks[0].started_at.as_deref(), rollup.checks[0].completed_at.as_deref()), (Some("2026-11-11T10:00:00Z"), None), "GitHub's year-one stand-in is no time");
-        assert_eq!(rollup.checks[1].started_at.as_deref(), Some("2026-11-11T10:01:00Z"));
+        assert_eq!(rollup.checks[1].started_at, None, "a status's time is when its latest state was posted");
         // The merge gate's check runs and statuses: the same requests as before, more of each record kept.
         let pr = parse_snapshot(&serde_json::from_str(OPEN_PR).unwrap());
         let mut requests = 0;
@@ -2336,7 +2340,7 @@ mod tests {
         assert_eq!((queued.state.as_str(), queued.url.as_deref(), queued.started_at.as_deref(), queued.summary.as_deref()), ("queued", Some("https://github.com/o/r/runs/2"), None, None));
         let status = &checks[2];
         assert_eq!((status.name.as_str(), status.url.as_deref(), status.started_at.as_deref(), status.completed_at.as_deref(), status.summary.as_deref()),
-            ("ci/legacy", Some("https://ci.example.com/3"), Some("2026-11-11T10:02:00Z"), None, Some("Build started")), "a pending status has not finished");
+            ("ci/legacy", Some("https://ci.example.com/3"), None, None, Some("Build started")), "a status's times are when its latest state was posted, not when it ran");
     }
 
     #[test]
