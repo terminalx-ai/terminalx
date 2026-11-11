@@ -48,6 +48,7 @@ import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
 import { bootMergedCleanup } from "@/lib/mergedCleanup";
+import { WorkspaceRestoreDialog } from "@/components/session/WorkspaceRestoreDialog";
 import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
 import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialog";
 import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
@@ -261,6 +262,7 @@ export function AppShell() {
       <GuestSessionHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />
+      <WorkspaceRestoreDialog />
       <WorktreeCleanupDialog />
       <ProjectStartDialogHost />
       <div className="flex min-h-0 flex-1">

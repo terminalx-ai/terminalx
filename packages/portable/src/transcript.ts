@@ -1,4 +1,4 @@
-import type { AgentEvent, BackgroundTask, FileEdit, Goal, Payload, PermissionOption, Question, ToolResult } from "./events";
+import type { AgentEvent, BackgroundTask, FileEdit, Goal, Payload, PermissionOption, Question, ToolResult, Usage } from "./events";
 import { withoutHarnessBlocks } from "./harnessText";
 import { compactionOperationKey, emptyCompactionLifecycle, reduceCompactionLifecycle, type CompactionLifecycle, type CompactionOperation } from "./compactionLifecycle";
 
@@ -44,9 +44,9 @@ export type WorkItem =
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
   | { kind: "text"; text: string; key: string; seq: number; messageTs?: string }
   | { kind: "reasoning"; text: string; key: string; seq: number }
-  | ({ kind: "queued"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] } & Delivery)
+  | ({ kind: "queued"; baseline?: string; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] } & Delivery)
   /** A queued message the agent took mid-turn (#551): the reader's own words, where the agent read them. */
-  | ({ kind: "message"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] } & Delivery)
+  | ({ kind: "message"; baseline?: string; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] } & Delivery)
   | { kind: "status"; text: string; initiatingPrompt?: string; key: string; seq: number }
   /** `detail`: the agent's (or its launch's) own words under the error (#667). */
   | { kind: "error"; text: string; detail?: string; key: string; seq: number }
@@ -63,13 +63,15 @@ export interface Turn {
   checkpointSeq?: number;
   /** Time of the event that opened this turn, even without a prompt or completion. */
   ts: string;
-  prompt?: { author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; messageTs?: string; seq: number } & Delivery;
+  prompt?: { baseline?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; messageTs?: string; seq: number } & Delivery;
   work: WorkItem[];
   finalText?: string;
   /** Under a failed turn's `finalText`: the agent's last line, when it exited before it ever worked (#667). */
   detail?: string;
   completed?: { seq?: number; status: string; durationMs?: number; ts: string; head?: string };
-  usage?: { contextUsed?: number; contextMax?: number };
+  usage?: Usage;
+  agent?: string;
+  model?: string;
   toolCount: number;
   editedFiles: number;
   live: boolean;
@@ -171,7 +173,7 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
   const [item] = turn.work.splice(at, 1);
   if (item.kind !== "queued" && item.kind !== "message") return undefined;
   const { inputOccupied, replaced, withdrawn, unconfirmed, sent } = item;
-  return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, unconfirmed, sent }, from: turn };
+  return { prompt: { baseline: item.baseline, author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, unconfirmed, sent }, from: turn };
 }
 
 /** Where the reader's message published under `seq` is drawn now: a turn's prompt (no `at`), or a note at `at` in a turn's work. */
@@ -316,7 +318,7 @@ export class TranscriptReducer {
 
   private ensureTurn(event: AgentEvent): Turn {
     if (!this.current) {
-      this.current = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, work: [], toolCount: 0, editedFiles: 0, live: false };
+      this.current = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, agent: event.harness, model: this.model, work: [], toolCount: 0, editedFiles: 0, live: false };
       this.turns.push(this.current);
     }
     this.touch(this.current);
@@ -341,7 +343,7 @@ export class TranscriptReducer {
   }
 
   private newTurn(event: AgentEvent, prompt?: Turn["prompt"]): Turn {
-    const turn: Turn = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, work: [], toolCount: 0, editedFiles: 0, live: false };
+    const turn: Turn = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, agent: event.harness, model: this.model, work: [], toolCount: 0, editedFiles: 0, live: false };
     if (prompt) turn.prompt = prompt;
     this.current = turn;
     this.turns.push(turn);
@@ -373,11 +375,11 @@ export class TranscriptReducer {
         // nothing yet: a turn the agent started itself is heard of before its
         // first record (#540), and the message is not that turn's prompt.
         if (payload.queued) {
-          this.ensureTurn(event).work.push({ kind: "queued", author: payload.author, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, messageTs: event.messageTs, images: payload.images });
+          this.ensureTurn(event).work.push({ kind: "queued", baseline: payload.baseline, author: payload.author, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, messageTs: event.messageTs, images: payload.images });
           break;
         }
         this.abandonUnresolved();
-        this.newTurn(event, { author: payload.author, text, images: payload.images, ts: event.ts, messageTs: event.messageTs, seq: event.seq });
+        this.newTurn(event, { baseline: payload.baseline, author: payload.author, text, images: payload.images, ts: event.ts, messageTs: event.messageTs, seq: event.seq });
         this.modelRequestOpen = false;
         this.workingSince = Date.parse(event.ts);
         break;
@@ -566,7 +568,9 @@ export class TranscriptReducer {
         if (payload.usage) {
           if (payload.usage.contextUsed != null) this.contextUsed = payload.usage.contextUsed;
           if (payload.usage.contextMax != null) this.contextMax = payload.usage.contextMax;
-          turn.usage = { contextUsed: payload.usage.contextUsed, contextMax: payload.usage.contextMax };
+          if (payload.usage.model) this.model = payload.usage.model;
+          turn.usage = payload.usage;
+          turn.model = payload.usage.model ?? turn.model;
         }
         if (payload.authFailed) this.authFailed = true;
         this.modelRequestOpen = false;

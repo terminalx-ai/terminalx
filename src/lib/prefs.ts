@@ -61,6 +61,7 @@ export interface Prefs {
    * notes beside them (see `@/lib/autocorrect`). Off unless the reader turned it on.
    */
   autocorrect: boolean;
+  followUps: "now" | "hold";
   lastProject: string | null;
   lastAgent: string;
   lastModel: Record<string, string>;
@@ -99,7 +100,7 @@ export interface Prefs {
    * app draws it; "status" groups individual sessions by their manual status.
    */
   sidebarLayout: "simple" | "list" | "status";
-  sidebarSort: "updated" | "created";
+  sidebarSort: "updated" | "created" | "custom";
   sidebarProject: string | null;
   sidebarShowArchived: boolean;
   /**
@@ -175,6 +176,7 @@ const DEFAULTS: Prefs = {
   promptMap: true,
   fixErrorsInstructions: "",
   autocorrect: false,
+  followUps: "now",
   lastProject: null,
   lastAgent: "claude",
   lastModel: {},
@@ -260,6 +262,7 @@ function cleanCloudSections(value: unknown): Prefs["cloudSections"] {
 }
 
 let preferenceFileValues: Partial<Prefs> = {};
+let hasSidebarSortChoice = false;
 
 function load(legacyOnly = false): Prefs {
   try {
@@ -277,13 +280,15 @@ function load(legacyOnly = false): Prefs {
     prefs.selectedOrganization = typeof prefs.selectedOrganization === "string" ? prefs.selectedOrganization : null;
     // The project tree ("detailed") is gone; anyone who had it gets the default.
     prefs.sidebarLayout = ["list", "status"].includes(prefs.sidebarLayout) ? prefs.sidebarLayout : "simple";
-    prefs.sidebarSort = prefs.sidebarSort === "created" ? "created" : "updated";
+    prefs.sidebarSort = ["created", "custom"].includes(prefs.sidebarSort) ? prefs.sidebarSort : "updated";
+    if (!legacyOnly) hasSidebarSortChoice = ["updated", "created", "custom"].includes(parsed.sidebarSort);
     prefs.sidebarProject = typeof prefs.sidebarProject === "string" ? prefs.sidebarProject : null;
     prefs.sidebarShowArchived = prefs.sidebarShowArchived === true;
     for (const key of ["sidebarFilters", "sidebarSections"] as const) {
       if (!prefs[key] || typeof prefs[key] !== "object" || Array.isArray(prefs[key])) prefs[key] = {};
     }
     prefs.autocorrect = prefs.autocorrect === true;
+    prefs.followUps = prefs.followUps === "hold" ? "hold" : "now";
     prefs.prActivityOrder = prefs.prActivityOrder === "oldest" ? "oldest" : "newest";
     prefs.diffMode = prefs.diffMode === "split" ? "split" : "unified";
     prefs.diffHideWhitespace = prefs.diffHideWhitespace === true;
@@ -333,7 +338,12 @@ function load(legacyOnly = false): Prefs {
     }
     if (migrated) {
       try {
-        localStorage.setItem(KEY, JSON.stringify({ ...prefs, ...windowChoices({ ...DEFAULTS, ...legacy }) }));
+        localStorage.setItem(KEY, JSON.stringify({
+          ...prefs, ...windowChoices({ ...DEFAULTS, ...legacy }),
+          // An unrelated migration must not turn the default into a sort choice
+          // or publish this window's override. Undefined stays absent in JSON.
+          sidebarSort: legacy.sidebarSort,
+        }));
       } catch {
         // Still use the migrated preferences when storage is unavailable.
       }
@@ -396,7 +406,13 @@ export function getPrefs(): Prefs {
   return state;
 }
 
+/** Unconfigured windows inherit the Rust index's pre-existing custom-order choice. */
+export function getSidebarSortChoice(): Prefs["sidebarSort"] | null {
+  return hasSidebarSortChoice ? state.sidebarSort : null;
+}
+
 export function setPrefs(patch: Partial<Prefs>) {
+  if (patch.sidebarSort !== undefined) hasSidebarSortChoice = true;
   state = { ...state, ...patch };
   persistLocal(patch);
   const saved = Object.fromEntries(Object.entries(patch).filter(([key]) => fileKeys.includes(key as keyof Prefs) && !WINDOW_KEYS.includes(key as typeof WINDOW_KEYS[number])));

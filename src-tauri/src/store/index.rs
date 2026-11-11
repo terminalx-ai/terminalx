@@ -366,12 +366,18 @@ pub struct AutomationRef {
 /// Provenance for a session whose checkout has been deleted. Operationally
 /// the session moves to the project checkout, but the sidebar must not imply
 /// that its existing transcript was created there.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovedWorkspace {
     pub path: String,
     pub name: String,
     pub branch: Option<String>,
+    /// HEAD immediately before deletion; absent on records from older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The repository that owned the checkout, including for guest/quick sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// The repo a chat's agent is working in: its root, and the branch checked out there.
@@ -659,6 +665,8 @@ struct IndexFile {
     workspace_tabs: BTreeMap<String, TabLayout>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     closed_tabs: Vec<ClosedTab>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sidebar_order: Option<SidebarOrder>,
     #[serde(flatten, default)]
     unknown: BTreeMap<String, serde_json::Value>,
 }
@@ -680,6 +688,9 @@ pub fn revision() -> u64 {
 }
 
 fn save_file(file: &mut IndexFile) -> Result<()> {
+    if let Some(order) = &mut file.sidebar_order {
+        reconcile_sidebar_sessions(&mut order.sessions, &file.sessions);
+    }
     local_sections::prune(file);
     // A closed tab goes with its session: there is nothing left to reopen it into.
     let IndexFile { sessions, closed_tabs, .. } = file;
@@ -733,6 +744,143 @@ pub fn update<R>(f: impl FnOnce(&mut Vec<SessionEntry>) -> Result<R>) -> Result<
 pub fn tab_state() -> Result<TabState> {
     let file = load_file()?;
     Ok(TabState { workspaces: file.workspace_tabs, closed: file.closed_tabs })
+}
+
+/// Sidebar arrangement is independent of activity and of whether custom order
+/// is currently displayed. Revision guards windows against delayed replies.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SidebarOrder {
+    pub custom: bool,
+    pub sessions: Vec<String>,
+    pub projects: Vec<String>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SidebarOrderPatch {
+    pub custom: Option<bool>,
+    pub sessions: Option<Vec<String>>,
+    pub projects: Option<Vec<String>>,
+}
+
+/// Only the named rows move. Filtered, folded, archived and other groups' rows
+/// retain their slots; simultaneous edits to different groups cannot erase one another.
+fn merge_sidebar_order(saved: &mut Vec<String>, requested: Vec<String>) {
+    let mut unique = std::collections::HashSet::new();
+    saved.retain(|id| unique.insert(id.clone()));
+    let mut seen = std::collections::HashSet::new();
+    let requested: Vec<_> = requested.into_iter().filter(|id| seen.insert(id.clone())).collect();
+    let missing: Vec<_> = requested.iter().filter(|id| !unique.contains(*id)).cloned().collect();
+    saved.splice(0..0, missing);
+    let mut next = requested.iter();
+    for id in saved.iter_mut() {
+        if seen.contains(id) {
+            *id = next.next().expect("one slot per requested row").clone();
+        }
+    }
+}
+
+fn reconcile_sidebar_sessions(saved: &mut Vec<String>, sessions: &[SessionEntry]) {
+    let mut seen = std::collections::HashSet::new();
+    let existing: std::collections::HashSet<_> = sessions.iter().map(|s| &s.id).collect();
+    saved.retain(|id| existing.contains(id) && seen.insert(id.clone()));
+    let mut new: Vec<_> = sessions.iter().filter(|s| !seen.contains(&s.id)).collect();
+    new.sort_by(|a, b| b.created.cmp(&a.created).then(a.id.cmp(&b.id)));
+    saved.splice(0..0, new.into_iter().map(|s| s.id.clone()));
+}
+
+/// Project groups include attached projects and repositories still represented by
+/// conversations, including archives and linked chats. Forget only vanished groups.
+fn sidebar_projects(sessions: &[SessionEntry], attached: &[super::projects::Project]) -> Result<Vec<String>> {
+    let chats = super::root()?.join("Chats");
+    let chats = chats.canonicalize().unwrap_or(chats).to_string_lossy().trim_end_matches('/').to_string();
+    let mut groups: BTreeMap<String, (bool, String, bool)> = attached.iter()
+        .filter(|p| p.path.trim_end_matches('/') != chats)
+        .map(|p| (p.path.trim_end_matches('/').to_string(), (p.pinned, p.last_opened.clone().unwrap_or_default(), false)))
+        .collect();
+    for session in sessions.iter().filter(|s| !s.is_quick()) {
+        let path = if session.project_path.trim_end_matches('/') == chats {
+            let Some(link) = &session.link else { continue };
+            &link.path
+        } else { &session.project_path };
+        let group = groups.entry(path.trim_end_matches('/').to_string()).or_default();
+        if !session.archived {
+            let time = sidebar_message_time(session);
+            if !group.2 || time > group.1 { group.1 = time; }
+            group.2 = true;
+        }
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by(|(a, av), (b, bv)| bv.0.cmp(&av.0).then(bv.1.cmp(&av.1)).then(a.cmp(b)));
+    Ok(groups.into_iter().map(|(path, _)| path).collect())
+}
+
+fn sidebar_message_time(session: &SessionEntry) -> String {
+    super::message_activity::last_message_at(session)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| session.created.clone())
+}
+
+fn reconcile_sidebar_projects(saved: &mut Vec<String>, current: &[String]) {
+    let current: std::collections::HashSet<_> = current.iter().collect();
+    let mut seen = std::collections::HashSet::new();
+    saved.retain(|id| current.contains(id) && seen.insert(id.clone()));
+    let mut new: Vec<_> = current.into_iter().filter(|id| !seen.contains(*id)).cloned().collect();
+    new.sort();
+    saved.splice(0..0, new);
+}
+
+pub fn sidebar_order() -> Result<SidebarOrder> {
+    let file = load_file()?;
+    let Some(mut order) = file.sidebar_order else { return Ok(SidebarOrder::default()) };
+    match super::projects::list() {
+        Ok((attached, _)) => {
+            let projects = sidebar_projects(&file.sessions, &attached)?;
+            reconcile_sidebar_projects(&mut order.projects, &projects);
+        }
+        // An unavailable project catalog must not hide or prune the saved order.
+        Err(error) => log::warn!("read sidebar projects; keeping saved order: {error:#}"),
+    }
+    Ok(order)
+}
+
+pub fn set_sidebar_order(patch: SidebarOrderPatch) -> Result<SidebarOrder> {
+    update_file(|file| {
+        // Read after acquiring the index lock so a waiting drop sees newly attached projects.
+        let attached = super::projects::list()?.0;
+        // Seed only once, in this transaction, so enabling custom order keeps the
+        // pin/message ordering already on screen and cannot overwrite another window.
+        if file.sidebar_order.is_none() {
+            let mut sessions = file.sessions.clone();
+            super::message_activity::project(&mut sessions)?;
+            // Section members are absent from the main project list, so their
+            // activity must not reshuffle that list when custom order is enabled.
+            let sectioned: std::collections::HashSet<_> = file.local_sections.iter().flat_map(|section| &section.sessions).collect();
+            let main_sessions: Vec<_> = sessions.iter().filter(|session| !sectioned.contains(&session.id)).cloned().collect();
+            let projects = sidebar_projects(&main_sessions, &attached)?;
+            sessions.sort_by_cached_key(|s| (std::cmp::Reverse(s.pinned), std::cmp::Reverse(sidebar_message_time(s)), s.id.clone()));
+            file.sidebar_order = Some(SidebarOrder { sessions: sessions.into_iter().map(|s| s.id).collect(), projects, ..Default::default() });
+        }
+        let projects = sidebar_projects(&file.sessions, &attached)?;
+        let project_ids: std::collections::HashSet<_> = projects.iter().collect();
+        let session_ids: std::collections::HashSet<_> = file.sessions.iter().map(|s| &s.id).collect();
+        let order = file.sidebar_order.as_mut().expect("initialized above");
+        reconcile_sidebar_sessions(&mut order.sessions, &file.sessions);
+        reconcile_sidebar_projects(&mut order.projects, &projects);
+        if let Some(custom) = patch.custom { order.custom = custom; }
+        if let Some(mut sessions) = patch.sessions {
+            sessions.retain(|id| session_ids.contains(id));
+            merge_sidebar_order(&mut order.sessions, sessions);
+        }
+        if let Some(mut projects) = patch.projects {
+            projects.retain(|id| project_ids.contains(id));
+            merge_sidebar_order(&mut order.projects, projects);
+        }
+        order.revision = order.revision.saturating_add(1);
+        Ok(order.clone())
+    })
 }
 
 /// Save how a workspace's tabs are arranged; an empty layout forgets it.
@@ -942,6 +1090,7 @@ pub fn mark_workspace_removed(session: &mut SessionEntry, project_branch: Option
             path: session.cwd.clone(),
             name,
             branch: session.branch.clone(),
+            ..Default::default()
         });
     }
     session.cwd = session.project_path.clone();
@@ -1051,6 +1200,161 @@ mod tests {
 
     fn tab_ids(session_id: &str) -> Vec<String> {
         get(session_id).unwrap().tabs.into_iter().map(|tab| tab.id).collect()
+    }
+
+    #[test]
+    fn sidebar_order_survives_updates_and_new_sessions_lead_even_while_off() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("a"), entry("b"), entry("c")];
+        for session in &mut sessions { session.created = "2026-01-01".into(); session.project_path = if session.id == "b" { "/b" } else { "/a" }.into(); }
+        save(&sessions).unwrap();
+        assert_eq!(sidebar_order().unwrap(), SidebarOrder::default());
+        let saved = set_sidebar_order(SidebarOrderPatch {
+            custom: Some(true), sessions: Some(vec!["c".into(), "a".into(), "b".into(), "c".into(), "gone".into()]),
+            projects: Some(vec!["/b".into(), "/a".into()]),
+        }).unwrap();
+        assert_eq!(saved.sessions, ["c", "a", "b"]);
+        assert_eq!(sidebar_order().unwrap(), saved);
+        set_sidebar_order(SidebarOrderPatch { custom: Some(false), ..Default::default() }).unwrap();
+        update_session("b", |session| { session.modified = "later".into(); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, saved.sessions);
+        update(|sessions| { let mut new = entry("new"); new.project_path = "/a".into(); sessions.push(new); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, ["new", "c", "a", "b"]);
+        // A filtered drop preserves the unseen rows and another group's order.
+        set_sidebar_order(SidebarOrderPatch { sessions: Some(vec!["b".into(), "c".into()]), ..Default::default() }).unwrap();
+        let restored = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(restored.sessions, ["new", "b", "a", "c"]);
+        assert_eq!(restored.projects, ["/b", "/a"]);
+        assert!(restored.revision > saved.revision);
+        assert_eq!(get("a").unwrap().modified, sessions[0].modified);
+        update(|sessions| { sessions.retain(|s| s.id != "a"); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, ["new", "b", "c"]);
+    }
+
+    #[test]
+    fn sidebar_seeds_project_order_from_sessions_outside_personal_sections() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("a"), entry("b"), entry("sectioned")];
+        for (session, (path, created)) in sessions.iter_mut().zip([
+            ("/a", "2026-01-01T00:00:00Z"), ("/b", "2026-02-01T00:00:00Z"), ("/a", "2026-03-01T00:00:00Z"),
+        ]) {
+            session.project_path = path.into();
+            session.created = created.into();
+        }
+        save(&sessions).unwrap();
+        local_sections::edit(local_sections::SectionEdit::Create {
+            name: "Release".into(), emoji: None, session_ids: vec!["sectioned".into()],
+        }).unwrap();
+        let order = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(order.projects, ["/b", "/a"]);
+        assert_eq!(order.sessions, ["sectioned", "b", "a"]);
+    }
+
+    #[test]
+    fn sidebar_order_and_section_memberships_survive_each_others_writes() {
+        use local_sections::SectionEdit;
+        let _home = crate::store::temp_home();
+        save(&[entry("a"), entry("b")]).unwrap();
+        let order = set_sidebar_order(SidebarOrderPatch {
+            custom: Some(true), sessions: Some(vec!["b".into(), "a".into()]), ..Default::default()
+        }).unwrap();
+        let sections = local_sections::edit(SectionEdit::Create {
+            name: "Release".into(), emoji: None, session_ids: vec!["a".into(), "b".into()],
+        }).unwrap();
+        let id = &sections.sections[0].id;
+        assert_eq!(sidebar_order().unwrap(), order);
+        local_sections::insert_session(&entry("new"), Some(id)).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, ["new", "b", "a"]);
+        set_sidebar_order(SidebarOrderPatch { sessions: Some(vec!["a".into(), "new".into(), "b".into()]), ..Default::default() }).unwrap();
+        assert_eq!(local_sections::load().unwrap().sections[0].sessions, ["a", "b", "new"]);
+        update(|sessions| { sessions.retain(|session| session.id != "b"); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, ["a", "new"]);
+        assert_eq!(local_sections::load().unwrap().sections[0].sessions, ["a", "new"]);
+    }
+
+    #[test]
+    fn sidebar_order_remains_readable_when_the_project_catalog_is_unavailable() {
+        let _home = crate::store::temp_home();
+        let projects_path = crate::store::root().unwrap().join("projects.json");
+        let projects = serde_json::json!({ "projects": [{ "path": "/attached", "name": "Attached" }] });
+        crate::store::write_json(&projects_path, &projects).unwrap();
+        save(&[entry("a"), entry("b")]).unwrap();
+        let saved = set_sidebar_order(SidebarOrderPatch {
+            custom: Some(true), sessions: Some(vec!["b".into(), "a".into()]),
+            projects: Some(vec!["/attached".into(), "/p".into()]),
+        }).unwrap();
+        let index_before = std::fs::read(file_path().unwrap()).unwrap();
+        std::fs::write(&projects_path, b"{invalid").unwrap();
+        assert_eq!(sidebar_order().unwrap(), saved);
+        std::fs::remove_file(&projects_path).unwrap();
+        std::fs::create_dir(&projects_path).unwrap();
+        assert_eq!(sidebar_order().unwrap(), saved);
+        assert_eq!(std::fs::read(file_path().unwrap()).unwrap(), index_before);
+        std::fs::remove_dir(&projects_path).unwrap();
+        crate::store::write_json(&projects_path, &serde_json::json!({ "projects": [] })).unwrap();
+        let restored = sidebar_order().unwrap();
+        assert_eq!(restored.projects, ["/p"]);
+        assert_eq!(restored.sessions, saved.sessions);
+        assert!(restored.custom);
+    }
+
+    #[test]
+    fn sidebar_project_reorder_keeps_other_groups_and_index_fields() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("a"), entry("hidden"), entry("b")];
+        for session in &mut sessions { session.project_path = format!("/{}", session.id); }
+        save(&sessions).unwrap();
+        set_tab_layout("/a", layout(&["agent:tab"])).unwrap();
+        set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/a".into(), "/hidden".into(), "/b".into()]), ..Default::default() }).unwrap();
+        set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/b".into(), "/a".into(), "/a".into()]), ..Default::default() }).unwrap();
+        assert_eq!(sidebar_order().unwrap().projects, ["/b", "/hidden", "/a"]);
+        assert_eq!(tab_state().unwrap().workspaces["/a"].order, ["agent:tab"]);
+        assert_eq!(load().unwrap().len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidebar_recognizes_the_canonical_chats_directory() {
+        let _home = crate::store::temp_home();
+        let root = crate::store::root().unwrap();
+        let real = crate::store::ensure_dir(root.join("chat-target")).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("Chats")).unwrap();
+        let mut chat = entry("chat");
+        chat.project_path = real.canonicalize().unwrap().to_string_lossy().into_owned();
+        chat.link = Some(ChatLink { path: "/linked".into(), branch: None });
+        save(&[chat]).unwrap();
+        let order = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(order.projects, ["/linked"]);
+        assert_eq!(sidebar_order().unwrap().projects, ["/linked"]);
+    }
+
+    #[test]
+    fn sidebar_starts_in_display_order_and_reconciles_projects_before_filtered_drops() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("pinned"), entry("newest"), entry("active")];
+        for session in &mut sessions {
+            session.project_path = if session.id == "newest" { "/b" } else { "/z" }.into();
+            session.created = "2026-01-01T00:00:00Z".into();
+        }
+        sessions[0].pinned = true;
+        sessions[1].created = "2026-02-01T00:00:00Z".into();
+        sessions[2].unknown.insert("lastMessageAt".into(), "2026-03-01T00:00:00Z".into());
+        crate::store::write_json(&crate::store::root().unwrap().join("projects.json"), &serde_json::json!({
+            "projects": [{ "path": "/b", "name": "B", "pinned": true }, { "path": "/z", "name": "Z" }]
+        })).unwrap();
+        save(&sessions).unwrap();
+        let first = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(first.sessions, ["pinned", "active", "newest"]);
+        assert_eq!(first.projects, ["/b", "/z"]);
+        update(|sessions| { let mut new = entry("fresh"); new.project_path = "/new".into(); sessions.push(new); Ok(()) }).unwrap();
+        let reordered = set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/z".into(), "/b".into(), "/gone".into()]), ..Default::default() }).unwrap();
+        assert_eq!(reordered.projects, ["/new", "/z", "/b"]);
+        update(|sessions| { sessions.retain(|s| s.id != "fresh"); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().projects, ["/z", "/b"]);
+        set_sidebar_order(SidebarOrderPatch { custom: Some(false), ..Default::default() }).unwrap();
+        let restored = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(restored.sessions, first.sessions);
+        assert_eq!(restored.projects, ["/z", "/b"]);
     }
 
     #[test]
@@ -1569,6 +1873,7 @@ mod tests {
                 path: "/p/.raccoon/worktrees/feature-one".into(),
                 name: "feature-one".into(),
                 branch: Some("raccoon/feature-one".into()),
+                ..Default::default()
             })
         );
         assert!(claimed_worktree_names(&[session]).is_empty());
@@ -1588,6 +1893,7 @@ mod tests {
                 path: "/worktrees/existing-feature".into(),
                 name: "existing-feature".into(),
                 branch: Some("feature/existing".into()),
+                ..Default::default()
             })
         );
     }

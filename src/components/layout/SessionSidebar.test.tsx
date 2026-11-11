@@ -597,6 +597,22 @@ it("keeps removed-workspace provenance separate from a live checkout on the same
   expect(screen.queryByRole("button", { name: /main.*Talk old/ })).toBeNull();
 });
 
+it.each(["simple", "list"] as const)("offers Restore workspace for a removed conversation in the %s sidebar", async (sidebarLayout) => {
+  prefs.setPrefs({ sidebarLayout });
+  await boot([session("restore", "/repos/web", new Date().toISOString(), {
+    worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" },
+  })]);
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk restore" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Restore workspace…" }));
+  const dialogs = await import("@/lib/dialogs");
+  const Probe = () => <div data-testid="restore-request">{dialogs.useDialogs().workspaceRestore}</div>;
+  render(<Probe />);
+  expect(screen.getByTestId("restore-request").textContent).toBe("restore");
+  act(dialogs.closeWorkspaceRestore);
+});
+
 
 /** #696: "Review #590", its workspace gone on Oct 24, sat among the live work for good. */
 it("sets removed workspaces apart under a fold, which opens while it holds the open conversation", async () => {
@@ -843,5 +859,72 @@ describe("row extras and unread reminders (PRO-179)", () => {
     fireEvent.keyDown(menu, { key: "r" });
     await screen.findByRole("menuitem", { name: "Mark as unread" });
     expect(store.getSessionStore().sessions[0].tabs[0]).toMatchObject({ markedUnread: false, status: "waiting" });
+  });
+});
+
+describe("custom order (PRO-169)", () => {
+  it("uses the saved order inside the archive and restores recency when off", async () => {
+    const { archivedConversations, groupConversations } = await import("./SessionSidebar");
+    const entries = [session("recent", "/repos/web", "2026-11-02", { archived: true }), session("older", "/repos/web", "2026-11-01", { archived: true })];
+    const order = { custom: true, sessions: ["older", "recent"], projects: [], revision: 1 };
+    expect(archivedConversations(entries, "updated", order).map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(archivedConversations(entries, "updated", { ...order, custom: false }).map((s) => s.id)).toEqual(["recent", "older"]);
+    expect(groupConversations(entries, projects, chatsPath, {}, null, true, true, "updated", order).groups[0].archived.map((s) => s.id)).toEqual(["older", "recent"]);
+  });
+  it("restores recency when off without losing either saved order, and keeps new sessions first", async () => {
+    const { groupConversations } = await import("./SessionSidebar");
+    const order = { custom: true, sessions: ["older", "recent"], projects: ["/repos/other", "/repos/web"], revision: 1 };
+    const entries = [session("recent", "/repos/web", "2026-11-02"), session("older", "/repos/web", "2026-11-01"), session("other", "/repos/other", "2026-11-01")];
+    const attached = [...projects, { path: "/repos/other", name: "other", kind: "git" as const }];
+    const grouped = (custom: boolean, list = entries) => groupConversations(list, attached, chatsPath, {}, null, true, false, "updated", { ...order, custom });
+    expect(grouped(true).groups.map((g) => g.path)).toEqual(["/repos/other", "/repos/web"]);
+    expect(grouped(true).groups[1].sessions.map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(grouped(false).groups[0].sessions.map((s) => s.id)).toEqual(["recent", "older"]);
+    expect(grouped(true).groups[1].sessions.map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(grouped(true, [...entries, session("new", "/repos/web", "2026-11-03")]).groups[1].sessions.map((s) => s.id)).toEqual(["new", "older", "recent"]);
+  });
+  it("uses one mutually exclusive View sort in both sidebar layouts", async () => {
+    const ordering = await import("@/lib/sidebarOrder");
+    let saved = { custom: false, sessions: ["older", "recent"], projects: [], revision: 10 };
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "set_sidebar_order") {
+        saved = { ...saved, ...(args as { patch: object }).patch, revision: saved.revision + 1 };
+        return saved;
+      }
+      return base(command, args);
+    });
+    await boot([session("recent", "/repos/web", "2026-11-02", { branch: "recent" }), session("older", "/repos/web", "2026-11-01", { branch: "raccoon/quiet-amber-fox" })]);
+    await act(async () => { await ordering.saveSidebarOrder({ custom: false }); });
+    mount();
+    fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
+    fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Sort by: Updated" }), { key: "ArrowRight" });
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Custom order" })).toBeNull();
+    expect((await screen.findByRole("menuitemradio", { name: "Updated" })).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Custom" }));
+    // The handle names the displayed conversation, not its hidden generated branch.
+    await screen.findByRole("button", { name: "Reorder Talk older" });
+    const rowIds = () => [...screen.getByTestId("conversation-list").querySelectorAll("[data-row-sessions]")].map((row) => row.getAttribute("data-row-sessions"));
+    expect(rowIds()).toEqual(["older", "recent"]);
+    act(() => prefs.setPrefs({ sidebarLayout: "list" }));
+    await screen.findByRole("button", { name: "Reorder Talk older" });
+    expect(rowIds()).toEqual(["older", "recent"]);
+    const choose = async (current: string, next: string) => {
+      fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
+      fireEvent.keyDown(await screen.findByRole("menuitem", { name: `Sort by: ${current}` }), { key: "ArrowRight" });
+      const choices = await Promise.all(["Updated", "Created", "Custom"].map((name) => screen.findByRole("menuitemradio", { name })));
+      expect(choices.filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent)).toEqual([current]);
+      fireEvent.click(screen.getByRole("menuitemradio", { name: next }));
+      await waitFor(() => expect(prefs.getPrefs().sidebarSort).toBe(next.toLowerCase()));
+    };
+    await choose("Custom", "Created");
+    expect(rowIds()).toEqual(["recent", "older"]);
+    expect(screen.queryByRole("button", { name: /Reorder/ })).toBeNull();
+    await choose("Created", "Custom");
+    expect(rowIds()).toEqual(["older", "recent"]);
+    await choose("Custom", "Updated");
+    expect(rowIds()).toEqual(["recent", "older"]);
+    expect(screen.queryByRole("button", { name: /Reorder/ })).toBeNull();
+    expect(saved.sessions).toEqual(["older", "recent"]);
   });
 });

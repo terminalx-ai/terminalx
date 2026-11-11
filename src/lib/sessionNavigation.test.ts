@@ -44,3 +44,12 @@ it("cycles waiting sessions in dashboard order, without including unread or arch
   expect(nextAttentionSession(sessions.slice(2), null)).toBeNull();
   expect(nextAttentionSession([], null)).toBeNull();
 });
+
+it("follows custom local order in both directions while retaining recency when off", () => {
+  const sessions = ["a", "b", "c", "new"].map((id) => ({ id, created: "2026-01-01", pinned: id === "a" }));
+  const order = { custom: true, sessions: ["c", "b", "a"], projects: [], revision: 1 };
+  expect(adjacentSession(sessions, "c", 1, order)).toBe("b");
+  expect(adjacentSession(sessions, "b", -1, order)).toBe("c");
+  expect(adjacentSession(sessions, "a", 1, order)).toBe("new");
+  expect(adjacentSession(sessions, "a", 1, { ...order, custom: false })).toBe("b");
+});

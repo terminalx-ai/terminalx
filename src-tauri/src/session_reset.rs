@@ -76,6 +76,7 @@ impl SessionManager {
             anyhow::ensure!(!rt.turn_open && !rt.stopping && !rt.stop_in_flight && rt.restart_claim.is_none()
                 && !rt.stdio_starting && rt.pending.is_empty() && rt.queued.is_empty()
                 && !matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting)
+                && !rt.held_queue.keeps_runtime_busy()
                 && !matches!(&rt.engine, Engine::Cli(c) if c.awaiting_delivery.is_some() || c.resend_after_abort.is_some() || !c.held.is_empty()),
                 "Wait for the agent and queued messages to finish before resetting this chat.");
         }
@@ -174,6 +175,15 @@ impl SessionManager {
             Ok(session.clone())
         })?;
         rt.log_path = next_log;
+        // The new log is a copy cut at an earlier turn (or the pre-reset one
+        // on undo). Its last held_queue snapshot can predate deliveries and
+        // edits; restore after a restart must not bring those items back.
+        if held::Queue::replay(&retained) != rt.held_queue {
+            let queue = rt.held_queue.clone();
+            if let Err(error) = self.save_held(&mut rt, queue) {
+                log::warn!("persist held queue after chat reset: {error:#}");
+            }
+        }
         rt.left_at = None;
         rt.message_times.clear();
         rt.recovery = None;
@@ -268,5 +278,55 @@ mod tests {
         assert!(read(&native_path(&restored, &restored.tabs[0]).unwrap()).unwrap().contains("LATER_RESET_SECRET"));
         restarted.closing();
         restarted.terminals.kill_all();
+    }
+
+    /// The cut log can end on a held_queue snapshot older than the live
+    /// queue. Reset must not let a restart bring a delivered item back, and
+    /// must not race a held delivery that is about to start.
+    #[test]
+    fn reset_keeps_the_live_held_queue_and_waits_for_its_delivery() {
+        let _home = store::temp_home();
+        let program = store::root().unwrap().join("claude");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _program = claude::pty::claude_program_for_tests(program);
+        let cwd = store::root().unwrap().join("checkout");
+        std::fs::create_dir(&cwd).unwrap();
+        let provider = "32610000-0000-4000-8000-000000000002";
+        let entry: index::SessionEntry = serde_json::from_value(json!({"id":"reset-held-s", "projectPath":cwd,"cwd":cwd,"title":"Reset", "created":"now", "modified":"now", "tabs":[{"id":"reset-held-t","harness":"claude","providerSessionId":provider,"created":"now"}]})).unwrap();
+        index::save(std::slice::from_ref(&entry)).unwrap();
+        let native = native_path(&entry, &entry.tabs[0]).unwrap();
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, include_str!("harness/fixtures/claude-reset.jsonl")).unwrap();
+        let log = store::log_path("reset-held-s", "reset-held-t").unwrap();
+        let held = |items: serde_json::Value, paused: bool| json!({"type":"held_queue","queue":{"items":items,"paused":paused}});
+        for (seq, payload) in [
+            (1, json!({"type":"turn_started"})),
+            (2, held(json!([{"id":"h1","text":"HELD_BEFORE_RESET","images":[]}]), true)),
+            (3, json!({"type":"turn_completed","status":"ok"})),
+            (4, held(json!([]), false)),
+            (5, json!({"type":"user_message","text":"LATER","images":[],"queued":false})),
+            (6, json!({"type":"turn_completed","status":"ok"})),
+        ] {
+            store::append_line(&log, &json!({"id":format!("e{seq}"),"sessionId":"reset-held-s","tabId":"reset-held-t","harness":"claude","seq":seq,"ts":"2026-11-07T10:56:21.941Z","payload":payload}).to_string()).unwrap();
+        }
+        let m = manager();
+        let rt = m.runtime("reset-held-s", "reset-held-t").unwrap();
+        assert!(rt.lock().unwrap().held_queue.items.is_empty());
+        rt.lock().unwrap().held_queue = held::Queue { items: vec![held::Item { id: "h2".into(), text: "CLAIMED".into(), images: Vec::new() }], sending: Some("h2".into()), ..Default::default() };
+        let error = m.reset_chat("reset-held-s", "reset-held-t", Some(3), false).unwrap_err();
+        assert!(error.to_string().contains("queued messages"), "{error:#}");
+        assert_eq!(store::log_path("reset-held-s", "reset-held-t").unwrap(), log);
+        rt.lock().unwrap().held_queue = held::Queue::default();
+        m.reset_chat("reset-held-s", "reset-held-t", Some(3), false).unwrap();
+        let new_log = store::log_path("reset-held-s", "reset-held-t").unwrap();
+        assert_ne!(new_log, log);
+        assert!(held::Queue::restore(&new_log).unwrap().items.is_empty());
+        m.stop("reset-held-s", "reset-held-t").unwrap();
+        m.closing();
+        m.terminals.kill_all();
     }
 }

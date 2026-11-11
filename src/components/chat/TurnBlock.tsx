@@ -1,3 +1,4 @@
+import { TurnDetailsPopover } from "./UsagePopovers";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -158,7 +159,7 @@ function TurnBody({
         </div>
       )}
 
-      {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} />}
+      {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
 
       {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} onReset={onReset} />}
     </div>
@@ -218,20 +219,20 @@ function TurnFooter({ turn, outcome, onReset }: { turn: Turn; outcome: Outcome |
     return () => window.clearTimeout(id);
   }, [copied]);
   const quiet = outcome?.tone === "ok";
-  if (!messageTime(ts) && !outcome && !text && !onReset) return null;
+  if (!messageTime(ts) && !outcome && !text && !turn.completed && !onReset) return null;
   return (
     <div className="flex min-h-7 flex-wrap items-center gap-x-1.5 text-xs text-faint" data-testid="turn-footer">
       <MessageTime ts={ts} inline />
       {onReset && turn.completed?.status === "ok" && turn.completed.seq != null && (
         <button type="button" onClick={() => onReset(turn.completed!.seq!)} className="rounded px-1.5 py-1 hover:bg-veil-raised focus-visible:outline">Reset to here</button>
       )}
-      {outcome && (
-        <span className={cn("flex items-center gap-1.5", outcome.tone === "failed" && "text-destructive")}>
+      {turn.completed && !turn.live && <TurnDetailsPopover turn={turn}>
+        {outcome ? <>
           {!quiet && <OutcomeIcon tone={outcome.tone} />}
-          <span>{outcome.word}</span>
+          <span className={cn(outcome.tone === "failed" && "text-destructive")}>{outcome.word}</span>
           {outcome.duration && <span className="-ml-1">{outcome.duration}</span>}
-        </span>
-      )}
+        </> : <span>Details</span>}
+      </TurnDetailsPopover>}
       {text && (
           <button
             type="button"
