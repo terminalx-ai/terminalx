@@ -1,3 +1,4 @@
+import { DiscardButton } from "./DiscardDialog";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { MediaPreview } from "@/components/editor/MediaPane";
@@ -17,7 +18,7 @@ export function diffMediaKind(path: string): "image" | "pdf" | "svg" | null {
 
 /** Owns the revision read so switching files/scopes never leaves stale content or copy actions. */
 type FileDiffProps = {
-  source: GitSource; path: string; oldPath?: string; base: string; head: string | null; revision?: number;
+  source: GitSource; path: string; oldPath?: string; base: string; head: string | null; revision?: number; onDiscard?: () => void;
   /** A centre editor also needs this snapshot for Entire file and disk-change warnings. */
   text?: { before: string; after: string };
 };
@@ -25,7 +26,7 @@ export function FileDiff(props: FileDiffProps) {
   return <FileDiffContent key={JSON.stringify([props.source.key, props.path, props.oldPath, props.base, props.head, props.revision])} {...props} />;
 }
 
-function FileDiffContent({ source, path, oldPath, base, head, text }: FileDiffProps) {
+function FileDiffContent({ source, path, oldPath, base, head, text, onDiscard }: FileDiffProps) {
   const fileKey = diffFileKey(source.key, path);
   const options = useDiffOptions(fileKey);
   const kind = diffMediaKind(path);
@@ -59,6 +60,7 @@ function FileDiffContent({ source, path, oldPath, base, head, text }: FileDiffPr
   return <div className="flex h-full min-h-0 min-w-0 flex-col">
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-xs">
       <span className="min-w-0 flex-1 truncate" title={path}>{path}</span>
+      {onDiscard && <DiscardButton path={path} onClick={onDiscard} />}
       {kind === "svg" && <Button size="xs" variant="secondary" onClick={() => setRaw(!raw)}>{raw ? "Rendered SVG" : "Raw SVG"}</Button>}
       {textView && <label className="flex items-center gap-1">Wrap lines
         <select aria-label="Wrap lines for this file" className="rounded bg-well p-1" value={options.override === undefined ? "default" : String(options.override)} onChange={(e) => setFileWrap(fileKey, e.target.value === "default" ? undefined : e.target.value === "true")}>

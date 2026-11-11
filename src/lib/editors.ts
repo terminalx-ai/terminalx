@@ -55,8 +55,8 @@ export interface DiffEditorEntry extends EditorBase {
     /** A live workspace comparison can be explicitly refreshed. Turn snapshots stay fixed. */
     target?: string | null;
     uncommitted?: boolean;
-    /** Chips from historical turns must not be labelled as the latest turn. */
-    turnLabel?: "Turn" | "Latest turn";
+    /** The fixed snapshot's name in the tab title ("Turn", "Commit 5be01f4"); chips from historical turns must not say "Latest turn". */
+    turnLabel?: string;
     mode: DiffMode;
   };
 }
@@ -94,6 +94,7 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
         if (d.oldPath !== undefined && (typeof d.oldPath !== "string" || !reviewPath(e.root, d.oldPath))) continue;
         if (!reviewPath(e.root, e.rel)) continue;
         if (d.target != null && typeof d.target !== "string") continue;
+        if (d.turnLabel !== undefined && typeof d.turnLabel !== "string") continue;
         editors.push({ ...e, created: typeof e.created === "string" ? e.created : undefined, dirty: false, jump: undefined, viewMode: "source", diff: { ...d, mode: d.mode === "edit" ? "diff" : d.mode } });
       } else if (e.kind === "pr" && e.pr?.scope?.kind === "local" && typeof e.pr.scope.cwd === "string"
         && typeof e.pr.url === "string" && typeof e.pr.head === "string" && Number.isSafeInteger(e.pr.number) && e.pr.number > 0) {

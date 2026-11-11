@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { CleanupStep } from "@terminalx/portable/workspace";
+import type { CleanupCandidate, CleanupStep } from "@terminalx/portable/workspace";
 import { holdQuit } from "@/lib/quitWarning";
 import { forgetWorkspaceSize } from "@/lib/workspaceSizes";
 import { LOCAL_HOST, candidateKey, runCleanup, totals, type CleanupHost, type CleanupOutcome, type CleanupSelection, type CleanupTotals } from "@/lib/worktreeCleanup";
@@ -40,6 +40,7 @@ export interface CleanupRun {
 
 let run: CleanupRun | null = null;
 let abort: AbortController | null = null;
+let retryContext: { hosts: CleanupHost[]; selections: CleanupSelection[] } | null = null;
 const listeners = new Set<() => void>();
 
 function set(next: CleanupRun | null) {
@@ -81,6 +82,7 @@ export function startCleanupRun(hosts: CleanupHost[], selections: CleanupSelecti
     path: candidate.path,
     estimatedBytes: typeof estimatedBytes === "number" ? estimatedBytes : null,
   }));
+  retryContext = { hosts, selections };
   const started: CleanupRun = { status: "running", stopping: false, items, outcomes: [], current: null };
   const controller = new AbortController();
   abort = controller;
@@ -112,6 +114,42 @@ export function startCleanupRun(hosts: CleanupHost[], selections: CleanupSelecti
   return true;
 }
 
+/** A failed cleanup may already have removed some of the reviewed ignored data. */
+function sameArchiveRemoval(before: CleanupCandidate, after: CleanupCandidate): boolean {
+  if (before.token === after.token) return true;
+  const removable = (candidate: CleanupCandidate) => candidate.verdict === "eligible" || candidate.verdict === "ignoredData";
+  const sessions = (candidate: CleanupCandidate) => candidate.sessions.map((session) => session.id).sort().join("\0");
+  // Both verdicts imply a clean Git status. Every other field of the backend
+  // confirmation token must match; added data still requires a fresh review.
+  return removable(before) && removable(after)
+    && before.path === after.path && before.projectPath === after.projectPath
+    && before.head === after.head && before.branch === after.branch && sessions(before) === sessions(after)
+    && after.ignoredData.length < before.ignoredData.length
+    && after.ignoredData.every((name) => before.ignoredData.includes(name));
+}
+
+/** Explicit consent for the failed hooks only; every workspace is scanned again. */
+export async function retryArchiveFailures(): Promise<void> {
+  if (!run || run.status !== "done" || !retryContext) return;
+  const previous = run;
+  const context = retryContext;
+  const failed = run.outcomes.filter((outcome) => outcome.hostId === LOCAL_HOST && outcome.archiveFailure);
+  const selections: CleanupSelection[] = [];
+  for (const host of context.hosts) {
+    const failures = failed.filter((outcome) => outcome.hostId === host.id);
+    if (!failures.length) continue;
+    const projects = await host.scan();
+    for (const failure of failures) {
+      const original = context.selections.find((selection) => selection.hostId === host.id && selection.candidate.path === failure.path);
+      const candidate = projects.flatMap((project) => project.candidates).find((candidate) => candidate.path === failure.path);
+      if (!original || !candidate || !sameArchiveRemoval(original.candidate, candidate)) throw new Error("A failed workspace changed. Scan again and review it before removal.");
+      selections.push({ ...original, candidate, archiveFailure: failure.archiveFailure!.token });
+    }
+  }
+  if (run !== previous) return;
+  startCleanupRun(context.hosts, selections);
+}
+
 /** Leave the worktrees that were not started. The one being removed is finished first, never interrupted. */
 export function stopCleanupRun() {
   if (run?.status !== "running" || run.stopping) return;
@@ -123,12 +161,14 @@ export function stopCleanupRun() {
 export function clearCleanupRun() {
   if (run?.status !== "done") return;
   abort = null;
+  retryContext = null;
   set(null);
 }
 
 /** For tests: forget whatever run there is, and stop hearing from it. */
 export function resetCleanupRun() {
   abort = null;
+  retryContext = null;
   set(null);
 }
 

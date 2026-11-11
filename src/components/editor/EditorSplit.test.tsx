@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useRef } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { api, fs } from "@/lib/api";
+import { api, fs, git } from "@/lib/api";
 import { closeAllEditors, closeEditor, getEditors, openFile, openDiff, setActiveEditor, setLastFocused } from "@/lib/editors";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { liveEditorsFor } from "@/lib/editorViews";
@@ -10,11 +11,15 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { setPrefs } from "@/lib/prefs";
 import { copyText } from "@/lib/clipboard";
 import { EditorSplit } from "./EditorSplit";
+import { useChatFind } from "@/components/chat/ChatFind";
+import { buildTranscript } from "@/lib/transcript";
+import { useShortcut } from "@/lib/hotkeys";
 
 vi.mock("@/lib/api", () => ({
   errorMessage: String,
   fs: { openMedia: vi.fn(), closeMedia: vi.fn().mockResolvedValue(undefined), mtime: vi.fn().mockResolvedValue(1), readText: vi.fn(), writeText: vi.fn().mockResolvedValue(2) },
-  api: { headTree: vi.fn().mockResolvedValue(null), fileContentsAt: vi.fn(), diffMediaContent: vi.fn(), changesBetween: vi.fn().mockResolvedValue([]) },
+  api: { headTree: vi.fn().mockResolvedValue(null), fileContentsAt: vi.fn(), diffMediaContent: vi.fn(), changesBetween: vi.fn().mockResolvedValue([]), reviewRange: vi.fn() },
+  git: { discard: vi.fn().mockResolvedValue(undefined) },
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn().mockResolvedValue(true) }));
@@ -203,6 +208,25 @@ it("shares persisted diff options, file wrapping and exact-text copying with the
   expect(second.container.querySelector(".cm-lineWrapping")).toBeNull();
 });
 
+it("discards a live comparison from the centre diff header and refreshes it, but never a fixed snapshot", async () => {
+  vi.mocked(api.fileContentsAt).mockResolvedValue({ before: "old\n", after: "new\n" });
+  vi.mocked(api.reviewRange).mockResolvedValue({ base: "merge-base", head: "fresh", target: "main" });
+  const id = openDiff("split", "/workspace", "live.ts", { scope: "all", range: { base: "merge-base", head: "snapshot" }, target: "main" });
+  const view = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
+  fireEvent.click(await screen.findByRole("button", { name: "Discard changes to live.ts" }));
+  expect(git.discard).not.toHaveBeenCalled();
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(git.discard).toHaveBeenCalledWith("/workspace", "live.ts", "merge-base", undefined));
+  await waitFor(() => expect(getEditors().editors.find((e) => e.id === id)).toMatchObject({ diff: { range: { base: "merge-base", head: "fresh" } } }));
+  view.unmount();
+  await act(() => closeEditor(id));
+  const fixed = openDiff("split", "/workspace", "fixed.ts", { scope: "turn", range: { base: "before", head: "after" }, turnLabel: "Commit 5be01f4" });
+  expect(getEditors().editors.find((e) => e.id === fixed)?.name).toBe("fixed.ts · Commit 5be01f4");
+  render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
+  await screen.findByRole("radio", { name: "Edit" });
+  expect(screen.queryByRole("button", { name: "Discard changes to fixed.ts" })).toBeNull();
+});
+
 it.each(["png", "pdf", "svg"])("keeps both revisions of a renamed %s visible in a centre diff", async (ext) => {
   vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL: vi.fn(() => "blob:fixture"), revokeObjectURL: vi.fn() }));
   vi.mocked(api.diffMediaContent).mockImplementation(async (_root, path, tree) => ({ data: btoa(`${path}:${tree}`), mime: ext === "pdf" ? "application/pdf" : "image/png" }));
@@ -229,4 +253,48 @@ it.each(["png", "pdf", "svg"])("keeps both revisions of a renamed %s visible in 
     expect(api.fileContentsAt).not.toHaveBeenCalled();
     expect(screen.queryByRole("radio", { name: "Edit" })).toBeNull();
   }
+});
+
+const emptyTranscript = buildTranscript([], false);
+function SearchableChat({ label }: { label: string }) {
+  const root = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
+  const find = useChatFind({ root, scroller, transcript: emptyTranscript, footerHeight: 0 });
+  return <div ref={root} data-find-scope="chat">{find.bar}<div ref={scroller} /><textarea aria-label={label} /></div>;
+}
+
+it("routes Cmd+F to the focused chat, actual file editor, or terminal regardless of registration order", async () => {
+  const terminalFind = vi.fn();
+  function TerminalFind() {
+    const frame = useRef<HTMLDivElement>(null);
+    // PRO-246 (#837) registers this same focused-frame contract on files.find.
+    useShortcut("files.find", () => {
+      if (!frame.current?.contains(document.activeElement)) return false;
+      terminalFind();
+    });
+    return <div ref={frame} className="terminal-host"><textarea aria-label="Terminal" /></div>;
+  }
+  openFile("split", "/workspace", "code.ts");
+  render(<TooltipProvider><SearchableChat label="First chat" /><EditorSplit sessionId="split" active /><SearchableChat label="Second chat" /><TerminalFind /></TooltipProvider>);
+  await waitFor(() => expect(liveEditorsFor("/workspace/code.ts")).toHaveLength(1));
+  const editor = liveEditorsFor("/workspace/code.ts")[0].view;
+  const first = screen.getByRole("textbox", { name: "First chat" });
+  first.focus();
+  fireEvent.keyDown(first, { key: "f", ctrlKey: true });
+  expect(screen.getByRole("search", { name: "Find in chat" }).parentElement).toBe(first.parentElement);
+  expect(document.querySelector(".cm-find")).toBeNull();
+  act(() => editor.focus());
+  fireEvent.keyDown(editor.contentDOM, { key: "f", ctrlKey: true });
+  expect(await screen.findByRole("textbox", { name: "Find" })).toBeTruthy();
+  expect(screen.getAllByRole("search", { name: "Find in chat" })).toHaveLength(1);
+  const terminal = screen.getByRole("textbox", { name: "Terminal" });
+  terminal.focus();
+  fireEvent.keyDown(terminal, { key: "f", ctrlKey: true });
+  expect(terminalFind).toHaveBeenCalledOnce();
+  expect(document.activeElement).toBe(terminal);
+  const second = screen.getByRole("textbox", { name: "Second chat" });
+  second.focus();
+  fireEvent.keyDown(second, { key: "f", ctrlKey: true });
+  expect(screen.getAllByRole("search", { name: "Find in chat" })).toHaveLength(2);
+  expect(document.activeElement?.parentElement?.closest('[data-find-scope="chat"]')).toBe(second.parentElement);
 });

@@ -3,6 +3,7 @@ import { RefreshCw } from "@/icons";
 import { DiffPane } from "@/components/changes/DiffPane";
 import { DiffOptions } from "@/components/changes/DiffOptions";
 import { diffMediaKind, FileDiff } from "@/components/changes/FileDiff";
+import { DiscardDialog } from "@/components/changes/DiscardDialog";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
@@ -26,6 +27,7 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [changed, setChanged] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
   const [entire, setEntire] = useState(mode === "entire");
   const [editing, setEditing] = useState(mode === "edit");
   const [previewed, setPreviewed] = useState(mode === "preview");
@@ -93,6 +95,8 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
     } catch (e) { setError(source.errorMessage(e)); }
     finally { setRefreshing(false); }
   };
+  // Like the Changes panel: only a live comparison can be discarded, never a turn or commit snapshot.
+  const canDiscard = scope === "all" && !!range && !!source.discard && source.canWrite;
   const binary = pair?.before.includes("\0") || pair?.after.includes("\0");
   const canEdit = !media && !binary && !!pair && !pair.deleted;
   const modes: { value: DiffMode; label: string }[] = [{ value: "diff", label: "Diff" }, { value: "entire", label: "Entire file" }];
@@ -106,12 +110,14 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
       {scope === "all" && <Button variant="ghost" size="icon-xs" aria-label="Refresh diff" disabled={refreshing} onClick={() => void refresh()}><RefreshCw className={cn(refreshing && "animate-spin")} /></Button>}
     </div>
     {mode === "diff" && <DiffOptions />}
+    {canDiscard && <DiscardDialog source={source} file={discarding ? { path: entry.rel, oldPath } : null} base={uncommitted ? undefined : range?.base}
+      onClose={() => setDiscarding(false)} onDiscarded={() => void refresh()} />}
     {changed && <div role="status" className="shrink-0 bg-warning/10 px-3 py-2 text-xs">This file changed on disk or differs from this snapshot. Edit and media preview use the current file.</div>}
     {error && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}</div>}
     <div className="relative min-h-0 flex-1">
       {(["diff", ...(entire ? ["entire" as const] : [])] as const).map((surface) => <div key={surface} className={cn("absolute inset-0", mode !== surface && "hidden")}>
         {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Open All changes in the Changes panel to review the workspace.</p>
-          : surface === "diff" && !binary && (pair || (media && diffMediaKind(entry.rel))) ? <FileDiff source={source} path={entry.rel} oldPath={oldPath} base={range.base} head={range.head} text={pair ?? undefined} />
+          : surface === "diff" && !binary && (pair || (media && diffMediaKind(entry.rel))) ? <FileDiff source={source} path={entry.rel} oldPath={oldPath} base={range.base} head={range.head} text={pair ?? undefined} onDiscard={canDiscard ? () => setDiscarding(true) : undefined} />
           : media || binary ? <p className="p-4 text-sm text-muted-foreground">Binary file changed.{kind !== "text" && " Choose Preview to view the current file."}</p>
           : pair ? <DiffPane path={entry.rel} before={pair.before} after={pair.after} mode="entire" wrap={options.wrap} />
           : !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading file diff…</p>}
