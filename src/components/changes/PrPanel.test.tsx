@@ -416,6 +416,8 @@ it("opens a PR from its header and refreshes the same identity after the checkou
   let checks = "pending";
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "work_status") return { isRepo: true, dirty: false, branch: "new-branch", defaultBranch: "main", ahead: 0, behind: 0, aheadOfBase: 1 };
     if (command === "pr_list" || command === "pr_details") {
       const pr = { ...mergedPr, title, state: "OPEN", checks: [{ name: "CI", state: checks }] };
@@ -446,8 +448,13 @@ it("renders a centre PR description with the same restrictions as review threads
   const pr = { ...followup, body: '[website](https://example.test/docs) [local](/Applications/Terminal.app)\n\n![pixel](https://untrusted.example/pixel.png)' };
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
     if (command === "work_status") return workStatus(pr.head);
     if (command === "pr_details") return pr;
+    // The description is drawn by the PR conversation, from its own read.
+    if (command === "pr_conversation") return { url: pr.url, title: pr.title, body: pr.body, author: "author", viewer: "reviewer", state: "OPEN", canEdit: false, reviewers: [], unresolvedThreads: 0, activity: [] };
+    if (command === "pr_review_threads") return { url: pr.url, headOid: "head", baseOid: "base", threads: [] };
     throw Error(command);
   });
   const { container } = render(<PrPanel cwd={cwd} selectedPr={association(pr)} branch={pr.head} active busy={false} />);
