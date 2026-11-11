@@ -444,6 +444,28 @@ it("opens a PR from its header and refreshes the same identity after the checkou
   dropEditors((e) => e.id === entry.id);
 });
 
+it("renders a centre PR description with the same restrictions as review threads", async () => {
+  const pr = { ...followup, body: '[website](https://example.test/docs) [local](/Applications/Terminal.app)\n\n![pixel](https://untrusted.example/pixel.png)' };
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "gh_available") return true;
+    if (command === "gh_connection_status") return { state: "connected", details: null };
+    if (command === "git_has_remote") return true;
+    if (command === "work_status") return workStatus(pr.head);
+    if (command === "pr_details") return pr;
+    // The description is drawn by the PR conversation, from its own read.
+    if (command === "pr_conversation") return { url: pr.url, title: pr.title, body: pr.body, author: "author", viewer: "reviewer", state: "OPEN", canEdit: false, reviewers: [], unresolvedThreads: 0, activity: [] };
+    if (command === "pr_review_threads") return { url: pr.url, headOid: "head", baseOid: "base", threads: [] };
+    throw Error(command);
+  });
+  const { container } = render(<PrPanel cwd={cwd} selectedPr={association(pr)} branch={pr.head} active busy={false} />);
+  await screen.findByRole("link", { name: "website" });
+  expect(screen.queryByRole("link", { name: "local" })).toBeNull();
+  fireEvent.click(screen.getByText("local"));
+  expect(container.querySelector("img")).toBeNull();
+  expect(screen.getByText("pixel (image blocked)")).toBeTruthy();
+  expect(mocks.invoke.mock.calls.map(([command]) => command)).not.toContain("inspect_local_path");
+});
+
 it.each(["panel", "inline", "centre"])("loads review threads for the selected PR URL (%s)", async (surface) => {
   const { reviewSnapshot } = await import("@/test/reviewThreads");
   const pr = { ...followup, url: reviewSnapshot.url, number: 1 };

@@ -6,9 +6,9 @@ import { groupSessionsByStatus } from "@/lib/sidebarView";
 import { cn } from "@/lib/cn";
 import { useFold } from "./useFold";
 
-export function StatusGroups<T extends { manualStatus?: ManualStatus }>({ sessions, children, scope = "local" }: { sessions: T[]; children: (session: T) => ReactNode; scope?: string }) {
+export function StatusGroups<T extends { manualStatus?: ManualStatus }>({ sessions, children, scope = "local", renderGroup }: { sessions: T[]; children: (session: T) => ReactNode; scope?: string; renderGroup?: (sessions: T[], children: ReactNode) => ReactNode }) {
   return <>{groupSessionsByStatus(sessions).map((group) => <StatusGroup key={group.status} status={group.status} count={group.sessions.length} scope={scope}>
-    {group.sessions.map(children)}
+    {renderGroup ? renderGroup(group.sessions, group.sessions.map(children)) : group.sessions.map(children)}
   </StatusGroup>)}</>;
 }
 

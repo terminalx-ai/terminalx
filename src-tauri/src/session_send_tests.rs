@@ -156,8 +156,9 @@ fn hold() -> (Hold, impl Fn() + Send + 'static) {
 fn a_prompt_is_answered_while_a_merged_sweep_waits_on_github() {
     let rig = Rig::new();
     let (held, at) = hold();
+    let project = rig.project.clone();
     *crate::local_runtime::workspaces::PULL_REQUESTS.lock().unwrap() = Some(Box::new(move |_, branches| {
-        assert_eq!(branches, [git::worktree_branch("feature")]);
+        assert_eq!(branches, [git::worktree_branch_for(&project, "feature").unwrap()]);
         at();
         Ok(HashMap::new())
     }));

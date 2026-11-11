@@ -25,6 +25,7 @@ import type {
   SessionEntry,
   Workspace,
   WorkspaceDisposition,
+  WorkspaceRestorePreview,
   TabEntry,
   TabStatus,
   UnfinishedMerge,
@@ -211,6 +212,7 @@ export interface NewSession {
   worktreeName?: string | null;
   /** An existing branch to check out in the new worktree, instead of a new branch. */
   checkoutBranch?: string | null;
+  checkoutPr?: number | null;
   /** Explicit acknowledgement that a requested worktree should be skipped. */
   onMain?: boolean;
   issue?: IssueRef | null;
@@ -266,6 +268,8 @@ export interface ShellPane {
   title: string | null;
   /** The reader named it; `title` is otherwise the name it was opened with. */
   renamed?: boolean;
+  /** Explicit placement; absent for terminals opened by older runtimes. */
+  docked?: boolean | null;
   cwd: string;
   exited: boolean;
   /** When it was opened, so every window lists it in the same place. */
@@ -283,6 +287,12 @@ export interface PaneAgent {
  * session a tab belongs to. A tab is named `agent:<tab id>`,
  * `terminal:<pane id>` or `browser:<page id>` (`tabKey` in `@/lib/tabLayouts`).
  */
+export interface TabPane {
+  id: "left" | "right";
+  tabs: string[];
+  active: string | null;
+}
+
 export interface TabLayout {
   /** The tabs in the order the reader put them in; a tab not listed comes after these, oldest first. */
   order: string[];
@@ -292,6 +302,10 @@ export interface TabLayout {
   muted: string[];
   /** The reader's own title for a tab. */
   titles: Record<string, string>;
+  /** Optional for layouts saved before split panes. Preserved by the backend's extension fields. */
+  panes?: TabPane[];
+  focusedPane?: TabPane["id"];
+  splitRatio?: number;
 }
 
 /** An agent tab the reader closed, kept with its conversation so it can be reopened. */
@@ -581,6 +595,10 @@ export const api = {
   /** Remove a workspace through the one checked path. */
   removeWorkspace: (projectPath: string, path: string, options: WorkspaceRemoveOptions) =>
     invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
+
+  previewWorkspaceRestore: (sessionId: string) => invoke<WorkspaceRestorePreview>("preview_workspace_restore", { sessionId }),
+  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) =>
+    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -2027,6 +2045,8 @@ export const agent = {
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
   /** Send a message the CLI holds behind its running turn now: the turn is interrupted and the message typed again. */
   sendQueuedNow: (sessionId: string, tabId: string, seq: number) => invoke<void>("send_queued_now", { sessionId, tabId, seq }),
+  changeHeldQueue: (sessionId: string, tabId: string, change: import("@/lib/heldQueue").HeldQueueChange) =>
+    invoke<SendOutcome>("change_held_queue", { sessionId, tabId, change }),
   listQueued: (sessionId: string, tabId: string) => invoke<QueuedMessage[]>("list_queued", { sessionId, tabId }),
   respondPermission: (sessionId: string, tabId: string, requestId: string, optionId: string) =>
     invoke<void>("respond_permission", { sessionId, tabId, requestId, optionId }),
@@ -2037,6 +2057,7 @@ export const agent = {
     invoke<void>("set_tab_permission_mode", { sessionId, tabId, mode }),
   setEffort: (sessionId: string, tabId: string, effort: string | null) =>
     invoke<void>("set_tab_effort", { sessionId, tabId, effort }),
+  setUnread: (sessionId: string, tabId: string, unread: boolean) => invoke<void>("set_tab_unread", { sessionId, tabId, unread }),
   markRead: (sessionId: string, tabId: string) => invoke<void>("mark_tab_read", { sessionId, tabId }),
   listModels: (refresh?: boolean) => invoke<ModelInfo[]>("list_models", { refresh: refresh ?? false }),
 };
@@ -2175,6 +2196,8 @@ export interface GitHubConnectionStatus {
 }
 
 export const gh = {
+  search: (cwd: string, query: string) => invoke<PullRequest[]>("pr_search", { cwd, query }),
+  attach: (cwd: string, number: number) => invoke<string>("pr_attach", { cwd, number }),
   connectionStatus: (cwd?: string) => invoke<GitHubConnectionStatus>("gh_connection_status", { cwd: cwd ?? null }),
   loginStart: (id: string, hostname: string) => invoke<void>("gh_login_start", { id, hostname }),
   createRepository: (cwd: string, name: string, privateRepo: boolean) => invoke<void>("gh_create_repository", { cwd, name, private: privateRepo }),
@@ -2334,6 +2357,9 @@ export const pty = {
   /** The agents in front of terminals right now (#437), for a window that loads after they were started. */
   agents: () => invoke<PaneAgent[]>("pane_agents"),
   rename: (id: string, title: string) => invoke<void>("pty_rename", { id, title }),
+  /** Sessions with a TCP listener working in their checkout, including detached servers. */
+  listeningSessions: (sessions: Pick<SessionEntry, "id" | "cwd">[]) => invoke<string[]>("listening_sessions", { sessions }),
+  setDocked: (id: string, docked: boolean) => invoke<ShellPane>("pty_set_docked", { id, docked }),
   /** Which of these shell tabs are running a command now. */
   busy: (ids: string[]) => invoke<string[]>("pty_busy", { ids }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),

@@ -42,7 +42,7 @@ const { bootBrowser, refreshBrowserPages } = await import("@/lib/browser");
 const { dropSessionTerminals, openTerminal, setSelectedAgent, getTerminalState } = await import("@/lib/terminal");
 const { getTabState, layoutOf, resetTabLayouts } = await import("@/lib/tabLayouts");
 const { useTabRow } = await import("@/lib/sessionTabs");
-const { useDialogs } = await import("@/lib/dialogs");
+const { useDialogs, closeAgentHandoff } = await import("@/lib/dialogs");
 const { TabMenuItems } = await import("./TabMenu");
 const { agent } = await import("@/lib/api");
 const { peekInstance, disposeInstance } = await import("@/lib/terminal");
@@ -62,7 +62,7 @@ function Menu({ tab, readOnlyReason }: { tab: string; readOnlyReason?: string })
   return (
     <>
       {target ? <TabMenuItems row={row} tab={target} selected={selected} readOnlyReason={readOnlyReason} /> : null}
-      <output data-testid="asked">{JSON.stringify({ rename: dialogs.renameTab, close: dialogs.closeTabs })}</output>
+      <output data-testid="asked">{JSON.stringify({ rename: dialogs.renameTab, close: dialogs.closeTabs, handoff: dialogs.agentHandoff })}</output>
       <output data-testid="row">{row.tabs.map((item) => item.key).join(",")}</output>
     </>
   );
@@ -82,6 +82,7 @@ const layout = () => layoutOf(getTabState(), FEATURE);
 let shell = "";
 
 beforeEach(async () => {
+  closeAgentHandoff();
   backend.reset();
   await bootSessions();
   await refreshSessions();
@@ -106,6 +107,26 @@ afterEach(() => {
 });
 
 describe("a tab's right-click menu", () => {
+  it.each([["a1", "codex", "Codex"], ["a2", "claude", "Claude Code"], ["b1", "claude", "Claude Code"]])("hands off the clicked tab %s in its own workspace", async (id, harness, name) => {
+    render(<Menu tab={`agent:${id}`} />);
+    await choose(`Hand off to ${name}`);
+    const request = asked().handoff;
+    expect(request).toMatchObject({ harness, source: { id }, session: { id: id === "b1" ? "b" : "a", cwd: FEATURE } });
+    expect(backend.callsOf("add_tab")).toEqual([]);
+    expect(getTerminalState().selected.a).toEqual({ kind: "agent", id: "a1" });
+    await choose(`Hand off to ${name}`);
+    expect(asked().handoff).toEqual(request);
+  });
+  it("hides handoff when the counterpart is not installed", () => {
+    const store = getSessionStore();
+    const codex = store.harnesses.find((harness) => harness.id === "codex")!;
+    const available = codex.available;
+    codex.available = false;
+    try {
+      render(<Menu tab="agent:a1" />);
+      expect(offered("Hand off to Codex")).toBe(false);
+    } finally { codex.available = available; }
+  });
   it.each([
     { name: "PTY Codex", harness: "codex", transport: "pty" },
     { name: "native Codex", harness: "codex", transport: "experimentalCodexStdio" },
@@ -153,6 +174,7 @@ describe("a tab's right-click menu", () => {
       "Switch to terminal view",
       "Duplicate tab",
       "Fork conversation",
+      "Hand off to Codex",
       "Open in floating window",
       "Restart agent",
       "Copy",
@@ -168,6 +190,7 @@ describe("a tab's right-click menu", () => {
       "Share…",
       "Link to issue…",
       "Delete…",
+      "Split right",
       "Move tab",
       "Move tab left",
       "Move tab right",
@@ -353,7 +376,7 @@ describe("a tab's right-click menu", () => {
     const reason = "View only: this session is shared with you to watch.";
     render(<Menu tab="agent:a2" readOnlyReason={reason} />);
     expect(screen.getByRole("note").textContent).toBe(reason);
-    const off = ["Rename…", "Duplicate tab", "Fork conversation", "Restart agent", "Pin tab", "Mute notifications for this tab", "Archive", "Delete…", "Move tab right", "Close tab", "Close other tabs…", "Close all tabs…", "New agent tab", "New terminal", "New browser tab"];
+    const off = ["Rename…", "Duplicate tab", "Fork conversation", "Hand off to Claude Code", "Restart agent", "Pin tab", "Mute notifications for this tab", "Archive", "Delete…", "Move tab right", "Close tab", "Close other tabs…", "Close all tabs…", "New agent tab", "New terminal", "New browser tab"];
     for (const name of off) expect(item(name).getAttribute("aria-disabled")).toBe("true");
     // Looking is still allowed.
     for (const name of ["Tab title", "Working directory", "Reveal working directory in the file manager", "Skills for this agent…"]) expect(item(name).getAttribute("aria-disabled")).toBeNull();

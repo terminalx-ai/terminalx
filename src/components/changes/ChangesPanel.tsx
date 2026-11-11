@@ -1,3 +1,4 @@
+import { ReviewCommentsProvider, useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
 import { useEffect, useId, useMemo, useState } from "react";
 import { openDiff } from "@/lib/editors";
@@ -22,6 +23,7 @@ import { RepoPanel } from "./RepoPanel";
  * Uncommitted is where a commit is made, and History opens past commits.
  */
 export function ChangesPanel(props: {
+  reviewTabId?: string | null;
   cwd?: string;
   sessionId?: string;
   source?: GitSource;
@@ -34,7 +36,8 @@ export function ChangesPanel(props: {
 }) {
   const source = useMemo(() => props.source ?? localGitSource(props.cwd ?? ""), [props.source, props.cwd]);
   const root = !source.cloud ? props.cwd ?? (source.key.startsWith("local:") ? source.key.slice(6) : undefined) : undefined;
-  return <ScopedChanges key={source.key} {...props} source={source} editor={root ? { root, sessionId: props.sessionId ?? `checkout:${root}` } : undefined} />;
+  const panel = <ScopedChanges key={source.key} {...props} source={source} editor={root ? { root, sessionId: props.sessionId ?? `checkout:${root}` } : undefined} />;
+  return props.reviewTabId ? <ReviewCommentsProvider key={source.key} source={source} active={props.active} tabId={props.reviewTabId}>{panel}</ReviewCommentsProvider> : panel;
 }
 
 function ScopedChanges({ source, events, version, active, live, workingTree, editor }: {
@@ -46,6 +49,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   live: boolean;
   workingTree?: boolean;
 }) {
+  const review = useReviewComments();
   const targetId = useId();
   const { hideWhitespace } = useDiffOptions();
   const [choice, setChoice] = useState(() => readChangesChoice(source.key));
@@ -154,6 +158,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   const onOpenDiff = editor ? (file: ChangedFile, range: ChangeRange) => openDiff(editor.sessionId, editor.root, file.path, fixed
     ? { scope: "turn", range, oldPath: file.oldPath, turnLabel: choice.scope === "commit" && choice.commit ? `Commit ${choice.commit.slice(0, 7)}` : choice.scope === "checkpoint" ? "Turn" : undefined }
     : { scope: "all", range, oldPath: file.oldPath, target: choice.target, uncommitted: choice.scope === "uncommitted" }) : undefined;
+  useEffect(() => { if (result) review?.refresh(); }, [result, review?.refresh]);
   const label = choice.scope === "all" ? "All changes" : choice.scope === "uncommitted" ? "Uncommitted changes" : choice.scope === "commit" ? "Commit changes" : choice.scope === "checkpoint" ? "Turn changes" : live ? "This turn" : "Last turn";
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -255,7 +260,7 @@ function ChangesBody({
       <DiscardDialog source={source} file={discarding} base={range.base} onClose={() => setDiscarding(null)} onDiscarded={() => { setSelected(null); onChanged(); }} />
       {error && <div className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
       <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[40%] border-b border-hairline" : "flex-1")}>
-        <ReviewFileList workspace={source.key} files={files} groups={groups} selected={selected} onSelect={select} empty={empty} trailing={discardAction} />
+        <ReviewFileList workspace={source.key} base={range.base} files={files} groups={groups} selected={selected} onSelect={select} empty={empty} trailing={discardAction} />
       </div>
       {current && <div className="min-h-0 flex-1">
         <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={range.base} head={range.head} onDiscard={discardAction ? () => setDiscarding(current) : undefined} />

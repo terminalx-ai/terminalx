@@ -75,7 +75,8 @@ function FileDiffContent({ source, path, oldPath, base, head, text, onDiscard }:
     {copyStatus && <p role="status" className="px-3 py-1 text-xs">{copyStatus}</p>}
     {error ? <div role="alert" className="p-3 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={() => setRetry((n) => n + 1)}>Retry</Button></div>
       : !pair ? <div role="status" className="p-3 text-xs">Loading file diff…</div>
-      : pair.kind === "text" && textView ? <div className="min-h-0 flex-1"><DiffPane path={path} before={pair.before} after={pair.after} mode={options.mode} wrap={options.wrap} hideWhitespace={options.hideWhitespace} /></div>
+      : pair.kind === "text" && (pair.before.includes("\0") || pair.after.includes("\0")) ? <p className="p-3 text-xs text-muted-foreground">Binary file changed.</p>
+      : pair.kind === "text" && textView ? <div className="min-h-0 flex-1"><DiffPane path={path} before={pair.before} after={pair.after} base={base} originalPath={oldPath} mode={options.mode} wrap={options.wrap} hideWhitespace={options.hideWhitespace} /></div>
       : <div className="grid min-h-0 flex-1 grid-cols-2 divide-x divide-hairline">
         {(["before", "after"] as const).map((side) => <section key={side} aria-label={side === "before" ? "Before" : "After"} className="flex min-h-0 min-w-0 flex-col">
           <h4 className="shrink-0 border-b border-hairline px-2 py-1 text-xs text-muted-foreground">{side === "before" ? "Before" : "After"}</h4>

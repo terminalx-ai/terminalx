@@ -38,7 +38,7 @@ vi.mock("@/lib/terminal", async (original) => ({
   // and the switch's refusal/retry path are covered in createInstance.test.ts.
   ensureTerminalAttached: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn() }));
+vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn(), subscribePrefs: () => () => {} }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set<string>() }));
 vi.mock("@/lib/models", async (original) => ({
@@ -374,7 +374,7 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(within(header).getByRole("button", { name: "Workspace details" })).toBeTruthy();
     expect(within(header).queryByRole("tablist")).toBeNull();
     // The row of tabs is right under the title bar, and the + ends it.
-    const row = header.nextElementSibling as HTMLElement;
+    const row = screen.getByTestId("workspace-tab-strip");
     expect(row.getAttribute("data-testid")).toBe("workspace-tab-strip");
     const strip = within(row).getByRole("tablist", { name: "Workspace tabs" });
     expect(within(strip).getAllByRole("tab").map((item) => item.getAttribute("aria-label"))).toEqual(["Investigate", "Write the fix"]);

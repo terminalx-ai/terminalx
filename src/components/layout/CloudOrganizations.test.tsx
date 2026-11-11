@@ -63,7 +63,7 @@ const session = (id: string, title: string, status: string, fields: Record<strin
 });
 
 beforeEach(async () => {
-  prefs.setPrefs({ sidebarLayout: "simple", sidebarProject: null, sidebarFilters: {}, sidebarSections: {}, hiddenOrganizations: [], organizationDisplay: "all", selectedOrganization: null, cloudPinned: {}, cloudProjects: {}, cloudBlankProjects: {} });
+  prefs.setPrefs({ sidebarLayout: "simple", sidebarSort: "updated", sidebarProject: null, sidebarFilters: {}, sidebarSections: {}, hiddenOrganizations: [], organizationDisplay: "all", selectedOrganization: null, cloudPinned: {}, cloudProjects: {}, cloudBlankProjects: {} });
   mocks.status = {
     state: "signed-in",
     identity: { name: "A", email: "a@example.com", organization: "Acme", organizationId: ORG },
@@ -111,6 +111,26 @@ const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpe
 const orgSection = (orgId: string) => screen.getAllByTestId("cloud-org-list").find((section) => section.getAttribute("data-org") === orgId)!;
 
 describe("cloud organizations in the sidebar", () => {
+  it("keeps cloud status groups and actions isolated from local custom ordering", async () => {
+    prefs.setPrefs({ sidebarLayout: "status", sidebarSort: "custom" });
+    catalog.cacheCloudSessions(ORG, "ws-1", [session("s1", "Fix login redirect", "idle", { manualStatus: "in_review" })] as never, ["session/2"]);
+    mount();
+    const org = orgSection(ORG);
+    expect(within(org).getByRole("button", { name: "In review 1" })).toBeTruthy();
+    expect(within(org).queryByRole("button", { name: /Reorder/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Reorder Talk here" })).toBeTruthy();
+    const cloud = within(org).getByRole("button", { name: /^Fix login redirect/, description: "Status: In review" });
+    cloud.focus();
+    fireEvent.keyDown(cloud, { key: " ", code: "Space" });
+    fireEvent.keyDown(document, { key: "ArrowDown", code: "ArrowDown" });
+    fireEvent.keyDown(document, { key: " ", code: "Space" });
+    fireEvent.click(within(org).getByRole("button", { name: "In review 1" }));
+    expect(within(org).queryByRole("button", { name: /^Fix login redirect/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Reorder Talk here" })).toBeTruthy();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "set_sidebar_order" || command === "set_session_status")).toBe(false);
+    expect(mocks.resume).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])("retains a selected session outside the project filter without including its workspace peers (archived: %s)", async (archived) => {
     await act(async () => {
       catalog.cacheCloudSessions(ORG, "ws-1", [session("s1", "Fix login redirect", "idle", { archived })] as never, ["session/2"]);

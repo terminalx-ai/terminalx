@@ -34,10 +34,10 @@ export const launch = () => webkit.launch();
  * script run after the stub (to add answers or saved prefs), and
  * `colorScheme` the system appearance the page sees.
  */
-export async function open(browser, url, fixture, viewport, { extra = "", colorScheme, locale } = {}) {
+export async function open(browser, url, fixture, viewport, { extra = "", colorScheme, locale, navigationTimeout } = {}) {
   const page = await browser.newPage({ viewport, ...(colorScheme ? { colorScheme } : {}), ...(locale ? { locale } : {}) });
   await page.addInitScript(`window.__PW_FIXTURE__ = ${JSON.stringify(fixture)};\n${stub}\n${extra}`);
-  await page.goto(url);
+  await page.goto(url, { timeout: navigationTimeout });
   return page;
 }
 

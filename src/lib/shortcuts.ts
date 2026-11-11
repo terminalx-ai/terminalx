@@ -48,7 +48,7 @@ interface ActionDef {
 const ACTIONS = [
   { id: "app.about", label: "About TerminalX", group: "App", keys: [], menu: { section: "app", order: 0, label: "About TerminalX" } },
   { id: "app.checkUpdates", label: "Check for updates", group: "App", keys: [], menu: { section: "app", order: 2, label: "Check for Updates…" } },
-  { id: "app.newWindow", label: "New chat window", group: "App", keys: ["mod+shift+n"], menu: { section: "file", order: 1, label: "New Window" } },
+  { id: "app.newWindow", label: "New chat window", group: "App", keys: [], menu: { section: "file", order: 1, label: "New Window" } },
   { id: "app.addProject", label: "Add project", group: "App", keys: ["mod+o"], menu: { section: "file", order: 2, label: "Add Project…" } },
   { id: "app.openRecent", label: "Open recent", group: "App", keys: [], menu: { section: "file", order: 3, label: "Open Recent" } },
   { id: "app.closeWindow", label: "Close window", group: "App", keys: ["mod+shift+w"], menu: { section: "file", order: 5, label: "Close Window", target: "focused" } },
@@ -57,6 +57,7 @@ const ACTIONS = [
   { id: "app.zoomReset", label: "Actual size", group: "App", keys: ["mod+0"], menu: { section: "view", order: 6, label: "Actual Size", target: "focused" } },
   { id: "app.fullscreen", label: "Toggle full screen", group: "App", keys: ["f11"], macKeys: ["mod+ctrl+f"], menu: { section: "view", order: 7, label: "Toggle Full Screen", separator: true, target: "focused" } },
   { id: "app.nextSession", label: "Next session", group: "App", keys: ["mod+alt+down"], menu: { section: "go", order: 3, label: "Next Session", separator: true } },
+  { id: "app.nextAttention", label: "Go to next session needing attention", group: "App", keys: ["mod+alt+l"], menu: { section: "go", order: 5, label: "Next Session Needing Attention" } },
   { id: "app.previousSession", label: "Previous session", group: "App", keys: ["mod+alt+up"], menu: { section: "go", order: 4, label: "Previous Session" } },
   { id: "app.docs", label: "Documentation", group: "App", keys: [], menu: { section: "help", order: 0, label: "Documentation" } },
   { id: "app.shortcuts", label: "Keyboard shortcuts", group: "App", keys: [], menu: { section: "help", order: 1, label: "Keyboard Shortcuts" } },
@@ -65,6 +66,7 @@ const ACTIONS = [
   { id: "app.commandPalette", label: "Command palette", group: "App", keys: ["mod+k"] },
   { id: "app.home", label: "Home", group: "App", keys: [] },
   { id: "app.newSession", label: "New session", group: "App", keys: ["mod+n"], menu: { section: "file", order: 0, label: "New Chat", target: "focused" } },
+  { id: "app.startFrom", label: "Start session from…", group: "App", keys: ["mod+shift+n"], menu: { section: "file", order: 1.5, label: "Start From…" } },
   { id: "app.issues", label: "Issues", group: "App", keys: ["mod+i"], menu: { section: "go", order: 1, label: "Issues" } },
   { id: "app.agentDashboard", label: "Agent dashboard", group: "App", keys: ["mod+shift+a"], menu: { section: "go", order: 0, label: "Dashboard" } },
   { id: "app.stats", label: "Stats & Usage", group: "App", keys: ["mod+shift+u"] },
@@ -75,6 +77,7 @@ const ACTIONS = [
   { id: "app.togglePanel", label: "Toggle right panel", group: "App", keys: ["mod+e"], menu: { section: "view", order: 1, label: "Toggle Right Panel" } },
   // No keys inside the window by default: the floating window has a system-wide shortcut of its own (Settings → Shortcuts).
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
+  { id: "session.archive", label: "Archive session", group: "Session", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
   { id: "session.fixErrors", label: "Fix failing CI checks", group: "Session", keys: ["mod+shift+x"] },
   { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"], menu: { section: "file", order: 4, label: "Close Tab", target: "focused", separator: true } },
@@ -90,6 +93,8 @@ const ACTIONS = [
   { id: "session.tab7", label: "Switch to tab 7", group: "Session", keys: ["mod+7"] },
   { id: "session.tab8", label: "Switch to tab 8", group: "Session", keys: ["mod+8"] },
   { id: "session.lastTab", label: "Switch to last tab", group: "Session", keys: ["mod+9"] },
+  { id: "session.focusOtherPane", label: "Focus other pane", group: "Session", keys: ["mod+alt+o"] },
+  { id: "session.moveTabToOtherPane", label: "Move tab to other pane", group: "Session", keys: ["mod+alt+shift+o"] },
   { id: "session.moveTabLeft", label: "Move tab left", group: "Session", keys: ["mod+alt+shift+["] },
   { id: "session.moveTabRight", label: "Move tab right", group: "Session", keys: ["mod+alt+shift+]"] },
   // The browser's own keys for this (mod+shift+t) switch the tab to its terminal view here; Ctrl+Alt+T opens a terminal on most Linux desktops.
@@ -119,6 +124,7 @@ const ACTIONS = [
   // Right Option is AltGr on many Windows and Linux layouts, so holding it to dictate is a macOS default only.
   { id: "composer.dictate", label: "Start or stop dictation", group: "Composer", keys: ["mod+shift+d"], macKeys: ["hold:AltRight", "mod+shift+d"], hold: true },
   { id: "composer.send", label: "Send", group: "Composer", keys: ["enter"], scope: "context" },
+  { id: "composer.sendAlternate", label: "Send the other way (hold or interrupt)", group: "Composer", keys: ["mod+enter"], scope: "context" },
   { id: "composer.newLine", label: "New line", group: "Composer", keys: ["shift+enter"], scope: "context" },
   { id: "composer.historyPrevious", label: "Recall the previous message", group: "Composer", keys: ["up"], scope: "context" },
   { id: "composer.historyNext", label: "Recall the next message, then the draft", group: "Composer", keys: ["down"], scope: "context" },

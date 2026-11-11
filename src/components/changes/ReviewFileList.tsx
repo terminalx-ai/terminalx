@@ -6,8 +6,10 @@ import { FileList } from "./FileList";
 import type { MergeGroup } from "./MergeInProgress";
 
 /** Shared review controls for workspace, turn, commit and uncommitted files. */
-export function ReviewFileList({ workspace, files, groups, selected, onSelect, empty, trailing }: {
+export function ReviewFileList({ workspace, base, files, groups, selected, onSelect, empty, trailing }: {
   workspace: string;
+  /** The diff base, so each row can count the review comments made against it. */
+  base?: string;
   files: ChangedFile[];
   groups?: MergeGroup[] | null;
   selected: string | null;
@@ -22,7 +24,7 @@ export function ReviewFileList({ workspace, files, groups, selected, onSelect, e
   const matches = (file: ChangedFile) => !query || file.path.toLocaleLowerCase().includes(query) || !!file.oldPath?.toLocaleLowerCase().includes(query);
   const visible = files.filter(matches);
   const count = files.filter((file) => viewed.status(file).viewed).length;
-  const list = (items: ChangedFile[]) => <FileList files={items} folders={view === "folders"} expandAll={!!query}
+  const list = (items: ChangedFile[]) => <FileList base={base} files={items} folders={view === "folders"} expandAll={!!query}
     selected={selected} onSelect={onSelect} empty={files.length && query ? "No files match this filter." : empty}
     trailing={(file) => {
       const status = viewed.status(file);

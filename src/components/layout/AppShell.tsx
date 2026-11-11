@@ -28,7 +28,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
 import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
-import { bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
+import { archiveSession, getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent, type ImageInput } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -48,6 +48,7 @@ import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
 import { bootMergedCleanup } from "@/lib/mergedCleanup";
+import { WorkspaceRestoreDialog } from "@/components/session/WorkspaceRestoreDialog";
 import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
 import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialog";
 import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
@@ -73,7 +74,9 @@ import { EditorSplit } from "@/components/editor/EditorSplit";
 import { openLocalProject } from "@/lib/projectStart";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { REPO_URL, repoFile } from "@/lib/repo";
-import { stepVisibleSession } from "@/lib/sessionNavigation";
+import { workspaceKey, branchSessionsAsTabs } from "@/lib/tabLayouts";
+import { conversationBranch } from "@/lib/checkout";
+import { stepAttentionSession, stepVisibleSession } from "@/lib/sessionNavigation";
 import { ImageViewerHost } from "@/components/ui/ImageViewer";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
@@ -205,6 +208,11 @@ export function AppShell() {
   useShortcut("app.addProject", () => { setSettingsOpen(false); void openLocalProject().catch((error) => console.error("add project", error)); });
   useShortcut("app.openRecent", () => setPaletteOpen(true));
   useShortcut("app.nextSession", () => { setSettingsOpen(false); stepVisibleSession(1); });
+  useShortcut("app.nextAttention", () => { setSettingsOpen(false); stepAttentionSession(); });
+  useShortcut("session.archive", () => {
+    const id = getSessionStore().selectedSessionId;
+    if (id && !isCloudKey(id)) void archiveSession(id, true).catch(() => {});
+  });
   useShortcut("app.previousSession", () => { setSettingsOpen(false); stepVisibleSession(-1); });
   useShortcut("app.docs", () => { void openUrl(repoFile("README.md")).catch(console.error); });
   useShortcut("app.reportIssue", () => { void openUrl(`${REPO_URL}/issues/new`).catch(console.error); });
@@ -212,6 +220,7 @@ export function AppShell() {
   useShortcut("app.togglePanel", togglePanel);
   useShortcut("app.settings", () => openSettings());
   useShortcut("app.newSession", newSession);
+  useShortcut("app.startFrom", () => { setSettingsOpen(false); openNewSession(true); });
   useShortcut("app.home", showHome);
   useShortcut("app.issues", showIssues);
   useShortcut("app.agentDashboard", showAgents);
@@ -256,6 +265,7 @@ export function AppShell() {
       <GuestSessionHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />
+      <WorkspaceRestoreDialog />
       <WorktreeCleanupDialog />
       <ProjectStartDialogHost />
       <div className="flex min-h-0 flex-1">
@@ -302,7 +312,7 @@ export function AppShell() {
               </main>
             ) : selected ? (
               <main className={MAIN}>
-                <ErrorBoundary key={selected.id} label="the session">
+                <ErrorBoundary key={branchSessionsAsTabs(prefs) ? `${workspaceKey(selected, store.chatsPath)}:${conversationBranch(selected, store.chatsPath, store.workspaces)}` : selected.id} label="the session">
                   <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                 </ErrorBoundary>
               </main> ) : behind ? (

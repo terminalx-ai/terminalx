@@ -1,3 +1,6 @@
+import { selectSessionTab } from "@/lib/terminal";
+import { ReviewCommentsProvider } from "@/components/changes/ReviewComments";
+import { useSessionStore } from "@/lib/sessions";
 import { useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "@/icons";
 import { DiffPane } from "@/components/changes/DiffPane";
@@ -17,13 +20,19 @@ import { MediaPane } from "./MediaPane";
 
 /** Keep each surface mounted: mode switches preserve the diff's scroll and the editor's buffer/undo. */
 export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
+  const source = useMemo(() => localGitSource(entry.root), [entry.root]);
+  const session = useSessionStore().sessions.find((s) => s.id === entry.sessionId);
+  const tabId = session?.activeTab ?? session?.tabs[0]?.id;
+  return <ReviewCommentsProvider onAdd={() => { if (tabId) selectSessionTab(entry.sessionId, { kind: "agent", id: tabId }); }} key={source.key} source={source} active={visible} tabId={tabId}><DiffEditorContent entry={entry} visible={visible} /></ReviewCommentsProvider>;
+}
+function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
   const { range, mode, scope, target, uncommitted, oldPath } = entry.diff;
   const source = useMemo(() => localGitSource(entry.root), [entry.root]);
   const files = useFileSource(undefined, entry.root);
   const kind = fileKind(entry.rel);
   const media = kind !== "text" || diffMediaKind(entry.rel) === "pdf";
   const options = useDiffOptions(diffFileKey(source.key, entry.rel));
-  const [pair, setPair] = useState<{ before: string; after: string; deleted: boolean } | null>(null);
+  const [pair, setPair] = useState<{ before: string; after: string; deleted: boolean; originalPath?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [changed, setChanged] = useState(false);
@@ -48,7 +57,8 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
         : undefined);
       const before = previousPath ? (await source.fileContentsAt(previousPath, range.base, range.head)).before : next.before;
       if (before === null && next.after === null) throw new Error("This file is not present in either snapshot.");
-      if (!cancelled) setPair({ before: before ?? "", after: next.after ?? "", deleted: next.after === null });
+      // Comments made on the before side are keyed by the path they were read from.
+      if (!cancelled) setPair({ before: before ?? "", after: next.after ?? "", deleted: next.after === null, originalPath: previousPath });
     })().catch((e) => { if (!cancelled) setError(source.errorMessage(e)); });
     return () => { cancelled = true; };
   }, [source, entry.rel, range?.base, range?.head, oldPath, media]);
@@ -117,9 +127,9 @@ export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; vis
     <div className="relative min-h-0 flex-1">
       {(["diff", ...(entire ? ["entire" as const] : [])] as const).map((surface) => <div key={surface} className={cn("absolute inset-0", mode !== surface && "hidden")}>
         {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Open All changes in the Changes panel to review the workspace.</p>
-          : surface === "diff" && !binary && (pair || (media && diffMediaKind(entry.rel))) ? <FileDiff source={source} path={entry.rel} oldPath={oldPath} base={range.base} head={range.head} text={pair ?? undefined} onDiscard={canDiscard ? () => setDiscarding(true) : undefined} />
+          : surface === "diff" && !binary && (pair || (media && diffMediaKind(entry.rel))) ? <FileDiff source={source} path={entry.rel} oldPath={oldPath ?? pair?.originalPath} base={range.base} head={range.head} text={pair ?? undefined} onDiscard={canDiscard ? () => setDiscarding(true) : undefined} />
           : media || binary ? <p className="p-4 text-sm text-muted-foreground">Binary file changed.{kind !== "text" && " Choose Preview to view the current file."}</p>
-          : pair ? <DiffPane path={entry.rel} before={pair.before} after={pair.after} mode="entire" wrap={options.wrap} />
+          : pair ? <DiffPane path={entry.rel} before={pair.before} after={pair.after} base={range.base} originalPath={oldPath ?? pair.originalPath} mode="entire" wrap={options.wrap} hideWhitespace={options.hideWhitespace} />
           : !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading file diff…</p>}
       </div>)}
       {previewed && <div className={cn("absolute inset-0", mode !== "preview" && "hidden")}>

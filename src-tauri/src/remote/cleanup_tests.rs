@@ -151,6 +151,7 @@ fn session(f: &Fixture, title: &str, worktree: Option<&str>) -> crate::store::in
         section_id: None,
         project_path: f.root.to_string_lossy().into_owned(),
         checkout_branch: None,
+        checkout_pr: None,
         title: Some(title.into()),
         use_worktree: worktree.is_some(),
         base_ref: worktree.map(|_| "main".into()),
