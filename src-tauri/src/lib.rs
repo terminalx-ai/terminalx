@@ -159,6 +159,7 @@ pub mod remote;
 mod session;
 mod sidebar_activity;
 mod session_archive;
+mod session_usage;
 mod session_ops;
 mod workspace_setup;
 mod stray_processes;
@@ -902,6 +903,7 @@ pub fn run() {
             commands::orchestration_approve,
             commands::orchestration_stop,
             commands::orchestration_update_plan,
+            commands::session_usage,
             commands::organization_work_status,
             commands::set_organization_work_status,
             commands::session_link_issue,

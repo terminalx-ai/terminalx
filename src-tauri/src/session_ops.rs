@@ -224,6 +224,7 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
         context_max: None,
         fork_from: None,
         continuation: None,
+        usage: None,
         parked: false,
         follow: Default::default(),
         unknown: BTreeMap::new(),
