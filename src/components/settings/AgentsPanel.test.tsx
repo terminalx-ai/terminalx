@@ -223,7 +223,8 @@ describe("Agents · API key (PRO-306)", () => {
     fireEvent.change(screen.getByLabelText("Anthropic API key"), { target: { value: KEY } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(statusLine().textContent).toBe("Using an API key · not verified: api.anthropic.com refused this key (HTTP 401). Check it was copied whole, or make a new one"));
-    expect(screen.getByRole("tab", { name: "Claude Code: Using an API key" }).querySelector(".text-add")).toBeNull();
+    // The tab's badge follows once the page has the new status.
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Claude Code: Using an API key" }).querySelector(".text-add")).toBeNull());
     // Refresh asks the provider again.
     verification = { ok: true };
     fireEvent.click(within(statusLine().parentElement!).getByRole("button", { name: "Refresh" }));
