@@ -54,12 +54,13 @@ export function PrChecks({ pr, source, disabled, fixBusy, onRerun, onFix, showSu
  */
 function CheckRow({ check, emphasis, className, children }: { check: PrCheck; emphasis?: boolean; className?: string; children?: ReactNode }) {
   const url = webUrl(check.url);
-  const name = cn("min-w-0 truncate text-left", emphasis ? "text-foreground" : "text-muted-foreground");
+  // The name keeps its room; GitHub's line gives way first, then the name is cut.
+  const name = cn("max-w-full shrink-0 truncate text-left", emphasis ? "text-foreground" : "text-muted-foreground");
   return <div aria-label={`${check.name}: ${check.state}`} className={cn("flex min-w-0 items-center gap-2 text-xs", className)}>
     <CheckIcon state={check.state} />
     <span className="flex min-w-0 flex-1 items-baseline gap-2">
       {url ? <button type="button" onClick={() => void openUrl(url)} className={cn(name, "hover:underline")} title={`${check.name}: ${check.state}`}>{check.name}</button> : <span className={name} title={`${check.name}: ${check.state}`}>{check.name}</span>}
-      {check.summary && <span className="min-w-0 shrink-[4] truncate text-[11px] text-faint" title={check.summary}>{check.summary}</span>}
+      {check.summary && <span className="min-w-0 truncate text-[11px] text-faint" title={check.summary}>{check.summary}</span>}
     </span>
     {children}
   </div>;

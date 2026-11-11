@@ -236,22 +236,10 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
         </p>
       )}
 
-      {checks?.outcome === "failed" ? (
-        <p role="status" data-testid="pipeline-check-failed" className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-          <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" />
-          <span className="min-w-0">
-            <span className="font-medium text-foreground">
-              {namesOf(failedChecks)} failed on {checks.commit.slice(0, 7)}.
-            </span>{" "}
-            Nothing is merged. {place ? "Open the run to see why." : "The failure goes back to the author session, or you can run the check again."}
-          </span>
+      {showNote && (
+        <p role="status" className={cn("text-xs leading-relaxed", pipeline.state === "needsYou" ? "text-foreground" : "text-muted-foreground")}>
+          {pipeline.note}
         </p>
-      ) : (
-        showNote && (
-          <p role="status" className={cn("text-xs leading-relaxed", pipeline.state === "needsYou" ? "text-foreground" : "text-muted-foreground")}>
-            {pipeline.note}
-          </p>
-        )
       )}
 
       <ol className="flex flex-wrap gap-x-4 gap-y-1 text-xs" aria-label="Stages">
@@ -269,6 +257,18 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
           </li>
         ))}
       </ol>
+
+      {checks?.outcome === "failed" && (
+        <p role="status" data-testid="pipeline-check-failed" className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+          <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+          <span className="min-w-0">
+            <span className="font-medium text-foreground">
+              {namesOf(failedChecks)} failed on {checks.commit.slice(0, 7)}.
+            </span>{" "}
+            Nothing is merged. {place ? "Open the run to see why." : "The failure goes back to the author session, or you can run the check again."}
+          </span>
+        </p>
+      )}
 
       {checks && <PipelineCheckList view={checks} now={now} />}
 
@@ -312,6 +312,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
               {!place && (
                 <Button
                   size="sm"
+                  variant="accent"
                   disabled={busy != null || !authorHere || failedRuns.length === 0}
                   title={!authorHere ? "The author session is not on this computer." : failedRuns.length === 0 ? "Only a GitHub Actions run's logs can be sent." : "Send the failed check logs to the author session"}
                   onClick={() => void run("sendFailure", () => sendFailedChecks(pipeline.author.sessionId, pipeline.author.tabId, pipeline.pr!.url, prefs.fixErrorsInstructions).then((said) => said && "Sent the failure to the author session."))}
