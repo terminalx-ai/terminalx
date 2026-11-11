@@ -86,7 +86,7 @@ export interface RunReview {
 /** How one try's result was checked (`verify::Verification`): the gates that ran, in order, a failure last. */
 export interface RunVerification {
   gates: GateResult[];
-  facts?: { files: string[]; changedLines: number; securityAreas?: string[]; commit?: string };
+  facts?: { files: string[]; changedLines: number; securityAreas?: string[]; /** The piece has commands and TerminalX did not run them unasked. */ commandsNotRun?: boolean; commit?: string };
   review?: RunReview;
   /** Absent while it is under way. */
   outcome?: "passed" | "failed" | "inconclusive";

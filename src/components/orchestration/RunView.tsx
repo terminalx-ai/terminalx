@@ -455,9 +455,10 @@ function Checks({ piece }: { piece: RunPiece }) {
             const ran = check.gates.find((result) => result.gate === gate);
             const state = ran ? (ran.passed ? "passed" : "failed") : gate === next || (gate === "review" && check.review && !check.outcome) ? "running" : failed ? "skipped" : check.outcome ? "notNeeded" : "waiting";
             const Icon = state === "passed" ? CircleCheck : state === "failed" ? CircleX : state === "running" ? LoaderCircle : CircleDashed;
-            const words = state === "notNeeded" ? (gate === "commands" ? "no command" : "not needed") : state === "skipped" ? "not run" : state;
+            const unasked = gate === "commands" && !ran && !!check.facts?.commandsNotRun;
+            const words = unasked ? "not run" : state === "notNeeded" ? (gate === "commands" ? "no command" : "not needed") : state === "skipped" ? "not run" : state;
             return (
-              <li key={gate} data-gate={gate} data-gate-state={state} title={ran?.detail ?? (state === "skipped" ? "A check before it failed, so it did not run." : state === "notNeeded" && gate === "review" ? "The checks before it passed and nothing called for a reader: no model was asked." : undefined)}
+              <li key={gate} data-gate={gate} data-gate-state={state} title={ran?.detail ?? (unasked ? "Not run: nobody approved this plan, and this piece's worker is asked before it runs a command. A verifier read the result instead." : state === "skipped" ? "A check before it failed, so it did not run." : state === "notNeeded" && gate === "review" ? "The checks before it passed and nothing called for a reader: no model was asked." : undefined)}
                 className={cn("inline-flex items-center gap-1 whitespace-nowrap", state === "passed" ? "text-add" : state === "failed" ? "text-destructive" : state === "running" ? "text-info" : "text-faint")}>
                 <Icon aria-hidden className="size-3 shrink-0" />
                 <span className={state === "passed" || state === "failed" ? "text-foreground" : undefined}>{GATE_LABEL[gate]}</span>

@@ -263,6 +263,13 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
         }) {
             return Err(PlanError::new("plan_invalid", Some(id), format!("Done-check {} of piece {id} is a vote that cannot pass: {} voters and a threshold of {}.", at + 1, voters.map_or("unset".into(), |n| n.to_string()), threshold.map_or("unset".into(), |n| n.to_string())), json!({"check": at})));
         }
+        // TerminalX runs each command itself, on the worker's result: one that pushes, merges or deploys is no check.
+        if let Some((at, found)) = piece.done_checks.iter().enumerate().find_map(|(at, check)| match check {
+            Check::Command { run } => super::guard::refused(run).map(|(_, found)| (at, found)),
+            _ => None,
+        }) {
+            return Err(PlanError::new("check_not_allowed", Some(id), format!("Done-check {} of piece {id} runs `{found}`. A done-check is run by TerminalX on the worker's result and may not push, merge or deploy. Use a command that only checks: a test, a build, a search.", at + 1), json!({"check": at, "command": found})));
+        }
         // A command is checked by running it: no model, no tokens. A piece with none says why.
         if !piece.done_checks.iter().any(|check| matches!(check, Check::Command { .. })) {
             if !piece.review_only {
@@ -587,6 +594,21 @@ mod tests {
 
     fn refused(plan: &Plan) -> PlanError {
         check(plan, 8).expect_err("the plan is refused")
+    }
+
+    #[test]
+    fn a_done_check_that_pushes_merges_or_deploys_is_refused_naming_it() {
+        for (run, found) in [("cargo t && git push origin HEAD", "git push"), ("sh -c 'npm publish'", "npm publish"), ("gh pr merge 12 --squash", "gh pr merge")] {
+            let mut cli = piece("cli");
+            cli.done_checks = vec![Check::Command { run: "cargo t".into() }, Check::Command { run: run.into() }];
+            let error = refused(&plan(vec![cli]));
+            assert_eq!((error.code, error.piece.as_deref(), &error.details), ("check_not_allowed", Some("cli"), &json!({"check": 1, "command": found})), "{run}");
+            assert!(error.message.contains("may not push, merge or deploy"), "{}", error.message);
+        }
+        // Words in a review point are not a command.
+        let mut cli = piece("cli");
+        cli.done_checks.push(Check::Review { text: "Nothing in it runs git push.".into() });
+        assert!(check(&plan(vec![cli]), 8).is_ok());
     }
 
     #[test]

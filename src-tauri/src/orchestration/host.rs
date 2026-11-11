@@ -197,7 +197,9 @@ impl Host for ManagerHost {
         };
         // The project's own check, the one its pipelines run before a merge.
         let project_check = crate::store::projects::issue_pipeline_settings(&run.project_path).ok().and_then(|settings| settings.local_check_command);
-        verify::gates(&Checkout { cwd: session.cwd.into(), base, branch: piece.branch.clone() }, piece, project_check.as_deref(), verify::COMMAND_TIMEOUT)
+        // The mode the worker was started in decides, with the person's approval, whether its commands are run unasked.
+        let commands = verify::may_run_commands(run.approval.is_some(), piece.started_mode.as_deref().unwrap_or_else(|| piece.mode(&run.worker_mode)));
+        verify::gates(&Checkout { cwd: session.cwd.into(), base, branch: piece.branch.clone(), commands }, piece, project_check.as_deref(), verify::COMMAND_TIMEOUT)
     }
 
     fn create_verifier(&self, _run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef> {

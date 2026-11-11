@@ -310,14 +310,28 @@ pub const VERIFIER_MODE: &str = "plan";
 /// The tools that change a file, by the names both agents' hooks give them.
 const EDIT_TOOLS: &[&str] = &["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch", "file_change", "write_file", "create_file"];
 
-/// Why a verifier's tool call is refused: it changes a file. A verifier
-/// reads a result; it never repairs one, whatever mode its tab is put in
-/// later. `None` for a call that edits nothing by itself: what a shell
-/// command may do is left to the mode it was started in ([`VERIFIER_MODE`]).
+/// The tools that run a shell command, by the names both agents' hooks give them.
+const SHELL_TOOLS: &[&str] = &["Bash", "shell", "shell_command", "exec_command", "local_shell", "functions.exec_command", "functions.shell_command"];
+
+/// Why a verifier's tool call is refused: it changes a file, or it is a
+/// shell command that is not known to only read. A verifier reads a result;
+/// it never repairs one, whatever mode its tab is put in later.
+///
+/// A shell command goes ahead only when the app's own reader of discovery
+/// commands (`harness::read_only`) takes every part of it for one that reads:
+/// `git diff`, `git status`, `cat`, `rg`, `grep`, `ls`. Anything it does not know
+/// (`sed -i`, `git commit`, a redirect, a script) is refused, not asked about:
+/// nobody is there to answer.
 pub fn verifier_refusal(payload: &Value) -> Option<String> {
     let tool = payload["tool_name"].as_str().unwrap_or_default();
     let edits = EDIT_TOOLS.contains(&tool) || (tool.starts_with("mcp__") && ["__write_file", "__edit_file", "__create_or_update_file", "__push_files"].iter().any(|suffix| tool.ends_with(suffix)));
-    edits.then(|| format!("TerminalX refused `{tool}`: a verifier of a run changes no file. You are here to judge the result as it is. If something is wrong, say where in your verdict block (`file:line`); the piece goes back to a worker."))
+    if edits {
+        return Some(format!("TerminalX refused `{tool}`: a verifier of a run changes no file. You are here to judge the result as it is. If something is wrong, say where in your verdict block (`file:line`); the piece goes back to a worker."));
+    }
+    if SHELL_TOOLS.contains(&tool) && crate::harness::read_only::approved_input(tool, &payload["tool_input"], payload["cwd"].as_str()).is_none() {
+        return Some("TerminalX refused this command: a verifier of a run runs only commands that read (`git diff`, `git status`, `cat`, `rg`, `grep`, `ls`), with no redirect and no script. The checks were already run for you; judge the result from the diff and the files as they are.".to_string());
+    }
+    None
 }
 
 /// Whether a tab is held to reading: it is a verifier of a run's result.
@@ -559,9 +573,27 @@ mod tests {
             assert_eq!(super::refusal_output(&reason)["hookSpecificOutput"]["permissionDecision"], "deny");
         }
         // Reading is its work.
-        for tool in ["Read", "Grep", "Glob", "Bash", "mcp__filesystem__read_file"] {
-            assert_eq!(super::verifier_refusal(&serde_json::json!({"tool_name": tool, "tool_input": {"command": "git diff lead...HEAD"}})), None, "{tool}");
+        for tool in ["Read", "Grep", "Glob", "mcp__filesystem__read_file"] {
+            assert_eq!(super::verifier_refusal(&serde_json::json!({"tool_name": tool, "tool_input": {"file_path": "src/cli.rs"}})), None, "{tool}");
         }
+        // A shell command is held to reading too, in whatever mode the tab is in: one that reads goes ahead.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        crate::git::run(&cwd, &["init", "-q", "-b", "lead"]).unwrap();
+        let shell = |tool: &str, command: &str| super::verifier_refusal(&serde_json::json!({"tool_name": tool, "tool_input": {"command": command}, "cwd": cwd}));
+        // (Tools every machine has: whether `rg` is one depends on where this runs.)
+        for reads in ["git diff lead...HEAD -- src/cli.rs", "git status --short", "cat src/cli.rs", "ls src"] {
+            assert_eq!(shell("Bash", reads), None, "{reads}");
+        }
+        // One that writes, or that nobody can tell, is refused: by either agent's name for its shell.
+        for writes in ["sed -i '' s/a/b/ src/cli.rs", "git commit -am fix", "git checkout -- src/cli.rs", "git stash", "echo fixed > src/cli.rs", "cat a | tee b", "rm src/cli.rs", "sh -c 'cat src/cli.rs'", "cargo t", "python3 fix.py", "git diff && touch x"] {
+            for tool in ["Bash", "shell", "exec_command", "local_shell"] {
+                let reason = shell(tool, writes).unwrap_or_else(|| panic!("{tool}: {writes} is refused"));
+                assert!(reason.starts_with("TerminalX refused this command: a verifier of a run runs only commands that read"), "{reason}");
+            }
+        }
+        // A shell call with no directory to check it in is not one that is known to read.
+        assert!(super::verifier_refusal(&serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "cat src/cli.rs"}})).is_some());
         // And it starts where its agent itself changes nothing: Claude Code's plan mode, Codex's read-only sandbox.
         assert_eq!(super::VERIFIER_MODE, "plan");
         assert_eq!(crate::harness::codex::stance(super::VERIFIER_MODE).1, "read-only");

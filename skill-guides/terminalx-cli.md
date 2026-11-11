@@ -683,6 +683,8 @@ piece in `details.piece`, and nothing is stored:
 - `dependency_cycle` (`details.cycle`), `unknown_dependency` (`details.dependsOn`).
 - `no_done_check`: a piece has no `doneChecks`. `empty_check`: one of them says nothing
   (`details.check` is its place in the list).
+- `check_not_allowed`: a `command` check pushes, merges or deploys (`details.command`).
+  TerminalX runs the checks itself and does none of those; use a command that only checks.
 - `no_command_check`: a piece has no `command` check and is not `reviewOnly`.
   `review_only_without_reason`: it is `reviewOnly` and `reviewOnlyReason` is empty.
 - `owns_outside_repository`: a piece owns a path that is not inside the repository
@@ -771,7 +773,9 @@ Do not poll, and do not wait on single workers. While your run is under way,
 `wait --children-of <your session>` waits on the run itself: it does not return each time a
 worker's turn ends, but when a piece's result is accepted (`done`), when a piece stops for
 good (`blocked`, `failed`), when a piece is ready for you to start, or when the run has
-ended. It returns `why` (a line for each of those), `ready` (the pieces `runs start` would
+ended. It also returns at once when nothing is under way and nothing can start (a piece
+blocked on a question, say): waiting would change nothing. It returns `why` (a line for each
+of those), `ready` (the pieces `runs start` would
 start now), `state`, and every piece with its `state` and whether it `changed` since the
 wait began. `--all` returns only when nothing is under way any more. At the timeout it
 returns `timedOut: true`; wait again.
@@ -790,8 +794,12 @@ in this order and stop at the first that fails; the first four use no model:
    your branch merges into it without conflicts (`git merge-tree`).
 4. **Command checks.** Every `command` done-check, then the project's own check command if
    it has one and the piece changed files. TerminalX runs them in the worker's worktree. A
-   failure keeps the exit code and the last 100 lines.
-5. **Review**, only when one of these holds: the piece has no `command` check; the diff
+   failure keeps the exit code and the last 100 lines. They are run unasked only where a
+   person approved the plan, or the piece's worker runs in `bypassPermissions`; in a project
+   that starts runs without approval and asks its workers before a command, they are left
+   unrun (`facts.commandsNotRun`) and a verifier reads the result instead.
+5. **Review**, only when one of these holds: the piece has no `command` check, or its
+   commands were not run; the diff
    touches a security area (the ones an issue pipeline runs its security pass for); the diff
    is over 400 changed lines (a setting, `reviewDiffLines`); the piece's kind is `refactor`;
    or the plan asks for one with a `review` or `vote` check.
@@ -800,7 +808,8 @@ A piece with a passing `command` check, a small diff, no security area and a kin
 `refactor` is accepted after step 4 with no verifier session at all. So give every piece a
 command that really proves it, and keep pieces small: that is what keeps checking free.
 
-A verifier is a conversation of its own in the worker's worktree that cannot edit files. It
+A verifier is a conversation of its own in the worker's worktree that cannot edit files and
+runs only commands that read (`git diff`, `cat`, `rg`, `grep`, `ls`); anything else is refused. It
 is sent the piece's goal, its done-checks, the diff and what the gates printed, and none of
 the worker's transcript or report. It runs on the routing table's `verify` row (mid, at
 medium, unless the person changed it), not on the worker's model, and ends with a verdict:

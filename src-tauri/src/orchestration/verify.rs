@@ -132,6 +132,11 @@ pub struct Facts {
     pub files: Vec<String>,
     /// Lines added and removed, together.
     pub changed_lines: u32,
+    /// The piece has commands and TerminalX did not run them: nobody approved
+    /// the plan, and the piece's worker is asked before it runs a command
+    /// ([`may_run_commands`]). A verifier reads the result instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub commands_not_run: bool,
     /// The commit that was checked. A result is accepted as this commit: a
     /// branch that has moved since is not the result the gates passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -290,6 +295,27 @@ pub struct Checkout {
     pub base: String,
     /// The branch the worker was given; the worktree must still be on it.
     pub branch: Option<String>,
+    /// TerminalX may run the piece's commands here ([`may_run_commands`]).
+    pub commands: bool,
+}
+
+/// Whether TerminalX runs a piece's commands itself, unasked. It does when a
+/// person approved the plan, which shows them every command, or when the
+/// piece's worker runs in bypass, where the worker ran the same commands
+/// unasked already. Otherwise running them would do for the lead what a
+/// piece's own mode may not: get a command run with nobody asked. They are
+/// then left unrun, and a verifier reads the result.
+pub fn may_run_commands(approved: bool, mode: &str) -> bool {
+    approved || mode == "bypassPermissions"
+}
+
+/// Where it is noted, in a worktree's own git directory, which commit passed
+/// the branch gate clean: what the commands of gate 4 write after that is not
+/// the worker's uncommitted work when the gates are run again.
+const CLEAN_MARK: &str = "terminalx-checked-clean";
+
+fn clean_mark(checkout: &Checkout) -> Option<PathBuf> {
+    Some(PathBuf::from(git(checkout, &["rev-parse", "--absolute-git-dir"]).ok()?.trim()).join(CLEAN_MARK))
 }
 
 /// What gates 2 to 4 found.
@@ -361,9 +387,15 @@ fn branch_state(checkout: &Checkout, commit: &str) -> GateResult {
         Ok(None) => {}
         Err(error) => return failed(format!("The worktree's state could not be read: {error:#}")),
     }
-    let status = match git(checkout, &["status", "--porcelain", "--untracked-files=normal", "--"]) {
-        Ok(status) => status,
-        Err(error) => return failed(format!("The worktree's state could not be read: {error:#}")),
+    // This commit was found clean before, and its commands were run since: what lies in the
+    // worktree now is what they wrote (a lockfile, a snapshot), not work left uncommitted.
+    let checked_before = clean_mark(checkout).and_then(|mark| std::fs::read_to_string(mark).ok()).is_some_and(|marked| marked.trim() == commit);
+    let status = match checked_before {
+        true => String::new(),
+        false => match git(checkout, &["status", "--porcelain", "--untracked-files=normal", "--"]) {
+            Ok(status) => status,
+            Err(error) => return failed(format!("The worktree's state could not be read: {error:#}")),
+        },
     };
     let dirty: Vec<&str> = status.lines().filter(|line| !line.trim().is_empty()).collect();
     if !dirty.is_empty() {
@@ -386,6 +418,10 @@ fn branch_state(checkout: &Checkout, commit: &str) -> GateResult {
 /// Run one command at the root of the worktree, as its worker was told it would be run.
 fn run_command(checkout: &Checkout, run: &str, project: bool, timeout: Duration) -> CommandRun {
     let started = Instant::now();
+    // What no worker of a run may do, a check of its result does not do either.
+    if let Some((_, found)) = super::guard::refused(run) {
+        return CommandRun { run: run.to_string(), project, exit_code: None, passed: false, millis: 0, output: Some(format!("TerminalX did not run it: `{found}` pushes, merges or deploys, and a check of a result does none of those.")) };
+    }
     let mut process = std::process::Command::new("/bin/sh");
     // Both streams in the order they were written: the end of a test run is on either.
     process.args(["-c", &format!("exec 2>&1\n{run}")]).current_dir(&checkout.cwd);
@@ -423,7 +459,7 @@ fn commands(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, cha
     let mut gate = match last.passed {
         true => GateResult::passed(Gate::Commands, match runs.len() { 1 => "1 command exited 0.".to_string(), count => format!("{count} commands exited 0.") }),
         false => {
-            let how = match last.exit_code { Some(code) => format!("exited {code}"), None => "did not finish".to_string() };
+            let how = match last.exit_code { Some(code) => format!("exited {code}"), None if last.millis == 0 => "was not run".to_string(), None => "did not finish".to_string() };
             let whose = if last.project { "The project's check" } else { "The done-check" };
             GateResult::failed(Gate::Commands, format!("{whose} `{}` {how}. The last {OUTPUT_LINES} lines it printed:\n{}", last.run, last.output.as_deref().unwrap_or_default()))
         }
@@ -459,11 +495,20 @@ pub fn gates(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, ti
     if !clean {
         return checked;
     }
-    if let Some(gate) = commands(checkout, piece, project_check, !checked.facts.files.is_empty(), timeout) {
-        let passed = gate.passed;
-        checked.gates.push(gate);
-        if !passed {
-            return checked;
+    if !checkout.commands {
+        // Not TerminalX's to run unasked here: said, and left to a reader.
+        checked.facts.commands_not_run = piece.done_checks.iter().any(|check| matches!(check, Check::Command { .. }));
+    } else {
+        // Clean at this commit, noted before anything is run in it.
+        if let Some(mark) = clean_mark(checkout) {
+            let _ = std::fs::write(mark, &commit);
+        }
+        if let Some(gate) = commands(checkout, piece, project_check, !checked.facts.files.is_empty(), timeout) {
+            let passed = gate.passed;
+            checked.gates.push(gate);
+            if !passed {
+                return checked;
+            }
         }
     }
     // A command may write into the worktree (a lockfile, a snapshot): the result is what was
@@ -490,6 +535,9 @@ pub fn review_reasons(piece: &Piece, facts: &Facts, diff_lines: u32) -> Vec<Stri
     let mut reasons = Vec::new();
     if !piece.done_checks.iter().any(|check| matches!(check, Check::Command { .. })) {
         reasons.push("No command proves this piece: it is checked by review alone.".to_string());
+    }
+    if facts.commands_not_run {
+        reasons.push("Its commands were not run: nobody approved this plan, and this piece's worker is asked before it runs a command, so TerminalX does not run them unasked either. Judge from the diff whether they would pass.".to_string());
     }
     if !facts.security_areas.is_empty() {
         reasons.push(format!("The change touches {}: {}.", if facts.security_areas.len() == 1 { "a security area" } else { "security areas" }, facts.security_areas.join(", ")));
@@ -545,6 +593,12 @@ fn fitted_diff(diff: &str, budget: usize) -> (String, usize) {
     }
     sections.push(&diff[from..]);
     const NOTE: usize = 96;
+    // More files than there is room to say a word about each: the first ones that fit, and how many were left.
+    let room = (budget / 2) / NOTE;
+    let left_out = sections.len().saturating_sub(room.max(1));
+    sections.truncate(room.max(1));
+    let last = if left_out > 0 { format!("[… the diffs of {left_out} more files were left out to fit]\n") } else { String::new() };
+    let budget = budget.saturating_sub(last.len());
     let mut order: Vec<usize> = (0..sections.len()).collect();
     order.sort_by_key(|index| sections[*index].len());
     let mut share = vec![0usize; sections.len()];
@@ -570,7 +624,16 @@ fn fitted_diff(diff: &str, budget: usize) -> (String, usize) {
         out.push_str(kept);
         out.push_str(&format!("[… {} more lines of this file's diff were left out to fit]\n", section[kept.len()..].lines().count()));
     }
-    (out, cut)
+    out.push_str(&last);
+    // Whatever the arithmetic above, never past the budget.
+    if out.len() > budget + last.len() {
+        let mut end = budget + last.len();
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    (out, cut + left_out)
 }
 
 /// What a verifier is sent: the piece's goal, what must hold, why it was
@@ -591,7 +654,7 @@ pub fn prompt(piece: &Piece, base: &str, gates: &[GateResult], checked: &Checked
         format!("{}: {} — {said}", gate.gate.name(), if gate.passed { "passed" } else { "failed" })
     }).collect();
     let head = format!(
-        "You are checking one piece of work that another agent did, before it is accepted. You were not given that agent's conversation, its report or its reasoning, and you should not look for them: judge the result, not an account of it.\n\nYou cannot change files here, and you are not asked to: do not edit, commit, or run anything that writes. Everything you need is below; read a file in this worktree only where the diff alone cannot settle a point.\n\n## Goal of the piece\n\n{}\n\n## What must hold\n\n{must}\n\n## Why you were asked\n\n{}\n\n## What was already checked, without a model\n\n{}\n\nThese were run by TerminalX on this result. Do not run them again.\n\n",
+        "You are checking one piece of work that another agent did, before it is accepted. You were not given that agent's conversation, its report or its reasoning, and you should not look for them: judge the result, not an account of it.\n\nYou cannot change files here, and you are not asked to: do not edit, commit, or run anything that writes; a command that does more than read (`git diff`, `git status`, `cat`, `rg`, `grep`, `ls`) is refused. Everything you need is below; read a file in this worktree only where the diff alone cannot settle a point.\n\n## Goal of the piece\n\n{}\n\n## What must hold\n\n{must}\n\n## Why you were asked\n\n{}\n\n## What was already checked, without a model\n\n{}\n\nThese were run by TerminalX on this result. Do not run them again.\n\n",
         clipped(&piece.brief.goal, 2400),
         bullets(reasons),
         bullets(&ran),
@@ -758,7 +821,7 @@ mod tests {
         write(cwd, "src/session.rs", "fn session() {}\n");
         commit(cwd, "init");
         git(cwd, &["checkout", "-q", "-b", "piece"]);
-        let checkout = Checkout { cwd: cwd.to_path_buf(), base: "lead".into(), branch: Some("piece".into()) };
+        let checkout = Checkout { cwd: cwd.to_path_buf(), base: "lead".into(), branch: Some("piece".into()), commands: true };
         (dir, checkout)
     }
 
@@ -927,7 +990,7 @@ mod tests {
 
     #[test]
     fn a_model_reads_a_result_only_for_the_listed_reasons() {
-        let small = Facts { files: vec!["src/store/mod.rs".into()], changed_lines: 400, security_areas: Vec::new(), commit: None };
+        let small = Facts { files: vec!["src/store/mod.rs".into()], changed_lines: 400, security_areas: Vec::new(), commands_not_run: false, commit: None };
         // A command, a diff at the threshold, no security area, not a refactor, no review asked: no model.
         assert_eq!(review_reasons(&piece(json!({})), &small, 400), Vec::<String>::new());
         let reason = |fields: Value, facts: &Facts, lines: u32| review_reasons(&piece(fields), facts, lines).join(" | ");
@@ -957,7 +1020,7 @@ mod tests {
     }
 
     fn checked_with(diff: String, files: &[&str], lines: u32) -> Checked {
-        Checked { gates: vec![GateResult::passed(Gate::Scope, "2 files changed, all within what the piece owns."), GateResult::passed(Gate::Branch, "Committed, clean, and `lead` merges into it without conflicts."), GateResult { gate: Gate::Commands, passed: true, detail: Some("1 command exited 0.".into()), commands: vec![CommandRun { run: "cargo t store::settings".into(), project: false, exit_code: Some(0), passed: true, millis: 37_400, output: None }] }], facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, security_areas: Vec::new(), commit: None }, diff, base: "lead".into() }
+        Checked { gates: vec![GateResult::passed(Gate::Scope, "2 files changed, all within what the piece owns."), GateResult::passed(Gate::Branch, "Committed, clean, and `lead` merges into it without conflicts."), GateResult { gate: Gate::Commands, passed: true, detail: Some("1 command exited 0.".into()), commands: vec![CommandRun { run: "cargo t store::settings".into(), project: false, exit_code: Some(0), passed: true, millis: 37_400, output: None }] }], facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, security_areas: Vec::new(), commands_not_run: false, commit: None }, diff, base: "lead".into() }
     }
 
     #[test]
@@ -1035,6 +1098,74 @@ mod tests {
         assert!(checked.gates[3].detail.as_deref().unwrap().starts_with(&format!("The branch moved while its commands ran: they were run on {}", &checked_commit[..12])), "{:?}", checked.gates[3].detail);
         assert_eq!(checked.facts.commit, Some(checked_commit));
         assert!(!checked.passed() && checked.diff.is_empty());
+    }
+
+    #[test]
+    fn a_prompt_stays_under_its_limit_for_a_diff_of_thousands_of_files() {
+        let diff: String = (0..3000).map(|n| format!("diff --git a/src/gen/file_{n}.rs b/src/gen/file_{n}.rs\n--- a/src/gen/file_{n}.rs\n+++ b/src/gen/file_{n}.rs\n@@ -1 +1,3 @@\n+fn generated_{n}() {{}}\n+// one\n+// two\n")).collect();
+        let files: Vec<String> = (0..3000).map(|n| format!("src/gen/file_{n}.rs")).collect();
+        let names: Vec<&str> = files.iter().map(String::as_str).collect();
+        let prompt = prompt(&piece(json!({})), "lead", &[], &checked_with(diff, &names, 9000), &["The diff is 9000 changed lines, over the 400 a result is accepted at without a reader.".to_string()]);
+        assert!(prompt.len() <= PROMPT_LIMIT, "{} characters", prompt.len());
+        // The first files, and a line for the rest: not a note a file.
+        assert!(prompt.contains("diff --git a/src/gen/file_0.rs") && !prompt.contains("file_2999.rs"));
+        assert_eq!(prompt.matches("more files were left out to fit]").count(), 1);
+        assert!(prompt.ends_with("a fail without a `file:line` cannot be acted on and is not counted."));
+    }
+
+    #[test]
+    fn commands_are_run_unasked_only_where_a_person_approved_them_or_the_worker_ran_them_unasked() {
+        assert!(may_run_commands(true, "manual") && may_run_commands(true, "plan"));
+        assert!(may_run_commands(false, "bypassPermissions"));
+        for mode in ["plan", "manual", "acceptEdits", "auto"] {
+            assert!(!may_run_commands(false, mode), "{mode}");
+        }
+        // Where they are not: nothing is run, it is said, and a verifier is asked instead.
+        let (_dir, mut checkout) = worktree();
+        checkout.commands = false;
+        write(&checkout.cwd, "src/store/mod.rs", "pub fn read() -> u8 {\n    2\n}\n");
+        commit(&checkout.cwd, "two");
+        let piece = piece(json!({"doneChecks": [{"type": "command", "run": "touch command-ran"}]}));
+        let checked = gates(&checkout, &piece, Some("touch project-check-ran"), QUICK);
+        assert_eq!(names(&checked), [(Gate::Scope, true), (Gate::Branch, true)]);
+        assert!(checked.facts.commands_not_run && checked.passed());
+        assert!(!checkout.cwd.join("command-ran").exists() && !checkout.cwd.join("project-check-ran").exists());
+        assert!(review_reasons(&piece, &checked.facts, 400)[0].starts_with("Its commands were not run: nobody approved this plan"));
+        assert!(!checked.diff.is_empty(), "the verifier is shown the diff");
+    }
+
+    #[test]
+    fn a_check_never_pushes_merges_or_deploys() {
+        let (_dir, checkout) = worktree();
+        write(&checkout.cwd, "src/store/mod.rs", "pub fn read() -> u8 {\n    2\n}\n");
+        commit(&checkout.cwd, "two");
+        for run in ["touch ran-first && git push origin HEAD", "sh -c 'npm publish'"] {
+            let checked = gates(&checkout, &piece(json!({"doneChecks": [{"type": "command", "run": "true"}]})), Some(run), QUICK);
+            let ran = checked.gates[2].commands.last().unwrap();
+            assert_eq!((ran.project, ran.passed, ran.exit_code), (true, false, None));
+            assert!(ran.output.as_deref().unwrap().starts_with("TerminalX did not run it: `"), "{:?}", ran.output);
+            assert!(checked.gates[2].detail.as_deref().unwrap().contains("was not run"));
+            assert!(!checkout.cwd.join("ran-first").exists(), "no part of it ran");
+        }
+    }
+
+    #[test]
+    fn gates_run_again_do_not_take_what_their_own_commands_wrote_for_uncommitted_work() {
+        let (_dir, checkout) = worktree();
+        write(&checkout.cwd, "src/store/mod.rs", "pub fn read() -> u8 {\n    2\n}\n");
+        commit(&checkout.cwd, "two");
+        // A check that writes into the worktree: a snapshot, and a tracked file changed.
+        let piece = piece(json!({"doneChecks": [{"type": "command", "run": "echo snap > snapshot.new && echo '// touched' >> src/session.rs"}]}));
+        assert!(gates(&checkout, &piece, None, QUICK).passed());
+        assert!(!git(&checkout.cwd, &["status", "--porcelain"]).is_empty());
+        // Again on the same commit (the app stopped mid-check, or a verifier's branch check restarted it).
+        let again = gates(&checkout, &piece, None, QUICK);
+        assert_eq!(names(&again), [(Gate::Scope, true), (Gate::Branch, true), (Gate::Commands, true)]);
+        // A new commit is a new result: its worktree must be clean again.
+        git(&checkout.cwd, &["commit", "-q", "--allow-empty", "-m", "three"]);
+        let moved = gates(&checkout, &piece, None, QUICK);
+        assert_eq!(names(&moved), [(Gate::Scope, true), (Gate::Branch, false)]);
+        assert!(moved.gates[1].detail.as_deref().unwrap().contains("snapshot.new"));
     }
 
     fn reply(block: &str) -> String {

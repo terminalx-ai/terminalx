@@ -1118,8 +1118,10 @@ pub fn worker_turn_ended(host: &dyn Host, session_id: &str) -> Option<String> {
 /// turn: a `done` report is checked first, and a result that fails goes back
 /// to a fresh worker without the lead. It is woken when a piece's result is
 /// accepted, when a piece stops for good (blocked, failed), when a piece is
-/// ready for it to start, or when the run has ended. With `all`, only once
-/// nothing is under way any more.
+/// ready for it to start, when the run has ended, or when nothing is under
+/// way and nothing could start (a piece blocked before the wait began would
+/// otherwise keep it asleep to its timeout). With `all`, only once nothing is
+/// under way any more.
 pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     let name = |state: PieceState| serde_json::to_value(state).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
     let settled = |state: PieceState| matches!(state, PieceState::Done | PieceState::Blocked | PieceState::Failed | PieceState::Stopped);
@@ -1130,7 +1132,9 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     let ended = now.state != RunState::Running;
     let woken = match all {
         true => ended || !under_way,
-        false => ended || !changed.is_empty() || !ready.is_empty(),
+        // Nothing under way and nothing to start: whatever holds the run up (a blocked piece,
+        // from before this wait began) will not change by waiting.
+        false => ended || !changed.is_empty() || !ready.is_empty() || !under_way,
     };
     if !woken {
         return None;
@@ -1145,6 +1149,9 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     }
     if ended {
         why.push(format!("The run is {}.", state_name(now.state)));
+    } else if !under_way && ready.is_empty() {
+        let held: Vec<String> = now.pieces.iter().filter(|piece| matches!(piece.state, PieceState::Blocked | PieceState::Failed)).map(|piece| piece.id.clone()).collect();
+        why.push(format!("Nothing is under way and nothing can start: waiting changes nothing.{}", if held.is_empty() { String::new() } else { format!(" Held up by: {}. `terminalx runs show` says why for each.", held.join(", ")) }));
     }
     Some(json!({
         "run": now.id, "state": now.state, "reason": now.reason, "why": why, "ready": ready,
