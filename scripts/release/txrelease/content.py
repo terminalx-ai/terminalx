@@ -8,7 +8,7 @@ extracted to disk, so no member name can write outside the scan.
 What cannot be opened cannot be searched, so it is not treated as clean. A file in a compressed or
 encoded format the scan does not open (7z, RAR, zstd, an Apple disk image, ...) or any other
 high-entropy data is a finding, unless its format is in ALLOWED_OPAQUE, which names each format
-deliberately left closed and why that cannot hide a readable secret. A container that is corrupt,
+deliberately left closed (images, video, executables) and why. A container that is corrupt,
 encrypted, nested too deep or would expand too far is a finding too.
 """
 from __future__ import annotations
@@ -37,6 +37,18 @@ ALLOWED_OPAQUE = {
                   'and the whole file is searched byte for byte',
     'JPEG 2000 image': 'its wavelet-coded data holds only pixel samples (macOS stores some icon sizes this way); '
                        'XML and UUID boxes are stored as plain bytes, and the whole file is searched byte for byte',
+    'ISO media file': 'MP4, QuickTime, HEIC and AVIF hold coded video, audio and pixel samples; their metadata boxes '
+                      '(udta, meta, XMP) are stored as plain bytes, and the whole file is searched byte for byte',
+    'Matroska or WebM video': 'its blocks hold coded video and audio samples; tags and attachments are stored as plain '
+                              'bytes, and the whole file is searched byte for byte',
+    'Mach-O executable': 'machine code, symbol and string tables, embedded plists and the code signature are stored as '
+                         'plain bytes, and the whole file is searched byte for byte. The main executable also carries '
+                         'the frontend, which Tauri compresses into it (the whole file measures about 7.3 bits per '
+                         'byte); that is built from '
+                         "this repository's source and its locked packages, which are public, so no build-time "
+                         'secret may ever be given to it (docs/RELEASING.md)',
+    'ELF executable': 'machine code, symbol and string tables are stored as plain bytes, and the whole file is '
+                      'searched byte for byte',
 }
 
 MAX_DEPTH = 8
@@ -106,7 +118,52 @@ def sniff(data: bytes) -> str | None:
         return 'WOFF2 font'
     if len(data) >= 512 and data[-512:-508] == b'koly':
         return 'Apple disk image'
+    if _iso_media(data):
+        return 'ISO media file'
+    if data.startswith(b'\x1a\x45\xdf\xa3'):
+        return 'Matroska or WebM video'
+    if _mach_o(data):
+        return 'Mach-O executable'
+    if data.startswith(b'\x7fELF') and data[4:5] in (b'\x01', b'\x02') and data[5:6] in (b'\x01', b'\x02'):
+        return 'ELF executable'
     return None
+
+
+def _iso_media(data: bytes) -> bool:
+    # The first box: a 32-bit size, then its type. ftyp names MP4, HEIC and AVIF; an older QuickTime
+    # file may start straight at its movie or media data.
+    if len(data) < 16 or data[4:8] not in (b'ftyp', b'moov', b'mdat', b'wide'):
+        return False
+    size = struct.unpack('>I', data[:4])[0]
+    return size == 1 or 8 <= size <= len(data)
+
+
+def _mach_o(data: bytes) -> bool:
+    """A thin Mach-O whose load commands fit in the file, or a universal binary whose slices do."""
+    if data[:4] in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe'):
+        if len(data) < 28:
+            return False
+        filetype, ncmds, sizeofcmds = struct.unpack('<III', data[12:24])
+        header = 32 if data[0] == 0xcf else 28
+        return 1 <= filetype <= 12 and ncmds > 0 and header + sizeofcmds <= len(data)
+    if data[:4] in (b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf'):
+        # The same magic opens a Java class file, whose next four bytes are a version (45 or more);
+        # a universal binary has a handful of slices.
+        count = struct.unpack('>I', data[4:8])[0] if len(data) >= 8 else 0
+        wide = data[3] == 0xbf
+        entry = 32 if wide else 20
+        if not 1 <= count <= 16 or 8 + count * entry > len(data):
+            return False
+        for index in range(count):
+            at = 8 + index * entry
+            if wide:
+                offset, size = struct.unpack('>QQ', data[at + 8:at + 24])
+            else:
+                offset, size = struct.unpack('>II', data[at + 8:at + 16])
+            if offset + size > len(data):
+                return False
+        return True
+    return False
 
 
 def entropy(data: bytes) -> float:
@@ -163,7 +220,9 @@ class Inspector:
             self.hits.append(Hit(where, f'{kind} the scan cannot open; add it to ALLOWED_OPAQUE with a reason, or do not publish it'))
             return
         if len(data) >= ENTROPY_MIN_BYTES and entropy(data) > OPAQUE_ENTROPY:
-            self.hits.append(Hit(where, 'compressed or encrypted data in no format the scan can open'))
+            self.hits.append(Hit(where, 'compressed or encrypted data in no format the scan knows; recognise its format in '
+                                        'content.sniff() and either open it (OPENERS) or name it in ALLOWED_OPAQUE with a '
+                                        'reason, or do not publish it'))
 
 
 def _take(budget: list[int], size: int) -> None:

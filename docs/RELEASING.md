@@ -277,6 +277,15 @@ those gates and prints the tag, push and `gh release` commands without running
 them; `--dry-run` applies to no other step, since building and notarizing
 submit to Apple.
 
+If `publish` stops after it pushed (a failed upload, a download that did not
+match), fix the cause and run `publish` again. The push is then a no-op, and
+the draft release the first run left is reused: assets that are not this
+release's are deleted from it, and its notes and assets are replaced
+(`gh release upload --clobber`) before it is downloaded and compared again.
+Nothing is marked Latest until that comparison passes. Once the release is
+published (no longer a draft), `publish` refuses to touch it; run
+`verify-live` to check what it serves.
+
 `python3 -I scripts/release/release.py check-dmg <path>` is read-only. It
 validates the stapled tickets on any DMG and on the app inside it, and runs
 Gatekeeper's assessment of both. Run it on a downloaded release to confirm
@@ -309,7 +318,9 @@ Every release uploads six files:
 | `SHA256SUMS` | SHA-256 of the other five |
 
 Because the fixed-name copy is attached to every release, this link always
-downloads the newest notarized build. The website and the README link to it:
+downloads the newest notarized build. The README links to it, and so should
+every download button on the website: a link to a versioned DMG goes stale at
+the next release.
 
 <https://github.com/terminalx-ai/terminalx/releases/latest/download/TerminalX-latest-aarch64.dmg>
 
@@ -337,14 +348,21 @@ more than 8 deep or expanding past 2 GiB, a format it does not open (7z, RAR,
 zstd, LZ4, LZFSE, xar, WOFF2, an Apple disk image) and any other
 high-entropy data. The only formats deliberately left closed are listed, each
 with its reason, in `ALLOWED_OPAQUE` in `scripts/release/txrelease/content.py`:
-JPEG, GIF, WebP and JPEG 2000 images, whose coded data holds only pixels and
-whose metadata is stored as plain bytes. Publishing any other such file means
-adding its format there, with a reason, in a reviewed change. The release DMG
+JPEG, GIF, WebP and JPEG 2000 images, MP4/QuickTime/HEIC/AVIF and WebM video,
+whose coded data holds only samples and whose metadata is stored as plain
+bytes, and Mach-O and ELF executables, whose code and strings are plain bytes.
+A high-entropy file in any other format fails with a message saying so; to
+publish it, recognise its format in `sniff()` in the same file and either open
+it (`OPENERS`) or allow it (`ALLOWED_OPAQUE`) with a reason, in a reviewed
+change. The release DMG
 itself is the one exception: its compressed image is searched as bytes and its
 files are read by mounting it. Compressed data inside a file that is otherwise
 not compressed is searched only as bytes: notably the frontend that Tauri
 compresses (Brotli) into the app executable, which is built from this
-repository's own `src/` and its locked dependencies.
+repository's own `src/` and its locked dependencies. So the frontend build
+must never be given a secret: today it reads no environment beyond Vite's own
+`MODE`, `DEV` and `BASE_URL`, and a `VITE_` variable added later would ship in
+the app where this scan cannot see it.
 
 In a commit, a pattern or home-path match that the same file already holds on
 `origin/main` is already public and is not reported again; this machine's own
@@ -361,7 +379,8 @@ secrets always are. It searches for:
 
 It records only where a match is and which kind it is, never the value.
 `publish` refuses a scan that found anything, that did not include the assets,
-that ran on another commit, or that is older than any asset or the notes. To
+that ran on another commit, that did not start at the `origin/main` `prepare`
+recorded, or that is older than any asset or the notes. To
 check a branch before a release, scan only its commits:
 
 ```sh

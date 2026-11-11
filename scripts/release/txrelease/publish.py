@@ -4,7 +4,8 @@ publish checks every earlier step's record first and only then changes anything:
 checks, notarization, stapling, artifact verification or secret scan did not pass never gets a tag,
 a push or a GitHub release. It then pushes main and the tag, uploads a draft release, downloads it
 back and compares, and only then marks it Latest, which moves both the in-app update feed and the
-stable download link to it.
+stable download link to it. If it stops after the draft exists, running it again reuses that draft:
+the push is a no-op once main and the tag are there, and the draft's notes and assets are replaced.
 """
 from __future__ import annotations
 
@@ -50,6 +51,36 @@ def compare_download(release: Release, runner: Runner, downloaded: Path) -> dict
     return {'allAssetsMatchLocal': True, 'checksumsVerified': True, 'manifestVerified': True, 'updater': updater}
 
 
+def existing_release(release: Release, runner: Runner) -> dict | None:
+    """The GitHub release for this tag, if there is one: whether it is a draft and its asset names."""
+    found = runner.run(['gh', 'release', 'view', release.tag, '--repo', REPO, '--json', 'isDraft,assets'], cwd=release.root, check=False)
+    if found.code:
+        require('release not found' in found.output, f'gh release view exited {found.code}: {found.output[-2000:]}')
+        return None
+    document = json.loads(found.output)
+    return {'isDraft': document['isDraft'], 'assets': sorted(a['name'] for a in document.get('assets', []))}
+
+
+def upload_draft(release: Release, runner: Runner) -> None:
+    """Create the draft release, or bring the draft an earlier, failed publish left back to exactly
+    this release's notes and assets, so publish can simply be run again."""
+    root, tag = release.root, release.tag
+    paths = sorted(release.assets.iterdir())
+    title, notes = f'TerminalX {release.version}', release.record('notes.md')
+    existing = existing_release(release, runner)
+    if existing is None:
+        runner.run(['gh', 'release', 'create', tag, '--repo', REPO, '--verify-tag', '--draft', '--title', title,
+                    '--notes-file', notes, *paths], cwd=root, mutates=True)
+        return
+    require(existing['isDraft'], f'{tag} is already published on GitHub; run the verify-live step to check what it serves')
+    print(f'Reusing the draft release {tag} an earlier publish left.', flush=True)
+    for name in existing['assets']:
+        if name not in {p.name for p in paths}:
+            runner.run(['gh', 'release', 'delete-asset', tag, name, '--repo', REPO, '--yes'], cwd=root, mutates=True)
+    runner.run(['gh', 'release', 'edit', tag, '--repo', REPO, '--title', title, '--notes-file', notes], cwd=root, mutates=True)
+    runner.run(['gh', 'release', 'upload', tag, '--repo', REPO, '--clobber', *paths], cwd=root, mutates=True)
+
+
 def publish(release: Release, runner: Runner) -> dict:
     checked = gates(release, runner)
     source = checked['sourceCommit']
@@ -62,9 +93,7 @@ def publish(release: Release, runner: Runner) -> dict:
         require(runner.out('git', 'rev-parse', f'{tag}^{{}}', cwd=root) == source, f'tag {tag} already exists on another commit')
     # An atomic push refuses a stale main; it never overwrites remote history.
     runner.run(['git', 'push', '--atomic', 'origin', 'main', f'refs/tags/{tag}'], cwd=root, mutates=True)
-    assets = [str(p) for p in sorted(release.assets.iterdir())]
-    runner.run(['gh', 'release', 'create', tag, '--repo', REPO, '--verify-tag', '--draft', '--title', f'TerminalX {release.version}',
-                '--notes-file', release.record('notes.md'), *assets], cwd=root, mutates=True)
+    upload_draft(release, runner)
     downloaded = release.record('downloaded')
     if runner.dry_run:
         print('[dry run] would download the draft back and compare it with the local assets', flush=True)

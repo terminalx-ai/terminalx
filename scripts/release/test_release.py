@@ -122,11 +122,14 @@ class Fixture:
         write_json(self.release.record('secret-scan.json'),
                    {'clean': True, 'findings': [], 'assetsScanned': True, 'head': HEAD, 'base': BASE, 'scanned': {'files': 9, 'bytes': 1}, **overrides})
 
-    def runner(self, dry_run=True, tag_exists=False) -> FakeRunner:
+    def runner(self, dry_run=True, tag_exists=False, on_github=None) -> FakeRunner:
+        """``on_github`` is the GitHub release ``gh release view`` finds for the tag: None for none."""
+        found = Result(1, 'release not found') if on_github is None else Result(0, json.dumps(on_github))
         return FakeRunner([
             *git_responses(),
             (['git', 'rev-parse', '-q', '--verify'], Result(0 if tag_exists else 1, '')),
             (['git', 'rev-parse', f'{self.release.tag}^{{}}'], Result(0, HEAD)),
+            (['gh', 'release', 'view', self.release.tag, '--repo', config.REPO, '--json', 'isDraft,assets'], found),
         ], dry_run=dry_run)
 
 
@@ -351,7 +354,8 @@ class PublishGateTests(TempCase):
         self.assertIn(str(self.release.assets / LATEST_DMG), create)
         self.assertIn(str(self.release.assets / 'SHA256SUMS'), create)
         self.assertIn('--latest', runner.mutations[3])
-        self.assertFalse(runner.ran('gh'))
+        # The only gh command a dry run runs is the read-only look for a draft an earlier run left.
+        self.assertEqual([c[:3] for c in runner.calls if c[0] == 'gh'], [['gh', 'release', 'view']])
         self.assertIn('[dry run] would run: git push --atomic origin main refs/tags/v9.8.7', printed.getvalue())
         self.assertFalse(self.release.record('release-result.json').exists())
 
@@ -428,9 +432,45 @@ class PublishGateTests(TempCase):
         result = publish.publish(self.release, runner)
         self.assertTrue(result['uploadVerification']['allAssetsMatchLocal'])
         order = [c[:3] for c in runner.calls if c[0] in ('gh', 'git') and c[1] in ('release', 'push', 'tag')]
-        self.assertEqual(order, [['git', 'tag', '-a'], ['git', 'push', '--atomic'], ['gh', 'release', 'create'],
+        self.assertEqual(order, [['git', 'tag', '-a'], ['git', 'push', '--atomic'], ['gh', 'release', 'view'], ['gh', 'release', 'create'],
                                  ['gh', 'release', 'download'], ['gh', 'release', 'edit'], ['gh', 'release', 'view']])
         self.assertTrue(self.release.record('release-result.json').exists())
+
+    def test_running_publish_again_reuses_the_draft_an_earlier_run_left(self):
+        # The first run pushed and created the draft, then stopped: the draft holds a stray file and
+        # misses SHA256SUMS. The second run must bring it back to exactly this release, not fail.
+        names = sorted(p.name for p in self.release.assets.iterdir())
+        draft = {'isDraft': True, 'assets': [{'name': n} for n in names if n != 'SHA256SUMS'] + [{'name': 'stray.txt'}]}
+        runner = self.fixture.runner(dry_run=True, tag_exists=True, on_github=draft)
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            publish.publish(self.release, runner)
+        self.assertIn('Reusing the draft release v9.8.7', printed.getvalue())
+        self.assertEqual([m[:3] for m in runner.mutations], [['git', 'push', '--atomic'], ['gh', 'release', 'delete-asset'],
+                                                             ['gh', 'release', 'edit'], ['gh', 'release', 'upload'],
+                                                             ['gh', 'release', 'edit']])
+        self.assertEqual(runner.mutations[1][3:5], ['v9.8.7', 'stray.txt'])
+        self.assertIn('--notes-file', runner.mutations[2])
+        self.assertNotIn('--latest', runner.mutations[2])
+        upload = runner.mutations[3]
+        self.assertIn('--clobber', upload)
+        self.assertEqual(sorted(Path(a).name for a in upload if a.startswith(str(self.release.assets))), names)
+        self.assertIn('--latest', runner.mutations[4])
+
+    def test_refuses_to_touch_a_release_already_published(self):
+        runner = self.fixture.runner(dry_run=False, tag_exists=True, on_github={'isDraft': False, 'assets': []})
+        runner.responses.append((['git', 'push'], Result(0, 'Everything up-to-date')))
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ReleaseError) as raised:
+            publish.publish(self.release, runner)
+        self.assertIn('v9.8.7 is already published on GitHub; run the verify-live step', raised.exception.code)
+        self.assertEqual([m[:2] for m in runner.mutations], [['git', 'push']])
+
+    def test_a_failed_look_for_the_draft_stops_before_uploading(self):
+        runner = self.fixture.runner(dry_run=True)
+        runner.responses.insert(0, (['gh', 'release', 'view'], Result(1, 'HTTP 502: Bad Gateway')))
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ReleaseError) as raised:
+            publish.publish(self.release, runner)
+        self.assertIn('gh release view exited 1: HTTP 502', raised.exception.code)
+        self.assertFalse(any(m[:2] == ['gh', 'release'] for m in runner.mutations))
 
     def test_a_download_that_differs_never_becomes_latest(self):
         downloaded = self.release.record('downloaded')
@@ -622,7 +662,9 @@ class SecretScanTests(TempCase):
         self.assertFound(self.scan(), f'git vendor/tools.7z ({self.blob("vendor/tools.7z")})',
                          '7z archive the scan cannot open; add it to ALLOWED_OPAQUE with a reason, or do not publish it')
         self.commit({'vendor/tools.7z': None, 'vendor/blob.dat': os.urandom(64 << 10)})
-        self.assertFound(self.scan(), f'git vendor/blob.dat ({self.blob("vendor/blob.dat")})', 'compressed or encrypted data in no format the scan can open')
+        self.assertFound(self.scan(), f'git vendor/blob.dat ({self.blob("vendor/blob.dat")})',
+                         'compressed or encrypted data in no format the scan knows; recognise its format in content.sniff() '
+                         'and either open it (OPENERS) or name it in ALLOWED_OPAQUE with a reason, or do not publish it')
         # The earlier commits are still pushed, so their files still count; the allowed JPEG adds nothing.
         self.commit({'vendor/blob.dat': None, 'docs/photo.jpg': b'\xff\xd8\xff\xe0' + os.urandom(64 << 10)})
         self.assertEqual([f for f in self.scan()['findings'] if 'docs/photo.jpg' in f['where']], [])
@@ -691,6 +733,54 @@ class SecretScanTests(TempCase):
         self.assertEqual(scanner.findings, [])
         scanner.scan('source', SLACK_SHAPED.encode())
         self.assertEqual(scanner.findings, [{'where': 'source', 'what': 'Slack token pattern'}])
+
+
+def mach_o(body: bytes, filetype=2) -> bytes:
+    """A 64-bit arm64 Mach-O header with one load command, then ``body``."""
+    command = struct.pack('<II', 0x19, 72) + bytes(64)
+    return struct.pack('<IiiIIIII', 0xfeedfacf, 0x0100000c, 0, filetype, 1, len(command), 0, 0) + command + body
+
+
+class ContentTests(unittest.TestCase):
+    """The format checks an executable or a video passes, and the high-entropy data it would otherwise be."""
+
+    def inspect(self, data: bytes) -> list[str]:
+        inspector = content.Inspector({'test secret': b'tx-test-secret-value'}, dict(secrets_scan.PATTERNS))
+        inspector.inspect('file', data)
+        return [hit.what for hit in inspector.hits]
+
+    def test_an_executable_with_compressed_data_inside_is_searched_and_allowed(self):
+        # The main app executable measures about 7.3 bits per byte (Tauri compresses the frontend
+        # into it); a larger frontend must not stop a release, and its bytes are still searched.
+        payload = zlib.compress(os.urandom(256 << 10), 9)
+        self.assertGreater(content.entropy(mach_o(payload)), content.OPAQUE_ENTROPY)
+        self.assertEqual(content.sniff(mach_o(payload)), 'Mach-O executable')
+        self.assertEqual(self.inspect(mach_o(payload)), [])
+        self.assertEqual(self.inspect(mach_o(payload + b'tx-test-secret-value' + payload)), ['test secret'])
+        fat = struct.pack('>II', 0xcafebabe, 1) + struct.pack('>iiIII', 0x0100000c, 0, 4096, len(mach_o(payload)), 14)
+        fat += bytes(4096 - len(fat)) + mach_o(payload)
+        self.assertEqual(content.sniff(fat), 'Mach-O executable')
+        self.assertEqual(content.sniff(b'\x7fELF\x02\x01\x01' + payload), 'ELF executable')
+        self.assertIn('Mach-O executable', content.ALLOWED_OPAQUE)
+
+    def test_only_a_well_formed_header_counts_as_an_executable(self):
+        noise = os.urandom(64 << 10)
+        for data in (b'\xcf\xfa\xed\xfe' + noise,              # Mach-O magic, nonsense header
+                     mach_o(noise, filetype=0),                  # no such file type
+                     b'\xca\xfe\xba\xbe\x00\x00\x00\x34' + noise,  # a Java class file (version 52)
+                     b'\x7fELF\x09' + noise):                     # ELF magic, no such class
+            self.assertIsNone(content.sniff(data), data[:8])
+            self.assertEqual(len(self.inspect(data)), 1)
+            self.assertTrue(self.inspect(data)[0].startswith('compressed or encrypted data in no format the scan knows'))
+
+    def test_a_video_is_searched_and_allowed(self):
+        samples = os.urandom(128 << 10)
+        mp4 = struct.pack('>I', 24) + b'ftypisom' + bytes(12) + struct.pack('>I', 8 + len(samples)) + b'mdat' + samples
+        self.assertEqual(content.sniff(mp4), 'ISO media file')
+        self.assertEqual(self.inspect(mp4), [])
+        self.assertEqual(self.inspect(mp4 + f'udta {AWS_SHAPED}'.encode()), ['AWS access key pattern'])
+        self.assertEqual(content.sniff(b'\x1a\x45\xdf\xa3' + samples), 'Matroska or WebM video')
+        self.assertIsNone(content.sniff(struct.pack('>I', 3) + b'ftyp' + samples))
 
 
 class SourceTests(TempCase):
