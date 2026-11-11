@@ -714,6 +714,8 @@ pub fn run() {
             commands::git_checkout,
             commands::working_changes,
             commands::pr_list,
+            commands::pr_search,
+            commands::pr_attach,
             commands::pr_associations,
             commands::pr_associations_batch,
             commands::pr_details,

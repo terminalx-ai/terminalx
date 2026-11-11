@@ -528,3 +528,15 @@ describe("Home navigation (PRO-183)", () => {
     expect(sessions.getSessionStore().view).toBe("home");
   });
 });
+
+it("requests Start from only for that new-session navigation", () => {
+  sessions.openNewSession(true);
+  const first = sessions.getSessionStore().startFromRequest;
+  expect(first).toBeGreaterThan(0);
+  sessions.openNewSession(true);
+  expect(sessions.getSessionStore().startFromRequest).toBeGreaterThan(first);
+  sessions.openIssues();
+  expect(sessions.getSessionStore()).toMatchObject({ view: "issues", startFromRequest: 0 });
+  sessions.openNewSession();
+  expect(sessions.getSessionStore().startFromRequest).toBe(0);
+});

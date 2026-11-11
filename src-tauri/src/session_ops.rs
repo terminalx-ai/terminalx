@@ -96,6 +96,9 @@ pub struct NewSession {
     /// An existing branch to check out in the new worktree, instead of a new branch.
     #[serde(default)]
     pub checkout_branch: Option<String>,
+    /// A PR head, fetched by gh (including forks) into an isolated worktree.
+    #[serde(default)]
+    pub checkout_pr: Option<u64>,
     /// Explicit acknowledgement that a requested worktree should be skipped.
     #[serde(default)]
     pub on_main: bool,
@@ -116,6 +119,11 @@ pub struct NewSession {
 
 pub(crate) fn validate_session_target(req: &NewSession) -> Result<()> {
     if let Some(tab) = &req.tab { validate_transport(tab)?; }
+    if let Some(number) = req.checkout_pr {
+        if number == 0 || !req.use_worktree || req.on_main || req.cwd.is_some() || req.checkout_branch.is_some() || req.base_ref.is_some() || req.tab.is_none() {
+            return Err("Starting from a pull request requires a new worktree and an agent.".into());
+        }
+    }
     let requested_worktree = req.worktree_name.as_deref().is_some_and(|name| !name.trim().is_empty());
     if !req.use_worktree && requested_worktree && !req.on_main {
         return Err("A requested worktree can only be skipped when onMain is explicitly true.".into());
@@ -241,6 +249,10 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
     let project = projects::canonical_directory(&req.project_path).map_err(err)?;
     projects::refuse_mirror(&project).map_err(err)?;
     let project_path = Path::new(&project);
+    if req.checkout_pr.is_some() && !git::is_repo(project_path) {
+        return Err(WorkspaceError::InvalidArguments("Pull requests require a Git project.".into()));
+    }
+    let starting_pr = req.checkout_pr.map(|number| crate::github::pr_details(project_path, number).map_err(err)).transpose()?;
     let id = uuid::Uuid::now_v7().to_string();
     let now = index::now();
     let requested_title = req.title.clone().filter(|t| !t.trim().is_empty())
@@ -296,9 +308,13 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
             Some(name) => name,
             None => available_worktree_name(project_path, generated_name, None)?,
         };
-        let wt = match req.checkout_branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
-            Some(branch) => git::checkout_worktree(project_path, &name, branch).map_err(err)?,
-            None => git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?,
+        let wt = if let Some(number) = req.checkout_pr {
+            git::checkout_pr_worktree(project_path, &name, number).map_err(err)?
+        } else {
+            match req.checkout_branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
+                Some(branch) => git::checkout_worktree(project_path, &name, branch).map_err(err)?,
+                None => git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?,
+            }
         };
         entry.cwd = wt.path;
         entry.worktree_name = Some(wt.name);
@@ -316,6 +332,12 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
     });
 
     index::local_sections::insert_session(&entry, req.section_id.as_deref()).map_err(err)?;
+    if let Some(pr) = starting_pr {
+        // Association failure must not report an already-created session as failed.
+        if let Err(error) = crate::pr_associations::record_local(&entry.id, Path::new(&entry.cwd), &pr.url, entry.branch.as_deref().unwrap_or_default()) {
+            log::warn!("Could not associate the starting pull request: {error:#}");
+        }
+    }
     Ok(entry)
 }
 
@@ -1196,6 +1218,17 @@ pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn pull_request_sessions_require_an_isolated_target() {
+        let valid = serde_json::json!({ "projectPath": "/repo", "useWorktree": true, "checkoutPr": 12, "tab": { "harness": "claude" } });
+        assert!(super::validate_session_target(&serde_json::from_value(valid.clone()).unwrap()).is_ok());
+        for (key, value) in [("checkoutPr", serde_json::json!(0)), ("useWorktree", serde_json::json!(false)), ("onMain", serde_json::json!(true)), ("cwd", serde_json::json!("/repo")), ("checkoutBranch", serde_json::json!("main")), ("baseRef", serde_json::json!("main")), ("tab", serde_json::Value::Null)] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            assert!(super::validate_session_target(&serde_json::from_value(invalid).unwrap()).is_err(), "accepted conflicting {key}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1216,7 +1249,7 @@ mod tests {
         let mut settings = store::settings::load();
         settings.experimental.native_codex = true;
         store::settings::save(&settings).unwrap();
-        let mut issue = NewSession { parent: None, section_id: None, project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)) };
+        let mut issue = NewSession { parent: None, section_id: None, project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, checkout_pr: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)) };
         prefer_native_codex_session(&mut issue);
         assert_eq!(issue.tab.as_ref().unwrap().transport, index::AgentTransport::ExperimentalCodexStdio);
         issue.tab = Some(tab("codex", None));
@@ -1271,6 +1304,7 @@ mod tests {
             worktree_name: None,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             issue: None,
             automation: None,
             cwd: None,
@@ -1599,6 +1633,7 @@ mod tests {
             worktree_name: None,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             issue: None,
             automation: None,
             cwd: Some(cwd.into()),

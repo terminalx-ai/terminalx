@@ -928,6 +928,7 @@ fn create_session(manager: &crate::session::SessionManager, params: &Value) -> R
                 project_path: project.path, title, use_worktree: p.use_worktree, on_main: !p.use_worktree,
                 base_ref: None, worktree_name: (p.use_worktree && !named.is_empty()).then_some(named),
                 checkout_branch: None, issue: None, automation: None, cwd: None, tab: Some(tab),
+                checkout_pr: None,
             };
             crate::session_ops::validate_session_target(&req).map_err(|error| anyhow::anyhow!(error))?;
             crate::session_ops::create_session_blocking(&**manager.sink(), req).map_err(|error| anyhow::anyhow!(error))?

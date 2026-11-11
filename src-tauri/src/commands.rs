@@ -3059,6 +3059,16 @@ pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_assoc
 }
 
 #[tauri::command]
+pub async fn pr_search(cwd: String, query: String) -> CmdResult<Vec<crate::github::PullRequest>> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::search_prs(Path::new(&cwd), &query).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_attach(cwd: String, number: u64) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::attach_pr(Path::new(&cwd), number).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn pr_associations_batch(session_keys: Vec<String>) -> CmdResult<std::collections::BTreeMap<String, Vec<crate::pr_associations::Association>>> {
     tauri::async_runtime::spawn_blocking(move || crate::pr_associations::for_sessions(&session_keys).map_err(err)).await.map_err(err)?
 }
@@ -4120,6 +4130,7 @@ mod command_tests {
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4160,6 +4171,7 @@ mod command_tests {
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: Some("old-workspace".into()),
             issue: None,
@@ -4181,6 +4193,7 @@ mod command_tests {
             use_worktree: false,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4230,6 +4243,7 @@ mod command_tests {
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: Some("calm-ember".into()),
             issue: None,
@@ -4282,6 +4296,7 @@ mod command_tests {
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4309,6 +4324,7 @@ mod command_tests {
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4325,6 +4341,7 @@ mod command_tests {
             use_worktree: false,
             on_main: true,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,

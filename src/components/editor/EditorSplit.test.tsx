@@ -30,7 +30,13 @@ vi.mock("./PdfSurface", () => ({ default: ({ data }: { data: string }) => <div d
 beforeEach(() => {
   setLastFocused("chat");
   setPrefs({ diffMode: "unified", diffHideWhitespace: false, diffWrap: true, diffWrapFiles: {} });
-  vi.mocked(fs.mtime).mockResolvedValue(1);
+  // A save updates the version seen by the editor's periodic disk check.
+  const mtimes = new Map<string, number>();
+  vi.mocked(fs.mtime).mockImplementation(async (path) => mtimes.get(path) ?? 1);
+  vi.mocked(fs.writeText).mockImplementation(async (path) => {
+    mtimes.set(path, 2);
+    return 2;
+  });
   vi.mocked(fs.openMedia).mockResolvedValue({ token: "grant", url: "http://127.0.0.1:1234/grant", mtimeMs: 1 });
   vi.mocked(fs.readText).mockResolvedValue({ content: "<svg/>", binary: false, truncated: false, mtimeMs: 1, size: 6 });
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});

@@ -990,6 +990,7 @@ impl ControlService {
                         use_worktree: p.use_worktree,
                         on_main: p.on_main,
                         checkout_branch: None,
+                        checkout_pr: None,
                         base_ref: None,
                         worktree_name: None,
                         issue: issue.as_ref().map(|issue| issue.reference.clone()),

@@ -1044,6 +1044,7 @@ impl Starter for ManagerStarter {
                 use_worktree: false,
                 on_main: true,
                 checkout_branch: None,
+                checkout_pr: None,
                 base_ref: None,
                 worktree_name: None,
                 issue: None,
