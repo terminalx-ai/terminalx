@@ -12,7 +12,7 @@ activation or measured PR speedup is claimed.
 | Phase | Successful first-attempt PR runs | Whole-run median | Whole-run p90 | Status |
 | --- | ---: | ---: | ---: | --- |
 | Historical unsplit baseline, November 6 | 10 | 59.0 min | 74.1 min | Frozen historical sample, not today's three-job baseline |
-| Main's #882 three-job layout, November 11 | 6 | 51.8 min | 57.3 min | **Incomplete: 6/10**; descriptive only |
+| Main's #882 three-job layout, November 11 | 6 | 52.2 min | 62.3 min | **Incomplete: 6/10**; descriptive only |
 | PRO-267 Linux Rust split | 0 | — | — | **Incomplete: 0/10** at preparation; collect after publication |
 | Hetzner main/nightly pilot | 0 main runs | — | — | Owner prerequisites and activation pending; cannot represent PR acceleration |
 
@@ -22,7 +22,11 @@ measured speedup. The November 11 sample contains successful first-attempt PR
 runs started after #882 merged, with all three job names and no `linux-rust` job.
 The raw sanitized observations are in
 [`baseline-three-jobs.json`](../infra/ci-runners/baseline-three-jobs.json).
-The ten-run performance acceptance criteria remain open.
+The workflow blob on each included PR head matches main exactly: `28f0ae3e08612918769f48b0f92082391f14e47e`.
+Run `42950103996` was excluded after checking its different workflow revision,
+even though its job names matched. A later completed run (`42994223501`)
+matched the workflow and was added in the final refresh. The ten-run acceptance
+criteria remain open.
 
 ## Current main's three-job sample (incomplete)
 
@@ -30,19 +34,19 @@ Main three-job layout before PRO-267 (incomplete sample): 6 successful first att
 
 | Job | Runs | Median | p90 (nearest rank) |
 | --- | ---: | ---: | ---: |
-| Whole run | 6 | 51.8 | 57.3 |
-| check | 6 | 40.2 | 47.4 |
-| desktop-platforms (instabox-medium) | 6 | 9.9 | 10.1 |
-| frontend | 6 | 3.9 | 4.3 |
-| headless-serve | 6 | 4.9 | 5.8 |
+| Whole run | 6 | 52.2 | 62.3 |
+| check | 6 | 43.3 | 58.5 |
+| desktop-platforms (instabox-medium) | 6 | 9.9 | 12.2 |
+| frontend | 6 | 4.1 | 6.0 |
+| headless-serve | 6 | 5.2 | 6.1 |
 | legacy-runtime-probe (instabox-medium) | 6 | 0.1 | 0.2 |
 | legacy-runtime-probe (macos-latest) | 6 | 0.2 | 0.2 |
-| webkit-layout | 6 | 19.1 | 22.9 |
+| webkit-layout | 6 | 19.5 | 24.0 |
 
 Samples:
+- [42994223501](https://github.com/terminalx-ai/terminalx/actions/runs/42994223501) · 2026-11-11T09:19:35Z · `71aa466de0c9`
 - [42976833560](https://github.com/terminalx-ai/terminalx/actions/runs/42976833560) · 2026-11-11T07:04:28Z · `cdcd82088080`
 - [42974110579](https://github.com/terminalx-ai/terminalx/actions/runs/42974110579) · 2026-11-11T06:40:44Z · `bf27a131d9d4`
-- [42950103996](https://github.com/terminalx-ai/terminalx/actions/runs/42950103996) · 2026-11-11T03:02:58Z · `0313b907a36f`
 - [42949051452](https://github.com/terminalx-ai/terminalx/actions/runs/42949051452) · 2026-11-11T02:53:25Z · `1260ee3e4ca5`
 - [42947045989](https://github.com/terminalx-ai/terminalx/actions/runs/42947045989) · 2026-11-11T02:35:20Z · `014d477cd82e`
 - [42946576296](https://github.com/terminalx-ai/terminalx/actions/runs/42946576296) · 2026-11-11T02:31:17Z · `22ea1940251f`
@@ -96,11 +100,13 @@ of this one PR establishes the intended ten-run comparison.
   all-target Clippy with warnings denied.
 - Passed in TerminalX Local VM (Linux ARM64): frontend build and full-default-
   feature, all-target Clippy with warnings denied.
-- Passed: actionlint 1.7.12; all 19 CI helper/policy tests, including rejection
+- Passed: actionlint 1.7.12; all 20 CI helper/policy tests, including rejection
   fixtures for mutable actions, unguarded runners, write tokens, privileged
   triggers, cross-scope cache fallbacks and missing aggregate dependencies.
-- Full macOS and Linux Rust validation is in progress at this checkpoint.
-  Final results will be recorded before opening the PR. Previous November 6
+- The first merged Linux run exposed four security-test failures: an empty
+  loader-tracing flag caused false success without executing the guarded
+  command. The wrapper fix and added regression are under validation. Full
+  macOS/Linux results will be recorded before opening the PR. Previous November 6
   passes below are historical and are not presented as passes for this merge.
 
 ## Observed baseline

@@ -201,7 +201,13 @@ fn approved_input_in(
     // env -i clears variables only after env itself has loaded. Mask loader
     // controls with shell assignments first, so startup-file LD_* / DYLD_*
     // values cannot inject libraries or create loader trace/profile files.
-    let mut wrapper = String::new();
+    // glibc enables LD_TRACE_LOADED_OBJECTS by presence, even when empty:
+    // assigning '' makes env print libraries and exit 0 without running the
+    // directory guard or command. Unset it with a shell builtin before any
+    // executable loads, in a subshell so the caller's environment is retained.
+    // A readonly flag must stop execution rather than masquerade as success.
+    let mut wrapper =
+        String::from("('command' 'unset' 'LD_TRACE_LOADED_OBJECTS' || exit 125; ");
     for key in [
         "LD_PRELOAD",
         "LD_AUDIT",
@@ -209,7 +215,6 @@ fn approved_input_in(
         "LD_DEBUG_OUTPUT",
         "LD_PROFILE",
         "LD_PROFILE_OUTPUT",
-        "LD_TRACE_LOADED_OBJECTS",
         "DYLD_INSERT_LIBRARIES",
         "DYLD_FRAMEWORK_PATH",
         "DYLD_FALLBACK_LIBRARY_PATH",
@@ -228,6 +233,7 @@ fn approved_input_in(
     }
     wrapper.push_str(" '/bin/sh' '-c' ");
     wrapper.push_str(&quote(&script));
+    wrapper.push(')');
     let mut updated = input.clone();
     let field = if input.get("command").is_some() {
         "command"

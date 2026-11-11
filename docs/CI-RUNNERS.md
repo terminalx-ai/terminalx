@@ -57,6 +57,16 @@ slave's line discipline before exercising the nudge. Linux can finish the
 master write before that byte is visible to `FIONREAD`; the test still requires
 unread input and proves that neither nudge adds another byte.
 
+The merged main also exposed a Linux loader bug in the read-only approval
+wrapper: assigning an empty `LD_TRACE_LOADED_OBJECTS` made glibc print loader
+information and return success before `env` could run the directory guard or
+command. The wrapper now unsets that flag with a shell builtin inside a subshell
+before launching any executable, and fails closed if it is readonly. Existing
+security assertions remain, plus a regression covering empty/set/readonly flags
+and execution in a different directory. The [glibc implementation treats the
+flag as enabled by presence](https://sourceware.org/pipermail/glibc-cvs/2022q1/076642.html).
+No test is suppressed to accommodate this behavior.
+
 ## macOS Rust coverage
 
 The full macOS suite runs on pushes to `main`, nightly at 02:23 UTC, manual
@@ -70,7 +80,9 @@ base and PR head, including files containing `target_os = "macos"` or
 companion module directories conservatively (for example `computer/`,
 `transcription/`, `local_runtime/`, `browser/`, `pairing/`, `status/`, and
 `harness/codex/`). Rust manifests/locks, build scripts, toolchain/configuration,
-crate roots, workflow and helper scripts also select the suite. Deletions and
+crate roots, workflow and helper scripts also select the suite. Approval wrapper
+code/tests (`harness/read_only*`) always select it too, because shell and loader
+semantics differ even without an Apple cfg. Deletions and
 renames are checked at their old paths too. Adding a new macOS cfg automatically
 adds its file to coverage; no hand-maintained file list can silently go stale.
 

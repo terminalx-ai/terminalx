@@ -368,6 +368,51 @@ fn sanitized_execution_preserves_pipes_conditionals_and_literal_arguments() {
 }
 
 #[test]
+fn loader_trace_cannot_replace_sanitized_execution_or_its_directory_guard() {
+    let repo = Repository::new();
+    std::fs::write(repo.root.join("file"), "hello\n").unwrap();
+    let updated = repo.approved("cat file").unwrap();
+    let command = updated["command"].as_str().unwrap();
+    // Set the flag inside the already-running shell: putting it in Command's
+    // environment would trace the outer shell before our wrapper can run.
+    for value in ["", "1"] {
+        let script = format!("export LD_TRACE_LOADED_OBJECTS={}; {command}", quote(value));
+        let output = Command::new("/bin/sh")
+            .current_dir(&repo.root)
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"hello\n");
+        let outside = Command::new("/bin/sh")
+            .current_dir(&repo.home)
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert_eq!(outside.status.code(), Some(125), "{outside:?}");
+        assert!(outside.stdout.is_empty());
+    }
+    let output = Command::new("/bin/sh")
+        .current_dir(&repo.root)
+        .args([
+            "-c",
+            &format!(
+                "readonly LD_TRACE_LOADED_OBJECTS=1; export LD_TRACE_LOADED_OBJECTS; {command}"
+            ),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "an unremovable loader flag must fail closed"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no loader or tool should run: {output:?}"
+    );
+}
+
+#[test]
 fn a_checked_repository_cannot_authorize_git_execution_in_another_workdir() {
     let checked = Repository::new();
     let execution = Repository::new();

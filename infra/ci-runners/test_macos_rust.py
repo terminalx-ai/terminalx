@@ -77,6 +77,12 @@ class MacosRustSelection(unittest.TestCase):
             self.write(path, "changed\n")
         self.assertEqual(len(self.selected()), 3)
 
+    def test_approval_wrapper_and_its_tests_select_without_an_apple_cfg(self):
+        paths = ["src-tauri/src/harness/read_only.rs", "src-tauri/src/harness/read_only_security_tests.rs"]
+        for path in paths:
+            self.write(path, "fn portable_approval_guard() {}\n")
+        self.assertEqual(self.selected(), paths)
+
     def test_base_branch_changes_are_not_pr_changes(self):
         self.write("src/app.ts", "export const value = 1;\n")
         self.commit()

@@ -1,5 +1,22 @@
 [
   {
+    "id": 42994223501,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42994223501",
+    "sha": "71aa466de0c92350f0a9fc40f2e3862bf1af0b02",
+    "event": "pull_request",
+    "started_at": "2026-11-11T09:19:35Z",
+    "minutes": {
+      "Whole run": 62.31666666666667,
+      "headless-serve": 6.1,
+      "legacy-runtime-probe (macos-latest)": 0.16666666666666666,
+      "legacy-runtime-probe (instabox-medium)": 0.16666666666666666,
+      "check": 58.483333333333334,
+      "webkit-layout": 24.0,
+      "frontend": 6.05,
+      "desktop-platforms (instabox-medium)": 12.233333333333333
+    }
+  },
+  {
     "id": 42976833560,
     "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42976833560",
     "sha": "cdcd820880804ab0465c72d28893885b0e3f8b18",
@@ -31,23 +48,6 @@
       "desktop-platforms (instabox-medium)": 8.5,
       "legacy-runtime-probe (macos-latest)": 0.23333333333333334,
       "legacy-runtime-probe (instabox-medium)": 0.13333333333333333
-    }
-  },
-  {
-    "id": 42950103996,
-    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42950103996",
-    "sha": "0313b907a36f32eb06f1f02d56dc98d9bdc94607",
-    "event": "pull_request",
-    "started_at": "2026-11-11T03:02:58Z",
-    "minutes": {
-      "Whole run": 55.666666666666664,
-      "check": 35.11666666666667,
-      "headless-serve": 4.933333333333334,
-      "frontend": 3.9833333333333334,
-      "legacy-runtime-probe (macos-latest)": 0.18333333333333332,
-      "legacy-runtime-probe (instabox-medium)": 0.15,
-      "webkit-layout": 19.883333333333333,
-      "desktop-platforms (instabox-medium)": 10.05
     }
   },
   {

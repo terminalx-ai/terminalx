@@ -16,7 +16,11 @@ sides of the change for macOS/Apple cfgs, `native/`, build inputs and companion
 modules. Ordinary frontend/docs/shared-Rust PRs outside that set no longer run
 macOS Rust tests before merge; Linux runs the full default-feature suite.
 No tests are dropped or newly ignored. Earlier Linux portability, watcher
-lifetime and PTY deadline fixes are retained through the merge.
+lifetime and PTY deadline fixes are retained through the merge. Linux testing
+also caught a false-success bug in main's approval wrapper: an empty loader
+tracing flag prevented both command and directory guard execution. It is now
+unset before any executable starts, with fail-closed regression coverage.
+Approval-wrapper changes always select the macOS suite as well.
 
 ## Security
 
@@ -42,8 +46,8 @@ lifetime and PTY deadline fixes are retained through the merge.
 
 See [dated validation and reproducible observations](docs/CI-RUNNERS-MEASUREMENTS.md).
 The historical ten-run unsplit baseline is 59.0 minutes median / 74.1 p90.
-Today's #882 baseline has only **6/10** successful first attempts: 51.8 median /
-57.3 p90. PRO-267 post-change and Hetzner samples are **0/10** at preparation.
+Today's #882 baseline has only **6/10** successful first attempts using the exact current workflow: 52.2 median /
+62.3 p90. PRO-267 post-change and Hetzner samples are **0/10** at preparation.
 No ten-run improvement or 20-minute result is claimed.
 
 ## Still required from the owner

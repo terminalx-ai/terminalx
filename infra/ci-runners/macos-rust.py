@@ -21,6 +21,8 @@ ALWAYS = (
     "src-tauri/tauri", "src-tauri/capabilities/", "src-tauri/permissions/",
     "src-tauri/Entitlements", "src-tauri/Info.plist",
     "src-tauri/src/lib.rs", "src-tauri/src/main.rs",
+    # Approval wrappers depend on shell/loader behavior on both operating systems.
+    "src-tauri/src/harness/read_only",
 )
 
 
