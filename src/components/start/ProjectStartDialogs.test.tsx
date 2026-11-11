@@ -472,3 +472,15 @@ describe("Create a project (Quick start)", () => {
     expect(invoke).not.toHaveBeenCalledWith("project_create", expect.anything());
   });
 });
+
+describe("the Project added notice", () => {
+  it("is cleared when another project-start dialog opens, so it never covers the dialog", async () => {
+    const { announceProjectAdded, useProjectAdded } = await import("@/lib/projectAdded");
+    const { renderHook } = await import("@testing-library/react");
+    act(() => announceProjectAdded({ path: "/repos/a", name: "a" }));
+    const { result } = renderHook(() => useProjectAdded());
+    expect(result.current).not.toBeNull();
+    open("quick");
+    await waitFor(() => expect(result.current).toBeNull());
+  });
+});

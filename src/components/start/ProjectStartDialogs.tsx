@@ -21,6 +21,7 @@ import {
   type ProjectTemplate,
   type StartFailure,
 } from "@/lib/projectStart";
+import { dismissProjectAdded } from "@/lib/projectAdded";
 import { relativeTime } from "@/lib/time";
 
 /** Never taller than the window: in a short one the dialog scrolls, so its title and buttons stay reachable. */
@@ -30,6 +31,10 @@ const FIELD = "h-8 w-full rounded-md bg-well px-2 text-[13px] outline-none place
 /** Mounted once (AppShell): the dialogs behind "Open GitHub project" and "Quick start" ("Create a project"). */
 export function ProjectStartDialogHost() {
   const dialog = useProjectStartDialog();
+  // The notice about the last project added is done with once the reader starts another: it would sit over this dialog's buttons.
+  useEffect(() => {
+    if (dialog) dismissProjectAdded();
+  }, [dialog]);
   if (dialog === "github") return <GithubProjectDialog />;
   if (dialog === "quick") return <QuickStartDialog />;
   return null;
