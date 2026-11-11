@@ -320,6 +320,21 @@ pub fn verifier_refusal(payload: &Value) -> Option<String> {
     edits.then(|| format!("TerminalX refused `{tool}`: a verifier of a run changes no file. You are here to judge the result as it is. If something is wrong, say where in your verdict block (`file:line`); the piece goes back to a worker."))
 }
 
+/// Whether a tab is held to reading: it is a verifier of a run's result.
+/// `known` is what the runs say ([`super::store::is_verifier`]). When they
+/// cannot be read, the session's own entry decides, so that not knowing never
+/// reads as "may edit": in a run worker's session, every agent but the
+/// worker's own, the first it was given, is taken for a verifier. Nothing
+/// else is: an unreadable file stops no other agent on this computer.
+pub fn reads_only(known: Option<bool>, session: Option<&SessionEntry>, tab_id: &str) -> bool {
+    known.unwrap_or_else(|| {
+        session.is_some_and(|session| {
+            let own = session.tabs.iter().filter(|tab| !tab.is_terminal()).min_by(|a, b| a.created.cmp(&b.created));
+            session.run_worker() && own.is_some_and(|own| own.id != tab_id)
+        })
+    })
+}
+
 /// Why a worker's tool call is refused, or `None` when it may go ahead.
 /// `payload` is the agent's `PreToolUse` hook input.
 pub fn refusal(payload: &Value) -> Option<String> {
@@ -550,6 +565,34 @@ mod tests {
         // And it starts where its agent itself changes nothing: Claude Code's plan mode, Codex's read-only sandbox.
         assert_eq!(super::VERIFIER_MODE, "plan");
         assert_eq!(crate::harness::codex::stance(super::VERIFIER_MODE).1, "read-only");
+    }
+
+    #[test]
+    fn a_tab_is_held_to_reading_by_what_the_runs_say_and_not_knowing_is_not_permission() {
+        let session = |worker: bool| {
+            let mut entry: SessionEntry = serde_json::from_value(serde_json::json!({
+                "id": "w1", "projectPath": "/repo", "cwd": "/repo/wt", "title": "Piece", "created": "2026-11-11T00:00:00Z", "modified": "2026-11-11T00:00:00Z",
+                "tabs": [
+                    {"id": "verifier", "harness": "claude", "created": "2026-11-11T00:09:00Z"},
+                    {"id": "worker", "harness": "claude", "created": "2026-11-11T00:01:00Z"},
+                ]
+            })).unwrap();
+            if worker {
+                entry.mark_run_worker();
+            }
+            entry
+        };
+        let (worker, other) = (session(true), session(false));
+        // The runs were read: they decide, whatever the session looks like.
+        assert!(super::reads_only(Some(true), Some(&other), "worker"));
+        assert!(!super::reads_only(Some(false), Some(&worker), "verifier"));
+        // They could not be read. In a run worker's session the worker's own agent, the first
+        // it was given, still edits; any other agent there is taken for a verifier.
+        assert!(!super::reads_only(None, Some(&worker), "worker"));
+        assert!(super::reads_only(None, Some(&worker), "verifier"));
+        // No other session is touched: an unreadable file stops nobody else's edits.
+        assert!(!super::reads_only(None, Some(&other), "verifier"));
+        assert!(!super::reads_only(None, None, "verifier"));
     }
 
     use super::*;

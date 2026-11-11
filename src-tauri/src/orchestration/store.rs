@@ -83,22 +83,21 @@ fn stored_verifiers() -> Result<std::collections::HashSet<(String, String)>> {
 /// conversation in the worker's worktree that reads and never edits.
 ///
 /// Asked for every tool call that would edit a file, in any session, so it
-/// is answered from memory. If the runs cannot be read it says no, and reads
-/// again the next time: an unreadable file must not stop every agent on this
-/// computer from editing. A verifier is still started in a mode that edits
-/// nothing ([`super::guard::VERIFIER_MODE`]).
-pub fn is_verifier(session_id: &str, tab_id: &str) -> bool {
+/// is answered from memory. `None` when the runs cannot be read: not known,
+/// which is not "no" ([`super::guard::reads_only`] decides then), and they
+/// are read again the next time.
+pub fn is_verifier(session_id: &str, tab_id: &str) -> Option<bool> {
     let mut known = VERIFIERS.lock().unwrap_or_else(|error| error.into_inner());
     if known.is_none() {
         match stored_verifiers() {
             Ok(stored) => *known = Some(stored),
             Err(error) => {
                 log::warn!("read the runs to see which tabs are verifiers: {error:#}");
-                return false;
+                return None;
             }
         }
     }
-    known.as_ref().is_some_and(|known| known.contains(&(session_id.to_string(), tab_id.to_string())))
+    known.as_ref().map(|known| known.contains(&(session_id.to_string(), tab_id.to_string())))
 }
 
 /// A verifier was made: it is one from now, before it is sent anything.
