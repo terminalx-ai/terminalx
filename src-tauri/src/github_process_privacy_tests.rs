@@ -962,7 +962,9 @@ fn privacy_main_integration_child() {
     // Automatic lifecycle scripts share admission; user/agent terminals remain independent.
     let script_terminals = std::sync::Arc::new(crate::pty::Terminals::new());
     let script_sink: std::sync::Arc<dyn crate::sink::EventSink> = std::sync::Arc::new(crate::sink::BroadcastSink::new(32));
-    let script = "printf '%s' $$ > setup-pid; exec /bin/sleep 30";
+    // Publish complete PID markers: redirection creates an empty file before
+    // printf writes, so existence alone is only safe after an atomic rename.
+    let script = "printf '%s' $$ > setup-pid.tmp && /bin/mv setup-pid.tmp setup-pid && exec /bin/sleep 30";
     let run_script = || {
         let runner = crate::archive_script::Runner { terminals: &script_terminals, sink: &script_sink, unattended: false };
         crate::archive_script::ScriptRun::spawn(runner, "privacy-setup", &cwd, script, &[], &|| {})?
@@ -992,7 +994,9 @@ fn privacy_main_integration_child() {
     // The interactive gh login path holds admission after its RPC has returned.
     let terminals = crate::pty::Terminals::new();
     let sink: std::sync::Arc<dyn crate::sink::EventSink> = std::sync::Arc::new(crate::sink::BroadcastSink::new(32));
-    let command = "printf '%s' $$ > login-pid; exec /bin/sleep 30";
+    // The PTY launcher execs the supplied command. Keep publication and the
+    // long-lived process in one shell so it cannot exec only printf and exit.
+    let command = "/bin/sh -c 'printf \"%s\" $$ > login-pid.tmp && /bin/mv login-pid.tmp login-pid && exec /bin/sleep 30'";
     let start = || terminals.spawn_network(sink.clone(), "github-login-fixture", crate::pty::PaneSpec { cwd: cwd.to_str().unwrap(), cols:80, rows:20, command:Some(command), env:&[] });
     policy(true, managed); assert!(start().is_err());
     policy(false, managed);
@@ -1004,6 +1008,7 @@ fn privacy_main_integration_child() {
     let until = Instant::now() + Duration::from_secs(10);
     while !marker.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
     let pid: i32 = std::fs::read_to_string(marker).unwrap().parse().unwrap();
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "login fixture must remain alive until privacy activation");
     policy(true, managed);
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
     terminals.kill("github-login-fixture");
