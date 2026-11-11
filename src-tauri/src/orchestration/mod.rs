@@ -109,6 +109,37 @@ pub struct Estimate {
     pub high: f64,
 }
 
+/// One thing that proves a piece done. Checked in an order that spends no tokens before
+/// it must: commands are run as they are, in the worker's worktree, and a model reads the
+/// result only for what no command can show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum Check {
+    /// A shell command run at the root of the worker's worktree; exit code 0 passes.
+    Command { run: String },
+    /// What a reviewer who has not seen the worker's reasoning must confirm from the diff.
+    Review { text: String },
+    /// A claim several reviewers judge separately; it passes when `threshold` of `voters`
+    /// agree. Stored with the plan; how many is the verifier's default when absent.
+    Vote {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        voters: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threshold: Option<u32>,
+    },
+}
+
+impl Check {
+    /// The command, or the words to confirm.
+    pub fn text(&self) -> &str {
+        match self {
+            Check::Command { run } => run,
+            Check::Review { text } | Check::Vote { text, .. } => text,
+        }
+    }
+}
+
 /// What a worker is told, field by field ([`brief::render`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,16 +172,24 @@ pub struct Piece {
     pub id: String,
     pub title: String,
     pub brief: Brief,
-    /// The files or areas only this piece may change: paths relative to the
-    /// repository, a directory for everything in it, `*` and `**` as in a
-    /// glob. Empty for a piece that changes nothing.
+    /// The files only this piece may change, as globs relative to the repository's root in
+    /// the form `git diff --name-only` prints paths: forward slashes, no leading `./`, a
+    /// directory written as `dir/**` ([`plan::owns`] matches a path against them). Empty
+    /// for a piece that changes nothing.
     #[serde(default)]
     pub owns: Vec<String>,
     /// Pieces that must be done before this one starts, by id.
     #[serde(default)]
     pub depends_on: Vec<String>,
-    /// The command or condition that proves the piece done.
-    pub done_check: String,
+    /// What proves the piece done, in the order written. At least one; a `command` among
+    /// them unless `review_only`.
+    pub done_checks: Vec<Check>,
+    /// No command can prove this piece: its result is checked by review alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_only: bool,
+    /// Why no command can, in the lead's words. Never empty when `review_only`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub review_only_reason: String,
     /// The kind of work, as the lead named it (`search`, `code`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,

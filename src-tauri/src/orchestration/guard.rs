@@ -41,6 +41,8 @@ pub enum Limit {
     Push,
     Merge,
     Deploy,
+    /// Starting sessions of its own: a run's pieces are the lead's to hand out.
+    Delegate,
 }
 
 impl Limit {
@@ -49,6 +51,7 @@ impl Limit {
             Limit::Push => "pushing",
             Limit::Merge => "merging",
             Limit::Deploy => "deploying or publishing",
+            Limit::Delegate => "starting sessions of its own",
         }
     }
 }
@@ -77,12 +80,23 @@ pub const RULES: &[Rule] = &[
     rule(&["terminalx", "tnx"], &["pipelines", "merge"], Limit::Merge),
     // A pipeline pushes the branch, opens a pull request and may merge it: the app would
     // do for the worker what the worker may not do. The engine refuses one for a worker
-    // as well (`issue_pipeline::engine`); these stop the command where it is typed.
+    // as well (`issue_pipeline::engine`), and the control service refuses a worker every
+    // pipeline command but `list` and `show`; these stop the command where it is typed.
     rule(&["terminalx", "tnx"], &["pipelines", "start"], Limit::Merge),
     rule(&["terminalx", "tnx"], &["pipelines", "attach"], Limit::Merge),
-    rule(&["terminalx", "tnx"], &["pipelines", "advance"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["pipelines", "stop"], Limit::Merge),
     rule(&["terminalx", "tnx"], &["pipelines", "resume"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["pipelines", "advance"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["pipelines", "review"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["pipelines", "refresh"], Limit::Merge),
     rule(&["terminalx", "tnx"], &["pipelines", "auto-merge"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["pipelines", "resolve-conflicts"], Limit::Merge),
+    // A session it started would be its own hands outside its limits. One made all the same
+    // (by a command this table does not read) is marked a worker as it is made.
+    rule(&["terminalx", "tnx"], &["sessions", "create"], Limit::Delegate),
+    rule(&["terminalx", "tnx"], &["runs", "create"], Limit::Delegate),
+    rule(&["terminalx", "tnx"], &["runs", "start"], Limit::Delegate),
+    rule(&["terminalx", "tnx"], &["runs", "stop"], Limit::Delegate),
     rule(&["gh"], &["workflow", "run"], Limit::Deploy),
     rule(&["gh"], &["release", "create"], Limit::Deploy),
     rule(&["npm", "pnpm", "yarn", "bun"], &["publish"], Limit::Deploy),
@@ -114,6 +128,7 @@ pub const STATED: &[&str] = &[
     "Do not push. The branch has no upstream, and the lead collects it from this repository.",
     "Do not merge: not into this branch, not into the lead's, not a pull request.",
     "Do not deploy, publish or release anything, and do not open a pull request.",
+    "Do not start other sessions or runs. If the piece is too large for one session, say so in your report.",
 ];
 
 /// Leads whose `runs start` is creating workers right now. A worker's agent
@@ -340,14 +355,18 @@ fn refused_words(mut words: &[String], depth: usize) -> Option<(&'static Rule, S
         // of a wrapper's words are its own options, and which of those take a value, differs by
         // wrapper and by system. So every word after it that names a command a rule is about is
         // read as the start of that command. `sudo echo git push` is refused too: the price of
-        // not guessing.
-        return (0..args.len())
-            .filter(|at| {
-                let word = base(&args[*at]);
-                RULES.iter().any(|rule| rule.programs.contains(&word)) || SHELLS.contains(&word) || WRAPPERS.contains(&word) || word == "eval"
-            })
-            .find_map(|at| refused_words(&args[at..], depth));
+        // not guessing. One pass over the words: a wrapper inside a wrapper starts no pass of
+        // its own, since this one reads what follows it too.
+        return (0..args.len()).find_map(|at| refused_command(&args[at..], depth));
     }
+    refused_command(words, depth)
+}
+
+/// The rule a program and its arguments break: a shell or `eval` by what it is given to
+/// run, any other program by its first words.
+fn refused_command(words: &[String], depth: usize) -> Option<(&'static Rule, String)> {
+    let (program, args) = words.split_first()?;
+    let program = base(program);
     if SHELLS.contains(&program) || program == "eval" {
         // `sh -c 'git push'`, `bash -lc "…"`, `eval "git push"`.
         let script = if program == "eval" { Some(args.join(" ")) } else { args.iter().position(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')).and_then(|at| args.get(at + 1)).cloned() };
@@ -541,12 +560,33 @@ mod tests {
             "sudo -u root git merge x", "env -u X gh pr merge 1", "timeout -k 5 -s KILL 30 git merge main", "sudo -u root env A=b sh -c 'git merge x'",
             // A pipeline of its own would push and merge for it.
             "terminalx pipelines start 0198c", "tnx pipelines attach 0198c --auto-merge", "terminalx pipelines advance abc", "terminalx pipelines auto-merge abc on",
+            "terminalx pipelines stop abc", "terminalx pipelines review abc", "terminalx pipelines refresh abc", "tnx pipelines resolve-conflicts abc on", "terminalx pipelines resume abc",
+            // Wrappers within wrappers, however many: read in one pass.
+            "env env env env env env env env env env env env env env env env env env env env env env env env git merge x",
         ] {
             assert_eq!(limit_of(command), Some(Limit::Merge), "{command}");
         }
         for command in ["npm publish", "pnpm publish --access public", "cargo publish", "vercel deploy", "vercel --prod", "vercel deploy --prod", "gh workflow run release.yml", "gh release create v1", "docker push org/image", "kubectl apply -f k8s/", "terraform apply -auto-approve", "fly deploy", "helm upgrade app ./chart", "timeout -s KILL 30 npm publish", "sudo -E -u deploy kubectl apply -f k8s/"] {
             assert_eq!(limit_of(command), Some(Limit::Deploy), "{command}");
         }
+    }
+
+    #[test]
+    fn a_worker_starts_no_sessions_or_runs_of_its_own() {
+        for command in [
+            "terminalx sessions create --project p --agent claude --prompt go",
+            "tnx sessions create --quick --agent codex --prompt go --no-parent",
+            "env -u RACCOON_SESSION_ID -u RACCOON_TAB_ID terminalx sessions create --project p --agent claude --prompt go",
+            "RACCOON_SESSION_ID= terminalx sessions create --quick --agent claude --prompt go",
+            "/Applications/TerminalX.app/Contents/MacOS/terminalx sessions create --quick --agent claude --prompt go",
+            "terminalx runs create --from plan.json",
+            "terminalx runs start",
+            "terminalx runs stop 01a1",
+            "env -u RACCOON_SESSION_ID tnx runs stop",
+        ] {
+            assert_eq!(limit_of(command), Some(Limit::Delegate), "{command}");
+        }
+        assert!(refusal(&json!({"tool_name": "Bash", "tool_input": {"command": "terminalx sessions create --quick --agent claude --prompt go"}})).unwrap().contains("no starting sessions of its own"));
     }
 
     #[test]
@@ -579,6 +619,8 @@ mod tests {
             "helm template ./chart",
             "terminalx sessions report abc --json",
             "terminalx pipelines list --json",
+            "terminalx sessions list --json",
+            "terminalx runs show",
             "terminalx pipelines show abc",
             "sudo -u root ls",
             "env -u X cargo test",

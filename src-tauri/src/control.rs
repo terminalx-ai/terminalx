@@ -785,6 +785,10 @@ impl ControlService {
         let host = ManagerHost::new(self.sink.clone(), self.manager.clone());
         // The session the command runs in, when it runs in one the app knows.
         let caller = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok());
+        // A run's worker leads no run and steers none, its own lead's included: it may read them.
+        if matches!(command, "runs.create" | "runs.start" | "runs.stop") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
+            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start or stop a run. Report what is ready; the lead decides what happens next.", None::<String>));
+        }
         if command == "runs.create" {
             let lead = match optional_string(&params, "lead") {
                 Some(selector) => resolve_session(&selector)?,
@@ -1150,6 +1154,16 @@ impl ControlService {
                 .map_err(workspace_error)?
             }
         };
+        // A session a run's worker starts has the worker's limits, whoever it names as its
+        // parent, or none: marked before anything is sent to it (`orchestration::guard`).
+        let mut entry = entry;
+        if !entry.run_worker() && p.caller["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller)) {
+            entry = index::update_session(&entry.id, |session| {
+                session.mark_run_worker();
+                Ok(session.clone())
+            })
+            .map_err(ControlError::internal)?;
+        }
         let tab = entry
             .tabs
             .first()
@@ -1260,6 +1274,11 @@ impl ControlService {
 
     fn pipelines(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::issue_pipeline::{engine, store};
+        // A run's worker changes no pipeline, its own or anyone's: each of these can push a
+        // branch, merge it, or let a merge through (`orchestration::guard`). It may still read them.
+        if !matches!(command, "pipelines.list" | "pipelines.show") && params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller)) {
+            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not start, steer or merge a pipeline. Report what is ready; the lead decides what happens to it.", None::<String>));
+        }
         if command == "pipelines.start" {
             let target = resolve_target(&required_string(&params, "target")?)?;
             self.manager.accepting_work().map_err(ControlError::internal)?;

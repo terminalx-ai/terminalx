@@ -28,7 +28,7 @@ vi.mock("@/lib/models", () => ({ modelLabel: (_harness: string, id: string) => (
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(async () => {}) }));
 
 const { SessionCost, totals, formatTokens, formatCost } = await import("./SessionCost");
-const { resetExperimentalForTests } = await import("@/lib/experimental");
+const { resetExperimentalSettingsForTests } = await import("@/lib/experimentalSettings");
 
 const row = (model: string, input: number, output: number, read: number, costUsd: number | null): ModelUsage =>
   ({ model, inputTokens: input, outputTokens: output, cacheReadTokens: read, cacheWriteTokens: 0, costUsd });
@@ -52,7 +52,7 @@ const twoModels = () => session([
 const chip = () => screen.getByTestId("session-cost");
 
 beforeEach(() => {
-  resetExperimentalForTests();
+  resetExperimentalSettingsForTests();
   mocks.settings.mockReset().mockResolvedValue({ nativeCodex: false, sessionCost: true });
   mocks.invoke.mockReset().mockResolvedValue(null);
   mocks.readiness.mockReset().mockImplementation(async (agent: string) => ({ state: "ready", checkedAt: null, version: null, loginMethod: agent === "claude" ? "Claude account" : "ChatGPT account" }));

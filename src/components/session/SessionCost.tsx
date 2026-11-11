@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { BarChart3, Gauge, Terminal } from "@/icons";
 import { agentName } from "@/components/AgentMark";
 import { checkAgentReadiness } from "@/lib/agentReadiness";
-import { useExperimental } from "@/lib/experimental";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { modelLabel } from "@/lib/models";
 import { openStats, upsertSession } from "@/lib/sessions";
 import { useStatus } from "@/lib/status";
@@ -191,7 +191,8 @@ async function refresh(sessionId: string): Promise<SessionUsageReport | null> {
 }
 
 export function SessionCost({ session, className }: { session: SessionEntry; className?: string }) {
-  const enabled = useExperimental().sessionCost === true;
+  const settings = useExperimentalSettings();
+  const enabled = settings?.sessionCost === true;
   const [open, setOpen] = useState(false);
   const models = useMemo(() => sessionModels(session), [session]);
   const total = useMemo(() => totals(models), [models]);

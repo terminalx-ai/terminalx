@@ -139,10 +139,8 @@ fn phone_create_child() {
             // The desktop's Settings → Experimental follows it while open: its
             // every switch, of which the phone changed this one.
             let published = std::iter::from_fn(|| events.try_recv().ok()).find(|published| &*published.event == "experimental_settings_changed").unwrap();
-            // The event carries the whole section, as the settings watcher sends it: the phone's
-            // change, and the switches a phone does not have, as they are.
             let published: Value = serde_json::from_str(&published.payload).unwrap();
-            assert_eq!((&published["nativeCodex"], &published["sessionCost"], &published["orchestratorRuns"]), (&json!(true), &json!(true), &json!(false)));
+            assert_eq!((&published["nativeCodex"], &published["sessionCost"]), (&json!(true), &json!(true)));
             assert_eq!(call("tablet", "settings", json!({})).unwrap(), json!({"nativeCodex":true}));
             assert!(call("phone", "setSettings", json!({"nativeCodex":"yes"})).is_err());
         }

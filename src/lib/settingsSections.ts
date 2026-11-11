@@ -1,4 +1,4 @@
-import { getExperimental } from "@/lib/experimental";
+import { getExperimentalSettings } from "@/lib/experimentalSettings";
 import { indexPaletteItem, rankPaletteItems } from "@/lib/commandPalette";
 
 // Search currently navigates sections; individual row metadata lives in settingsRegistry.
@@ -17,7 +17,7 @@ export const SETTINGS_SECTIONS = [
   { id: "integrations", title: "Integrations", description: "Connect GitHub and Linear for issues and pull requests", terms: ["token api key login"] },
   { id: "storage", title: "Storage", description: "Clean up merged worktrees and leftover files", terms: ["disk space remove delete cleanup"] },
   { id: "shortcuts", title: "Shortcuts", description: "Customize keyboard shortcuts", terms: ["key bindings hotkeys"] },
-  { id: "experimental", title: "Experimental", description: "Try Native Codex, orchestration runs and session cost", terms: ["app server stdio", "orchestrator lead workers", "session cost", "tokens"] },
+  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost and orchestration runs", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers"] },
   { id: "about", title: "About", description: "Version, updates and changelog", terms: ["release channel beta"] },
 ] as const;
 
@@ -34,7 +34,7 @@ const sectionIndex = SETTINGS_SECTIONS.map((section) => indexPaletteItem({
 
 /** A section behind a switch in Settings → Experimental is found only while the switch is on. */
 function offered(tab: SettingsTab): boolean {
-  return tab !== "orchestrator" || getExperimental().orchestratorRuns;
+  return tab !== "orchestrator" || getExperimentalSettings()?.orchestratorRuns === true;
 }
 
 export function searchSettingsSections(query: string) {

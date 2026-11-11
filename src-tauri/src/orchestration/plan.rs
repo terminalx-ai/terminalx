@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::{Brief, Budget, Estimate, Piece, PieceState};
+use super::{Brief, Budget, Check, Estimate, Piece, PieceState};
 
 /// The modes a worker may be started in: the ones `sessions create --mode` takes.
 pub const MODES: [&str; 5] = ["plan", "manual", "auto", "acceptEdits", "bypassPermissions"];
@@ -52,7 +52,11 @@ pub struct PlanPiece {
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
-    pub done_check: String,
+    pub done_checks: Vec<Check>,
+    #[serde(default)]
+    pub review_only: bool,
+    #[serde(default)]
+    pub review_only_reason: String,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
@@ -95,8 +99,8 @@ impl std::fmt::Display for PlanError {
 }
 
 /// The keys a piece may have, as a plan writes them.
-const PIECE_KEYS: [&str; 19] = [
-    "id", "title", "goal", "why", "scope", "outOfScope", "known", "readFirst", "limits", "owns", "dependsOn", "doneCheck", "kind", "agent", "model", "effort", "permissionMode", "readsUntrusted", "estimate",
+const PIECE_KEYS: [&str; 21] = [
+    "id", "title", "goal", "why", "scope", "outOfScope", "known", "readFirst", "limits", "owns", "dependsOn", "doneChecks", "reviewOnly", "reviewOnlyReason", "kind", "agent", "model", "effort", "permissionMode", "readsUntrusted", "estimate",
 ];
 const PLAN_KEYS: [&str; 4] = ["goal", "budget", "agent", "pieces"];
 
@@ -108,7 +112,9 @@ pub fn parse(value: &Value) -> Result<Plan, PlanError> {
         let Some(found) = object.as_object().and_then(|object| object.keys().find(|key| !keys.contains(&key.as_str()))) else { return Ok(()) };
         // The same word in another spelling (`depends_on`), or a known key's last word (`mode`).
         let plain = |key: &str| key.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_lowercase();
-        let meant = keys.iter().find(|key| plain(key) == plain(found)).or_else(|| keys.iter().find(|key| plain(key).ends_with(&plain(found)) && plain(found).len() >= 4));
+        // … or its first words (`doneCheck`, `reason`-less `reviewOnly` spellings).
+        let close = |by: &dyn Fn(&str, &str) -> bool| keys.iter().find(|key| plain(found).len() >= 4 && by(&plain(key), &plain(found)));
+        let meant = keys.iter().find(|key| plain(key) == plain(found)).or_else(|| close(&|key, found| key.ends_with(found))).or_else(|| close(&|key, found| key.starts_with(found)));
         let hint = meant.map(|key| format!(" Did you mean `{key}`?")).unwrap_or_default();
         let place = piece.map(|id| format!("Piece {id}")).unwrap_or_else(|| "The plan".into());
         Err(PlanError::new("unknown_key", piece, format!("{place} has the key `{found}`, which a plan does not have.{hint} Nothing in a plan is ignored, so correct or remove it."), json!({"key": found, "meant": meant})))
@@ -118,7 +124,7 @@ pub fn parse(value: &Value) -> Result<Plan, PlanError> {
         let id = piece["id"].as_str().map(str::trim).filter(|id| !id.is_empty()).map(str::to_owned).unwrap_or_else(|| (index + 1).to_string());
         unknown(&PIECE_KEYS, piece, Some(&id))?;
     }
-    serde_json::from_value(value.clone()).map_err(|error| PlanError::new("plan_invalid", None, format!("The plan cannot be read: {error}. A plan is a JSON object with `goal` and `pieces`; each piece has `id`, `title` and `doneCheck`."), Value::Null))
+    serde_json::from_value(value.clone()).map_err(|error| PlanError::new("plan_invalid", None, format!("The plan cannot be read: {error}. A plan is a JSON object with `goal` and `pieces`; each piece has `id`, `title` and `doneChecks`, a list of `{{\"type\": \"command\", \"run\": …}}` and `{{\"type\": \"review\", \"text\": …}}`."), Value::Null))
 }
 
 /// What a plan is checked against: the project's settings and the agents on offer.
@@ -134,6 +140,9 @@ pub struct Rules<'a> {
     /// A person approves the plan before anything starts. Without that, no
     /// piece may ask for a mode that allows more than the project's.
     pub approval: bool,
+    /// The lead's checkout, to tell a directory a piece owns from a file. Without it only
+    /// an entry written with a trailing slash is a directory.
+    pub checkout: Option<&'a std::path::Path>,
 }
 
 /// How much a mode lets an agent do unasked: plan changes nothing, manual
@@ -214,14 +223,39 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
             ));
         }
     }
-    if let Some(piece) = plan.pieces.iter().find(|piece| piece.done_check.trim().is_empty()) {
+    for piece in &plan.pieces {
         let id = piece.id.trim();
-        return Err(PlanError::new(
-            "no_done_check",
-            Some(id),
-            format!("Piece {id} has no done-check. Say in `doneCheck` which command or condition proves it is done."),
-            Value::Null,
-        ));
+        if piece.done_checks.is_empty() {
+            return Err(PlanError::new(
+                "no_done_check",
+                Some(id),
+                format!("Piece {id} has no done-check. Give `doneChecks` at least one: a `command` to run in the worker's worktree, or a `review` saying what a reviewer must confirm."),
+                Value::Null,
+            ));
+        }
+        if let Some(at) = piece.done_checks.iter().position(|check| check.text().trim().is_empty()) {
+            return Err(PlanError::new("empty_check", Some(id), format!("Done-check {} of piece {id} is empty. A `command` needs `run`; a `review` or `vote` needs `text`.", at + 1), json!({"check": at})));
+        }
+        if let Some((at, voters, threshold)) = piece.done_checks.iter().enumerate().find_map(|(at, check)| match check {
+            Check::Vote { voters, threshold, .. } if *voters == Some(0) || *threshold == Some(0) || voters.zip(*threshold).is_some_and(|(voters, threshold)| threshold > voters) => Some((at, *voters, *threshold)),
+            _ => None,
+        }) {
+            return Err(PlanError::new("plan_invalid", Some(id), format!("Done-check {} of piece {id} is a vote that cannot pass: {} voters and a threshold of {}.", at + 1, voters.map_or("unset".into(), |n| n.to_string()), threshold.map_or("unset".into(), |n| n.to_string())), json!({"check": at})));
+        }
+        // A command is checked by running it: no model, no tokens. A piece with none says why.
+        if !piece.done_checks.iter().any(|check| matches!(check, Check::Command { .. })) {
+            if !piece.review_only {
+                return Err(PlanError::new(
+                    "no_command_check",
+                    Some(id),
+                    format!("Piece {id} has no `command` done-check. Add a command that exits 0 when the piece is done (a test, a build, a type check, a search that must find nothing), or, if no command can show it, set `reviewOnly: true` and say why in `reviewOnlyReason`."),
+                    Value::Null,
+                ));
+            }
+            if piece.review_only_reason.trim().is_empty() {
+                return Err(PlanError::new("review_only_without_reason", Some(id), format!("Piece {id} is `reviewOnly` and gives no reason. Say in `reviewOnlyReason` why no command can prove it done."), Value::Null));
+            }
+        }
     }
     for piece in &plan.pieces {
         let id = piece.id.trim();
@@ -252,10 +286,20 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
             }
         }
     }
+    // What each piece owns, as globs `git diff --name-only` can be matched against.
+    let mut owned: Vec<Vec<String>> = Vec::new();
+    for piece in &plan.pieces {
+        let id = piece.id.trim();
+        let globs = lines(&piece.owns).iter().map(|entry| owned_glob(entry, rules.checkout)).collect::<Result<Vec<_>, _>>().map_err(|(entry, why)| {
+            PlanError::new("owns_outside_repository", Some(id), format!("Piece {id} owns `{entry}`, which {why}. Write what a piece owns as paths relative to the repository's root."), json!({"path": entry}))
+        })?;
+        owned.push(globs);
+    }
     Ok(plan
         .pieces
         .iter()
-        .map(|piece| Piece {
+        .zip(owned)
+        .map(|(piece, owns)| Piece {
             id: piece.id.trim().to_string(),
             title: piece.title.trim().to_string(),
             brief: Brief {
@@ -268,9 +312,11 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
                 read_first: lines(&piece.read_first),
                 limits: lines(&piece.limits),
             },
-            owns: lines(&piece.owns),
+            owns,
             depends_on: lines(&piece.depends_on),
-            done_check: piece.done_check.trim().to_string(),
+            done_checks: piece.done_checks.iter().map(trimmed).collect(),
+            review_only: piece.review_only,
+            review_only_reason: piece.review_only_reason.trim().to_string(),
             kind: piece.kind.as_deref().map(str::trim).filter(|kind| !kind.is_empty()).map(str::to_owned),
             agent: piece.agent.as_deref().or(plan.agent.as_deref()).unwrap_or(rules.default_agent).to_string(),
             model: piece.model.trim().to_string(),
@@ -287,6 +333,62 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
             note: None,
         })
         .collect())
+}
+
+fn trimmed(check: &Check) -> Check {
+    match check {
+        Check::Command { run } => Check::Command { run: run.trim().to_string() },
+        Check::Review { text } => Check::Review { text: text.trim().to_string() },
+        Check::Vote { text, voters, threshold } => Check::Vote { text: text.trim().to_string(), voters: *voters, threshold: *threshold },
+    }
+}
+
+/// An entry of `owns` as it is stored: a glob relative to the repository's root, written
+/// as git writes paths. `src\\store\\` and `./src/store/` are both `src/store/**`; so is
+/// `src/store` when that is a directory of the lead's checkout. `Err` with the entry and
+/// why it cannot be one: it leaves the repository.
+fn owned_glob(entry: &str, checkout: Option<&std::path::Path>) -> Result<String, (String, &'static str)> {
+    let written = entry.trim().replace('\\', "/");
+    let outside = |why| Err((entry.trim().to_string(), why));
+    if written.starts_with('/') || written.starts_with('~') || written.chars().nth(1) == Some(':') {
+        return outside("is not relative to the repository");
+    }
+    let parts: Vec<&str> = written.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+    if parts.contains(&"..") {
+        return outside("reaches outside the repository");
+    }
+    let path = parts.join("/");
+    if path.is_empty() {
+        // `.`: the whole repository.
+        return Ok("**".into());
+    }
+    let glob = path.contains(['*', '?']);
+    let directory = written.ends_with('/') || (!glob && checkout.is_some_and(|checkout| checkout.join(&path).is_dir()));
+    Ok(if directory { format!("{path}/**") } else { path })
+}
+
+/// Whether `path`, as `git diff --name-only` prints it, is one a piece owning `globs` may
+/// change. Exact about letter case, as git is. What the scope gate of verification
+/// (PRO-278) asks of each changed file; nothing asks it before then.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn owns(globs: &[String], path: &str) -> bool {
+    let path: Vec<Token> = path.chars().map(Token::Lit).collect();
+    globs.iter().any(|glob| readings(glob).iter().any(|glob| intersect(glob, &path)))
+}
+
+/// A glob as the patterns it stands for. `**/` is "in any directory, this one included",
+/// so `**/*.md` is also `*.md`: each `**/` is read with and without its directories.
+fn readings(glob: &str) -> Vec<Vec<Token>> {
+    let mut texts = vec![String::new()];
+    let mut rest = glob;
+    // A handful at most: a pattern with more `**/` than this is read as written beyond them.
+    for _ in 0..4 {
+        let Some(at) = rest.find("**/").filter(|at| *at == 0 || rest[..*at].ends_with('/')) else { break };
+        let (before, after) = (&rest[..at], &rest[at + 3..]);
+        texts = texts.iter().flat_map(|text| [format!("{text}{before}**/"), format!("{text}{before}")]).collect();
+        rest = after;
+    }
+    texts.iter().map(|text| tokens(&format!("{text}{rest}"))).collect()
 }
 
 fn lines(values: &[String]) -> Vec<String> {
@@ -362,9 +464,8 @@ pub fn overlap(a: &str, b: &str) -> bool {
         // The repository's root: it holds every file.
         return true;
     }
-    let (a, b) = (tokens(&a), tokens(&b));
     let under = |pattern: &[Token]| [pattern, &[Token::Lit('/'), Token::Deep]].concat();
-    intersect(&a, &b) || intersect(&under(&a), &b) || intersect(&a, &under(&b))
+    readings(&a).iter().any(|a| readings(&b).iter().any(|b| intersect(a, b) || intersect(&under(a), b) || intersect(a, &under(b))))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -438,7 +539,7 @@ mod tests {
     use super::*;
 
     fn piece(id: &str) -> PlanPiece {
-        PlanPiece { id: id.into(), title: format!("Piece {id}"), done_check: "cargo t".into(), ..Default::default() }
+        PlanPiece { id: id.into(), title: format!("Piece {id}"), done_checks: vec![Check::Command { run: "cargo t".into() }], ..Default::default() }
     }
 
     fn plan(pieces: Vec<PlanPiece>) -> Plan {
@@ -447,7 +548,7 @@ mod tests {
 
     fn check(plan: &Plan, limit: u32) -> Result<Vec<Piece>, PlanError> {
         let agents = ["claude".to_string(), "codex".to_string()];
-        validate(plan, &Rules { piece_limit: limit, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true })
+        validate(plan, &Rules { piece_limit: limit, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: None })
     }
 
     fn refused(plan: &Plan) -> PlanError {
@@ -504,6 +605,8 @@ mod tests {
             ("src/a*.rs", "src/*b.rs"),
             ("src/**", "src/x/y.rs"),
             ("**/*.md", "docs/guide/a.md"),
+            ("**/*.md", "README.md"),
+            ("src/**/mod.rs", "src/mod.rs"),
             ("src/*", "src/store/mod.rs"),
             ("docs/?.md", "docs/a.md"),
             (".", "anything/at/all"),
@@ -545,10 +648,95 @@ mod tests {
     #[test]
     fn a_piece_with_no_done_check_is_refused_naming_it() {
         let mut blank = piece("docs");
-        blank.done_check = "  ".into();
+        blank.done_checks.clear();
         let error = refused(&plan(vec![piece("a"), blank]));
         assert_eq!((error.code, error.piece.as_deref()), ("no_done_check", Some("docs")));
         assert!(error.message.contains("Piece docs has no done-check"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_piece_needs_a_command_check_unless_it_says_why_review_alone_can_check_it() {
+        let with = |checks: Value, extra: Value| -> Result<Vec<Piece>, PlanError> {
+            let mut piece = json!({"id": "docs", "title": "Docs", "doneChecks": checks});
+            piece.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            check(&parse(&json!({"goal": "g", "pieces": [{"id": "a", "title": "A", "doneChecks": [{"type": "command", "run": "cargo t"}]}, piece]})).unwrap(), 8)
+        };
+        let review = json!([{"type": "review", "text": "Every documented key exists in the store."}]);
+        // Review alone, unexplained: refused, naming the piece and both ways out.
+        let error = with(review.clone(), json!({})).unwrap_err();
+        assert_eq!((error.code, error.piece.as_deref()), ("no_command_check", Some("docs")));
+        assert!(error.message.contains("Piece docs has no `command` done-check") && error.message.contains("`reviewOnly: true`") && error.message.contains("`reviewOnlyReason`"), "{}", error.message);
+        // `reviewOnly` needs its reason, and a blank one is none.
+        for extra in [json!({"reviewOnly": true}), json!({"reviewOnly": true, "reviewOnlyReason": "  "})] {
+            let error = with(review.clone(), extra).unwrap_err();
+            assert_eq!((error.code, error.piece.as_deref()), ("review_only_without_reason", Some("docs")));
+        }
+        // A reason without the switch is not the switch.
+        assert_eq!(with(review.clone(), json!({"reviewOnlyReason": "Prose only."})).unwrap_err().code, "no_command_check");
+        let pieces = with(review.clone(), json!({"reviewOnly": true, "reviewOnlyReason": " Prose only: nothing to run. "})).unwrap();
+        assert_eq!((pieces[1].review_only, pieces[1].review_only_reason.as_str()), (true, "Prose only: nothing to run."));
+        assert_eq!(pieces[1].done_checks, vec![Check::Review { text: "Every documented key exists in the store.".into() }]);
+        // A vote is no command either.
+        assert_eq!(with(json!([{"type": "vote", "text": "The migration loses no key.", "voters": 3, "threshold": 2}]), json!({})).unwrap_err().code, "no_command_check");
+
+        // Every kind is stored as written, in order; a command among them is enough.
+        let mixed = with(json!([{"type": "command", "run": " pnpm tsc --noEmit "}, {"type": "review", "text": "No public name changed."}, {"type": "vote", "text": "The migration loses no key.", "voters": 3, "threshold": 2}, {"type": "vote", "text": "Defaults"}]), json!({})).unwrap();
+        assert_eq!(mixed[1].done_checks, vec![
+            Check::Command { run: "pnpm tsc --noEmit".into() },
+            Check::Review { text: "No public name changed.".into() },
+            Check::Vote { text: "The migration loses no key.".into(), voters: Some(3), threshold: Some(2) },
+            Check::Vote { text: "Defaults".into(), voters: None, threshold: None },
+        ]);
+        assert!(!mixed[1].review_only && mixed[1].review_only_reason.is_empty());
+        // As it is stored and sent: the type beside its own field, nothing else.
+        assert_eq!(serde_json::to_value(&mixed[1].done_checks).unwrap(), json!([
+            {"type": "command", "run": "pnpm tsc --noEmit"}, {"type": "review", "text": "No public name changed."},
+            {"type": "vote", "text": "The migration loses no key.", "voters": 3, "threshold": 2}, {"type": "vote", "text": "Defaults"},
+        ]));
+
+        // A check that says nothing, and a vote that could never pass.
+        let error = with(json!([{"type": "command", "run": "cargo t"}, {"type": "review", "text": " "}]), json!({})).unwrap_err();
+        assert_eq!((error.code, error.piece.as_deref(), &error.details), ("empty_check", Some("docs"), &json!({"check": 1})));
+        assert_eq!(with(json!([{"type": "command", "run": ""}]), json!({})).unwrap_err().code, "empty_check");
+        let error = with(json!([{"type": "command", "run": "x"}, {"type": "vote", "text": "t", "voters": 2, "threshold": 3}]), json!({})).unwrap_err();
+        assert_eq!((error.code, error.piece.as_deref()), ("plan_invalid", Some("docs")));
+        // A type the format does not have, a check with a key of another type, and the old single string.
+        for checks in [json!([{"type": "test", "run": "x"}]), json!([{"type": "command", "text": "x"}]), json!([{"type": "command", "run": "x", "text": "y"}]), json!("cargo t"), json!(["cargo t"])] {
+            assert_eq!(parse(&json!({"goal": "g", "pieces": [{"id": "a", "title": "A", "doneChecks": checks}]})).unwrap_err().code, "plan_invalid", "{checks}");
+        }
+    }
+
+    #[test]
+    fn what_a_piece_owns_is_stored_as_globs_a_diff_can_be_matched_against() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/store/settings")).unwrap();
+        std::fs::write(dir.path().join("src/cli.rs"), "").unwrap();
+        let agents = ["claude".to_string()];
+        let rules = Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: Some(dir.path()) };
+        let owning = |owns: &[&str]| validate(&plan(vec![PlanPiece { owns: owns.iter().map(|path| path.to_string()).collect(), ..piece("a") }]), &rules).map(|pieces| pieces[0].owns.clone());
+        // As git writes paths: forward slashes from the root, no `./`, a directory as everything in it.
+        assert_eq!(
+            owning(&["./src/cli.rs", "src\\store\\", "docs/", "src/store/settings", "src//session*.rs", "**/*.md", " scripts/release.sh ", "."]).unwrap(),
+            ["src/cli.rs", "src/store/**", "docs/**", "src/store/settings/**", "src/session*.rs", "**/*.md", "scripts/release.sh", "**"]
+        );
+        // A name that is no directory of the checkout is a file, and a glob is left as written.
+        assert_eq!(owning(&["src/new_module", "src/store*"]).unwrap(), ["src/new_module", "src/store*"]);
+        // Nothing outside the repository can be owned.
+        for outside in ["/etc/hosts", "../sibling/src", "src/../../x", "~/notes.md", "C:\\repo\\src"] {
+            let error = owning(&[outside]).unwrap_err();
+            assert_eq!((error.code, error.piece.as_deref(), error.details["path"].as_str()), ("owns_outside_repository", Some("a"), Some(outside)), "{outside}");
+        }
+
+        // What `git diff --name-only` prints is matched against them, exactly.
+        let globs: Vec<String> = ["src/cli.rs", "src/store/**", "src/session*.rs", "**/*.md"].iter().map(|glob| glob.to_string()).collect();
+        for path in ["src/cli.rs", "src/store/mod.rs", "src/store/settings/file.rs", "src/session.rs", "src/session_ops.rs", "README.md", "docs/guide/a.md"] {
+            assert!(owns(&globs, path), "{path} is owned");
+        }
+        for path in ["src/cli.rs.bak", "src/control.rs", "src/storefront/a.rs", "src/store", "src/session/mod.rs", "SRC/cli.rs", "docs/a.txt", ""] {
+            assert!(!owns(&globs, path), "{path} is not owned");
+        }
+        assert!(owns(&["**".to_string()], "anything/at/all.rs"));
+        assert!(!owns(&[], "src/cli.rs"));
     }
 
     #[test]
@@ -572,7 +760,7 @@ mod tests {
             piece.permission_mode = Some(mode.into());
             plan(vec![piece])
         };
-        let rules = |worker_mode: &'static str, approval: bool| Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode, approval };
+        let rules = |worker_mode: &'static str, approval: bool| Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode, approval, checkout: None };
         // Nobody approves this project's runs: a piece may be stricter than the project, never looser.
         for (project, piece, allowed) in [
             ("manual", "bypassPermissions", false),
@@ -601,14 +789,14 @@ mod tests {
     fn a_key_a_plan_does_not_have_is_refused_naming_the_piece_and_what_was_meant() {
         let read = |pieces: Value| parse(&json!({"goal": "g", "pieces": pieces}));
         // The mistake that matters most: a mode under another name would run in the project's default.
-        for (written, meant) in [("mode", "permissionMode"), ("permission_mode", "permissionMode"), ("depends_on", "dependsOn"), ("done_check", "doneCheck"), ("DoneCheck", "doneCheck"), ("reads_untrusted", "readsUntrusted")] {
-            let error = read(json!([{"id": "a", "title": "A", "doneCheck": "x"}, {"id": "b", "title": "B", "doneCheck": "x", written: "manual"}])).unwrap_err();
+        for (written, meant) in [("mode", "permissionMode"), ("permission_mode", "permissionMode"), ("depends_on", "dependsOn"), ("done_checks", "doneChecks"), ("doneCheck", "doneChecks"), ("review_only", "reviewOnly"), ("reads_untrusted", "readsUntrusted")] {
+            let error = read(json!([{"id": "a", "title": "A", "doneChecks": [{"type": "command", "run": "x"}]}, {"id": "b", "title": "B", "doneChecks": [{"type": "command", "run": "x"}], written: "manual"}])).unwrap_err();
             assert_eq!((error.code, error.piece.as_deref()), ("unknown_key", Some("b")), "{written}");
             assert_eq!(error.details, json!({"key": written, "meant": meant}));
             assert!(error.message.contains(&format!("Piece b has the key `{written}`")) && error.message.contains(&format!("Did you mean `{meant}`?")), "{}", error.message);
         }
         // A key that resembles none is still refused, and a piece with no id is named by its place.
-        let error = read(json!([{"title": "A", "doneCheck": "x", "priority": 1}])).unwrap_err();
+        let error = read(json!([{"title": "A", "doneChecks": [{"type": "command", "run": "x"}], "priority": 1}])).unwrap_err();
         assert_eq!((error.code, error.piece.as_deref(), &error.details), ("unknown_key", Some("1"), &json!({"key": "priority", "meant": null})));
         let error = parse(&json!({"goal": "g", "pieces": [], "approve": true})).unwrap_err();
         assert_eq!((error.code, error.piece.as_deref()), ("unknown_key", None));
@@ -616,7 +804,7 @@ mod tests {
         // Every key the format has is read, and a plan of the wrong shape says so.
         let whole = parse(&json!({"goal": "g", "budget": {"points": 5}, "agent": "claude", "pieces": [{
             "id": "a", "title": "A", "goal": "g", "why": "w", "scope": "s", "outOfScope": "o", "known": ["k"], "readFirst": ["r"], "limits": ["l"], "owns": ["src/"],
-            "dependsOn": [], "doneCheck": "x", "kind": "code", "agent": "codex", "model": "m", "effort": "high", "permissionMode": "manual", "readsUntrusted": true, "estimate": {"low": 1.0, "high": 2.0},
+            "dependsOn": [], "doneChecks": [{"type": "command", "run": "x"}], "kind": "code", "agent": "codex", "model": "m", "effort": "high", "permissionMode": "manual", "readsUntrusted": true, "estimate": {"low": 1.0, "high": 2.0},
         }]})).unwrap();
         assert_eq!((whole.pieces[0].permission_mode.as_deref(), whole.pieces[0].reads_untrusted, whole.budget.points), (Some("manual"), true, Some(5.0)));
         assert_eq!(parse(&json!({"goal": "g", "pieces": "none"})).unwrap_err().code, "plan_invalid");
