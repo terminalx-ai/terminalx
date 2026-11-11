@@ -227,6 +227,46 @@ Validation of the final revision:
   pattern checks. The incomplete ten-run samples and owner-only Hetzner
   prerequisites remain open.
 
+## Review 3 correction (2026-11-11)
+
+The previous presence check could evaluate a Bash nameref's array subscript
+before environment cleanup or directory validation. The replacement never
+expands or tests a startup-defined named parameter. It probes the existing
+masked `env -i` launcher with a clean shell that exits 9, then uses shell-owned
+`$?` and descriptor duplication to reject the tracing loader's false status 0.
+No cleanup builtin or new aliasable control keyword runs in the startup shell.
+The previous function, alias and error-trap protections remain in place.
+
+The new regression first proves that the malicious nameref writes its marker
+when expanded, including a reference to an unset array element. The actual
+wrapper must then produce `hello` in the approved directory and status 125 in
+the wrong directory, without a marker in either case. Both unset and populated
+targets run on Linux Bash 5.2. macOS system Bash 3.2 cannot define namerefs.
+Unexported flags and Darwin's inert glibc flags now allow genuine sanitized
+execution; their tests require real output and the directory guard, rather
+than accepting an early zero status. Exported glibc flags still fail closed,
+including empty and readonly values. No existing case was removed.
+
+The new test failed against the previous wrapper with the reproduced marker
+write, then passed after the fix in a focused source-level Linux harness.
+Validation of the final source revision:
+
+- Passed on macOS and TerminalX Local VM (Debian 12 ARM64):
+  `cargo clippy --locked --all-targets -- -D warnings`.
+- Passed on each platform: **20 focused project tests**, comprising all 19
+  approval-wrapper tests and the session-directory regression, with zero
+  failures or ignores. The invocation was `cargo test --locked --lib --
+  harness::read_only
+  session::watch_tests::codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution`.
+  The new nameref payload ran on Linux Bash 5.2; macOS's Bash lacks namerefs,
+  as documented above. No new full-suite or frontend rerun is claimed.
+- The two Rust files had identical hashes in the VM and worktree. Rustfmt,
+  diff whitespace and added-line credential/key/address pattern checks passed.
+
+These local checks do not fill either incomplete ten-run CI sample.
+Infrastructure, credentials, repository settings and runner activation remain
+owner-only. The independent review hold is unchanged.
+
 ## Observed baseline
 
 Before split: PR baseline: 10 successful first attempts; durations in minutes.

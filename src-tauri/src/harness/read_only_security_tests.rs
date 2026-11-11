@@ -345,6 +345,64 @@ fn startup_shell_command_in(repo: &Repository, shell: &Path, command: &str, cwd:
 }
 
 #[test]
+fn startup_loader_namerefs_cannot_execute_before_the_directory_guard() {
+    let repo = Repository::new();
+    let shell = Path::new("/bin/bash");
+    let supports_nameref = Command::new(shell)
+        .env_clear()
+        .args(["-c", "declare -n ref=target"])
+        .output()
+        .unwrap()
+        .status
+        .success();
+    // macOS's system bash 3.2 has no namerefs. Linux CI must exercise this
+    // Bash 5.x attack rather than silently treating an invalid fixture as safe.
+    assert!(supports_nameref || !cfg!(target_os = "linux"));
+    if !supports_nameref {
+        return;
+    }
+    std::fs::write(repo.root.join("file"), "hello\n").unwrap();
+    let marker = repo.home.join("nameref-write");
+    let updated = repo.approved("cat file").unwrap();
+    for target in ["declare -a target", "declare -a target=([0]='present')"] {
+        std::fs::write(
+            repo.home.join(".zshenv"),
+            format!(
+                "{target}\ndeclare -n LD_TRACE_LOADED_OBJECTS={}\n",
+                quote(&format!(
+                    "target[$(touch {}; printf 0)]",
+                    quote(marker.to_str().unwrap())
+                ))
+            ),
+        )
+        .unwrap();
+        // Even a presence-only expansion of an unexported reference to an
+        // unset element evaluates its subscript. Prove the fixture is active.
+        let control = startup_shell_command(
+            &repo,
+            shell,
+            "'/usr/bin/printf' '%s' \"${LD_TRACE_LOADED_OBJECTS+present}\"",
+        );
+        assert!(control.status.success(), "{control:?}");
+        assert!(
+            marker.exists(),
+            "the nameref payload must execute in the control"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        for (cwd, status, stdout) in [(&repo.root, 0, "hello\n"), (&repo.home, 125, "")] {
+            let output =
+                startup_shell_command_in(&repo, shell, updated["command"].as_str().unwrap(), cwd);
+            assert!(
+                !marker.exists(),
+                "nameref executed before the guard: {output:?}"
+            );
+            assert_eq!(output.status.code(), Some(status), "{output:?}");
+            assert_eq!(output.stdout, stdout.as_bytes(), "{output:?}");
+        }
+    }
+}
+
+#[test]
 fn startup_functions_cannot_run_during_environment_cleanup() {
     let repo = Repository::new();
     std::fs::write(repo.root.join("file"), "hello\n").unwrap();
@@ -374,7 +432,7 @@ fn startup_functions_cannot_run_during_environment_cleanup() {
     ));
     // Neither a command-less redirection nor an empty expansion is a safe
     // status helper: zsh can dispatch NULLCMD or a global alias respectively.
-    startup.push_str("NULLCMD=unset\nREADNULLCMD=unset\nif [ -n \"$ZSH_VERSION\" ]; then alias -g '${?+}=unset'; fi\n");
+    startup.push_str("NULLCMD=unset\nREADNULLCMD=unset\nif [ -n \"$ZSH_VERSION\" ]; then alias -g '${?+}=unset'; fi\nalias '!=unset'\n");
     let updated = repo.approved("cat file").unwrap();
     let command = updated["command"].as_str().unwrap();
     for shell in ["/bin/bash", "/bin/zsh"] {
@@ -421,14 +479,21 @@ fn startup_functions_cannot_run_during_environment_cleanup() {
                 assert_eq!(output.status.code(), Some(125), "{output:?}");
                 assert!(output.stdout.is_empty());
             }
-            let refused = startup_shell_command_in(
+            let traced = startup_shell_command_in(
                 &repo,
                 shell,
                 &format!("export LD_TRACE_LOADED_OBJECTS=''; {command}"),
                 cwd,
             );
-            assert!(!refused.status.success(), "{refused:?}");
-            assert!(refused.stdout.is_empty());
+            if cfg!(all(target_os = "linux", target_env = "gnu")) {
+                assert!(!traced.status.success(), "{traced:?}");
+                assert!(traced.stdout.is_empty());
+            } else {
+                // Darwin ignores this glibc flag; env -i must remove it and
+                // execute the real command/guard, rather than forge success.
+                assert_eq!(traced.status.code(), output.status.code(), "{traced:?}");
+                assert_eq!(traced.stdout, output.stdout, "{traced:?}");
+            }
             assert!(
                 !marker.exists(),
                 "refusal invoked a startup function: {shell:?}"
@@ -494,7 +559,7 @@ fn startup_error_traps_cannot_turn_rejection_into_success() {
                         !marker.exists(),
                         "error hook ran: {shell:?}, {strict:?}, {loader:?}, {requested:?}, {output:?}"
                     );
-                    if loader.is_empty() {
+                    if loader.is_empty() || !cfg!(all(target_os = "linux", target_env = "gnu")) {
                         assert_eq!(output.status.code(), Some(status), "{output:?}");
                         assert_eq!(output.stdout, stdout.as_bytes(), "{output:?}");
                     } else {
@@ -564,51 +629,40 @@ fn loader_trace_cannot_replace_sanitized_execution_or_its_directory_guard() {
     for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
         // Set the flag inside the already-running shell: putting it in Command's
         // environment would trace the outer shell before our wrapper can run.
-        for setup in [
-            "LD_TRACE_LOADED_OBJECTS=''",
-            "export LD_TRACE_LOADED_OBJECTS=''",
-            "export LD_TRACE_LOADED_OBJECTS=1",
+        for (setup, exported) in [
+            ("LD_TRACE_LOADED_OBJECTS=''", false),
+            ("export LD_TRACE_LOADED_OBJECTS=''", true),
+            ("export LD_TRACE_LOADED_OBJECTS=1", true),
+            (
+                "readonly LD_TRACE_LOADED_OBJECTS=1; export LD_TRACE_LOADED_OBJECTS",
+                true,
+            ),
         ] {
             let script = format!("{setup}; {command}");
-            let output = Command::new(shell)
-                .current_dir(&repo.root)
-                .args(["-c", &script])
-                .output()
-                .unwrap();
-            assert!(
-                !output.status.success(),
-                "loader flags must fail closed: {output:?}"
-            );
-            assert!(
-                output.stdout.is_empty(),
-                "no loader or tool should run: {output:?}"
-            );
-            let outside = Command::new(shell)
-                .current_dir(&repo.home)
-                .args(["-c", &script])
-                .output()
-                .unwrap();
-            assert!(!outside.status.success(), "{outside:?}");
-            assert!(outside.stdout.is_empty());
+            for (cwd, status, stdout) in [(&repo.root, 0, "hello\n"), (&repo.home, 125, "")] {
+                let output = Command::new(shell)
+                    .current_dir(cwd)
+                    .args(["-c", &script])
+                    .output()
+                    .unwrap();
+                if exported && cfg!(all(target_os = "linux", target_env = "gnu")) {
+                    assert!(
+                        !output.status.success(),
+                        "loader tracing must fail closed: {output:?}"
+                    );
+                    assert!(
+                        output.stdout.is_empty(),
+                        "no loader output may escape: {output:?}"
+                    );
+                } else {
+                    // Unexported variables never reach env; Darwin ignores the
+                    // glibc flag. In either case the sanitized command must
+                    // really execute, and the wrong directory must return 125.
+                    assert_eq!(output.status.code(), Some(status), "{output:?}");
+                    assert_eq!(output.stdout, stdout.as_bytes(), "{output:?}");
+                }
+            }
         }
-        let output = Command::new(shell)
-            .current_dir(&repo.root)
-            .args([
-                "-c",
-                &format!(
-                    "readonly LD_TRACE_LOADED_OBJECTS=1; export LD_TRACE_LOADED_OBJECTS; {command}"
-                ),
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            !output.status.success(),
-            "an unremovable loader flag must fail closed"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "no loader or tool should run: {output:?}"
-        );
     }
 }
 

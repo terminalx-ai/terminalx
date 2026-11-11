@@ -18,11 +18,12 @@ macOS Rust tests before merge; Linux runs the full default-feature suite.
 No tests are dropped or newly ignored. Earlier Linux portability, watcher
 lifetime and PTY deadline fixes are retained through the merge. Linux testing
 also caught a false-success bug in main's approval wrapper: an empty loader
-tracing flag prevented both command and directory guard execution. It is now
-rejected before any executable starts, without resolving cleanup functions or
-aliases from shell startup files. Conditional execution also prevents inherited
-zsh error traps from turning rejection into an unapproved write and success;
-regressions cover function/list traps, strict modes and retained exit statuses.
+tracing flag prevented both command and directory guard execution. A clean-shell
+startup probe now detects loader tracing without expanding any startup-defined
+parameter or invoking cleanup functions. A descriptor guard rejects tracing
+before the real command starts. Conditional execution suppresses inherited zsh
+error traps; regressions cover poisoned functions/aliases, strict modes, stdin,
+exit statuses and Bash nameref writes in both correct and wrong directories.
 Approval-wrapper changes always select the macOS suite as well. A cache fixture
 also sets its rewrite timestamp explicitly so same-size writes remain observable
 on Linux; its assertions and the production cache are unchanged.
@@ -51,14 +52,18 @@ on Linux; its assertions and the production cache are unchanged.
 ## Validation and measurements
 
 Passed locally: desktop/mobile type checks, frontend build, Swift (123) and icon
-checks (18). After review corrections: Clippy on Linux/macOS, the full Linux
+checks (18). After the first two review corrections: Clippy on Linux/macOS, the full Linux
 suite (3,373 unit + 14 integration tests), 18 macOS approval-wrapper tests plus
 the session-directory regression, actionlint and 28 CI policy/helper tests.
 The merged macOS baseline passed its full suite (3,426 + 14); no second full
 macOS pass is claimed. Desktop TypeScript and all 5,392 Vitest tests passed
 again in a single run with two workers and unchanged assertions/deadlines.
-Hosted AMD64 CI and the next independent review remain required. No new tests
-are ignored or removed.
+After the third review correction: Clippy and all 19 approval-wrapper tests
+plus the session-directory regression (**20 total**) passed on both macOS and
+Linux. The new nameref payload was exercised on Linux Bash 5.2; macOS's system
+Bash 3.2 has no namerefs. No new full-suite or frontend rerun is claimed for
+that correction. Hosted AMD64 CI and independent review remain required.
+No new tests are ignored or removed.
 See [dated validation and reproducible observations](CI-RUNNERS-MEASUREMENTS.md).
 The historical ten-run unsplit baseline is 59.0 minutes median / 74.1 p90.
 Today's #882 baseline has only **6/10** successful first attempts using the exact current workflow: 52.2 median /

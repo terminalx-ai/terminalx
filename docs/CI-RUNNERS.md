@@ -60,29 +60,40 @@ unread input and proves that neither nudge adds another byte.
 The merged main also exposed a Linux loader bug in the read-only approval
 wrapper: assigning an empty `LD_TRACE_LOADED_OBJECTS` made glibc print loader
 information and return success before `env` could run the directory guard or
-command. The wrapper now refuses any environment where that flag is present,
-including empty and readonly values, before launching any executable. It uses
-a failing redirection through a non-directory (`/dev/null/<fixed suffix>`),
-not a cleanup command: startup-defined functions can replace even quoted
-`unset`, `builtin` or `command`, and aliases can replace shell keywords. With
-the flag absent, a temporary descriptor opens `/dev/null` and closes before
-execution; stdin is unchanged. Regression coverage exercises sh, bash and zsh,
-poisoned startup functions/aliases, normal execution and a mismatched directory.
-The guarded execution is the left side of `&&`, which suppresses inherited
-error traps (including zsh's function-style `TRAPZERR`) and preserves its
-failure status. Only on success, the same loader-masked `/usr/bin/env -i`
-launcher runs once more without a payload: its empty environment produces no
-output and returns zero. This reuses the existing launcher boundary; it adds no
-shell helper name or ordinary variable assignment. Shell noops are unsuitable:
-functions can replace `true`/`:`, global aliases can replace an empty expansion,
-zsh can dispatch `NULLCMD`, and an assignment can follow a hostile nameref.
-An outer subshell around the whole list would re-expose failure to error hooks.
-Tests install real startup traps that write a marker and exit zero, then require
-no marker and correct rejection, normal-command and directory-guard statuses.
-See [zsh trap semantics](https://zsh.sourceforge.io/Doc/Release/Functions.html). CI explicitly
-installs/requires ripgrep and zsh so executable security fixtures cannot take
-their missing-tool fallback. The [glibc implementation treats the
-flag as enabled by presence](https://sourceware.org/pipermail/glibc-cvs/2022q1/076642.html).
+command. The wrapper no longer reads or tests that variable: even a presence
+expansion can evaluate a startup-defined Bash nameref's array subscript.
+Instead, the existing loader-masked `/usr/bin/env -i` launcher first starts a
+clean `/bin/sh` that only exits 9, discarding the launcher's stdout. A tracing
+glibc loader exits 0 without starting that shell. Before the real launch, the
+wrapper saves stdin, closes descriptor 0, opens descriptor 9 on `/dev/null`, and
+tries to duplicate the probe's exit status as a descriptor. Status 9 succeeds;
+status 0 fails before command dispatch. It restores stdin and closes the
+working descriptors before execution. The only outer-shell expansion is `$?`,
+a shell-owned special parameter that cannot be a startup-defined nameref.
+All named values passed to the clean shell are literal, quoted arguments.
+
+Unexported loader flags never reach the launcher; Darwin does not interpret the
+glibc flag. In those cases `env -i` removes the flag and the real command and
+directory guard execute. Exported flags on glibc, including empty and readonly
+values, fail closed without leaking loader output. Tests require actual command
+output or status 125 for the wrong directory whenever execution is allowed.
+They also reproduce the nameref write with both unset and populated targets,
+then require no marker in either directory with the approved wrapper. Linux
+requires nameref-capable Bash; macOS's system Bash 3.2 lacks that feature.
+
+Both probe and guarded execution occupy the conditional side of `&&`, which
+suppresses inherited error traps (including zsh's function-style `TRAPZERR`)
+and preserves failure status. Only on success, the same loader-masked
+`/usr/bin/env -i` launcher runs without a payload to return zero silently.
+There is no cleanup/status builtin, control keyword or ordinary assignment
+that would resolve a startup function, alias or nameref. Tests retain poisoned
+functions, aliases, null commands and error traps, and check normal output,
+stdin and command/directory failure statuses. An outer subshell around the
+whole `&&` list would re-expose failure to error hooks.
+See [zsh trap semantics](https://zsh.sourceforge.io/Doc/Release/Functions.html).
+CI installs/requires ripgrep and zsh so the security fixtures cannot take their
+missing-tool fallback. The [glibc implementation treats the flag as enabled by
+presence](https://sourceware.org/pipermail/glibc-cvs/2022q1/076642.html).
 No test is suppressed to accommodate this behavior.
 
 A cache-reconciliation fixture also assumed that immediate same-size writes

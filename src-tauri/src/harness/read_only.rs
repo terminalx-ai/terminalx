@@ -204,14 +204,12 @@ fn approved_input_in(
     // values cannot inject libraries or create loader trace/profile files.
     // glibc enables LD_TRACE_LOADED_OBJECTS by presence, even when empty:
     // assigning '' makes env print libraries and exit 0 without running the
-    // directory guard or command. Refuse that environment before loading any
-    // executable. Even quoted unset/builtin/command can resolve startup
-    // functions, and aliases can replace control keywords like case. Instead,
-    // use a redirection below: /dev/null is not a directory, so a present flag
-    // makes opening /dev/null/<fixed suffix> fail before command dispatch.
-    // With no flag, opening /dev/null then closing the temporary fd succeeds.
-    // This also rejects empty, unexported and readonly flags without evaluating
-    // their contents, changing stdin or calling any cleanup command.
+    // directory guard or command. Do not inspect that variable in the outer
+    // shell: even ${name+...} follows a startup-defined Bash nameref and can
+    // execute its array subscript. Cleanup builtins can also be functions.
+    // Instead, probe the same launcher with a clean shell that only exits 9.
+    // A tracing loader returns 0; discard its output and reject that status
+    // using descriptor duplication below, without inspecting any named variable.
     let mut reset_env = String::new();
     for key in [
         "LD_PRELOAD",
@@ -232,16 +230,19 @@ fn approved_input_in(
         reset_env.push_str("='' ");
     }
     reset_env.push_str("LD_LIBRARY_PATH='/usr/lib:/lib' DYLD_LIBRARY_PATH='/usr/lib' GCONV_PATH='/usr/lib/gconv' LC_ALL='C' '/usr/bin/env' '-i'");
-    let mut wrapper = format!("({reset_env}");
+    let mut wrapper = format!("({reset_env} '/bin/sh' '-c' 'exit 9' >'/dev/null'; {reset_env}");
     for (key, value) in &execution.env {
         wrapper.push(' ');
         wrapper.push_str(&quote(&format!("{key}={value}")));
     }
     wrapper.push_str(" '/bin/sh' '-c' ");
     wrapper.push_str(&quote(&script));
-    wrapper.push_str(
-        " 9<\"/dev/null${LD_TRACE_LOADED_OBJECTS+/LD_TRACE_LOADED_OBJECTS-is-not-allowed}\" 9<&-)",
-    );
+    // Save stdin on 8, close 0, and open 9 on /dev/null. Duplicating the probe's
+    // status as a descriptor succeeds for 9, but fails for the tracing loader's
+    // 0 before env dispatch. Restore stdin and close every temporary descriptor.
+    // $? is shell-owned status, not a named parameter that startup can turn
+    // into a nameref. It is the only expansion in the outer wrapper.
+    wrapper.push_str(" 8<&0 0<&- 9<'/dev/null' 7<&\"$?\" 0<&8 7<&- 8<&- 9<&-)");
     // zsh inherits function-style TRAPZERR handlers into subshells. Keep the
     // entire guarded execution on the conditional side of && so neither a
     // rejection nor the requested command's failure invokes an outer error
