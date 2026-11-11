@@ -1,18 +1,23 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BranchOverview } from "@/lib/api";
+import type { BranchOverview, ProjectForge } from "@/lib/api";
 import { getDraft } from "@/lib/drafts";
 
 // The panel reads the branch, then its pull request: two answers in turn, slow on a busy machine.
 const WAIT = { timeout: 5000 };
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const { invoke, forge, session, openSettle } = vi.hoisted(() => ({
+  invoke: vi.fn(), forge: { value: "github" as ProjectForge | undefined }, openSettle: vi.fn(),
+  session: { id: "s1", projectPath: "/repo", cwd: "/repo/wt", title: "Add login", archived: false, worktreeRemoved: false, worktreeName: "wt", worktreeBase: { commit: "0000000" }, activeTab: "tab-1", tabs: [{ id: "tab-1", status: "idle", front: "agent" }] },
+}));
+vi.mock("@/lib/projectForge", () => ({ useProjectForge: () => forge.value }));
+vi.mock("@/lib/dialogs", () => ({ openSettle }));
+vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/lib/sessions", () => ({
-  useSessionStore: () => ({
-    sessions: [{ id: "s1", cwd: "/repo/wt", title: "Add login", archived: false, worktreeRemoved: false, activeTab: "tab-1", tabs: [] }],
-  }),
+  useSessionStore: () => ({ sessions: [session] }),
+  patchTab: vi.fn(),
 }));
 
 const { BranchPanel, FETCH_EVERY, avatarUrl, graphRows } = await import("./BranchPanel");
@@ -20,9 +25,12 @@ const { localStep } = await import("./NextStep");
 
 const commit = (sha: string, subject: string, author: string, email = `${author.toLowerCase()}@x.io`) => ({ sha, shortSha: sha.slice(0, 7), subject, body: "", author, email, date: "2026-10-01T00:00:00Z", parent: null, tree: "" });
 const overview = (patch: Partial<BranchOverview> = {}): BranchOverview => ({
+  nextStep: "pull",
   branch: "dc/login",
   base: "origin/main",
   onBase: false,
+  mainCheckout: "/repo",
+  inMainCheckout: false,
   forkPoint: commit("aaaaaaa1", "Base", "Cy"),
   ahead: 2,
   behind: 3,
@@ -31,7 +39,7 @@ const overview = (patch: Partial<BranchOverview> = {}): BranchOverview => ({
   contributors: [],
   baseContributors: [{ name: "Cy", email: "cy@x.io", commits: 3, last: "2026-10-01T00:00:00Z" }],
   upstream: "origin/dc/login",
-  unpushed: 1,
+  unpushed: 0,
   unpulled: 1,
   incoming: [commit("ddddddd4", "Fix header", "Bo")],
   dirty: true,
@@ -44,13 +52,15 @@ const overview = (patch: Partial<BranchOverview> = {}): BranchOverview => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  forge.value = "github";
+  session.tabs[0].status = "idle";
 });
 
 /** Answers the panel's questions; after a pull, the branch has nothing left to pull. */
 function answer(next: BranchOverview, prs: unknown[] = []) {
   let pulled = false;
   invoke.mockImplementation(async (command: string) => {
-    if (command === "branch_overview") return pulled ? { ...next, unpulled: 0, incoming: [] } : next;
+    if (command === "branch_overview") return pulled ? { ...next, nextStep: "conflicts", unpulled: 0, incoming: [] } : next;
     if (command === "branch_fetch") return true;
     if (command === "gh_available") return true;
     if (command === "pr_list") return prs;
@@ -65,6 +75,29 @@ function answer(next: BranchOverview, prs: unknown[] = []) {
 }
 
 describe("the Branch tab", () => {
+  it.each([undefined, "githubUnavailable"] as const)("reads the branch and retains PR actions while forge is %s", async (state) => {
+    forge.value = state;
+    answer(overview({ unpulled: 0, unpushed: 0, dirty: false, behind: 0, merge: { state: "clean", conflicted: [] } }));
+    const view = render(<BranchPanel cwd="/repo/wt" active sessionId="s1"><p>Create PR</p></BranchPanel>);
+    expect(await screen.findByTestId("branch-name", {}, WAIT)).toBeTruthy();
+    expect(screen.getByText("Create PR")).toBeTruthy();
+    expect(screen.queryByTestId("local-git-actions")).toBeNull();
+    expect(invoke).toHaveBeenCalledWith("branch_overview", { cwd: "/repo/wt", base: null, localOnly: false });
+    const reads = invoke.mock.calls.filter(([command]) => command === "branch_overview").length;
+    forge.value = "github";
+    view.rerender(<BranchPanel cwd="/repo/wt" active sessionId="s1"><p>Create PR</p></BranchPanel>);
+    expect(screen.getByTestId("branch-name")).toBeTruthy();
+    expect(invoke.mock.calls.filter(([command]) => command === "branch_overview")).toHaveLength(reads);
+  });
+
+  it("does not offer to merge from the main checkout reached through a different path", async () => {
+    forge.value = "localOnly";
+    answer(overview({ base: "main", mainCheckout: "/private/repo/main", inMainCheckout: true }));
+    render(<BranchPanel cwd="/repo/main" active sessionId="s1" />);
+    expect(await screen.findByRole("button", { name: "Commit" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Merge into main" })).toBeNull();
+  });
+
   it("says the one next step, then draws the branch against where it started", async () => {
     answer(overview({ baseCommits: [commit("eeeeeee5", "Bump deps", "Cy")], behind: 1 }));
     render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
@@ -90,7 +123,7 @@ describe("the Branch tab", () => {
   });
 
   it("lists the conflicting files under the step, and offers the agent to resolve them", async () => {
-    answer(overview({ unpulled: 0, incoming: [] }));
+    answer(overview({ nextStep: "conflicts", unpulled: 0, incoming: [] }));
     render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
     const step = await screen.findByTestId("next-step", {}, WAIT);
     expect(step.textContent).toContain("Conflicts with main in 1 file");
@@ -131,7 +164,7 @@ describe("the Branch tab", () => {
   });
 
   it("pulls what others pushed, or writes the agent a message asking it to", async () => {
-    answer(overview());
+    answer(overview({ dirty: false }));
     render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
     const step = await screen.findByTestId("next-step", {}, WAIT);
     expect(step.textContent).toContain("Pull 1 commit");
@@ -146,7 +179,7 @@ describe("the Branch tab", () => {
   });
 
   it("leaves the next step to the pull request once the branch needs nothing, and on the base shows none", async () => {
-    answer(overview({ merge: { state: "clean", conflicted: [] }, behind: 0, unpulled: 0, unpushed: 0, dirty: false, incoming: [] }), [
+    answer(overview({ nextStep: null, merge: { state: "clean", conflicted: [] }, behind: 0, unpulled: 0, unpushed: 0, dirty: false, incoming: [] }), [
       { number: 7, title: "Login", url: "", state: "OPEN", isDraft: false, base: "main", head: "dc/login", additions: 1, deletions: 0, mergeable: "MERGEABLE", reviewDecision: "APPROVED", checks: [], body: "", author: "ann" },
     ]);
     const onStep = vi.fn();
@@ -154,11 +187,11 @@ describe("the Branch tab", () => {
     expect(await screen.findByText("the pull request", {}, WAIT)).toBeTruthy();
     await vi.waitFor(() => expect(onStep).toHaveBeenLastCalledWith(false), WAIT);
     expect(screen.queryByTestId("next-step")).toBeNull();
-    expect(invoke).toHaveBeenCalledWith("branch_overview", { cwd: "/repo/wt", base: "origin/main" });
+    expect(invoke).toHaveBeenCalledWith("branch_overview", { cwd: "/repo/wt", base: "origin/main", localOnly: false });
     cleanup();
     invoke.mockClear();
 
-    answer(overview({ branch: "main", onBase: true, ahead: 0, behind: 0, commits: [], unpulled: 0, incoming: [], baseContributors: [], merge: { state: "merged", conflicted: [] } }));
+    answer(overview({ nextStep: null, branch: "main", onBase: true, ahead: 0, behind: 0, commits: [], unpulled: 0, incoming: [], baseContributors: [], merge: { state: "merged", conflicted: [] } }));
     render(<BranchPanel cwd="/repo/wt" active onStep={onStep}><p>the pull request</p></BranchPanel>);
     await screen.findByTestId("branch-name", {}, WAIT);
     expect(screen.queryByText("the pull request")).toBeNull();
@@ -168,37 +201,38 @@ describe("the Branch tab", () => {
   });
 
   it("names one step for every state of the branch, in order", () => {
-    const clean = overview({ unpulled: 0, incoming: [], merge: { state: "clean", conflicted: [] }, dirty: false, unpushed: 0 });
+    const clean = overview({ nextStep: null, unpulled: 0, incoming: [], merge: { state: "clean", conflicted: [] }, dirty: false, unpushed: 0 });
     const pr = { number: 1 } as never;
     const cases: [string, BranchOverview, unknown, string | null][] = [
       ["others pushed, before all else", overview(), null, "pull"],
       ["on main, behind its upstream", overview({ onBase: true }), null, "pull"],
       ["on main, up to date", { ...clean, onBase: true }, null, null],
-      ["detached", { ...clean, branch: null }, null, "detached"],
-      ["conflicts", { ...clean, merge: { state: "conflicts", conflicted: ["a"] } }, null, "conflicts"],
-      ["uncommitted", { ...clean, dirty: true }, null, "commit"],
-      ["nothing of its own, no pull request", { ...clean, ahead: 0 }, null, "empty"],
-      ["nothing of its own, a pull request speaks for it", { ...clean, ahead: 0 }, pr, null],
-      ["nothing of its own, pull request still being read", { ...clean, ahead: 0 }, undefined, null],
-      ["never pushed", { ...clean, upstream: null }, null, "push"],
-      ["no remote: merged here, never pushed", { ...clean, upstream: null, hasRemote: false }, null, "local"],
-      ["no remote, nothing yet", { ...clean, ahead: 0, hasRemote: false }, undefined, "empty"],
-      ["no remote, uncommitted first", { ...clean, dirty: true, hasRemote: false }, null, "commit"],
-      ["commits not pushed", { ...clean, unpushed: 2 }, pr, "push"],
+      ["detached", { ...clean, nextStep: "detached", branch: null }, null, "detached"],
+      ["conflicts", { ...clean, nextStep: "conflicts", merge: { state: "conflicts", conflicted: ["a"] } }, null, "conflicts"],
+      ["uncommitted", { ...clean, nextStep: "commit", dirty: true }, null, "commit"],
+      ["nothing of its own, no pull request", { ...clean, nextStep: "empty", ahead: 0 }, null, "empty"],
+      ["nothing of its own, a pull request speaks for it", { ...clean, nextStep: "empty", ahead: 0 }, pr, null],
+      ["nothing of its own, pull request still being read", { ...clean, nextStep: "empty", ahead: 0 }, undefined, null],
+      ["never pushed", { ...clean, nextStep: "push", upstream: null }, null, "push"],
+      ["no remote: merged here, never pushed", { ...clean, nextStep: "local", upstream: null, hasRemote: false }, null, "local"],
+      ["no remote, nothing yet", { ...clean, nextStep: "empty", ahead: 0, hasRemote: false }, undefined, "empty"],
+      ["no remote, uncommitted first", { ...clean, nextStep: "commit", dirty: true, hasRemote: false }, null, "commit"],
+      ["commits not pushed", { ...clean, nextStep: "push", unpushed: 2 }, pr, "push"],
       ["ready for its pull request", clean, null, null],
       ["ready, a pull request open", clean, pr, null],
     ];
     for (const [name, o, p, kind] of cases) expect([name, localStep(o, p as never, "main")?.kind ?? null]).toEqual([name, kind]);
-    expect(localStep({ ...clean, upstream: null }, null, "main")?.text).toBe("Push 2 commits");
-    expect(localStep({ ...clean, unpushed: 1 }, null, "main")?.text).toBe("Push 1 commit");
+    expect(localStep({ ...clean, nextStep: "push", upstream: null }, null, "main")?.text).toBe("Push 2 commits");
+    expect(localStep({ ...clean, nextStep: "push", unpushed: 1 }, null, "main")?.text).toBe("Push 1 commit");
     // Every step a newcomer can act on says why, in plain words.
     for (const [, o, p, kind] of cases) if (kind && kind !== "empty") expect(localStep(o, p as never, "main")?.why).toBeTruthy();
-    expect(localStep({ ...clean, dirty: true }, null, "main")?.why).toBe("3 files changed. A commit saves them on this branch as a checkpoint you can come back to.");
+    expect(localStep({ ...clean, nextStep: "commit", dirty: true }, null, "main")?.why).toBe("3 files changed. A commit saves them on this branch as a checkpoint you can come back to.");
   });
 
   it("on a project with no remote: says so, asks GitHub nothing, and merges into main here", async () => {
-    const local = overview({ base: "main", upstream: null, unpulled: 0, unpushed: 0, incoming: [], merge: { state: "clean", conflicted: [] }, behind: 0, hasRemote: false, dirty: false });
-    answer({ ...local, dirty: true });
+    forge.value = "localOnly";
+    const local = overview({ nextStep: "local", base: "main", upstream: null, unpulled: 0, unpushed: 0, incoming: [], merge: { state: "clean", conflicted: [] }, behind: 0, hasRemote: false, dirty: false });
+    answer({ ...local, nextStep: "commit", dirty: true });
     const shown = vi.fn();
     const { onPanelTab } = await import("@/lib/panelTab");
     const off = onPanelTab(shown);
@@ -216,15 +250,55 @@ describe("the Branch tab", () => {
 
     answer(local);
     const base = invoke.getMockImplementation()!;
-    invoke.mockImplementation(async (command: string, args: unknown) => (command === "branch_merge_into" ? "Merged into main" : base(command, args)));
+    invoke.mockImplementation(async (command: string, args: unknown) => (command === "send_message" ? { queued: false, events: [] } : base(command, args)));
     render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
     const ready = await screen.findByTestId("next-step", {}, WAIT);
     expect(ready.textContent).toContain("2 commits ready for main");
-    expect(screen.getByTestId("next-step-why").textContent).toContain("only on this computer");
-    fireEvent.click(within(ready).getByRole("button", { name: "Merge into main" }));
-    expect(invoke).toHaveBeenCalledWith("branch_merge_into", { cwd: "/repo/wt", into: "main" });
+    expect(screen.getByTestId("next-step-why").textContent).toContain("GitHub pull requests are unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "Merge into main" }));
+    await screen.findByText("Merge request sent to the active agent tab.");
+    expect(invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({ sessionId: "s1", tabId: "tab-1", text: expect.stringContaining('local base branch "main" in the main checkout "/repo"') }));
+    expect(invoke).not.toHaveBeenCalledWith("branch_merge_into", expect.anything());
     expect(invoke).not.toHaveBeenCalledWith("pr_list", expect.anything());
     expect(invoke).not.toHaveBeenCalledWith("gh_available", expect.anything());
+  });
+
+  it("offers local actions for other hosts, sends dirty work to the active tab, and reports failures", async () => {
+    forge.value = "localOnly";
+    answer(overview({ base: "develop", hasRemote: true, unpulled: 0, dirty: true }));
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "send_message") throw new Error("Agent unavailable");
+      return base(command, args);
+    });
+    render(<BranchPanel cwd="/repo/wt" active sessionId="s1"><p>Create PR</p></BranchPanel>);
+    fireEvent.click(await screen.findByRole("button", { name: "Merge into develop" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Agent unavailable");
+    expect(screen.getByRole("button", { name: "Commit" })).toBeTruthy();
+    expect(screen.queryByText("Create PR")).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith("pr_list", expect.anything());
+    expect(invoke).toHaveBeenCalledWith("branch_overview", { cwd: "/repo/wt", base: null, localOnly: true });
+    expect(invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({ text: expect.stringContaining("merge --abort") }));
+  });
+
+  it("offers the existing cleanup only after a clean local merge and while agents are idle", async () => {
+    forge.value = "localOnly";
+    answer(overview({ base: "develop", ahead: 0, dirty: false, unpulled: 0, merge: { state: "merged", conflicted: [] } }));
+    const view = render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete workspace" }));
+    expect(openSettle).toHaveBeenCalledWith(session);
+    session.tabs[0].status = "in_progress";
+    view.rerender(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
+    expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
+    expect((screen.getByRole("button", { name: "Merge into develop" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("does not offer cleanup for uncommitted changes or an unverified merge", async () => {
+    forge.value = "localOnly";
+    answer(overview({ base: "develop", ahead: 0, dirty: true, unpulled: 0, merge: { state: "unknown", conflicted: [] } }));
+    render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
+    await screen.findByRole("button", { name: "Commit" });
+    expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
   });
 
   it("asks the remote what others pushed on opening and every five minutes, and reads the branch again", async () => {

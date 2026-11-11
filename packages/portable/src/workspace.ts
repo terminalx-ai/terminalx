@@ -443,6 +443,7 @@ export type CleanupProgress =
  * `cwd` and `projectPath` are paths on the VM: never hand them to a local command.
  */
 export interface RuntimeSession {
+  rowStatus?: import("./sessionStatus").SessionStatusInput;
   manualStatus?: import("./manualStatus").ManualStatus;
   automation?: { id: string } | null;
   id: string;

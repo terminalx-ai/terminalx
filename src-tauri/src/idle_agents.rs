@@ -143,22 +143,28 @@ pub fn sweep(manager: &SessionManager, limit: Option<Duration>, now: Instant) ->
 /// agent's own children, its MCP and language servers among them, still
 /// descend from it and do not count. Processes that cannot be read are said
 /// to be there: not knowing is not idle.
-pub fn left_running(leader: u32) -> Option<String> {
+pub(crate) fn process_table() -> Option<String> {
     let program = if std::path::Path::new("/bin/ps").exists() { "/bin/ps" } else { "ps" };
-    let listed = std::process::Command::new(program).args(["-A", "-o", "pid=,ppid=,pgid="]).env("LC_ALL", "C").output();
-    match listed {
-        Ok(output) if output.status.success() => match strays(&String::from_utf8_lossy(&output.stdout), leader) {
+    let mut command = std::process::Command::new(program);
+    command.args(["-A", "-o", "pid=,ppid=,pgid="]).env("LC_ALL", "C");
+    let output = crate::git::capture_within(command, Duration::from_secs(5)).ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+pub fn left_running(leader: u32) -> Option<String> {
+    match process_table() {
+        Some(table) => match strays(&table, leader) {
             0 => None,
             1 => Some("a process it left running".into()),
             n => Some(format!("{n} processes it left running")),
         },
-        _ => Some("processes that could not be checked".into()),
+        None => Some("processes that could not be checked".into()),
     }
 }
 
 /// How many members of `leader`'s process group in a `pid ppid pgid` table
 /// do not descend from it.
-fn strays(table: &str, leader: u32) -> usize {
+pub(crate) fn strays(table: &str, leader: u32) -> usize {
     let mut parents = HashMap::new();
     let mut members = Vec::new();
     for line in table.lines() {

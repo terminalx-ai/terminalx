@@ -712,6 +712,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const session = useMemo<SessionEntry>(
     () => ({
       id: key,
+      rowStatus: connected && !locked ? runtimeSession?.rowStatus : undefined,
       projectPath: repo ? `cloud:${orgId}:${repo.identity}` : workspaceKey,
       cwd: root,
       branch: runtimeSession?.branch ?? item?.workspace.launch?.workBranch ?? null,
@@ -733,7 +734,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
           })),
       activeTab: locked ? null : (runtimeSession?.activeTab ?? null),
     }),
-    [key, repo?.identity, orgId, workspaceKey, root, runtimeSession, item?.workspace.launch?.workBranch, firstTitle, ownTabs, asleep, locked, workspaceName],
+    [key, connected, repo?.identity, orgId, workspaceKey, root, runtimeSession, item?.workspace.launch?.workBranch, firstTitle, ownTabs, asleep, locked, workspaceName],
   );
 
   // Who would manage once it runs: the role when sharing says (PRO-30), else what opening would grant.

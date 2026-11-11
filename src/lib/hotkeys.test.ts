@@ -58,12 +58,12 @@ describe("the binder and the reader's keys", () => {
   it("honours a custom chord at once, with no new registration, and drops the old one", () => {
     const handler = vi.fn();
     cleanups.push(registerShortcut("app.toggleSidebar", handler));
-    saveShortcut("app.toggleSidebar", ["mod+shift+y"]);
+    saveShortcut("app.toggleSidebar", ["mod+shift+v"]);
     press({ key: "b", code: "KeyB", ctrlKey: true });
     expect(handler).not.toHaveBeenCalled();
-    press({ key: "Y", code: "KeyY", ctrlKey: true, shiftKey: true });
+    press({ key: "V", code: "KeyV", ctrlKey: true, shiftKey: true });
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(shortcutKeys("app.toggleSidebar")).toEqual(["Ctrl", "Shift", "Y"]);
+    expect(shortcutKeys("app.toggleSidebar")).toEqual(["Ctrl", "Shift", "V"]);
   });
 
   it("does not run an unbound action, and lets its old keys through", () => {

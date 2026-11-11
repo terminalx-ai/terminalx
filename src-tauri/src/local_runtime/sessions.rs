@@ -154,6 +154,10 @@ impl Sessions {
         self.tab("resumeConversation", session, tab, json!({"harness":harness,"providerSessionId":provider_session_id}))
     }
 
+    pub fn row_statuses(&self, ids: Vec<String>) -> Result<Value> {
+        self.quick("runtime.session.rowStatuses", json!({"ids":ids}))
+    }
+
     pub fn running_tabs(&self) -> Result<Vec<RunningTab>> {
         self.quick("runtime.session.running", json!({}))
     }

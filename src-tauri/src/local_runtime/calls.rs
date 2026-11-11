@@ -75,7 +75,8 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 crate::issue_pipeline::admission::open(session, None)?;
                 let (cols, rows) = size()?;
                 let cwd = string(&params, "cwd")?;
-                terminals.spawn(sink.clone(), id, crate::pty::PaneSpec { cwd, cols, rows, command: params["command"].as_str(), env: &[] })?;
+                let env = crate::store::index::workspace_ports::environment(cwd)?;
+                terminals.spawn(sink.clone(), id, crate::pty::PaneSpec { cwd, cols, rows, command: params["command"].as_str(), env: &env })?;
                 if let Some(title) = params["title"].as_str().filter(|title| !title.trim().is_empty()) { terminals.set_title(id, title); }
                 if let Some(shell) = terminals.shell(id) { sink.emit("pty_opened", &shell); }
                 Ok(Value::Null)
@@ -108,6 +109,15 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
             }
             "resize" => { let (cols, rows) = size()?; manager.mobile.desktop_input(id, || terminals.resize(id, cols, rows))?; Ok(Value::Null) }
             "environmentChanged" => Ok(json!(manager.environment_changed(id)?)),
+            "localLinks" => {
+                let sessions = crate::store::index::load()?;
+                let session = sessions.iter().find(|session| crate::pty::shell_session(id) == Some(session.id.as_str())
+                    || session.tabs.iter().any(|tab| tab.follow.pane.as_deref() == Some(id) || id.strip_prefix("tab:") == Some(tab.id.as_str())));
+                Ok(match session {
+                    Some(session) => json!({ "sessionId": session.id, "cwd": session.cwd, "urls": terminals.local_urls(id) }),
+                    None => Value::Null,
+                })
+            }
             "busy" => Ok(json!(terminals.is_busy(id))),
             "output" => Ok(json!({"data":terminals.read_output(id).map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
                 "running":terminals.is_running(id), "pid":terminals.pid(id)})),
@@ -147,6 +157,11 @@ fn setup_panes(terminals: &crate::pty::Terminals, harness: &str) -> Vec<String> 
 }
 
 pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> Result<Value> {
+    if method == "rowStatuses" {
+        let ids: Vec<String> = serde_json::from_value(params["ids"].clone())?;
+        let sessions: Vec<_> = crate::store::index::load()?.into_iter().filter(|s| ids.contains(&s.id)).collect();
+        return Ok(serde_json::to_value(manager.row_statuses(&sessions))?);
+    }
     if method == "running" { return Ok(serde_json::to_value(manager.running_tabs())?); }
     if method == "permissions" { return Ok(serde_json::to_value(manager.pending_permissions())?); }
     match method {

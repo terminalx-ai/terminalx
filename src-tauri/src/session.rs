@@ -45,6 +45,8 @@ use crate::{git, pty, store};
 
 #[path = "session_follow.rs"]
 pub mod follow;
+#[path = "session_row_status.rs"]
+pub(crate) mod row_status;
 #[path = "session_held.rs"]
 pub mod held;
 #[path = "session_reset.rs"]
@@ -869,6 +871,7 @@ pub struct TabRuntime {
     compaction: compaction::Admission,
     stdio_compaction: Option<compaction::Token>,
     stdio_starting: bool,
+    setup_failed: bool,
     /// Each frame with the phone or share a prompt came from, if any.
     stdio_writer: Option<std::sync::mpsc::SyncSender<(codex::stdio::Outbound, Option<codex_stdio::Authority>)>>,
     /// The phone or share the prompt just sent came from, until its frame is
@@ -1100,6 +1103,7 @@ pub fn idle_orphaned_tabs_except(tabs: &std::collections::HashSet<(String, Strin
 
 #[derive(Clone)]
 pub struct SessionManager {
+    row_prs: Arc<row_status::PrCache>,
     pub(crate) history_downloads: Arc<crate::local_runtime::history::Downloads>,
     /// Desktop typing waiting for its programs to read it (#661).
     pub(crate) typing: Arc<crate::local_runtime::typing::Typing>,
@@ -1507,6 +1511,7 @@ impl SessionManager {
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
         let manager = Self {
+            row_prs: Arc::default(),
             mobile: Arc::new(crate::local_runtime::mobile::Registry::default()),
             sharing: Arc::new(Mutex::new(crate::local_sharing::Sharing::default())),
             sink,
@@ -1814,6 +1819,16 @@ impl SessionManager {
         &self.sink
     }
 
+    /// Bind an agent control call to the same launch credential as its hooks.
+    /// Session/tab ids alone are selectors, never proof of the caller's identity.
+    pub(crate) fn authenticates_cli(&self, session_id: &str, tab_id: &str, token: &str) -> bool {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        runtime.is_some_and(|runtime| {
+            let rt = runtime.lock().unwrap();
+            matches!(&rt.engine, Engine::Cli(cli) if crate::hooks::token_matches(&cli.origin.token, token))
+        })
+    }
+
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
         let key = key_of(session_id, tab_id);
         one_per_key(&self.tabs, &key, || {
@@ -1840,7 +1855,7 @@ impl SessionManager {
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(),
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(),
                 stdio_retiring: None,
                 turn_started_at: None,
                 turn_usage: Default::default(),
@@ -2046,6 +2061,9 @@ impl SessionManager {
     }
 
     fn set_status(&self, rt: &mut TabRuntime, status: TabStatus) {
+        // A failed launch also completes a turn and settles to idle. Keep its
+        // reason until work actually starts again.
+        if status == TabStatus::InProgress { rt.setup_failed = false; }
         if status != TabStatus::Waiting {
             rt.stalled_at = None;
             if rt.recovery.take().is_some() {
@@ -2531,7 +2549,9 @@ impl SessionManager {
         // (`cloud_config`) first, so a grant always wins.
         env.extend(crate::cloud_config::launch_config(&harness, &rt.key()).env);
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
-        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &[] }, sink)?;
+        env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
+        env.extend(index::workspace_ports::environment(cwd)?);
+        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &["TERMINALX_PORT".into(), "TERMINALX_PORTS".into()] }, sink)?;
         rt.environment = environment.stamp;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
@@ -4337,6 +4357,12 @@ impl SessionManager {
     /// same breath knows to wait for the TUI to finish drawing. `prompting`
     /// is whether the caller is about to send one.
     fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, prompting: bool) -> Result<bool> {
+        let result = self.start_cli_inner(rt, rt_arc, entry, tab, prompting);
+        if !rt.stopping && rt.restart_claim.is_none() { rt.setup_failed = result.is_err(); }
+        result
+    }
+
+    fn start_cli_inner(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, prompting: bool) -> Result<bool> {
         self.accepting_work()?;
         if rt.stopping { bail!("Stop has not confirmed local process exit. Retry Stop before resuming."); }
         if rt.restart_claim.is_some() { bail!("The agent is restarting to apply its settings. Try again shortly."); }
@@ -4445,6 +4471,8 @@ impl SessionManager {
         // from where it stands now: what a CLI before this one left running
         // went with it.
         rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
+        env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
+        env.extend(index::workspace_ports::environment(&entry.cwd)?);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
         self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -5248,6 +5276,7 @@ impl SessionManager {
     /// refused sign-in when that line says so. The latch as for
     /// [`Self::close_open_turn`].
     fn fail_open_turn(&self, rt: &mut TabRuntime, exit: &recovery::EarlyExit) {
+        rt.setup_failed = true;
         if !rt.turn_open {
             return;
         }
@@ -7092,3 +7121,7 @@ mod tests {
         assert_eq!(pty_first("opencode"), None);
     }
 }
+
+#[cfg(test)]
+#[path = "session_review_tests.rs"]
+mod review_tests;

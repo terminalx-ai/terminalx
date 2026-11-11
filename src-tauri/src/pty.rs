@@ -29,6 +29,8 @@ pub(crate) use handover::{Frozen, FrozenPane};
 use handover::{Hold, Parts, Waiter};
 #[path = "pty_output.rs"]
 mod output;
+#[path = "pty_urls.rs"]
+mod urls;
 use output::{OutputQueue, READ_BYTES};
 const COALESCE: Duration = Duration::from_millis(8);
 pub(crate) const MAX_CHUNK: usize = 32 * 1024;
@@ -732,6 +734,10 @@ impl Terminals {
         for k in ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_BRIDGE_SESSION_ID"] {
             cmd.env_remove(k);
         }
+        // Workspace assignments override inherited/configured values. A new
+        // pane must never accidentally inherit another workspace's port.
+        cmd.env_remove("TERMINALX_PORT");
+        cmd.env_remove("TERMINALX_PORTS");
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -1262,6 +1268,12 @@ impl Terminals {
         }
         self.drop_slot_if_unused(id);
         self.changed();
+    }
+
+    /// Parse the bounded output tail, including a retained pane after runtime
+    /// replacement. Reading the whole tail handles URLs split across PTY reads.
+    pub fn local_urls(&self, id: &str) -> Vec<String> {
+        self.read_output(id).map(|bytes| urls::detect(&bytes)).unwrap_or_default()
     }
 
     /// Stop a lifecycle script's entire process group, retaining its terminal log.

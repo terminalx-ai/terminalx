@@ -51,7 +51,7 @@ interface AppContextValue {
   renameHost(hostId: string, name: string): Promise<void>;
   /** Drop the connection to a computer and make it again (connecting to it if it was not the active one). */
   reconnectHost(hostId: string): Promise<void>;
-  refreshSessions(): Promise<void>;
+  refreshSessions(silent?: boolean): Promise<void>;
   clearError(): void;
 }
 
@@ -155,12 +155,12 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   const summariesRunning = useRef(false);
   const summariesDirty = useRef(false);
-  const refreshSessions = useCallback(async () => {
+  const refreshSessions = useCallback(async (silent = false) => {
     if (!activeHostRef.current) return;
     summariesDirty.current = true;
     if (summariesRunning.current) return;
     summariesRunning.current = true;
-    setLoadingSessions(true);
+    if (!silent) setLoadingSessions(true);
     try {
       while (summariesDirty.current && activeHostRef.current) {
         summariesDirty.current = false;
@@ -176,7 +176,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       }
     } finally {
       summariesRunning.current = false;
-      setLoadingSessions(false);
+      if (!silent) setLoadingSessions(false);
     }
   }, [api]);
 

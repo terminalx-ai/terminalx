@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
+import type { SessionStatusInput } from "@terminalx/portable/sessionStatus";
+import statusCases from "../../packages/portable/src/sessionStatusCases.json";
 
 // PRO-40: the `terminalx` CLI's cloud commands, run in the window through the
 // real stores. What matters most here: the CLI can do what the signed-in
@@ -263,6 +265,22 @@ describe("discovery", () => {
 });
 
 describe("listing", () => {
+  it("keeps the cloud CLI's detailed status identical to the dashboard without waking compute", async () => {
+    const dashboard = await import("./cloudDashboard");
+    await handleCloudControl("sessions.list");
+    const existing = dashboard.getCloudDashboard().find((entry) => entry.orgId === ORG)!;
+    const read = vi.spyOn(dashboard, "getCloudDashboard");
+    try {
+      for (const test of statusCases.filter((entry) => ["checks_failing", "needs_permission", "needs_answer", "review_plan"].includes(entry.name))) {
+        const rowStatus = test.input as SessionStatusInput;
+        read.mockReturnValue([{ ...existing, branch: rowStatus.branch, rowStatus }]);
+        const result = await handleCloudControl("sessions.list", { org: ORG });
+        expect(result).toMatchObject({ sessions: [{ rowStatus, detailedStatus: { id: test.expected } }] });
+      }
+      expectNoWake();
+    } finally { read.mockRestore(); }
+  });
+
   it("lists cloud projects with their workspaces, from the catalog alone", async () => {
     const { projects } = (await handleCloudControl("projects.list")) as { projects: { key: string; name: string; orgName: string; mayStartSessions: boolean; workspaces: { key: string; state: string; status: string; role: string }[] }[] };
     expect(projects.map((project) => [project.key, project.orgName, project.mayStartSessions])).toEqual([
