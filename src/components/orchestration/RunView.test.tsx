@@ -210,8 +210,8 @@ describe("a run with workers (PRO-274)", () => {
     expect(screen.getByText("3 pieces · started 14m ago · approved by you")).toBeTruthy();
     expect(screen.getByTestId("run-done").textContent).toBe("1");
     expect([row("map"), row("store"), row("docs")].map((r) => r.dataset.pieceState)).toEqual(["done", "blocked", "queued"]);
-    // State, tries, and the line its worker last reported.
-    expect(within(row("store")).getAllByRole("cell").slice(2).map((cell) => cell.textContent)).toEqual(["Blocked", "1", "Reported partial: two tests fail."]);
+    // State, tries, cost, and the line its worker last reported. No cost was read for it yet.
+    expect(within(row("store")).getAllByRole("cell").slice(2).map((cell) => cell.textContent)).toEqual(["Blocked", "1", "–", "Reported partial: two tests fail."]);
     // A queued piece says what it waits for, by number.
     expect(row("docs").textContent).toContain("Waits for 2");
     // The first piece is open: its result, its branch, and the way to its worker.
@@ -243,6 +243,100 @@ describe("a run with workers (PRO-274)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop run" }));
     await waitFor(() => expect(screen.getByTestId("run-state").textContent).toBe("Run stopped"));
     expect([row("map"), row("store"), row("docs")].map((r) => r.dataset.pieceState)).toEqual(["done", "stopped", "stopped"]);
+  });
+});
+
+describe("a piece's tries and what they cost (PRO-275)", () => {
+  /** A run whose CLI piece fell short three times, as the engine records it. */
+  const blocked = (): Run => {
+    const run = waiting();
+    const worker = (n: number) => ({ sessionId: `w-cli-${n}`, tabId: "t" });
+    return {
+      ...run, state: "failed", reason: "cli is blocked after 3 tries. docs cannot start without it.", approval: { at: new Date(Date.now() - 40 * 60_000).toISOString() }, maxTries: 3, costUsd: 3.75, costUnpricedModels: [],
+      pieces: [
+        {
+          ...run.pieces[0], state: "done", attempts: 1, tier: "small", note: "41 call sites in 9 files.", worker: { sessionId: "w-map", tabId: "t" }, costUsd: 0.04,
+          tries: [{ step: "first", model: "haiku", tier: "small", worker: { sessionId: "w-map", tabId: "t" }, outcome: "done", detail: "41 call sites in 9 files.", costUsd: 0.04 }],
+        },
+        {
+          ...piece("cli", "Move CLI code to the store", { kind: "scoped-code", owns: ["src-tauri/src/cli.rs"], dependsOn: ["map"], doneCheck: "cargo t control" }),
+          state: "blocked", attempts: 3, model: "opus", effort: "medium", tier: "large", worker: worker(3), branch: "raccoon/cli-try3", costUsd: 3.71,
+          note: "Blocked after 3 tries: sonnet at medium, then sonnet at high, then opus at medium. It used all 3 tries. Last failure: The done-check did not hold: cargo t control",
+          tries: [
+            { step: "first", model: "sonnet", effort: "medium", tier: "mid", worker: worker(1), branch: "raccoon/cli", outcome: "failed", detail: "The worker reported failed: 2 tests in control::tests fail.", costUsd: 0.61 },
+            { step: "effort", model: "sonnet", effort: "high", tier: "mid", worker: worker(2), branch: "raccoon/cli-try2", outcome: "partial", detail: "The worker reported partial: 1 test in control::tests fails.", costUsd: 0.92 },
+            {
+              step: "tier", model: "opus", effort: "medium", tier: "large", worker: worker(3), branch: "raccoon/cli-try3", outcome: "checkFailed", costUsd: 2.18,
+              detail: "The done-check did not hold: cargo t control\ntest control::tests::create_reads_default_mode ... FAILED\nleft: Some(\"manual\")  right: Some(\"auto\")",
+            },
+          ],
+        },
+        { ...run.pieces[2], dependsOn: ["cli"] },
+      ],
+    };
+  };
+  const tries = () => within(within(detail()).getByRole("list", { name: "Tries" })).getAllByRole("listitem");
+
+  it("shows each piece's tries and cost in its row, and what the run's workers cost so far", async () => {
+    await open(blocked());
+    expect(screen.getByRole("table", { name: "Pieces" }).querySelectorAll('[role="columnheader"]').length).toBe(6);
+    expect([...screen.getByRole("table", { name: "Pieces" }).querySelectorAll('[role="columnheader"]')].map((head) => head.textContent)).toEqual(["Piece", "Model", "State", "Tries", "Cost", "Report"]);
+    expect(within(row("map")).getAllByRole("cell").slice(1, 5).map((cell) => cell.textContent)).toEqual(["Haiku 5.5 Default", "Done", "1", "$0.04"]);
+    // The model a piece is on now is its last try's.
+    expect(within(row("cli")).getAllByRole("cell").slice(1, 5).map((cell) => cell.textContent)).toEqual(["Opus 5.5 Medium", "Blocked", "3", "$3.71"]);
+    expect(within(row("docs")).getAllByRole("cell").slice(3, 5).map((cell) => cell.textContent)).toEqual(["–", "–"]);
+    expect(screen.getByTestId("run-cost").textContent).toBe("$3.75");
+    expect(screen.getByRole("status").textContent).toBe("cli is blocked after 3 tries. docs cannot start without it.");
+  });
+
+  it("lists a blocked piece's tries: what each ran on, what it cost, why it was made, and how it ended", async () => {
+    await open(blocked());
+    fireEvent.click(within(row("cli")).getByRole("button", { name: "Move CLI code to the store" }));
+    expect(within(detail()).getByTestId("piece-tries-used").textContent).toBe("· 3 of 3 tries used");
+    expect(tries().map((item) => item.dataset.tryOutcome)).toEqual(["failed", "partial", "checkFailed"]);
+    const said = tries().map((item) => item.textContent ?? "");
+    for (const text of ["Sonnet 5.5 Medium", "$0.61", "First try", "Failed: 2 tests in control::tests fail."]) expect(said[0]).toContain(text);
+    for (const text of ["Sonnet 5.5 High", "$0.92", "Retried with the failure text, effort raised one level", "Partial: 1 test in control::tests fails."]) expect(said[1]).toContain(text);
+    for (const text of ["Opus 5.5 Medium", "$2.18", "Moved up one model at one effort level lower", "Check failed: cargo t control"]) expect(said[2]).toContain(text);
+    // What the check printed is shown as it printed it, under the try it failed.
+    expect(tries()[2].querySelector("pre")?.textContent).toBe('test control::tests::create_reads_default_mode ... FAILED\nleft: Some("manual")  right: Some("auto")');
+    expect(tries()[0].querySelector("pre")).toBeNull();
+    // Each try was its own worker: any of them can be opened.
+    fireEvent.click(within(tries()[0]).getByRole("button", { name: "Open worker" }));
+    expect(mocks.selectSession).toHaveBeenLastCalledWith("w-cli-1");
+    fireEvent.click(within(tries()[2]).getByRole("button", { name: "Open worker" }));
+    expect(mocks.selectSession).toHaveBeenLastCalledWith("w-cli-3");
+  });
+
+  it("shows a try under way and one that waits for its worker, and says nothing of tries for a piece on its first", async () => {
+    const run = blocked();
+    const cli = run.pieces[1];
+    await open({
+      ...run, state: "running", reason: undefined,
+      pieces: [run.pieces[0], { ...cli, state: "queued", worker: undefined, model: "sonnet", effort: "high", tier: "mid", tries: [cli.tries![0], { step: "effort", model: "sonnet", effort: "high", tier: "mid" }], costUsd: 0.61 }, run.pieces[2]],
+    });
+    // One try, done: the count is not worth a line.
+    expect(within(detail()).queryByTestId("piece-tries-used")).toBeNull();
+    expect(tries().map((item) => item.dataset.tryOutcome)).toEqual(["done"]);
+    fireEvent.click(within(row("cli")).getByRole("button", { name: "Move CLI code to the store" }));
+    expect(within(detail()).getByTestId("piece-tries-used").textContent).toBe("· 2 of 3 tries used");
+    expect(tries().map((item) => item.dataset.tryOutcome)).toEqual(["failed", "waiting"]);
+    expect(tries()[1].textContent).toContain("Waiting for its worker");
+    expect(within(tries()[1]).queryByRole("button", { name: "Open worker" })).toBeNull();
+    // Its worker started: the try is running, and has no cost yet.
+    act(() => mocks.listeners.get("orchestration_run")!({ payload: { ...run, state: "running", reason: undefined, pieces: [run.pieces[0], { ...cli, state: "running", tries: [cli.tries![0], { step: "effort", model: "sonnet", effort: "high", tier: "mid", worker: { sessionId: "w-cli-2", tabId: "t" } }] }, run.pieces[2]] } }));
+    await waitFor(() => expect(tries().map((item) => item.dataset.tryOutcome)).toEqual(["failed", "running"]));
+    expect(tries()[1].textContent).toContain("Running");
+  });
+
+  it("says in the piece when its tier has no installed model and what it runs on instead", async () => {
+    const run = waiting();
+    const note = "No top model of Codex is installed (astra): this piece runs on the lead's model, gpt-5.6-sol.";
+    await open({ ...run, pieces: [{ ...run.pieces[0], kind: "research", agent: "codex", model: "gpt-5.6-sol", effort: "medium", tier: "large", modelNote: note }, ...run.pieces.slice(1)] });
+    expect(within(detail()).getByRole("note").textContent).toBe(note);
+    // A plan's model select offers the routing table's choice for the piece's kind.
+    const model = within(row("map")).getByRole("combobox", { name: "Model of Map every settings read" }) as HTMLSelectElement;
+    expect(model.options[0].textContent).toBe("By kind (research)");
   });
 });
 

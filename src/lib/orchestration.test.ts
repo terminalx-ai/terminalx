@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { budgetText, estimateText, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf, withoutPiece } from "./orchestration";
+import {
+  appRouting, budgetText, costText, defaultRoute, estimateText, fellShort, gaveUp, PIECE_KINDS, pieceCost, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf, sameRoute, TIERS,
+  withoutPiece,
+} from "./orchestration";
 import type { Run, RunPiece } from "@/types/orchestration";
 
 const piece = (id: string, extra: Partial<RunPiece> = {}): RunPiece => ({
@@ -80,5 +83,54 @@ describe("orchestration runs (PRO-274)", () => {
 
   it("numbers pieces by their place in the plan", () => {
     expect(pieceNumbers(run([piece("map"), piece("store"), piece("docs")]))).toEqual({ map: 1, store: 2, docs: 3 });
+  });
+});
+
+describe("the routing table and a piece's tries (PRO-275)", () => {
+  it("has the built-in row of every kind, and the app's changed rows over them", () => {
+    // The same table as `routing::default_route`.
+    expect(PIECE_KINDS.map(({ kind }) => [kind, defaultRoute(kind)])).toEqual([
+      ["search", { tier: "small" }],
+      ["logs", { tier: "small" }],
+      ["scoped-code", { tier: "mid", effort: "medium" }],
+      ["review", { tier: "mid", effort: "medium" }],
+      ["code", { tier: "large", effort: "medium" }],
+      ["refactor", { tier: "top", effort: "medium" }],
+      ["research", { tier: "top", effort: "medium" }],
+      ["verify", { tier: "mid", effort: "medium" }],
+    ]);
+    const table = appRouting({ code: { claude: { tier: "mid", effort: "high" } } });
+    expect([table.code.claude, table.code.codex, table.search.claude]).toEqual([{ tier: "mid", effort: "high" }, { tier: "large", effort: "medium" }, { tier: "small" }]);
+    expect(Object.keys(appRouting(undefined))).toHaveLength(8);
+    // The same four tiers for both agents, smallest first.
+    expect(TIERS.map(({ tier, family }) => [tier, family.claude, family.codex])).toEqual([["small", "Haiku", "Luna"], ["mid", "Sonnet", "Terra"], ["large", "Opus", "Sol"], ["top", "Fable", "Astra"]]);
+    expect([sameRoute({ tier: "mid" }, { tier: "mid" }), sameRoute({ tier: "mid", effort: "low" }, { tier: "mid" }), sameRoute({ tier: "mid" }, { tier: "top" })]).toEqual([true, false, false]);
+  });
+
+  it("sums a piece's tries, and says when a cost leaves a model out", () => {
+    expect(costText(0.6149)).toBe("$0.61");
+    expect(costText(0.13, ["gpt-new"])).toBe("$0.13+");
+    expect([costText(null), costText(undefined)]).toEqual([null, null]);
+    expect(costText(0)).toBe("$0.00");
+    const tried = piece("cli", { tries: [{ step: "first", model: "sonnet", costUsd: 0.61, outcome: "failed" }, { step: "effort", model: "sonnet", costUsd: 0.92, costUnpricedModels: ["gpt-new"], outcome: "partial" }, { step: "tier", model: "opus" }] });
+    const summed = pieceCost(tried);
+    expect([summed.cost?.toFixed(2), summed.unpriced]).toEqual(["1.53", ["gpt-new"]]);
+    // The run's own sum is taken where it sent one; nothing read is no cost, not zero.
+    expect(pieceCost({ ...tried, costUsd: 9, costUnpricedModels: [] })).toEqual({ cost: 9, unpriced: [] });
+    expect(pieceCost(piece("map"))).toEqual({ cost: null, unpriced: [] });
+    expect(pieceCost(piece("map", { tries: [{ step: "first", model: "haiku" }] })).cost).toBeNull();
+  });
+
+  it("tells a piece the ladder gave up on from one that only waits on its lead", () => {
+    const tries = (outcome: "failed" | "partial" | "checkFailed" | "blocked" | "done") => [{ step: "first" as const, model: "sonnet", outcome }];
+    for (const outcome of ["failed", "partial", "checkFailed"] as const) {
+      expect(fellShort({ outcome })).toBe(true);
+      expect(gaveUp(piece("a", { state: "blocked", tries: tries(outcome) }))).toBe(true);
+    }
+    // A worker that asked for a person's answer is blocked, and was not given up on.
+    expect(gaveUp(piece("a", { state: "blocked", tries: tries("blocked") }))).toBe(false);
+    expect(gaveUp(piece("a", { state: "queued", tries: tries("failed") }))).toBe(false);
+    expect(gaveUp(piece("a", { state: "blocked" }))).toBe(false);
+    expect([fellShort({ outcome: "done" }), fellShort({})]).toEqual([false, false]);
   });
 });

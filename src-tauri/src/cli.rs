@@ -1585,7 +1585,7 @@ mod tests {
         for said in ["terminalx runs create --from PLAN.json|- [--lead SESSION]", "terminalx runs start|show|stop [RUN]", "terminalx runs list [--lead SESSION] [--all]", "terminalx runs check-failed PIECE [--run RUN] [--output FILE|-] [--reason TEXT]"] {
             assert!(help_text().contains(said), "{said}");
         }
-        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneCheck`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8"] {
+        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneCheck`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8", "#### Model and effort", "`no_kind`", "`unknown_kind`", "#### When a piece falls short", "terminalx runs check-failed <piece>", "never past\n   `high`", "`piece_not_done`", "`modelNote`", "| top | Fable | Astra |"] {
             assert!(GUIDE.contains(said), "the guide does not say {said:?}");
         }
     }

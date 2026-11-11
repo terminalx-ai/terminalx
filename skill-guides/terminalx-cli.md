@@ -583,6 +583,7 @@ terminalx runs start [<run>] --json
 terminalx runs show [<run>] --json
 terminalx runs list [--lead <session>] [--all] --json
 terminalx runs stop [<run>] --json
+terminalx runs check-failed <piece> [--run <run>] [--output <file>|-] [--reason <text>] --json
 ```
 
 `<run>` is a run's id or the start of one. Inside the lead's session it may be left out:
@@ -615,8 +616,6 @@ The plan is a JSON file you write:
       "dependsOn": [],
       "doneCheck": "cargo t store::settings exits 0",
       "kind": "code",
-      "model": "opus",
-      "effort": "medium",
       "permissionMode": "acceptEdits",
       "readsUntrusted": false,
       "estimate": {"low": 1.6, "high": 2.4}
@@ -625,7 +624,13 @@ The plan is a JSON file you write:
 }
 ```
 
-- `goal` and `pieces` are required; each piece needs `id`, `title` and `doneCheck`.
+- `goal` and `pieces` are required; each piece needs `id`, `title`, `kind` and `doneCheck`.
+- `kind`: what sort of work the piece is. Its model and effort come from it (see "Model and
+  effort" below), so name the kind that fits and leave `model` and `effort` out:
+  - `search`: finding files, listing call sites. `logs`: reading test output and logs.
+  - `scoped-code`: a bug fix or a change with a clear spec. `code`: everyday engineering.
+  - `refactor`: architecture and large refactors. `research`: deep research and analysis.
+  - `review`: reviewing a diff. `verify`: checking a worker's result.
 - `owns`: the files or areas only this piece changes, as paths relative to the repository. A
   directory means everything in it; `*`, `?` and `**` work as in a glob. Leave it empty for a
   piece that changes nothing (a search, a review).
@@ -635,8 +640,9 @@ The plan is a JSON file you write:
 - `goal`, `why`, `scope`, `outOfScope`, `known`, `readFirst`, `limits`: the worker's brief. A
   worker knows nothing of your conversation, so write what it needs; a part you leave empty is
   stated as empty in the brief.
-- `agent`: `claude` or `codex`, for the plan or for one piece; yours when absent. `model` and
-  `effort` are the piece's; absent, the agent's defaults.
+- `agent`: `claude` or `codex`, for the plan or for one piece; yours when absent.
+- `model`, `effort`: only to override what the piece's kind gives it. Either may be named
+  without the other; what you leave out still comes from the kind.
 - `permissionMode`: `plan`, `manual`, `acceptEdits`, `auto` or `bypassPermissions`. Absent,
   the project's setting, which is `bypassPermissions` unless the person changed it.
 - `readsUntrusted`: true for a piece that reads text from outside the repository (issues, web
@@ -653,6 +659,8 @@ piece in `details.piece`, and nothing is stored:
   file to one piece, or make one piece depend on the other and own it alone.
 - `dependency_cycle` (`details.cycle`), `unknown_dependency` (`details.dependsOn`).
 - `no_done_check`: a piece has no `doneCheck`.
+- `no_kind`: a piece has no `kind`. `unknown_kind`: it names one that does not exist
+  (`details.kinds` lists the eight).
 - `too_many_pieces`: more pieces than the limit (`details.limit`; 8 unless the person changed
   it in Settings → Orchestrator, for the app or for the project). Merge pieces; do not split
   the plan into two runs to get around it.
@@ -665,7 +673,32 @@ piece in `details.piece`, and nothing is stored:
   dropped.
 - `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`: as named.
 
-It returns `run` and `approvalRequired`.
+It returns `run`, `approvalRequired` and `notes`: one `{piece, note}` for each piece that
+does not run on the model its kind names (see below). Tell the person what a note says when
+you tell them the plan is ready.
+
+#### Model and effort
+
+A routing table gives each kind a model tier and an effort. The tiers are the same four for
+both agents, and a worker uses the column of the agent it runs on:
+
+| Tier | Claude Code | Codex | Kinds that start there |
+| -- | -- | -- | -- |
+| small | Haiku | Luna | `search`, `logs`, at the model's own default effort |
+| mid | Sonnet | Terra | `scoped-code`, `review`, `verify`, at medium |
+| large | Opus | Sol | `code`, at medium |
+| top | Fable | Astra | `refactor`, `research`, at medium |
+
+That is the built-in table. The person may have changed rows in Settings → Orchestrator, for
+the app or for the project, and the project's table is the one used. `runs create` resolves
+each tier against the models the agent has installed, and the run then shows every piece's
+`model`, `effort` and `tier`. When an agent has no model of a tier, the piece runs on your
+own model (or, for a worker on another agent than yours, on that agent's default), and its
+`modelNote` says so.
+
+Do not put every piece on your own model, and do not put everything on the smallest one: a
+search on a top model wastes most of what it costs, and a refactor on a small one fails. Name
+the kind honestly and let the table choose.
 
 #### Approval
 
@@ -706,24 +739,77 @@ terminalx sessions report --children-of <your session> --json
 terminalx runs start --json
 ```
 
+#### When a piece falls short
+
+A piece whose worker reports `failed` or `partial` is tried again without you asking, and
+you do not start, brief or message anything for it. Each try is a new worker session in a
+new worktree, on what the next step names, briefed with the piece again plus what the try
+before fell short on and the branch it left. It never gets the earlier worker's
+conversation. A piece gets at most three tries:
+
+1. The first, on its kind's model and effort.
+2. The same model with the failure text, and the effort raised one level, never past
+   `high` (at `high` or above, or on a model with no effort levels, the same effort again).
+3. One model tier up, at one effort level lower.
+
+After the third try, or the second when no model tier above it is installed, the piece is
+`blocked` and its `note` says what was tried and what failed last. A run in which nothing
+else can run is then `failed`, and `reason` names the piece. From there the choice is
+yours: `send` its last worker what it is missing (the piece is `running` again and takes
+its next report), do the piece yourself, or tell the person.
+
+So after `wait` returns, read the run, not only the reports: `sessions report` still lists
+the worker that fell short with its `failed` report, while `runs show` says the piece is
+`queued` or `running` on its next try. Do not `send` a worker whose piece moved on.
+
+A worker that reports `blocked`, sends no report or waits on a person is not tried again: a
+different model would not have what it lacks. That piece is `blocked` after one try and
+waits on you.
+
+When a piece reports `done` and its done-check does not hold when you run it, say so
+instead of fixing it yourself or messaging the worker:
+
+```text
+terminalx runs check-failed <piece> --output check.log --reason "exit 101" --json
+```
+
+`--output` is a file with what the check printed (`-` for standard input); `--reason` is a
+line of your own; give at least one. The piece takes the same next step as above, with that
+text as what its next worker is told failed. It returns `run`, `piece`, `retried` (a worker
+was started for the next try) and `blocked` (the piece ran out of tries). Run the check
+before you call `runs start` for the pieces that depend on it: they are cut from what is
+committed when they start. It is refused with `piece_not_done` for a piece that did not
+report `done`, and a run's worker cannot call it (`not_the_lead`).
+
 `runs show` returns the run: `state`, `goal`, `budget`, `workerMode`, `pieces`, `ready` (the
 pieces the next `runs start` would start), `waiting`, and `estimate` with `unestimated` (how
-many pieces carry none). Each piece has its plan fields and `state`, `attempts`, `worker`
-(`sessionId`, `tabId`), `branch`, `startedMode` and `note`.
+many pieces carry none), `maxTries`, and `costUsd` (what its workers used so far, at API
+list prices, as `sessions usage` counts it; `null` before any was read). Each piece has its
+plan fields and `state`, `tier`, `modelNote`, `attempts`, `worker` (`sessionId`, `tabId`),
+`branch`, `startedMode`, `note`, `costUsd` and `tries`. `model`, `effort`, `worker` and
+`branch` are those of its current try.
+
+`tries` is every try, oldest first: `step` (`first`, `retry`, `effort` or `tier`: what made
+it differ from the one before), `model`, `effort`, `tier`, `worker`, `branch`, `outcome`
+(`done`, `failed`, `partial`, `checkFailed`, `blocked`, `stopped`; absent while it runs),
+`detail` (the result line, or the failure text the next try was given), `costUsd`,
+`started` and `ended`.
 
 - Run `state`: `planned`, `awaitingApproval`, `running`, `verifying`, `merging`, `done`,
   `stopped`, `failed`. A run is `done` when every piece is. It is `failed` when a piece
-  failed and nothing is running or could start; `reason` names the piece and what it holds
-  up. A failed run goes back to `running` when that piece's worker finishes after all.
+  ran out of tries and nothing is running or could start; `reason` names the piece and what
+  it holds up. A failed run goes back to `running` when that piece's worker finishes after
+  all.
 - Piece `state` follows its worker's last report, each time the run is read: `queued` (no
-  worker yet), `running`, `done` (it reported `done`), `blocked` (it reported `partial` or
-  `blocked`, sent no report, waits on a person, or its session was deleted; `note` says
-  which), `failed` (it reported `failed`, or could not be started), `stopped`. A `done`
-  piece stays done when its worker's session is deleted afterwards.
+  worker yet, or its next try waits for one), `running`, `done` (it reported `done`),
+  `blocked` (it ran out of tries, reported `blocked`, sent no report, waits on a person, or
+  its session was deleted; `note` says which), `failed` (its worker could not be started),
+  `stopped`. A `done` piece stays done when its worker's session is deleted afterwards.
 
 A `done` piece is a worker's claim. Read its report and check the evidence before you build
-on it. To get a `blocked` or `failed` piece moving, `send` its worker what it needs: the
-piece is `running` again while the worker works, and takes its next report.
+on it; when its done-check does not hold, report that with `runs check-failed`. To get a
+`blocked` piece moving, `send` its worker what it needs: the piece is `running` again while
+the worker works, and takes its next report.
 
 `runs stop` stops every running worker and marks the run `stopped`; pieces that were not
 done become `stopped`. It returns `stopped` (pieces whose worker was running) and `failed`
