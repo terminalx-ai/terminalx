@@ -16,6 +16,7 @@ export const SETTINGS_SECTIONS = {
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
+  projects: { title: "Projects", group: "Repositories", entry: "projects.templates" },
   repositories: { title: "Repositories", group: "Repositories", entry: "repositories.rootPath" },
   organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar" },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup" },
@@ -492,6 +493,12 @@ export const SETTINGS_ROWS = [
     description: "Create or join an organization.",
     searchTerms: ["organizations", "create", "organization"], scope: "user",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
+  }),
+  defineSetting({
+    id: "projects.templates", section: "projects", title: "Project templates",
+    description: "Starting points for Create a project. The built-in ones ship with TerminalX; add a folder to start new projects with its files.",
+    searchTerms: ["projects", "templates", "template", "quick start", "create a project", "new project", "starter", "folder"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/project-templates.json#templates" }, layout: "content",
   }),
   defineSetting({
     id: "repositories.rootPath", section: "repositories", title: "Root path",

@@ -132,6 +132,7 @@ mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
 mod project_start;
+mod project_templates;
 mod pty;
 #[cfg(feature = "desktop")]
 mod quit;
@@ -449,6 +450,7 @@ pub fn run() {
             environment_commands::environment_read_file,
             environment_commands::environment_changed,
             local_runtime::ui::local_runtime_status,
+            local_runtime::ui::local_runtime_log,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
             local_runtime::ui::local_runtime_replace,
@@ -606,6 +608,9 @@ pub fn run() {
             commands::project_clone_cancel,
             commands::project_start_defaults,
             commands::project_create,
+            commands::project_templates,
+            commands::project_template_add,
+            commands::project_template_remove,
             commands::list_sessions,
             commands::session_row_statuses,
             commands::local_sections,

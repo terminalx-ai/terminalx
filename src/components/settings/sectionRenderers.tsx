@@ -12,6 +12,7 @@ import { RecoveryIncidentSettings } from "./RecoveryIncidentSettings";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
 import { EnvironmentSettings } from "./EnvironmentSettings";
+import { ProjectTemplatesSettings } from "./ProjectTemplatesSettings";
 
 interface SectionContext {
   onOpenSkills?: () => void;
@@ -32,6 +33,7 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   environment: () => <EnvironmentSettings />,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
+  projects: () => <ProjectTemplatesSettings />,
   repositories: ({ projectPath, row, onSelectRow }) => <RepositoriesTab projectPath={projectPath} row={row} onSelectRow={onSelectRow} />,
   storage: () => <><MergedCleanupSettings /><div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div><StorageTab /><RecoveryIncidentSettings /></>,
   shortcuts: () => <ShortcutsTab />,

@@ -310,6 +310,16 @@ fn export(state: &Snapshot) -> Result<String> {
         "incidents": incidents })).map_err(Into::into)
 }
 
+/// The OS as a person reads it, "macOS 26.1 (25B78)", for a report (PRO-287).
+pub fn os_label() -> Option<String> {
+    let version = os_version();
+    let number = version["version"].as_str()?;
+    Some(match version["build"].as_str() {
+        Some(build) => format!("macOS {number} ({build})"),
+        None => format!("macOS {number}"),
+    })
+}
+
 fn os_version() -> serde_json::Value {
     #[cfg(target_os = "macos")]
     { macos::version() }
