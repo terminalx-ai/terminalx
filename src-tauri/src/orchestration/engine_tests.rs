@@ -694,7 +694,7 @@ fn runs_are_found_by_id_prefix_lead_and_worker() {
 
 /// `count` pieces that depend on nothing, on `agent`.
 fn flat_plan(count: usize, agent: &str) -> Plan {
-    let pieces: Vec<serde_json::Value> = (1..=count).map(|n| json!({"id": format!("p{n}"), "title": format!("Piece {n}"), "doneCheck": "exit 0", "agent": agent, "model": "sonnet"})).collect();
+    let pieces: Vec<serde_json::Value> = (1..=count).map(|n| json!({"id": format!("p{n}"), "title": format!("Piece {n}"), "doneChecks": [{"type": "command", "run": "exit 0"}], "agent": agent, "model": "sonnet"})).collect();
     serde_json::from_value(json!({"goal": "Many small pieces", "pieces": pieces})).unwrap()
 }
 

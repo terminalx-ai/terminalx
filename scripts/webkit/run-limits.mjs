@@ -25,15 +25,16 @@ function setup({ mode, scene }) {
   const at = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
   const model = (id, label, efforts) => ({ id, label, harness: "claude", efforts, defaultEffort: "medium", acceptsImages: true, isDefault: id === "sonnet", upgrade: null, description: null, alias: true, resolved: null });
   answers.list_models = [model("haiku", "Haiku 5.5", []), model("sonnet", "Sonnet 5.5", ["low", "medium", "high"]), model("opus", "Opus 5.5", ["low", "medium", "high", "max"])];
-  // The window resets at 16:10 today, as the design shows it.
-  const reset = new Date();
-  reset.setHours(16, 10, 0, 0);
-  if (reset.getTime() < Date.now()) reset.setDate(reset.getDate() + 1);
-  const resetsAt = reset.getTime();
+  // The window resets in an hour and a half; its label is the one the Run view gives it
+  // (`resetClock`), so the checks hold at any hour.
+  const resetsAt = Math.ceil((Date.now() + 90 * 60_000) / 600_000) * 600_000;
+  const resetDate = new Date(resetsAt);
+  const time = resetDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  const label = new Date().toDateString() === resetDate.toDateString() ? time : `${resetDate.toLocaleDateString([], { weekday: "short" })} ${time}`;
   const fiveHour = { agent: "claude", key: "five_hour", label: "5h", percent: 41, start: 32, resetsAt, points: 9 };
 
   const piece = (id, title, extra) => ({
-    id, title, owns: [], dependsOn: [], kind: "scoped-code", agent: "claude", model: "sonnet", effort: "medium", readsUntrusted: false, attempts: 0, state: "queued", doneCheck: "cargo t",
+    id, title, owns: [], dependsOn: [], kind: "scoped-code", agent: "claude", model: "sonnet", effort: "medium", readsUntrusted: false, attempts: 0, state: "queued", doneChecks: [{ type: "command", run: "cargo t" }],
     brief: { goal: title, why: "", scope: "", outOfScope: "", known: [], readFirst: [], limits: [] }, ...extra,
   });
   const worker = (id) => ({ sessionId: `worker-${id}`, tabId: `worker-${id}-tab` });
@@ -51,13 +52,13 @@ function setup({ mode, scene }) {
     id: "01a1cabc-2fa5-7380-8770-af2097ca9149", lead: { sessionId: session.id, tabId: session.tabs[0].id }, projectPath: session.projectPath, goal: "Move settings reads to the typed store", budget: { points: 25 },
     workerMode: "bypassPermissions", created: at(20), modified: at(1), limits, usage: { dollars: 0, subscription: true, windows: [fiveHour] }, fit: [], estimate: { low: 3.15, high: 5.15 }, unestimated: 1,
   };
-  const pause = { kind: "window", message: "The Claude 5h window is at 87%, past the 85% this run stops at. It resets at 16:10.", window: { ...fiveHour, percent: 87, points: 55 } };
+  const pause = { kind: "window", message: `The Claude 5h window is at 87%, past the 85% this run stops at. It resets at ${label}.`, window: { ...fiveHour, percent: 87, points: 55 } };
   const runs = {
     running: { ...base, state: "running", approval: { at: at(14) }, pieces, inTurn: 2 },
     paused: { ...base, state: "needsYou", approval: { at: at(14) }, reason: pause.message, pause, usage: { ...base.usage, windows: [pause.window] }, inTurn: 1, pieces: pieces.map((p) => (p.id === "pipeline" ? { ...p, state: "done", note: "Moved." } : p.id === "cli" ? { ...p, queuedFor: "budget" } : p)) },
     approval: {
       ...base, state: "awaitingApproval", inTurn: 0, usage: { dollars: 0, subscription: true, windows: [{ ...fiveHour, percent: 70, start: undefined, points: 0 }] },
-      fit: ["The Claude 5h window is at 70%. This run may use up to 25 points, but it stops at 85%, about 15 points from now. It resets at 16:10."],
+      fit: [`The Claude 5h window is at 70%. This run may use up to 25 points, but it stops at 85%, about 15 points from now. It resets at ${label}.`],
       pieces: pieces.map(({ worker: _w, branch: _b, startedMode: _m, login: _l, note: _n, queuedFor: _q, ...plan }) => ({ ...plan, state: "queued", attempts: 0, estimate: { low: 0.5, high: 0.9 } })),
     },
   };
@@ -67,7 +68,7 @@ function setup({ mode, scene }) {
     settings: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, projects: {} },
     experimental: { nativeCodex: false, orchestratorRuns: true },
   };
-  window.__RUNS__ = { state, calls: [] };
+  window.__RUNS__ = { state, calls: [], label };
   const called = (name, args) => window.__RUNS__.calls.push({ name, args });
   Object.assign(answers, {
     experimental_settings: () => state.experimental,
@@ -136,6 +137,7 @@ try {
         return { page, errors };
       };
       const shot = async (page, name) => { if (shots) await page.screenshot({ path: join(shots, `run-limits-${name}-${mode}-${size.width}.png`) }); };
+      const resetLabel = (page) => page.evaluate(() => window.__RUNS__.label);
       const runView = async (page) => {
         await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
         const view = page.getByTestId("run-view");
@@ -150,9 +152,10 @@ try {
         const layout = await layoutOf(view);
         await shot(page, "running");
         const budget = await view.getByTestId("run-budget").textContent();
+        const label = await resetLabel(page);
         const checks = {
-          "the budget is in points of the window it draws on, with the window's level and reset": budget.includes("Budget · subscription") && budget.includes("9 of 25 points") && budget.includes("5h window at 41% · resets 16:10"),
-          "the workers card says how many run and how many may at once": (await view.getByTestId("run-workers").textContent()).includes("2running · 2 at a time"),
+          "the budget is in points of the window it draws on, with the window's level and reset": budget.includes("Budget · subscription") && budget.includes("9 of 25 points") && budget.includes(`5h window at 41% · resets ${label}`),
+          "the workers card says how many run and how many may at once": (await view.getByTestId("run-workers").textContent()).includes("2 running · 2 at a time"),
           "a stalled worker's piece says so": (await view.locator('[data-piece="pipeline"]').getAttribute("data-piece-state")) === "stalled" && (await view.locator('[data-piece="pipeline"]').textContent()).includes("Stalled"),
           "a queued piece says the run's limit holds it": size.width < 1200 || (await view.locator('[data-piece="cli"]').textContent()).includes("Queued: 2 workers at a time in this run"),
           "dollar figures are said to be API-equivalent": (await view.getByText(/Dollar figures are API-equivalent, not billed/).count()) === 1,
@@ -175,10 +178,11 @@ try {
         const layout = await layoutOf(view);
         await shot(page, "paused");
         const text = await notice.textContent();
+        const label = await resetLabel(page);
         const checks = {
           "the Run tab is flagged while the run waits for the person": flagged === 1,
           "the run is headed as paused": (await view.getByTestId("run-state").textContent()) === "Run paused, needs you",
-          "the notice names the window, its level and when it resets": text.includes("Paused: the Claude 5h window") && text.includes("87%") && text.includes("It resets at 16:10."),
+          "the notice names the window, its level and when it resets": text.includes("Paused: the Claude 5h window") && text.includes("87%") && text.includes(`It resets at ${label}.`),
           "it says running workers finish their turn": text.includes("Workers already in a turn finish it"),
           "a queued piece waits for the person": size.width < 1200 || (await view.locator('[data-piece="cli"]').textContent()).includes("Waits for you: the run reached its budget"),
           "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
@@ -189,11 +193,11 @@ try {
         await points.fill("40");
         await points.press("Enter");
         await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "setLimits"));
-        await notice.getByRole("button", { name: "Resume after the reset, 16:10", exact: true }).click();
+        await notice.getByRole("button", { name: `Resume after the reset, ${label}`, exact: true }).click();
         await view.getByTestId("run-resumes-at").waitFor();
         const calls = await page.evaluate(() => window.__RUNS__.calls);
         checks["raising the budget saves this run's limits"] = JSON.stringify(calls[0]) === JSON.stringify({ name: "setLimits", args: { id: "01a1cabc-2fa5-7380-8770-af2097ca9149", limits: { workers: 2, dollars: 15, points: 40, ceiling: 85 } } });
-        checks["resume after the reset is asked once, and the run says when it goes on"] = calls.filter((call) => call.name === "resume").length === 1 && calls.at(-1).args.afterReset === true && (await view.getByTestId("run-resumes-at").textContent()).includes("Goes on by itself at 16:10");
+        checks["resume after the reset is asked once, and the run says when it goes on"] = calls.filter((call) => call.name === "resume").length === 1 && calls.at(-1).args.afterReset === true && (await view.getByTestId("run-resumes-at").textContent()).includes(`Goes on by itself at ${label}`);
         await shot(page, "paused-resumes");
         checks["no browser errors"] = errors.length === 0;
         failed += report(`paused, ${at}`, checks, { layout, errors, calls });
@@ -206,11 +210,12 @@ try {
         const view = await runView(page);
         const summary = view.getByRole("region", { name: "Plan summary" });
         await summary.getByRole("alert").waitFor();
+        const label = await resetLabel(page);
         const layout = await layoutOf(view);
         await shot(page, "approval");
         const checks = {
-          "the warning says the run would pass the window's level, and when the window resets": (await summary.getByRole("alert").textContent()).includes("about 15 points from now. It resets at 16:10."),
-          "the windows it draws on are listed, with what a run's points mean": (await view.getByTestId("run-windows").textContent()).includes("Claude 5h at 70%, resets 16:10") && (await view.getByTestId("run-windows").textContent()).includes("the window is shared with everything else you run"),
+          "the warning says the run would pass the window's level, and when the window resets": (await summary.getByRole("alert").textContent()).includes(`about 15 points from now. It resets at ${label}.`),
+          "the windows it draws on are listed, with what a run's points mean": (await view.getByTestId("run-windows").textContent()).includes(`Claude 5h at 70%, resets ${label}`) && (await view.getByTestId("run-windows").textContent()).includes("the window is shared with everything else you run"),
           "this run's worker limit, points and level can be changed; no dollar budget on a subscription": (await summary.getByRole("spinbutton", { name: "Workers at once in this run" }).inputValue()) === "2" && (await summary.getByRole("spinbutton", { name: "Points of a window this run may use" }).inputValue()) === "25" && (await summary.getByRole("spinbutton", { name: "Pause when a window passes" }).inputValue()) === "85" && (await summary.getByRole("spinbutton", { name: "Dollars this run may spend" }).count()) === 0,
           "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
         };

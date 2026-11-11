@@ -328,12 +328,13 @@ function RunSummary({ run }: { run: Run }) {
       <BudgetCard run={run} estimate={estimate} />
       <div className="rounded-lg bg-well px-3.5 py-3 hairline">
         <div className="text-[11px] text-faint">Workers</div>
-        <div className="mt-1 flex items-center gap-1.5 text-[13px]" data-testid="run-workers">
-          <span className="text-xl font-semibold">{run.inTurn ?? run.pieces.filter((piece) => piece.state === "running").length}</span>
-          <span className="text-muted-foreground">running · {limits.workers} at a time ·</span>
-          <ShieldOff aria-hidden className="size-3.5 text-accent" />{modeLabel(run.workerMode)}
+        <div className="mt-1 text-[13px] text-muted-foreground" data-testid="run-workers">
+          <span className="text-xl font-semibold text-foreground">{run.inTurn ?? run.pieces.filter((piece) => piece.state === "running").length}</span> running · {limits.workers} at a time
         </div>
-        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-faint">{run.approval ? <><UserRoundCheck aria-hidden className="size-3" />Plan approved</> : "No approval asked"} · push, merge, deploy denied</div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-faint">
+          <span className="flex items-center gap-1"><ShieldOff aria-hidden className="size-3 text-accent" />{modeLabel(run.workerMode)}</span>·
+          <span className="flex items-center gap-1">{run.approval ? <><UserRoundCheck aria-hidden className="size-3" />Plan approved</> : "No approval asked"}</span>· push, merge, deploy denied
+        </div>
       </div>
     </section>
   );

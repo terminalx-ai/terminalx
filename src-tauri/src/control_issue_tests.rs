@@ -333,8 +333,8 @@ fn worker_limit_child() {
     let lead = service.execute("sessions.create", json!({"project": project.path, "agent": "claude", "prompt": "plan it", "useWorktree": true, "noPipeline": true}), "lead").unwrap();
     let caller = json!({"session": lead["sessionId"], "tab": lead["tabId"]});
     let plan = json!({"goal": "Two small pieces", "pieces": [
-        {"id": "one", "title": "First", "doneCheck": "exit 0", "owns": ["a/"]},
-        {"id": "two", "title": "Second", "doneCheck": "exit 0", "owns": ["b/"]},
+        {"id": "one", "title": "First", "doneChecks": [{"type": "command", "run": "exit 0"}], "owns": ["a/"]},
+        {"id": "two", "title": "Second", "doneChecks": [{"type": "command", "run": "exit 0"}], "owns": ["b/"]},
     ]});
     let created = service.execute("runs.create", json!({"plan": plan, "caller": caller}), "create").unwrap();
     assert_eq!(created["run"]["limits"]["workers"], 1);
