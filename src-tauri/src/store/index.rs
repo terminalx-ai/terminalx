@@ -16,6 +16,9 @@ use super::transaction;
 #[path = "local_sections.rs"]
 pub mod local_sections;
 
+#[path = "workspace_ports.rs"]
+pub mod workspace_ports;
+
 const TRANSACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The launch mode of any session or tab whose creator did not name one —
@@ -655,6 +658,10 @@ pub struct TabState {
 struct IndexFile {
     #[serde(default)]
     sessions: Vec<SessionEntry>,
+    /// First port of each checkout's ten-port block. Kept with the sessions,
+    /// under the same cross-process transaction lock.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workspace_ports: BTreeMap<String, u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     local_sections: Vec<local_sections::LocalSection>,
     #[serde(default)]
@@ -707,7 +714,9 @@ fn with_file_lock<R>(f: impl FnOnce() -> Result<R>) -> Result<R> {
 fn update_file<R>(f: impl FnOnce(&mut IndexFile) -> Result<R>) -> Result<R> {
     with_file_lock(|| {
         let mut file = load_file()?;
+        let previous = workspace_ports::locations(&file.sessions);
         let r = f(&mut file)?;
+        workspace_ports::relocate(&mut file, &previous);
         save_file(&mut file)?;
         Ok(r)
     })

@@ -477,7 +477,7 @@ impl SessionManager {
         // because the first grant sync may still be on its way.
         let key = key_of(session, tab);
         let (grant, config) = cloud_launch(&key, cwd);
-        let native = native_launch(&grant, &config, &crate::local_vm::launch_args("codex", false));
+        let mut native = native_launch(&grant, &config, &crate::local_vm::launch_args("codex", false));
         // In a workspace Codex signs in with the workspace's credential, in a
         // home of its own with no Raccoon hooks; on a Mac, the reader's home.
         if grant.codex_auth.is_some() {
@@ -485,6 +485,9 @@ impl SessionManager {
             env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
         }
         env.extend(native.env);
+        env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
+        env.extend(index::workspace_ports::environment(cwd)?);
+        native.unset.extend(["TERMINALX_PORT".into(), "TERMINALX_PORTS".into()]);
         current()?;
         {
             let mut rt = rt_arc.lock().unwrap();
