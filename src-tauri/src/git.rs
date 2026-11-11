@@ -920,6 +920,8 @@ fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: 
     if path.exists() { bail!("Worktree path already exists: {}", path.display()); }
     std::fs::create_dir_all(worktree_root(project))?;
     run(project, &["worktree", "add", "--detach", arg(&path)?, "HEAD"])?;
+    // Before the file copy below: it refuses to stage inside an unignored folder.
+    ensure_worktree_dir_ignored(project);
     let result = (|| {
         checkout(&path, number, &branch)?;
         let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
@@ -935,7 +937,7 @@ fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: 
         if run(project, &["worktree", "remove", "--force", arg(&path)?]).is_ok() && branch_exists(project, &branch) {
             let _ = run(project, &["branch", "-D", &branch]);
         }
-    } else { ensure_worktree_dir_ignored(project); }
+    }
     result
 }
 

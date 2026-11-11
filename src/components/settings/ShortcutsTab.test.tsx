@@ -28,9 +28,11 @@ describe("Settings → Shortcuts", () => {
   it("lists every shortcut with its current keys", () => {
     render(<ShortcutsTab />);
     expect(row("app.commandPalette").textContent).toContain("Command palette");
-    for (const [id, label, key] of [["git.commitPush", "Commit and push", "Y"], ["git.pull", "Pull latest", "L"], ["git.fixChecks", "Fix checks", "X"], ["git.merge", "Merge pull request", "M"], ["git.createPr", "Create pull request", "C"]]) {
+    for (const [id, label, key] of [["git.commitPush", "Commit and push", "Y"], ["git.pull", "Pull latest", "L"], ["session.fixErrors", "Fix failing CI checks", "X"], ["git.merge", "Merge pull request", "M"], ["git.createPr", "Create pull request", "C"]]) {
       expect(within(row(id)).getByRole("button", { name: `${label}: Ctrl+Shift+${key}. Change` })).toBeTruthy();
     }
+    // Ctrl+Shift+X stays with Fix failing CI checks; the Git button's step has no default of its own.
+    expect(within(row("git.fixChecks")).getByRole("button", { name: "Fix checks: no shortcut. Set one" })).toBeTruthy();
     expect(within(row("app.commandPalette")).getByRole("button", { name: "Command palette: Ctrl+K. Change" })).toBeTruthy();
     expect(within(row("session.interrupt")).getByRole("button", { name: "Interrupt the running turn: Esc. Change" })).toBeTruthy();
     // Ending the agent's process has no keys until the reader gives it some (#427).

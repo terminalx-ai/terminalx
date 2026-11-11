@@ -1451,11 +1451,15 @@ mod tests {
         projects::update(&project.path, projects::ProjectPatch {
             scripts: Some(projects::RepositoryScripts { setup: "exit 0".into(), archive: String::new() }), ..Default::default()
         }).unwrap();
-        // Setup cannot create its status directory after the index has landed.
-        std::fs::write(store::root().unwrap().join("sessions"), "not a directory").unwrap();
-        let entry = create_session_entry(named_request(dir.path(), Some("setup save failure"))).unwrap();
+        // Setup cannot write its status after the index has landed. (Making the
+        // sessions folder a file would also stop the index, which lives in it.)
+        crate::workspace_setup::SAVE_FAILS.with(|fails| fails.set(true));
+        let created = create_session_entry(named_request(dir.path(), Some("setup save failure")));
+        crate::workspace_setup::SAVE_FAILS.with(|fails| fails.set(false));
+        let entry = created.unwrap();
         assert!(Path::new(&entry.cwd).is_dir());
         assert_eq!(index::get(&entry.id).unwrap(), entry);
+        assert!(!store::sessions_dir().unwrap().join(&entry.id).join("workspace-setup.json").exists());
     }
 
     #[test]

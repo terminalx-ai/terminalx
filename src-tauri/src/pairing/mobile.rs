@@ -657,7 +657,11 @@ fn row_branch(session: &SessionEntry, labels: Option<&std::collections::BTreeMap
 const QUICK_CHATS_PROJECT: &str = "Quick chats";
 
 fn session_summaries(connection: &MobileConnection) -> Result<Value> {
-    let row_statuses = connection.call("rowStatuses", json!({})).unwrap_or(Value::Null);
+    summaries_with_row_statuses(connection.call("rowStatuses", json!({})).unwrap_or(Value::Null))
+}
+
+/// `row_statuses` maps a session id to its row status; a runtime without them leaves them out.
+fn summaries_with_row_statuses(row_statuses: Value) -> Result<Value> {
     let snippets: HashMap<_, _> = summaries::collect(None)?
         .into_iter()
         .map(|summary| (summary.session_id.clone(), summary))
@@ -1781,13 +1785,13 @@ mod tests {
         runtime.configure(sink.clone()).unwrap();
         let (tx, mut rx) = mpsc::channel(8);
         runtime.register_client("phone", tx, Arc::new(std::sync::atomic::AtomicBool::new(false)));
-        let before = session_summaries().unwrap();
+        let before = summaries_with_row_statuses(Value::Null).unwrap();
         assert!(before["sessions"][0]["manualStatus"].is_null());
         let patch = crate::session_ops::SessionPatch { manual_status: Some(index::ManualStatus::InReview), ..Default::default() };
         let updated = crate::session_ops::update_session_meta("manual", &patch).unwrap();
         sink.emit("session_updated", &updated);
         assert_eq!(rx.try_recv().unwrap(), json!({"method":"sessions.changed"}));
-        let after = session_summaries().unwrap();
+        let after = summaries_with_row_statuses(Value::Null).unwrap();
         assert_eq!(after["sessions"][0]["manualStatus"], "in_review");
         // Conditional summary reads must also see the metadata change.
         assert_ne!(conditional(before, None).unwrap()["version"], conditional(after, None).unwrap()["version"]);

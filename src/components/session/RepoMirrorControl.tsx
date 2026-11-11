@@ -1,13 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FolderSync } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, errorMessage, type RepoMirrorStatus } from "@/lib/api";
 import type { SessionEntry } from "@/types/session";
 
-/** Local-session header control. Kept available from the root session too,
- * so a removed workspace or an app restart cannot strand the cleanup action. */
-export function RepoMirrorControl({ session }: { session: SessionEntry }) {
+export type RepoMirror = { on: boolean; eligible: boolean; label: string; show: () => void; dialog: ReactNode };
+
+/** A session's repo-root mirror: its status, polled, and the dialog that starts or stops it. */
+export function useRepoMirror(session: SessionEntry): RepoMirror {
   const [status, setStatus] = useState<RepoMirrorStatus | null>(null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -35,12 +36,13 @@ export function RepoMirrorControl({ session }: { session: SessionEntry }) {
       }
       if (!disposed) timer = setTimeout(() => void refresh(), 2000);
     };
+    // One hook follows whichever session the header shows: forget the last one's.
+    setStatus(null); setOpen(false); setError(null); setReadError(null);
     void refresh();
     return () => { disposed = true; clearTimeout(timer); ++request.current; };
   }, [session.id]);
 
   const on = !!status?.source;
-  if (!eligible && !on) return null;
   const label = on ? (status?.active ? "Mirroring to repo root" : "Repo root mirror paused") : "Mirror into repo root";
   const change = async () => {
     if (changing.current || !status) return;
@@ -60,10 +62,7 @@ export function RepoMirrorControl({ session }: { session: SessionEntry }) {
     }
   };
 
-  return <>
-    <Button variant="ghost" size="sm" className="shrink-0 text-xs" onClick={() => setOpen(true)} title={label}>
-      <FolderSync className="size-3.5" /> {label}
-    </Button>
+  const dialog = (
     <Dialog open={open} onOpenChange={(value) => !busy && setOpen(value)}>
       <DialogContent width="max-w-[32rem]">
         <DialogHeader>
@@ -86,5 +85,25 @@ export function RepoMirrorControl({ session }: { session: SessionEntry }) {
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  </>;
+  );
+  return { on, eligible, label, show: () => setOpen(true), dialog };
+}
+
+/** The title bar's icon for a mirror: its state, and the way to its dialog. */
+export function RepoMirrorButton({ mirror }: { mirror: RepoMirror }) {
+  return (
+    <Button variant="ghost" size="icon-xs" aria-label={mirror.label} title={mirror.label} onClick={mirror.show}
+      className={mirror.on ? "shrink-0 text-primary" : "shrink-0 text-faint hover:text-foreground"}>
+      <FolderSync />
+    </Button>
+  );
+}
+
+/** Local-session control on its own: the icon and its dialog. Kept available
+ * from the root session too, so a removed workspace or an app restart cannot
+ * strand the cleanup action. */
+export function RepoMirrorControl({ session }: { session: SessionEntry }) {
+  const mirror = useRepoMirror(session);
+  if (!mirror.eligible && !mirror.on) return null;
+  return <><RepoMirrorButton mirror={mirror} />{mirror.dialog}</>;
 }

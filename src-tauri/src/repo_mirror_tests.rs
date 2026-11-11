@@ -287,7 +287,12 @@ fn line_endings_follow_git_attributes_and_return_to_a_clean_tree() {
         git(cwd, &["add", ".gitattributes"]).unwrap();
         git(cwd, &["commit", "-m", "line endings"]).unwrap();
     }
-    fs::write(r.root.join("file.txt"), b"original\r\n").unwrap();
+    // Git writes the root's CRLF copy, as a checkout under these attributes
+    // has it. Rewritten by hand, its index entry predates the attribute and
+    // `git status` reports it modified, so the mirror would rightly refuse.
+    fs::remove_file(r.root.join("file.txt")).unwrap();
+    git(&r.root, &["checkout", "--", "file.txt"]).unwrap();
+    assert_eq!(fs::read(r.root.join("file.txt")).unwrap(), b"original\r\n");
     fs::write(r.source.join("file.txt"), b"workspace\r\n").unwrap();
     assert!(r.start().active);
     assert_eq!(fs::read(r.root.join("file.txt")).unwrap(), b"workspace\r\n");

@@ -188,6 +188,9 @@ fn checkout_failure_rolls_back_the_reserved_directory_and_new_branch() {
     let (repo, _, _) = fixture();
     // A required smudge filter fails while Git populates the checkout.
     git::run(repo.path(), &["config", "filter.fail.smudge", "false"]).unwrap();
+    // Only the checkout fails: Git also cleans tracked.txt when it re-reads it
+    // (a racily clean index entry), and a required filter needs both commands.
+    git::run(repo.path(), &["config", "filter.fail.clean", "cat"]).unwrap();
     git::run(repo.path(), &["config", "filter.fail.required", "true"]).unwrap();
     std::fs::write(repo.path().join(".gitattributes"), "tracked.txt filter=fail\n").unwrap();
     git::run(repo.path(), &["add", ".gitattributes"]).unwrap();
