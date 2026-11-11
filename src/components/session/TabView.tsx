@@ -1,3 +1,4 @@
+import { useTabRead } from "@/lib/useTabRead";
 import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQueue";
 import { usePrefs } from "@/lib/prefs";
@@ -255,13 +256,7 @@ export function TabView({
     [session.id, tab.id],
   );
 
-  // Viewing a finished tab marks it read.
-  useEffect(() => {
-    if (active && tab.status === "completed") {
-      void backendRef.current.markRead(tab.id);
-      backendRef.current.patchTab(tab.id, { status: "idle" });
-    }
-  }, [active, tab.status, backend.key, tab.id]);
+  useTabRead(active, backend.key, tab, backend.markRead);
 
   // Nothing is running in a conversation that is only being read.
   const canReset = local && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation

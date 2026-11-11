@@ -31,6 +31,16 @@ describe("the chat list", () => {
     expect(named({ kind: "quick", project: QUICK_CHATS, branch: "main" })).toEqual(["Fix the login", false]);
   });
 
+  it("shows a reminder marked on the Mac, and a finished turn, as unread", () => {
+    const rows = chatRows([
+      session("seen"),
+      session("marked", { tabs: [{ id: "m", harness: "claude", status: "idle", markedUnread: true }] }),
+      session("finished", { tabs: [{ id: "f", harness: "codex", status: "completed" }, { id: "g", harness: "claude", status: "idle" }] }),
+    ]);
+    expect(Object.fromEntries(rows.map((row) => [row.key, row.unread]))).toEqual({ seen: false, marked: true, finished: true });
+    expect(branchChats(rows.find((row) => row.key === "finished")!.session).map((chat) => chat.unread)).toEqual([true, false]);
+  });
+
   it("keeps what was last said as the preview while the chat works or waits", () => {
     const [row] = chatRows([session("w", { lastReply: "Running the tests", tabs: [{ id: "t", harness: "claude", status: "in_progress" }] })]);
     expect([row.state, row.preview]).toEqual(["working", "Running the tests"]);
@@ -101,9 +111,9 @@ describe("the chats a branch holds", () => {
       { id: "b", harness: "claude", title: "Claude Code", status: "waiting" },
       { id: "c", harness: "codex", title: null, status: "completed" },
     ] }))).toEqual([
-      { id: "a", name: "Functionality", harness: "claude", state: "working" },
-      { id: "b", name: "Claude Code", harness: "claude", state: "needs" },
-      { id: "c", name: "Codex", harness: "codex", state: "done" },
+      { id: "a", name: "Functionality", harness: "claude", state: "working", unread: false },
+      { id: "b", name: "Claude Code", harness: "claude", state: "needs", unread: false },
+      { id: "c", name: "Codex", harness: "codex", state: "done", unread: true },
     ]);
   });
 });

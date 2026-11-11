@@ -21,7 +21,7 @@ describe("native menus and the action registry", () => {
       ["app", ["app.about", "app.settings", "app.checkUpdates"]],
       ["file", ["app.newSession", "app.newWindow", "app.addProject", "app.openRecent", "session.closeTab", "app.closeWindow"]],
       ["view", ["app.toggleSidebar", "app.togglePanel", "session.latestShell", "session.toggleTerminalView", "app.zoomIn", "app.zoomOut", "app.zoomReset", "app.fullscreen"]],
-      ["go", ["app.agentDashboard", "app.issues", "app.automations", "app.nextSession", "app.previousSession"]],
+      ["go", ["app.agentDashboard", "app.issues", "app.automations", "app.nextSession", "app.previousSession", "app.nextAttention"]],
       ["help", ["app.docs", "app.shortcuts", "app.reportIssue"]],
     ]);
     const ids = leaves(groups.flatMap((group) => group.items)).map((item) => item.id.split(":").at(-1));
