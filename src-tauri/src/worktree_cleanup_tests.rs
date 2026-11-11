@@ -114,6 +114,7 @@ impl Fixture {
             id: uuid::Uuid::now_v7().to_string(),
             kind: crate::store::index::SessionKind::Project,
             link: None,
+            parent: None,
             project_path: project.to_string_lossy().into_owned(),
             cwd: cwd.to_string_lossy().into_owned(),
             worktree_name: (cwd != project).then(|| cwd.file_name().unwrap().to_string_lossy().into_owned()),
@@ -131,6 +132,7 @@ impl Fixture {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             active_tab: None,
             tabs: vec![tab],
             unknown: BTreeMap::new(),
@@ -153,7 +155,7 @@ impl Fixture {
                 Ok(())
             }
         };
-        f(&Host { projects: &self.projects, protected, confine, live: &live, fetch: Fetch::Fresh, stop_agents: Some(&stop_agents) })
+        f(&Host { projects: &self.projects, protected, confine, live: &live, fetch: Fetch::Fresh, stop_agents: Some(&stop_agents), archive: None })
     }
 
     fn scan(&self) -> Vec<ProjectScan> {
@@ -166,7 +168,7 @@ impl Fixture {
     }
 
     fn item(&self, candidate: &Candidate) -> RemoveItem {
-        RemoveItem { project_path: candidate.project_path.clone(), path: candidate.path.clone(), token: candidate.token.clone(), delete_sessions: false, accept_ignored: false, estimated_bytes: None }
+        RemoveItem { project_path: candidate.project_path.clone(), path: candidate.path.clone(), token: candidate.token.clone(), delete_sessions: false, accept_ignored: false, estimated_bytes: None, archive_failure: None }
     }
 
     fn remove(&self, items: &[RemoveItem]) -> Vec<ItemResult> {
@@ -261,7 +263,7 @@ fn the_main_directory_is_protected_whatever_it_is_called_or_asked() {
     let session = f.session(&alpha, &alpha, TabStatus::Idle);
     for (path, token) in [(alpha.clone(), main.token.clone()), (alpha.clone(), "forged".into()), (alias, main.token), (opened.clone(), f.find(&opened).token), (outer.clone(), found.token)] {
         for project_path in [alpha.clone(), opened.clone()] {
-            let item = RemoveItem { project_path: project_path.to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), token: token.clone(), delete_sessions: true, accept_ignored: true, estimated_bytes: None };
+            let item = RemoveItem { project_path: project_path.to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), token: token.clone(), delete_sessions: true, accept_ignored: true, estimated_bytes: None, archive_failure: None };
             let done = f.remove_one(item);
             assert_eq!(done.outcome, Outcome::Skipped, "{}: {:?}", path.display(), done.reason);
         }
@@ -689,7 +691,7 @@ fn a_cloud_host_removes_only_inside_its_workspace_and_never_its_root() {
 
     // A path that belongs to another host (the desktop's project) is not interpreted here.
     let local = f.alpha();
-    let foreign = RemoveItem { project_path: local.to_string_lossy().into_owned(), path: local.join(".raccoon/worktrees/x").to_string_lossy().into_owned(), token: "t".into(), delete_sessions: false, accept_ignored: false, estimated_bytes: None };
+    let foreign = RemoveItem { project_path: local.to_string_lossy().into_owned(), path: local.join(".raccoon/worktrees/x").to_string_lossy().into_owned(), token: "t".into(), delete_sessions: false, accept_ignored: false, estimated_bytes: None, archive_failure: None };
     let items = [f.item(&of(&inside)), f.item(&of(&outside)), f.item(&of(&repo)), foreign, RemoveItem { path: root.to_string_lossy().into_owned(), ..f.item(&of(&inside)) }];
     let done = f.with_host(&protected, Some(&root), |host| remove(host, &*f.events, &items, Watch::default()));
     assert_eq!(done.iter().map(|item| item.outcome).collect::<Vec<_>>(), vec![Outcome::Removed, Outcome::Skipped, Outcome::Skipped, Outcome::Skipped, Outcome::Skipped]);
@@ -776,7 +778,7 @@ fn a_folder_that_went_missing_is_not_taken_for_a_removed_worktree() {
     .unwrap();
     let inside = index::get(&inside.id).unwrap();
     for path in [gone.clone(), f.base.join("never-existed")] {
-        let forged = RemoveItem { project_path: alpha.to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), token: "forged".into(), delete_sessions: true, accept_ignored: true, estimated_bytes: None };
+        let forged = RemoveItem { project_path: alpha.to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), token: "forged".into(), delete_sessions: true, accept_ignored: true, estimated_bytes: None, archive_failure: None };
         assert_eq!(f.remove_one(forged).outcome, Outcome::Skipped);
     }
     assert_eq!(index::get(&inside.id).unwrap(), inside);
@@ -912,4 +914,93 @@ fn a_removal_told_to_stop_finishes_the_worktree_it_is_on_and_leaves_the_rest() {
     // Stopping is per removal: the next one runs as usual.
     let (again, _) = f.remove_watched(&items[1..], None, &|_| {});
     assert_eq!(again.iter().map(|item| item.outcome).collect::<Vec<_>>(), [Outcome::Removed, Outcome::Removed]);
+}
+
+#[test]
+fn bulk_archive_runs_every_hook_and_keeps_failures_for_separate_confirmation() {
+    let f = Fixture::new();
+    let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
+    crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "case $TERMINALX_BRANCH in *fails*) exit 23;; esac\nexit 0".into() }), ..Default::default()
+    }).unwrap();
+    let fails = f.worktree(&f.alpha(), "fails");
+    let succeeds = f.worktree(&f.alpha(), "succeeds");
+    let items = [f.item(&f.find(&fails)), f.item(&f.find(&succeeds))];
+    let terminals = Arc::new(crate::pty::Terminals::new());
+    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+    let remove_with_archive = |items: &[RemoveItem]| f.with_host(&[], None, |host| {
+        let host = Host { archive: Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false }), ..*host };
+        remove(&host, &*sink, items, Watch::default())
+    });
+    let results = remove_with_archive(&items);
+    assert_eq!(results[0].outcome, Outcome::Failed);
+    let failure = results[0].archive_failure.as_ref().unwrap();
+    assert_eq!(failure.code, Some(23));
+    assert!(fails.exists());
+    assert_eq!(results[1].outcome, Outcome::Removed, "{:?}", results[1]);
+    assert!(!succeeds.exists());
+    let retry = RemoveItem { archive_failure: Some(failure.token.clone()), ..f.item(&f.find(&fails)) };
+    assert_eq!(remove_with_archive(&[retry])[0].outcome, Outcome::Removed);
+    assert!(!fails.exists());
+    terminals.kill_all();
+}
+
+#[test]
+fn archive_changes_are_checked_again_before_bulk_removal() {
+    let f = Fixture::new();
+    let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
+    crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "echo keep > new-file".into() }), ..Default::default()
+    }).unwrap();
+    let tree = f.worktree(&f.alpha(), "changes");
+    let item = f.item(&f.find(&tree));
+    let terminals = Arc::new(crate::pty::Terminals::new());
+    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+    let results = f.with_host(&[], None, |host| {
+        let host = Host { archive: Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false }), ..*host };
+        remove(&host, &*sink, &[item], Watch::default())
+    });
+    assert_eq!(results[0].outcome, Outcome::Skipped);
+    assert!(tree.join("new-file").exists());
+    terminals.kill_all();
+}
+
+#[test]
+fn removal_wire_format_preserves_archive_consent_and_omits_absent_receipts() {
+    let old = serde_json::json!({ "projectPath": "/p", "path": "/p/tree", "token": "review" });
+    let mut item: RemoveItem = serde_json::from_value(old).unwrap();
+    assert!(serde_json::to_value(&item).unwrap().get("archiveFailure").is_none());
+    item.archive_failure = Some("failed-run".into());
+    let wire = serde_json::to_value(&item).unwrap();
+    assert_eq!(wire["archiveFailure"], "failed-run");
+    assert_eq!(serde_json::from_value::<RemoveItem>(wire).unwrap().archive_failure.as_deref(), Some("failed-run"));
+}
+
+#[test]
+fn archive_may_remove_reviewed_ignored_data_but_cannot_add_new_ignored_data() {
+    let f = Fixture::new();
+    let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
+    let save = |script: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: script.into() }), ..Default::default()
+    }).unwrap();
+    let shrinks = f.worktree(&f.alpha(), "shrinks");
+    std::fs::write(shrinks.join(".env"), "local-data").unwrap();
+    std::fs::create_dir(shrinks.join("node_modules")).unwrap();
+    std::fs::write(shrinks.join("node_modules/package"), "build-output").unwrap();
+    let mut item = f.item(&f.find(&shrinks));
+    item.accept_ignored = true;
+    let terminals = Arc::new(crate::pty::Terminals::new());
+    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+    let run = |item: RemoveItem| f.with_host(&[], None, |host| {
+        let host = Host { archive: Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false }), ..*host };
+        remove(&host, &*sink, &[item], Watch::default())
+    });
+    save("rm -f .env; rm -rf node_modules");
+    assert_eq!(run(item)[0].outcome, Outcome::Removed);
+    assert!(!shrinks.exists());
+    let grows = f.worktree(&f.alpha(), "grows");
+    save("echo new-local-data > .env");
+    assert_eq!(run(f.item(&f.find(&grows)))[0].outcome, Outcome::Skipped);
+    assert!(grows.join(".env").exists());
+    terminals.kill_all();
 }

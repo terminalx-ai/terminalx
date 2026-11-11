@@ -25,8 +25,14 @@ vi.mock("@/lib/api", () => ({
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
 
+import { useDialogs, closeWorkspaceRemove } from "@/lib/dialogs";
 import { resetLeftoverRun } from "@/lib/leftoverRun";
 import { StorageTab } from "./StorageTab";
+
+function RemovalRequest() {
+  const { workspaceRemove } = useDialogs();
+  return <output data-testid="removal-request">{JSON.stringify(workspaceRemove)}</output>;
+}
 
 const base = { projectPath: "/p", projectName: "terminalx", agent: null, keptBecause: null };
 const clean: Leftover = { ...base, id: "worktree:/p:quiet-amber-fox", kind: "worktree", name: "quiet-amber-fox", paths: ["/p/.raccoon/worktrees/quiet-amber-fox"], sizeBytes: 2_500_000_000 };
@@ -36,7 +42,7 @@ const transcripts: Leftover = { ...base, id: "claude:-p--raccoon-worktrees-gone"
 describe("StorageTab", () => {
   afterEach(() => {
     cleanup();
-    act(() => resetLeftoverRun());
+    act(() => { resetLeftoverRun(); closeWorkspaceRemove(); });
   });
   beforeEach(() => {
     events.run = events.listener = null;
@@ -94,6 +100,20 @@ describe("StorageTab", () => {
     expect(within(dialog).queryByText(/dirty-red-owl/)).toBeNull();
     expect(within(dialog).getByRole("button", { name: "Delete 150 items" })).toBeTruthy();
     expect(removeLeftovers).not.toHaveBeenCalled();
+  });
+
+  it("keeps an archive failure and opens its log and separate removal confirmation", async () => {
+    const failure = { token: "receipt", pane: "archive:failed", code: 7, timedOut: false };
+    scanLeftovers.mockResolvedValue([clean]);
+    removeLeftovers.mockResolvedValue({ removed: [], failed: [{ id: clean.id, error: `ARCHIVE_SCRIPT_FAILED:${JSON.stringify(failure)}` }], freedBytes: 0 });
+    render(<><StorageTab /><RemovalRequest /></>);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /quiet-amber-fox/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Delete selected/ }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Clean up leftovers" })).getByRole("button", { name: "Delete 1 item" }));
+    await screen.findByText(/Kept: Archive script failed \(exit 7\)/);
+    fireEvent.click(screen.getByRole("button", { name: "Review removal / Open log" }));
+    expect(JSON.parse(screen.getByTestId("removal-request").textContent!)).toMatchObject({ projectPath: clean.projectPath, path: clean.paths[0], archiveFailure: failure });
+    expect(removeLeftovers).toHaveBeenCalledTimes(1);
   });
 
   it("deletes only the confirmed, removable rows and reports what was freed", async () => {

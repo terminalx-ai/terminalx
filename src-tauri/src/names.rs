@@ -45,7 +45,7 @@ pub fn unclaimed(taken: &[String]) -> String {
 }
 
 /// Words that say nothing about the work, as `worktreeNameFromPrompt` in
-/// `src/lib/worktreeNames.ts` skips them; a test keeps the two the same.
+/// `packages/portable/src/worktreeNames.ts` skips them; a test keeps the two the same.
 const FILLER: [&str; 41] = [
     "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with", "at", "by", "from", "into", "is", "are", "be", "it", "this", "that",
     "i", "we", "you", "me", "my", "our", "please", "can", "could", "would", "should", "let", "lets", "let's", "need", "want", "like", "just", "some", "so",
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn the_sidebar_draws_from_the_same_words() {
         // The sidebar tells a drawn name from a chosen one without asking; its lists must be these.
-        let ts = include_str!("../../src/lib/worktreeNames.ts");
+        let ts = include_str!("../../packages/portable/src/worktreeNames.ts");
         let words = |name: &str| -> Vec<String> {
             let start = ts.find(&format!("const {name} = new Set([")).unwrap();
             let body = &ts[start..];

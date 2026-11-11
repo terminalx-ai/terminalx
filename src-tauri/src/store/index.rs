@@ -434,6 +434,47 @@ impl<'de> Deserialize<'de> for SessionKind {
     }
 }
 
+/// A person's workflow status, independent of what any agent tab is doing.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualStatus {
+    #[default]
+    Backlog,
+    InProgress,
+    InReview,
+    Done,
+    Canceled,
+}
+
+/// Stored metadata may come from a newer build. An unknown status must not
+/// prevent loading or updating any session. Mutations still use the strict enum.
+fn stored_manual_status<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<ManualStatus>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+/// The session that started another (PRO-270): `sessions create` run from
+/// inside a session, or told `--parent`. It is a record of who started whom
+/// and nothing more: it gives the parent no hold over the session, and
+/// deleting or archiving the parent leaves both the session and this as
+/// they are, so it may name a session that is gone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentRef {
+    pub session_id: String,
+    /// The tab that ran the command, when it is known: `--parent` names a
+    /// session only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+}
+
+/// A parent this build cannot read (a newer build's shape) is read as none
+/// rather than failing the whole index, as an unknown manual status is.
+fn stored_parent<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<ParentRef>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
@@ -483,6 +524,8 @@ pub struct SessionEntry {
     pub archive: ArchiveMark,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default, deserialize_with = "stored_manual_status", skip_serializing_if = "Option::is_none")]
+    pub manual_status: Option<ManualStatus>,
     #[serde(default)]
     pub tabs: Vec<TabEntry>,
     #[serde(default)]
@@ -491,11 +534,20 @@ pub struct SessionEntry {
     /// last worked in, and on which branch, so the chat shows under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<ChatLink>,
+    /// The session that started this one, if one did. Left out of the file
+    /// when empty, so an entry nothing started is written exactly as before.
+    #[serde(default, deserialize_with = "stored_parent", skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentRef>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 impl SessionEntry {
+    /// Whether `session_id` is recorded as having started this session.
+    pub fn started_by(&self, session_id: &str) -> bool {
+        self.parent.as_ref().is_some_and(|parent| parent.session_id == session_id)
+    }
+
     pub fn is_quick(&self) -> bool {
         self.kind == SessionKind::Quick
     }
@@ -922,11 +974,64 @@ mod tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: vec![],
             active_tab: None,
             link: None,
+            parent: None,
             unknown: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn manual_status_defaults_and_survives_index_updates() {
+        let _home = crate::store::temp_home();
+        let mut legacy = serde_json::to_value(entry("one")).unwrap();
+        legacy.as_object_mut().unwrap().remove("manualStatus");
+        let legacy: SessionEntry = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.manual_status, None);
+        save(&[legacy, entry("two")]).unwrap();
+        for (status, wire) in [(ManualStatus::Backlog, "backlog"), (ManualStatus::InProgress, "in_progress"), (ManualStatus::InReview, "in_review"), (ManualStatus::Done, "done"), (ManualStatus::Canceled, "canceled")] {
+            let patch = crate::session_ops::SessionPatch { manual_status: Some(status), ..Default::default() };
+            assert!(!patch.is_empty());
+            crate::session_ops::update_session_meta("one", &patch).unwrap();
+            // An unrelated metadata edit must retain the manual status.
+            crate::session_ops::update_session_meta("one", &crate::session_ops::SessionPatch { title: Some("renamed".into()), ..Default::default() }).unwrap();
+            let saved = load().unwrap();
+            assert_eq!(saved[0].manual_status, Some(status));
+            assert_eq!(serde_json::to_value(&saved[0]).unwrap()["manualStatus"], wire);
+            assert!(!saved[0].archived);
+            assert_eq!(saved[1].manual_status, None);
+        }
+        assert!(serde_json::from_value::<crate::session_ops::SessionPatch>(serde_json::json!({"manualStatus":"broken"})).is_err());
+    }
+
+    #[test]
+    fn an_unknown_manual_status_does_not_cost_the_index_or_block_writes() {
+        let _home = crate::store::temp_home();
+        let mut rows = Vec::new();
+        for (id, value) in [("future", serde_json::json!("triage")), ("null", serde_json::Value::Null), ("malformed", serde_json::json!(42)), ("known", serde_json::json!("in_review"))] {
+            let mut row = serde_json::to_value(entry(id)).unwrap();
+            row["manualStatus"] = value;
+            rows.push(row);
+        }
+        std::fs::write(file_path().unwrap(), serde_json::to_vec(&serde_json::json!({
+            "sessions": rows,
+            "localSections": [{"id":"release", "name":"Release", "sessions":["future", "known"]}],
+            "localSectionsRevision": 17
+        })).unwrap()).unwrap();
+        let loaded = load().expect("a newer build's status must not hide every session");
+        assert_eq!(loaded.len(), 4);
+        assert!(loaded[..3].iter().all(|session| session.manual_status.is_none()));
+        assert_eq!(loaded[3].manual_status, Some(ManualStatus::InReview));
+        let sections = local_sections::load().unwrap();
+        crate::session_ops::update_session_meta("future", &crate::session_ops::SessionPatch { title: Some("renamed".into()), ..Default::default() }).unwrap();
+        assert_eq!(get("future").unwrap().title, "renamed");
+        save(&load().unwrap()).unwrap();
+        assert_eq!(load().unwrap().len(), 4);
+        assert_eq!(get("known").unwrap().manual_status, Some(ManualStatus::InReview));
+        assert_eq!(get("future").unwrap().manual_status, None);
+        assert_eq!(local_sections::load().unwrap(), sections, "status edits preserve section membership and revision");
     }
 
     fn tab(id: &str) -> TabEntry {
@@ -1306,6 +1411,77 @@ mod tests {
         // It rewrites the index (a rename, say): the session is still a quick chat afterwards.
         std::fs::write(file_path().unwrap(), serde_json::to_string(&old).unwrap()).unwrap();
         assert_eq!(load().unwrap()[0].kind, SessionKind::Quick);
+    }
+
+    /// PRO-270: the field is additive in both directions.
+    #[test]
+    fn a_parent_is_stored_only_where_there_is_one_and_older_and_newer_indexes_both_load() {
+        let _home = crate::store::temp_home();
+        // An index written before the field existed loads with it empty.
+        let before = r#"{"sessions":[{"id":"old","projectPath":"/p","cwd":"/p","title":"t","created":"x","modified":"y"}]}"#;
+        std::fs::write(file_path().unwrap(), before).unwrap();
+        assert_eq!(load().unwrap()[0].parent, None);
+
+        // A session nothing started is written exactly as before; one that was started says by whom.
+        let mut worker = entry("worker");
+        worker.parent = Some(ParentRef { session_id: "lead".into(), tab_id: Some("lead-tab".into()) });
+        let mut named = entry("named");
+        named.parent = Some(ParentRef { session_id: "lead".into(), tab_id: None });
+        save(&[entry("lead"), worker.clone(), named.clone()]).unwrap();
+        let text = std::fs::read_to_string(file_path().unwrap()).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(written["sessions"][0].get("parent").is_none());
+        assert_eq!(written["sessions"][1]["parent"], serde_json::json!({"sessionId": "lead", "tabId": "lead-tab"}));
+        assert_eq!(written["sessions"][2]["parent"], serde_json::json!({"sessionId": "lead"}));
+        let loaded = load().unwrap();
+        assert_eq!((&loaded[1].parent, &loaded[2].parent), (&worker.parent, &named.parent));
+        assert!(loaded[1].started_by("lead") && !loaded[1].started_by("worker") && !loaded[0].started_by("lead"));
+
+        // The previous release knows nothing of the field: it still reads
+        // every session, and what it writes back keeps the parent.
+        #[derive(Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldEntry {
+            id: String,
+            project_path: String,
+            cwd: String,
+            title: String,
+            #[serde(flatten, default)]
+            unknown: BTreeMap<String, serde_json::Value>,
+        }
+        #[derive(Serialize, Deserialize)]
+        struct OldIndex {
+            sessions: Vec<OldEntry>,
+            #[serde(flatten, default)]
+            unknown: BTreeMap<String, serde_json::Value>,
+        }
+        let mut old: OldIndex = serde_json::from_str(&text).expect("the previous release must still parse the index");
+        assert_eq!(old.sessions.iter().map(|session| session.id.as_str()).collect::<Vec<_>>(), ["lead", "worker", "named"]);
+        old.sessions[1].title = "renamed by the previous release".into();
+        std::fs::write(file_path().unwrap(), serde_json::to_string(&old).unwrap()).unwrap();
+        let back = load().unwrap();
+        assert_eq!(back.len(), 3);
+        assert_eq!((back[1].title.as_str(), &back[1].parent, &back[2].parent), ("renamed by the previous release", &worker.parent, &named.parent));
+
+        // Deleting the lead clears nothing: the record outlives it.
+        update(|sessions| { sessions.retain(|session| session.id != "lead"); Ok(()) }).unwrap();
+        assert!(load().unwrap().iter().all(|session| session.started_by("lead")));
+    }
+
+    #[test]
+    fn a_parent_this_build_cannot_read_does_not_cost_the_whole_index() {
+        let _home = crate::store::temp_home();
+        let mut rows = Vec::new();
+        for (id, value) in [("text", serde_json::json!("lead")), ("null", serde_json::Value::Null), ("number", serde_json::json!(7)), ("partial", serde_json::json!({"tabId": "t"})), ("known", serde_json::json!({"sessionId": "lead", "since": "a newer build's field"}))] {
+            let mut row = serde_json::to_value(entry(id)).unwrap();
+            row["parent"] = value;
+            rows.push(row);
+        }
+        std::fs::write(file_path().unwrap(), serde_json::to_vec(&serde_json::json!({"sessions": rows})).unwrap()).unwrap();
+        let loaded = load().unwrap();
+        assert_eq!(loaded.len(), 5);
+        assert!(loaded[..4].iter().all(|session| session.parent.is_none()));
+        assert_eq!(loaded[4].parent, Some(ParentRef { session_id: "lead".into(), tab_id: None }));
     }
 
     #[test]

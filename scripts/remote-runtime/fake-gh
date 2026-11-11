@@ -88,6 +88,14 @@ def main(args):
         fail("HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login")
     if flag("offline"):
         fail("error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com")
+    if args[:2] == ["repo", "view"] and flag("repo-url"):
+        with open(path("repo-url")) as f:
+            print(json.dumps({"url": f.read().strip()}))
+        return
+    if args[:2] == ["api", "graphql"] and flag("conversation.json") and "PullRequestConversation" in option(args, "-f", ""):
+        with open(path("conversation.json")) as f:
+            print(f.read())
+        return
     prs = load_all()
     if args[:2] == ["api", "graphql"]:
         query = option(args, "-f", "")

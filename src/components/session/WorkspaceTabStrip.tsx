@@ -273,7 +273,7 @@ export function WorkspaceTabStrip({
                       : "text-muted-foreground hover:text-foreground",
                     drag?.key === tab.key && "opacity-60",
                   )}
-                  // The open tab's close button is always there, so it keeps that much more for its title.
+                  // The open tab keeps room for its close button, shown on hover, so it allows that much more.
                   style={tab.pinned ? undefined : { width: `${TAB_MAX_REM}rem`, minWidth: `${TAB_MIN_REM + (isActive ? 1 : 0)}rem` }}
                 >
                   <Tooltip delayDuration={400}>
@@ -317,11 +317,12 @@ export function WorkspaceTabStrip({
                       data-tab-close
                       aria-label={`Close ${label}`}
                       onClick={() => void closePeer(session.id, tab, tabs, selected)}
-                      // The open tab always has it. Another tab takes no room for it until it is pointed at or has the
-                      // focus, so a narrow tab shows its title instead.
+                      // Shown only while the tab is pointed at or has the focus. The open tab keeps its room for it,
+                      // invisible, so its title does not shift as it appears; another tab takes no room until then, so a
+                      // narrow tab shows its title instead.
                       className={cn(
-                        "mr-2 size-4 shrink-0 items-center justify-center rounded-sm opacity-70 outline-none hover:bg-veil-strong hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40",
-                        isActive ? "flex" : "hidden group-focus-within/tab:flex group-hover/tab:flex",
+                        "mr-2 size-4 shrink-0 items-center justify-center rounded-sm outline-none transition-opacity hover:bg-veil-strong hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40",
+                        isActive ? "flex opacity-0 group-hover/tab:opacity-70 group-focus-within/tab:opacity-70" : "hidden opacity-70 group-focus-within/tab:flex group-hover/tab:flex",
                       )}
                     >
                       <X className="size-3" />

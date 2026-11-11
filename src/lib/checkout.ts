@@ -15,6 +15,16 @@ export function worktreeCheckout(session: SessionEntry, workspaces: Record<strin
 }
 
 /**
+ * The project's own checkout, for a conversation that works in it rather than
+ * in a worktree of its own: whatever is checked out there now, which another
+ * conversation (or anyone at a terminal) may have switched.
+ */
+export function rootCheckout(session: SessionEntry, workspaces: Record<string, Workspace[]>): Workspace | undefined {
+  if (session.worktreeName || session.worktreeRemoved) return undefined;
+  return (workspaces[session.projectPath] ?? []).find((workspace) => workspace.isMain && canon(workspace.path) === canon(session.cwd));
+}
+
+/**
  * Whether a session's worktree is still on the branch name drawn for it
  * (`calm-ember-panda`). Until somebody names a branch the conversation goes
  * by its title, as a chat does; it becomes a branch once it is on a real one.

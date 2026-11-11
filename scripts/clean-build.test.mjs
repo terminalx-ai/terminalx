@@ -188,24 +188,32 @@ describe('clean-build', () => {
 
   it('counts a hard-linked file as freed only once its last link goes', () => {
     profile('debug')
+    const builds = []
     for (const [build, daysAgo] of [['1aaaaaa', 0], ['1bbbbbb', 5]]) {
       const object = put(`debug/deps/raccoon_lib.000adn0786jak.${build}.rcgu.o`, daysAgo, 8192)
       const session = put(`debug/incremental/raccoon_lib-0${build}aaaaa/s-one/`, daysAgo)
       const built = statSync(session).mtime
       linkSync(object, path.join(session, '000adn0786jak.o'))
       utimesSync(session, built, built)
+      builds.push({ object, session })
     }
 
-    // Both links of the older build go: its 8 KiB is freed, and counted once.
+    // Both links of the older build go: count the data once, plus the two
+    // removed directories. Directory allocation differs between filesystems.
+    const old = builds[1]
+    const dataBytes = statSync(old.object).blocks * 512
+    const directoryBytes = [path.dirname(old.session), old.session]
+      .reduce((bytes, dir) => bytes + statSync(dir).blocks * 512, 0)
+    expect(dataBytes).toBeGreaterThan(0)
     const both = clean({ keep: 1 })[0].bytes
-    expect(both).toBeGreaterThanOrEqual(8192)
-    expect(both).toBeLessThan(2 * 8192)
+    expect(both).toBe(dataBytes + directoryBytes)
     expect(ls('debug/deps')).toEqual(['raccoon_lib.000adn0786jak.1aaaaaa.rcgu.o'])
 
     // One link of two: the data stays on disk under the other name.
     const links = new Map()
-    expect(sizeOf(path.join(target, 'debug/deps/raccoon_lib.000adn0786jak.1aaaaaa.rcgu.o'), links)).toBe(0)
-    expect(sizeOf(path.join(target, 'debug/incremental/raccoon_lib-01aaaaaaaaaaa/s-one/000adn0786jak.o'), links)).toBeGreaterThanOrEqual(8192)
+    const kept = builds[0]
+    expect(sizeOf(kept.object, links)).toBe(0)
+    expect(sizeOf(path.join(kept.session, '000adn0786jak.o'), links)).toBe(statSync(kept.object).blocks * 512)
   })
 
   it('tells profile dirs, side target dirs and unrelated dirs apart', () => {

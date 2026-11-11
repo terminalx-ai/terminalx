@@ -9,6 +9,7 @@ import { cn } from "@/lib/cn";
 import { githubAvatarUrl, useGithubIdentity } from "@/lib/githubIdentity";
 import { startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
+import { ProjectLeftovers } from "./ProjectLeftovers";
 
 /** One accent per contributor's strip, in order. */
 const STRIP = ["bg-warning", "bg-info", "bg-add", "bg-accent", "bg-destructive", "bg-muted-foreground"];
@@ -104,6 +105,9 @@ export function ProjectOverview({ path }: { path: string }) {
           <Stat value={prs?.merged} label="Merged PRs" hint="Last 30 days" icon={GitMerge} loading={loading} />
           <Stat value={overview?.branches.length} label="Branches" hint="Local branches" icon={GitBranch} loading={loading} />
         </section>
+
+        {/* What earlier sessions left behind, when there is something safe to remove. */}
+        <ProjectLeftovers path={path} />
 
         <Section title="Top contributors" note="Last 30 days">
           {overview?.contributors.length ? (

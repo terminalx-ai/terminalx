@@ -65,8 +65,9 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   `pipeline.noteTracker`. It also lets `session.create` take an issue, which
 ///   an older runtime would ignore: a client sends one only once this is granted.
 /// - `pipeline/2`: paginated persistent reviewer identities, independent of pipeline history.
-pub const CAPABILITIES: [&str; 23] = [
-    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
+/// - `session-status/1`: `session.update.manualStatus`, separate from agent activity.
+pub const CAPABILITIES: [&str; 24] = [
+    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
     "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2",
 ];
 
@@ -187,9 +188,13 @@ pub const METHODS: &[Method] = &[
     method("git.reviewRange", "git/1", Participate, false),
     method("git.changesBetween", "git/1", Participate, false),
     method("git.fileContents", "git/1", Participate, false),
+    method("git.mediaContent", "git/1", Participate, false),
     method("git.log", "git/1", Participate, false),
     method("git.branches", "git/1", Participate, false),
     method("git.prs", "git/1", Participate, false),
+    method("git.prConversation", "git/1", Participate, false),
+    method("git.prReviewerSearch", "git/1", Manage, false),
+    method("git.prConversationAction", "git/1", Manage, true),
     method("git.prAssociations", "git/1", Participate, false),
     method("git.prLanded", "git/1", Manage, false),
     method("git.checkout", "git/1", Manage, true),
@@ -511,6 +516,11 @@ mod tests {
             assert!(find_method(name).unwrap().idempotent, "{name}");
         }
         assert_eq!(find_method("git.prAssociations").unwrap().authority, Participate);
+        assert_eq!(find_method("git.prConversation").unwrap().authority, Participate);
+        assert_eq!(find_method("git.prReviewerSearch").unwrap().authority, Manage);
+        let conversation_action = find_method("git.prConversationAction").unwrap();
+        assert_eq!(conversation_action.authority, Manage);
+        assert!(conversation_action.idempotent);
         assert_eq!(find_method("git.prLanded").unwrap().authority, Manage);
         // A pipeline is read by whoever sees the sessions and steered by the manager.
         assert_eq!(find_method("pipeline.list").map(|method| (method.capability, method.authority, method.idempotent)), Some(("pipeline/1", Participate, false)));

@@ -55,36 +55,40 @@ const repositories = new Map<string, boolean>();
  * Whether a session's directory is a Git repository, which is what the
  * Changes, Repo and PR surfaces need.
  *
- * A project session asks its project, as it always has (a project is a
- * repository unless it was attached as a plain folder). A quick chat has no
- * project to ask: its scratch directory never is one, and a folder it was
- * pointed at is read once and remembered.
+ * Attached projects supply their kind. Ordinary Chats and other unlisted
+ * local sessions need their actual working directory checked, as do quick
+ * chats pointed outside their scratch folder. Cloud callers keep their
+ * remote Git handling and never probe a path on this computer.
  */
-export function useSessionIsGit(session: Pick<SessionEntry, "kind" | "projectPath" | "cwd">): boolean {
-  const projects = useSessionStore().projects;
+export function useSessionIsGit(session: Pick<SessionEntry, "kind" | "projectPath" | "cwd">, local = true): boolean {
+  const { projects, chatsPath } = useSessionStore();
+  const project = projects.find((item) => item.path === session.projectPath);
   const quick = isQuickChat(session);
   const scratch = inScratch(session);
   const cwd = trimmed(session.cwd);
-  const [known, setKnown] = useState<boolean | undefined>(() => repositories.get(cwd));
+  const chat = chatsPath != null && trimmed(session.projectPath) === trimmed(chatsPath);
+  const probe = local && !scratch && (quick || chat || !project);
+  const [known, setKnown] = useState(() => ({ cwd, isRepo: repositories.get(cwd) }));
   useEffect(() => {
-    if (!quick || scratch) return;
+    if (!probe) return;
     let cancelled = false;
-    setKnown(repositories.get(cwd));
+    setKnown({ cwd, isRepo: repositories.get(cwd) });
     api
       .workStatus(cwd)
       .then((status) => {
         repositories.set(cwd, status.isRepo);
-        if (!cancelled) setKnown(status.isRepo);
+        if (!cancelled) setKnown({ cwd, isRepo: status.isRepo });
       })
       .catch(() => {
-        if (!cancelled) setKnown(false);
+        if (!cancelled) setKnown({ cwd, isRepo: false });
       });
     return () => {
       cancelled = true;
     };
-  }, [quick, scratch, cwd]);
-  if (!quick) return projects.find((project) => project.path === session.projectPath)?.kind !== "folder";
-  return !scratch && known === true;
+  }, [probe, cwd]);
+  if (probe) return (known.cwd === cwd ? known.isRepo : repositories.get(cwd)) === true;
+  if (quick) return false;
+  return project?.kind !== "folder";
 }
 
 /** Tests only. */

@@ -1,0 +1,215 @@
+{
+  "data": {
+    "viewer": {
+      "login": "author"
+    },
+    "repository": {
+      "pullRequest": {
+        "url": "https://github.com/acme/widgets/pull/799",
+        "title": "Improve the pull request workflow",
+        "body": "Recorded description or review text.",
+        "state": "MERGED",
+        "author": {
+          "login": "author"
+        },
+        "viewerCanUpdate": true,
+        "reviews": {
+          "nodes": [
+            {
+              "id": "recorded-node-1",
+              "state": "COMMENTED",
+              "submittedAt": "2026-11-06T13:51:13Z",
+              "author": {
+                "login": "author",
+                "__typename": "User"
+              }
+            }
+          ],
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpO0MjAyNi0xMS0wNlQxMzo1MToxM1q0MjAyNi0xMS0wNlQxMzo1MToxM1rPAAAAAVnDyfo="
+          }
+        },
+        "reviewRequests": {
+          "nodes": [],
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          }
+        },
+        "reviewThreads": {
+          "nodes": [],
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          }
+        },
+        "timelineItems": {
+          "nodes": [
+            {
+              "__typename": "PullRequestCommit",
+              "id": "recorded-node-2",
+              "commit": {
+                "oid": "0000000000000000000000000000000000000001",
+                "messageHeadline": "Update the implementation",
+                "committedDate": "2026-11-06T09:26:18Z",
+                "url": "https://github.com/acme/widgets/commit/0000000000000000000000000000000000000001",
+                "author": {
+                  "name": "Recorded author",
+                  "user": {
+                    "login": "author"
+                  }
+                }
+              }
+            },
+            {
+              "__typename": "PullRequestCommit",
+              "id": "recorded-node-3",
+              "commit": {
+                "oid": "0000000000000000000000000000000000000002",
+                "messageHeadline": "Update the implementation",
+                "committedDate": "2026-11-06T10:19:36Z",
+                "url": "https://github.com/acme/widgets/commit/0000000000000000000000000000000000000002",
+                "author": {
+                  "name": "Recorded author",
+                  "user": {
+                    "login": "author"
+                  }
+                }
+              }
+            },
+            {
+              "__typename": "PullRequestCommit",
+              "id": "recorded-node-4",
+              "commit": {
+                "oid": "0000000000000000000000000000000000000003",
+                "messageHeadline": "Update the implementation",
+                "committedDate": "2026-11-06T10:20:34Z",
+                "url": "https://github.com/acme/widgets/commit/0000000000000000000000000000000000000003",
+                "author": {
+                  "name": "Recorded author",
+                  "user": {
+                    "login": "author"
+                  }
+                }
+              }
+            },
+            {
+              "__typename": "IssueComment",
+              "id": "recorded-node-5",
+              "body": "Recorded description or review text.",
+              "createdAt": "2026-11-06T10:42:26Z",
+              "url": "https://github.com/acme/widgets/pull/799#issuecomment-6682970431",
+              "author": {
+                "login": "author"
+              }
+            },
+            {
+              "__typename": "PullRequestCommit",
+              "id": "recorded-node-6",
+              "commit": {
+                "oid": "0000000000000000000000000000000000000004",
+                "messageHeadline": "Update the implementation",
+                "committedDate": "2026-11-06T11:12:15Z",
+                "url": "https://github.com/acme/widgets/commit/0000000000000000000000000000000000000004",
+                "author": {
+                  "name": "Recorded author",
+                  "user": {
+                    "login": "author"
+                  }
+                }
+              }
+            },
+            {
+              "__typename": "IssueComment",
+              "id": "recorded-node-7",
+              "body": "Recorded description or review text.",
+              "createdAt": "2026-11-06T11:18:08Z",
+              "url": "https://github.com/acme/widgets/pull/799#issuecomment-6683593387",
+              "author": {
+                "login": "author"
+              }
+            },
+            {
+              "__typename": "PullRequestCommit",
+              "id": "recorded-node-8",
+              "commit": {
+                "oid": "0000000000000000000000000000000000000005",
+                "messageHeadline": "Update the implementation",
+                "committedDate": "2026-11-06T13:16:26Z",
+                "url": "https://github.com/acme/widgets/commit/0000000000000000000000000000000000000005",
+                "author": {
+                  "name": "Recorded author",
+                  "user": {
+                    "login": "author"
+                  }
+                }
+              }
+            },
+            {
+              "__typename": "IssueComment",
+              "id": "recorded-node-9",
+              "body": "Recorded description or review text.",
+              "createdAt": "2026-11-06T13:23:46Z",
+              "url": "https://github.com/acme/widgets/pull/799#issuecomment-6685861191",
+              "author": {
+                "login": "author"
+              }
+            },
+            {
+              "__typename": "PullRequestCommit",
+              "id": "recorded-node-10",
+              "commit": {
+                "oid": "0000000000000000000000000000000000000006",
+                "messageHeadline": "Update the implementation",
+                "committedDate": "2026-11-06T13:30:52Z",
+                "url": "https://github.com/acme/widgets/commit/0000000000000000000000000000000000000006",
+                "author": {
+                  "name": "Recorded author",
+                  "user": {
+                    "login": "author"
+                  }
+                }
+              }
+            },
+            {
+              "__typename": "PullRequestCommit",
+              "id": "recorded-node-11",
+              "commit": {
+                "oid": "0000000000000000000000000000000000000007",
+                "messageHeadline": "Update the implementation",
+                "committedDate": "2026-11-06T13:43:55Z",
+                "url": "https://github.com/acme/widgets/commit/0000000000000000000000000000000000000007",
+                "author": {
+                  "name": "Recorded author",
+                  "user": {
+                    "login": "author"
+                  }
+                }
+              }
+            },
+            {
+              "__typename": "PullRequestReview",
+              "id": "recorded-node-1",
+              "body": "Recorded description or review text.",
+              "submittedAt": "2026-11-06T13:51:13Z",
+              "state": "COMMENTED",
+              "url": "https://github.com/acme/widgets/pull/799#pullrequestreview-5800970746",
+              "author": {
+                "login": "author"
+              }
+            }
+          ],
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpPPAAABobEgtGgFqjU4MDA5NzA3NDY="
+          }
+        }
+      }
+    }
+  },
+  "_fixture": {
+    "recording": "GitHub GraphQL PullRequestConversation, 2026-11-07",
+    "sanitized": "Repository, logins, names, node IDs, commit OIDs, URLs and text replaced. Response shapes and timestamps retained."
+  }
+}

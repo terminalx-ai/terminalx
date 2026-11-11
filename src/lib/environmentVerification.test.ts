@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -137,6 +137,10 @@ describe("verifyProposal, with a scripted runner", () => {
 const bash = spawnSync("bash", ["-c", "git --version"]).status === 0;
 describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
   const base = mkdtempSync(join(tmpdir(), "tx-verify-"));
+  // The machine install script may run through sudo. Restricted Linux
+  // sandboxes can become root without permission to traverse a user's 0700
+  // directory; let that process read these generated test fixtures too.
+  chmodSync(base, 0o755);
   const github = join(base, "github");
   const root = join(base, "workspace");
   mkdirSync(github);
@@ -178,6 +182,9 @@ describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
   const one = (name: string, entry: Record<string, unknown>) =>
     parseProposal(JSON.stringify({ token: TOKEN, installScript: "", repositories: [{ owner: "acme", name, ...entry }] }), [{ owner: "acme", name, defaultBranch: "main" }], TOKEN);
 
+  // These two cases create several checkouts and spawn many real Git/shell
+  // processes. Allow a loaded host to finish without changing command deadlines.
+  const multiCheckoutTimeout = 180_000;
   it("keeps a healthy repository and a failing check distinct, at the commit GitHub has", async () => {
     // `lint` passes only once setup has made `deps/`; `test` fails whatever is set up; `build` passes.
     const head = repository("widgets", {
@@ -222,7 +229,7 @@ describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
     // The agent's own checkout is untouched: no deps, no build output.
     expect(spawnSync("bash", ["-c", "test ! -e widgets/deps && test ! -e widgets/out.txt"], { cwd: root }).status).toBe(0);
     expect(steps).toContain("acme/widgets: checking failures without the recipe");
-  }, 60_000);
+  }, multiCheckoutTimeout);
 
   it("is not turned green by an agent that edits a failing test and commits without pushing", async () => {
     const head = repository("gamed", { "test.sh": "#!/bin/bash\nexit 4\n" });
@@ -239,7 +246,7 @@ describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
     expect(observations.repositories[0].commit).toBe(head);
     expect(observations.repositories[0].checks[2]).toMatchObject({ kind: "test", status: "failed", exitCode: 4, preexisting: true });
     expect(sources[0]).toMatchObject({ commit: head, agentCheckout: "differs" });
-  }, 60_000);
+  }, multiCheckoutTimeout);
 
   it("notices files the agent changed without committing, but not its own proposal file", async () => {
     repository("dirty", { "test.sh": "#!/bin/bash\nexit 0\n" });
