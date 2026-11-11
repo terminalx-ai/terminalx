@@ -443,7 +443,7 @@ fn legacy_names_with_erased_path_syntax_are_redacted_across_versions() {
     let stored = read_all().unwrap();
     assert_eq!(stored.len(), paths.len() + current_ids.len() * 2 + 1);
     for (line, id) in stored.iter().zip(&ids) { assert_eq!(line["incident"], *id); assert_eq!(line["v"], 1); }
-    for (pair, model) in stored[paths.len()..stored.len() - 1].chunks_exact(2).zip(current_ids) {
+    for (pair, model) in stored[paths.len()..stored.len() - 1].as_chunks::<2>().0.iter().zip(current_ids) {
         assert_eq!(pair[0]["v"], 2);
         assert_eq!(pair[0]["agent"]["model"], model);
         assert_eq!(pair[1]["appBuild"], "0.2.25");
@@ -468,7 +468,7 @@ fn legacy_names_with_erased_path_syntax_are_redacted_across_versions() {
         for key in ["runtime", "appBuild"] { assert_eq!(line[key], PATH); }
         for key in ["harness", "transport", "model", "effort"] { assert_eq!(line["agent"][key], PATH); }
     }
-    for (pair, model) in lines[paths.len()..lines.len() - 1].chunks_exact(2).zip(current_ids) {
+    for (pair, model) in lines[paths.len()..lines.len() - 1].as_chunks::<2>().0.iter().zip(current_ids) {
         assert_eq!(pair[0]["runtime"], env!("CARGO_PKG_VERSION"));
         assert_eq!(pair[0]["agent"], json!({ "harness": "codex", "transport": "codex_stdio", "model": model, "effort": "xhigh" }));
         assert_eq!(pair[1]["appBuild"], "0.2.25");
