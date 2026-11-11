@@ -297,6 +297,9 @@ pub struct Checkout {
     pub branch: Option<String>,
     /// TerminalX may run the piece's commands here ([`may_run_commands`]).
     pub commands: bool,
+    /// A directory of the app's own, outside every checkout, where it is
+    /// noted which commit of this worktree passed the branch gate clean.
+    pub marks: Option<PathBuf>,
 }
 
 /// Whether TerminalX runs a piece's commands itself, unasked. It does when a
@@ -309,13 +312,14 @@ pub fn may_run_commands(approved: bool, mode: &str) -> bool {
     approved || mode == "bypassPermissions"
 }
 
-/// Where it is noted, in a worktree's own git directory, which commit passed
-/// the branch gate clean: what the commands of gate 4 write after that is not
-/// the worker's uncommitted work when the gates are run again.
-const CLEAN_MARK: &str = "terminalx-checked-clean";
-
+/// Where it is noted which commit of a worktree passed the branch gate
+/// clean: what the commands of gate 4 write after that is not the worker's
+/// uncommitted work when the gates are run again. Kept in the app's own
+/// store, a file a worktree, never inside the checkout a worker writes in.
 fn clean_mark(checkout: &Checkout) -> Option<PathBuf> {
-    Some(PathBuf::from(git(checkout, &["rev-parse", "--absolute-git-dir"]).ok()?.trim()).join(CLEAN_MARK))
+    use sha2::Digest;
+    let name = format!("{:x}", sha2::Sha256::digest(checkout.cwd.to_string_lossy().as_bytes()));
+    Some(checkout.marks.as_ref()?.join(name))
 }
 
 /// What gates 2 to 4 found.
@@ -501,6 +505,7 @@ pub fn gates(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, ti
     } else {
         // Clean at this commit, noted before anything is run in it.
         if let Some(mark) = clean_mark(checkout) {
+            let _ = mark.parent().map(std::fs::create_dir_all);
             let _ = std::fs::write(mark, &commit);
         }
         if let Some(gate) = commands(checkout, piece, project_check, !checked.facts.files.is_empty(), timeout) {
@@ -813,7 +818,8 @@ mod tests {
     /// A repository with the lead's branch `lead`, and the worker's branch `piece` checked out from it.
     fn worktree() -> (tempfile::TempDir, Checkout) {
         let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path();
+        let cwd = &dir.path().join("worktree");
+        std::fs::create_dir_all(cwd).unwrap();
         git(cwd, &["init", "-q", "-b", "lead"]);
         git(cwd, &["config", "user.email", "t@example.com"]);
         git(cwd, &["config", "user.name", "T"]);
@@ -821,7 +827,7 @@ mod tests {
         write(cwd, "src/session.rs", "fn session() {}\n");
         commit(cwd, "init");
         git(cwd, &["checkout", "-q", "-b", "piece"]);
-        let checkout = Checkout { cwd: cwd.to_path_buf(), base: "lead".into(), branch: Some("piece".into()), commands: true };
+        let checkout = Checkout { cwd: cwd.to_path_buf(), base: "lead".into(), branch: Some("piece".into()), commands: true, marks: Some(dir.path().join("marks")) };
         (dir, checkout)
     }
 
@@ -1161,6 +1167,10 @@ mod tests {
         // Again on the same commit (the app stopped mid-check, or a verifier's branch check restarted it).
         let again = gates(&checkout, &piece, None, QUICK);
         assert_eq!(names(&again), [(Gate::Scope, true), (Gate::Branch, true), (Gate::Commands, true)]);
+        // The note of it is the app's own, outside the checkout: nothing a worker writes in its worktree stands in for it.
+        assert!(checkout.marks.as_ref().unwrap().read_dir().unwrap().count() == 1 && !checkout.marks.as_ref().unwrap().starts_with(&checkout.cwd));
+        let unmarked = Checkout { marks: None, ..checkout.clone() };
+        assert_eq!(names(&gates(&unmarked, &piece, None, QUICK)), [(Gate::Scope, true), (Gate::Branch, false)]);
         // A new commit is a new result: its worktree must be clean again.
         git(&checkout.cwd, &["commit", "-q", "--allow-empty", "-m", "three"]);
         let moved = gates(&checkout, &piece, None, QUICK);
