@@ -56,7 +56,7 @@ import type { Project, TabEntry, Workspace } from "@/types/session";
 import { sessionStatus, type SessionEntry, type TabStatus } from "@/types/session";
 import { RowTime } from "./SidebarRows";
 import { useFold } from "./useFold";
-import { StatusMark } from "@/components/ui/StatusMark";
+import { SessionStatus } from "@/components/ui/SessionStatus";
 import { AppDestinations, ProjectAppearance, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations, useHasCloudOrganizations } from "./CloudOrganizations";
@@ -1220,15 +1220,17 @@ function ConversationRow({
                   <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchLabel ?? "No branch"}</span>
                   {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                   {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                  {/* The row's state sits where the time does, at the end, so the row's own icon keeps its place; while working, the sign stands in for the time. */}
-                  <StatusMark status={status} unread={unread} />
-                  {status !== "in_progress" && <RowTime at={conversationTime(session)} />}
+                  {/* One status for all sessions represented by this branch row; unread stays a separate reading indicator. */}
+                  <SessionStatus session={session} peers={peers} className="max-w-[48%] shrink" />
+                  {unread && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
+                  <RowTime at={conversationTime(session)} />
                 </>
               ) : (
                 <>
                   <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
                   {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                  <StatusMark status={status} unread={unread} />
+                  <SessionStatus session={session} peers={peers} className="max-w-[48%] shrink" />
+                  {unread && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
                 </>
               )}
               {named === "branch" || status === "in_progress" ? null : locationLabel || branch ? (

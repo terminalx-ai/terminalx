@@ -6,6 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 import { TerminalMoveButton } from "./TerminalMoveButton";
 import { TerminalTools } from "./TerminalTools";
 import { EnvironmentNotice } from "./EnvironmentNotice";
+import { LocalTerminalLinks } from "./LocalTerminalLinks";
 import { pty } from "@/lib/api";
 import { disposeInstance, getInstance, isAgentPane, peekInstance, registerTerminalFactory, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
@@ -353,6 +354,7 @@ export function TerminalView({
     <div ref={frame} className="group/terminal relative flex h-full w-full flex-col bg-terminal" data-testid="terminal-drop-target" {...drop.zoneProps}>
       <TerminalTools id={id} shown={shown} frame={frame} />
       <EnvironmentNotice id={id} active={visible && !create} />
+      {!create && <LocalTerminalLinks id={id} active={shown} />}
       {(redraw || actions || moveToDock) && (
         // Floats over the terminal's corner rather than taking a row: nothing is drawn until it is wanted.
         <div

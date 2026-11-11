@@ -63,6 +63,10 @@ impl Terminals {
         self.0.quick("runtime.pty.environmentChanged", json!({"id":id}))
     }
 
+    pub fn local_links(&self, id: &str) -> Result<serde_json::Value> {
+        self.0.quick("runtime.pty.localLinks", json!({"id":id}))
+    }
+
     pub fn environment_ready(&self, project: Option<&str>) -> Result<bool> {
         self.0.quick("runtime.pty.environmentReady", json!({"projectPath":project}))
     }

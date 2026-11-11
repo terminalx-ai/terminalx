@@ -17,6 +17,9 @@ use crate::sink::EventSink;
 use crate::store::index::{self, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 
+#[path = "review_control.rs"]
+pub(crate) mod review;
+
 const APP_UNAVAILABLE_RECOVERY: &str =
     "Open TerminalX with the same TERMINALX_HOME, then retry status once.";
 const LINEAR_INTEGRATION_RECOVERY: &str =
@@ -123,7 +126,7 @@ impl ControlResponse {
 /// here so every command has identical authentication and recovery behavior.
 pub fn call(
     command: &str,
-    params: Value,
+    mut params: Value,
     timeout: Duration,
 ) -> Result<ControlResponse, ControlError> {
     #[cfg(unix)]
@@ -149,6 +152,9 @@ pub fn call(
                 Some("Restart an app-launched tab, or let a human shell read TERMINALX_HOME/run/control.token.".into()),
             )
         })?;
+    if command == "review.comment" {
+        params["hookToken"] = json!(std::env::var(crate::hooks::TOKEN_ENV).unwrap_or_default());
+    }
     let request = ControlRequest {
         id: uuid::Uuid::now_v7().to_string(),
         token,
@@ -625,8 +631,9 @@ impl ControlService {
             "sessions.list" => self.sessions_list(params),
             "sessions.show" => {
                 let selector = required_string(&params, "session")?;
-                Ok(serde_json::to_value(resolve_session(&selector)?)
-                    .map_err(ControlError::internal)?)
+                let mut session = resolve_session(&selector)?;
+                self.manager.annotate_row_statuses(std::slice::from_mut(&mut session));
+                Ok(serde_json::to_value(session).map_err(ControlError::internal)?)
             }
             "sessions.create" => self.sessions_create(params),
             "sessions.report" => self.sessions_report(params),
@@ -714,6 +721,7 @@ impl ControlService {
                 serde_json::to_value(renamed).map_err(ControlError::internal)
             }
             "worktrees.delete" => self.worktree_delete(params),
+            "review.comment" | "review.comments" => self.review_comments(command, params),
             "issues.list" => self.issues_list(params),
             // Creation uses the local owner's credentials and never needs a
             // desktop attachment. Cloud workspace capabilities stay unchanged.
@@ -771,7 +779,8 @@ impl ControlService {
                 return Err(ControlError::invalid("--worktree lists every session in the worktree, quick chats and archived ones included; it cannot be combined with --quick or --archived."));
             }
             let (project, worktree) = resolve_worktree(&params)?;
-            let held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+            let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+            self.manager.annotate_row_statuses(&mut held);
             return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
         }
         if let Some(selector) = optional_string(&params, "project") {
@@ -787,6 +796,7 @@ impl ControlService {
             sessions.retain(SessionEntry::is_quick);
         }
         sessions.retain(|session| session.archived == archived);
+        self.manager.annotate_row_statuses(&mut sessions);
         Ok(json!({"sessions": sessions}))
     }
 

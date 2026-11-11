@@ -54,9 +54,24 @@ function session(id: string, patch: Partial<SessionEntry> = {}): SessionEntry {
   return { id, title: id, projectPath: "/api", cwd: "/api", worktreeRemoved: false, created: at, modified: at, archived: false, pinned: false,
     tabs: [{ id: `${id}-tab`, harness: "codex", status: "in_progress", created: at, modified: at, model: "", permissionMode: "auto" }], ...patch };
 }
-const rowNames = () => within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("row").slice(1).map((r) => r.querySelectorAll("td")[1]?.textContent);
+const rowNames = () => within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("row").slice(1).map((r) => r.querySelector("[data-session-title]")?.textContent);
 const openMenu = (name: string) => fireEvent.pointerDown(screen.getByRole("button", { name }), { button: 0, ctrlKey: false, pointerType: "mouse" });
 const closeMenu = () => fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+
+it("shows detailed automatic statuses in the table while preserving workflow states", () => {
+  const branchStatus = { branch: "feature", checked: true, headMatches: true, pr: { number: 7, state: "OPEN", draft: false, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", checks: "FAILURE", inMergeQueue: false } };
+  state.sessions = [
+    session("Needs approval", { rowStatus: { tabs: [{ status: "waiting", activity: "needs_permission" }], branch: "feature", branchStatus } }),
+    session("Failed build", { rowStatus: { tabs: [{ status: "idle" }], branch: "feature", branchStatus } }),
+  ];
+  render(<AgentDashboard />);
+  fireEvent.click(screen.getByRole("button", { name: "Table" }));
+  const table = within(screen.getByRole("table", { name: "Sessions" }));
+  expect(table.getByText("Needs permission")).toBeTruthy();
+  expect(table.getByText("Checks failing")).toBeTruthy();
+  expect(table.getAllByText("Working")).toHaveLength(2);
+  expect(rowNames()).toEqual(["Failed build", "Needs approval"]);
+});
 
 it("keeps search and filters across views, includes archived automations, and clears filters", async () => {
   state.sessions = [session("Fix live"), session("Fix archived", { archived: true, automation: { id: "auto", name: "Daily", runId: "run", runNumber: 1 } }), session("Other")];

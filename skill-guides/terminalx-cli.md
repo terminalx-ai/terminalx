@@ -112,6 +112,18 @@ only the archived ones, as the sidebar's Show archived does; it combines with `-
 sitting idle. `sessions show` and every other session command take an archived session's id
 as they take any other.
 
+`sessions list` and `sessions show` include `detailedStatus` (id, label, icon,
+colour token and tooltip) and `rowStatus` (the live facts behind it). Agent
+attention takes precedence over the session's associated PR. The existing
+session-PR registry supplies ownership; a shared branch alone never does. A
+local head must match the PR head before a row says Ready to merge or Merged.
+Default branches and detached heads carry agent status only. Local facts refresh
+in the background every 10 seconds; associated PRs are batched once per project
+every 120 seconds, with rate-limit backoff and at least 1,000 points reserved for
+other GitHub work. A first read can return agent status while the cache warms;
+read again to see the result. The existing tab `status` remains the agent's
+lifecycle state.
+
 ### Layered configuration
 
 ```text
@@ -593,6 +605,42 @@ terminalx worktrees delete <worktree> --yes --sessions <ids from the dry run> --
 A worktree that is not clean and merged also needs `--force`. Pass it only when losing the
 work the preview lists is intended. The response lists each deleted session under
 `removedSessions` with its `id`, `title`, `project` and `belongsTo`.
+
+### Review comments
+
+From a pipeline's recorded reviewer tab, while its review is active:
+
+```text
+terminalx review comment --file src/foo.ts --line 40 --body "Explain the defect and when it occurs." --json
+terminalx review comment --file src/foo.ts --line 40-43 --body "One finding on this range." --json
+terminalx review comments --json
+```
+
+Comments are local annotations, persisted per workspace outside the checkout. They do not
+post to GitHub or Linear. The tab's stored workspace and name are used; changing the shell's
+directory does not change that workspace. Both commands need the tab's `RACCOON_SESSION_ID`
+and `RACCOON_TAB_ID`, set when TerminalX launches the agent. Writing also requires that
+tab's current `RACCOON_HOOK_TOKEN`; the CLI sends it automatically. Author tabs, ordinary
+chats and calls claiming a different tab are refused. Listing remains available to other
+agent tabs. The commands work on the headless local owner too. Cloud workspaces return `unsupported` until they share the desktop comment store.
+
+`--file` is relative to that workspace root, or an absolute path inside it. Parent traversal
+and symlinks resolving outside it are refused. `--line` is one-based and inclusive on the
+current file (the after side), and must not exceed its last line. Empty, binary, non-UTF-8
+and files larger than 4 MiB cannot be annotated; `--body` is nonempty and at most 32 KiB.
+Ranges are limited to 10,000 lines and 1,000,000 bytes of quoted text. Deleted files and
+before-side lines are not supported by these commands.
+
+The result includes the saved `comment`, with its quoted `lineText`, range, `note`, revision,
+and shared `author` (`kind: agent`, `role: reviewer`) with the tab's id and name. It uses the same workspace key
+and store as user diff comments. Agent notes appear on their diff lines with the agent's name
+and are included by “Add all to chat”; editing, Sent and Outdated work as for user comments.
+Each new comment also appears as a card in the caller's chat. `review comments` lists all user
+and agent comments in file and line order. Read that list before retrying an uncertain write:
+an identical retry for the same reviewer and reviewed commit returns that note with
+`created: false`, preserving its state and avoiding another chat card. Note text uses the
+store's whitespace trimming. The anchor records the PR comparison tree, surrounding source
+lines and `reviewedCommit`; changed checkout commits or quoted lines are refused.
 
 ### Issues
 

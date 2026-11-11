@@ -76,6 +76,7 @@ mod drag_text;
 mod transcription;
 mod events;
 mod files;
+mod workspace_file;
 mod foreground;
 #[cfg(feature = "desktop")]
 mod floating;
@@ -83,6 +84,8 @@ mod floating;
 mod media;
 mod media_types;
 mod branch_overview;
+#[cfg(feature = "desktop")]
+mod branch_step;
 mod git;
 #[cfg(feature = "desktop")]
 mod repo_mirror;
@@ -590,6 +593,7 @@ pub fn run() {
             commands::project_start_defaults,
             commands::project_create,
             commands::list_sessions,
+            commands::session_row_statuses,
             commands::local_sections,
             commands::edit_local_section,
             commands::automations_list,
@@ -643,6 +647,7 @@ pub fn run() {
             commands::skill_detail,
             commands::work_status,
             commands::branch_overview,
+            commands::project_forge,
             commands::branch_fetch,
             commands::branch_merge_into,
             commands::list_branches,
@@ -708,6 +713,9 @@ pub fn run() {
             commands::cloud_mirror_claim_owner,
             commands::cloud_mirror_note_unreadable,
             commands::git_push,
+            commands::branch_step_refresh,
+            commands::branch_step_account,
+            commands::branch_step_action,
             commands::git_has_remote,
             commands::git_add_remote,
             commands::gh_connection_status,
@@ -750,6 +758,7 @@ pub fn run() {
             star_nag::star_nag_dismiss,
             star_nag::star_nag_act,
             commands::pty_spawn,
+            commands::pty_local_links,
             commands::pty_shells,
             commands::pty_rename,
             commands::pty_set_docked,
