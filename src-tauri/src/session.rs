@@ -1802,6 +1802,37 @@ impl SessionManager {
         })
     }
 
+    /// What the window asks of orchestration runs (`orchestration`). Approve
+    /// and Edit are here and nowhere in the `terminalx` CLI: the lead runs
+    /// the CLI, and a lead does not approve its own plan.
+    pub(crate) fn orchestration(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        use crate::orchestration::{engine, host::ManagerHost, store};
+        let host = ManagerHost::new(self.sink.clone(), self.clone());
+        let string = |key: &str| params[key].as_str().with_context(|| format!("{key} is required"));
+        // A refusal keeps its code and its particulars: the window shows a refused edit by the piece it names.
+        let refused = |error: engine::EngineError| anyhow!("{}", serde_json::to_string(&error).unwrap_or_else(|_| error.message.clone()));
+        Ok(match method {
+            "forSession" => match store::for_lead(string("sessionId")?)? {
+                Some(run) => engine::shown(&engine::refreshed(&host, &run.id).map_err(refused)?),
+                None => serde_json::Value::Null,
+            },
+            "list" => serde_json::Value::Array(store::list()?.iter().map(engine::shown).collect()),
+            // A plan file a person chose in the session's Run view: checked and stored as the CLI's would be.
+            "create" => engine::shown(&engine::create(&host, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?, string("sessionId")?, None).map_err(refused)?),
+            "approve" => {
+                self.accepting_work()?;
+                serde_json::to_value(engine::approve(&host, string("id")?).map_err(refused)?)?
+            }
+            "start" => {
+                self.accepting_work()?;
+                serde_json::to_value(engine::start(&host, string("id")?).map_err(refused)?)?
+            }
+            "stop" => serde_json::to_value(engine::stop(&host, string("id")?, engine::By::Person).map_err(refused)?)?,
+            "updatePlan" => engine::shown(&engine::update_plan(&host, string("id")?, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?).map_err(refused)?),
+            _ => anyhow::bail!("unsupported orchestration operation"),
+        })
+    }
+
     pub(crate) fn workspace(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         crate::local_runtime::workspaces::execute(self, self.sink.as_ref(), method, params)
     }
@@ -4694,6 +4725,14 @@ impl SessionManager {
             (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
         ];
+        // A run's worker never pushes (`orchestration::guard`): every git its
+        // agent starts, in a script as much as on a command line, reads a
+        // configuration that sends a push nowhere. Without it the worker
+        // does not start.
+        if crate::orchestration::guard::limited(entry) {
+            let config = crate::orchestration::guard::git_config(&entry.id, Path::new(&entry.cwd)).context("write the run worker's git configuration")?;
+            env.push(("GIT_CONFIG_GLOBAL".to_string(), config.to_string_lossy().into_owned()));
+        }
         // A fresh secret per launch, per tab: the socket path is inherited by
         // every process the agent starts, so what keeps one tab's hooks from
         // speaking for another is that only this CLI was given this token.
@@ -4857,6 +4896,11 @@ impl SessionManager {
         if let Some(env) = route.map(|route| &route.claude_settings_env).filter(|env| !env.is_empty()) {
             settings["env"] = env.iter().map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone()))).collect::<serde_json::Map<_, _>>().into();
         }
+        // A run's worker is handed its limits at launch (`orchestration::guard`):
+        // deny rules hold in every permission mode, bypass included.
+        if crate::orchestration::guard::limited(entry) {
+            crate::orchestration::guard::claude_settings(&mut settings);
+        }
         // A route that names its model runs on it: the endpoint may serve no
         // model of the tab's name.
         let route_model = route.and_then(|route| route.model.clone());
@@ -4975,6 +5019,12 @@ impl SessionManager {
         let restart = rollout.is_none().then(|| unsent::restart(unsent::said_in(&rt.log_path, tab.follow.conversation.as_deref()), tab.continuation, resume.is_some())).flatten();
         if rollout.is_none() {
             resume = None;
+        }
+        // A run's worker is handed its limits at launch (`orchestration::guard`):
+        // Codex reads a checkout's own rules, and applies them in bypass too.
+        // Without them the worker does not start: bypass is safe only with them.
+        if crate::orchestration::guard::limited(entry) {
+            crate::orchestration::guard::write_codex_rules(Path::new(&entry.cwd)).context("write the run worker's deny rules")?;
         }
         let command = launcher.command(codex::pty::LaunchOptions {
             resume: resume.as_deref(),
@@ -6354,6 +6404,15 @@ impl SessionManager {
         // its prompt did not go through the app's composer.
         if frame.event == "PreToolUse" && crate::issue_pipeline::admission::check(&frame.session, &frame.tab).is_err() {
             return reply_for(kind, "PreToolUse", Decision::Deny);
+        }
+        // A run's worker never pushes, merges or deploys, in any permission
+        // mode: refused here as well as by the rules its agent was launched
+        // with, which match a command by its first words only.
+        if frame.event == "PreToolUse" {
+            if let Some(reason) = crate::orchestration::guard::refusal(&frame.payload).filter(|_| index::get(&frame.session).is_ok_and(|session| crate::orchestration::guard::limited(&session))) {
+                log::info!("run worker {}/{}: {reason}", frame.session, frame.tab);
+                return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
+            }
         }
         if frame.event == "StatusLine" {
             if kind == CliKind::Claude && self.status.usage.ingest_claude(usage_account.as_deref(), &frame.payload) {

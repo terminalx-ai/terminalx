@@ -124,6 +124,10 @@ Usage:
   terminalx pipelines auto-merge PIPELINE on|off [--project PROJECT] [--json]
   terminalx pipelines resolve-conflicts PIPELINE on|off [--project PROJECT] [--json]
   terminalx pipelines stop|resume|advance|review|merge|refresh PIPELINE [--project PROJECT] [--json]
+  terminalx runs create --from PLAN.json|- [--lead SESSION] [--json]
+  terminalx runs start|show|stop [RUN] [--json]
+  terminalx runs list [--lead SESSION] [--all] [--json]
+  terminalx runs check-failed PIECE [--run RUN] [--output FILE|-] [--reason TEXT] [--json]
   terminalx vm status|start|stop [--json]
   terminalx vm tools [TOOL] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--json]
@@ -525,6 +529,7 @@ fn parse_with_stdin(
         "issues" => parse_issues(&mut tokens, stdin),
         "review" => parse_review(&mut tokens),
         "pipelines" => parse_pipelines(&mut tokens),
+        "runs" => parse_runs(&mut tokens, stdin),
         "computer" => crate::computer::cli::parse(&mut tokens, stdin),
         "vm" => {
             let action = tokens.required_front("vm action (status, start, stop, tools, call or screenshot)")?;
@@ -828,10 +833,9 @@ fn started_by(params: &mut Value, tokens: &mut Tokens) -> Result<(), ControlErro
         (Some(parent), false) if parent.trim().is_empty() => return Err(invalid("--parent needs a session.")),
         (Some(parent), false) if is_cloud_key(&parent) => return Err(invalid("--parent names a session on this computer, not a cloud session.")),
         (Some(parent), false) => params["parent"] = json!(parent),
-        (None, true) => {
-            params["noParent"] = json!(true);
-            return Ok(());
-        }
+        // No parent is recorded, but where the command ran is still said: a run's worker
+        // is held to its limits by who asks, not by what the request records.
+        (None, true) => params["noParent"] = json!(true),
         (None, false) => {}
     }
     if let Some(caller) = calling_session() {
@@ -1234,11 +1238,76 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let project = tokens.option("--project")?;
             let pipeline = tokens.required_front("pipeline")?;
             tokens.finish()?;
-            Ok(Action::Rpc { command: "pipelines.act".into(), params: json!({"pipeline": pipeline, "project": project, "action": command}), timeout: PIPELINE_TIMEOUT })
+            let mut params = json!({"pipeline": pipeline, "project": project, "action": command});
+            // Who asks, when it is asked from inside a session: a run's worker steers no pipeline.
+            if let Some(caller) = calling_session() {
+                params["caller"] = caller;
+            }
+            Ok(Action::Rpc { command: "pipelines.act".into(), params, timeout: PIPELINE_TIMEOUT })
         }
         other => Err(invalid(format!("Unknown pipelines command {other}."))),
     }
 }
+
+/// Orchestration runs: a lead's plan of pieces, and the workers started for
+/// them. Approving a run is not here: a person does that in the app.
+fn parse_runs(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, ControlError>) -> Result<Action, ControlError> {
+    let command = tokens.required_front("runs command (create, start, show, list, stop or check-failed)")?;
+    // Where the command runs: the lead of a new run, and the run meant when none is named.
+    let caller = calling_session();
+    match command.as_str() {
+        "create" => {
+            let from = tokens.option("--from")?.ok_or_else(|| invalid("Missing --from PLAN: the plan's JSON file, or - for standard input."))?;
+            let lead = tokens.option("--lead")?;
+            if lead.as_deref().is_some_and(|lead| lead.trim().is_empty()) {
+                return Err(invalid("--lead needs a session."));
+            }
+            if lead.as_deref().is_some_and(is_cloud_key) {
+                return Err(invalid("--lead names a session on this computer; a run's workers are local sessions."));
+            }
+            tokens.finish()?;
+            let text = if from == "-" { stdin()? } else { std::fs::read_to_string(&from).map_err(|error| invalid(format!("Could not read --from {from}: {error}")))? };
+            // Refused here with the file's own line: the app would only see what was parsed.
+            let plan: Value = serde_json::from_str(&text).map_err(|error| ControlError::new("plan_invalid", format!("The plan in {from} is not JSON: {error}."), Some("A plan is a JSON object with `goal` and `pieces`. See `terminalx skills get terminalx-cli`.".into())))?;
+            Ok(Action::Rpc { command: "runs.create".into(), params: json!({"plan": plan, "lead": lead, "caller": caller}), timeout: Duration::from_secs(30) })
+        }
+        "list" => {
+            let lead = tokens.option("--lead")?;
+            let all = tokens.flag("--all")?;
+            rpc("runs.list", json!({"lead": lead, "all": all}), tokens)
+        }
+        "show" | "start" | "stop" => {
+            let run = tokens.take_front();
+            tokens.finish()?;
+            // A start makes a worktree and a session for every ready piece before it answers.
+            let timeout = if command == "start" { RUN_START_TIMEOUT } else { Duration::from_secs(60) };
+            Ok(Action::Rpc { command: format!("runs.{command}"), params: json!({"run": run, "caller": caller}), timeout })
+        }
+        // A piece's worker said `done` and its done-check did not hold: the piece takes the next step of the ladder.
+        "check-failed" => {
+            let piece = tokens.required_front("piece id")?;
+            let run = tokens.option("--run")?;
+            let output = tokens.option("--output")?;
+            let reason = tokens.option("--reason")?;
+            tokens.finish()?;
+            let output = match output.as_deref() {
+                Some("-") => Some(stdin()?),
+                Some(path) => Some(std::fs::read_to_string(path).map_err(|error| invalid(format!("Could not read --output {path}: {error}")))?),
+                None => None,
+            };
+            // What the next worker is told failed: the reason in a line, then what the check printed.
+            let said: Vec<String> = [reason, output].into_iter().flatten().map(|text| text.trim().to_string()).filter(|text| !text.is_empty()).collect();
+            if said.is_empty() {
+                return Err(invalid("Say what failed: --output FILE (or - for standard input) with what the check printed, --reason TEXT, or both. The next worker is given it."));
+            }
+            Ok(Action::Rpc { command: "runs.checkFailed".into(), params: json!({"run": run, "piece": piece, "output": said.join("\n"), "caller": caller}), timeout: RUN_START_TIMEOUT })
+        }
+        other => Err(invalid(format!("Unknown runs command {other}. Use create, start, show, list, stop or check-failed."))),
+    }
+}
+
+/// Starting a run creates a worktree and a session for each ready piece.
+const RUN_START_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A pipeline step pushes, opens a pull request or asks GitHub to merge
 /// before it answers.
@@ -1419,9 +1488,9 @@ mod tests {
             assert!(inside.get("parent").is_none() && inside.get("noParent").is_none());
             // The named parent goes with the caller, whose tab is recorded when they are the same session.
             assert_eq!((&named["parent"], &named["caller"]), (&json!("0198c"), &caller));
-            // Nobody: not even where it ran.
-            assert_eq!(nobody["noParent"], true);
-            assert!(nobody.get("caller").is_none() && nobody.get("parent").is_none());
+            // Nobody is recorded as its parent; where it ran is still said.
+            assert_eq!((&nobody["noParent"], &nobody["caller"]), (&json!(true), &caller));
+            assert!(nobody.get("parent").is_none());
             assert_eq!(with(base, &["--parent", "0198c"])["parent"], "0198c");
             for refused in [&["--parent", "0198c", "--no-parent"][..], &["--parent", ""], &["--parent"], &["--parent", "cloud:org:ws:s"]] {
                 assert_eq!(parse(&args(&[base, refused].concat())).unwrap_err().code, "invalid_arguments", "{refused:?}");
@@ -1452,6 +1521,76 @@ mod tests {
             &["sessions", "stop"], &["sessions", "stop", "0198c"], &["sessions", "stop", "--children-of", "0198c", "extra"],
         ] {
             assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn runs_are_created_from_a_plan_file_and_driven_by_id_or_from_inside_their_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.json");
+        let plan = json!({"goal": "Move settings reads", "pieces": [{"id": "a", "title": "A", "kind": "code", "doneChecks": [{"type": "command", "run": "cargo t"}]}]});
+        std::fs::write(&path, plan.to_string()).unwrap();
+        let path = path.to_str().unwrap();
+
+        // Outside a session the request names no caller; the app then asks for --lead.
+        let (command, params, _) = rpc_of(&["runs", "create", "--from", path, "--json"]);
+        assert_eq!((command.as_str(), params), ("runs.create", json!({"plan": plan, "lead": null, "caller": null})));
+        assert_eq!(rpc_of(&["runs", "create", "--from", path, "--lead", "0198c"]).1["lead"], "0198c");
+        // Inside one, the session and tab it runs in lead the run, and name it when no run is named.
+        let caller = json!({"session": "lead", "tab": "lead-tab"});
+        CALLING_SESSION.with(|calling| *calling.borrow_mut() = Some(caller.clone()));
+        let inside = rpc_of(&["runs", "create", "--from", path]).1;
+        let unnamed = rpc_of(&["runs", "start"]);
+        CALLING_SESSION.with(|calling| *calling.borrow_mut() = None);
+        assert_eq!(inside["caller"], caller);
+        assert_eq!((unnamed.0.as_str(), unnamed.1, unnamed.2), ("runs.start", json!({"run": null, "caller": caller}), Duration::from_secs(300)));
+
+        // The plan may come on standard input.
+        let mut stdin = || Ok(plan.to_string());
+        let Action::Rpc { params, .. } = parse_with_stdin(&args(&["runs", "create", "--from", "-"]), &mut stdin).unwrap().action else { panic!("expected rpc") };
+        assert_eq!(params["plan"], plan);
+
+        for (words, command) in [(&["runs", "show", "01a1"][..], "runs.show"), (&["runs", "start", "01a1"], "runs.start"), (&["runs", "stop", "01a1", "--json"], "runs.stop")] {
+            let (sent, params, _) = rpc_of(words);
+            assert_eq!((sent.as_str(), params), (command, json!({"run": "01a1", "caller": null})));
+        }
+        assert_eq!(rpc_of(&["runs", "list"]), ("runs.list".into(), json!({"lead": null, "all": false}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["runs", "list", "--lead", "0198c", "--all"]).1, json!({"lead": "0198c", "all": true}));
+
+        // A plan that cannot be read is refused here, with the file's own line; nothing is sent.
+        std::fs::write(dir.path().join("broken.json"), "{\n  \"goal\": \"x\",\n  pieces\n}").unwrap();
+        let broken = parse(&args(&["runs", "create", "--from", dir.path().join("broken.json").to_str().unwrap()])).unwrap_err();
+        assert_eq!(broken.code, "plan_invalid");
+        assert!(broken.message.contains("is not JSON") && broken.message.contains("line 3"), "{}", broken.message);
+        let missing = parse(&args(&["runs", "create", "--from", &format!("{path}.missing")])).unwrap_err();
+        assert!(missing.code == "invalid_arguments" && missing.message.contains("Could not read --from"), "{}", missing.message);
+        for refused in [
+            &["runs"][..], &["runs", "create"], &["runs", "create", "--from"], &["runs", "create", "--from", path, "--lead", ""],
+            &["runs", "create", "--from", path, "--lead", "cloud:org-a:ws-1:s1"], &["runs", "create", "--from", path, "extra"],
+            &["runs", "start", "01a1", "extra"], &["runs", "list", "01a1"], &["runs", "approve", "01a1"], &["runs", "pause"],
+        ] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        // A lead does not approve its own plan: there is no such command, and the guide says so.
+        assert!(parse(&args(&["runs", "approve", "01a1"])).unwrap_err().message.contains("Use create, start, show, list, stop or check-failed"));
+
+        // A failed done-check names the piece and carries what the check printed.
+        std::fs::write(dir.path().join("check.log"), "test control::tests::reads_default ... FAILED\n").unwrap();
+        let log = dir.path().join("check.log");
+        let (command, params, timeout) = rpc_of(&["runs", "check-failed", "cli", "--run", "01a1", "--output", log.to_str().unwrap(), "--reason", "exit 101", "--json"]);
+        assert_eq!((command.as_str(), params, timeout), ("runs.checkFailed", json!({"run": "01a1", "piece": "cli", "output": "exit 101\ntest control::tests::reads_default ... FAILED", "caller": null}), Duration::from_secs(300)));
+        assert_eq!(rpc_of(&["runs", "check-failed", "cli", "--reason", "the list misses two call sites"]).1, json!({"run": null, "piece": "cli", "output": "the list misses two call sites", "caller": null}));
+        let mut printed = || Ok("FAILED on stdin\n".to_string());
+        let Action::Rpc { params, .. } = parse_with_stdin(&args(&["runs", "check-failed", "cli", "--output", "-"]), &mut printed).unwrap().action else { panic!("expected rpc") };
+        assert_eq!(params["output"], "FAILED on stdin");
+        for refused in [&["runs", "check-failed"][..], &["runs", "check-failed", "cli"], &["runs", "check-failed", "cli", "--reason", "  "], &["runs", "check-failed", "cli", "--output", "/no/such/file"], &["runs", "check-failed", "cli", "--reason", "x", "extra"]] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        for said in ["terminalx runs create --from PLAN.json|- [--lead SESSION]", "terminalx runs start|show|stop [RUN]", "terminalx runs list [--lead SESSION] [--all]", "terminalx runs check-failed PIECE [--run RUN] [--output FILE|-] [--reason TEXT]"] {
+            assert!(help_text().contains(said), "{said}");
+        }
+        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneChecks`", "{\"type\": \"command\", \"run\":", "{\"type\": \"review\", \"text\":", "`no_command_check`", "`review_only_without_reason`", "\"reviewOnly\": true", "`owns_outside_repository`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8", "#### Model and effort", "`no_kind`", "`unknown_kind`", "#### When a piece falls short", "terminalx runs check-failed <piece>", "never past\n   `high`", "`piece_not_done`", "`modelNote`", "| top | Fable | Astra |"] {
+            assert!(GUIDE.contains(said), "the guide does not say {said:?}");
         }
     }
 

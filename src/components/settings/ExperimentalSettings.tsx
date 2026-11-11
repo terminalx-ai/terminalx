@@ -4,14 +4,16 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Switch } from "@/components/ui/controls";
 import { errorMessage, experimental, type ExperimentalSettings } from "@/lib/api";
+import { noteExperimental } from "@/lib/experimental";
 import { noteExperimentalSettings } from "@/lib/experimentalSettings";
 
-export { NATIVE_CODEX_DESCRIPTION } from "./settingsRegistry";
+export { NATIVE_CODEX_DESCRIPTION, ORCHESTRATOR_RUNS_DESCRIPTION } from "./settingsRegistry";
 
 /** Features that are on only when the reader turns them on. */
 export function ExperimentalTab() {
   const { revision } = useSettingsFile();
   const [nativeCodex, setNativeCodex] = useState<boolean | null>(null);
+  const [orchestratorRuns, setOrchestratorRuns] = useState<boolean | null>(null);
   const [sessionCost, setSessionCost] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,11 +24,13 @@ export function ExperimentalTab() {
       .then((settings) => {
         if (!live) return;
         setNativeCodex(settings?.nativeCodex ?? false);
+        setOrchestratorRuns(settings?.orchestratorRuns ?? false);
         setSessionCost(settings?.sessionCost ?? false);
       })
       .catch((e: unknown) => {
         if (!live) return;
         setNativeCodex(false);
+        setOrchestratorRuns(false);
         setSessionCost(false);
         setError(errorMessage(e));
       });
@@ -38,8 +42,9 @@ export function ExperimentalTab() {
   // A paired phone can change it too (Settings → This Mac on the phone).
   useEffect(() => {
     let live = true;
-    const unlisten = listen<{ nativeCodex?: boolean; sessionCost?: boolean }>("experimental_settings_changed", (event) => {
+    const unlisten = listen<{ nativeCodex?: boolean; orchestratorRuns?: boolean; sessionCost?: boolean }>("experimental_settings_changed", (event) => {
       if (live && typeof event.payload?.nativeCodex === "boolean") setNativeCodex(event.payload.nativeCodex);
+      if (live && typeof event.payload?.orchestratorRuns === "boolean") setOrchestratorRuns(event.payload.orchestratorRuns);
       if (live && typeof event.payload?.sessionCost === "boolean") setSessionCost(event.payload.sessionCost);
     }).catch(() => null);
     return () => {
@@ -56,8 +61,25 @@ export function ExperimentalTab() {
       const saved = await experimental.setNativeCodex(on);
       setNativeCodex(saved.nativeCodex);
       noteExperimentalSettings(saved);
+      noteExperimental(saved);
     } catch (e) {
       setNativeCodex(before);
+      setError(errorMessage(e));
+    }
+  };
+
+  const changeRuns = async (on: boolean) => {
+    const before = orchestratorRuns;
+    setOrchestratorRuns(on);
+    setError(null);
+    try {
+      const saved = await experimental.setOrchestratorRuns(on);
+      setOrchestratorRuns(saved.orchestratorRuns);
+      // The Run view and Settings → Orchestrator appear at once, not when the file watcher gets to it.
+      noteExperimental(saved);
+      noteExperimentalSettings(saved);
+    } catch (e) {
+      setOrchestratorRuns(before);
       setError(errorMessage(e));
     }
   };
@@ -70,6 +92,7 @@ export function ExperimentalTab() {
       const saved: ExperimentalSettings = await experimental.setSessionCost(on);
       setSessionCost(saved.sessionCost ?? false);
       noteExperimentalSettings(saved);
+      noteExperimental(saved);
     } catch (e) {
       setSessionCost(before);
       setError(errorMessage(e));
@@ -81,6 +104,9 @@ export function ExperimentalTab() {
       <p className="pb-3 text-[13px] text-muted-foreground">These features are still being tested. Turn one off at any time; sessions it already started keep working.</p>
       <RegisteredSetting setting="experimental.nativeCodex"
         control={<Switch aria-label="Native Codex" checked={nativeCodex ?? false} disabled={nativeCodex === null} onCheckedChange={(on) => void change(on)} />}
+      />
+      <RegisteredSetting setting="experimental.orchestratorRuns"
+        control={<Switch aria-label="Orchestration runs" checked={orchestratorRuns ?? false} disabled={orchestratorRuns === null} onCheckedChange={(on) => void changeRuns(on)} />}
       />
       <RegisteredSetting setting="experimental.sessionCost"
         control={<Switch aria-label="Session cost" checked={sessionCost ?? false} disabled={sessionCost === null} onCheckedChange={(on) => void changeSessionCost(on)} />}

@@ -141,6 +141,8 @@ fn phone_create_child() {
             let published = std::iter::from_fn(|| events.try_recv().ok()).find(|published| &*published.event == "experimental_settings_changed").unwrap();
             let published: Value = serde_json::from_str(&published.payload).unwrap();
             assert_eq!((&published["nativeCodex"], &published["sessionCost"]), (&json!(true), &json!(true)));
+            // And the switches a phone does not have, as they are.
+            assert_eq!(published["orchestratorRuns"], json!(false));
             assert_eq!(call("tablet", "settings", json!({})).unwrap(), json!({"nativeCodex":true}));
             assert!(call("phone", "setSettings", json!({"nativeCodex":"yes"})).is_err());
         }

@@ -4973,6 +4973,169 @@ pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Optio
     Ok(settings.experimental)
 }
 
+/// Its own command: `set_experimental_settings` takes Native Codex alone, as
+/// a paired phone sends it, and a phone has no Run view to switch on.
+#[tauri::command]
+pub fn set_experimental_orchestrator_runs(on: bool) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+    let mut settings = store::settings::load();
+    settings.experimental.orchestrator_runs = on;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.experimental)
+}
+
+// ---------------------------------------------------------------- orchestration runs (PRO-274)
+
+/// Settings → Orchestrator: the app-wide values and each project's own.
+#[tauri::command]
+pub fn orchestrator_settings() -> crate::store::settings::OrchestratorSettings {
+    store::settings::load().orchestrator
+}
+
+/// One change to the orchestrator settings. `project` names the project
+/// whose own answer changes; without it the app-wide value does. For a
+/// project, a setting given as `null` goes back to following the app.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorPatch {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default, deserialize_with = "given")]
+    require_approval: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "given")]
+    piece_limit: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "given")]
+    worker_mode: Option<Option<String>>,
+    /// Cells of the routing table, by kind and then by agent. A cell given
+    /// as `null` loses its override: it follows the app again (for a
+    /// project) or the built-in table (for the app).
+    #[serde(default)]
+    routing: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Option<serde_json::Value>>>,
+    /// Take every override away: "Reset to defaults".
+    #[serde(default)]
+    reset_routing: bool,
+}
+
+/// A field that is present, even as `null`, is `Some`: absent is "leave it".
+fn given<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[tauri::command]
+pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
+    use crate::store::settings::{MAX_PIECE_LIMIT, WORKER_MODES};
+    if let Some(Some(limit)) = patch.piece_limit {
+        if !(1..=MAX_PIECE_LIMIT).contains(&limit) {
+            return Err(format!("A plan may have from 1 to {MAX_PIECE_LIMIT} pieces, not {limit}."));
+        }
+    }
+    if let Some(Some(mode)) = &patch.worker_mode {
+        if !WORKER_MODES.contains(&mode.as_str()) {
+            return Err(format!("Workers cannot run in {mode}."));
+        }
+    }
+    // Every cell is checked before anything is stored.
+    use crate::orchestration::routing::{default_route, Route, AGENTS, KINDS};
+    let mut cells: Vec<(&str, &str, Option<Route>)> = Vec::new();
+    for (kind, columns) in &patch.routing {
+        if !KINDS.contains(&kind.as_str()) {
+            return Err(format!("{kind} is not a kind of piece. The kinds are: {}.", KINDS.join(", ")));
+        }
+        for (agent, route) in columns {
+            if !AGENTS.contains(&agent.as_str()) {
+                return Err(format!("The routing table has no column for {agent}."));
+            }
+            let route = match route {
+                Some(value) => Some(Route::read(value).ok_or_else(|| format!("{value} is not a tier and an effort: use small, mid, large or top, and low, medium, high, xhigh, max or none."))?),
+                None => None,
+            };
+            cells.push((kind, agent, route));
+        }
+    }
+    let mut settings = store::settings::load();
+    let orchestrator = &mut settings.orchestrator;
+    match patch.project {
+        Some(path) => {
+            let project = orchestrator.projects.entry(path.clone()).or_default();
+            if patch.reset_routing { project.routing = Default::default(); }
+            for (kind, agent, route) in cells { project.routing.set(kind, agent, route); }
+            if let Some(value) = patch.require_approval { project.require_approval = value; }
+            if let Some(value) = patch.piece_limit { project.piece_limit = value; }
+            if let Some(value) = patch.worker_mode { project.worker_mode = value; }
+            // A project that follows the app in everything has no entry of its own.
+            if project.is_empty() { orchestrator.projects.remove(&path); }
+        }
+        None => {
+            if patch.reset_routing { orchestrator.routing = Default::default(); }
+            // Only what differs from the built-in table is kept, so a later change to that table reaches this app.
+            for (kind, agent, route) in cells { orchestrator.routing.set(kind, agent, route.filter(|route| default_route(kind).as_ref() != Some(route))); }
+            // The app-wide value has no "follow": `null` is not a value for it.
+            if let Some(value) = patch.require_approval { orchestrator.require_approval = value.ok_or("Say whether a run asks first.")?; }
+            if let Some(value) = patch.piece_limit { orchestrator.piece_limit = value.ok_or("Say how many pieces a plan may have.")?; }
+            if let Some(value) = patch.worker_mode { orchestrator.worker_mode = value.ok_or("Say which mode workers run in.")?; }
+        }
+    }
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.orchestrator)
+}
+
+/// The model each tier runs on today, per agent, for the routing table in
+/// Settings: `{"claude": {"small": Model | null, …}, "codex": {…}}`. `null`
+/// where the agent's CLI lists no model of the tier.
+#[tauri::command]
+pub async fn orchestrator_tier_models(state: State<'_, AppState>, refresh: Option<bool>) -> CmdResult<serde_json::Value> {
+    use crate::orchestration::routing::{model_for, Tier, AGENTS};
+    let models = list_models(state, refresh).await?;
+    Ok(AGENTS.iter().map(|agent| (agent.to_string(), Tier::ALL.iter().map(|tier| (tier.name().to_string(), serde_json::json!(model_for(agent, *tier, &models)))).collect::<serde_json::Map<_, _>>().into())).collect::<serde_json::Map<String, serde_json::Value>>().into())
+}
+
+/// The run a session leads, as it is now, or `null` when it leads none.
+#[tauri::command]
+pub async fn orchestration_run_for_session(app: AppHandle, session_id: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("forSession", serde_json::json!({"sessionId": session_id})).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn orchestration_runs(app: AppHandle) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("list", serde_json::json!({})).map_err(err)).await.map_err(err)?
+}
+
+/// Store a plan a person chose from a file as a run of `session_id`.
+#[tauri::command]
+pub async fn orchestration_create(app: AppHandle, session_id: String, plan: serde_json::Value) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("create", serde_json::json!({"sessionId": session_id, "plan": plan})).map_err(err)).await.map_err(err)?
+}
+
+/// What holds for runs in one project: its own answers where it gave them, the app's otherwise.
+#[tauri::command]
+pub fn orchestrator_limits(project_path: String) -> crate::store::settings::OrchestratorLimits {
+    store::settings::load().orchestrator.for_project(&project_path)
+}
+
+/// A person approves a run's plan: its first workers start. Here and not in
+/// the `terminalx` CLI, which the lead itself runs.
+#[tauri::command]
+pub async fn orchestration_approve(app: AppHandle, id: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("approve", serde_json::json!({"id": id})).map_err(err)).await.map_err(err)?
+}
+
+/// Stop a run, or discard a plan nobody approved.
+#[tauri::command]
+pub async fn orchestration_stop(app: AppHandle, id: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("stop", serde_json::json!({"id": id})).map_err(err)).await.map_err(err)?
+}
+
+/// Replace the plan of a run that has not started: what Edit saves.
+#[tauri::command]
+pub async fn orchestration_update_plan(app: AppHandle, id: String, plan: serde_json::Value) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("updatePlan", serde_json::json!({"id": id, "plan": plan})).map_err(err)).await.map_err(err)?
+}
+
 /// The header's usage popover (PRO-273): the session's tokens and estimated
 /// cost, read again from its agents' transcripts, and the session as it is
 /// now for the window to take.

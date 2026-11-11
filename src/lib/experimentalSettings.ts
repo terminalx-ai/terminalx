@@ -12,7 +12,7 @@ const listeners = new Set<() => void>();
 let booted: Promise<void> | null = null;
 
 function set(next: Partial<ExperimentalSettings>) {
-  current = { nativeCodex: false, ...current, ...next };
+  current = { nativeCodex: false, orchestratorRuns: false, ...current, ...next };
   for (const listener of [...listeners]) listener();
 }
 

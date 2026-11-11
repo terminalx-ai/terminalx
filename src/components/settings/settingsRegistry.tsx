@@ -5,6 +5,9 @@ import { SHORTCUT_ACTIONS } from "@/lib/shortcuts";
 export const NATIVE_CODEX_DESCRIPTION =
   "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.";
 
+export const ORCHESTRATOR_RUNS_DESCRIPTION =
+  "A session can lead a run: it splits one goal into pieces, and each piece goes to a worker session on its own branch. Shows the Run view in a session, where you approve the lead's plan before any worker starts, and Settings → Orchestrator. The terminalx runs commands work either way.";
+
 export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Repositories", "Admin", "More"] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number];
 export const SETTINGS_SECTIONS = {
@@ -13,6 +16,7 @@ export const SETTINGS_SECTIONS = {
   general: { title: "General", group: "Personal", entry: "general.websiteLinks" },
   appearance: { title: "Appearance", group: "Personal", entry: "appearance.theme" },
   agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup" },
+  orchestrator: { title: "Orchestrator", group: "Agents & environment", entry: "orchestrator.requireApproval" },
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
@@ -279,10 +283,40 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.nativeCodex" },
   }),
   defineSetting({
+    id: "experimental.orchestratorRuns", section: "experimental", title: "Orchestration runs",
+    description: ORCHESTRATOR_RUNS_DESCRIPTION,
+    searchTerms: ["experimental", "orchestrator", "orchestration", "runs", "lead", "workers", "plan"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.orchestratorRuns" },
+  }),
+  defineSetting({
     id: "experimental.sessionCost", section: "experimental", title: "Session cost",
     description: "Show each session's estimated cost in its header, with its tokens by model. On a subscription it is what the tokens would cost at API prices, not what you are billed.",
     searchTerms: ["experimental", "session", "cost", "tokens", "usage", "spend", "price"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.sessionCost" },
+  }),
+  defineSetting({
+    id: "orchestrator.requireApproval", section: "orchestrator", title: "Ask before a run starts",
+    description: "Show the plan and wait for Approve. Off: a lead starts its workers as soon as its plan is stored.",
+    searchTerms: ["orchestrator", "run", "approve", "approval", "plan", "ask", "lead", "workers"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.requireApproval" },
+  }),
+  defineSetting({
+    id: "orchestrator.pieceLimit", section: "orchestrator", title: "Pieces per run, at most",
+    description: "A larger plan is refused, and the lead is told the limit. From 1 to 50.",
+    searchTerms: ["orchestrator", "pieces", "limit", "plan", "workers", "most"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.pieceLimit" },
+  }),
+  defineSetting({
+    id: "orchestrator.workerMode", section: "orchestrator", title: "Workers run in",
+    description: "The permission mode a worker starts in unless its piece names another. Push, merge and deploy stay blocked by deny rules in every mode.",
+    searchTerms: ["orchestrator", "workers", "permissions", "mode", "bypass", "deny", "rules"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.workerMode" },
+  }),
+  defineSetting({
+    id: "orchestrator.routing", section: "orchestrator", title: "Starting model by kind of piece",
+    description: "The model tier and effort each kind of piece starts on, for Claude Code workers and for Codex workers. A piece that falls short is retried on more effort, then on the next model up.",
+    searchTerms: ["orchestrator", "routing", "table", "model", "effort", "tier", "kind", "haiku", "sonnet", "opus", "fable", "luna", "terra", "sol", "astra", "escalate", "retry"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.routing" }, layout: "content",
   }),
   defineSetting({
     id: "general.dataPrivacy", section: "general", title: "Data privacy mode",
@@ -535,6 +569,12 @@ export const SETTINGS_ROWS = [
     description: "Override automatic merged-workspace cleanup for this repository.",
     searchTerms: ["repositories", "workspace", "cleanup"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#mergedCleanup.projects" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.orchestrator", section: "repositories", title: "Orchestrator",
+    description: "Override for this repository whether a run asks first, how many pieces it may have, the mode its workers run in, and the model each kind of piece starts on.",
+    searchTerms: ["repositories", "orchestrator", "runs", "approval", "pieces", "workers", "permissions", "routing", "model", "effort", "tier"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.projects" }, layout: "content",
   }),
   defineSetting({
     id: "repositories.scripts", section: "repositories", title: "Scripts",
