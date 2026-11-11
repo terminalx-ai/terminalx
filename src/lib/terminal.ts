@@ -60,12 +60,27 @@ export interface TerminalState {
   agents: Record<string, string>;
 }
 
-export type SelectedSessionTab = { kind: "agent" | "terminal" | "browser"; id: string };
+export type SelectedSessionTab = { kind: "agent" | "terminal" | "browser" | "review"; id: string };
 
-let state: TerminalState = { panes: [], active: {}, selected: {}, agents: {} };
+const SELECTION_KEY = "terminalx:selected-tabs:v1";
+export function restoreSessionTabSelection(raw: string | null): Record<string, SelectedSessionTab> {
+  try {
+    const saved = JSON.parse(raw ?? "{}");
+    return Object.fromEntries(Object.entries(saved).filter(([, value]) => {
+      const tab = value as SelectedSessionTab | null;
+      return tab && ["agent", "terminal", "browser", "review"].includes(tab.kind) && typeof tab.id === "string";
+    })) as Record<string, SelectedSessionTab>;
+  } catch { return {}; }
+}
+let state: TerminalState = { panes: [], active: {}, selected: restoreSessionTabSelection((() => {
+  try { return localStorage.getItem(SELECTION_KEY); } catch { return null; }
+})()), agents: {} };
 const listeners = new Set<() => void>();
 function set(patch: Partial<TerminalState>) {
   state = { ...state, ...patch };
+  if (patch.selected) {
+    try { localStorage.setItem(SELECTION_KEY, JSON.stringify(state.selected)); } catch { /* Optional persistence. */ }
+  }
   for (const l of listeners) l();
 }
 
@@ -97,12 +112,25 @@ export interface TerminalInstance {
   release?: () => void;
   /** Attach again over a new connection, the screen redrawn from the backend's scrollback. */
   reattach?: () => void;
+  /** Resolves only after output attachment succeeds; retries a failed attachment. */
+  ensureAttached?: () => Promise<void>;
   /** Whether it is attached now under `token`, the name of one attachment of its pane's output. */
   attachedAs?: (token: string) => boolean;
   /** May be rebuilt from the backend's bounded scrollback without ending the process. */
   restorable?: boolean;
 }
 const instances = new Map<string, TerminalInstance>();
+const instanceFactories = new Map<string, Set<() => TerminalInstance>>();
+/** Mounted views can recreate a parser evicted while their Chat was visible. */
+export function registerTerminalFactory(id: string, create: () => TerminalInstance): () => void {
+  const factories = instanceFactories.get(id) ?? new Set();
+  instanceFactories.set(id, factories);
+  factories.add(create);
+  return () => {
+    factories.delete(create);
+    if (!factories.size && instanceFactories.get(id) === factories) instanceFactories.delete(id);
+  };
+}
 const sizes = new Map<string, { cols: number; rows: number }>();
 /** Recently used, hidden local terminals. Visible and remote terminals are not evicted. */
 export const IDLE_TERMINAL_LIMIT = 8;
@@ -130,6 +158,15 @@ export function setArchivedTerminalSessions(ids: readonly string[]) {
 /** The live instance of a pane, if it has one. Never makes one: a view that is on its way out must not bring a closed terminal back. */
 export function peekInstance(id: string): TerminalInstance | undefined {
   return instances.get(id);
+}
+
+/** Pane registration alone does not establish the window's PTY stream. */
+export async function ensureTerminalAttached(id: string, fallback?: () => TerminalInstance): Promise<void> {
+  const create = instanceFactories.get(id)?.values().next().value ?? fallback;
+  const inst = peekInstance(id) ?? (create ? getInstance(id, create) : undefined);
+  if (!inst?.ensureAttached) throw new Error("The terminal view is not ready to attach. Keep using Chat and try again.");
+  await inst.ensureAttached();
+  if (peekInstance(id) !== inst) throw new Error("The terminal connection changed while opening. Keep using Chat and try again.");
 }
 
 /** Mount before trimming when a view is acquiring a visible terminal. */
@@ -585,6 +622,13 @@ export function setActiveTerminal(sessionId: string, id: string) {
  */
 export function selectSessionTab(sessionId: string, tab: SelectedSessionTab) {
   set({ selected: { ...state.selected, [sessionId]: tab } });
+}
+
+export function clearSelectedReview(sessionId: string, id: string) {
+  if (state.selected[sessionId]?.kind !== "review" || state.selected[sessionId].id !== id) return;
+  const selected = { ...state.selected };
+  delete selected[sessionId];
+  set({ selected });
 }
 
 /** Forget the tab asked for in every session whose id starts with `prefix` (a cloud workspace whose content is gone for this person). */

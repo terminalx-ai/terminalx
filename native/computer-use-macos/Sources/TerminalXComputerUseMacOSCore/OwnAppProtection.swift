@@ -60,7 +60,7 @@ public enum OwnAppProtection {
     }
 
     public static func actionRefusal(targetName: String) -> String {
-        "computer use does not click, type or change anything in \(targetName)'s own windows: its confirmations and settings are the person's to operate. Ask the person to do it."
+        "computer use does not click, type or change anything in \(targetName)'s own windows: its confirmations and settings are the person's to operate. For scoped session controls use terminalx computer self-ui authorize; for Autopilot use terminalx pipelines start."
     }
 
     public static let keyboardRefusal =
@@ -70,5 +70,5 @@ public enum OwnAppProtection {
         "TerminalX's own windows are never screenshotted by computer use: a pairing code or a secret on screen would leak."
 
     public static let treeRefusal =
-        "accessibility tree withheld: computer use does not read TerminalX's own windows. They show pairing codes, invite links and other sessions' terminals as plain text. Ask the person, or use the terminalx CLI for what it offers."
+        "accessibility tree withheld: computer use does not read TerminalX's own windows. They show pairing codes, invite links and other sessions' terminals as plain text. Use terminalx computer self-ui authorize for a scoped semantic view of approved session controls, or terminalx pipelines start for Autopilot."
 }

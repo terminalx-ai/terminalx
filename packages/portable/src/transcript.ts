@@ -1,4 +1,4 @@
-import type { AgentEvent, BackgroundTask, FileEdit, Payload, PermissionOption, Question, ToolResult } from "./events";
+import type { AgentEvent, BackgroundTask, FileEdit, Goal, Payload, PermissionOption, Question, ToolResult } from "./events";
 import { withoutHarnessBlocks } from "./harnessText";
 import { compactionOperationKey, emptyCompactionLifecycle, reduceCompactionLifecycle, type CompactionLifecycle, type CompactionOperation } from "./compactionLifecycle";
 
@@ -33,6 +33,8 @@ export interface Delivery {
   replaced?: boolean;
   /** Stopped while it waited on the agent's input box: never typed. */
   withdrawn?: boolean;
+  /** Delivery may have happened, but the connection lost its acknowledgement. */
+  unconfirmed?: boolean;
   /** What was sent, when the agent received something else; `text` is then what it received. */
   sent?: string;
 }
@@ -42,9 +44,9 @@ export type WorkItem =
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
   | { kind: "text"; text: string; key: string; seq: number; messageTs?: string }
   | { kind: "reasoning"; text: string; key: string; seq: number }
-  | ({ kind: "queued"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] } & Delivery)
+  | ({ kind: "queued"; baseline?: string; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] } & Delivery)
   /** A queued message the agent took mid-turn (#551): the reader's own words, where the agent read them. */
-  | ({ kind: "message"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] } & Delivery)
+  | ({ kind: "message"; baseline?: string; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] } & Delivery)
   | { kind: "status"; text: string; initiatingPrompt?: string; key: string; seq: number }
   /** `detail`: the agent's (or its launch's) own words under the error (#667). */
   | { kind: "error"; text: string; detail?: string; key: string; seq: number }
@@ -58,14 +60,15 @@ export type WorkItem =
 export interface Turn {
   key: string;
   seq: number;
+  checkpointSeq?: number;
   /** Time of the event that opened this turn, even without a prompt or completion. */
   ts: string;
-  prompt?: { author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; messageTs?: string; seq: number } & Delivery;
+  prompt?: { baseline?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; messageTs?: string; seq: number } & Delivery;
   work: WorkItem[];
   finalText?: string;
   /** Under a failed turn's `finalText`: the agent's last line, when it exited before it ever worked (#667). */
   detail?: string;
-  completed?: { status: string; durationMs?: number; ts: string; head?: string };
+  completed?: { seq?: number; status: string; durationMs?: number; ts: string; head?: string };
   usage?: { contextUsed?: number; contextMax?: number };
   toolCount: number;
   editedFiles: number;
@@ -90,6 +93,7 @@ export interface PendingAsk {
 }
 
 export interface Transcript {
+  goal?: Goal;
   turns: Turn[];
   pendingAsks: PendingAsk[];
   tasks: BackgroundTask[];
@@ -145,8 +149,8 @@ function pullQueued(turns: Turn[], seq: number): { item: Extract<WorkItem, { kin
  * A queued message is a note in the turn it was queued behind: the agent held
  * it until that turn was over and then took it as its next prompt, or it was
  * typed again as one when the reader sent it now. One the agent took mid-turn
- * has a `prompt_absorbed` instead (#551), and stays in its turn as a message;
- * in a log from before that event it stays as it was sent.
+ * has a `prompt_absorbed` instead (#551), and stays in its turn as a message
+ * unless a later `turn_started` explicitly names it as that turn's prompt.
  *
  * A message drawn as a turn's prompt can be taken too (#540). It was sent
  * while the agent was busy on a turn of its own that the app had not heard
@@ -160,11 +164,14 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
     turn.prompt = undefined;
     return { prompt, from: turn };
   }
-  const found = pullQueued(turns, seq);
+  const found = findMessage(turns, seq);
   if (!found) return undefined;
-  const { item, turn } = found;
-  const { inputOccupied, replaced, withdrawn, sent } = item;
-  return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, sent }, from: turn };
+  const { turn, at } = found;
+  if (at == null) return undefined;
+  const [item] = turn.work.splice(at, 1);
+  if (item.kind !== "queued" && item.kind !== "message") return undefined;
+  const { inputOccupied, replaced, withdrawn, unconfirmed, sent } = item;
+  return { prompt: { baseline: item.baseline, author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, unconfirmed, sent }, from: turn };
 }
 
 /** Where the reader's message published under `seq` is drawn now: a turn's prompt (no `at`), or a note at `at` in a turn's work. */
@@ -252,6 +259,7 @@ export class TranscriptReducer {
   private readonly rowTurn = new Map<CompactionRow, Turn>();
   private readonly resolutions = new WeakMap<CompactionLifecycle, CompactionLifecycle>();
   private tasks: BackgroundTask[] = [];
+  private goal: Goal | undefined;
   private contextUsed: number | undefined;
   private contextMax: number | undefined;
   private model: string | undefined;
@@ -346,8 +354,14 @@ export class TranscriptReducer {
     const payload: Payload = event.payload;
     const followsCompaction = this.afterCompaction;
     // The app may clear a standing recovery between the two as the summary is taken for a prompt.
-    if (!event.subagent && payload.type !== "recovery") this.afterCompaction = payload.type === "context_compacted";
+    if (!event.subagent && payload.type !== "recovery" && payload.type !== "goal_updated" && payload.type !== "goal_cleared") this.afterCompaction = payload.type === "context_compacted";
     switch (payload.type) {
+      case "goal_updated":
+        if (!event.subagent && event.harness === "codex") this.goal = payload.goal;
+        break;
+      case "goal_cleared":
+        if (!event.subagent && event.harness === "codex") this.goal = undefined;
+        break;
       case "user_message": {
         if (followsCompaction && !payload.queued && !payload.author && payload.text.startsWith(COMPACTION_SUMMARY_OPENING)) {
           this.attachSummary(event, payload.text);
@@ -359,11 +373,11 @@ export class TranscriptReducer {
         // nothing yet: a turn the agent started itself is heard of before its
         // first record (#540), and the message is not that turn's prompt.
         if (payload.queued) {
-          this.ensureTurn(event).work.push({ kind: "queued", author: payload.author, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, messageTs: event.messageTs, images: payload.images });
+          this.ensureTurn(event).work.push({ kind: "queued", baseline: payload.baseline, author: payload.author, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, messageTs: event.messageTs, images: payload.images });
           break;
         }
         this.abandonUnresolved();
-        this.newTurn(event, { author: payload.author, text, images: payload.images, ts: event.ts, messageTs: event.messageTs, seq: event.seq });
+        this.newTurn(event, { baseline: payload.baseline, author: payload.author, text, images: payload.images, ts: event.ts, messageTs: event.messageTs, seq: event.seq });
         this.modelRequestOpen = false;
         this.workingSince = Date.parse(event.ts);
         break;
@@ -452,7 +466,7 @@ export class TranscriptReducer {
         break;
       }
       case "prompt_withdrawn": {
-        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, inputOccupied: undefined }));
+        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, unconfirmed: payload.unconfirmed, inputOccupied: undefined }));
         break;
       }
       case "prompt_joined": {
@@ -535,10 +549,14 @@ export class TranscriptReducer {
         }
         break;
       }
+      case "turn_checkpoint": {
+        if (!event.subagent) this.ensureTurn(event).checkpointSeq = payload.seq;
+        break;
+      }
       case "turn_completed": {
         const turn = this.ensureTurn(event);
         this.abandonUnresolved();
-        turn.completed = { status: payload.status, durationMs: payload.durationMs, ts: event.ts, head: payload.head };
+        turn.completed = { seq: event.seq, status: payload.status, durationMs: payload.durationMs, ts: event.ts, head: payload.head };
         const lastText = [...turn.work].reverse().find((item) => item.kind === "text");
         if (payload.finalText && (!lastText || (lastText.kind === "text" && lastText.text.trim() !== payload.finalText.trim()))) {
           if (payload.status !== "ok") turn.finalText = payload.finalText;
@@ -801,6 +819,7 @@ export class TranscriptReducer {
       this.pendingAsks = { version: this.asksVersion, asks: [...this.asks.values()].sort((a, b) => a.seq - b.seq) };
     }
     const transcript: Transcript = {
+      goal: this.goal,
       turns,
       pendingAsks: this.pendingAsks.asks,
       tasks: this.tasks,
@@ -924,7 +943,13 @@ function standsInGroup(call: ToolCall): boolean {
   return !call.result?.images?.length && !call.result?.safetyCheck;
 }
 
-/** Runs of two or more consecutive calls to one groupable tool fold into one row. */
+/**
+ * Runs of this many consecutive calls to one groupable tool fold into one row. Shorter runs keep a row per step, so a
+ * turn reads as what the agent did, in order; only a long run of the same thing (many reads) is worth folding.
+ */
+export const GROUP_AT = 4;
+
+/** Runs of `GROUP_AT` or more consecutive calls to one groupable tool fold into one row. */
 export function groupWork(items: WorkItem[]): WorkItem[] {
   const output: WorkItem[] = [];
   let index = 0;
@@ -940,7 +965,7 @@ export function groupWork(items: WorkItem[]): WorkItem[] {
           nextIndex++;
         } else break;
       }
-      if (run.length >= 2) {
+      if (run.length >= GROUP_AT) {
         output.push({ kind: "tool_group", name: item.call.name, calls: run, key: `g${item.call.callId}` });
         index = nextIndex;
         continue;

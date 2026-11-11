@@ -166,14 +166,9 @@ impl Store {
         apply(&mut values, json!({"worktreeDir": defaults.worktree_dir, "branchPrefix": defaults.branch_prefix}).as_object().unwrap().clone(), Layer::Defaults, &mut warnings)?;
         if let Some(bytes) = home.read(SHARED)? {
             match object(&bytes) {
-                Ok(mut user) => {
-                    // Until PRO-140 migrates the whole settings file, the legacy
-                    // worktree path still uses Settings' all-or-default parser.
-                    if serde_json::from_value::<super::settings::Settings>(Value::Object(user.clone())).is_err() {
-                        user.remove("worktreeDir");
-                    }
-                    apply(&mut values, user, Layer::User, &mut warnings)?;
-                }
+                // settings::file recovers each field independently, so one
+                // invalid sibling does not discard a valid worktree path here.
+                Ok(user) => apply(&mut values, user, Layer::User, &mut warnings)?,
                 Err(_) => record_warning(&mut warnings, Layer::User, "file (malformed)"),
             }
         }
@@ -234,7 +229,10 @@ impl Store {
         // environment is deliberately authored/reviewed explicitly, never migrated.
         ensure!(key != "environment", "Edit file environment explicitly; use Settings → Environment for private variables.");
         ensure!(value.as_ref().is_none_or(|v| valid(key, v, Layer::RepositoryLocal)), "Invalid configuration value.");
-        super::transaction::run(&self.home.join("configuration.lock"), Duration::from_secs(10), || {
+        // The user layer is settings.json: serialize with every other writer
+        // of that file (settings::file), which locks settings.lock.
+        let lock = if layer == Layer::User { "settings.lock" } else { "configuration.lock" };
+        super::transaction::run(&self.home.join(lock), Duration::from_secs(10), || {
             let resolved = self.resolve(repository)?;
             ensure!(!resolved.values.get(key).is_some_and(|value| value.locked), "This setting is locked by managed configuration.");
             let dir = if layer == Layer::User { self.home()? } else {

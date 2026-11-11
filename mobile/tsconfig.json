@@ -11,5 +11,5 @@
       "@mobile/*": ["src/*"]
     }
   },
-  "include": ["app/**/*.tsx", "src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts", ".expo/types/**/*.ts", "expo-env.d.ts"]
+  "include": ["app/**/*.tsx", "modules/**/*.ts", "src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts", ".expo/types/**/*.ts", "expo-env.d.ts"]
 }

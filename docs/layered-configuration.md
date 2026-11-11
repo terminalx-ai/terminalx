@@ -75,7 +75,9 @@ into repository files. A managed variable cannot be changed/deleted through that
 existing editor. The Layered configuration view shows its lock and effective source.
 
 **Dependency check:** PRO-131 (#804), PRO-140 (#812), and PRO-149 (#808) were open
-and absent from `origin/main` at implementation. This standalone increment uses
+and absent from `origin/main` at implementation; they have since merged, and this
+branch now saves the user layer through PRO-140's `settings::file`. Reading their
+files-to-copy and script settings from repository files is follow-up work. This standalone increment uses
 the existing environment service and branch settings. Files-to-copy integration,
 setup/archive script fields and runners, comprehensive preference migration,
 settings-schema publication and per-row sources throughout Settings

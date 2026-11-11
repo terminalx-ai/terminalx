@@ -1,5 +1,6 @@
-//! Settings the Rust side needs before the webview exists. Anything the
-//! frontend can read for itself lives in localStorage instead.
+//! User settings shared by the runtime and every window.
+
+pub mod file;
 
 use std::path::PathBuf;
 
@@ -9,6 +10,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    /// User-facing webview preferences. Missing keys inherit app defaults.
+    pub preferences: std::collections::BTreeMap<String, serde_json::Value>,
+    /// The first window copied the legacy localStorage choices successfully.
+    pub preferences_migrated: bool,
     // Keep layered keys written/reset by another window while an unrelated
     // settings control holds a previously loaded snapshot. Not persisted.
     #[serde(skip)]
@@ -322,6 +327,8 @@ impl Default for StatusBarSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            preferences: Default::default(),
+            preferences_migrated: false,
             loaded_configuration: None,
             worktree_dir: ".raccoon/worktrees".into(),
             branch_prefix: "raccoon/".into(),
@@ -346,43 +353,18 @@ impl Default for Settings {
     }
 }
 
-fn file_path() -> Result<PathBuf> {
+pub(super) fn file_path() -> Result<PathBuf> {
     Ok(super::root()?.join("settings.json"))
 }
 
 pub fn load() -> Settings {
-    let mut settings = file_path()
-        .ok()
-        .and_then(|p| super::read_json::<Settings>(&p).ok().flatten())
-        .unwrap_or_default();
+    let mut settings = file::load();
     settings.loaded_configuration = Some((settings.branch_prefix.clone(), settings.worktree_dir.clone()));
     settings
 }
 
 pub fn save(s: &Settings) -> Result<()> {
-    let path = file_path()?;
-    super::transaction::run(&super::root()?.join("configuration.lock"), std::time::Duration::from_secs(10), || {
-        let mut document = serde_json::to_value(s)?;
-        if let Some((prefix, directory)) = &s.loaded_configuration {
-            let latest = super::read_json::<serde_json::Value>(&path)?;
-            for (key, unchanged) in [("branchPrefix", prefix == &s.branch_prefix), ("worktreeDir", directory == &s.worktree_dir)] {
-                if unchanged {
-                    if let Some(value) = latest.as_ref().and_then(|value| value.get(key)) {
-                        document[key] = value.clone();
-                    } else {
-                        document.as_object_mut().unwrap().remove(key);
-                    }
-                }
-            }
-        }
-        super::write_json(&path, &document)?;
-        // Tighten files left loose by older builds; new ones are private from creation.
-        #[cfg(unix)] {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
-    })
+    file::save(s)
 }
 
 #[cfg(test)]

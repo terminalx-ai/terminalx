@@ -233,7 +233,7 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
           </label>
           <SettingRow
             label="Agents comment and change status without asking"
-            description="A terminalx issues command can comment on this project's GitHub issues or move their status without asking you each time. Assigning, labels, new issues and Linear issues always ask."
+            description="A terminalx issues command can comment on this project's GitHub issues or move their status without asking you each time. Assigning, labels and edits to existing Linear issues always ask. Creating GitHub or Linear issues needs no additional approval."
             control={<Switch aria-label="Agents comment and change status without asking" checked={agentUpdatesOn} onCheckedChange={saveAgentUpdates} />}
           />
         </div>

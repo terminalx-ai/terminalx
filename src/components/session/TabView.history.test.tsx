@@ -7,7 +7,7 @@ import type { OutboxEntry } from "@/lib/cloudAgentApi";
 import type { SessionBackend } from "@/lib/sessionBackend";
 
 // PRO-85: Up and Down in the composer recall the tab's messages, the same in a local and a cloud tab.
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {} } }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => () => {}) }) }));

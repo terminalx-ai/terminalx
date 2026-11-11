@@ -1,7 +1,8 @@
+import { reviewFileReader } from "./reviewThreads";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
-import { RemoteGit, gitErrorMessage, type GitAuthor } from "@terminalx/portable/workspaceGit";
-import { api, errorMessage, gh, git, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
+import { RemoteGit, gitErrorMessage, type GitAuthor, type PrConversationAccess } from "@terminalx/portable/workspaceGit";
+import { api, errorMessage, gh, git, type GitHubConnectionStatus, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
 import type { BranchInfo, ChangedFile, CommitInfo, UnfinishedMerge, WorkStatus } from "@/types/session";
 
 /** A workspace's Git status, with what is left in progress in it. */
@@ -41,14 +42,24 @@ export interface GitSource {
   pull(): Promise<string | null>;
   fetch?(): Promise<string | null>;
   /** Local only: discarding in a cloud workspace is left to its terminal. */
-  discard?(path: string): Promise<void>;
+  discard?(path: string, base?: string | null, oldPath?: string | null): Promise<void>;
   /** Local only: a merge left in progress, told apart file by file (#736). */
   unfinishedMerge?(): Promise<UnfinishedMerge | null>;
   /** Local only, with `unfinishedMerge`: commit or abort exactly the merge that was read. */
   commitMerge?(merge: UnfinishedMerge): Promise<void>;
   abortMerge?(merge: UnfinishedMerge): Promise<void>;
   ghAvailable(): Promise<boolean>;
+  /** Local connection setup; cloud credentials belong to the workspace. */
+  githubStatus?(): Promise<GitHubConnectionStatus>;
+  hasRemote?(): Promise<boolean>;
+  addRemote?(url: string): Promise<void>;
+  createRepository?(name: string, privateRepo: boolean): Promise<void>;
+  /** Actions operations are optional for runtimes that cannot yet serve logs. */
+  checkLog?(prUrl: string, checkUrl: string, failed: boolean): Promise<CheckLog>;
+  rerunCheck?(prUrl: string, checkUrl: string, failed: boolean): Promise<void>;
   prs(branch: string): Promise<PullRequest[]>;
+  /** Review threads through this source's GitHub credentials, when supported. */
+  reviewThreads?(url: string): import("./reviewThreads").ReviewThreadAccess;
   /** Durable transport locator, separate from the repository/PR URL identity. */
   prScope?: PrScope;
   prAccess?(association: PrAssociation): {
@@ -56,6 +67,7 @@ export interface GitSource {
     ready(): Promise<void>;
     merge(method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
   };
+  conversation?(pr: PullRequest, association?: PrAssociation): PrConversationAccess;
   createPr(input: { title: string; body: string; base: string | null; draft: boolean; sessionId?: string }): Promise<string | null>;
   readyPr(number: number): Promise<void>;
   mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
@@ -84,12 +96,24 @@ export function localGitSource(cwd: string): GitSource {
     commit: (message) => git.commit(cwd, message).then(() => null),
     push: () => git.push(cwd).then(() => null),
     pull: () => git.pull(cwd).then(() => null),
-    discard: (path) => git.discard(cwd, path),
+    discard: (path, base, oldPath) => git.discard(cwd, path, base, oldPath),
     unfinishedMerge: () => git.unfinishedMerge(cwd),
     commitMerge: (merge) => git.commitMerge(cwd, merge.head, merge.mergeHead).then(() => undefined),
     abortMerge: (merge) => git.abortMerge(cwd, merge.head, merge.mergeHead),
     ghAvailable: () => gh.available(),
+    githubStatus: () => gh.connectionStatus(cwd),
+    hasRemote: () => git.hasRemote(cwd),
+    addRemote: (url) => git.addRemote(cwd, url),
+    createRepository: (name, privateRepo) => gh.createRepository(cwd, name, privateRepo),
+    checkLog: (prUrl, checkUrl, failed) => gh.checkLog(cwd, prUrl, checkUrl, failed),
+    rerunCheck: (prUrl, checkUrl, failed) => gh.rerunCheck(cwd, prUrl, checkUrl, failed),
     prs: (branch) => gh.list(cwd, branch),
+    reviewThreads: (url) => ({
+      read: () => gh.reviewThreads(url),
+      file: reviewFileReader((snapshot) => gh.reviewFiles(url, snapshot.headOid, snapshot.baseOid)),
+      resolve: (id, resolved) => gh.resolveReview(url, id, resolved),
+      reply: (id, body) => gh.replyReview(url, id, body),
+    }),
     prScope: { kind: "local", cwd },
     prAccess: (association) => {
       if (association.scope.kind !== "local") throw new Error("Reconnect this PR's cloud workspace to refresh it.");
@@ -98,6 +122,10 @@ export function localGitSource(cwd: string): GitSource {
         ready: () => gh.ready(cwd, association.number, association.url),
         merge: (method) => gh.merge(cwd, association.number, method, association.url),
       };
+    },
+    conversation: (pr, association) => {
+      if (association && association.scope.kind !== "local") throw new Error("Reconnect this PR's cloud workspace to read its conversation.");
+      return gh.conversation(pr.url);
     },
     createPr: ({ title, body, base, draft, sessionId }) => gh.create(cwd, title, body, base, draft, sessionId).then(() => null),
     readyPr: (number) => gh.ready(cwd, number),
@@ -206,6 +234,11 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
         ready: () => repository.readyPr(association.number).then(() => undefined),
         merge: (method) => repository.mergePr(association.number, method).then(() => undefined),
       };
+    },
+    conversation: (pr, association) => {
+      if (!association) return remote.prConversation(pr.url);
+      if (association.scope.kind !== "cloud" || association.scope.workspace !== input.workspaceKey || !association.scope.repo) throw new Error("Reconnect this PR's workspace to read its conversation.");
+      return new RemoteGit(remote.client, association.scope.repo).prConversation(pr.url);
     },
     createPr: async ({ title, body, base, draft, sessionId }) => {
       const result = await remote.createPr({ title, body, base, draft });

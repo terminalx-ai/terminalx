@@ -546,9 +546,10 @@ mod tests {
                 kind: crate::store::index::SessionKind::Project,
                 branch: None, base_ref: None, worktree_base: None, worktree_removed: false, removed_workspace: None, issue: None, issue_work: Default::default(), automation: None,
                 title: "Safe session".into(),
-                created: String::new(), modified: String::new(), archived: false, archive: Default::default(), pinned: false, tabs: vec![tab],
+                created: String::new(), modified: String::new(), archived: false, archive: Default::default(), pinned: false, manual_status: Default::default(), tabs: vec![tab],
                 active_tab: Some("t1".into()), unknown: Default::default(),
                 link: None,
+                parent: None,
             };
             bound_pane(&pane, &[session], &HashMap::new(), Some(Aggregate::default())).kill_rule
         };

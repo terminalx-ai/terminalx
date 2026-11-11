@@ -193,12 +193,14 @@ fn unrelated_settings_saves_preserve_concurrent_layered_writes_and_resets() {
 }
 
 #[test]
-fn legacy_empty_prefix_still_disables_cleanup_and_legacy_path_parser_is_respected() {
+fn legacy_empty_prefix_still_disables_cleanup_and_an_invalid_sibling_keeps_the_path() {
     let f = Fixture::new();
     f.file(Layer::User, json!({"branchPrefix":"", "worktreeDir":"custom", "notifications":"invalid"}));
     let resolved = f.resolve();
     assert_eq!(resolved.values["branchPrefix"].value, "");
-    assert_eq!(resolved.values["worktreeDir"].source, Layer::Defaults);
+    // settings::file recovers fields one by one (PRO-140), as the resolver does.
+    assert_eq!(resolved.values["worktreeDir"].source, Layer::User);
+    assert_eq!(resolved.values["worktreeDir"].value, "custom");
     f.file(Layer::Managed, json!({"worktreeDir":"forbidden"}));
     assert!(f.store.resolve(None).is_err(), "non-lockable keys cannot be pinned by policy");
 }

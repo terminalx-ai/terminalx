@@ -2,9 +2,10 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { agent, errorMessage, type HandoffInfo, type TabPtyEvent } from "@/lib/api";
 import { defaultTabView, tabPaneId, tabViewIn, type TabViewMode } from "@/lib/tabFront";
-import { adoptPane, closeTerminal, followShellToTab, openTerminal } from "@/lib/terminal";
+import { adoptPane, closeTerminal, ensureTerminalAttached, followShellToTab, openTerminal } from "@/lib/terminal";
 import { getSessionStore } from "@/lib/sessions";
 import type { SessionEntry, TabEntry } from "@/types/session";
+import { getTheme } from "@/lib/theme";
 
 /**
  * Which face a tab shows: the transcript, or the agent's own CLI in a terminal.
@@ -43,9 +44,10 @@ interface State {
   info: Record<string, HandoffInfo>;
   errors: Record<string, string | null>;
   switching: Record<string, boolean>;
+  waiting: Record<string, boolean>;
 }
 
-let state: State = { views: {}, info: {}, errors: {}, switching: {} };
+let state: State = { views: {}, info: {}, errors: {}, switching: {}, waiting: {} };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -93,19 +95,20 @@ function removedHere(tabId: string) {
 /** Active tabs disappeared from the index; their on-disk history is untouched. */
 export function forgetClosedTabViews(tabIds: readonly string[]) {
   const views = { ...state.views }, info = { ...state.info };
-  const errors = { ...state.errors }, switching = { ...state.switching };
+  const errors = { ...state.errors }, switching = { ...state.switching }, waiting = { ...state.waiting };
   for (const id of tabIds) {
     removedTabs.delete(id);
     removedTabs.add(id);
+    cancelTerminalView(id);
     lifetimes.delete(id);
     starting.delete(id);
-    delete views[id]; delete info[id]; delete errors[id]; delete switching[id];
+    delete views[id]; delete info[id]; delete errors[id]; delete switching[id]; delete waiting[id];
   }
   for (const oldest of removedTabs) {
     if (removedTabs.size <= REMEMBERED_REMOVALS) break;
     removedTabs.delete(oldest);
   }
-  set({ views, info, errors, switching });
+  set({ views, info, errors, switching, waiting });
 }
 
 /** The pane a tab's terminal view shows: its own, or the shell's it took over. */
@@ -169,14 +172,14 @@ async function registerTabPty() {
  * then. In-flight calls are shared, because two starts racing is exactly how a
  * tab ended up with two CLIs fighting over one conversation.
  */
-const starting = new Map<string, { run: Promise<void>; opened: boolean }>();
+const starting = new Map<string, { run: Promise<boolean>; opened: boolean }>();
 
 /**
  * `opened`: the tab is only being shown, in its chat. An agent nobody is about to use is then left for its next message
  * to start (`agent.startOnOpen`, #696); the terminal view, a restart and "New shell" start it whatever it is.
  */
 export async function startTabAgent(session: SessionEntry, tab: TabEntry, how: { opened?: boolean } = {}) {
-  if (!isPtyFirst(tab.harness) || removedHere(tab.id)) return;
+  if (!isPtyFirst(tab.harness) || removedHere(tab.id)) return false;
   const opened = how.opened === true;
   const key = tab.id;
   const token = lifetime(tab.id);
@@ -188,14 +191,16 @@ export async function startTabAgent(session: SessionEntry, tab: TabEntry, how: {
   const run = (async () => {
     await before;
     await subscribeTabPty();
-    if (!current(tab.id, token)) return;
+    if (!current(tab.id, token)) return false;
     try {
       await (opened ? agent.startOnOpen(session.id, tab.id) : agent.ensureStarted(session.id, tab.id));
-      if (!current(tab.id, token)) return;
+      if (!current(tab.id, token)) return false;
       await adoptTabPane(session.id, tab.id, token);
       if (current(tab.id, token)) clearTabViewError(tab.id);
+      return true;
     } catch (e) {
       if (current(tab.id, token)) set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
+      return false;
     }
   })().finally(() => { if (starting.get(key)?.run === run) starting.delete(key); });
   starting.set(key, { run, opened });
@@ -216,51 +221,95 @@ async function adoptTabPane(sessionId: string, tabId: string, token: object) {
 export interface TabViewPlace {
   remote?: boolean;
   /** Remote: what moves a native Codex tab to its terminal there (the backend's `toTerminal`). */
-  toTerminal?: (tabId: string) => Promise<void>;
+  toTerminal?: (tabId: string, transitionId?: string) => Promise<boolean | void>;
 }
 
-/** Show the tab's CLI. For a headless agent this stops it and resumes it there. */
+// A wait belongs to the window's explicit switch request, not to the agent.
+// Cancelling it never interrupts work or replays input. Every retry asks the
+// runtime again, so stale UI status cannot stop an active native connection.
+const terminalWaits = new Map<string, { cancelled: boolean; wake?: () => void }>();
+export function cancelTerminalView(tabId: string) {
+  const wait = terminalWaits.get(tabId);
+  if (wait) { wait.cancelled = true; wait.wake?.(); }
+}
+
+/** Show the tab's CLI. Native Codex waits for its current turn to settle. */
 export async function enterTerminalView(session: SessionEntry, tab: TabEntry, place: TabViewPlace = {}) {
-  if (state.switching[tab.id] || tabViewOf(tab) === "terminal") return;
-  if (place.remote) {
-    // A native Codex tab has no terminal until it moves there, as on a Mac; the runtime decides who may move it.
-    if (tab.transport === "experimentalCodexStdio" && place.toTerminal) {
-      set({ switching: { ...state.switching, [tab.id]: true }, errors: { ...state.errors, [tab.id]: null } });
-      try {
-        await place.toTerminal(tab.id);
-      } catch (e) {
-        set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
-        return;
-      } finally {
-        set({ switching: { ...state.switching, [tab.id]: false } });
-      }
-    }
-    set({ views: { ...state.views, [tab.id]: "terminal" }, errors: { ...state.errors, [tab.id]: null } });
-    return;
-  }
-  if (removedHere(tab.id)) return;
+  if (state.switching[tab.id] || tabViewOf(tab) === "terminal" || (!place.remote && removedHere(tab.id))) return;
   const token = lifetime(tab.id);
+  const wait = { cancelled: false, wake: undefined as (() => void) | undefined };
+  const transitionId = crypto.randomUUID();
+  const startedAt = performance.now();
+  let sequence = 0;
+  let reports = Promise.resolve();
+  let category: "handoff" | "start" | "attach" = "handoff";
+  const note = (stage: Parameters<typeof agent.reportTerminalView>[2]["stage"], errorCategory: typeof category | null = null) => {
+    if (place.remote) return; // The workspace records its own handoff evidence.
+    const report = { transitionId, sequence: ++sequence, elapsedMs: Math.round(performance.now() - startedAt), surface: "window" as const, stage, errorCategory };
+    // Ordered, best effort, and never on the path that opens the terminal.
+    reports = reports.then(() => agent.reportTerminalView(session.id, tab.id, report)).catch(() => {});
+  };
+  note("requested");
+  terminalWaits.set(tab.id, wait);
+  const valid = () => current(tab.id, token) && !wait.cancelled;
   set({ switching: { ...state.switching, [tab.id]: true }, errors: { ...state.errors, [tab.id]: null } });
   try {
-    if (isPtyFirst(tab.harness)) {
-      // Only here, never when the tab is merely shown: the move is for good.
-      if (tab.transport === "experimentalCodexStdio") await agent.tabToTerminal(session.id, tab.id);
-      await startTabAgent(session, tab);
-      // The toggle can be the first thing that happens to a tab in this
-      // window, so the pane may still need claiming.
-      if (!current(tab.id, token)) return;
-      await adoptTabPane(session.id, tab.id, token);
-    } else {
-      const info = await agent.tabHandoff(session.id, tab.id);
-      if (!current(tab.id, token)) return;
-      await openTerminal(session.id, session.cwd, 100, 24, { id: terminalPaneId(tab), title: tab.title ?? tab.harness, command: info.command, hidden: true });
-      if (current(tab.id, token)) set({ info: { ...state.info, [tab.id]: info } });
+    if (tab.transport === "experimentalCodexStdio") {
+      if (place.remote && !place.toTerminal) throw new Error("This workspace cannot open the native Codex terminal. Reconnect to an updated runtime and try again.");
+      const move = () => place.remote ? place.toTerminal?.(tab.id, transitionId) : agent.tabToTerminal(session.id, tab.id, transitionId);
+      while (valid() && await move() === false) {
+        if (!valid()) return;
+        if (!state.waiting[tab.id]) {
+          note("waiting_for_turn");
+          set({ waiting: { ...state.waiting, [tab.id]: true } });
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 500);
+          wait.wake = () => { clearTimeout(timer); resolve(); };
+        });
+      }
+      if (!valid()) return;
+      set({ waiting: { ...state.waiting, [tab.id]: false } });
     }
-    if (current(tab.id, token)) set({ views: { ...state.views, [tab.id]: "terminal" } });
+    if (!place.remote) {
+      if (isPtyFirst(tab.harness)) {
+        // A failed start retains the chat and the precise refusal. Mount-time
+        // starts still report errors through the store, without rejecting.
+        category = "start";
+        note("starting_terminal");
+        if (!await startTabAgent(session, tab)) { note("failed", category); return; }
+        if (!valid()) return;
+        category = "attach";
+        note("attaching");
+        await adoptTabPane(session.id, tab.id, token);
+        if (!valid()) return;
+        // The sidebar can switch a session this window has never mounted.
+        // Prepare its ordinary cached terminal now; a later view adopts the
+        // same instance and stream instead of requiring another handoff.
+        const paneId = terminalPaneId(tab);
+        const terminalView = await import("@/components/terminal/TerminalView");
+        if (!valid()) return;
+        await ensureTerminalAttached(paneId, () => terminalView.createInstance(paneId, getTheme().resolvedMode));
+      } else {
+        const info = await agent.tabHandoff(session.id, tab.id);
+        if (!valid()) return;
+        await openTerminal(session.id, session.cwd, 100, 24, { id: terminalPaneId(tab), title: tab.title ?? tab.harness, command: info.command, hidden: true });
+        if (valid()) set({ info: { ...state.info, [tab.id]: info } });
+      }
+    }
+    if (valid()) {
+      set({ views: { ...state.views, [tab.id]: "terminal" }, errors: { ...state.errors, [tab.id]: null } });
+      note("opened");
+    }
   } catch (e) {
-    if (current(tab.id, token)) set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
+    if (valid()) {
+      note("failed", category);
+      set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
+    }
   } finally {
-    if (current(tab.id, token)) set({ switching: { ...state.switching, [tab.id]: false } });
+    if (!valid()) note("cancelled");
+    if (terminalWaits.get(tab.id) === wait) terminalWaits.delete(tab.id);
+    if (current(tab.id, token)) set({ switching: { ...state.switching, [tab.id]: false }, waiting: { ...state.waiting, [tab.id]: false } });
   }
 }
 
@@ -299,10 +348,12 @@ export async function toggleTabView(session: SessionEntry, tab: TabEntry, place:
 
 /** Tests only. */
 export function resetTabViews() {
+  for (const id of terminalWaits.keys()) cancelTerminalView(id);
+  terminalWaits.clear();
   lifetimes.clear();
   removedTabs.clear();
   starting.clear();
-  set({ views: {}, info: {}, errors: {}, switching: {} });
+  set({ views: {}, info: {}, errors: {}, switching: {}, waiting: {} });
 }
 
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());

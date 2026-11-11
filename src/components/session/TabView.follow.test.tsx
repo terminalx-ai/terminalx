@@ -9,7 +9,7 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  */
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {} },
+  views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} },
   start: vi.fn(),
   forget: vi.fn(),
   leave: vi.fn(),
@@ -22,7 +22,7 @@ vi.mock("@/lib/tabViews", () => ({
   useTabViews: () => mocks.views, isPtyFirst: () => true, startTabAgent: mocks.start,
   clearTabViewError: vi.fn(), forgetTabView: mocks.forget, leaveTerminalView: mocks.leave,
 }));
-vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="terminal" data-pane={id} /> }));
+vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id, actions }: { id: string; actions?: React.ReactNode }) => <><div data-testid="terminal" data-pane={id} />{actions}</> }));
 // The chat's own drawing is not under test: which conversation it is given, and what stands under it, are.
 vi.mock("@/components/chat/Chat", () => ({
   Chat: ({ transcript, footer }: { transcript: { turns: { key: string; prompt?: { text: string }; work: { kind: string; text?: string }[] }[] }; footer: React.ReactNode }) => (
@@ -43,6 +43,7 @@ import { applyEvent } from "@/lib/agentEvents";
 import { bootSessions, upsertSession, useSessionStore } from "@/lib/sessions";
 import { mouseClick } from "@/test/press";
 import { permissionEntry } from "@/test/permissionMenu";
+import { noticesDeferred } from "@/lib/noticeDeferral";
 
 let seq = 0;
 let session: SessionEntry;
@@ -71,6 +72,8 @@ function open(tab: Partial<TabEntry>, log: AgentEvent[] = []) {
     if (command === "list_sessions") return [session];
     if (command === "list_harnesses") return [{ id: "claude", name: "Claude Code", available: true }, { id: "codex", name: "Codex", available: true }];
     if (command === "list_models" || command === "list_workspaces") return [];
+    if (command === "chats_dir") return "/home/.raccoon/Chats";
+    if (command === "work_status") return { isRepo: true, dirty: false, branch: "main", ahead: 0, behind: 0 };
     return null;
   });
   return render(<Tab />);
@@ -84,7 +87,12 @@ beforeEach(async () => {
   };
   mocks.views.views = {};
   for (const mock of [mocks.invoke, mocks.start, mocks.forget, mocks.leave]) mock.mockReset();
-  mocks.invoke.mockImplementation(async (command: string) => (command === "list_harnesses" ? [{ id: "claude", name: "Claude Code", available: true }, { id: "codex", name: "Codex", available: true }] : command === "list_projects" ? { projects: [], lastSelected: null } : []));
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "chats_dir") return "/home/.raccoon/Chats";
+    if (command === "list_harnesses") return [{ id: "claude", name: "Claude Code", available: true }, { id: "codex", name: "Codex", available: true }];
+    if (command === "list_projects") return { projects: [], lastSelected: null };
+    return [];
+  });
   await bootSessions();
 });
 afterEach(cleanup);
@@ -99,7 +107,6 @@ describe("a tab that is a terminal", () => {
       event("claude", { type: "status", text: "Claude Code exited before the turn finished." }),
     ]);
     await waitFor(() => expect(screen.getByTestId("terminal-view-title").textContent).toBe("Terminal"));
-    expect(screen.getByText(/No agent is running in this tab/)).toBeTruthy();
     expect(screen.getByTestId("terminal").getAttribute("data-pane")).toBe(`tab:${tabId()}`);
     expect(screen.queryByLabelText("Session recovery")).toBeNull();
     expect(screen.queryByRole("button", { name: "Stop session" })).toBeNull();
@@ -144,7 +151,6 @@ describe("a tab that is a terminal", () => {
     become({ front: "by_hand", harness: "codex", status: "in_progress" });
     expect(mocks.forget).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("terminal-view-title").textContent).toBe("Terminal view · Working");
-    expect(screen.getByText(/Codex was started in this terminal\. The chat is the same conversation\./)).toBeTruthy();
   });
 });
 
@@ -243,6 +249,31 @@ describe("a tab that held another conversation before", () => {
     mouseClick(within(bar).getByRole("button", { name: "Conversations" }));
     mouseClick(within(await screen.findByRole("menu")).getByText("First with Claude"));
     expect(mocks.leave).toHaveBeenCalled();
+  });
+
+  it("protects the waiting live terminal independently of the earlier chat being read", async () => {
+    mocks.views.views = { [`tab${seq}`]: "chat" };
+    const view = open({ ...held, status: "waiting" }, log());
+    await waitFor(() => expect(said()).toEqual(["then, with Codex"]));
+    expect(noticesDeferred()).toBe(true);
+    mouseClick(screen.getByRole("button", { name: "Conversations" }));
+    mouseClick(within(await screen.findByRole("menu")).getByText("First with Claude"));
+    await screen.findByTestId("conversation-read-only");
+    expect(noticesDeferred()).toBe(false);
+
+    mocks.views.views[tabId()] = "terminal";
+    view.rerender(<Tab />);
+    expect(screen.getByText("Terminal view · Needs attention")).toBeTruthy();
+    expect(noticesDeferred()).toBe(true);
+    // Returning to history releases the notices; the terminal is no longer visible.
+    mocks.views.views[tabId()] = "chat";
+    view.rerender(<Tab />);
+    expect(noticesDeferred()).toBe(false);
+    mocks.views.views[tabId()] = "terminal";
+    view.rerender(<Tab />);
+    expect(noticesDeferred()).toBe(true);
+    become({ status: "idle" });
+    expect(noticesDeferred()).toBe(false);
   });
 
   it("does not list a conversation in which nothing was said", async () => {
