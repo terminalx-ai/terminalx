@@ -131,7 +131,7 @@ pub struct Estimate {
 /// it must: commands are run as they are, in the worker's worktree, and a model reads the
 /// result only for what no command can show.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum Check {
     /// A shell command run at the root of the worker's worktree; exit code 0 passes.
     Command { run: String },
