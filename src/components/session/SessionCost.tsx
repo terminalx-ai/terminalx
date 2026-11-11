@@ -133,7 +133,7 @@ function UsagePopover({ session, models, total, onClose }: { session: SessionEnt
   const tabs = session.tabs.filter((tab) => tab.usage?.models.length);
   const command = `terminalx sessions usage ${session.id} --json`;
   return <>
-    <div className="flex items-center gap-2 px-3.5 pt-3 pb-2.5">
+    <div className="flex items-center gap-2 px-3.5 pt-3 pb-2.5 text-[13px]">
       <span className="shrink-0 whitespace-nowrap font-medium">Session usage</span>
       <span className="truncate text-[11px] text-faint" data-testid="session-usage-billing">{SUBTITLE[billing]}</span>
       <span className="ml-auto shrink-0 text-right leading-4">
