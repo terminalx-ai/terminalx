@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import { COMPACTING_LINE, type Transcript } from "@/lib/transcript";
+import { COMPACTING_LINE, type Transcript, type Turn } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { SendingMessage, TurnBlock } from "./TurnBlock";
 import { PermissionCard, QuestionCard } from "./AskCards";
@@ -105,6 +105,7 @@ export function Chat({
   onSendQueuedNow,
   sending = null,
   onSendAgain,
+  onSecondOpinion,
   onReset,
 }: {
   sessionId: string;
@@ -132,6 +133,7 @@ export function Chat({
   sending?: { text: string; images: { url: string; name?: string }[]; pressedAt: number } | null;
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
   onSendAgain?: (seq: number) => void;
+  onSecondOpinion?: (turn: Turn) => void;
   onReset?: (endSeq: number) => void;
 }) {
   // Guest and workspace chats render requests here, without a TabView banner.
@@ -456,6 +458,7 @@ export function Chat({
                 // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
                 onSendAgain={live ? onSendAgain : undefined}
+                onSecondOpinion={onSecondOpinion}
                 onReset={!isLast && !live && !sending ? onReset : undefined}
                 divider={turnDivider(turns[start + i - 1], t)}
               />
