@@ -287,14 +287,14 @@ pub struct ExperimentalSettings {
     /// New Codex conversations a person starts go through Codex's app server
     /// (#644) where it can serve them (`session_ops::prefer_native_codex`).
     pub native_codex: bool,
-    /// Show orchestration runs in the app (PRO-274): a session's Run view,
-    /// with the plan to approve, and Settings → Orchestrator. The `terminalx
-    /// runs` commands work either way.
-    pub orchestrator_runs: bool,
     /// The session header shows the session's estimated cost, with its
     /// tokens by model in a popover (PRO-273). The totals are recorded and
     /// `terminalx sessions usage` answers either way.
     pub session_cost: bool,
+    /// Show orchestration runs in the app (PRO-274): a session's Run view,
+    /// with the plan to approve, and Settings → Orchestrator. The `terminalx
+    /// runs` commands work either way.
+    pub orchestrator_runs: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -520,7 +520,10 @@ mod tests {
         assert!(!legacy.experimental.native_codex);
         let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
         assert!(on.experimental.native_codex);
-        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"orchestratorRuns":false,"sessionCost":false}));
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false}));
+        assert!(!legacy.experimental.session_cost);
+        let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
+        assert!(cost.experimental.session_cost && !cost.experimental.native_codex);
         assert!(!legacy.experimental.orchestrator_runs);
         let runs: Settings = serde_json::from_value(serde_json::json!({"experimental":{"orchestratorRuns":true}})).unwrap();
         assert!(runs.experimental.orchestrator_runs && !runs.experimental.native_codex);

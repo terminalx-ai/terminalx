@@ -38,6 +38,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "devices.paired",
   "environment.variables",
   "experimental.nativeCodex",
+  "experimental.sessionCost",
   "experimental.orchestratorRuns",
   "experimental.sessionCost",
   "orchestrator.requireApproval",

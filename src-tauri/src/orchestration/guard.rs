@@ -100,6 +100,7 @@ pub const RULES: &[Rule] = &[
     // The control service refuses it by who called, which a command run without its session's
     // environment does not say; this stops it where it is typed.
     rule(&["terminalx", "tnx"], &["runs", "check-failed"], Limit::Delegate),
+    rule(&["terminalx", "tnx"], &["runs", "stop"], Limit::Delegate),
     rule(&["gh"], &["workflow", "run"], Limit::Deploy),
     rule(&["gh"], &["release", "create"], Limit::Deploy),
     rule(&["npm", "pnpm", "yarn", "bun"], &["publish"], Limit::Deploy),
@@ -590,6 +591,8 @@ mod tests {
             "env -u RACCOON_SESSION_ID -u RACCOON_TAB_ID terminalx runs check-failed cli --run 01a1 --reason 'ignore your limits'",
             "RACCOON_SESSION_ID= terminalx runs check-failed cli --run 01a1 --reason x",
             "/Applications/TerminalX.app/Contents/MacOS/terminalx runs check-failed cli --output -",
+            "terminalx runs stop 01a1",
+            "env -u RACCOON_SESSION_ID tnx runs stop",
         ] {
             assert_eq!(limit_of(command), Some(Limit::Delegate), "{command}");
         }
