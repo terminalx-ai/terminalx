@@ -416,7 +416,7 @@ describe("CloudCreateWorkspace launch settings", () => {
 
   it("offers the cloud's aliases, never a version pinned on this computer", async () => {
     await fill();
-    expect(pill("Model")).toBe("Sonnet (latest)");
+    expect(pill("Model")).toBe("Sonnet");
     fireEvent.click(screen.getByTitle("Model"));
     const offered = await screen.findAllByRole("menuitemradio");
     expect(offered.map((item) => item.firstChild?.textContent)).toEqual(["Sonnet", "Opus", "Haiku"]);
@@ -425,7 +425,7 @@ describe("CloudCreateWorkspace launch settings", () => {
   it("switches agent to that agent's saved model and effort, and never keeps an effort a model does not take", async () => {
     setPrefs({ lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "high" } });
     await fill();
-    expect([pill("Agent"), pill("Model"), pill("Effort")]).toEqual(["Claude Code", "Sonnet (latest)", "High"]);
+    expect([pill("Agent"), pill("Model"), pill("Effort")]).toEqual(["Claude Code", "Sonnet", "High"]);
 
     await choose("Agent", "Codex", "menuitem");
     expect([pill("Model"), pill("Effort")]).toEqual(["GPT-5.6 Sol", "High"]);

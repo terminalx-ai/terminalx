@@ -1114,6 +1114,15 @@ describe("autocorrect in the composer (#525)", () => {
 // #637: hold the delivery promise independently of any agent response.
 // #727: the message leaves the composer as Send is pressed; the chat draws it as sending.
 describe("pending send acknowledgment", () => {
+  it.each(["/goal Reduce p95 latency below 120 ms", "/goal", "/goal pause", "/goal resume", "/goal clear"])("passes %s through to Codex unchanged", async (command) => {
+    const onSend = vi.fn();
+    render(<TestComposer onSend={onSend} />);
+    const field = screen.getByRole("textbox");
+    fireEvent.change(field, { target: { value: command } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() => expect(onSend).toHaveBeenCalledExactlyOnceWith(command, []));
+  });
+
   it.each(["click", "keyboard"])("hands the message on at once from a %s, and submits once until acceptance", async (action) => {
     let accept!: () => void;
     const onSend = vi.fn(() => new Promise<void>((resolve) => { accept = resolve; }));

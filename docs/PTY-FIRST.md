@@ -90,9 +90,15 @@ only accepts a `transcript_path` under that tab's own transcript directory.
 Sidebar **New chat**, a project's **New chat**, and a branch's start action
 open `NewSessionView`. Opening or closing the form creates no session,
 scratch folder, worktree, or running agent tab. The destination is a draft in
-`sessions.ts`; a project-less draft uses the same quick-chat creation as the
-floating window. A project or branch draft retains that destination until
-Send. Only the first send creates the session and delivers its prompt.
+`sessions.ts`. Sidebar chats remain ordinary sessions in the shared Chats
+directory, retaining their history and automatic project linking; they are
+not disposable quick chats. Only the floating window's explicit `quick`
+form uses quick-chat creation and its retention policy. A project or branch
+draft retains that destination until Send, including the source advertised
+by New branch. A removed project is resolved again before a retained
+conversation opens its branch composer; an absent explicit destination must
+never fall back to another project. Only the first send creates the session
+and delivers its prompt.
 
 `useSessionAgent` reads and writes the existing `prefs.ts` preferences for
 agent, per-agent model and effort, and permission mode. Local new-chat forms
@@ -106,7 +112,8 @@ Cloud forms continue to use the workspace's agents and model catalog.
 
 Discovery and fallback never overwrite preferences; only explicit picker
 choices do. Send checks login again before creating anything. A refusal keeps
-the prompt and attachments, and Check again can pick up a completed login.
+the prompt and attachments. Both readiness hooks refresh on app resume and
+embedded sign-in terminal exit; Check again also picks up a completed login.
 The zero-, one-, and two-login cases are covered by `useSessionAgent.test.ts`,
 with asynchronous discovery and stale-probe tests in `agentReadiness.test.ts`.
 

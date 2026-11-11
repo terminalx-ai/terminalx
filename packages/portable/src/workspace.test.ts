@@ -41,6 +41,7 @@ class FakeRuntime implements WorkspaceTransport {
   agentEvents: { seq: number; id: string }[] = [];
   sessions: RuntimeSession[] = [session("s1", "Fix login")];
   updates = 0;
+  terminalWaiting = false;
   private cache = new Map<string, unknown>();
   private applied = new Map<string, number>();
   private subscription = 0;
@@ -153,6 +154,8 @@ class FakeRuntime implements WorkspaceTransport {
       }
       case "session.interrupt":
         return ok({ interrupted: true });
+      case "session.toTerminal":
+        return ok({ sessionId: params.sessionId, tabId: params.tabId, ...(this.terminalWaiting ? { waitingForTurn: true } : {}) });
       case "session.nudge":
         return ok({});
       case "session.list":
@@ -161,7 +164,7 @@ class FakeRuntime implements WorkspaceTransport {
         const session = this.sessions.find((entry) => entry.id === params.sessionId);
         if (!session) return { id: frame.id, ok: false, error: { code: "not_found", message: "no such session" } };
         this.updates++;
-        Object.assign(session, Object.fromEntries(["title", "pinned", "archived"].filter((field) => field in params).map((field) => [field, params[field]])));
+        Object.assign(session, Object.fromEntries(["title", "pinned", "archived", "manualStatus"].filter((field) => field in params).map((field) => [field, params[field]])));
         const result = { session: { ...session } };
         this.cache.set(key!, result);
         return ok(result);
@@ -877,6 +880,20 @@ describe("workspace RPC client", () => {
       before.close();
     });
 
+    it("opts into deferred terminal switching and also accepts an older runtime's completed response", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      expect(await client.moveAgentTabToTerminal("s1", "t1")).toEqual({ sessionId: "s1", tabId: "t1" });
+      runtime.terminalWaiting = true;
+      expect(await client.moveAgentTabToTerminal("s1", "t1", { deferUntilIdle: true })).toMatchObject({ waitingForTurn: true });
+      const requests = runtime.sent.filter((frame) => frame.method === "session.toTerminal");
+      expect(requests).toHaveLength(2);
+      expect(requests[0].params.deferUntilIdle).toBeUndefined();
+      expect(requests[1].params.deferUntilIdle).toBe(true);
+      client.close();
+    });
+
     it("session/3: an interrupt is one live call, never resent after a drop, and an older runtime is never asked", async () => {
       const runtime = new FakeRuntime();
       const client = new WorkspaceRpcClient(runtime, ids);
@@ -922,6 +939,18 @@ describe("workspace RPC client", () => {
       expect((await client.listSessions()).map((entry) => entry.id)).toEqual(["s1"]);
       await client.createPty({ cols: 80, rows: 24 });
       expect((runtime.sent.at(-1)!.params as Record<string, unknown>).sessionId).toBeUndefined();
+      client.close();
+    });
+
+    it("requires manual status support before updating an older runtime", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect(["session/1", "session/2"]);
+      await expect(client.updateSession("s1", { manualStatus: "done" })).rejects.toMatchObject({ code: "capability_not_granted" });
+      expect(runtime.sent.some((frame) => frame.method === "session.update")).toBe(false);
+      runtime.drop();
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      expect(await client.updateSession("s1", { manualStatus: "in_review" })).toMatchObject({ manualStatus: "in_review" });
       client.close();
     });
 

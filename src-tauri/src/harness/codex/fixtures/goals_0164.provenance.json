@@ -1,0 +1,26 @@
+{
+  "codexVersion": "0.164.0",
+  "capturedAt": "2026-11-07",
+  "source": "Isolated CODEX_HOME without credentials; codex app-server --stdio, experimentalApi enabled; persistent read-only thread.",
+  "requests": {
+    "method": "thread/goal/set",
+    "objective": "PRO-256 isolated goal persistence probe",
+    "tokenBudget": 1000,
+    "origin": "user",
+    "statuses": [
+      "paused",
+      "active",
+      "paused",
+      "complete",
+      "blocked",
+      "budgetLimited",
+      "usageLimited"
+    ]
+  },
+  "selection": "Only event_msg/thread_goal_updated records, unchanged from the rollout; no model response was requested. Active briefly initiated an unauthenticated continuation, interrupted at cleanup.",
+  "notes": [
+    "The CLI reports blocked, budgetLimited and usageLimited, not a generic failed state. Complete is displayed as Done.",
+    "thread/goal/clear succeeded and emitted thread/goal/cleared on stdio, but 0.164.0 did not persist a thread_goal_cleared record. The rollout banner can only show the last reported state until another goal update.",
+    "Counters in this capture are zero. Numeric updates, absent budgets and malformed records are covered by synthetic parser tests."
+  ]
+}

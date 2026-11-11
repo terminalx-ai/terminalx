@@ -2413,7 +2413,7 @@ impl Rig {
                 Payload::TurnStarted { prompt_seq: Some(seq), .. } => Some(format!("turn for: {}", text(*seq))),
                 Payload::InputOccupied { prompt_seq, occupied } => Some(format!("{} {}", if *occupied { "waiting:" } else { "typed:" }, text(*prompt_seq))),
                 Payload::PromptJoined { prompt_seq, into_seq } => Some(format!("joined: {} -> {}", text(*prompt_seq), text(*into_seq))),
-                Payload::PromptWithdrawn { prompt_seq } => Some(format!("withdrawn: {}", text(*prompt_seq))),
+                Payload::PromptWithdrawn { prompt_seq, .. } => Some(format!("withdrawn: {}", text(*prompt_seq))),
                 Payload::AssistantText { text, .. } => Some(format!("reply: {text}")),
                 _ => None,
             })
