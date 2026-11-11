@@ -60,6 +60,8 @@ struct World {
     verifier_tokens: BTreeMap<String, verify::Tokens>,
     /// Pieces no verifier can be made for.
     no_verifier: BTreeSet<String>,
+    /// The commit a worker's worktree is at now, by its session.
+    commits: BTreeMap<String, String>,
 }
 
 struct Fake {
@@ -220,6 +222,10 @@ impl Host for Fake {
         self.world().verifier_now.get(verifier.tab_id.as_deref().unwrap_or_default()).cloned().unwrap_or(VerifierNow::Gone)
     }
 
+    fn result_commit(&self, worker: &SessionRef) -> Option<String> {
+        self.world().commits.get(&worker.session_id).cloned()
+    }
+
     fn verifier_tokens(&self, verifier: &SessionRef) -> Option<verify::Tokens> {
         self.world().verifier_tokens.get(verifier.tab_id.as_deref().unwrap_or_default()).copied()
     }
@@ -237,7 +243,7 @@ impl Host for Fake {
 fn passing(files: &[&str], lines: u32) -> Checked {
     Checked {
         gates: vec![GateResult::passed(Gate::Scope, "Within what the piece owns."), GateResult::passed(Gate::Branch, "Committed and clean."), GateResult::passed(Gate::Commands, "1 command exited 0.")],
-        facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, security_areas: Vec::new() },
+        facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, security_areas: Vec::new(), commit: Some("c0ffee1".into()) },
         diff: files.iter().map(|file| format!("diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n-old\n+new\n")).collect(),
         base: "settings-typed-store".into(),
     }

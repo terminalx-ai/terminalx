@@ -139,6 +139,9 @@ pub trait Host: Send + Sync {
     fn create_verifier(&self, run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef>;
     fn brief_verifier(&self, verifier: &SessionRef, prompt: &str) -> anyhow::Result<()>;
     fn verifier(&self, verifier: &SessionRef) -> VerifierNow;
+    /// The commit a worker's worktree is at now. A result is accepted as the
+    /// commit its gates ran on; `None` when the worktree cannot be read.
+    fn result_commit(&self, worker: &SessionRef) -> Option<String>;
     /// What a verifier's conversation has used.
     fn verifier_tokens(&self, verifier: &SessionRef) -> Option<checks::Tokens>;
     /// Tell the lead what a person decided about its run.
@@ -525,6 +528,13 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             }).collect::<Vec<_>>()
         })
         .collect();
+    // Where each result that is about to be counted stands now: it is accepted as the commit that was checked.
+    let commits: Vec<(String, Option<String>)> = run
+        .pieces
+        .iter()
+        .filter(|piece| reading.iter().any(|(id, _, _, now, _)| *id == piece.id && *now != VerifierNow::Working))
+        .filter_map(|piece| Some((piece.id.clone(), host.result_commit(piece.worker.as_ref()?))))
+        .collect();
     // The ladder needs the installed models only when a try fell short.
     let models = if seen.iter().any(|(_, _, now, _)| fell_short(now)) || reading.iter().any(|(_, _, _, now, _)| *now != VerifierNow::Working) { host.models() } else { Vec::new() };
     let (after, ()) = store::update(id, |run| {
@@ -587,7 +597,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                         if attempt.verification.is_none() {
                             attempt.verification = match (&short, state) {
                                 (Some(failure), _) => Some(Verification { gates: vec![GateResult::failed(Gate::Report, failure.clone())], outcome: Some(checks::Outcome::Failed), failure: Some(failure.clone()), started: Some(at.clone()), ended: Some(at), ..Verification::default() }),
-                                (None, PieceState::Verifying) => Some(Verification { gates: vec![GateResult::passed(Gate::Report, "The report block was read and says done.")], started: Some(at), ..Verification::default() }),
+                                (None, PieceState::Verifying) => Some(Verification::reported(at)),
                                 _ => None,
                             };
                         }
@@ -614,6 +624,17 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             verifier.tokens = tokens;
         }
         for piece in run.pieces.iter_mut().filter(|piece| piece.state == PieceState::Verifying) {
+            // The branch moved under its verifiers: what they read is not what would be accepted.
+            // The check starts again, from the gates, on the commit that is there now.
+            let moved = commits.iter().find(|(id, _)| *id == piece.id).and_then(|(_, now)| now.as_deref()).is_some_and(|now| {
+                piece.tries.last().and_then(|attempt| attempt.verification.as_ref()).filter(|check| check.review_open()).and_then(|check| check.facts.as_ref()?.commit.as_deref()).is_some_and(|checked| checked != now)
+            });
+            if moved {
+                if let Some(attempt) = piece.tries.last_mut() {
+                    attempt.verification = Some(Verification::reported(crate::store::index::now()));
+                }
+                continue;
+            }
             counted(piece, &models);
         }
         settle(run);

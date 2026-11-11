@@ -240,6 +240,11 @@ impl Host for ManagerHost {
         }
     }
 
+    fn result_commit(&self, worker: &SessionRef) -> Option<String> {
+        let session = index::get(&worker.session_id).ok()?;
+        crate::git::head_commit(Path::new(&session.cwd))
+    }
+
     fn verifier_tokens(&self, verifier: &SessionRef) -> Option<verify::Tokens> {
         let tab_id = verifier.tab_id.as_deref()?;
         // Read from its transcript again, as far as it has got.
