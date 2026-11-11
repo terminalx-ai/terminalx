@@ -1,5 +1,7 @@
 # TerminalX orchestrator
 
+This guide is served by `terminalx skills get terminalx-orchestrator`.
+
 How a lead session decides whether to split a task, cuts it, briefs workers, and checks what
 comes back. The commands are in `terminalx skills get terminalx-cli` (sections "Worker reports"
 and "Orchestration runs"); this guide says when and how to use them. It names no models: read the
