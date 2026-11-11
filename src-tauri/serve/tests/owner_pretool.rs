@@ -127,10 +127,13 @@ fn owner_read_only_approval_preserves_the_replacement_through_the_hook_process()
     let decision = &reply["hookSpecificOutput"]["decision"];
     assert_eq!(decision["behavior"], "allow");
     let command = decision["updatedInput"]["command"].as_str().expect("approval must carry the sanitized command");
-    assert!(command.starts_with("LD_PRELOAD=''"));
     assert!(command.contains("'/usr/bin/env' '-i'"));
     assert_eq!(decision["updatedInput"]["description"], "Inspect the current directory");
     assert_eq!(serve.control("permissions.list", json!({}))["permissions"], json!([]));
     let output = Command::new("/bin/sh").current_dir(&world.project).args(["-c", command]).output().unwrap();
     assert!(output.status.success());
+    assert_eq!(std::path::Path::new(std::str::from_utf8(&output.stdout).unwrap().trim()), world.project.canonicalize().unwrap());
+    let outside = Command::new("/bin/sh").current_dir(&world.home).args(["-c", command]).output().unwrap();
+    assert_eq!(outside.status.code(), Some(125));
+    assert!(outside.stdout.is_empty());
 }

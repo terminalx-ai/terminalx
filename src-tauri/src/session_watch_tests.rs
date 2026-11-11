@@ -1756,6 +1756,21 @@ impl Drop for Rig {
     }
 }
 
+#[test]
+fn dropping_the_last_manager_releases_its_background_watcher() {
+    let rig = Rig::new();
+    let observer = Arc::downgrade(&rig.observer);
+    let manager = rig.manager.clone();
+    drop(rig);
+    assert!(observer.upgrade().is_some(), "a live manager still owns its observer");
+    drop(manager);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while observer.upgrade().is_some() && Instant::now() < deadline {
+        std::thread::sleep(MOMENT);
+    }
+    assert!(observer.upgrade().is_none(), "the poll thread must not retain a dropped manager forever");
+}
+
 // ---- #404: one model and effort, whichever side changed it
 
 const STATUS_FRAMES: &str = include_str!("harness/claude/fixtures/status_line.jsonl");
@@ -2562,8 +2577,15 @@ fn no_enter_is_written_into_a_cli_that_has_not_read_its_input() {
     let _receipt = continuation_entered_unacknowledged(&rig, 5);
     // The handoff's Enter, still in the queue: the CLI has stopped reading.
     rig.manager.terminals.write(&rig.pane, tui::SUBMIT).unwrap();
-    let unread = rig.manager.terminals.unread_input(&rig.pane);
-    assert!(unread.is_some_and(|n| n > 0), "the platform reports unread input");
+    // Linux can finish the master write before its line discipline exposes
+    // the byte on the slave. Observe the queued input before nudging it.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let unread = loop {
+        let unread = rig.manager.terminals.unread_input(&rig.pane);
+        if unread.is_some_and(|n| n > 0) { break unread; }
+        assert!(Instant::now() < deadline, "the platform never reported unread input: {unread:?}");
+        std::thread::sleep(MOMENT);
+    };
     for _ in 0..tui::NUDGES {
         rig.advance(tui::NUDGE_AFTER);
         rig.tick();

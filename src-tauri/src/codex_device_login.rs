@@ -722,7 +722,7 @@ mod tests {
         let id = jwt(json!({ "email": "ada@example.com" }));
         let body = format!(
             r#"#!/bin/sh
-printf '%s|%s|%s|%s|%s|%s|%s\n' "$*" "$HOME" "$CODEX_HOME" "${{TERMINALX_P79_FROM_THE_APP:-none}}" "$(cat "$CODEX_HOME/config.toml" | tr '\n' ';')" "$(stat -f %Lp "$HOME")" "$$" > '{record}'
+printf '%s|%s|%s|%s|%s|%s|%s\n' "$*" "$HOME" "$CODEX_HOME" "${{TERMINALX_P79_FROM_THE_APP:-none}}" "$(cat "$CODEX_HOME/config.toml" | tr '\n' ';')" "$(stat -c %a "$HOME" 2>/dev/null || stat -f %Lp "$HOME")" "$$" > '{record}'
 printf '{prompt}'
 case '{behaviour}' in
   expire) echo 'Error logging in with device code: device auth timed out after 15 minutes' >&2; exit 1 ;;

@@ -26,7 +26,10 @@ run what you change.
   the resolved CLI's help before fresh or resumed launches. Older CLIs such
   as 0.152.0 and 0.153.4 need upgrading; TerminalX reports this before starting
   an agent instead of falling back to a shared daemon with another tab's identity.
-- macOS on Apple silicon is the only platform currently built and tested.
+- **zsh** and **ripgrep** are required for the full Rust security fixtures.
+  Linux CI installs both; install them locally too before running that suite.
+- macOS on Apple silicon and Linux are checked in CI. Apple native helpers
+  and WebKit layout checks run on macOS; Windows CI remains disabled.
 
 ## Setup
 
@@ -59,11 +62,14 @@ cd src-tauri && cargo test
 ```
 
 `pnpm check` runs the first two together and `pnpm test` runs vitest alone.
-The same four run on every pull request in `.github/workflows/ci.yml`, on
-macOS, because the Rust side links AppKit, AVFoundation and Speech and will
-not build anywhere else. CI also runs `pnpm test:computer-macos` (the Swift
-helper's unit tests) and builds the helper app before the Rust checks; run
-those too when you touch `native/computer-use-macos`.
+The same four run on every pull request in `.github/workflows/ci.yml`, with
+portable checks and the full Rust suite on GitHub-hosted Linux for PRs. The
+required statuses remain `check`, `frontend`, and `webkit-layout`; `check`
+aggregates every job. macOS keeps Clippy, WebKit,
+Apple icon checks and native helper checks. The full macOS Rust suite also runs
+on main, nightly and PRs selected for Apple-specific changes; see
+[CI runners and coverage](docs/CI-RUNNERS.md). Run `pnpm test:computer-macos`
+and `pnpm build:computer-macos` too when you touch `native/computer-use-macos`.
 
 Clippy is run with `-D warnings`, so a warning is a failure.
 
