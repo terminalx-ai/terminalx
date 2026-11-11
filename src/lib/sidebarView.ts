@@ -2,7 +2,7 @@ import { MANUAL_STATUSES, normalizeManualStatus, type ManualStatus } from "@term
 import { compareMessageActivity } from "@/lib/messageActivity";
 import type { SessionEntry } from "@/types/session";
 
-export type SidebarSort = "updated" | "created";
+export type SidebarSort = "updated" | "created" | "custom";
 export const canonicalProject = (path: string) => path === "/" ? path : path.replace(/\/+$/, "");
 
 /** Chats follow the project they are linked to, as in the project sidebar. */
@@ -15,7 +15,7 @@ export function sidebarProjectOf(session: Pick<SessionEntry, "kind" | "projectPa
 
 /** Preserve the sidebar's message chronology for Updated; both orders keep pins first. */
 export function compareSidebarSessions(a: SessionEntry, b: SessionEntry, sort: SidebarSort): number {
-  if (sort === "updated") return compareMessageActivity(a, b, a.id, b.id);
+  if (sort !== "created") return compareMessageActivity(a, b, a.id, b.id);
   return Number(b.pinned) - Number(a.pinned)
     || (Date.parse(b.created) || 0) - (Date.parse(a.created) || 0)
     || a.id.localeCompare(b.id);

@@ -92,7 +92,9 @@ describe("website browser preferences", () => {
       linkBrowser: "system", linkBrowserChosen: false, sounds: false, fontScale: "lg", sidebarWidth: 310,
       shortcuts: { "app.toggleSidebar": ["mod+shift+b"] },
     });
-    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toEqual(getPrefs());
+    const { sidebarSort, ...persisted } = getPrefs();
+    expect(sidebarSort).toBe("updated"); // Runtime fallback is not a saved choice.
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toEqual(persisted);
     expect(write).toHaveBeenCalledTimes(1);
 
     vi.resetModules();
@@ -176,7 +178,9 @@ describe("shortcuts saved before Escape was split into interrupt and stop", () =
     expect(keymap["session.stop"]).toEqual([]);
     expect(prefs).toMatchObject({ sounds: false, shortcutsVersion: 2 });
     // Saved, with its version, by the one write the migration makes (the first is the test's own).
-    expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual(prefs);
+    const { sidebarSort, ...persisted } = prefs;
+    expect(sidebarSort).toBe("updated"); // The migration leaves an unchosen sort absent.
+    expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual(persisted);
     expect(write).toHaveBeenCalledTimes(2);
 
     vi.resetModules();
@@ -349,14 +353,14 @@ describe("sidebar choices per window (PRO-164)", () => {
     expect(prefs.legacyUserPreferences()).toEqual({ sidebarLayout: "list", sounds: false });
   });
 
-  it("keeps window views independent of settings-file updates and shared storage events", async () => {
+  it("keeps Custom and Updated window views independent of settings-file updates and shared storage events", async () => {
     const main = await import("./prefs");
     const writeMain = vi.fn();
     main.connectPreferenceFile(writeMain);
     main.applyFilePreferences({ sidebarLayout: "list", sounds: false });
     expect(main.getPrefs().sidebarLayout).toBe("list");
     expect(localStorage.getItem("raccoon.prefs.sidebar.main")).toBeNull();
-    main.setPrefs({ sidebarLayout: "status", sidebarSort: "created", sidebarProject: "/a", sounds: true });
+    main.setPrefs({ sidebarLayout: "status", sidebarSort: "custom", sidebarProject: "/a", sounds: true });
     expect(writeMain).toHaveBeenCalledExactlyOnceWith({ sounds: true });
 
     vi.resetModules();
@@ -372,7 +376,7 @@ describe("sidebar choices per window (PRO-164)", () => {
     // An external file edit updates shared settings without resetting either view.
     for (const prefs of [main, second]) prefs.applyFilePreferences({ sidebarLayout: "simple", sounds: false });
     window.dispatchEvent(new StorageEvent("storage", { key: "raccoon.prefs", storageArea: localStorage }));
-    expect(main.getPrefs()).toMatchObject({ sidebarLayout: "status", sidebarSort: "created", sidebarProject: "/a", sounds: false });
+    expect(main.getPrefs()).toMatchObject({ sidebarLayout: "status", sidebarSort: "custom", sidebarProject: "/a", sounds: false });
     expect(second.getPrefs()).toMatchObject({ sidebarLayout: "simple", sidebarSort: "updated", sidebarProject: "/b", sounds: false });
     const shared = JSON.parse(localStorage.getItem("raccoon.prefs")!);
     for (const key of ["sidebarLayout", "sidebarSort", "sidebarProject", "sounds"]) expect(shared).not.toHaveProperty(key);
@@ -381,7 +385,7 @@ describe("sidebar choices per window (PRO-164)", () => {
     const reloaded = await import("./prefs");
     reloaded.connectPreferenceFile(vi.fn());
     reloaded.applyFilePreferences({ sidebarLayout: "list", sounds: false });
-    expect(reloaded.getPrefs()).toMatchObject({ sidebarLayout: "status", sidebarSort: "created", sidebarProject: "/a", sounds: false });
+    expect(reloaded.getPrefs()).toMatchObject({ sidebarLayout: "status", sidebarSort: "custom", sidebarProject: "/a", sounds: false });
   });
 
   it("removes closed chat records, retaining live, newly opened and persistent windows", async () => {

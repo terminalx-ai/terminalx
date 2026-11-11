@@ -22,6 +22,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "appearance.mode",
   "appearance.textSize",
   "appearance.transcriptLayout",
+  "appearance.customOrder",
   "appearance.tabBar",
   "appearance.branchSessions",
   "appearance.openUsage",
