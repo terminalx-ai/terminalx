@@ -50,6 +50,7 @@ interface StoredLog extends TabLog {
   fed?: boolean;
 }
 const logs = new Map<string, StoredLog>();
+const historyGenerations = new Map<string, string | undefined>();
 const listeners = new Map<string, Set<() => void>>();
 const dirty = new Set<string>();
 let frame: number | null = null;
@@ -184,8 +185,10 @@ export function applyEvent(ev: AgentEvent) {
   touch(k, urgent);
 }
 
-export async function loadTab(sessionId: string, tabId: string) {
+export async function loadTab(sessionId: string, tabId: string, resetGeneration?: string) {
   const k = key(sessionId, tabId);
+  const generation = resetGeneration ?? getSessions().sessions.find((s) => s.id === sessionId)?.tabs.find((t) => t.id === tabId)?.resetLogId;
+  syncHistoryGeneration(sessionId, tabId, generation);
   const log = getLog(k);
   if (log.loaded && log.compactionContinuityKnown) return;
   const token = historyReadToken(log);
@@ -307,6 +310,20 @@ export function lastSeq(sessionId: string, tabId: string): number {
   return 0;
 }
 
+function syncHistoryGeneration(sessionId: string, tabId: string, generation: string | undefined) {
+  const k = key(sessionId, tabId);
+  const changed = historyGenerations.get(k) !== generation;
+  historyGenerations.set(k, generation);
+  if (changed) dropTabLog(sessionId, tabId);
+  return changed;
+}
+
+/** Replace, rather than merge, after a reset; invalidate outstanding reads. */
+export async function reloadTabHistory(sessionId: string, tabId: string, resetGeneration?: string) {
+  dropTabLog(sessionId, tabId);
+  await loadTab(sessionId, tabId, resetGeneration);
+}
+
 /** Forget a tab's log, e.g. a cloud tab that was closed. */
 export function dropTabLog(sessionId: string, tabId: string) {
   const k = key(sessionId, tabId);
@@ -377,6 +394,10 @@ export async function reconcileAgentEvents() {
           const current = getSessions().sessions.find((s) => s.id === session.id)?.tabs.find((t) => t.id === tab.id);
           // A live update during the read wins over its snapshot. Only status
           // is reconciled here; recovery must not close panes or change drafts.
+          if (old === current && syncHistoryGeneration(session.id, tab.id, tab.resetLogId)) {
+            patchTab(session.id, tab.id, { resetLogId: tab.resetLogId, resetBackupId: tab.resetBackupId });
+            await reloadTabHistory(session.id, tab.id, tab.resetLogId);
+          }
           if (old && old === current && old.status !== tab.status) setTabStatus(session.id, tab.id, tab.status);
         }
       }
@@ -414,6 +435,9 @@ export async function subscribeAgentEvents() {
     await listen<{ sessionId: string; tabId: string; status: TabStatus }>("tab_status", ({ payload }) => {
       if (liveTab(payload.sessionId, payload.tabId)) setTabStatus(payload.sessionId, payload.tabId, payload.status);
     });
+    await listen<{ sessionId: string; tabId: string; generation: string }>("tab_history_reset", ({ payload }) => {
+      if (liveTab(payload.sessionId, payload.tabId)) void reloadTabHistory(payload.sessionId, payload.tabId, payload.generation).catch(() => undefined);
+    });
     await listen<string>("session_deleted", ({ payload: id }) => {
       for (const k of logs.keys()) if (k.startsWith(`${id}/`)) {
         logs.delete(k);
@@ -421,6 +445,11 @@ export async function subscribeAgentEvents() {
       }
     });
     await listen<SessionEntry>("session_updated", ({ payload: session }) => {
+      for (const tab of session.tabs) {
+        if (syncHistoryGeneration(session.id, tab.id, tab.resetLogId) && listeners.get(key(session.id, tab.id))?.size) {
+          void loadTab(session.id, tab.id, tab.resetLogId).catch(() => undefined);
+        }
+      }
       const kept = new Set(session.tabs.map((tab) => key(session.id, tab.id)));
       for (const k of logs.keys()) if (k.startsWith(`${session.id}/`) && !kept.has(k)) {
         logs.delete(k);

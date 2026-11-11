@@ -41,7 +41,7 @@ beforeEach(async () => {
     if (command === "chats_dir") return "/Chats";
     return null;
   });
-  prefs.setPrefs({ sidebarLayout: "simple", sidebarSections: {}, branchSessions: "sidebar" });
+  prefs.setPrefs({ sidebarLayout: "simple", sidebarSections: {}, sidebarProject: null, sidebarSort: "updated", branchSessions: "sidebar" });
   filter.setSidebarFilter("all");
   Element.prototype.scrollIntoView = vi.fn();
   Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo;
@@ -86,7 +86,7 @@ describe("personal local sections", () => {
     expect(mocks.invoke.mock.calls.some(([command]) => /archive|delete_session/.test(command))).toBe(false);
   });
 
-  it.each(["simple", "list"] as const)("moves by the row menu and keeps memberships on remount in %s layout", async (sidebarLayout) => {
+  it.each(["simple", "list", "status"] as const)("moves by the row menu and keeps memberships on remount in %s layout", async (sidebarLayout) => {
     prefs.setPrefs({ sidebarLayout });
     await seed([section("Release"), section("Bugs", ["two"])]);
     const view = mount();
@@ -117,14 +117,14 @@ describe("personal local sections", () => {
     nextSections = [section("Release")]; await submit("Move");
     expect(mocks.invoke).toHaveBeenCalledWith("edit_local_section", { edit: { kind: "move", sessionIds: ["one"], sectionId: null } });
     fireEvent.click(screen.getByRole("button", { name: "New session in Release" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: true, newSessionSectionId: "Release" });
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: true, newSessionSectionId: "Release" });
     act(() => store.closeNewSession());
     expect(store.getSessionStore().newSessionSectionId).toBeNull();
     await act(() => store.startChat());
     expect(store.getSessionStore().newSessionSectionId).toBeNull();
   });
 
-  it.each(["simple", "list"] as const)("keeps archived membership and narrows sections with filters in %s layout", async (sidebarLayout) => {
+  it.each(["simple", "list", "status"] as const)("keeps archived membership and narrows sections with filters in %s layout", async (sidebarLayout) => {
     prefs.setPrefs({ sidebarLayout });
     entries[0]!.tabs[0]!.status = "waiting";
     await act(() => store.refreshEverything());
@@ -137,6 +137,36 @@ describe("personal local sections", () => {
     expect(screen.queryByRole("region", { name: "Bugs section" })).toBeNull();
     expect(screen.queryByText("Session old")).toBeNull();
     expect(within(screen.getByRole("region", { name: "Release section" })).getByText("Session one")).toBeTruthy();
+  });
+
+  it.each(["simple", "list", "status"] as const)("combines section membership with creation order and project filtering in %s layout", async (sidebarLayout) => {
+    entries[0]!.manualStatus = "in_review";
+    entries[1]!.manualStatus = "done";
+    entries[2]!.manualStatus = "in_review";
+    entries.push(session("newer", "/web", { created: "2026-11-03T00:00:00Z", manualStatus: "in_review" }));
+    entries.push(session("outside", "/web", { manualStatus: "in_review" }));
+    await act(() => store.refreshEverything());
+    await seed([section("Release", ["one", "two", "old", "newer"])]);
+    prefs.setPrefs({ sidebarLayout, sidebarSort: "created", sidebarProject: "/web" });
+    mount();
+    const release = screen.getByRole("region", { name: "Release section" });
+    expect(within(release).getAllByRole("button", { name: /^Session / }).map((row) => within(row).getByText(/^Session /).textContent)).toEqual(["Session newer", "Session one"]);
+    expect(screen.getAllByText("Session one")).toHaveLength(1);
+    expect(screen.queryByText("Session two")).toBeNull();
+    expect(screen.queryByText("Session old")).toBeNull();
+    if (sidebarLayout === "status") {
+      expect(within(release).getByRole("button", { name: "In review 2" })).toBeTruthy();
+      expect(within(release).queryByRole("button", { name: /^Done/ })).toBeNull();
+      fireEvent.click(within(release).getByRole("button", { name: "In review 2" }));
+      expect(screen.queryByText("Session one")).toBeNull();
+      expect(screen.getByRole("button", { name: "Session outside" })).toBeTruthy();
+      expect(prefs.getPrefs().sidebarSections["status:local-section:Release:in_review"]).toBe("collapsed");
+      fireEvent.click(within(release).getByRole("button", { name: "In review 2" }));
+    }
+    act(() => store.setShowArchived(true));
+    expect(within(release).getByText("Session old")).toBeTruthy();
+    expect(screen.getAllByText("Session old")).toHaveLength(1);
+    if (sidebarLayout === "status") expect(within(release).getByRole("button", { name: "In review 3" })).toBeTruthy();
   });
 
   it("copies the real branch while a cross-project section row also names its project", async () => {

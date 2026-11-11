@@ -39,6 +39,15 @@ async function narrowToSettings(input: HTMLElement) {
 }
 
 describe("settings in the command palette", () => {
+  it("opens repository settings for copy-pattern searches", async () => {
+    const { input, onOpenSettings } = palette();
+    await narrowToSettings(input);
+    fireEvent.change(input, { target: { value: "worktreeinclude" } });
+    await screen.findByRole("option", { name: /Repositories/ });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(onOpenSettings).toHaveBeenCalledWith("repositories"));
+  });
+
   it("lists matching sections in Settings and opens the font section with Enter", async () => {
     const { input, onOpenSettings, onOpenChange } = palette();
     fireEvent.change(input, { target: { value: "font" } });
@@ -56,8 +65,9 @@ describe("settings in the command palette", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(screen.getAllByRole("group").map((group) => group.getAttribute("aria-labelledby"))).toEqual(["palette-group-settings"]);
     const results = screen.getAllByRole("option");
-    expect(results).toHaveLength(13);
+    expect(results).toHaveLength(14);
     expect(screen.getByRole("option", { name: /^Environment/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /^Repositories/ })).toBeTruthy();
     fireEvent.keyDown(input, { key: "ArrowUp" });
     expect(input.getAttribute("aria-activedescendant")).toBe(results.at(-1)!.id);
     fireEvent.keyDown(input, { key: "ArrowDown" });

@@ -317,8 +317,10 @@ mod tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             active_tab: None,
             link: None,
+            parent: None,
             tabs,
             unknown: BTreeMap::new(),
         }

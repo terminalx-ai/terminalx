@@ -75,7 +75,7 @@ fn targets_this_process(params: &Value, this_pid: u32) -> bool {
 fn own_app_protected() -> ComputerError {
     ComputerError::new(
         OWN_APP_PROTECTED,
-        "Computer use does not click, type or change anything in TerminalX's own windows: its confirmations and settings are the person's to operate.",
+        "Raw computer use cannot operate TerminalX. For explicitly authorized session controls use terminalx computer self-ui authorize; for Autopilot use terminalx pipelines start. Confirmations and security overrides remain person-only.",
     )
 }
 
@@ -122,7 +122,7 @@ pub fn recovery_for(code: &str) -> &'static str {
         "app_not_found" => "Run terminalx computer list-apps and retry with the bundle id or pid:<n>; website names are not desktop apps.",
         "app_not_running" => "The target quit and computer use never launches apps: start it, run terminalx computer list-apps, then retry with pid:<n>.",
         "app_blocked" => "Stop; this app is intentionally blocked from computer use.",
-        "own_app_protected" => "Stop: computer use never operates TerminalX's own windows. Ask the person to do it themselves; do not look for another way.",
+        "own_app_protected" => "Use terminalx computer self-ui authorize for scoped, person-approved session controls, or terminalx pipelines start SESSION-OR-TAB --adopt-pr for an existing PR. Raw clicks, screenshots, confirmations and security overrides remain protected.",
         "confirmation_pending" => "Stop and wait for the person: only they can answer a TerminalX confirmation. Do not retry in a loop.",
         "window_not_found" | "window_stale" => "Run terminalx computer list-windows --app <app>, choose a current selector, then rerun get-app-state.",
         "window_not_focused" => "Retry once with --restore-window; if restore was already requested, bring the app forward manually.",
@@ -467,6 +467,7 @@ impl ComputerService {
                         permissions::attach_to_capabilities(&mut capabilities, &status);
                     }
                 }
+                capabilities["supports"]["safety"]["selfUi"] = json!({"authorization": "person-approved", "window": "main", "transport": "semantic", "maxSeconds": 900});
                 capabilities
             }),
             "listApps" => provider.list_apps(),
@@ -547,30 +548,43 @@ impl Drop for ComputerService {
 
 // ------------------------------------------------------- settings UI commands
 
-#[tauri::command]
-pub fn computer_permission_status(
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<permissions::PermissionStatusResult, String> {
-    permissions::status(state.computer.helper().map_err(|e| e.to_string())?.as_ref()).map_err(|e| e.to_string())
+// These reach the Computer Use helper, starting it when it is not running,
+// which takes seconds. A synchronous command runs on the app's main thread,
+// the one that draws the window, so they run on a blocking thread instead:
+// Settings → General froze for over four seconds while one did.
+
+/// Runs `work` against the computer service off the main thread.
+async fn off_main<T: Send + 'static>(state: tauri::State<'_, crate::AppState>, work: impl FnOnce(&ComputerService) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    let computer = state.computer.clone();
+    tauri::async_runtime::spawn_blocking(move || work(&computer)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn computer_open_permission(
+pub async fn computer_permission_status(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<permissions::PermissionStatusResult, String> {
+    off_main(state, |computer| permissions::status(computer.helper().map_err(|e| e.to_string())?.as_ref()).map_err(|e| e.to_string())).await
+}
+
+#[tauri::command]
+pub async fn computer_open_permission(
     state: tauri::State<'_, crate::AppState>,
     id: Option<permissions::PermissionId>,
 ) -> Result<permissions::PermissionSetupResult, String> {
-    permissions::open_setup(state.computer.helper().map_err(|e| e.to_string())?.as_ref(), id).map_err(|e| e.to_string())
+    off_main(state, move |computer| permissions::open_setup(computer.helper().map_err(|e| e.to_string())?.as_ref(), id).map_err(|e| e.to_string())).await
 }
 
 #[tauri::command]
-pub fn computer_reset_permissions(
+pub async fn computer_reset_permissions(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<permissions::PermissionResetResult, String> {
-    let result = permissions::reset(state.computer.helper().map_err(|e| e.to_string())?.as_ref()).map_err(|e| e.to_string())?;
-    // A helper that already holds a session keeps its old TCC decision
-    // cached; restart it so the next call sees the reset.
-    state.computer.shutdown();
-    Ok(result)
+    off_main(state, |computer| {
+        let result = permissions::reset(computer.helper().map_err(|e| e.to_string())?.as_ref()).map_err(|e| e.to_string())?;
+        // A helper that already holds a session keeps its old TCC decision
+        // cached; restart it so the next call sees the reset.
+        computer.shutdown();
+        Ok(result)
+    }).await
 }
 
 /// Every action must say how it was verified. A helper that reports the
@@ -698,8 +712,8 @@ mod tests {
                     .call(method, serde_json::json!({ "app": selector, "elementIndex": 1, "x": 1, "y": 1 }), "r")
                     .unwrap_err();
                 assert_eq!(error.code, OWN_APP_PROTECTED, "{method}");
-                assert!(error.message.contains("own windows"), "{method}");
-                assert!(error.recovery().contains("Ask the person"), "{method}");
+                assert!(error.message.contains("self-ui authorize"), "{method}");
+                assert!(error.recovery().contains("person-approved"), "{method}");
             }
         }
         // Looking at the app is not an action, and another process is not this app.

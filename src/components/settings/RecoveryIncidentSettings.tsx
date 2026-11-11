@@ -5,6 +5,7 @@ import { Download, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { errorMessage, recoveryIncidents, type RecoveryIncidentSummary } from "@/lib/api";
+import { useSettingsFile } from "@/lib/settingsFile";
 
 /** What is recorded, in a line: incidents, and those a person should look at. */
 export function summaryText(summary: RecoveryIncidentSummary): string {
@@ -18,6 +19,7 @@ export function summaryText(summary: RecoveryIncidentSummary): string {
 
 /** Settings → Storage: the recovery incident log (#815), on this Mac only. */
 export function RecoveryIncidentSettings() {
+  const { revision } = useSettingsFile();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [summary, setSummary] = useState<RecoveryIncidentSummary | null>(null);
   const [busy, setBusy] = useState(false);
@@ -38,7 +40,7 @@ export function RecoveryIncidentSettings() {
       .catch((e) => live && setResult({ ok: false, text: errorMessage(e) }));
     void refresh();
     return () => { live = false; };
-  }, [refresh]);
+  }, [refresh, revision]);
 
   const change = async (next: boolean) => {
     setBusy(true);

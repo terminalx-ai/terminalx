@@ -59,16 +59,22 @@ async function boot(list: SessionEntry[]) {
 }
 
 describe("new-chat entry points", () => {
+  it("announces manual status alongside the branch row's accessible name", async () => {
+    await boot([session("here", "/repos/web", new Date().toISOString(), { manualStatus: "in_review" })]);
+    mount();
+    expect(screen.getByRole("button", { name: "main, Talk here", description: "Status: In review" })).toBeTruthy();
+  });
+
   it("opens the same composer from the sidebar plus menu and its project option without creating a session", async () => {
     await boot([session("here", "/repos/web", new Date().toISOString())]);
     mount();
     const titlebar = screen.getByTestId("sidebar-titlebar");
     fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "New chat" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: true, selectedSessionId: null });
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: true, selectedSessionId: null });
     fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "web" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
     expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat"].includes(command))).toBe(false);
   });
 });
@@ -360,18 +366,13 @@ describe("the conversation list", () => {
     expect(screen.queryByRole("group", { name: "web" })).toBeNull();
   });
 
-  it("marks each row with its agent only once the conversations use more than one", async () => {
+  it("draws no agent mark on a row, even when the conversations use more than one agent", async () => {
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
     const codex = (entry: SessionEntry) => ({ ...entry, tabs: entry.tabs.map((tab) => ({ ...tab, harness: "codex" })) });
-    await boot([session("one", chatsPath, at(1)), session("two", chatsPath, at(2))]);
-    mount();
-    expect(document.querySelectorAll("[data-agent-id]")).toHaveLength(0);
-    cleanup();
-
+    // A row is its name and its age; which agent runs it is in the chat.
     await boot([session("one", chatsPath, at(1)), codex(session("two", chatsPath, at(2)))]);
     mount();
-    const chats = screen.getByRole("region", { name: "Chats" });
-    expect([...chats.querySelectorAll("[data-agent-id]")].map((mark) => mark.getAttribute("data-agent-id"))).toEqual(["codex", "claude"]);
+    expect(screen.getByRole("region", { name: "Chats" }).querySelectorAll("[data-agent-id]")).toHaveLength(0);
   });
 
   it("gathers the conversations on one branch under it, and shows a project's latest few branches before View all", async () => {
@@ -476,7 +477,7 @@ describe("renaming from the sidebar", () => {
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {

@@ -190,12 +190,39 @@ fn revocation_cancels_a_queued_followup_before_the_turn_can_finish() {
         )["queued"],
         true
     );
+    // Sharing permits the host's chosen mode, including Bypass. A driver
+    // cannot change it, and a host's change cannot settle an active approval.
+    for method in ["session.mode", "runtime.session.mode"] {
+        fixture.refused(
+            "guest",
+            fixture.guest(method, json!({"mode":"bypassPermissions"})),
+        );
+    }
+    fixture.serve.control(
+        "runtime.session.mode",
+        json!({"sessionId":fixture.session,"tabId":fixture.tab,"mode":"bypassPermissions"}),
+    );
+    let shown = fixture
+        .serve
+        .control("sessions.show", json!({"session":fixture.session}));
+    assert_eq!(shown["tabs"][0]["permissionMode"], "manual");
     assert_eq!(
-        fixture.serve.try_control(
-            "runtime.session.mode",
-            json!({"sessionId":fixture.session,"tabId":fixture.tab,"mode":"bypassPermissions"})
-        )["ok"],
-        false
+        shown["tabs"][0]["requestedPermissionMode"],
+        "bypassPermissions"
+    );
+    assert_eq!(
+        fixture.serve.control("permissions.list", json!({}))["permissions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture.call("status", json!({}))["queue"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
     fixture.call("revoke", json!({"linkId":"link","removeGuests":true}));
     let pending = fixture.serve.control("permissions.list", json!({}));

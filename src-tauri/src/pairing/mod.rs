@@ -150,18 +150,15 @@ impl PairingManager {
             .set(sink.clone())
             .map_err(|_| anyhow!("pairing manager was already configured"))?;
         self.mobile.configure(sink.clone())?;
+        let settings = self.clone();
+        sink.listen("settings_file_changed", Box::new(move |_| {
+            settings.mobile.broadcast_settings_changed();
+        }));
         let events = self.clone();
         sink.listen(
             "agent_event",
             Box::new(move |payload| {
                 events.mobile.capture_agent_event(&events, payload);
-            }),
-        );
-        let statuses = self.clone();
-        sink.listen(
-            "tab_status",
-            Box::new(move |_| {
-                statuses.mobile.broadcast_sessions_changed();
             }),
         );
         if !self.registry.list()?.is_empty() {
@@ -1820,6 +1817,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "chat.list",
         "sessions.summaries",
         "session.tail",
+        // A prompt's image, from the session's own attachments.
+        "session.image",
         "session.sync",
         "sync.capabilities",
         "transport.negotiate",
@@ -1872,6 +1871,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "session.setEffort",
         "session.setMode",
         "session.continue",
+        // Closing a tab as the desktop's tab strip does.
+        "session.closeTab",
     ];
     VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
 }
@@ -1904,7 +1905,7 @@ mod tests {
             assert!(allowed_method(DeviceScope::Viewer, read), "{read}");
         }
         for control in ["session.stop", "session.interrupt", "session.resendUnsent", "session.setModel", "session.setEffort",
-            "session.setMode", "session.continue", "terminal.open", "steerLease.queueInput"] {
+            "session.setMode", "session.continue", "session.closeTab", "terminal.open", "steerLease.queueInput"] {
             assert!(allowed_method(DeviceScope::Driver, control), "{control}");
             assert!(!allowed_method(DeviceScope::Viewer, control), "{control} is a driver's");
         }

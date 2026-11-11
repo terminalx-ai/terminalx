@@ -8,7 +8,6 @@ export function agentConversations(session: SessionSummary) {
       id: tab.id,
       label,
       status: tab.status,
-      unread: !!tab.markedUnread || tab.status === "completed",
       href: {
         pathname: "/session/[sessionId]" as const,
         params: { sessionId: session.id, tabId: tab.id, title: label },
