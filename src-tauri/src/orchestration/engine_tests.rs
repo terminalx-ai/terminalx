@@ -6,7 +6,8 @@ use std::sync::Mutex;
 
 use serde_json::json;
 
-use super::engine::{self, By, Cost, EngineError, Host, Lead, Started, WorkerNow};
+use super::engine::{self, By, Cost, EngineError, Host, Lead, Started, VerifierNow, WorkerNow};
+use super::verify::{self, Checked, Facts, Gate, GateResult};
 use super::plan::Plan;
 use super::ladder::Step;
 use super::routing::Tier;
@@ -46,6 +47,19 @@ struct World {
     cost_reads: BTreeMap<String, usize>,
     /// The runs the engine asked to have their waiting retries started, one entry an ask.
     retries: Vec<String>,
+    /// What gates 2 to 4 find for a piece; one with no entry passes them with nothing changed.
+    checks: BTreeMap<String, Checked>,
+    /// The pieces whose gates were run, one entry a run of them.
+    checked: Vec<String>,
+    /// Left for the test to run (`engine::verify`), as the app runs them: off the read.
+    hold_checks: bool,
+    /// The verifiers made, as the engine asked for them, and what each was sent.
+    verifiers: Vec<Made>,
+    prompts: BTreeMap<String, String>,
+    verifier_now: BTreeMap<String, VerifierNow>,
+    verifier_tokens: BTreeMap<String, verify::Tokens>,
+    /// Pieces no verifier can be made for.
+    no_verifier: BTreeSet<String>,
 }
 
 struct Fake {
@@ -73,6 +87,19 @@ impl Fake {
 
     fn session_of(&self, piece: &str) -> String {
         self.world().made.iter().rev().find(|made| made.piece == piece).unwrap_or_else(|| panic!("no worker was made for {piece}")).session.clone()
+    }
+
+    /// What gates 2 to 4 will find for `piece`.
+    fn finds(&self, piece: &str, checked: Checked) {
+        self.world().checks.insert(piece.into(), checked);
+    }
+
+    /// Verifier `number` of `piece` (from 1) ends its turn with `reply`, having used `tokens`.
+    fn verifier_replies(&self, piece: &str, number: usize, reply: &str, tokens: u64) {
+        let mut world = self.world();
+        let session = world.verifiers.iter().filter(|made| made.piece == piece).nth(number - 1).unwrap_or_else(|| panic!("no verifier {number} was made for {piece}")).session.clone();
+        world.verifier_now.insert(session.clone(), VerifierNow::Replied(reply.into()));
+        world.verifier_tokens.insert(session, verify::Tokens { input: tokens, ..Default::default() });
     }
 
     fn made(&self) -> Vec<String> {
@@ -156,12 +183,63 @@ impl Host for Fake {
         Ok(was_running)
     }
 
+    fn check_waits(&self, run_id: &str) {
+        if self.world().hold_checks {
+            return;
+        }
+        // The app runs them on a thread of their own; here they are run at once, so a
+        // report read is a result checked.
+        engine::verify(self, run_id).unwrap();
+    }
+
+    fn check(&self, _run: &Run, piece: &Piece, _worker: &SessionRef) -> Checked {
+        let mut world = self.world();
+        world.checked.push(piece.id.clone());
+        world.checks.get(&piece.id).cloned().unwrap_or_else(|| passing(&[], 0))
+    }
+
+    fn create_verifier(&self, _run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef> {
+        let mut world = self.world();
+        if world.no_verifier.contains(&piece.id) {
+            anyhow::bail!("the agent is not installed");
+        }
+        let tab = format!("{}-verifier-{number}", worker.session_id);
+        world.verifiers.push(Made { piece: piece.id.clone(), agent: piece.agent.clone(), model: model.into(), effort: effort.map(str::to_owned), mode: super::guard::VERIFIER_MODE.into(), session: tab.clone() });
+        Ok(SessionRef { session_id: worker.session_id.clone(), tab_id: Some(tab) })
+    }
+
+    fn brief_verifier(&self, verifier: &SessionRef, prompt: &str) -> anyhow::Result<()> {
+        let tab = verifier.tab_id.clone().unwrap();
+        let mut world = self.world();
+        world.prompts.insert(tab.clone(), prompt.to_string());
+        world.verifier_now.insert(tab, VerifierNow::Working);
+        Ok(())
+    }
+
+    fn verifier(&self, verifier: &SessionRef) -> VerifierNow {
+        self.world().verifier_now.get(verifier.tab_id.as_deref().unwrap_or_default()).cloned().unwrap_or(VerifierNow::Gone)
+    }
+
+    fn verifier_tokens(&self, verifier: &SessionRef) -> Option<verify::Tokens> {
+        self.world().verifier_tokens.get(verifier.tab_id.as_deref().unwrap_or_default()).copied()
+    }
+
     fn tell_lead(&self, _run: &Run, text: &str) {
         self.world().told.push(text.to_string());
     }
 
     fn changed(&self, run: &Run) {
         self.world().changed.push(run.state);
+    }
+}
+
+/// Gates 2 to 4 passed on a change of `files` and `lines` changed lines.
+fn passing(files: &[&str], lines: u32) -> Checked {
+    Checked {
+        gates: vec![GateResult::passed(Gate::Scope, "Within what the piece owns."), GateResult::passed(Gate::Branch, "Committed and clean."), GateResult::passed(Gate::Commands, "1 command exited 0.")],
+        facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, security_areas: Vec::new() },
+        diff: files.iter().map(|file| format!("diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n-old\n+new\n")).collect(),
+        base: "settings-typed-store".into(),
     }
 }
 

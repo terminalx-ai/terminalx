@@ -303,6 +303,23 @@ pub fn no_upstream(cwd: &Path, branch: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The mode a verifier's agent is started in: Claude Code's plan mode and
+/// Codex's read-only sandbox, where the agent itself changes no file.
+pub const VERIFIER_MODE: &str = "plan";
+
+/// The tools that change a file, by the names both agents' hooks give them.
+const EDIT_TOOLS: &[&str] = &["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch", "file_change", "write_file", "create_file"];
+
+/// Why a verifier's tool call is refused: it changes a file. A verifier
+/// reads a result; it never repairs one, whatever mode its tab is put in
+/// later. `None` for a call that edits nothing by itself: what a shell
+/// command may do is left to the mode it was started in ([`VERIFIER_MODE`]).
+pub fn verifier_refusal(payload: &Value) -> Option<String> {
+    let tool = payload["tool_name"].as_str().unwrap_or_default();
+    let edits = EDIT_TOOLS.contains(&tool) || (tool.starts_with("mcp__") && ["__write_file", "__edit_file", "__create_or_update_file", "__push_files"].iter().any(|suffix| tool.ends_with(suffix)));
+    edits.then(|| format!("TerminalX refused `{tool}`: a verifier of a run changes no file. You are here to judge the result as it is. If something is wrong, say where in your verdict block (`file:line`); the piece goes back to a worker."))
+}
+
 /// Why a worker's tool call is refused, or `None` when it may go ahead.
 /// `payload` is the agent's `PreToolUse` hook input.
 pub fn refusal(payload: &Value) -> Option<String> {

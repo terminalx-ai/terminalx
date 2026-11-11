@@ -63,6 +63,12 @@ pub fn for_worker(session_id: &str) -> Result<Option<(Run, String)>> {
     }))
 }
 
+/// Whether a tab is a verifier of some piece's result (`verify`): a
+/// conversation in the worker's worktree that reads and never edits.
+pub fn is_verifier(session_id: &str, tab_id: &str) -> Result<bool> {
+    Ok(list()?.iter().flat_map(|run| &run.pieces).flat_map(|piece| &piece.tries).filter_map(|attempt| attempt.verification.as_ref()?.review.as_ref()).flat_map(|review| &review.verifiers).filter_map(|verifier| verifier.session.as_ref()).any(|verifier| verifier.session_id == session_id && verifier.tab_id.as_deref() == Some(tab_id)))
+}
+
 pub fn insert(run: &Run) -> Result<()> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let mut runs = list()?;

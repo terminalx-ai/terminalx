@@ -16,6 +16,14 @@
 //! names, and a fresh worker is started for it with the failure text in its
 //! brief. No model decides any of this. When the ladder runs out the piece
 //! is `blocked`, with what was tried in its note.
+//!
+//! A `done` report is a claim, not acceptance. The piece is `verifying`
+//! until its result has passed the gates ([`super::verify`]): its report,
+//! the files it touched, the state of its branch and the plan's commands are
+//! checked with no model ([`verify`]), off the thread that read the report,
+//! and a verifier session reads the diff only where those cannot settle it.
+//! A gate that fails is a try that fell short: what the gate printed is the
+//! failure text of the same ladder.
 
 use std::sync::Mutex;
 
@@ -24,6 +32,8 @@ use serde_json::{json, Value};
 
 use super::ladder::{self, Step, Verdict};
 use super::plan::{self, Plan, PlanError};
+use super::routing::{self, LeadModel};
+use super::verify::{self as checks, Gate, GateResult, Tally, Verification, Verifier};
 use super::{brief, guard, store, Approval, Outcome, Piece, PieceState, Run, RunState, SessionRef, Try};
 use crate::models::Model;
 use crate::store::settings::OrchestratorLimits;
@@ -60,9 +70,25 @@ pub enum WorkerNow {
     Working,
     /// Its last turn ended with a report.
     Reported { status: Status, result: String },
+    /// Its last turn ended, it was reminded once, and there is still no
+    /// report that can be read: what is wrong with the reply. Gate 1 fails.
+    NoReport(String),
     /// It stopped without a report, or waits on a person: why, in a sentence.
     Stuck(String),
     /// Its session was deleted.
+    Gone,
+}
+
+/// What a verifier of a piece's result is doing now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifierNow {
+    /// Reading, or about to take its prompt.
+    Working,
+    /// Its last turn ended with this reply.
+    Replied(String),
+    /// It stopped without a reply, or waits on a person: why, in a sentence.
+    Stuck(String),
+    /// Its conversation was closed.
     Gone,
 }
 
@@ -100,6 +126,21 @@ pub trait Host: Send + Sync {
     fn worker(&self, worker: &SessionRef) -> WorkerNow;
     /// Stop a worker's agents. `false` when none was running.
     fn stop_worker(&self, worker: &SessionRef) -> anyhow::Result<bool>;
+    /// A piece of `run_id` reported `done` and its result has not been
+    /// checked: run the gates ([`verify`]), off the caller's thread. They run
+    /// the plan's commands, which may take minutes; a read never waits on them.
+    fn check_waits(&self, run_id: &str);
+    /// Gates 2 to 4 on a worker's result ([`checks::gates`]): git and the
+    /// piece's commands, in the worker's worktree. No session is started.
+    fn check(&self, run: &Run, piece: &Piece, worker: &SessionRef) -> checks::Checked;
+    /// Make a verifier for a piece's result: a conversation in the worker's
+    /// worktree that cannot edit files, on `model` at `effort`. It is not the
+    /// worker's conversation and is given none of it. Nothing is sent yet.
+    fn create_verifier(&self, run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef>;
+    fn brief_verifier(&self, verifier: &SessionRef, prompt: &str) -> anyhow::Result<()>;
+    fn verifier(&self, verifier: &SessionRef) -> VerifierNow;
+    /// What a verifier's conversation has used.
+    fn verifier_tokens(&self, verifier: &SessionRef) -> Option<checks::Tokens>;
     /// Tell the lead what a person decided about its run.
     fn tell_lead(&self, run: &Run, text: &str);
     /// The stored run changed.
@@ -331,7 +372,7 @@ pub fn approve(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     host.tell_lead(
         run,
         &format!(
-            "The person approved the plan of run {id}.{edited} {started}\n\nWait for them with `terminalx wait --children-of {lead} --any --json`, read what they report with `terminalx sessions report --children-of {lead} --json`, and call `terminalx runs start {id} --json` again whenever a piece is done: it starts the pieces that waited on it."
+            "The person approved the plan of run {id}.{edited} {started}\n\nDo not poll. Wait with `terminalx wait --children-of {lead} --json`: while this run is open it returns when a piece's result is accepted or a piece is blocked, not each time a worker's turn ends. A worker's `done` is checked by TerminalX before the piece is done (its report, the files it touched, its branch, your commands; a verifier reads the diff only where those cannot settle it), and a result that fails goes back to a fresh worker without you. When the wait returns, read the run with `terminalx runs show {id} --json`, and call `terminalx runs start {id} --json` when a piece is done: it starts the pieces that waited on it."
         ),
     );
     Ok(start)
@@ -469,8 +510,23 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             Some((piece.id.clone(), worker.clone(), host.worker(&worker), cost))
         })
         .collect();
+    // The verifiers still reading a result: each is read as a worker is.
+    let reading: Vec<(String, usize, SessionRef, VerifierNow, Option<checks::Tokens>)> = run
+        .pieces
+        .iter()
+        .filter(|piece| piece.state == PieceState::Verifying)
+        .flat_map(|piece| {
+            let review = piece.tries.last().and_then(|attempt| attempt.verification.as_ref()).filter(|check| check.review_open()).and_then(|check| check.review.as_ref());
+            review.into_iter().flat_map(|review| review.verifiers.iter().enumerate()).filter(|(_, verifier)| !verifier.settled()).filter_map(|(index, verifier)| {
+                let session = verifier.session.clone()?;
+                let now = host.verifier(&session);
+                let tokens = if now == VerifierNow::Working { None } else { host.verifier_tokens(&session) };
+                Some((piece.id.clone(), index, session, now, tokens))
+            }).collect::<Vec<_>>()
+        })
+        .collect();
     // The ladder needs the installed models only when a try fell short.
-    let models = if seen.iter().any(|(_, _, now, _)| fell_short(now)) { host.models() } else { Vec::new() };
+    let models = if seen.iter().any(|(_, _, now, _)| fell_short(now)) || reading.iter().any(|(_, _, _, now, _)| *now != VerifierNow::Working) { host.models() } else { Vec::new() };
     let (after, ()) = store::update(id, |run| {
         if !matches!(run.state, RunState::Running | RunState::Failed) {
             return Ok(());
@@ -496,7 +552,21 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             }
             let short = fell_short(&now).then(|| failure_of(&now));
             let outcome = outcome_of(&now);
-            let (state, note) = follows(now);
+            let (mut state, note) = follows(now);
+            // `done` is the worker's claim: the piece is done once its result has passed the gates.
+            if state == PieceState::Done {
+                // A check recorded for an earlier report (one that said `failed`) says nothing of this one.
+                if let Some(attempt) = piece.tries.last_mut().filter(|attempt| attempt.outcome.is_some_and(|outcome| outcome != Outcome::Done)) {
+                    attempt.verification = None;
+                }
+                match piece.tries.last().map(|attempt| attempt.verification.as_ref().and_then(|check| check.outcome)) {
+                    // A piece stored before tries were kept has nothing to record a check on.
+                    None | Some(Some(checks::Outcome::Passed)) => {}
+                    // A check that could not be finished stands, as a failed one does, until the worker works again.
+                    Some(Some(_)) => continue,
+                    Some(None) => state = PieceState::Verifying,
+                }
+            }
             piece.state = state;
             // A worker back at work keeps the line it last reported until it reports again.
             if state != PieceState::Running {
@@ -504,20 +574,47 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             }
             if let Some(attempt) = piece.tries.last_mut() {
                 match outcome {
-                    // Back at work: the try is open again.
-                    None => (attempt.outcome, attempt.ended) = (None, None),
+                    // Back at work: the try is open again, and what was checked is not what it will report.
+                    None => (attempt.outcome, attempt.ended, attempt.verification) = (None, None, None),
                     Some(outcome) => {
+                        let at = crate::store::index::now();
                         if attempt.outcome != Some(outcome) || attempt.ended.is_none() {
-                            attempt.ended = Some(crate::store::index::now());
+                            attempt.ended = Some(at.clone());
                         }
                         attempt.outcome = Some(outcome);
                         attempt.detail = short.clone().or(note);
+                        // Gate 1, from the report that was just read: no session, no command.
+                        if attempt.verification.is_none() {
+                            attempt.verification = match (&short, state) {
+                                (Some(failure), _) => Some(Verification { gates: vec![GateResult::failed(Gate::Report, failure.clone())], outcome: Some(checks::Outcome::Failed), failure: Some(failure.clone()), started: Some(at.clone()), ended: Some(at), ..Verification::default() }),
+                                (None, PieceState::Verifying) => Some(Verification { gates: vec![GateResult::passed(Gate::Report, "The report block was read and says done.")], started: Some(at), ..Verification::default() }),
+                                _ => None,
+                            };
+                        }
                     }
                 }
             }
             if let Some(failure) = short {
                 climb(piece, &failure, &models);
             }
+        }
+        for (piece_id, index, session, now, tokens) in reading {
+            let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.state == PieceState::Verifying) else { continue };
+            let Some(review) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).filter(|check| check.review_open()).and_then(|check| check.review.as_mut()) else { continue };
+            let Some(verifier) = review.verifiers.get_mut(index).filter(|verifier| verifier.session.as_ref() == Some(&session) && !verifier.settled()) else { continue };
+            match now {
+                VerifierNow::Working => continue,
+                VerifierNow::Replied(reply) => match checks::verdict(&reply) {
+                    Ok(verdict) => (verifier.verdict, verifier.evidence) = (Some(verdict.decision), verdict.evidence),
+                    Err(problem) => verifier.problem = Some(problem),
+                },
+                VerifierNow::Stuck(why) => verifier.problem = Some(why),
+                VerifierNow::Gone => verifier.problem = Some("Its conversation was closed before it gave a verdict.".into()),
+            }
+            verifier.tokens = tokens;
+        }
+        for piece in run.pieces.iter_mut().filter(|piece| piece.state == PieceState::Verifying) {
+            counted(piece, &models);
         }
         settle(run);
         Ok(())
@@ -531,12 +628,194 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     if after.pieces.iter().any(|piece| piece.retry_waits() && !run.piece(&piece.id).is_some_and(Piece::retry_waits)) {
         host.retry_waits(&after.id);
     }
+    // A result waits for its gates: they are run from here, off this thread, by whichever
+    // read finds them waiting. One whose gates a thread is already running is left to it.
+    if after.pieces.iter().any(|piece| piece.check_waits() && !checks::is_checking(&after.id, &piece.id)) {
+        host.check_waits(&after.id);
+        // Gates with no command to run may be through already.
+        return stored(id);
+    }
     Ok(after)
 }
 
-/// The worker's report says the try fell short: `failed` or `partial`.
+/// A gate's failure as the next try reads it.
+fn gate_failure(gate: &GateResult) -> String {
+    format!("The result did not pass the {} check, which TerminalX ran on it after the worker reported done.\n{}", gate.gate.name(), gate.detail.as_deref().unwrap_or_default())
+}
+
+/// End the check of a piece's current try. Passed: the piece is done.
+/// Failed: the try fell short, and `said` is the failure text the ladder
+/// gives the next one. Inconclusive: the piece is blocked, and `said` is why.
+fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, models: &[Model]) {
+    let at = crate::store::index::now();
+    let Some(attempt) = piece.tries.last_mut() else { return };
+    let check = attempt.verification.get_or_insert_with(Verification::default);
+    check.outcome = Some(outcome);
+    check.failure = said.clone();
+    check.ended = Some(at.clone());
+    match outcome {
+        checks::Outcome::Passed => piece.state = PieceState::Done,
+        checks::Outcome::Failed => {
+            let failure = failure_text(&said.unwrap_or_default());
+            attempt.outcome = Some(Outcome::CheckFailed);
+            attempt.detail = Some(failure.clone());
+            attempt.ended = Some(at);
+            climb(piece, &failure, models);
+        }
+        checks::Outcome::Inconclusive => {
+            piece.state = PieceState::Blocked;
+            piece.note = Some(format!("Its result could not be checked. {} The gates before the review passed; read the diff, or stop the run.", said.unwrap_or_default()));
+        }
+    }
+}
+
+/// Count the verdicts of a piece's review once every verifier has given
+/// one or stopped without, and end the check with what they come to.
+fn counted(piece: &mut Piece, models: &[Model]) {
+    let Some(check) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).filter(|check| check.review_open()) else { return };
+    let Some(review) = check.review.as_ref() else { return };
+    let passes = review.verifiers.iter().filter(|verifier| verifier.verdict == Some(checks::Decision::Pass)).count();
+    let (outcome, said) = match checks::tally(review) {
+        Tally::Open => return,
+        Tally::Passed => {
+            check.gates.push(GateResult::passed(Gate::Review, if review.voters == 1 { "The verifier passed it.".to_string() } else { format!("{passes} of {} verifiers passed it; {} had to.", review.voters, review.threshold) }));
+            (checks::Outcome::Passed, None)
+        }
+        Tally::Failed(evidence) => {
+            let gate = GateResult::failed(Gate::Review, evidence);
+            let failure = gate_failure(&gate);
+            check.gates.push(gate);
+            (checks::Outcome::Failed, Some(failure))
+        }
+        Tally::Inconclusive(why) => (checks::Outcome::Inconclusive, Some(why)),
+    };
+    conclude(piece, outcome, said, models);
+}
+
+/// The current try of `piece_id` is the one whose check began at `started`,
+/// still waiting on it: nobody replaced its worker or sent it back to work.
+fn checked_try<'a>(run: &'a mut Run, piece_id: &str, worker: &SessionRef, started: &str) -> Option<&'a mut Piece> {
+    if !matches!(run.state, RunState::Running | RunState::Failed) {
+        return None;
+    }
+    run.pieces.iter_mut().find(|piece| {
+        piece.id == piece_id && piece.state == PieceState::Verifying && piece.worker.as_ref() == Some(worker) && piece.tries.last().and_then(|attempt| attempt.verification.as_ref()).is_some_and(|check| check.outcome.is_none() && check.started.as_deref() == Some(started))
+    })
+}
+
+/// Check the result of every piece that waits for it: gates 2 to 4
+/// ([`checks::gates`]), then a verifier only where [`checks::review_reasons`]
+/// names a reason. Called by the host off the thread that read the report
+/// ([`Host::check_waits`]): the plan's commands run here, and may take minutes.
+///
+/// A result that passes with no reason for a review is accepted here, with
+/// no session started. One that fails a gate takes the ladder's next step
+/// with what the gate printed. One that needs a reader gets its verifiers,
+/// and is settled when they have answered ([`refreshed`]).
+pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
+    let run = stored(id)?;
+    let waiting: Vec<String> = run.pieces.iter().filter(|piece| piece.check_waits()).map(|piece| piece.id.clone()).collect();
+    for piece_id in waiting {
+        // One thread a piece: a second read that got here first has it.
+        let Some(_checking) = checks::checking(id, &piece_id) else { continue };
+        let run = stored(id)?;
+        if !matches!(run.state, RunState::Running | RunState::Failed) {
+            break;
+        }
+        let Some(piece) = run.piece(&piece_id).filter(|piece| piece.check_waits()) else { continue };
+        let (Some(worker), Some(started)) = (piece.worker.clone(), piece.tries.last().and_then(|attempt| attempt.verification.as_ref()).and_then(|check| check.started.clone())) else { continue };
+        let checked = host.check(&run, piece, &worker);
+        let limits = host.limits(&run.project_path);
+        let failed = checked.gates.iter().find(|gate| !gate.passed).map(gate_failure);
+        let reasons = if failed.is_none() { checks::review_reasons(piece, &checked.facts, limits.review_diff_lines) } else { Vec::new() };
+        // Gates 1 to 4 passed and nothing calls for a reader, or a gate failed: settled with no session.
+        if reasons.is_empty() {
+            let models = if failed.is_some() { host.models() } else { Vec::new() };
+            let (after, ()) = store::update(id, |run| {
+                if let Some(piece) = checked_try(run, &piece_id, &worker, &started) {
+                    if let Some(check) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()) {
+                        check.gates.extend(checked.gates.iter().cloned());
+                        check.facts = Some(checked.facts.clone());
+                    }
+                    conclude(piece, if failed.is_some() { checks::Outcome::Failed } else { checks::Outcome::Passed }, failed.clone(), &models);
+                }
+                settle(run);
+                Ok(())
+            })
+            .map_err(EngineError::internal)?;
+            announce(host, &run, &after);
+            continue;
+        }
+        // The model step: the routing table's `verify` row, not the worker's model.
+        let (voters, threshold) = checks::panel(piece);
+        let models = host.models();
+        let lead = host.lead(&run.lead.session_id).ok();
+        let chosen = routing::choose("verify", &piece.agent, "", None, &limits.routing, &models, &LeadModel { agent: lead.as_ref().map_or(piece.agent.as_str(), |lead| lead.agent.as_str()), model: lead.as_ref().map_or("", |lead| lead.model.as_str()) });
+        let report: Vec<GateResult> = piece.tries.last().and_then(|attempt| attempt.verification.as_ref()).map(|check| check.gates.clone()).unwrap_or_default();
+        let prompt = checks::prompt(piece, &checked.base, &report, &checked, &reasons);
+        let verifiers: Vec<Verifier> = (1..=voters)
+            .map(|number| {
+                let made = host.create_verifier(&run, piece, &worker, &chosen.model, chosen.effort.as_deref(), number);
+                let problem = made.as_ref().err().map(|error| format!("It could not be started: {error:#}"));
+                Verifier { session: made.ok(), model: chosen.model.clone(), effort: chosen.effort.clone(), verdict: None, evidence: Vec::new(), problem, tokens: None }
+            })
+            .collect();
+        // Stored before anything is sent: a verifier is known as one, and held to reading, from its first turn.
+        let review = checks::Review { reasons, voters, threshold, verifiers: verifiers.clone(), prompt_chars: prompt.chars().count() };
+        let (after, kept) = store::update(id, |run| {
+            let Some(piece) = checked_try(run, &piece_id, &worker, &started) else { return Ok(false) };
+            if let Some(check) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()) {
+                check.gates.extend(checked.gates.iter().cloned());
+                check.facts = Some(checked.facts.clone());
+                check.review = Some(review);
+            }
+            Ok(true)
+        })
+        .map_err(EngineError::internal)?;
+        announce(host, &run, &after);
+        if !kept {
+            continue;
+        }
+        let unsent: Vec<(usize, String)> = verifiers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, verifier)| Some((index, host.brief_verifier(verifier.session.as_ref()?, &prompt).err()?)))
+            .map(|(index, error)| (index, format!("It was started but did not take its prompt: {error:#}")))
+            .collect();
+        // One that could not be asked has said all it will: a review nobody can answer ends here.
+        let (last, ()) = store::update(id, |run| {
+            if let Some(piece) = checked_try(run, &piece_id, &worker, &started) {
+                if let Some(review) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).and_then(|check| check.review.as_mut()) {
+                    for (index, problem) in &unsent {
+                        if let Some(verifier) = review.verifiers.get_mut(*index).filter(|verifier| !verifier.settled()) {
+                            verifier.problem = Some(problem.clone());
+                        }
+                    }
+                }
+                counted(piece, &models);
+            }
+            settle(run);
+            Ok(())
+        })
+        .map_err(EngineError::internal)?;
+        announce(host, &after, &last);
+    }
+    stored(id)
+}
+
+/// Say that a run changed, and ask for the next try of a piece that now waits for one.
+fn announce(host: &dyn Host, before: &Run, after: &Run) {
+    if after != before {
+        host.changed(after);
+    }
+    if after.pieces.iter().any(|piece| piece.retry_waits() && !before.piece(&piece.id).is_some_and(Piece::retry_waits)) {
+        host.retry_waits(&after.id);
+    }
+}
+
+/// The worker's report says the try fell short, `failed` or `partial`, or there is no report to read.
 fn fell_short(now: &WorkerNow) -> bool {
-    matches!(now, WorkerNow::Reported { status: Status::Failed | Status::Partial, .. })
+    matches!(now, WorkerNow::Reported { status: Status::Failed | Status::Partial, .. } | WorkerNow::NoReport(_))
 }
 
 /// What the next try is told went wrong: the worker's own words.
@@ -544,6 +823,7 @@ fn failure_of(now: &WorkerNow) -> String {
     match now {
         WorkerNow::Reported { status: Status::Partial, result } => format!("The worker reported partial: {result}"),
         WorkerNow::Reported { result, .. } => format!("The worker reported failed: {result}"),
+        WorkerNow::NoReport(problem) => format!("The worker ended without a report that can be read, after it was asked once more for one. {problem} Whatever it did is on its branch, unchecked."),
         _ => String::new(),
     }
 }
@@ -555,6 +835,7 @@ fn outcome_of(now: &WorkerNow) -> Option<Outcome> {
         WorkerNow::Reported { status: Status::Done, .. } => Outcome::Done,
         WorkerNow::Reported { status: Status::Failed, .. } => Outcome::Failed,
         WorkerNow::Reported { status: Status::Partial, .. } => Outcome::Partial,
+        WorkerNow::NoReport(_) => Outcome::CheckFailed,
         WorkerNow::Reported { status: Status::Blocked, .. } | WorkerNow::Stuck(_) | WorkerNow::Gone => Outcome::Blocked,
     })
 }
@@ -567,6 +848,7 @@ fn follows(now: WorkerNow) -> (PieceState, Option<String>) {
         WorkerNow::Reported { status: Status::Failed, result } => (PieceState::Failed, Some(result)),
         WorkerNow::Reported { status: Status::Partial, result } => (PieceState::Blocked, Some(format!("Reported partial: {result}"))),
         WorkerNow::Reported { status: Status::Blocked, result } => (PieceState::Blocked, Some(format!("Reported blocked: {result}"))),
+        WorkerNow::NoReport(problem) => (PieceState::Blocked, Some(format!("No report: {problem}"))),
         WorkerNow::Stuck(why) => (PieceState::Blocked, Some(why)),
         WorkerNow::Gone => (PieceState::Blocked, Some("Its worker session was deleted.".into())),
     }
@@ -657,6 +939,7 @@ pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> 
     if piece.state != PieceState::Done || piece.tries.is_empty() {
         let why = match piece.state {
             PieceState::Running => "its worker is still working".to_string(),
+            PieceState::Verifying => "its result is still being checked by TerminalX, which sends it back by itself if a check fails".to_string(),
             PieceState::Queued => "it has no worker yet".to_string(),
             PieceState::Blocked if piece.gave_up() => format!("it is already blocked after {} tries", piece.tries.len()),
             _ => format!("it is {}", serde_json::to_value(piece.state).ok().and_then(|state| state.as_str().map(str::to_owned)).unwrap_or_default()),
@@ -702,7 +985,7 @@ fn settle(run: &mut Run) {
     let failed: Vec<&Piece> = run.pieces.iter().filter(|piece| (piece.state == PieceState::Failed && piece.worker.is_some()) || piece.gave_up()).collect();
     let (state, reason) = if run.pieces.iter().all(|piece| piece.state == PieceState::Done) {
         (RunState::Done, None)
-    } else if run.pieces.iter().any(|piece| piece.state == PieceState::Running) || !run.ready().is_empty() || failed.is_empty() {
+    } else if run.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Verifying)) || !run.ready().is_empty() || failed.is_empty() {
         (RunState::Running, None)
     } else {
         let names: Vec<String> = failed.iter().map(|piece| piece.id.clone()).collect();
@@ -814,6 +1097,9 @@ pub fn shown(run: &Run) -> Value {
     value["estimate"] = json!(estimate);
     value["unestimated"] = json!(unestimated);
     value["maxTries"] = json!(ladder::MAX_TRIES);
+    // What checking the results cost: the tokens of every verifier session, apart from the workers'.
+    let verifier_tokens: Vec<u64> = run.pieces.iter().flat_map(|piece| &piece.tries).filter_map(|attempt| attempt.verification.as_ref()?.review.as_ref()?.tokens()).collect();
+    value["verifierTokens"] = json!((!verifier_tokens.is_empty()).then(|| verifier_tokens.iter().sum::<u64>()));
     // What each piece's tries cost so far, and the run's workers together.
     let (mut total, mut unpriced) = (None::<f64>, Vec::<String>::new());
     for (index, piece) in run.pieces.iter().enumerate() {

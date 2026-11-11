@@ -48,7 +48,7 @@ static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
 // These object keys are user-defined, rather than settings field names.
 static DYNAMIC_MAPS: LazyLock<BTreeMap<&str, Value>> = LazyLock::new(|| BTreeMap::from([
     ("mergedCleanup.projects", Value::Bool(false)),
-    ("orchestrator.projects", serde_json::json!({"requireApproval": false, "pieceLimit": 0, "workerMode": ""})),
+    ("orchestrator.projects", serde_json::json!({"requireApproval": false, "pieceLimit": 0, "workerMode": "", "reviewDiffLines": 0})),
     ("preferences.shortcuts", serde_json::json!([""])),
 ]));
 
@@ -116,6 +116,9 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_line
     }
     if key == "orchestrator.pieceLimit" && !value.as_u64().is_some_and(|n| (1..=u64::from(super::MAX_PIECE_LIMIT)).contains(&n)) {
         return Err(error("expected a number of pieces from 1 to 50"));
+    }
+    if key == "orchestrator.reviewDiffLines" && !value.as_u64().is_some_and(|n| (1..=u64::from(super::MAX_REVIEW_DIFF_LINES)).contains(&n)) {
+        return Err(error("expected a number of changed lines from 1 to 100000"));
     }
     if key == "floating.retentionDays" && !value.as_u64().is_some_and(|n| n <= u64::from(super::MAX_RETENTION_DAYS)) {
         return Err(error("expected days from 0 to 3650"));

@@ -99,7 +99,7 @@ pub(crate) fn pr_number(url: &str) -> Option<u64> {
 
 /// A transcript's last finished turn: when it ended, and its reply (the
 /// turn's final text, else its last message). A subagent's turns are not the tab's.
-fn last_reply(events: &[crate::events::AgentEvent]) -> Option<(DateTime<Utc>, String)> {
+pub(crate) fn last_reply(events: &[crate::events::AgentEvent]) -> Option<(DateTime<Utc>, String)> {
     use crate::events::{Payload, TurnStatus};
     let end = events.iter().rposition(|event| event.subagent.is_none() && matches!(event.payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. }))?;
     let at = DateTime::parse_from_rfc3339(&events[end].ts).ok()?.with_timezone(&Utc);

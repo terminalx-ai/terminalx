@@ -402,8 +402,7 @@ fn owned_glob(entry: &str, checkout: Option<&std::path::Path>) -> Result<String,
 
 /// Whether `path`, as `git diff --name-only` prints it, is one a piece owning `globs` may
 /// change. Exact about letter case, as git is. What the scope gate of verification
-/// (PRO-278) asks of each changed file; nothing asks it before then.
-#[cfg_attr(not(test), allow(dead_code))]
+/// asks of each changed file (`verify::gates`).
 pub fn owns(globs: &[String], path: &str) -> bool {
     let path: Vec<Token> = path.chars().map(Token::Lit).collect();
     globs.iter().any(|glob| readings(glob).iter().any(|glob| intersect(glob, &path)))

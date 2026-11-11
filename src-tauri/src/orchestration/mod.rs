@@ -22,6 +22,13 @@
 //! more effort and then on the next model up ([`ladder`]), each a fresh
 //! worker, three tries at most; every try is kept on the piece.
 //!
+//! A worker's `done` is not the piece's: its result is checked first
+//! ([`verify`]), by gates that use no model (its report, the files it
+//! touched, the state of its branch, the plan's commands) and only then,
+//! where a gate cannot settle it, by a verifier session that sees the diff
+//! and none of the worker's reasoning. A result that fails a gate is a try
+//! that fell short, and takes the next step of the same ladder.
+//!
 //! [`engine`] reaches sessions through [`engine::Host`], so the scheduling is
 //! the same code in the app and under test.
 
@@ -35,6 +42,7 @@ pub mod ladder;
 pub mod plan;
 pub mod routing;
 pub mod store;
+pub mod verify;
 
 use serde::{Deserialize, Serialize};
 
@@ -76,7 +84,9 @@ pub enum PieceState {
     Queued,
     /// Its worker is in a turn, or is about to be reminded of its report.
     Running,
-    /// Its worker reported `done`.
+    /// Its worker reported `done` and the result is being checked ([`verify`]).
+    Verifying,
+    /// Its worker reported `done` and the result passed every check.
     Done,
     /// Its worker stopped without finishing: a `partial` or `blocked` report,
     /// no report, or a question only a person can answer. `note` says which.
@@ -184,7 +194,9 @@ pub enum Outcome {
     Failed,
     /// Its worker reported `partial`.
     Partial,
-    /// Its worker reported `done` and the piece's done-check did not hold.
+    /// Its worker reported `done` and its result failed a check: a gate
+    /// ([`verify`]), or a done-check the lead reported. Also a worker that
+    /// ended without a report that can be read.
     CheckFailed,
     /// Its worker stopped without finishing: a `blocked` report, no report,
     /// a question for a person, or a deleted session.
@@ -232,6 +244,10 @@ pub struct Try {
     /// Models whose tokens the cost leaves out: with names here it is partial.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cost_unpriced_models: Vec<String>,
+    /// The check of its result: each gate that ran, and the verifier's
+    /// tokens when a model read it. Absent before its worker reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<verify::Verification>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -241,7 +257,7 @@ pub struct Try {
 impl Try {
     /// A try that has no worker yet.
     pub fn planned(step: ladder::Step, model: &str, effort: Option<&str>, tier: Option<routing::Tier>) -> Self {
-        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, outcome: None, detail: None, cost_usd: None, cost_unpriced_models: Vec::new(), started: None, ended: None }
+        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, outcome: None, detail: None, cost_usd: None, cost_unpriced_models: Vec::new(), verification: None, started: None, ended: None }
     }
 }
 
@@ -342,6 +358,12 @@ impl Piece {
     /// The ladder ran out: its last try fell short and no further one is made.
     pub fn gave_up(&self) -> bool {
         self.state == PieceState::Blocked && self.tries.last().and_then(|last| last.outcome).is_some_and(Outcome::fell_short)
+    }
+
+    /// Its worker reported `done` and gates 2 to 4 have yet to run on the
+    /// result: never run, or cut short when the app stopped.
+    pub fn check_waits(&self) -> bool {
+        self.state == PieceState::Verifying && self.tries.last().is_some_and(|attempt| attempt.verification.as_ref().is_none_or(|check| check.outcome.is_none() && check.review.is_none()))
     }
 
     /// What its tries cost so far, and the models that sum leaves out.
