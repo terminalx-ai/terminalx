@@ -2531,7 +2531,7 @@ mod tests {
             // The gate, and saying so when the answer is to stay.
             "do not need each other's output", "its own done-check", "would not fit in your context", "say which one failed",
             // How many, how to cut.
-            "Three to five workers", "One owner per file", "competing hypothesis",
+            "Three to five workers", "One owner per file", "`owns_outside_repository`", "competing hypothesis",
             // The brief, field by field, and the verifier rule.
             "`goal`", "`why`", "`scope`", "`known`", "`readFirst`", "`doneChecks`", "`reviewOnly`", "`limits`", "`terminalx-report`", "the material, not your conclusion",
             // Reading reports and disagreement.

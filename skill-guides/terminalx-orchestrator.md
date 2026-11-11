@@ -40,7 +40,9 @@ three stages holds at most three workers at a time.
 ## 3. How to cut
 
 - One owner per file. List what a piece changes in `owns`; two pieces that own the same path are
-  refused (`shared_file`). A change that touches a shared file is either its own piece that the
+  refused (`shared_file`). Write each path relative to the repository root, as `git diff --name-only` prints it; an
+  absolute path or one with `..` is refused (`owns_outside_repository`), and a worker's diff is
+  held to what its piece owns. A change that touches a shared file is either its own piece that the
   others depend on, or it stays with you (section 8).
 - Each piece is self-contained: a worker knows nothing of your conversation. It has a clear
   deliverable it can finish and check by itself.
