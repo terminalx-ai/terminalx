@@ -54,9 +54,9 @@ const tab: TabEntry = {
   modified: "2026-09-04T00:00:00Z",
 };
 
-function TestComposer({ onSend, cwd }: { cwd?: string; onSend: (text: string, images: { mediaType: string; data: string; name?: string }[]) => Promise<void> | void }) {
+function TestComposer({ onSend, cwd, setupRunning = false }: { cwd?: string; onSend: (text: string, images: { mediaType: string; data: string; name?: string }[]) => Promise<void> | void; setupRunning?: boolean }) {
   const [draft, setDraft] = useState("");
-  return <Composer cwd={cwd} tab={tab} busy={false} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+  return <Composer cwd={cwd} tab={tab} busy={false} setupRunning={setupRunning} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
 }
 
 beforeEach(() => {
@@ -71,6 +71,15 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+it("shows setup progress while still letting the agent take a prompt", async () => {
+  const onSend = vi.fn();
+  render(<TestComposer onSend={onSend} setupRunning />);
+  expect(screen.getByText("Setup running")).toBeTruthy();
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Inspect the project" } });
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send" })));
+  expect(onSend).toHaveBeenCalledWith("Inspect the project", []);
 });
 
 describe("composer height", () => {

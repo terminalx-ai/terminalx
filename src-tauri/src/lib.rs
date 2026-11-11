@@ -140,6 +140,7 @@ mod session;
 mod sidebar_activity;
 mod session_archive;
 mod session_ops;
+mod workspace_setup;
 mod stray_processes;
 pub mod serve;
 pub mod sink;
@@ -607,6 +608,7 @@ pub fn run() {
             commands::app_activity_summary,
             commands::stats_usage_refresh,
             commands::create_session,
+            commands::workspace_setup,
             commands::create_quick_chat,
             commands::set_quick_chat_cwd,
             commands::move_quick_chat_to_project,

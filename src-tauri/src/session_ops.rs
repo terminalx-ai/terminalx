@@ -65,7 +65,7 @@ pub(crate) fn notify_sessions_deleted(sink: &dyn EventSink, removed: &[SessionEn
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTab {
     pub harness: String,
@@ -79,7 +79,7 @@ pub struct NewTab {
     pub permission_mode: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSession {
     #[serde(default)]
@@ -341,6 +341,11 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         if let Err(error) = crate::pr_associations::record_local(&entry.id, Path::new(&entry.cwd), &pr.url, entry.branch.as_deref().unwrap_or_default()) {
             log::warn!("Could not associate the starting pull request: {error:#}");
         }
+    }
+    // The checkout and index entry already exist. Setup bookkeeping must not
+    // turn a successful creation into an error that invites a duplicate retry.
+    if let Err(error) = crate::workspace_setup::prepare(&entry) {
+        log::warn!("Record workspace setup for {}: {error:#}", entry.id);
     }
     Ok(entry)
 }
@@ -1436,6 +1441,21 @@ mod tests {
         assert!(super::automatic_title("New session", ""));
         assert!(super::automatic_title("We can work on PRD", "We can work on PRD here\nand more"));
         assert!(!super::automatic_title("Pricing notes", "We can work on PRD here"));
+    }
+
+    #[test]
+    fn setup_persistence_failure_does_not_fail_an_existing_worktree_creation() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        projects::update(&project.path, projects::ProjectPatch {
+            scripts: Some(projects::RepositoryScripts { setup: "exit 0".into(), archive: String::new() }), ..Default::default()
+        }).unwrap();
+        // Setup cannot create its status directory after the index has landed.
+        std::fs::write(store::root().unwrap().join("sessions"), "not a directory").unwrap();
+        let entry = create_session_entry(named_request(dir.path(), Some("setup save failure"))).unwrap();
+        assert!(Path::new(&entry.cwd).is_dir());
+        assert_eq!(index::get(&entry.id).unwrap(), entry);
     }
 
     #[test]
