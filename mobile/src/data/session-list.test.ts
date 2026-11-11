@@ -111,9 +111,9 @@ describe("the chats a branch holds", () => {
       { id: "b", harness: "claude", title: "Claude Code", status: "waiting" },
       { id: "c", harness: "codex", title: null, status: "completed" },
     ] }))).toEqual([
-      { id: "a", name: "Functionality", harness: "claude", state: "working" },
-      { id: "b", name: "Claude Code", harness: "claude", state: "needs" },
-      { id: "c", name: "Codex", harness: "codex", state: "done" },
+      { id: "a", name: "Functionality", harness: "claude", state: "working", unread: false },
+      { id: "b", name: "Claude Code", harness: "claude", state: "needs", unread: false },
+      { id: "c", name: "Codex", harness: "codex", state: "done", unread: true },
     ]);
   });
 });
