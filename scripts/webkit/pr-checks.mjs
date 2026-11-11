@@ -16,6 +16,8 @@ function setup() {
   window.__checks = { reruns: [], prompts: [], copies: [], logs: [], pr };
   Object.assign(answers, {
     gh_available: true,
+    gh_connection_status: { state: "connected", details: null },
+    git_has_remote: true,
     pr_list: [pr], pr_details: pr,
     pr_associations: [{ url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd: session.cwd } }],
     work_status: { isRepo: true, dirty: false, branch: "feature", defaultBranch: "main", aheadOfBase: 1, head: "a", ahead: 0, behind: 0 },

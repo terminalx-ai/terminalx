@@ -473,14 +473,16 @@ mod tests {
     fn timeout_cleanup_fixture(stall_before_log: bool, previously_launched: bool) {
         let tmp = tempfile::tempdir().unwrap();
         let fake = tmp.path().join("agent-browser");
-        // A timeout may happen before the client handles or records a command.
+        // Setup and close succeed; snapshots can stall before command handling.
+        // Exec keeps a sleeping grandchild from retaining the output pipes.
         std::fs::write(&fake, r#"#!/bin/sh
 case "$*" in
   *close*) echo "$@" >> "$AB_LOG"; echo '{"success":true,"data":{"closed":true}}' ;;
-  *)
+  *snapshot*)
     if [ "$AB_STALL_BEFORE_LOG" = 1 ]; then exec sleep 5; fi
     echo "$@" >> "$AB_LOG"
     exec sleep 5 ;;
+  *) echo "$@" >> "$AB_LOG"; echo '{"success":true,"data":{}}' ;;
 esac
 "#).unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -493,8 +495,7 @@ esac
         let session = bridge.session("default", tmp.path().join("profile"), tmp.path().join("downloads"));
         if previously_launched {
             bridge.with_session(&session, |ctx| {
-                ctx.lane.launched = true;
-                ctx.lane.active_tab = Some("t1".into());
+                ctx.ensure_tab("t1").unwrap();
                 ctx.lane.capture_active = true;
             });
         }

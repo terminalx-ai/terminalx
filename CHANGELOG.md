@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Connect GitHub from the PR tab or Settings → Integrations in an embedded
+  sign-in terminal. Pushing a repository without a remote now offers a URL
+  field, or creation of a GitHub repository when signed in. Git failures show
+  a readable explanation with command output behind **Show details**. Connection
+  checks and login target the repository's host after resolving SSH aliases and
+  excluding unrelated remotes. Connection failures offer retry,
+  failed login output stays available, and repository creation works from linked
+  worktrees. PR conversations, check logs, reruns and Fix errors remain available after
+  connecting; failed reruns keep their output behind **Show details**. Remote setup
+  preserves file filters and folder view in the updated Changes panel. (PRO-166)
+
+- Keep native resend regression fixtures within their existing deadlines by
+  removing shell helper launches from the simulated protocol. (PRO-166 validation)
+
 - Keep sidebar New chat conversations in Chats with ordinary retention and
   project linking, while using the shared composer and saved agent settings.
   Branch drafts retain their requested project and advertised source branch.

@@ -8,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
 import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
+import { LocalGitHubConnection } from "@/components/changes/GitRecovery";
 import { AgentSetupCard } from "./AgentSetupCard";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
@@ -16,7 +17,7 @@ import { CLOUD_CONTROL_HAS_SETTING, CLOUD_CONTROL_POLICY, CLOUD_CONTROL_SETTING,
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { repoFile } from "@/lib/repo";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
-import { api, errorMessage, gh, issues, USAGE_REFRESH_MINUTES, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
+import { api, errorMessage, issues, USAGE_REFRESH_MINUTES, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
 import { forgetIssueViewers } from "@/lib/issueViewer";
 import { ComputerUseRows } from "./ComputerUseSettings";
 import changelog from "../../../CHANGELOG.md?raw";
@@ -443,11 +444,9 @@ export function IntegrationsTab() {
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [ghOk, setGhOk] = useState<boolean | null>(null);
   useEffect(() => {
     let live = true;
     issues.linearStatus().then((value) => live && setLinear(value)).catch(() => live && setLinear({ connected: false }));
-    gh.available().then((value) => live && setGhOk(value)).catch(() => live && setGhOk(false));
     return () => { live = false; };
   }, [revision]);
   const save = async (value: string) => {
@@ -469,19 +468,7 @@ export function IntegrationsTab() {
       <RegisteredSetting setting="integrations.github"><div>
         <div className="text-sm font-medium">GitHub</div>
         <p className="mt-0.5 text-xs text-muted-foreground">Issues and pull requests go through the GitHub CLI, which holds its own login.</p>
-        <div className="mt-2 flex items-center gap-2 text-xs">
-          {ghOk == null ? (
-            <Loader2 className="size-3.5 animate-spin text-faint" />
-          ) : ghOk ? (
-            <span className="flex items-center gap-1 text-add">
-              <Check className="size-3.5" /> gh is installed and signed in
-            </span>
-          ) : (
-            <span className="flex items-center gap-1 text-warning">
-              <CircleAlert className="size-3.5" /> Install gh and run <code className="font-mono">gh auth login</code>
-            </span>
-          )}
-        </div>
+        <LocalGitHubConnection />
       </div></RegisteredSetting>
       <RegisteredSetting setting="integrations.linear"><div>
         <div className="text-sm font-medium">Linear</div>

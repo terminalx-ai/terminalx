@@ -2,7 +2,7 @@ import { reviewFileReader } from "./reviewThreads";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor, type PrConversationAccess } from "@terminalx/portable/workspaceGit";
-import { api, errorMessage, gh, git, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
+import { api, errorMessage, gh, git, type GitHubConnectionStatus, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
 import type { BranchInfo, ChangedFile, CommitInfo, UnfinishedMerge, WorkStatus } from "@/types/session";
 
 /** A workspace's Git status, with what is left in progress in it. */
@@ -49,6 +49,11 @@ export interface GitSource {
   commitMerge?(merge: UnfinishedMerge): Promise<void>;
   abortMerge?(merge: UnfinishedMerge): Promise<void>;
   ghAvailable(): Promise<boolean>;
+  /** Local connection setup; cloud credentials belong to the workspace. */
+  githubStatus?(): Promise<GitHubConnectionStatus>;
+  hasRemote?(): Promise<boolean>;
+  addRemote?(url: string): Promise<void>;
+  createRepository?(name: string, privateRepo: boolean): Promise<void>;
   /** Actions operations are optional for runtimes that cannot yet serve logs. */
   checkLog?(prUrl: string, checkUrl: string, failed: boolean): Promise<CheckLog>;
   rerunCheck?(prUrl: string, checkUrl: string, failed: boolean): Promise<void>;
@@ -96,6 +101,10 @@ export function localGitSource(cwd: string): GitSource {
     commitMerge: (merge) => git.commitMerge(cwd, merge.head, merge.mergeHead).then(() => undefined),
     abortMerge: (merge) => git.abortMerge(cwd, merge.head, merge.mergeHead),
     ghAvailable: () => gh.available(),
+    githubStatus: () => gh.connectionStatus(cwd),
+    hasRemote: () => git.hasRemote(cwd),
+    addRemote: (url) => git.addRemote(cwd, url),
+    createRepository: (name, privateRepo) => gh.createRepository(cwd, name, privateRepo),
     checkLog: (prUrl, checkUrl, failed) => gh.checkLog(cwd, prUrl, checkUrl, failed),
     rerunCheck: (prUrl, checkUrl, failed) => gh.rerunCheck(cwd, prUrl, checkUrl, failed),
     prs: (branch) => gh.list(cwd, branch),
