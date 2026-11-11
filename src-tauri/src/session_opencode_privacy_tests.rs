@@ -153,8 +153,8 @@ server.serve_forever()
         { let ticket = crate::data_privacy::Ticket::default(); let _scope = ticket.scope().unwrap();
           rig.manager.respond_permission(SESSION, TAB, &request, "once").unwrap(); }
         arrived.recv_timeout(WAIT).unwrap();
+        assert!(rig.rt.lock().unwrap().pending.contains_key(&request), "enqueueing must retain the card while the provider awaits delivery");
         assert!(rig.manager.respond_permission(SESSION, TAB, &request, "reject").unwrap_err().to_string().contains("still being delivered"));
-        assert!(rig.rt.lock().unwrap().pending.contains_key(&request));
         assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
         policy(true); if cycle { policy(false); }
         release.send(()).unwrap();
@@ -223,7 +223,7 @@ server.serve_forever()
 }
 
 #[test]
-fn privacy_native3_opencode_revoked_approval_stays_answerable() {
+fn privacy_review3_revoked_approval_opencode_stays_answerable() {
     for kind in ["personal-on", "personal-cycle", "managed-on", "managed-cycle"] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "session::watch_tests::prompts::privacy::opencode_privacy::opening_child", "--nocapture"])

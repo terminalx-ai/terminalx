@@ -1934,8 +1934,13 @@ fn privacy_review3_high_codex_startup_retains_remote_ticket() {
 }
 
 #[test]
-fn privacy_native3_codex_approval_and_followup_delivery() {
-    for action in ["approval", "followup"] { native3_delivery_cases(action); }
+fn privacy_review3_revoked_approval_codex_stays_answerable() {
+    native3_delivery_cases("approval");
+}
+
+#[test]
+fn privacy_native3_codex_followup_delivery() {
+    native3_delivery_cases("followup");
 }
 
 fn native3_delivery_cases(action: &str) {
@@ -2058,8 +2063,8 @@ fn native3_fixture(case: &str, manager: &SessionManager, root: &Path, bin: &Path
         { let ticket = crate::data_privacy::Ticket::default(); let _scope = ticket.scope().unwrap();
           manager.respond_permission("stdio-owner", "tab", &request, "allow").unwrap(); }
         arrived.recv_timeout(WAIT).unwrap();
+        assert!(rt.lock().unwrap().pending.contains_key(&request), "enqueueing must retain the card while the provider awaits delivery");
         assert!(manager.respond_permission("stdio-owner", "tab", &request, "deny").unwrap_err().to_string().contains("still being delivered"));
-        assert!(rt.lock().unwrap().pending.contains_key(&request));
         assert!(!events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
         policy(true); if case.ends_with("cycle") { policy(false); }
         release.send(()).unwrap();
