@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// PRO-274, PRO-275: a session's Run view and Settings → Orchestrator in WebKit,
+// PRO-274, PRO-275, PRO-278: a session's Run view and Settings → Orchestrator in WebKit,
 // at the window's wide and narrow sizes, light and dark: a plan waiting for
-// approval, a run with workers, a piece blocked after three tries, a session
-// with no run, and the settings with the routing table. A synthetic run
+// approval, a run with workers and results being checked, a piece blocked
+// after three tries with the done-check that failed, a session with no run,
+// and the settings with the routing table. A synthetic run
 // behind the Tauri stub; nothing is started, and Approve, Edit, Stop and the
 // settings are answered by the stub the way the engine answers them.
 // pnpm build && node scripts/webkit/orchestration.mjs
@@ -65,6 +66,8 @@ function setup({ mode, scene, enabled }) {
       maxTries: 3,
       costUsd: costs.length ? costs.reduce((sum, value) => sum + value, 0) : null,
       costUnpricedModels: [],
+      // What every verifier session used, apart from the workers: `engine::shown`.
+      verifierTokens: (() => { const used = run.pieces.flatMap((piece) => piece.tries ?? []).flatMap((attempt) => attempt.verification?.review?.verifiers ?? []).filter((one) => one.tokens).map((one) => one.tokens.input + one.tokens.output + one.tokens.cacheRead + one.tokens.cacheWrite); return used.length ? used.reduce((sum, value) => sum + value, 0) : null; })(),
       estimate: known.length ? { low: known.reduce((sum, piece) => sum + piece.estimate.low, 0), high: known.reduce((sum, piece) => sum + piece.estimate.high, 0) } : null,
       unestimated: run.pieces.length - known.length,
       ready: run.state === "running" ? run.pieces.filter((piece) => piece.state === "queued" && piece.dependsOn.every(done)).map((piece) => piece.id) : [],
@@ -74,12 +77,38 @@ function setup({ mode, scene, enabled }) {
   const base = { id: "01a1cabc-2fa5-7380-8770-af2097ca9149", lead: { sessionId: session.id, tabId: session.tabs[0].id }, projectPath: session.projectPath, goal: "Move settings reads to the typed store", budget: { points: 25 }, workerMode: "bypassPermissions", created: at(20), modified: at(1) };
   const worker = (id) => ({ sessionId: `worker-${id}`, tabId: `worker-${id}-tab` });
   const started = (id, state, note, attempts = 1) => ({ state, note, attempts, worker: worker(id), branch: `raccoon/${id}-piece`, startedMode: "bypassPermissions" });
+  // How a result was checked (PRO-278): the gates TerminalX ran itself, and the verifier where one was asked.
+  const gate = (name, passed = true, detail) => ({ gate: name, passed, ...(detail ? { detail } : {}) });
+  const ran = (run, exitCode, millis, output) => ({ run, exitCode, passed: exitCode === 0, millis, ...(output ? { output } : {}) });
+  const commands = (...runs) => ({ gate: "commands", passed: runs.every((command) => command.passed), commands: runs });
+  const verifier = (id, extra = {}) => ({ session: { sessionId: `worker-${id}`, tabId: `worker-${id}-verifier` }, model: "sonnet", effort: "medium", ...extra });
+  const tried = (id, model, effort, tierName, costUsd, verification) => [{ step: "first", model, effort, tier: tierName, worker: worker(id), branch: `raccoon/${id}-piece`, outcome: "done", costUsd, verification, started: at(13), ended: at(4) }];
   const running = {
-    map: started("map", "done", "41 call sites in 9 files."),
-    store: started("store", "done", "Store added, 14 tests pass. Unknown keys are kept on save."),
-    session: started("session", "running"),
-    pipeline: started("pipeline", "blocked", "Reported partial: two call sites read a key the store does not have yet."),
-    cli: started("cli", "running", "Retry: the check failed once.", 2),
+    // Review only: no command to run, so a verifier read the list.
+    map: { ...started("map", "done", "41 call sites in 9 files."), tier: "small", tries: tried("map", "haiku", undefined, "small", 0.04, {
+      outcome: "passed", facts: { files: [], changedLines: 0, commit: "9d2c1b0" }, gates: [gate("report"), gate("scope"), gate("branch"), gate("review", true, "The verifier passed it.")],
+      review: { reasons: ["No command proves this piece: it is checked by review alone."], voters: 1, threshold: 1, promptChars: 3100, verifiers: [verifier("map", { verdict: "pass", tokens: { input: 2900, output: 240, cacheRead: 0, cacheWrite: 0 } })] },
+    }) },
+    // Accepted by the gates, then read because the plan asks for a review.
+    store: { ...started("store", "done", "Store added, 14 tests pass. Unknown keys are kept on save."), tier: "large", tries: tried("store", "opus", "medium", "large", 1.82, {
+      outcome: "passed", facts: { files: ["src-tauri/src/store/settings/mod.rs", "src-tauri/src/store/settings/migrate.rs", "src-tauri/src/store/mod.rs"], changedLines: 312, commit: "4c1e9a7" },
+      gates: [gate("report"), gate("scope", true, "3 files changed, all within what the piece owns."), gate("branch"), commands(ran("cargo t store::settings", 0, 37_600)), gate("review", true, "The verifier passed it.")],
+      review: { reasons: ["The plan asks for a review of this piece."], voters: 1, threshold: 1, promptChars: 21_400, verifiers: [verifier("store", { verdict: "pass", tokens: { input: 6100, output: 310, cacheRead: 0, cacheWrite: 0 } })] },
+    }) },
+    session: { ...started("session", "running"), tier: "mid", tries: [{ step: "first", model: "sonnet", effort: "medium", tier: "mid", worker: worker("session"), branch: "raccoon/session-piece", costUsd: 0.61, started: at(6) }] },
+    // Its commands passed; it touches a security area, so a verifier is reading the diff.
+    pipeline: { ...started("pipeline", "verifying", "12 reads moved"), tier: "mid", tries: tried("pipeline", "sonnet", "medium", "mid", 0.74, {
+      facts: { files: ["src-tauri/src/issue_pipeline/engine.rs", "src-tauri/src/issue_pipeline/cloud_merge.rs"], changedLines: 148, securityAreas: ["authorization"], commit: "b71f03e" },
+      gates: [gate("report"), gate("scope", true, "2 files changed, all within what the piece owns."), gate("branch"), commands(ran("! rg -q 'settings::get' src-tauri/src/issue_pipeline", 0, 400))],
+      review: { reasons: ["The change touches a security area: authorization."], voters: 1, threshold: 1, promptChars: 17_900, verifiers: [verifier("pipeline")] },
+    }) },
+    // Its first try's done-check failed; a second worker is at it, on more effort.
+    cli: { ...started("cli", "running", undefined, 2), effort: "high", tier: "mid", worker: { sessionId: "worker-cli-2", tabId: "worker-cli-2-tab" }, tries: [
+      { step: "first", model: "sonnet", effort: "medium", tier: "mid", worker: { sessionId: "worker-cli-1", tabId: "worker-cli-1-tab" }, branch: "raccoon/cli-piece", outcome: "checkFailed", costUsd: 0.61, started: at(12), ended: at(5),
+        detail: "The result did not pass the command checks check, which TerminalX ran on it after the worker reported done.",
+        verification: { outcome: "failed", facts: { files: ["src-tauri/src/cli.rs"], changedLines: 90, commit: "0aa41c2" }, gates: [gate("report"), gate("scope"), gate("branch"), commands(ran("cargo t control", 101, 41_000, "test control::tests::create_reads_default_mode ... FAILED\ntest control::tests::create_reads_project_mode ... FAILED\ntest result: FAILED. 10 passed; 2 failed"))] } },
+      { step: "effort", model: "sonnet", effort: "high", tier: "mid", worker: { sessionId: "worker-cli-2", tabId: "worker-cli-2-tab" }, branch: "raccoon/cli-try2-piece", costUsd: 0.31, started: at(2) },
+    ] },
     docs: {},
   };
   // A piece blocked after three tries (design 18.03): four pieces done, the fifth out of tries, the sixth waiting on it.
@@ -90,16 +119,26 @@ function setup({ mode, scene, enabled }) {
     store: once("store", "opus", "medium", "large", "Store added, 14 tests pass", 1.82),
     session: once("session", "sonnet", "medium", "mid", "17 reads moved", 0.88),
     pipeline: {
-      ...started("pipeline", "done", "12 reads moved, the check passes", 2), tier: "mid", effort: "high",
-      tries: [attempt("pipeline", 1, "first", "sonnet", "medium", "mid", "partial", "The worker reported partial: two call sites read a key the store does not have yet.", 0.38), attempt("pipeline", 2, "effort", "sonnet", "high", "mid", "done", "12 reads moved, the check passes", 0.59)],
+      ...started("pipeline", "done", "12 reads moved", 2), tier: "mid", effort: "high",
+      tries: [
+        attempt("pipeline", 1, "first", "sonnet", "medium", "mid", "partial", "The worker reported partial: two call sites read a key the store does not have yet.", 0.38),
+        { ...attempt("pipeline", 2, "effort", "sonnet", "high", "mid", "done", "12 reads moved", 0.59), verification: {
+          outcome: "passed", facts: { files: ["src-tauri/src/issue_pipeline/engine.rs"], changedLines: 148, securityAreas: ["authorization"], commit: "b71f03e" },
+          gates: [gate("report"), gate("scope"), gate("branch"), commands(ran("! rg -q 'settings::get' src-tauri/src/issue_pipeline", 0, 400)), gate("review", true, "The verifier passed it.")],
+          review: { reasons: ["The change touches a security area: authorization."], voters: 1, threshold: 1, promptChars: 17_900, verifiers: [verifier("pipeline-2", { verdict: "pass", tokens: { input: 5400, output: 180, cacheRead: 0, cacheWrite: 0 } })] },
+        } },
+      ],
     },
     cli: {
       ...started("cli", "blocked", "Blocked after 3 tries: sonnet at medium, then sonnet at high, then opus at medium. It used all 3 tries. Last failure: The done-check did not hold: cargo t control", 3),
       model: "opus", effort: "medium", tier: "large", worker: { sessionId: "worker-cli-3", tabId: "worker-cli-3-tab" }, branch: "raccoon/cli-try3-piece",
       tries: [
-        attempt("cli", 1, "first", "sonnet", "medium", "mid", "checkFailed", "The done-check did not hold: cargo t control\ntest control::tests::create_reads_default_mode ... FAILED\ntest control::tests::create_reads_project_mode ... FAILED", 0.61),
-        attempt("cli", 2, "effort", "sonnet", "high", "mid", "checkFailed", "The done-check did not hold: cargo t control\ntest control::tests::create_reads_default_mode ... FAILED", 0.92),
-        attempt("cli", 3, "tier", "opus", "medium", "large", "checkFailed", "The done-check did not hold: cargo t control\ntest control::tests::create_reads_default_mode ... FAILED\nleft: Some(\"manual\")  right: Some(\"auto\")\ncontrol.rs:1184", 2.18),
+        { ...attempt("cli", 1, "first", "sonnet", "medium", "mid", "checkFailed", "The result did not pass the command checks check.", 0.61), verification: { outcome: "failed", gates: [gate("report"), gate("scope"), gate("branch"), commands(ran("cargo t control", 101, 39_000, "test control::tests::create_reads_default_mode ... FAILED\ntest control::tests::create_reads_project_mode ... FAILED"))] } },
+        { ...attempt("cli", 2, "effort", "sonnet", "high", "mid", "checkFailed", "The result did not pass the command checks check.", 0.92), verification: { outcome: "failed", gates: [gate("report"), gate("scope"), gate("branch"), commands(ran("cargo t control", 101, 40_000, "test control::tests::create_reads_default_mode ... FAILED"))] } },
+        { ...attempt("cli", 3, "tier", "opus", "medium", "large", "checkFailed", "The result did not pass the command checks check.", 2.18), verification: {
+          outcome: "failed", facts: { files: ["src-tauri/src/cli.rs", "src-tauri/src/control.rs"], changedLines: 96, commit: "e19c7d4" },
+          gates: [gate("report"), gate("scope"), gate("branch"), commands(ran("cargo t control", 101, 41_000, "running 12 tests\ntest control::tests::create_reads_default_mode ... FAILED\nleft: Some(\"manual\")  right: Some(\"auto\")\ncontrol.rs:1184"))],
+        } },
       ],
     },
     docs: {},
@@ -109,7 +148,7 @@ function setup({ mode, scene, enabled }) {
       : scene === "blocked" ? { ...base, state: "failed", reason: "cli is blocked after 3 tries. docs cannot start without it.", approval: { at: at(46) }, pieces: pieces.map((piece) => ({ ...piece, ...blocked[piece.id] })) }
       : scene === "running" ? { ...base, state: "running", approval: { at: at(14) }, pieces: pieces.map((piece) => ({ ...piece, ...running[piece.id] })) }
       : { ...base, state: "awaitingApproval", pieces },
-    settings: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", projects: {} },
+    settings: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", reviewDiffLines: 400, projects: {} },
     experimental: { nativeCodex: false, orchestratorRuns: enabled },
   };
   window.__RUNS__ = { state, calls: [] };
@@ -289,14 +328,36 @@ try {
         await view.getByRole("table", { name: "Pieces" }).waitFor();
         await view.locator('[data-piece="store"] button').first().click();
         const layout = await layoutOf(view);
-        const detail = await view.getByTestId("piece-detail").textContent();
+        const panel = view.getByTestId("piece-detail");
+        const detail = await panel.textContent();
         await shot(page, "running");
         const states = layout.rows.map((row) => row.state).join();
+        const gatesOf = () => panel.locator("[data-gate]").evaluateAll((items) => items.map((item) => `${item.dataset.gate}:${item.dataset.gateState}`).join());
+        const rowReport = (id) => view.locator(`[data-piece="${id}"]`).getByTestId("piece-report").textContent();
+        // A done piece: every gate it went through, the done-check as TerminalX ran it, and the verifier that read it.
+        const accepted = { gates: await gatesOf(), check: await panel.getByTestId("done-check").textContent(), review: await panel.getByTestId("piece-review").textContent(), mark: await panel.getByTestId("piece-check-passed").textContent() };
+        // A piece being checked: what it waits on, and the verifier reading it.
+        await view.locator('[data-piece="pipeline"] button').first().click();
+        await panel.getByTestId("piece-review").waitFor();
+        const verifying = { gates: await gatesOf(), review: await panel.getByTestId("piece-review").textContent(), text: await panel.textContent(), layout: await layoutOf(view) };
+        await shot(page, "verifying");
+        // A piece on its second try: why the first went back.
+        await view.locator('[data-piece="cli"] button').first().click();
+        await panel.getByTestId("done-check").waitFor();
+        const retried = { title: await panel.textContent(), gates: await gatesOf(), check: await panel.getByTestId("done-check").textContent(), layout: await layoutOf(view) };
+        await shot(page, "retry");
+        await view.locator('[data-piece="store"] button').first().click();
         const checks = {
           "the Run tab carries no waiting mark": (await page.getByTestId("run-strip").getByRole("status").count()) === 0,
           "the run says how many pieces are done and that the plan was approved": (await view.getByTestId("run-done").textContent()) === "2" && (await view.getByRole("region", { name: "Run summary" }).textContent()).includes("of 6 done") && (await view.getByText("6 pieces · started 14m ago · approved by you", { exact: true }).count()) === 1,
-          "each piece shows the state its worker reported": states === "done,done,running,blocked,running,queued",
-          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultStore added, 14 tests pass.") && detail.includes("raccoon/store-piece") && (await view.getByRole("button", { name: "Open worker", exact: true }).count()) === 1,
+          "each piece shows where it stands: one being checked is verifying, not done": states === "done,done,running,verifying,running,queued",
+          "a row says what a piece being checked waits on, and that a verifier passed one": size.width < 1200 || ((await rowReport("pipeline")) === "Waiting on the verifier" && (await rowReport("store")) === "Store added, 14 tests pass. Unknown keys are kept on save., verifier passed"),
+          "a done piece shows the gates it passed and its done-check as it ran": accepted.gates === "report:passed,scope:passed,branch:passed,commands:passed,review:passed" && accepted.check === "Done-checkpassed · 38scargo t store::settings" && accepted.mark === "· checked and read",
+          "the verifier that read it shows why it was asked, its verdict and what it used": ["Verifierpassed · 6.4k tokens", "The plan asks for a review of this piece.", "Sonnet 5.5 Medium", "Pass"].every((said) => accepted.review.includes(said)),
+          "a piece being checked shows its gates passed and its verifier reading": verifying.gates === "report:passed,scope:passed,branch:passed,commands:passed,review:running" && ["Verifierreading", "The change touches a security area: authorization.", "Reading"].every((said) => verifying.review.includes(said)) && verifying.text.includes("Waiting on the verifier. Nothing that depends on it starts until it has passed."),
+          "a piece on its second try shows the check that sent the first back": retried.title.includes("Checks of try 1") && retried.gates === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && retried.check.includes("Done-checkfailed · exit 101cargo t control") && retried.check.includes("test result: FAILED. 10 passed; 2 failed"),
+          "the checks fit their panel at every size": [verifying.layout, retried.layout].every((seen) => !seen.scrolls && seen.outside === 0 && !seen.overlaps && seen.smallest >= 10.5),
+          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultStore added, 14 tests pass.") && detail.includes("raccoon/store-piece") && (await view.getByRole("button", { name: "Open worker", exact: true }).count()) === 2,
           "the plan can no longer be edited or approved": (await view.getByRole("button", { name: "Approve and start" }).count()) === 0 && (await view.getByRole("button", { name: "Edit plan" }).count()) === 0 && (await view.getByRole("combobox").count()) === 0,
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
         };
@@ -340,7 +401,9 @@ try {
             && ["Sonnet 5.5 Medium", "$0.61", "First try", "Check failed: cargo t control"].every((text) => said[0].includes(text))
             && ["Sonnet 5.5 High", "$0.92", "Retried with the failure text, effort raised one level"].every((text) => said[1].includes(text))
             && ["Opus 5.5 Medium", "$2.18", "Moved up one model at one effort level lower"].every((text) => said[2].includes(text)),
-          "the last try shows what the check printed": (await tries.nth(2).locator("pre").textContent()).includes('left: Some("manual")  right: Some("auto")'),
+          "the failed done-check shows its command, its exit code and the end of what it printed": await (async () => { const check = await detail.getByTestId("done-check").textContent(); return check.startsWith("Done-checkfailed · exit 101cargo t control") && check.includes("test control::tests::create_reads_default_mode ... FAILED") && check.includes('left: Some("manual")  right: Some("auto")') && check.includes("control.rs:1184"); })(),
+          "the gates before the command passed, and no model was asked after it failed": (await detail.locator("[data-gate]").evaluateAll((items) => items.map((item) => `${item.dataset.gate}:${item.dataset.gateState}`).join())) === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && (await detail.getByTestId("piece-review").count()) === 0,
+          "a piece a verifier passed says so in its row": !wide || (await view.locator('[data-piece="pipeline"]').getByTestId("piece-report").textContent()) === "12 reads moved, verifier passed",
           "every try can be opened": (await detail.getByRole("button", { name: "Open worker", exact: true }).count()) === 4,
           "the table's columns are the design's, where there is room": !wide || (await view.getByRole("table", { name: "Pieces" }).getByRole("columnheader").allTextContents()).join() === "Piece,Model,State,Tries,Cost,Report",
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
@@ -404,6 +467,7 @@ try {
         const routingLayout = await layoutOf(tab.getByTestId("routing-table"));
         const checks = {
           "the page states the three limits with their stored values": (await tab.getByRole("switch", { name: "Ask before a run starts" }).getAttribute("aria-checked")) === "true" && (await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).inputValue()) === "8" && (await tab.getByRole("combobox", { name: "Workers run in" }).inputValue()) === "bypassPermissions",
+          "the page says how results are checked, and over how many changed lines a verifier reads one": (await tab.getByRole("spinbutton", { name: "Changed lines a result is accepted at without a verifier, at most" }).inputValue()) === "400" && (await tab.textContent()).includes("None of that uses a model."),
           "the mode's row says what stays blocked in every mode": (await tab.getByText("Push, merge and deploy stay blocked by deny rules in every mode.", { exact: false }).count()) === 1,
           "the routing table has a row for each kind and a column for each agent": (await routing.locator("[role=row][data-kind]").count()) === 8 && (await routing.getByRole("columnheader", { name: "Claude Code workers" }).count()) === 1 && (await routing.getByRole("columnheader", { name: "Codex workers" }).count()) === 1,
           "each kind starts on its tier's model and effort, the same tiers for both agents": table.search === "Haiku 5.5,Default,GPT-6 Luna,Default" && table.logs === table.search
@@ -434,7 +498,7 @@ try {
         await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 6);
         await shot(page, "settings-repository");
         calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(3));
-        checks["a repository's rows show the defaults they follow"] = defaults.includes("Default (off)") && defaults.includes("Default (Accept edits)") && (await own.getByRole("spinbutton").getAttribute("placeholder")) === "12";
+        checks["a repository's rows show the defaults they follow"] = defaults.includes("Default (off)") && defaults.includes("Default (Accept edits)") && (await own.getByRole("spinbutton", { name: /^Pieces per run/ }).getAttribute("placeholder")) === "12";
         checks["a repository saves its own answers by its path, and null follows the app again"] = JSON.stringify(calls) === JSON.stringify([{ project: "/repos/p0", requireApproval: true }, { project: "/repos/p0", workerMode: "manual" }, { project: "/repos/p0", requireApproval: null }]);
         // The repository's routing rows follow the app until it names a tier of its own.
         const ownCell = (name) => own.getByRole("combobox", { name, exact: true });
