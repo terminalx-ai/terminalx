@@ -310,6 +310,19 @@ describe("cloud pipeline switches saved by a newer version", () => {
   });
 });
 
+describe("follow-up delivery preferences", () => {
+  it("preserves today's default and persists Hold across restarts", async () => {
+    const { getPrefs, setPrefs } = await import("./prefs");
+    expect(getPrefs().followUps).toBe("now");
+    setPrefs({ followUps: "hold" });
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().followUps).toBe("hold");
+  });
+  it("uses the default for an unrecognized saved value", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ followUps: "invalid" }));
+    expect((await import("./prefs")).getPrefs().followUps).toBe("now");
+  });
+});
 
 describe("sidebar choices per window (PRO-164)", () => {
   it.each([

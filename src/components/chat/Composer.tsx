@@ -108,6 +108,7 @@ export function Composer({
   draft,
   onDraftChange,
   onSend,
+  followUps,
   sentAfter,
   history = NO_HISTORY,
   onStop,
@@ -144,7 +145,8 @@ export function Composer({
   busy: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
-  onSend: (text: string, images: ImageInput[]) => Promise<void> | void;
+  onSend: (text: string, images: ImageInput[], alternate?: boolean) => Promise<void> | void;
+  followUps?: "now" | "hold";
   /** The tab's newest event, read as Send is pressed: the sent message's own event comes after it (#727). */
   sentAfter?: () => number;
   /** The messages already sent in this tab, oldest first, for Up and Down to recall (`sentMessages`). */
@@ -404,7 +406,7 @@ export function Composer({
     [token, draft, caret, onDraftChange],
   );
 
-  const send = useCallback(async () => {
+  const send = useCallback(async (alternate = false) => {
     const text = draft.trim();
     if ((!text && !attachments.length) || disabled) return;
     const previews = attachments.map((a) => ({ url: a.previewUrl, name: a.name }));
@@ -420,7 +422,8 @@ export function Composer({
     const images = attach.setAside();
     ref.current?.focus({ preventScroll: true });
     try {
-      await onSend(text, images.images);
+      if (alternate) await onSend(text, images.images, true);
+      else await onSend(text, images.images);
     } catch (error) {
       // Back in the composer; into the tab's saved draft once this one has gone.
       if (mounted.current) {
@@ -469,6 +472,11 @@ export function Composer({
       void send();
       return;
     }
+    if (followUps && matchesShortcut(e.nativeEvent, "composer.sendAlternate")) {
+      e.preventDefault();
+      void send(true);
+      return;
+    }
     // Enter that is not Send already breaks the line; any other key for New line has to do it itself.
     if (matchesShortcut(e.nativeEvent, "composer.newLine") && e.key !== "Enter") {
       e.preventDefault();
@@ -476,7 +484,12 @@ export function Composer({
     }
   };
 
-  const placeholder = busy ? "Send a follow-up (it queues until the agent pauses)" : "Ask, build, or describe the next step";
+  const alternateKeys = keysOf("composer.sendAlternate").join("+");
+  const sendLabel = busy && followUps === "hold" ? "Hold until the turn ends" : "Send";
+  const sendHint = busy && followUps && alternateKeys
+    ? `${sendLabel} · ${alternateKeys} ${followUps === "hold" ? "interrupts and sends" : "holds until the turn ends"}`
+    : sendLabel;
+  const placeholder = busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up to the agent") : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
   // An alias reads as the version it is running, once someone has said which.
   const modelName = model ? runningModelName(model, reportedModel) : tab.model ? prettyModelId(tab.model) : "Model";
@@ -673,7 +686,7 @@ export function Composer({
                 </Button>
               </WithTooltip>
             ) : (
-              <WithTooltip label={sending ? "Sending…" : busy ? "Queue" : "Send"} keys={keysOf("composer.send")}>
+              <WithTooltip label={sending ? "Sending…" : sendHint} keys={keysOf("composer.send")}>
                 <Button
                   size="icon-sm"
                   className={CORNER}

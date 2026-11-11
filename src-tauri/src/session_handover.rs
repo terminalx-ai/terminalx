@@ -63,6 +63,8 @@ pub(crate) struct TabRecord {
     #[serde(default)]
     pub queued: Vec<QueuedMessage>,
     #[serde(default)]
+    pub held_queue: held::Queue,
+    #[serde(default)]
     pub turn_open: bool,
     #[serde(default)]
     pub turn_opener: Option<(String, String)>,
@@ -440,6 +442,9 @@ impl SessionManager {
     /// carry. Fails with [`Unsettled`] while it is about to change.
     fn tab_record(&self, rt: &TabRuntime) -> Result<Option<TabRecord>> {
         let name = || format!("{}/{}", rt.session_id, rt.tab_id);
+        if rt.held_queue.sending.is_some() {
+            return Err(Unsettled(format!("A held follow-up in {} is being delivered", name())).into());
+        }
         if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting {
             return Err(Unsettled(format!("The agent in {} is starting or stopping", name())).into());
         }
@@ -460,6 +465,7 @@ impl SessionManager {
                 },
             }).collect(),
             queued: rt.queued.clone(),
+            held_queue: rt.held_queue.clone(),
             turn_open: rt.turn_open,
             turn_opener: rt.turn_opener.map(|(source, kind)| (source.to_string(), kind.to_string())),
             turn_by_command: rt.turn_by_command,
@@ -478,7 +484,7 @@ impl SessionManager {
         };
         let Engine::Cli(p) = &rt.engine else {
             // Nothing runs for it: only what is waiting goes over.
-            let waiting = !record.queued.is_empty() || record.left_at.is_some();
+            let waiting = !record.held_queue.items.is_empty() || !record.queued.is_empty() || record.left_at.is_some();
             return Ok(waiting.then_some(record));
         };
         let (path, offset, began, carried) = p.tail.position();
@@ -549,6 +555,7 @@ impl SessionManager {
             tool_use_id: ask.tool_use_id.clone(), tool_name: ask.tool_name.clone(), input: ask.input.clone(), suggestions: ask.suggestions.clone(),
         })).collect();
         rt.queued = record.queued;
+        rt.held_queue = record.held_queue;
         rt.turn_open = record.turn_open;
         rt.turn_opener = record.turn_opener.as_ref().and_then(|(source, kind)| Some((label(source)?, label(kind)?)));
         rt.turn_by_command = record.turn_by_command;

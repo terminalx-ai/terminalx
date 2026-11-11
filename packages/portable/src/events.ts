@@ -119,6 +119,15 @@ export type Delta =
 
 export type RecoveryKind = "capacity" | "usage_limit" | "tool" | "timeout" | "delivery_unconfirmed" | "unsent" | "disconnected" | "permission_expired" | "signed_out" | "failed";
 
+export interface HeldFollowUp { id: string; text: string; images: ImageRef[] }
+export interface HeldQueue {
+  items: HeldFollowUp[];
+  paused: boolean;
+  sending: string | null;
+  next: string | null;
+  error: string | null;
+}
+
 /** Reported by Codex; tokensUsed is goal usage, not context-window occupancy. */
 export interface Goal {
   objective: string;
@@ -128,6 +137,7 @@ export interface Goal {
 }
 
 export type Payload =
+  | { type: "held_queue"; queue: HeldQueue }
   | { type: "goal_updated"; goal: Goal }
   | { type: "goal_cleared" }
   | { type: "recovery"; kind: RecoveryKind | null }

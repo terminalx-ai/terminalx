@@ -278,6 +278,8 @@ pub enum GoalStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Payload {
+    /// Reader-owned messages that have not been sent to the agent.
+    HeldQueue { queue: crate::session::held::Queue },
     /// A durable snapshot, including counters: reopening the chat must restore the banner.
     GoalUpdated { goal: Goal },
     GoalCleared,

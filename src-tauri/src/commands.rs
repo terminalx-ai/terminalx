@@ -2700,6 +2700,13 @@ pub async fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: St
     tauri::async_runtime::spawn_blocking(move || m.stop(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
 
+/// Change a reader-owned follow-up queue, persisting before acknowledging.
+#[tauri::command]
+pub async fn change_held_queue(state: State<'_, AppState>, session_id: String, tab_id: String, change: crate::session::held::Change) -> CmdResult<SendOutcome> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.change_held(&session_id, &tab_id, change).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn reset_chat(state: State<'_, AppState>, session_id: String, tab_id: String, end_seq: Option<u64>, reset_files: bool) -> CmdResult<Option<String>> {
     let m = state.sessions().map_err(err)?;

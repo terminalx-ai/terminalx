@@ -60,6 +60,7 @@ export interface Prefs {
    * notes beside them (see `@/lib/autocorrect`). Off unless the reader turned it on.
    */
   autocorrect: boolean;
+  followUps: "now" | "hold";
   lastProject: string | null;
   lastAgent: string;
   lastModel: Record<string, string>;
@@ -173,6 +174,7 @@ const DEFAULTS: Prefs = {
   promptMap: true,
   fixErrorsInstructions: "",
   autocorrect: false,
+  followUps: "now",
   lastProject: null,
   lastAgent: "claude",
   lastModel: {},
@@ -284,6 +286,7 @@ function load(legacyOnly = false): Prefs {
       if (!prefs[key] || typeof prefs[key] !== "object" || Array.isArray(prefs[key])) prefs[key] = {};
     }
     prefs.autocorrect = prefs.autocorrect === true;
+    prefs.followUps = prefs.followUps === "hold" ? "hold" : "now";
     prefs.prActivityOrder = prefs.prActivityOrder === "oldest" ? "oldest" : "newest";
     prefs.diffMode = prefs.diffMode === "split" ? "split" : "unified";
     prefs.diffHideWhitespace = prefs.diffHideWhitespace === true;

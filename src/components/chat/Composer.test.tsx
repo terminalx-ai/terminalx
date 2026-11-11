@@ -592,13 +592,13 @@ describe("composer history (PRO-85)", () => {
   // The draft lives outside the composer, as a tab's does, so it outlasts a remount.
   const drafts = new Map<string, string>();
 
-  function HistoryComposer({ history = SENT, cwd, onSend = vi.fn(), id = "tab-history" }: { history?: string[]; cwd?: string; onSend?: (text: string) => Promise<void> | void; id?: string }) {
+  function HistoryComposer({ history = SENT, cwd, onSend = vi.fn(), id = "tab-history", followUps }: { history?: string[]; cwd?: string; onSend?: (text: string) => Promise<void> | void; id?: string; followUps?: "now" | "hold" }) {
     const [draft, setDraft] = useState(drafts.get(id) ?? "");
     const change = (text: string) => {
       drafts.set(id, text);
       setDraft(text);
     };
-    return <Composer tab={{ ...tab, id }} cwd={cwd} busy={false} draft={draft} onDraftChange={change} onSend={onSend} history={history} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    return <Composer tab={{ ...tab, id }} followUps={followUps} cwd={cwd} busy={!!followUps} draft={draft} onDraftChange={change} onSend={onSend} history={history} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
   }
 
   const field = () => document.querySelector("textarea") as HTMLTextAreaElement;
@@ -762,13 +762,32 @@ describe("composer history (PRO-85)", () => {
       // `mod` is Ctrl in jsdom, which is not a Mac.
       setPrefs({ shortcuts: { "composer.send": ["mod+enter"] } });
       const onSend = vi.fn();
-      render(<HistoryComposer onSend={onSend} />);
+      render(<HistoryComposer onSend={onSend} followUps="now" />);
       type("a new message");
       // Not taken by the composer: the textarea breaks the line itself.
       expect(press("Enter")).toBe(false);
       expect(onSend).not.toHaveBeenCalled();
       expect(press("Enter", { ctrlKey: true })).toBe(true);
       await waitFor(() => expect(onSend).toHaveBeenCalledWith("a new message", []));
+    });
+
+    it.each(["now", "hold"] as const)("uses a rebound alternate shortcut with %s and releases the old key", async followUps => {
+      setPrefs({ shortcuts: { "composer.sendAlternate": ["mod+shift+enter"] } });
+      const onSend = vi.fn();
+      render(<HistoryComposer onSend={onSend} followUps={followUps} />);
+      type("a new message");
+      expect(press("Enter", { ctrlKey: true })).toBe(false);
+      expect(onSend).not.toHaveBeenCalled();
+      expect(press("Enter", { ctrlKey: true, shiftKey: true })).toBe(true);
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith("a new message", [], true));
+    });
+
+    it("does not claim the alternate key in a composer without held follow-ups", () => {
+      const onSend = vi.fn();
+      render(<HistoryComposer onSend={onSend} />);
+      type("a new message");
+      expect(press("Enter", { ctrlKey: true })).toBe(false);
+      expect(onSend).not.toHaveBeenCalled();
     });
 
     it("does not send at all when Send has no key", () => {

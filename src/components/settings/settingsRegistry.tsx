@@ -128,6 +128,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "action", location: "Skills page" },
   }),
   defineSetting({
+    id: "agents.followUps", section: "agents", title: "Follow-ups while the agent works",
+    description: "For local desktop chats on this device. Held messages are not read mid-turn; they go one per finished turn. Idle messages send immediately. The “Send the other way” shortcut in Shortcuts reverses this choice: hold, or interrupt and send. Phone and cloud messages keep their current behavior.",
+    searchTerms: ["queue", "hold", "follow-ups", "pause", "composer"], scope: "user",
+    storage: { kind: "localStorage", location: "raccoon.prefs#followUps" },
+  }),
+  defineSetting({
     id: "agents.idleStop", section: "agents", title: "Stop idle agents after",
     description: "An agent sitting at its prompt still holds its memory, its MCP servers and its language server. Once it has had nothing to do for this long it is stopped; its conversation stays, and your next message starts it again where it left off. An agent at work, waiting for your answer, or waiting on something it started (a background command, monitor or agent, a wakeup or scheduled job, a process it left running) keeps running, and so does one you started yourself in a terminal. An agent in an archived session, or one whose workspace was removed, is stopped after 10 idle minutes.",
     searchTerms: ["agents", "stop", "idle", "after"], scope: "user",
