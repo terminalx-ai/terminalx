@@ -1,5 +1,5 @@
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, TriangleAlert } from "@/icons";
 import { commitRange } from "@/lib/changesScope";
 import { useGitWorkingChanges } from "@/lib/changes";
@@ -14,6 +14,7 @@ import { FileDiff } from "./FileDiff";
 import { DiffOptions } from "./DiffOptions";
 import { useDiffOptions } from "@/lib/diffOptions";
 import { ReviewFileList } from "./ReviewFileList";
+import { AddRemote, GitError } from "./GitRecovery";
 
 export type RepoView = "uncommitted" | "history";
 
@@ -37,6 +38,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   revision?: number;
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
+  const selectedSource = useRef({ source, generation: 0 });
+  if (selectedSource.current.source !== source) selectedSource.current = { source, generation: selectedSource.current.generation + 1 };
+  const generation = selectedSource.current.generation;
   const [discarding, setDiscarding] = useState<{ path: string; oldPath?: string } | null>(null);
   const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
@@ -49,6 +53,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [operation, setOperation] = useState<string | undefined>();
+  const [needsRemote, setNeedsRemote] = useState(false);
   /** Null until the history is read: an empty list is then really empty. */
   const [commits, setCommits] = useState<CommitInfo[] | null>(null);
   const [openCommit, setOpenCommit] = useState<string | null>(null);
@@ -60,6 +66,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
     setSelected(null);
     setNotice(null);
     setError(null);
+    setNeedsRemote(false);
+    setBusy(null);
   }, [source]);
 
   useEffect(() => {
@@ -81,23 +89,35 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   }, [source, active, sub, tick]);
 
   const run = async (label: string, fn: () => Promise<string | null | void>) => {
+    setOperation(label);
     setBusy(label);
     setError(null);
     setNotice(null);
     try {
       const said = await fn();
+      if (selectedSource.current.generation !== generation) return false;
       if (said) setNotice(said);
       refresh();
       return true;
     } catch (e) {
+      if (selectedSource.current.generation !== generation) return false;
       setError(source.errorMessage(e));
       refresh();
       return false;
     } finally {
-      setBusy(null);
+      if (selectedSource.current.generation === generation) setBusy(null);
     }
   };
   const commit = () => void run("commit", () => source.commit(message.trim())).then((ok) => ok && setMessage(""));
+  const push = () => void run("push", async () => {
+    if (source.hasRemote && !await source.hasRemote()) {
+      if (selectedSource.current.generation === generation) setNeedsRemote(true);
+      return;
+    }
+    if (selectedSource.current.generation !== generation) return;
+    setNeedsRemote(false);
+    return source.push();
+  });
   const writable = source.canWrite;
 
   return (
@@ -120,9 +140,10 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
         </div>
       </div>}
       {!embedded && <DiffOptions />}
-      {error && <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      {needsRemote && source.addRemote && <AddRemote key={source.key} source={source} onDone={() => { setNeedsRemote(false); setError(null); setNotice("Remote added. Push when you’re ready."); refresh(); }} />}
+      {error && (source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} operation={operation} />)}
       {!error && readError != null && (
-        <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)}</div>
+        source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)}</div> : <GitError details={source.errorMessage(readError)} />
       )}
       {notice && <div role="status" className="mx-3 mb-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(status?.operation || !!status?.conflicted?.length) && (
@@ -173,7 +194,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                   {busy === "commit" ? <Loader2 className="animate-spin" /> : <Check />} Commit
                 </Button>
                 <WithTooltip label="Push">
-                  <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => void run("push", () => source.push())}>
+                  <Button size="sm" variant="secondary" disabled={!!busy} onClick={push}>
                     {busy === "push" ? <Loader2 className="animate-spin" /> : <ArrowUpFromLine />} Push
                   </Button>
                 </WithTooltip>

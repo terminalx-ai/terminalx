@@ -447,6 +447,28 @@ fn stored_manual_status<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::
     Ok(serde_json::from_value(value).ok())
 }
 
+/// The session that started another (PRO-270): `sessions create` run from
+/// inside a session, or told `--parent`. It is a record of who started whom
+/// and nothing more: it gives the parent no hold over the session, and
+/// deleting or archiving the parent leaves both the session and this as
+/// they are, so it may name a session that is gone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentRef {
+    pub session_id: String,
+    /// The tab that ran the command, when it is known: `--parent` names a
+    /// session only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+}
+
+/// A parent this build cannot read (a newer build's shape) is read as none
+/// rather than failing the whole index, as an unknown manual status is.
+fn stored_parent<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<ParentRef>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
@@ -506,11 +528,20 @@ pub struct SessionEntry {
     /// last worked in, and on which branch, so the chat shows under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<ChatLink>,
+    /// The session that started this one, if one did. Left out of the file
+    /// when empty, so an entry nothing started is written exactly as before.
+    #[serde(default, deserialize_with = "stored_parent", skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentRef>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 impl SessionEntry {
+    /// Whether `session_id` is recorded as having started this session.
+    pub fn started_by(&self, session_id: &str) -> bool {
+        self.parent.as_ref().is_some_and(|parent| parent.session_id == session_id)
+    }
+
     pub fn is_quick(&self) -> bool {
         self.kind == SessionKind::Quick
     }
@@ -940,6 +971,7 @@ mod tests {
             tabs: vec![],
             active_tab: None,
             link: None,
+            parent: None,
             unknown: BTreeMap::new(),
         }
     }
@@ -1372,6 +1404,77 @@ mod tests {
         // It rewrites the index (a rename, say): the session is still a quick chat afterwards.
         std::fs::write(file_path().unwrap(), serde_json::to_string(&old).unwrap()).unwrap();
         assert_eq!(load().unwrap()[0].kind, SessionKind::Quick);
+    }
+
+    /// PRO-270: the field is additive in both directions.
+    #[test]
+    fn a_parent_is_stored_only_where_there_is_one_and_older_and_newer_indexes_both_load() {
+        let _home = crate::store::temp_home();
+        // An index written before the field existed loads with it empty.
+        let before = r#"{"sessions":[{"id":"old","projectPath":"/p","cwd":"/p","title":"t","created":"x","modified":"y"}]}"#;
+        std::fs::write(file_path().unwrap(), before).unwrap();
+        assert_eq!(load().unwrap()[0].parent, None);
+
+        // A session nothing started is written exactly as before; one that was started says by whom.
+        let mut worker = entry("worker");
+        worker.parent = Some(ParentRef { session_id: "lead".into(), tab_id: Some("lead-tab".into()) });
+        let mut named = entry("named");
+        named.parent = Some(ParentRef { session_id: "lead".into(), tab_id: None });
+        save(&[entry("lead"), worker.clone(), named.clone()]).unwrap();
+        let text = std::fs::read_to_string(file_path().unwrap()).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(written["sessions"][0].get("parent").is_none());
+        assert_eq!(written["sessions"][1]["parent"], serde_json::json!({"sessionId": "lead", "tabId": "lead-tab"}));
+        assert_eq!(written["sessions"][2]["parent"], serde_json::json!({"sessionId": "lead"}));
+        let loaded = load().unwrap();
+        assert_eq!((&loaded[1].parent, &loaded[2].parent), (&worker.parent, &named.parent));
+        assert!(loaded[1].started_by("lead") && !loaded[1].started_by("worker") && !loaded[0].started_by("lead"));
+
+        // The previous release knows nothing of the field: it still reads
+        // every session, and what it writes back keeps the parent.
+        #[derive(Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldEntry {
+            id: String,
+            project_path: String,
+            cwd: String,
+            title: String,
+            #[serde(flatten, default)]
+            unknown: BTreeMap<String, serde_json::Value>,
+        }
+        #[derive(Serialize, Deserialize)]
+        struct OldIndex {
+            sessions: Vec<OldEntry>,
+            #[serde(flatten, default)]
+            unknown: BTreeMap<String, serde_json::Value>,
+        }
+        let mut old: OldIndex = serde_json::from_str(&text).expect("the previous release must still parse the index");
+        assert_eq!(old.sessions.iter().map(|session| session.id.as_str()).collect::<Vec<_>>(), ["lead", "worker", "named"]);
+        old.sessions[1].title = "renamed by the previous release".into();
+        std::fs::write(file_path().unwrap(), serde_json::to_string(&old).unwrap()).unwrap();
+        let back = load().unwrap();
+        assert_eq!(back.len(), 3);
+        assert_eq!((back[1].title.as_str(), &back[1].parent, &back[2].parent), ("renamed by the previous release", &worker.parent, &named.parent));
+
+        // Deleting the lead clears nothing: the record outlives it.
+        update(|sessions| { sessions.retain(|session| session.id != "lead"); Ok(()) }).unwrap();
+        assert!(load().unwrap().iter().all(|session| session.started_by("lead")));
+    }
+
+    #[test]
+    fn a_parent_this_build_cannot_read_does_not_cost_the_whole_index() {
+        let _home = crate::store::temp_home();
+        let mut rows = Vec::new();
+        for (id, value) in [("text", serde_json::json!("lead")), ("null", serde_json::Value::Null), ("number", serde_json::json!(7)), ("partial", serde_json::json!({"tabId": "t"})), ("known", serde_json::json!({"sessionId": "lead", "since": "a newer build's field"}))] {
+            let mut row = serde_json::to_value(entry(id)).unwrap();
+            row["parent"] = value;
+            rows.push(row);
+        }
+        std::fs::write(file_path().unwrap(), serde_json::to_vec(&serde_json::json!({"sessions": rows})).unwrap()).unwrap();
+        let loaded = load().unwrap();
+        assert_eq!(loaded.len(), 5);
+        assert!(loaded[..4].iter().all(|session| session.parent.is_none()));
+        assert_eq!(loaded[4].parent, Some(ParentRef { session_id: "lead".into(), tab_id: None }));
     }
 
     #[test]

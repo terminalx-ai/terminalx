@@ -706,6 +706,8 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
     let tabs = std::mem::take(&mut record.tabs);
     let frames = std::mem::take(&mut record.frames);
     let decisions = std::mem::take(&mut record.decisions);
+    // Before any tab taken over can record a change.
+    crate::store::activity::carry_on(std::mem::take(&mut record.activity));
     let (own, published) = (record.control.own, record.control.published);
     let emit: Arc<dyn EventSink> = sink.clone();
     for pane in panes {

@@ -61,8 +61,8 @@ interface State {
   newSessionReturn: { sessionId: string | null; view: State["view"] } | null;
   /** A new-session form pre-filled from a workspace row. */
   newSessionPreset: { projectPath: string; cwd: string | null; fromBranch?: string } | null;
-  /** The same composer, with no project or worktree. */
-  newSessionQuick: boolean;
+  /** An ordinary chat in the shared Chats directory, composed before its first send. */
+  newSessionChat: boolean;
   /** Personal local section chosen from its header; cleared on leaving the composer. */
   newSessionSectionId: string | null;
   /**
@@ -98,7 +98,7 @@ let state: State = {
   selectedCloudWorkspace: null,
   newSessionReturn: null,
   newSessionPreset: null,
-  newSessionQuick: false,
+  newSessionChat: false,
   newSessionSectionId: null,
   cloudSessionPreset: null,
   selectedCloudProject: null,
@@ -122,7 +122,7 @@ function set(patch: Partial<State>) {
   // Clear the draft destination when navigating away, not in React cleanup
   // (Strict Mode also runs cleanup when a workspace first mounts).
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
-  if (next.view !== "new" || next.selectedSessionId || "newSessionPreset" in patch || "cloudSessionPreset" in patch) next.newSessionQuick = patch.newSessionQuick ?? false;
+  if (next.view !== "new" || next.selectedSessionId || "newSessionPreset" in patch || "cloudSessionPreset" in patch) next.newSessionChat = patch.newSessionChat ?? false;
   if (next.view !== "new" || next.selectedSessionId || patch.cloudSessionPreset) next.newSessionSectionId = null;
   // Opened from a session, the form remembers it; any other way out forgets it.
   // Only an explicit "New session" (`openNewSession`, a project's or branch's +) records where to go back to; any way out forgets it.
@@ -608,18 +608,21 @@ export async function addProject(path: string) {
 /** Open New chat without creating a session, workspace, or running tab until the first send. */
 export async function startChat(place?: { projectPath: string; cwd?: string; fromBranch?: string }): Promise<void> {
   if (place) {
-    startSessionIn(place.projectPath, place.cwd ?? null, place.fromBranch);
+    // Retained conversations can outlive their project's sidebar entry. Resolve
+    // that project again instead of letting the composer choose a different one.
+    const project = state.projects.find((item) => item.path === place.projectPath) ?? await addProject(place.projectPath);
+    startSessionIn(project.path, place.cwd ?? null, place.fromBranch);
     return;
   }
   const back = returnHere();
   selectSession(null);
-  set({ newSessionReturn: back, newSessionQuick: true });
+  set({ newSessionReturn: back, newSessionChat: true });
 }
 
 export function startSessionInSection(sectionId: string) {
   const back = returnHere();
   selectSession(null);
-  set({ newSessionReturn: back, newSessionQuick: true, newSessionSectionId: sectionId });
+  set({ newSessionReturn: back, newSessionChat: true, newSessionSectionId: sectionId });
 }
 
 export async function removeProject(path: string) {
@@ -745,6 +748,22 @@ export async function setSessionWorkPrivate(id: string, isPrivate: boolean) {
 export async function deleteSession(id: string) {
   await api.deleteSession(id);
   removeSessions([id]);
+}
+
+/** Ordinary sidebar chats keep their retention and automatic project linking through the shared Chats path. */
+export async function createChat(req: NewQuickChat) {
+  const chatsPath = state.chatsPath ?? await api.chatsDir();
+  if (chatsPath !== state.chatsPath) set({ chatsPath });
+  const session = await api.createSession({
+    ...(req.sectionId ? { sectionId: req.sectionId } : {}),
+    projectPath: chatsPath,
+    cwd: req.cwd ?? chatsPath,
+    title: req.title,
+    useWorktree: false,
+    tab: req.tab ?? undefined,
+  });
+  upsertSession(session);
+  return session;
 }
 
 /** Start a quick chat: a session with no project. The caller selects it and sends the first prompt. */

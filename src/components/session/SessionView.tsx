@@ -412,13 +412,13 @@ export function SessionView({
   const compact = !!chrome?.compact;
   // PRO-28: the side panel's Ports tab, from the header's menus; a compact window has no panel.
   const showPorts = cloud?.ports.offered && !compact ? () => showPanelTab("ports") : undefined;
-  const isGit = useSessionIsGit(session);
+  const backend = cloud?.backend ?? localSessionBackend(session.id);
+  const local = backend.caps.local;
+  const isGit = useSessionIsGit(session, local);
   const quick = isQuickChat(session);
   const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
   const prefs = usePrefs();
   const store = useSessionStore();
-  const backend = cloud?.backend ?? localSessionBackend(session.id);
-  const local = backend.caps.local;
   // The workspace's tabs as a row under the title bar: a local session's, unless the reader turned the row off
   // (the floating window says for itself whether it has one).
   const stripRow = local && !cloud && (chrome ? !!chrome.tabStrip : prefs.tabStrip);
@@ -427,8 +427,10 @@ export function SessionView({
   // What the chat's Delete workspace acts on; a cloud session's is its runtime's.
   const localWorkspace = cloud ? undefined : localRemovableWorkspace(session);
   const project = store.projects.find((p) => p.path === session.projectPath);
-  // The GitHub account the folder is connected to: a chat's is its linked repo's; a plain folder has none; a cloud session's is not this computer's to say.
-  const githubIdentity = useGithubIdentity(cloud || !isGit ? null : (session.link?.path ?? session.cwd));
+  // A chat's linked repository has its own identity even when its working folder has no Git panels.
+  // A cloud session's account is not this computer's to say.
+  const identityPath = cloud ? null : (session.link?.path ?? (isGit ? session.cwd : null));
+  const githubIdentity = useGithubIdentity(identityPath);
   const terminals = useTerminals();
   // A shell an agent was started in is that agent's tab (#437), drawn by its tab view and not as a shell beside it.
   const shellPanes = local ? terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden && !session.tabs.some((tab) => tab.pane === pane.id)) : [];
@@ -561,7 +563,7 @@ export function SessionView({
           /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
           <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden @max-[360px]/session-header:gap-0.5 @max-[360px]/session-header:px-0 @max-[360px]/session-header:[&>*]:ml-0")} data-testid="session-breadcrumb">
             {/* Where the project lives, first: GitHub's mark (the account on hover; a click asks GitHub again), GitLab's, another host, or this computer when it has no remote yet. */}
-            {githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(session.link?.path ?? session.cwd)} />}
+            {identityPath && githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(identityPath)} />}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
             {!(cloud && cloud.projectName === session.title) && (
               <>

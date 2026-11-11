@@ -1,4 +1,4 @@
-import type { AgentEvent, BackgroundTask, FileEdit, Payload, PermissionOption, Question, ToolResult } from "./events";
+import type { AgentEvent, BackgroundTask, FileEdit, Goal, Payload, PermissionOption, Question, ToolResult } from "./events";
 import { withoutHarnessBlocks } from "./harnessText";
 import { compactionOperationKey, emptyCompactionLifecycle, reduceCompactionLifecycle, type CompactionLifecycle, type CompactionOperation } from "./compactionLifecycle";
 
@@ -93,6 +93,7 @@ export interface PendingAsk {
 }
 
 export interface Transcript {
+  goal?: Goal;
   turns: Turn[];
   pendingAsks: PendingAsk[];
   tasks: BackgroundTask[];
@@ -258,6 +259,7 @@ export class TranscriptReducer {
   private readonly rowTurn = new Map<CompactionRow, Turn>();
   private readonly resolutions = new WeakMap<CompactionLifecycle, CompactionLifecycle>();
   private tasks: BackgroundTask[] = [];
+  private goal: Goal | undefined;
   private contextUsed: number | undefined;
   private contextMax: number | undefined;
   private model: string | undefined;
@@ -352,8 +354,14 @@ export class TranscriptReducer {
     const payload: Payload = event.payload;
     const followsCompaction = this.afterCompaction;
     // The app may clear a standing recovery between the two as the summary is taken for a prompt.
-    if (!event.subagent && payload.type !== "recovery") this.afterCompaction = payload.type === "context_compacted";
+    if (!event.subagent && payload.type !== "recovery" && payload.type !== "goal_updated" && payload.type !== "goal_cleared") this.afterCompaction = payload.type === "context_compacted";
     switch (payload.type) {
+      case "goal_updated":
+        if (!event.subagent && event.harness === "codex") this.goal = payload.goal;
+        break;
+      case "goal_cleared":
+        if (!event.subagent && event.harness === "codex") this.goal = undefined;
+        break;
       case "user_message": {
         if (followsCompaction && !payload.queued && !payload.author && payload.text.startsWith(COMPACTION_SUMMARY_OPENING)) {
           this.attachSummary(event, payload.text);
@@ -811,6 +819,7 @@ export class TranscriptReducer {
       this.pendingAsks = { version: this.asksVersion, asks: [...this.asks.values()].sort((a, b) => a.seq - b.seq) };
     }
     const transcript: Transcript = {
+      goal: this.goal,
       turns,
       pendingAsks: this.pendingAsks.asks,
       tasks: this.tasks,
@@ -934,7 +943,13 @@ function standsInGroup(call: ToolCall): boolean {
   return !call.result?.images?.length && !call.result?.safetyCheck;
 }
 
-/** Runs of two or more consecutive calls to one groupable tool fold into one row. */
+/**
+ * Runs of this many consecutive calls to one groupable tool fold into one row. Shorter runs keep a row per step, so a
+ * turn reads as what the agent did, in order; only a long run of the same thing (many reads) is worth folding.
+ */
+export const GROUP_AT = 4;
+
+/** Runs of `GROUP_AT` or more consecutive calls to one groupable tool fold into one row. */
 export function groupWork(items: WorkItem[]): WorkItem[] {
   const output: WorkItem[] = [];
   let index = 0;
@@ -950,7 +965,7 @@ export function groupWork(items: WorkItem[]): WorkItem[] {
           nextIndex++;
         } else break;
       }
-      if (run.length >= 2) {
+      if (run.length >= GROUP_AT) {
         output.push({ kind: "tool_group", name: item.call.name, calls: run, key: `g${item.call.callId}` });
         index = nextIndex;
         continue;

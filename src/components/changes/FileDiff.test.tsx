@@ -17,14 +17,12 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
-// The header appears when the read resolves; DiffPane mounts CodeMirror in an effect.
-const editorReady = (container: HTMLElement) => waitFor(() => expect(container.querySelector(".cm-editor")).not.toBeNull());
-
 it("hides whitespace highlights without changing the displayed or copied new text", async () => {
   const { container } = render(<><DiffOptions /><FileDiff {...props} /></>);
   await screen.findByRole("button", { name: "Copy file" });
-  await editorReady(container);
-  expect(container.querySelector(".cm-changedLine")).not.toBeNull();
+  // The header and the editor are not drawn in the same step: the button is
+  // there once the file is read, the editor once its effect has run.
+  await waitFor(() => expect(container.querySelector(".cm-changedLine")).not.toBeNull());
   fireEvent.click(screen.getByLabelText("Hide whitespace changes"));
   expect(container.querySelector(".cm-changedLine")).toBeNull();
   expect(container.querySelector(".cm-content")?.textContent).toContain("const x=1;");
@@ -39,14 +37,12 @@ it("hides whitespace highlights without changing the displayed or copied new tex
 it("applies file wrap overrides independently of the global default", async () => {
   const { container, rerender } = render(<><DiffOptions /><FileDiff {...props} /></>);
   const select = await screen.findByLabelText("Wrap lines for this file");
-  await editorReady(container);
-  expect(container.querySelector(".cm-lineWrapping")).not.toBeNull();
+  await waitFor(() => expect(container.querySelector(".cm-lineWrapping")).not.toBeNull());
   fireEvent.change(select, { target: { value: "false" } });
   expect(container.querySelector(".cm-lineWrapping")).toBeNull();
   rerender(<><DiffOptions /><FileDiff {...props} path="other.ts" /></>);
   await screen.findByLabelText("Wrap lines for this file");
-  await editorReady(container);
-  expect(container.querySelector(".cm-lineWrapping")).not.toBeNull();
+  await waitFor(() => expect(container.querySelector(".cm-lineWrapping")).not.toBeNull());
   fireEvent.click(screen.getByLabelText("Wrap lines by default"));
   expect(container.querySelector(".cm-lineWrapping")).toBeNull();
   fireEvent.change(screen.getByLabelText("Wrap lines for this file"), { target: { value: "true" } });

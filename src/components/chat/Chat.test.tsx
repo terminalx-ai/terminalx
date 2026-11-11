@@ -125,6 +125,25 @@ function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
 }
 
 describe("chat scroll follow", () => {
+  it("shows a reported goal above the scroller before the first turn and hides a cleared goal", () => {
+    const event: AgentEvent = { id: "goal", seq: 1, sessionId: "s", tabId: "t", harness: "codex", ts: "",
+      payload: { type: "goal_updated", goal: { objective: "Finish the migration", status: "active", tokenBudget: 1000, tokensUsed: 0 } } };
+    const props = { sessionId: "s", live: false, progressing: false, answering: false, stream: [], onAnswerPermission: () => {}, onAnswerQuestions: () => {}, footer: null };
+    const view = render(<Chat {...props} transcript={buildTranscript([event], false)} />, { wrapper: TooltipProvider });
+    const banner = screen.getByRole("region", { name: "Codex goal" });
+    expect(banner.textContent).toContain("Finish the migration");
+    expect(view.container.querySelector("[data-chat-scroller]")?.contains(banner)).toBe(false);
+    // The banner shares main's focusable chat root; it must not replace search.
+    fireEvent.pointerDown(banner);
+    const region = view.container.querySelector('[data-find-scope="chat"]');
+    expect(document.activeElement).toBe(region);
+    fireEvent.keyDown(document.activeElement!, { key: "f", ctrlKey: true });
+    expect(screen.getByRole("textbox", { name: "Find in chat" })).toBeDefined();
+    expect(screen.getByRole("region", { name: "Codex goal" })).toBe(banner);
+    view.rerender(<Chat {...props} transcript={buildTranscript([event, { ...event, id: "clear", seq: 2, payload: { type: "goal_cleared" } }], false)} />);
+    expect(screen.queryByRole("region", { name: "Codex goal" })).toBeNull();
+  });
+
   it("shows confirmed compaction while ordinary work is idle", () => {
     const scope = { sessionId: "s", tabId: "t", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
     const events: AgentEvent[] = [
@@ -366,6 +385,7 @@ describe("chat scroll follow", () => {
   // #727: a turn scrolled far from the view is not drawn. What the reader
   // opened in it is the chat's to keep, so it comes back as they left it.
   it("keeps a turn's tool calls unfolded after it was scrolled out of the drawn band and back", () => {
+    setPrefs({ foldToolCalls: true });
     const { transcript } = setup(200);
     const key = transcript.turns.at(-2)!.key;
     const fold = () => content.querySelector<HTMLElement>(`[data-turn="${key}"]`)?.querySelector<HTMLElement>("button[aria-expanded]") ?? null;

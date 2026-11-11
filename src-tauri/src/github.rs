@@ -288,23 +288,8 @@ fn prs_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]
     let fields = format!("{FIELDS},isCrossRepository,headRepository,headRepositoryOwner");
     let out = run(cwd, &["pr", "list", "--head", branch, "--state", "all", "--json", &fields, "--limit", "1000"])?;
     let v: Value = serde_json::from_str(&out)?;
-    // The repositories this branch's head can be ours in: origin, and the one
-    // the branch is pushed to, which is a fork when the work goes to origin by
-    // pull request from it.
-    let ours: Vec<String> = [crate::git::remote_url(cwd), crate::git::push_remote_url(cwd, branch)]
-        .into_iter()
-        .flatten()
-        .filter_map(|url| remote_repo(&url))
-        .collect();
-    let mut prs: Vec<PullRequest> = v.as_array().map(|a| a.iter().filter(|pr| {
-        // Another fork can reuse the same branch name, so a PR from another
-        // repository counts only when its head is one of ours.
-        pr["isCrossRepository"].as_bool() != Some(true) || {
-            let owner = pr["headRepositoryOwner"]["login"].as_str().unwrap_or_default();
-            let repo = pr["headRepository"]["name"].as_str().unwrap_or_default();
-            ours.iter().any(|ours| ours.eq_ignore_ascii_case(&format!("{owner}/{repo}")))
-        }
-    }).map(parse_pr).collect()).unwrap_or_default();
+    let ours = branch_head_repositories(cwd, branch);
+    let mut prs: Vec<PullRequest> = v.as_array().map(|a| a.iter().filter(|pr| has_own_head(pr, &ours)).map(parse_pr).collect()).unwrap_or_default();
     prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
     // Lookup is also used by workspace deletion checks, and runs while Stats
     // is closed. Only known workspaces/branches contribute installation totals.
@@ -319,6 +304,60 @@ fn prs_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]
         crate::store::activity::report_error(format!("PRs were discovered, but their activity could not be saved: {error:#}"));
     }
     Ok(prs)
+}
+
+/// Origin and the branch's push remote identify heads owned by this checkout.
+fn branch_head_repositories(cwd: &Path, branch: &str) -> Vec<String> {
+    [crate::git::remote_url(cwd), crate::git::push_remote_url(cwd, branch)]
+        .into_iter()
+        .flatten()
+        .filter_map(|url| remote_repo(&url))
+        .collect()
+}
+
+/// Match the PR's repository to one configured push destination. Return the
+/// URL from that same observation so a remote edit cannot replace its identity.
+pub(crate) fn head_push_destination(cwd: &Path, branch: &str, repository: &str) -> Result<(String, String)> {
+    for remote in crate::git::push_remote(cwd, branch).into_iter().chain(std::iter::once("origin".into())) {
+        if let Ok(url) = crate::git::configured_push_url(cwd, &remote) {
+            if remote_repo(&url).is_some_and(|repo| repo.eq_ignore_ascii_case(repository)) {
+                return Ok((remote, url));
+            }
+        }
+    }
+    bail!("The pull request head repository has no matching single push destination in this checkout. Configure its fork remote before resolving conflicts.");
+}
+
+/// A PR belongs to its base repository, which need not be this checkout's
+/// origin. Keep a matching configured transport (including SSH aliases), or
+/// fetch the canonical GitHub repository when no local remote names it.
+pub(crate) fn base_fetch_destination(cwd: &Path, pr: &PrSnapshot) -> Result<String> {
+    let (repository, number) = pr_url_parts(&pr.url).context("GitHub did not identify the pull request's base repository.")?;
+    if number != pr.number { bail!("The pull request URL does not match its number."); }
+    for remote in crate::git::run(cwd, &["remote"])?.lines() {
+        let Ok(urls) = crate::git::run(cwd, &["config", "--get-all", &format!("remote.{remote}.url")]) else { continue };
+        let urls: Vec<_> = urls.lines().filter(|url| !url.is_empty()).collect();
+        if let [url] = urls.as_slice() {
+            if remote_repo(url).is_some_and(|repo| repo.eq_ignore_ascii_case(&repository)) {
+                return Ok((*url).into());
+            }
+        }
+    }
+    Ok(format!("https://github.com/{repository}.git"))
+}
+
+fn head_repository(pr: &Value) -> Option<String> {
+    let owner = pr["headRepositoryOwner"]["login"].as_str().filter(|s| !s.is_empty())?;
+    let name = pr["headRepository"]["name"].as_str().filter(|s| !s.is_empty())?;
+    Some(format!("{owner}/{name}"))
+}
+
+fn has_own_head(pr: &Value, ours: &[String]) -> bool {
+    // Another fork can reuse the same branch name, so a cross-repository PR
+    // counts only when its head repository is one of this checkout's remotes.
+    pr["isCrossRepository"].as_bool() != Some(true) || {
+        head_repository(pr).is_some_and(|repo| ours.iter().any(|ours| ours.eq_ignore_ascii_case(&repo)))
+    }
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
@@ -465,6 +504,10 @@ pub struct PrSnapshot {
     pub base: String,
     pub head: String,
     pub head_sha: String,
+    /// GitHub's head repository, including fork ownership. Missing identity
+    /// cannot authorize a conflict-resolution push.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_repository: Option<String>,
     /// MERGEABLE | CONFLICTING | UNKNOWN
     pub mergeable: String,
     /// CLEAN | UNSTABLE | BLOCKED | BEHIND | DIRTY | DRAFT | HAS_HOOKS | UNKNOWN
@@ -488,7 +531,7 @@ pub struct PrSnapshot {
     pub validation: Option<Vec<PrCheck>>,
 }
 
-const SNAPSHOT_FIELDS: &str = "number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body,author";
+const SNAPSHOT_FIELDS: &str = "number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body,author,headRepository,headRepositoryOwner";
 
 pub(crate) fn parse_snapshot(v: &Value) -> PrSnapshot {
     let pr = parse_pr(v);
@@ -502,6 +545,7 @@ pub(crate) fn parse_snapshot(v: &Value) -> PrSnapshot {
         base: pr.base,
         head: pr.head,
         head_sha: v["headRefOid"].as_str().unwrap_or("").into(),
+        head_repository: head_repository(v),
         mergeable: pr.mergeable,
         merge_state: v["mergeStateStatus"].as_str().unwrap_or("UNKNOWN").into(),
         review_decision: pr.review_decision,
@@ -762,17 +806,18 @@ fn failed_validation(state: &str) -> bool {
     matches!(state, "failure" | "error" | "cancelled" | "timed_out" | "action_required" | "startup_failure" | "stale")
 }
 
-/// The open pull request whose head is `branch` in this repository (not a
-/// fork's branch of the same name), by number. Asks for nothing but that, so
-/// a token that may not read checks is answered too.
+/// The open pull request whose head is `branch` in this checkout's origin or
+/// push remote, including its own fork. Does not request checks, so a token
+/// that may not read them is answered too.
 pub fn open_pr_for_branch(cwd: &Path, branch: &str) -> Result<Option<u64>> {
     open_pr_for_branch_with(cwd, branch, run)
 }
 
 fn open_pr_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<Option<u64>> {
-    let out = run(cwd, &["pr", "list", "--head", branch, "--state", "open", "--json", "number,isCrossRepository", "--limit", "100"])?;
+    let out = run(cwd, &["pr", "list", "--head", branch, "--state", "open", "--json", "number,isCrossRepository,headRepository,headRepositoryOwner", "--limit", "100"])?;
     let listed: Value = serde_json::from_str(&out)?;
-    Ok(listed.as_array().into_iter().flatten().filter(|pr| pr["isCrossRepository"] != Value::Bool(true)).filter_map(|pr| pr["number"].as_u64()).max())
+    let ours = branch_head_repositories(cwd, branch);
+    Ok(listed.as_array().into_iter().flatten().filter(|pr| has_own_head(pr, &ours)).filter_map(|pr| pr["number"].as_u64()).max())
 }
 
 /// Leave a comment on a pull request; the comment's URL.
@@ -920,6 +965,485 @@ pub fn mark_ready(cwd: &Path, number: u64) -> Result<()> {
 
 pub fn available() -> bool {
     crate::binpath::resolve("gh").is_some()
+}
+
+pub fn login_command(hostname: &str) -> Result<String> {
+    validate_hostname(hostname)?;
+    Ok(format!("gh auth login --web --hostname '{hostname}'"))
+}
+
+fn validate_hostname(hostname: &str) -> Result<()> {
+    if hostname.is_empty() || hostname.starts_with('-') || hostname.len() > 253
+        || !hostname.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b':'))
+        || url::Url::parse(&format!("https://{hostname}")).is_err() {
+        bail!("Invalid GitHub hostname.");
+    }
+    Ok(())
+}
+
+fn default_hostname() -> String {
+    std::env::var("GH_HOST").ok().filter(|host| !host.is_empty()).unwrap_or_else(|| "github.com".into())
+}
+
+fn hostname_from_remote(remote: &str) -> Option<String> {
+    hostname_from_remote_with(remote, &mut |host| ssh_hostname(host, Command::new(crate::binpath::resolve("ssh")?)))
+}
+
+fn hostname_from_remote_with(remote: &str, translate_ssh: &mut impl FnMut(&str) -> Option<String>) -> Option<String> {
+    let url = if remote.contains("://") { remote.to_string() }
+        else { format!("ssh://{}", remote.replacen(':', "/", 1)) };
+    let url = url::Url::parse(&url).ok()?;
+    let host = url.host_str()?;
+    if url.scheme() == "ssh" {
+        let host = translate_ssh(host).unwrap_or_else(|| host.to_string());
+        // gh's SSH translator applies this after expanding ~/.ssh/config aliases.
+        return Some(if host.eq_ignore_ascii_case("ssh.github.com") { "github.com".into() } else { host.to_ascii_lowercase() });
+    }
+    Some(match url.port() { Some(port) => format!("{host}:{port}"), None => host.to_ascii_lowercase() })
+}
+
+/// Like gh, ask OpenSSH to expand Host/HostName (including Include and patterns).
+/// -G prints configuration without opening a connection; keep even this local
+/// subprocess bounded, and never let a remote hostname become an SSH option.
+fn ssh_hostname(host: &str, mut command: Command) -> Option<String> {
+    validate_hostname(host).ok()?;
+    command.args(["-G", "--", host]);
+    let output = crate::git::capture_within(command, std::time::Duration::from_secs(5)).ok()?;
+    if !output.status.success() { return None; }
+    String::from_utf8_lossy(&output.stdout).lines().find_map(|line| {
+        let (key, value) = line.split_once(' ')?;
+        (key == "hostname" && !value.trim().is_empty()).then(|| value.trim().to_string())
+    })
+}
+
+fn github_config_dir() -> Option<PathBuf> {
+    for (key, suffix) in [("GH_CONFIG_DIR", ""), ("XDG_CONFIG_HOME", "gh")] {
+        if let Some(path) = std::env::var_os(key).filter(|value| !value.is_empty()) { return Some(PathBuf::from(path).join(suffix)); }
+    }
+    #[cfg(windows)]
+    if let Some(path) = std::env::var_os("AppData").filter(|value| !value.is_empty()) { return Some(PathBuf::from(path).join("GitHub CLI")); }
+    dirs::home_dir().map(|home| home.join(".config/gh"))
+}
+
+/// Read host names only, including accounts whose tokens live in the keychain.
+/// Authentication values are ignored, never returned or used for a probe here.
+fn configured_github_hosts(config_dir: &Path) -> BTreeSet<String> {
+    type Hosts = std::collections::BTreeMap<String, serde::de::IgnoredAny>;
+    #[derive(Deserialize, Default)]
+    struct Config { #[serde(default)] hosts: Hosts }
+    let hosts: Hosts = std::fs::read(config_dir.join("hosts.yml")).ok()
+        .and_then(|bytes| serde_yaml::from_slice(&bytes).ok()).unwrap_or_default();
+    // gh also accepts the older hosts section in config.yml when hosts.yml is empty.
+    let hosts = if hosts.is_empty() {
+        std::fs::read(config_dir.join("config.yml")).ok()
+            .and_then(|bytes| serde_yaml::from_slice::<Config>(&bytes).ok()).unwrap_or_default().hosts
+    } else { hosts };
+    hosts.into_keys().map(|host| host.to_ascii_lowercase()).collect()
+}
+
+/// Mirror gh's local resolution before any authentication check: translate SSH,
+/// filter to known GitHub hosts, then apply the default host and remote ordering.
+fn repository_hostname(cwd: &Path) -> Option<String> {
+    let hosts = github_config_dir().map(|path| configured_github_hosts(&path)).unwrap_or_default();
+    repository_hostname_with(cwd, &hosts, |host| ssh_hostname(host, Command::new(crate::binpath::resolve("ssh")?)))
+}
+
+fn repository_hostname_with(cwd: &Path, configured_hosts: &BTreeSet<String>, mut translate_ssh: impl FnMut(&str) -> Option<String>) -> Option<String> {
+    let names = crate::git::run(cwd, &["remote"]).ok()?;
+    let mut names: Vec<_> = names.lines().collect();
+    names.sort_by_key(|name| match name.to_ascii_lowercase().as_str() { "upstream" => 0, "github" => 1, "origin" => 2, _ => 3 });
+    let mut remotes: Vec<_> = names.into_iter().filter_map(|name| {
+        let url = crate::git::run(cwd, &["remote", "get-url", name]).ok()?;
+        let host = hostname_from_remote_with(url.trim(), &mut translate_ssh)?;
+        (host == "github.com" || configured_hosts.contains(&host)).then_some((name, host))
+    }).collect();
+    // gh prefers its sole configured host if this repository has a remote there.
+    // connection_hostname handles GH_HOST and GH_REPO before calling this resolver.
+    if let Some(host) = configured_hosts.iter().next().filter(|_| configured_hosts.len() == 1) {
+        if remotes.iter().any(|(_, remote_host)| remote_host == host) { remotes.retain(|(_, remote_host)| remote_host == host); }
+    }
+    let resolved = crate::git::run(cwd, &["config", "--get-regexp", r"^remote\..*\.gh-resolved$"]).unwrap_or_default();
+    let bases: BTreeSet<_> = resolved.lines().filter_map(|line| {
+        let (key, value) = line.split_once(' ')?;
+        (value == "base").then(|| key.strip_prefix("remote.")?.strip_suffix(".gh-resolved")).flatten()
+    }).collect();
+    // An explicit base on an unrelated host is excluded just like any other remote.
+    remotes.iter().find(|(name, _)| bases.contains(name)).or_else(|| remotes.first()).map(|(_, host)| host.clone())
+}
+
+fn connection_hostname(cwd: Option<&Path>) -> String {
+    if let Some(cwd) = cwd {
+        if let Ok(repo) = std::env::var("GH_REPO") {
+            if repo.contains("://") { if let Some(host) = hostname_from_remote(&repo) { return host; } }
+            else if repo.split('/').count() == 3 { return repo.split('/').next().unwrap().to_string(); }
+            else if repo.split('/').count() == 2 { return default_hostname(); }
+        }
+        if let Ok(host) = std::env::var("GH_HOST") { if !host.is_empty() { return host; } }
+        if let Some(host) = repository_hostname(cwd) { return host; }
+    }
+    default_hostname()
+}
+
+pub fn validate_login_pane(id: &str) -> Result<()> {
+    let suffix = id.strip_prefix("github-login-").context("invalid GitHub login pane")?;
+    uuid::Uuid::parse_str(suffix).context("invalid GitHub login pane")?;
+    Ok(())
+}
+
+/// Installation and authentication are separate: finding `gh` on PATH says
+/// nothing about whether it can read pull requests for this person.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionStatus {
+    pub state: &'static str,
+    pub details: Option<String>,
+    pub hostname: String,
+}
+
+pub fn connection_status(cwd: Option<&Path>) -> ConnectionStatus {
+    connection_status_with(&connection_hostname(cwd), gh)
+}
+
+fn connection_status_with(hostname: &str, command: impl Fn() -> Result<Command>) -> ConnectionStatus {
+    let status = |state, details| ConnectionStatus { state, details, hostname: hostname.into() };
+    if let Err(error) = validate_hostname(hostname) { return status("unavailable", Some(error.to_string())); }
+    let Ok(mut check) = command() else { return status("missing", None); };
+    // Scope gh's account selection before any probe. In particular, an
+    // Enterprise environment token must not be sent to an unknown remote host.
+    check.args(["auth", "status", "--active", "--hostname", hostname]);
+    let timeout = std::time::Duration::from_secs(15);
+    match crate::git::capture_within(check, timeout) {
+        Ok(output) if output.status.success() => return status("connected", None),
+        Ok(output) => {
+            let details = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            if details.contains("not logged into") {
+                return status("signed_out", Some(details.trim().to_string()));
+            }
+            // auth status calls both rejected credentials and transport
+            // failures an invalid token. Only probe an account it selected.
+            if !details.contains("Active account: true") {
+                return status("unavailable", Some(details.trim().to_string()));
+            }
+        }
+        Err(error) => return status("unavailable", Some(error.to_string())),
+    }
+    let result = (|| -> Result<std::process::Output> {
+        let mut probe = command()?;
+        probe.args(["api", "--hostname", hostname, "--include", "--silent", "user"]);
+        Ok(crate::git::capture_within(probe, timeout)?)
+    })();
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let state = api_connection_state(output.status.success(), &stdout);
+            let details = (state != "connected").then(|| format!("{stdout}{}", String::from_utf8_lossy(&output.stderr)).trim().to_string());
+            status(state, details)
+        }
+        Err(error) => status("unavailable", Some(error.to_string())),
+    }
+}
+
+fn api_connection_state(success: bool, stdout: &str) -> &'static str {
+    let code = stdout.lines().find_map(|line| {
+        let mut words = line.split_whitespace();
+        words.next()?.starts_with("HTTP/").then(|| words.next()?.parse::<u16>().ok()).flatten()
+    });
+    match code {
+        Some(200) if success => "connected",
+        Some(401) => "signed_out",
+        _ => "unavailable",
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[test]
+    fn login_panes_cannot_address_an_agent_or_session_shell() {
+        validate_login_pane("github-login-2d690d12-4cc3-46f4-a183-05c6aad7a3ce").unwrap();
+        for id in ["tab:agent", "session:shell", "github-login-", "github-login-session:shell"] {
+            assert!(validate_login_pane(id).is_err());
+        }
+        assert_eq!(login_command("github.example.test").unwrap(), "gh auth login --web --hostname 'github.example.test'");
+        for host in ["", "--web", "github.com;touch /tmp/bad", "$(whoami)", "github.com\nwhoami", "https://github.com"] {
+            assert!(login_command(host).is_err());
+        }
+    }
+
+    #[test]
+    fn signed_out_cli_is_a_connection_state_with_optional_details() {
+        let Some(path) = crate::binpath::resolve("gh") else { return; };
+        let config = tempfile::tempdir().unwrap();
+        let status = connection_status_with("github.com", || {
+            let mut command = Command::new(&path);
+            command.env("GH_CONFIG_DIR", config.path()).env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
+                .env_remove("GH_ENTERPRISE_TOKEN").env_remove("GITHUB_ENTERPRISE_TOKEN").env_remove("GH_HOST");
+            Ok(command)
+        });
+        assert_eq!(status.state, "signed_out");
+        assert!(status.details.unwrap().contains("not logged into"));
+    }
+
+    fn isolated_gh(config: &Path) -> Option<Command> {
+        let mut command = Command::new(crate::binpath::resolve("gh")?);
+        command.env("GH_CONFIG_DIR", config).env("GH_PROMPT_DISABLED", "1").env("NO_COLOR", "1")
+            .env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN").env_remove("GH_ENTERPRISE_TOKEN")
+            .env_remove("GITHUB_ENTERPRISE_TOKEN").env_remove("GH_HOST").env_remove("GH_REPO");
+        Some(command)
+    }
+
+    struct RejectingProxy {
+        url: String,
+        stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        server: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl RejectingProxy {
+        fn new() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop = stopped.clone();
+            let server = std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    if let Ok((connection, _)) = listener.accept() { drop(connection); }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            });
+            Self { url, stopped, server: Some(server) }
+        }
+
+        fn command(&self, config: &Path) -> Command {
+            let mut command = isolated_gh(config).unwrap();
+            command.env("GH_TOKEN", "pro166-test-token-not-a-credential").env("HTTPS_PROXY", &self.url)
+                .env("HTTP_PROXY", &self.url).env("ALL_PROXY", &self.url).env("NO_PROXY", "").env("no_proxy", "");
+            command
+        }
+    }
+
+    impl Drop for RejectingProxy {
+        fn drop(&mut self) {
+            self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.server.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[test]
+    fn refused_proxy_is_unavailable_not_signed_out() {
+        if !available() { return; }
+        let config = tempfile::tempdir().unwrap();
+        let proxy = RejectingProxy::new();
+        // An unrelated expired Enterprise account cannot determine this result.
+        std::fs::write(config.path().join("hosts.yml"), "github.expired.test:\n  user: other\n  oauth_token: expired-test-token\n").unwrap();
+        let status = connection_status_with("github.com", || Ok(proxy.command(config.path())));
+        assert_eq!(status.state, "unavailable");
+        let details = status.details.unwrap();
+        assert!(details.contains("https://api.github.com/user"), "{details}");
+        assert!(!details.contains("pro166-test-token-not-a-credential"));
+    }
+
+    #[test]
+    fn credentials_for_another_host_do_not_count_as_connected() {
+        if !available() { return; }
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(config.path().join("hosts.yml"), "github.other.test:\n  user: other\n  oauth_token: not-a-real-token\n").unwrap();
+        let status = connection_status_with("github.missing.test", || {
+            let mut command = isolated_gh(config.path()).unwrap();
+            command.env("GH_ENTERPRISE_TOKEN", "test-not-a-credential").env("GH_HOST", "github.other.test");
+            Ok(command)
+        });
+        assert_eq!(status.hostname, "github.missing.test");
+        assert_eq!(status.state, "signed_out");
+        assert!(status.details.unwrap().contains("github.missing.test"));
+    }
+
+    #[test]
+    fn only_an_http_authentication_rejection_requests_login() {
+        assert_eq!(api_connection_state(true, "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n"), "connected");
+        assert_eq!(api_connection_state(false, "HTTP/2.0 401 Unauthorized\r\n"), "signed_out");
+        assert_eq!(api_connection_state(false, "HTTP/2.0 403 Forbidden\r\n"), "unavailable");
+        assert_eq!(api_connection_state(false, "HTTP/2.0 502 Bad Gateway\r\n"), "unavailable");
+        assert_eq!(api_connection_state(false, ""), "unavailable");
+        assert_eq!(api_connection_state(false, "The token is invalid."), "unavailable");
+    }
+
+    #[test]
+    fn repository_hostname_uses_remote_and_explicit_gh_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = BTreeSet::from(["github.com".into(), "github.enterprise.test".into()]);
+        let hostname = || repository_hostname_with(dir.path(), &hosts, |host| Some(host.into()));
+        crate::git::run(dir.path(), &["init"]).unwrap();
+        crate::git::run(dir.path(), &["remote", "add", "origin", "git@github.com:owner/repo.git"]).unwrap();
+        assert_eq!(hostname().as_deref(), Some("github.com"));
+        crate::git::run(dir.path(), &["remote", "add", "upstream", "https://github.enterprise.test/owner/repo.git"]).unwrap();
+        assert_eq!(hostname().as_deref(), Some("github.enterprise.test"));
+        crate::git::run(dir.path(), &["config", "remote.origin.gh-resolved", "base"]).unwrap();
+        assert_eq!(hostname().as_deref(), Some("github.com"));
+        assert_eq!(hostname_from_remote("ssh://git@github.enterprise.test:2222/owner/repo.git").as_deref(), Some("github.enterprise.test"));
+        assert_eq!(hostname_from_remote("file:///tmp/repo.git"), None);
+    }
+
+    #[test]
+    fn unrelated_remotes_are_filtered_before_preferences_and_explicit_base() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::git::run(dir.path(), &["init"]).unwrap();
+        crate::git::run(dir.path(), &["remote", "add", "origin", "https://github.com/owner/repo.git"]).unwrap();
+        crate::git::run(dir.path(), &["remote", "add", "upstream", "https://gitlab.com/owner/repo.git"]).unwrap();
+        crate::git::run(dir.path(), &["config", "remote.upstream.gh-resolved", "base"]).unwrap();
+        // github.com remains a valid sign-in destination even with no accounts yet.
+        assert_eq!(repository_hostname_with(dir.path(), &BTreeSet::new(), |_| None).as_deref(), Some("github.com"));
+        // A sole configured host is preferred only if a remote actually uses it.
+        let hosts = BTreeSet::from(["github.enterprise.test".into()]);
+        assert_eq!(repository_hostname_with(dir.path(), &hosts, |_| None).as_deref(), Some("github.com"));
+        crate::git::run(dir.path(), &["remote", "add", "enterprise", "https://github.enterprise.test/owner/repo.git"]).unwrap();
+        assert_eq!(repository_hostname_with(dir.path(), &hosts, |_| None).as_deref(), Some("github.enterprise.test"));
+        crate::git::run(dir.path(), &["remote", "remove", "origin"]).unwrap();
+        assert_eq!(repository_hostname_with(dir.path(), &BTreeSet::new(), |_| None), None);
+    }
+
+    #[test]
+    fn known_hosts_include_keychain_accounts_and_legacy_config_without_using_tokens() {
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(config.path().join("config.yml"), "hosts:\n  legacy.example.test:\n    user: person\n").unwrap();
+        assert_eq!(configured_github_hosts(config.path()), BTreeSet::from(["legacy.example.test".into()]));
+        std::fs::write(config.path().join("hosts.yml"), "GitHub.COM:\n  user: person\n  users:\n    person: {}\ngithub.enterprise.test:\n  user: other\n  oauth_token: test-not-a-credential\n").unwrap();
+        assert_eq!(configured_github_hosts(config.path()), BTreeSet::from(["github.com".into(), "github.enterprise.test".into()]));
+    }
+
+    #[test]
+    fn ssh_translation_is_only_for_ssh_and_falls_back_if_the_config_cannot_be_read() {
+        assert_eq!(hostname_from_remote_with("ssh://git@ssh.github.com:443/owner/repo.git", &mut |_| None).as_deref(), Some("github.com"));
+        assert_eq!(hostname_from_remote_with("git@personal:owner/repo.git", &mut |_| Some("ssh.github.com".into())).as_deref(), Some("github.com"));
+        assert_eq!(hostname_from_remote_with("git@work:owner/repo.git", &mut |_| Some("github.enterprise.test".into())).as_deref(), Some("github.enterprise.test"));
+        assert_eq!(hostname_from_remote_with("https://github.com/owner/repo.git", &mut |_| panic!("HTTPS does not use SSH aliases")).as_deref(), Some("github.com"));
+        assert_eq!(hostname_from_remote_with("git@unknown:owner/repo.git", &mut |_| None).as_deref(), Some("unknown"));
+        assert_eq!(ssh_hostname("-oProxyCommand=bad", Command::new("must-not-run")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_aliases_and_mixed_remotes_choose_the_same_host_as_installed_gh() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(ssh) = crate::binpath::resolve("ssh") else { return; };
+        if !available() { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let ssh_config = dir.path().join("ssh-config");
+        let included = dir.path().join("included-config");
+        std::fs::write(&ssh_config, format!("Include {}\n", included.display())).unwrap();
+        std::fs::write(&included, "Host personal\n  HostName ssh.github.com\n  Port 443\nHost work-*\n  HostName github.enterprise.test\n").unwrap();
+        // Both paths use the real OpenSSH parser with an isolated config. The
+        // wrapper only supplies -F to gh's ssh invocation; no CLI output is faked.
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+        std::fs::write(bin.join("ssh"), format!("#!/bin/sh\nexec {} -F {} \"$@\"\n", quote(&ssh), quote(&ssh_config))).unwrap();
+        std::fs::set_permissions(bin.join("ssh"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::git::run(dir.path(), &["init"]).unwrap();
+        crate::git::run(dir.path(), &["remote", "add", "origin", "https://github.com/owner/repo.git"]).unwrap();
+        crate::git::run(dir.path(), &["remote", "add", "upstream", "https://gitlab.com/owner/repo.git"]).unwrap();
+        let proxy = RejectingProxy::new();
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+        for (remote, expected) in [
+            ("https://github.com/owner/repo.git", "github.com"),
+            ("ssh://git@ssh.github.com:443/owner/repo.git", "github.com"),
+            ("git@personal:owner/repo.git", "github.com"),
+            ("ssh://git@personal:443/owner/repo.git", "github.com"),
+            ("git@work-account:owner/repo.git", "github.enterprise.test"),
+        ] {
+            std::fs::write(config.path().join("hosts.yml"), format!("{expected}:\n  user: test\n")).unwrap();
+            crate::git::run(dir.path(), &["remote", "set-url", "origin", remote]).unwrap();
+            let host = repository_hostname_with(dir.path(), &configured_github_hosts(config.path()), |host| {
+                let mut command = Command::new(&ssh);
+                command.args(["-F"]).arg(&ssh_config);
+                ssh_hostname(host, command)
+            }).unwrap();
+            assert_eq!(host, expected, "{remote}");
+            let mut command = proxy.command(config.path());
+            command.env("PATH", &path).current_dir(dir.path()).args(["repo", "view", "--json", "url"]);
+            let output = crate::git::capture_within(command, std::time::Duration::from_secs(15)).unwrap();
+            let error = String::from_utf8_lossy(&output.stderr);
+            let endpoint = if expected == "github.com" { "https://api.github.com/graphql".to_string() } else { format!("https://{expected}/api/graphql") };
+            assert!(!output.status.success());
+            assert!(error.contains(&endpoint), "gh must choose the same host for {remote}: {error}");
+        }
+    }
+
+    #[test]
+    fn creation_from_a_linked_worktree_uses_the_shared_primary_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("primary checkout");
+        let linked = dir.path().join("linked checkout");
+        std::fs::create_dir(&main).unwrap();
+        crate::git::run(&main, &["init"]).unwrap();
+        crate::git::run(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "Initial"]).unwrap();
+        crate::git::run(&main, &["worktree", "add", "-b", "feature", linked.to_str().unwrap()]).unwrap();
+        assert!(linked.join(".git").is_file());
+        create_repository_with(&linked, "owner/new-repo", true, |cwd, args| {
+            assert_eq!(cwd, linked);
+            assert_eq!(&args[..4], &["repo", "create", "owner/new-repo", "--private"]);
+            assert_eq!(args[4], "--source");
+            assert_eq!(canonical_path(Path::new(args[5])), canonical_path(&main));
+            assert_eq!(args[6], "--remote=origin");
+            assert!(!args.contains(&"--push"));
+            if available() {
+                let config = tempfile::tempdir().unwrap();
+                let proxy = RejectingProxy::new();
+                let mut command = proxy.command(config.path());
+                command.current_dir(cwd).args(args);
+                let output = crate::git::capture_within(command, std::time::Duration::from_secs(15)).unwrap();
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(!output.status.success());
+                assert!(!error.contains("not a git repository"), "{error}");
+                assert!(error.contains("https://api.github.com/users/owner"), "gh must accept the source and reach its owner lookup: {error}");
+            }
+            // This is the shared config gh modifies, observed from the actual
+            // linked checkout below; no GitHub repository is created in a test.
+            crate::git::add_remote(Path::new(args[5]), "https://github.com/owner/new-repo.git")
+        }).unwrap();
+        assert_eq!(crate::git::remote_url(&linked).as_deref(), Some("https://github.com/owner/new-repo.git"));
+    }
+
+    #[test]
+    fn invalid_repository_names_never_run_gh() {
+        for name in ["", "--public", "a/b/c", "owner/", "../repo", "a;touch bad"] {
+            assert!(create_repository(Path::new("/does-not-exist"), name, true).unwrap_err().to_string().contains("repository name"));
+        }
+    }
+}
+
+/// Create only on explicit submission, private by default in the UI. `gh`
+/// adds origin; publishing commits remains the separate Push action.
+pub fn create_repository(cwd: &Path, name: &str, private: bool) -> Result<()> {
+    create_repository_with(cwd, name, private, |cwd, args| {
+        let mut command = gh()?;
+        let hostname = default_hostname();
+        validate_hostname(&hostname)?;
+        command.env("GH_HOST", hostname).current_dir(cwd).args(args);
+        let output = output_within(command, GH_TIMEOUT)?;
+        if !output.status.success() { bail!("{}", String::from_utf8_lossy(&output.stderr).trim()); }
+        Ok(())
+    })
+}
+
+fn create_repository_with(cwd: &Path, name: &str, private: bool, run: impl FnOnce(&Path, &[&str]) -> Result<()>) -> Result<()> {
+    if name.is_empty() || name.starts_with('-') || name.split('/').count() > 2
+        || name.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')) {
+        bail!("Enter a repository name, optionally preceded by its owner.");
+    }
+    if crate::git::has_remote(cwd)? {
+        bail!("This repository already has a remote. Refresh before creating a repository.");
+    }
+    // gh 2.70 rejects a linked checkout's .git file. Git lists the primary
+    // checkout (or bare repository) first; its config and remotes are shared
+    // with this worktree. -z preserves paths containing spaces or newlines.
+    let worktrees = crate::git::run(cwd, &["worktree", "list", "--porcelain", "-z"])?;
+    let source = worktrees.split('\0').next().and_then(|line| line.strip_prefix("worktree ")).context("Git did not identify the repository's primary checkout")?;
+    run(cwd, &["repo", "create", name, if private { "--private" } else { "--public" }, "--source", source, "--remote=origin"])?;
+    Ok(())
 }
 
 // ---- for the removal of a workspace once its pull request has merged --------
@@ -1628,6 +2152,7 @@ mod tests {
         .unwrap();
         assert!(snapshot.checks_unread);
         assert!(!asked[1].contains("statusCheckRollup") && asked[1].contains("headRefOid") && asked[1].contains("mergeStateStatus"));
+        assert!(asked.iter().all(|fields| fields.contains("headRepositoryOwner") && fields.contains("headRepository")));
         assert_eq!((snapshot.head_sha.as_str(), snapshot.mergeable.as_str(), snapshot.required_checks.clone()), ("1111111111111111111111111111111111111111", "MERGEABLE", None));
         // The required checks alone refused: the checks read are not taken for the whole story.
         let partly = pr_snapshot_with(cwd, 7, |_, _| Ok(OPEN_PR.into()), |_, _| Ok(output(false, "", refused))).unwrap();
@@ -1640,11 +2165,33 @@ mod tests {
     #[test]
     fn the_open_pull_request_of_a_branch_is_this_repositorys_and_asks_for_no_checks() {
         let found = open_pr_for_branch_with(Path::new("/repo"), "raccoon/x", |_, args| {
-            assert_eq!(args, ["pr", "list", "--head", "raccoon/x", "--state", "open", "--json", "number,isCrossRepository", "--limit", "100"]);
+            assert_eq!(args, ["pr", "list", "--head", "raccoon/x", "--state", "open", "--json", "number,isCrossRepository,headRepository,headRepositoryOwner", "--limit", "100"]);
             Ok(r#"[{"number":9,"isCrossRepository":true},{"number":7,"isCrossRepository":false}]"#.into())
         });
         assert_eq!(found.unwrap(), Some(7));
         assert_eq!(open_pr_for_branch_with(Path::new("/repo"), "b", |_, _| Ok("[]".into())).unwrap(), None);
+    }
+
+    #[test]
+    fn open_pr_lookup_accepts_our_fork_but_not_unrelated_forks_with_the_same_branch() {
+        let _home = crate::store::temp_home();
+        let cwd = crate::store::root().unwrap();
+        crate::git::run(&cwd, &["init", "-q"]).unwrap();
+        crate::git::run(&cwd, &["remote", "add", "origin", "https://github.com/acme/widgets.git"]).unwrap();
+        crate::git::run(&cwd, &["remote", "add", "fork", "git@github-work:me/widgets.git"]).unwrap();
+        crate::git::run(&cwd, &["config", "branch.feature.remote", "fork"]).unwrap();
+        let listed = serde_json::json!([
+            {"number":9,"isCrossRepository":true,"headRepositoryOwner":{"login":"Me"},"headRepository":{"name":"Widgets"}},
+            {"number":10,"isCrossRepository":true,"headRepositoryOwner":{"login":"someone"},"headRepository":{"name":"widgets"}},
+            {"number":11,"isCrossRepository":true,"headRepositoryOwner":{"login":"me"},"headRepository":{"name":"other"}},
+            {"number":12,"isCrossRepository":true}
+        ]).to_string();
+        assert_eq!(open_pr_for_branch_with(&cwd, "feature", |_, _| Ok(listed.clone())).unwrap(), Some(9));
+        // An unrelated branch does not inherit the configured fork push remote.
+        assert_eq!(open_pr_for_branch_with(&cwd, "other", |_, _| Ok(listed.clone())).unwrap(), None);
+        // A checkout with the fork as origin works without a separate push remote.
+        crate::git::run(&cwd, &["remote", "set-url", "origin", "https://github.com/me/widgets.git"]).unwrap();
+        assert_eq!(open_pr_for_branch_with(&cwd, "other", |_, _| Ok(listed.clone())).unwrap(), Some(9));
     }
 
     #[test]

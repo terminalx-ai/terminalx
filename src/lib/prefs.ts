@@ -167,7 +167,8 @@ const DEFAULTS: Prefs = {
   animations: true,
   fontScale: "md",
   transcriptLayout: "wide",
-  foldToolCalls: true,
+  // Off: every step of a turn stays in view between its paragraphs, so a turn reads as what the agent did, in order.
+  foldToolCalls: false,
   turnChanges: true,
   promptMap: true,
   fixErrorsInstructions: "",
