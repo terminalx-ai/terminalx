@@ -25,6 +25,7 @@ import type {
   SessionEntry,
   Workspace,
   WorkspaceDisposition,
+  WorkspaceRestorePreview,
   TabEntry,
   TabStatus,
   UnfinishedMerge,
@@ -582,6 +583,10 @@ export const api = {
   /** Remove a workspace through the one checked path. */
   removeWorkspace: (projectPath: string, path: string, options: WorkspaceRemoveOptions) =>
     invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
+
+  previewWorkspaceRestore: (sessionId: string) => invoke<WorkspaceRestorePreview>("preview_workspace_restore", { sessionId }),
+  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) =>
+    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -2028,6 +2033,8 @@ export const agent = {
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
   /** Send a message the CLI holds behind its running turn now: the turn is interrupted and the message typed again. */
   sendQueuedNow: (sessionId: string, tabId: string, seq: number) => invoke<void>("send_queued_now", { sessionId, tabId, seq }),
+  changeHeldQueue: (sessionId: string, tabId: string, change: import("@/lib/heldQueue").HeldQueueChange) =>
+    invoke<SendOutcome>("change_held_queue", { sessionId, tabId, change }),
   listQueued: (sessionId: string, tabId: string) => invoke<QueuedMessage[]>("list_queued", { sessionId, tabId }),
   respondPermission: (sessionId: string, tabId: string, requestId: string, optionId: string) =>
     invoke<void>("respond_permission", { sessionId, tabId, requestId, optionId }),

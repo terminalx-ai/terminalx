@@ -120,6 +120,7 @@ const ACTIONS = [
   // Right Option is AltGr on many Windows and Linux layouts, so holding it to dictate is a macOS default only.
   { id: "composer.dictate", label: "Start or stop dictation", group: "Composer", keys: ["mod+shift+d"], macKeys: ["hold:AltRight", "mod+shift+d"], hold: true },
   { id: "composer.send", label: "Send", group: "Composer", keys: ["enter"], scope: "context" },
+  { id: "composer.sendAlternate", label: "Send the other way (hold or interrupt)", group: "Composer", keys: ["mod+enter"], scope: "context" },
   { id: "composer.newLine", label: "New line", group: "Composer", keys: ["shift+enter"], scope: "context" },
   { id: "composer.historyPrevious", label: "Recall the previous message", group: "Composer", keys: ["up"], scope: "context" },
   { id: "composer.historyNext", label: "Recall the next message, then the draft", group: "Composer", keys: ["down"], scope: "context" },

@@ -250,7 +250,7 @@ struct Seen {
     archive_pause: Option<ArchivePause>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Ledger {
     /// By the workspace's path on this host.
@@ -772,6 +772,41 @@ pub fn hold(path: &str, held: bool, now: DateTime<Utc>) -> anyhow::Result<()> {
         seen.first_seen = stamp(now);
     }
     ledger.save()
+}
+
+/// Session-driven restores share the sweep's lock and hold any checkout it
+/// previously removed. Save before creating files: a failed ledger write must
+/// not leave a restored workspace eligible for immediate automatic removal.
+pub(crate) fn with_workspace_restore<T>(path: &str, project: &str, commit: &str, restore: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut ledger = Ledger::load()?;
+    let before = ledger.clone();
+    let now = stamp(Utc::now());
+    let at_path = |record: &&Record| record.path == path && record.project_path == project;
+    let record = ledger.removed.iter().rev().filter(at_path).find(|record| record.commit == commit)
+        .or_else(|| ledger.removed.iter().rev().find(at_path)).cloned();
+    if let Some(record) = record {
+        // A path can have been reused since this conversation was removed.
+        // Holding it must not mark a different removal's commit as restored.
+        if record.commit == commit {
+            if let Some(saved) = ledger.removed.iter_mut().find(|saved| saved.id == record.id && saved.restored_at.is_none()) {
+                saved.restored_at = Some(now.clone());
+            }
+        }
+        let archive_pause = ledger.seen.get(path).and_then(|seen| seen.archive_pause.clone());
+        ledger.seen.insert(path.into(), Seen { project_path: record.project_path, pr: record.pr, first_seen: now, held: true, archive_pause });
+    } else if let Some(seen) = ledger.seen.get_mut(path) {
+        seen.held = true;
+    }
+    ledger.save()?;
+    match restore() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let mut before = before;
+            before.save().map_err(|rollback| anyhow::anyhow!("{error:#}; restoring the cleanup record also failed: {rollback:#}"))?;
+            Err(error)
+        }
+    }
 }
 
 /// Where a recorded removal can be put back, or why it cannot.

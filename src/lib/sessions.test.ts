@@ -84,6 +84,22 @@ beforeEach(async () => {
 });
 
 describe("worktree deletion events", () => {
+  it("reopens the retained session and tabs in the restored checkout", async () => {
+    sessions.upsertSession({ ...attached, cwd: projectPath, worktreeRemoved: true, archived: true });
+    const preview = { projectPath, path: worktreePath, branch: attached.branch!, commit: "a".repeat(40), needsBranch: null, suggestedBranch: "restored", legacy: false, sessionIds: [attached.id] };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "restore_workspace") return [attached];
+      if (command === "list_workspaces") return [main, worktree];
+      if (command === "list_harnesses") return [];
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    await sessions.restoreWorkspace(attached.id, preview, null);
+    expect(mocks.invoke).toHaveBeenCalledWith("restore_workspace", { sessionId: attached.id, expected: preview, newBranch: null });
+    expect(sessions.getSessionStore().selectedSessionId).toBe(attached.id);
+    expect(sessions.getSessionStore().sessions).toEqual([attached]);
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "send_message")).toBe(false);
+  });
+
   it("forgets sessions the backend deleted with their worktree and removes the cached workspace", async () => {
     expect(sessions.getSessionStore().workspaces[projectPath]).toEqual([main, worktree]);
     sessions.selectSession(attached.id);
