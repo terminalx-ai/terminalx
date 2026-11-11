@@ -14,6 +14,11 @@ export interface AgentReadiness {
   account?: string | null;
   /** Claude Code's organization name, display only. */
   organization?: string | null;
+  /**
+   * The agent's own login, when a key saved in Settings is what its new tabs use instead (PRO-306): the fields
+   * above then say "ready · API key", and this whether the subscription would work if chosen again.
+   */
+  ownLogin?: Pick<AgentReadiness, "state" | "loginMethod" | "plan" | "account" | "organization"> | null;
 }
 
 export const READINESS_LABELS: Record<AgentReadiness["state"], string> = {

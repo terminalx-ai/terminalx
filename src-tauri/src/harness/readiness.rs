@@ -22,6 +22,23 @@ pub struct Readiness {
     pub account: Option<String>,
     /// Claude Code's organization name, display only (PRO-306).
     pub organization: Option<String>,
+    /// What the agent's own login says, when a key saved in Settings is
+    /// what its new tabs use instead (PRO-306): whether switching back to
+    /// the subscription would work. `None` otherwise: the fields above are
+    /// its own login then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_login: Option<OwnLogin>,
+}
+
+/// An agent's own login, beside a saved API key that takes its place.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnLogin {
+    pub state: State,
+    pub login_method: Option<String>,
+    pub plan: Option<String>,
+    pub account: Option<String>,
+    pub organization: Option<String>,
 }
 
 /// A local login is evidence of configuration, not proof of entitlement or
@@ -97,7 +114,7 @@ fn codex_home_for_check(user: Option<PathBuf>, managed: Option<PathBuf>) -> Opti
 pub fn check(id: &str) -> Readiness {
     match super::offered().into_iter().find(|h| h.id == id) {
         Some(agent) => check_binary(id, agent.path),
-        None => Readiness { state: State::Unknown, checked_at: chrono::Utc::now().to_rfc3339(), version: None, login_method: None, plan: None, account: None, organization: None },
+        None => Readiness { state: State::Unknown, checked_at: chrono::Utc::now().to_rfc3339(), version: None, login_method: None, plan: None, account: None, organization: None, own_login: None },
     }
 }
 
@@ -113,7 +130,7 @@ pub fn check(id: &str) -> Readiness {
 pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    let mut result = Readiness { state: State::Unknown, checked_at: String::new(), version: None, login_method: None, plan: None, account: None, organization: None };
+    let mut result = Readiness { state: State::Unknown, checked_at: String::new(), version: None, login_method: None, plan: None, account: None, organization: None, own_login: None };
     if let Some(path) = path {
         let mut version = std::process::Command::new(&path);
         version.arg("--version").env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
@@ -144,9 +161,16 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
     // screen read must say so, or a person with a key and no subscription
     // could never start one. Its own login is not what tabs will use.
     if result.state != State::Missing && crate::agent_keys::uses_saved_key(id) {
+        // Kept apart, so Settings can still say whether the subscription
+        // would work before anyone switches back to it.
+        result.own_login = Some(OwnLogin {
+            state: result.state,
+            login_method: result.login_method.replace("API key".into()),
+            plan: result.plan.take(),
+            account: result.account.take(),
+            organization: result.organization.take(),
+        });
         result.state = State::Ready;
-        result.login_method = Some("API key".into());
-        (result.plan, result.account, result.organization) = (None, None, None);
     }
     result.checked_at = chrono::Utc::now().to_rfc3339();
     result
@@ -183,6 +207,13 @@ mod tests {
         crate::agent_keys::save_for_test("claude", "sk-ant-api03-ReadinessKey0123456789abcdefghijklmnop-test", &secrets);
         let ready = check_binary("claude", path.clone());
         assert_eq!((ready.state, ready.login_method.as_deref(), ready.version.as_deref()), (State::Ready, Some("API key"), Some("2.3.41")));
+        // Its own login is still told, apart: there is none to switch back to.
+        assert_eq!(ready.own_login, Some(OwnLogin { state: State::SignedOut, login_method: None, plan: None, account: None, organization: None }));
+        // Signed in to the subscription as well: whose, for when it is chosen again.
+        std::fs::write(&claude, "#!/bin/sh\ncase \"$1\" in\n  --version) echo '2.3.41 (Claude Code)' ;;\n  auth) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"subscriptionType\":\"max\",\"email\":\"ada@example.com\",\"orgName\":\"Acme\"}' ;;\nesac\n").unwrap();
+        let both = check_binary("claude", path.clone());
+        assert_eq!((both.state, both.login_method.as_deref(), both.plan.as_deref(), both.account.as_deref()), (State::Ready, Some("API key"), None, None));
+        assert_eq!(both.own_login, Some(OwnLogin { state: State::Ready, login_method: Some("Claude account".into()), plan: Some("max".into()), account: Some("ada@example.com".into()), organization: Some("Acme".into()) }));
         // Not installed stays not installed: a key does not run a CLI.
         assert_eq!(check_binary("claude", None).state, State::Missing);
         // Another agent's key signs nothing in.
@@ -190,7 +221,8 @@ mod tests {
 
         // Back on the subscription (the key kept, or removed): its own login again.
         crate::agent_keys::set_mode("claude", crate::agent_keys::Mode::Subscription).unwrap();
-        assert_eq!(check_binary("claude", path).state, State::SignedOut);
+        let own = check_binary("claude", path);
+        assert_eq!((own.state, own.account.as_deref(), own.own_login), (State::Ready, Some("ada@example.com"), None));
     }
 
     #[test]

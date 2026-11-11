@@ -43,6 +43,11 @@ function subscriptionName(harness: string, readiness: AgentReadiness | null): st
   return plan ? `${brand} ${plan}` : `${brand} account`;
 }
 
+/** What the agent's own (subscription) login says, also while a saved key stands in for it. */
+function ownLogin(readiness: AgentReadiness | null): AgentReadiness | null {
+  return readiness?.ownLogin ? { ...readiness, ...readiness.ownLogin, ownLogin: null } : readiness;
+}
+
 /** What the subscription choice is called for each agent that has one. */
 const SUBSCRIPTION: Record<string, { title: string; hint: string; again: string; short: string }> = {
   claude: { title: "Claude subscription", hint: "claude /login", again: "your Claude login", short: "your Claude subscription" },
@@ -278,20 +283,21 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     </span>
   </div> : null;
 
+  const own = ownLogin(readiness);
   const statusLine = usingKey ? <KeyStatus status={status!} verifying={busy === "verify"} now={now} />
-    : flow && setupActive(flow) ? runBadge(flow) : checking ? "Checking…" : BADGES[readiness?.state ?? "unknown"];
+    : flow && setupActive(flow) ? runBadge(flow) : checking ? "Checking…" : BADGES[own?.state ?? "unknown"];
   const dot = usingKey
     ? (status?.problem || status?.verified?.ok === false ? "bad" : status?.verified?.ok ? "ok" : "busy")
-    : readiness?.state === "ready" ? "ok" : checking ? "busy" : "off";
+    : own?.state === "ready" ? "ok" : checking ? "busy" : "off";
   const loginRow = usingKey
     ? <>API key · {status!.variable} <span className="text-faint">· Keychain{status?.baseUrl ? ` · ${hostOf(status.baseUrl)}` : ""}</span></>
-    : readiness?.state === "ready" ? [subscriptionName(harness.id, readiness), readiness.account].filter(Boolean).join(" · ") || "Local login found"
-    : readiness?.state === "signed_out" ? "None · sign in required" : null;
-  const needsSetup = !usingKey && (readiness?.state === "missing" || readiness?.state === "signed_out" || readiness?.state === "unknown" || setupActive(flow));
+    : own?.state === "ready" ? [subscriptionName(harness.id, own), own.account].filter(Boolean).join(" · ") || "Local login found"
+    : own?.state === "signed_out" ? "None · sign in required" : null;
+  const needsSetup = !usingKey && (own?.state === "missing" || own?.state === "signed_out" || own?.state === "unknown" || setupActive(flow));
 
   return <div>
     {harness.id === "codex"
-      ? <CodexChoice harness={harness} status={status} readiness={readiness} chosen={chosen} usingKey={usingKey} onChoose={(mode) => void choose(mode)} busy={busy}
+      ? <CodexChoice harness={harness} status={status} readiness={own} chosen={chosen} usingKey={usingKey} onChoose={(mode) => void choose(mode)} busy={busy}
           keyArea={<>{keyField}{shellNote}</>} onBaseUrl={async (url) => { const next = await act("mode", () => agentLogins.setBaseUrl(harness.id, url)); if (next) { login.take(next); if (next.saved) void verify(); } return !!next; }} />
       : <>
         <div className="mt-4 text-[12.5px] font-medium" id={`${harness.id}-sign-in`}>Sign-in</div>
@@ -315,11 +321,11 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     <Details rows={[
       ["Version", readiness?.version ?? null],
       ...(harness.id === "codex" ? [] : [["Login", loginRow] as [string, ReactNode]]),
-      ...(harness.id === "claude" && !usingKey && readiness?.organization ? [["Organization", readiness.organization] as [string, ReactNode]] : []),
+      ...(harness.id === "claude" && !usingKey && own?.organization ? [["Organization", own.organization] as [string, ReactNode]] : []),
       ...(harness.id === "codex" && status?.config ? [["Config", <Mono key="config">{status.config}</Mono>] as [string, ReactNode]] : []),
       ["Executable", harness.path ? <Mono>{shortPath(harness.path)}</Mono> : null],
     ]} />
-    {needsSetup && <div className="mt-3"><AgentSetup harness={harness} value={readiness} checking={checking} onRefresh={recheck} headless /></div>}
+    {needsSetup && <div className="mt-3"><AgentSetup harness={harness} value={own} checking={checking} onRefresh={recheck} headless /></div>}
   </div>;
 }
 

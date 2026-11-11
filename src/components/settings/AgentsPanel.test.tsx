@@ -165,7 +165,8 @@ describe("Agents · API key (PRO-306)", () => {
     expect(calls("agent_login_verify")).toEqual([{ harness: "claude" }]);
     expect(row("Login")).toBe("API key · ANTHROPIC_API_KEY · Keychain");
     expect(screen.queryByText("Organization", { selector: "dt" })).toBeNull();
-    expect(screen.getByRole("tab", { name: "Claude Code: Using an API key" })).toBeTruthy();
+    // The badge follows the readiness check a save asks for, which may answer after the key's own check.
+    expect(await screen.findByRole("tab", { name: "Claude Code: Using an API key" })).toBeTruthy();
 
     // A Codex tab, a tab already on the new key: neither is restarted.
     running.claude.push({ sessionId: "s1", tabId: "t9", current: true });
@@ -300,6 +301,18 @@ describe("Agents · API key (PRO-306)", () => {
     await waitFor(() => expect(asked()).toBe(before + 1));
     fireEvent.click(screen.getByRole("radio", { name: /Claude subscription/ }));
     await waitFor(() => expect(asked()).toBe(before + 2));
+  });
+
+  it("still says what the ChatGPT login is while a saved key stands in for it", async () => {
+    logins.codex = { ...logins.codex, mode: "api_key", saved: { masked: `sk-proj-${"•".repeat(24)}9Qx1`, savedAt: "2026-11-11T09:00:00Z" } };
+    readiness.codex = { ...ready("codex"), loginMethod: "API key", plan: null, account: null, ownLogin: { state: "ready", loginMethod: "ChatGPT account", plan: "pro", account: "ada@example.com" } };
+    show([codex]);
+    expect(await screen.findByRole("radio", { name: /ChatGPT\s*ada@example.com · Pro/, checked: false })).toBeTruthy();
+    cleanup();
+    readiness.codex = { ...ready("codex"), loginMethod: "API key", plan: null, account: null, ownLogin: { state: "signed_out" } };
+    show([codex]);
+    expect(await screen.findByRole("radio", { name: /ChatGPT\s*Not signed in/ })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Codex: Using an API key" })).toBeTruthy();
   });
 
   it("switches between a saved key and the subscription without forgetting the key", async () => {
