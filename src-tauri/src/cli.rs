@@ -2539,7 +2539,7 @@ mod tests {
             // What stays, and context.
             "Edits that span pieces", "Judgment calls", "Merging", "pushed or shared", "references, not content",
             // Deterministic first, never poll.
-            "Never poll", "wait --children-of", "Write the done-check as a command",
+            "Never poll", "wait --children-of", "Write a `command` done-check",
             // Models come from the routing table and the ladder.
             "routing table", "escalation ladder",
         ] {
