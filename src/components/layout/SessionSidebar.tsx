@@ -1182,8 +1182,10 @@ function ConversationRow({
   const leadExpanded = !!family && (leadOpen || family.workers.some((entry) => entry.id === selectedSessionId));
   const folded = !!family && family.workers.length > 0 && !leadExpanded;
   const { piece } = useWorkerPiece(session);
+  // A lead goes by its title, as a run's rows are read (18.07): its branch is in its tooltip, its run's glyph leads it.
+  if (family) named = "title";
   const statusDescriptionId = useId();
-  const title = worker && piece ? piece.title : named === "branch" ? (peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session)) : sidebarConversationTitle(session, branch, sessions);
+  const title = worker && piece ? piece.title : family ? conversationTitle(session) : named === "branch" ? (peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session)) : sidebarConversationTitle(session, branch, sessions);
   const draft = useSessionDraft(peers);
   const unread = peers.some(isUnread) || (folded && !!summary?.unread);
   // The sessions the row stands for, picked as one for the bulk bar (#718).
