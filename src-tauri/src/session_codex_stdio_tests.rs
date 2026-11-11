@@ -1929,15 +1929,22 @@ pub(super) fn before_approval(frame: &Outbound) {
 }
 
 #[test]
-fn privacy_native3_codex_handshake_and_approval_delivery() {
-    for action in ["handshake", "approval", "followup"] {
-        for kind in ["personal-on", "personal-cycle", "managed-on", "managed-cycle"] {
-            let case = format!("native3-{action}-{kind}");
-            let out = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "session::codex_stdio::tests::child_fixture", "--nocapture"])
-                .env(CASE, &case).output().unwrap();
-            assert!(out.status.success(), "{case}\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        }
+fn privacy_review3_high_codex_startup_retains_remote_ticket() {
+    native3_delivery_cases("handshake");
+}
+
+#[test]
+fn privacy_native3_codex_approval_and_followup_delivery() {
+    for action in ["approval", "followup"] { native3_delivery_cases(action); }
+}
+
+fn native3_delivery_cases(action: &str) {
+    for kind in ["personal-on", "personal-cycle", "managed-on", "managed-cycle"] {
+        let case = format!("native3-{action}-{kind}");
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::codex_stdio::tests::child_fixture", "--nocapture"])
+            .env(CASE, &case).output().unwrap();
+        assert!(out.status.success(), "{case}\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 }
 
