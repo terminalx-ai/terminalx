@@ -387,8 +387,8 @@ fn orchestration_run_child() {
     assert_ne!(lead_head, git(repo.path().to_str().unwrap(), &["rev-parse", "main"]).unwrap());
     let caller = json!({"session": lead_id, "tab": lead["tabId"]});
     let plan = json!({"goal": "Move settings reads to the typed store", "pieces": [
-        {"id": "store", "title": "Typed store module", "doneCheck": "cargo t store", "owns": ["src/store/"], "model": "sonnet", "effort": "high", "readFirst": ["docs/SETTINGS.md"]},
-        {"id": "docs", "title": "Update the docs", "doneCheck": "every key is documented", "owns": ["docs/"], "dependsOn": ["store"], "permissionMode": "acceptEdits"},
+        {"id": "store", "title": "Typed store module", "doneChecks": [{"type": "command", "run": "cargo t store"}], "owns": ["src/store/"], "model": "sonnet", "effort": "high", "readFirst": ["docs/SETTINGS.md"]},
+        {"id": "docs", "title": "Update the docs", "doneChecks": [{"type": "command", "run": "every key is documented"}], "owns": ["docs/"], "dependsOn": ["store"], "permissionMode": "acceptEdits"},
     ]});
 
     // Each rule refuses with its own code and the piece, and leaves nothing behind.
@@ -397,7 +397,7 @@ fn orchestration_run_child() {
         change(&mut broken);
         service.execute("runs.create", json!({"plan": broken, "caller": caller}), "refused").unwrap_err()
     };
-    let error = refused(&|plan| plan["pieces"][1]["doneCheck"] = json!(""));
+    let error = refused(&|plan| plan["pieces"][1]["doneChecks"] = json!([]));
     assert_eq!((error.code.as_str(), error.details.as_ref().unwrap()["piece"].as_str()), ("no_done_check", Some("docs")));
     let error = refused(&|plan| plan["pieces"][1]["owns"] = json!(["src/store/settings.rs"]));
     assert_eq!((error.code.as_str(), error.details.as_ref().unwrap()["piece"].as_str(), error.details.as_ref().unwrap()["other"].as_str()), ("shared_file", Some("docs"), Some("store")));
@@ -495,6 +495,30 @@ fn orchestration_run_child() {
         assert!(entry.run_worker() && crate::orchestration::guard::limited(&entry));
         assert!(service.execute("pipelines.start", json!({"target": entry.id}), "pipeline").unwrap_err().message.contains("worker of an orchestration run"));
     }
+    // Whoever it names as its parent, or none: what counts is who asked.
+    for extra in [json!({"noParent": true}), json!({"parent": lead_id})] {
+        let mut params = json!({"project": project.path, "agent": "claude", "prompt": "help", "useWorktree": true, "noPipeline": true, "caller": {"session": worker.id, "tab": tab.id}});
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let loose = service.execute("sessions.create", params, "loose").unwrap();
+        assert!(index::get(loose["sessionId"].as_str().unwrap()).unwrap().run_worker(), "{extra}");
+    }
+    // A worker changes no pipeline, its own or the lead's; it may read them.
+    let leads = crate::issue_pipeline::store::for_session(lead_id).unwrap().unwrap().id;
+    let as_worker = json!({"session": worker.id, "tab": tab.id});
+    for (command, params) in [
+        ("pipelines.start", json!({"target": lead_id})),
+        ("pipelines.act", json!({"pipeline": leads, "action": "stop"})),
+        ("pipelines.act", json!({"pipeline": leads, "action": "merge"})),
+        ("pipelines.autoMerge", json!({"pipeline": leads, "value": true})),
+        ("pipelines.resolveConflicts", json!({"pipeline": leads, "value": true})),
+    ] {
+        let mut params = params;
+        params["caller"] = as_worker.clone();
+        let error = service.execute(command, params, "pipeline").unwrap_err();
+        assert_eq!(error.code, "forbidden", "{command}: {}", error.message);
+    }
+    assert!(service.execute("pipelines.show", json!({"pipeline": leads, "caller": as_worker}), "show").unwrap().to_string().contains(leads.as_str()));
+    assert!(!crate::issue_pipeline::store::get(&leads).unwrap().stopped);
     // One the lead starts by hand is an ordinary session.
     assert!(!index::get(from(lead_id, lead["tabId"].as_str().unwrap())["sessionId"].as_str().unwrap()).unwrap().run_worker());
 

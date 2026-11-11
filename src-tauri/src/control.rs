@@ -1150,6 +1150,16 @@ impl ControlService {
                 .map_err(workspace_error)?
             }
         };
+        // A session a run's worker starts has the worker's limits, whoever it names as its
+        // parent, or none: marked before anything is sent to it (`orchestration::guard`).
+        let mut entry = entry;
+        if !entry.run_worker() && p.caller["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller)) {
+            entry = index::update_session(&entry.id, |session| {
+                session.mark_run_worker();
+                Ok(session.clone())
+            })
+            .map_err(ControlError::internal)?;
+        }
         let tab = entry
             .tabs
             .first()
@@ -1260,6 +1270,11 @@ impl ControlService {
 
     fn pipelines(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::issue_pipeline::{engine, store};
+        // A run's worker changes no pipeline, its own or anyone's: each of these can push a
+        // branch, merge it, or let a merge through (`orchestration::guard`). It may still read them.
+        if !matches!(command, "pipelines.list" | "pipelines.show") && params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller)) {
+            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not start, steer or merge a pipeline. Report what is ready; the lead decides what happens to it.", None::<String>));
+        }
         if command == "pipelines.start" {
             let target = resolve_target(&required_string(&params, "target")?)?;
             self.manager.accepting_work().map_err(ControlError::internal)?;

@@ -27,7 +27,7 @@ const { onOrchestratorSettingsRequest, resetRunsForTests } = await import("@/lib
 const session = { id: "lead", projectPath: "/repo", cwd: "/repo/.worktrees/lead", title: "Move settings reads", tabs: [{ id: "lead-tab", harness: "claude" }] } as unknown as SessionEntry;
 
 const piece = (id: string, title: string, extra: Partial<RunPiece> = {}): RunPiece => ({
-  id, title, owns: [], dependsOn: [], doneCheck: "cargo t", agent: "claude", model: "sonnet", effort: "medium", readsUntrusted: false, attempts: 0, state: "queued",
+  id, title, owns: [], dependsOn: [], doneChecks: [{ type: "command", run: "cargo t" }], agent: "claude", model: "sonnet", effort: "medium", readsUntrusted: false, attempts: 0, state: "queued",
   brief: { goal: title, why: "", scope: "", outOfScope: "", known: [], readFirst: [], limits: [] }, ...extra,
 });
 
@@ -147,7 +147,7 @@ describe("a plan waiting for approval (PRO-274)", () => {
     const saved: RunPlan[] = [];
     answers.orchestration_update_plan = ({ plan }: { id: string; plan: RunPlan }) => {
       saved.push(plan);
-      if (plan.pieces.some((p) => !p.doneCheck.trim())) throw '{"code":"no_done_check","message":"Piece store has no done-check.","details":{"piece":"store"}}';
+      if (plan.pieces.some((p) => !p.doneChecks.length)) throw '{"code":"no_done_check","message":"Piece store has no done-check.","details":{"piece":"store"}}';
       return { ...run, planEdited: true, pieces: run.pieces.filter((p) => plan.pieces.some((kept) => kept.id === p.id)).map((p) => ({ ...p, model: plan.pieces.find((kept) => kept.id === p.id)!.model, effort: plan.pieces.find((kept) => kept.id === p.id)!.effort })) };
     };
     await open(run);
@@ -164,7 +164,7 @@ describe("a plan waiting for approval (PRO-274)", () => {
     fireEvent.click(within(row("store")).getByRole("button", { name: "Typed store module" }));
     fireEvent.click(within(detail()).getByRole("button", { name: "Edit brief" }));
     const form = within(detail()).getByRole("form", { name: "Edit the brief of Typed store module" });
-    fireEvent.change(within(form).getByLabelText(/^Done when/), { target: { value: " " } });
+    fireEvent.change(within(form).getByLabelText(/^Done when: commands/), { target: { value: " " } });
     fireEvent.change(within(form).getByLabelText(/^Files it owns/), { target: { value: "src/store/settings/\n\nsrc/store/mod.rs\n" } });
     fireEvent.click(within(form).getByRole("button", { name: "Save brief" }));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Piece store has no done-check."));
@@ -177,6 +177,51 @@ describe("a plan waiting for approval (PRO-274)", () => {
     await waitFor(() => expect(saved).toHaveLength(3));
     expect(saved[2].pieces.map((p) => [p.id, p.dependsOn])).toEqual([["map", []], ["docs", []]]);
     await waitFor(() => expect(document.querySelectorAll("[data-piece]")).toHaveLength(2));
+  });
+
+  it("shows each done-check by its kind, and edits commands and review points apart", async () => {
+    const run = waiting();
+    run.pieces[2] = {
+      ...run.pieces[2], reviewOnly: true, reviewOnlyReason: "Prose: nothing to run.",
+      doneChecks: [{ type: "review", text: "Every documented key exists." }, { type: "vote", text: "No key lost its meaning.", voters: 3, threshold: 2 }],
+    };
+    run.pieces[1] = { ...run.pieces[1], doneChecks: [{ type: "command", run: "cargo t store" }, { type: "command", run: "cargo clippy" }, { type: "review", text: "Unknown keys survive a save." }] };
+    const saved: RunPlan[] = [];
+    answers.orchestration_update_plan = ({ plan }: { id: string; plan: RunPlan }) => {
+      saved.push(plan);
+      return { ...run, pieces: run.pieces.map((p) => { const next = plan.pieces.find((kept) => kept.id === p.id)!; return { ...p, doneChecks: next.doneChecks, reviewOnly: next.reviewOnly, reviewOnlyReason: next.reviewOnlyReason }; }) };
+    };
+    await open(run);
+    // The row shows the first check by its kind, and how many more there are.
+    const storeCheck = within(row("store")).getAllByRole("cell")[2];
+    expect(storeCheck.textContent).toBe("cargo t store+2");
+    expect(within(storeCheck).getByLabelText("Command")).toBeTruthy();
+    expect(within(within(row("docs")).getAllByRole("cell")[2]).getByLabelText("Review")).toBeTruthy();
+    // The brief lists every check, and says when review alone checks the piece, and why.
+    fireEvent.click(within(row("docs")).getByRole("button", { name: "Update the docs" }));
+    const checks = within(detail()).getByTestId("done-checks");
+    expect(within(checks).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Every documented key exists.", "No key lost its meaning. · vote, 2 of 3"]);
+    expect(within(checks).getByLabelText("Vote")).toBeTruthy();
+    expect(detail().textContent).toContain("Review only, no command: Prose: nothing to run.");
+
+    // Edit: commands and review points a line each; the vote it had stays, and the reason goes with the switch.
+    fireEvent.click(within(detail()).getByRole("button", { name: "Edit brief" }));
+    const form = within(detail()).getByRole("form", { name: "Edit the brief of Update the docs" });
+    expect((within(form).getByLabelText(/^Done when: review points/) as HTMLTextAreaElement).value).toBe("Every documented key exists.");
+    expect((within(form).getByLabelText(/^Why no command can/) as HTMLInputElement).value).toBe("Prose: nothing to run.");
+    fireEvent.change(within(form).getByLabelText(/^Done when: commands/), { target: { value: "pnpm docs:check\n\n  pnpm lint docs  " } });
+    fireEvent.click(within(form).getByRole("checkbox", { name: /No command can prove this piece/ }));
+    expect(within(form).queryByLabelText(/^Why no command can/)).toBeNull();
+    fireEvent.click(within(form).getByRole("button", { name: "Save brief" }));
+    await waitFor(() => expect(saved).toHaveLength(1));
+    const docs = saved[0].pieces[2];
+    expect(docs.doneChecks).toEqual([
+      { type: "command", run: "pnpm docs:check" }, { type: "command", run: "pnpm lint docs" },
+      { type: "review", text: "Every documented key exists." }, { type: "vote", text: "No key lost its meaning.", voters: 3, threshold: 2 },
+    ]);
+    expect([docs.reviewOnly, docs.reviewOnlyReason]).toEqual([undefined, undefined]);
+    // The other pieces go back exactly as they were.
+    expect(saved[0].pieces[1].doneChecks).toEqual(run.pieces[1].doneChecks);
   });
 
   it("discards the plan when asked, and says who did", async () => {
@@ -273,7 +318,7 @@ describe("a session with no run (PRO-274)", () => {
 
   it("stores a plan chosen from a file as this session's run, and shows a refused one by its rule", async () => {
     const run = waiting();
-    const plan = { goal: run.goal, pieces: [{ id: "a", title: "A", doneCheck: "cargo t" }] };
+    const plan = { goal: run.goal, pieces: [{ id: "a", title: "A", doneChecks: [{ type: "command", run: "cargo t" }] }] };
     mocks.openFile.mockResolvedValue("/repo/plan.json");
     answers.read_text_file = { content: JSON.stringify(plan), mtimeMs: 0, size: 1, binary: false, truncated: false };
     answers.orchestration_create = () => { throw '{"code":"too_many_pieces","message":"The plan has 9 pieces and the limit is 8.","details":{"limit":8,"pieces":9}}'; };

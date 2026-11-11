@@ -32,6 +32,8 @@ pub struct Lead {
     pub agent: String,
     /// Workers need worktrees, so the project must be a git repository.
     pub repository: bool,
+    /// The lead's own checkout: where a path a piece owns is looked up.
+    pub cwd: String,
 }
 
 /// A worker session, just created for a piece.
@@ -157,7 +159,7 @@ fn stored(id: &str) -> Result<Run, EngineError> {
 }
 
 fn rules_for<'a>(limits: &'a OrchestratorLimits, lead: &'a Lead, agents: &'a [String]) -> plan::Rules<'a> {
-    plan::Rules { piece_limit: limits.piece_limit, default_agent: &lead.agent, agents, worker_mode: &limits.worker_mode, approval: limits.require_approval }
+    plan::Rules { piece_limit: limits.piece_limit, default_agent: &lead.agent, agents, worker_mode: &limits.worker_mode, approval: limits.require_approval, checkout: Some(std::path::Path::new(&lead.cwd)) }
 }
 
 /// Validate a plan and store it as a run of `lead_session`. It waits for
