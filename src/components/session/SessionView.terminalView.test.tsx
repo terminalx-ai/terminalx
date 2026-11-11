@@ -735,7 +735,8 @@ describe("a quick chat in the floating window's compact chrome", () => {
     const linkedPath = "/Users/me/linked-identity-repo";
     const session: SessionEntry = { ...quick(), id: "linked-identity", kind: "project", projectPath: cwd, cwd };
     guard.handlers.work_status = () => ({ isRepo: false, dirty: false, branch: null, ahead: 0, behind: 0 });
-    guard.handlers.github_identity = ({ refresh }) => ({ login: refresh ? "refreshed-account" : "linked-account", source: "ssh", email: "me@example.com", repo: "me/linked-repo", remoteHost: "github" });
+    let login = "linked-account";
+    guard.handlers.github_identity = () => ({ login, source: "ssh", email: "me@example.com", repo: "me/linked-repo", remoteHost: "github" });
     mocks.prefs.panelOpen = true;
     const Local = () => {
       const current = useSessionStore().sessions.find((entry) => entry.id === session.id)!;
@@ -756,12 +757,15 @@ describe("a quick chat in the floating window's compact chrome", () => {
       const chip = await screen.findByRole("button", { name: "Connected to GitHub as linked-account" });
       expect(getSessionStore().sessions.find((entry) => entry.id === session.id)?.cwd).toBe(cwd);
       expect(screen.queryByRole("button", { name: "Branch" })).toBeNull();
-      expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: linkedPath, refresh: false }]);
+      // A new privacy generation requires a fresh native lookup, even before
+      // an explicit refresh. The provider identity changes independently.
+      expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: linkedPath, refresh: true }]);
 
+      login = "refreshed-account";
       fireEvent.click(chip);
       expect(await screen.findByRole("button", { name: "Connected to GitHub as refreshed-account" })).toBeTruthy();
       expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([
-        { projectPath: linkedPath, refresh: false },
+        { projectPath: linkedPath, refresh: true },
         { projectPath: linkedPath, refresh: true },
       ]);
 

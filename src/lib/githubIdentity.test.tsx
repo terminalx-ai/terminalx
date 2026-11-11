@@ -43,6 +43,7 @@ it("shares a pending lookup between headers", async () => {
   const { result } = renderHook(() => [useGithubIdentity("/shared-privacy"), useGithubIdentity("/shared-privacy/")]);
   await waitFor(() => expect(result.current).toEqual([connected, connected]));
   expect(calls.identity).toHaveBeenCalledTimes(1);
+  expect(calls.identity).toHaveBeenCalledWith("/shared-privacy", true);
 });
 
 it("withdraws late answers across activation and off/on restoration", async () => {
