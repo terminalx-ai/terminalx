@@ -815,10 +815,9 @@ fn started_by(params: &mut Value, tokens: &mut Tokens) -> Result<(), ControlErro
         (Some(parent), false) if parent.trim().is_empty() => return Err(invalid("--parent needs a session.")),
         (Some(parent), false) if is_cloud_key(&parent) => return Err(invalid("--parent names a session on this computer, not a cloud session.")),
         (Some(parent), false) => params["parent"] = json!(parent),
-        (None, true) => {
-            params["noParent"] = json!(true);
-            return Ok(());
-        }
+        // No parent is recorded, but where the command ran is still said: a run's worker
+        // is held to its limits by who asks, not by what the request records.
+        (None, true) => params["noParent"] = json!(true),
         (None, false) => {}
     }
     if let Some(caller) = calling_session() {
@@ -1452,9 +1451,9 @@ mod tests {
             assert!(inside.get("parent").is_none() && inside.get("noParent").is_none());
             // The named parent goes with the caller, whose tab is recorded when they are the same session.
             assert_eq!((&named["parent"], &named["caller"]), (&json!("0198c"), &caller));
-            // Nobody: not even where it ran.
-            assert_eq!(nobody["noParent"], true);
-            assert!(nobody.get("caller").is_none() && nobody.get("parent").is_none());
+            // Nobody is recorded as its parent; where it ran is still said.
+            assert_eq!((&nobody["noParent"], &nobody["caller"]), (&json!(true), &caller));
+            assert!(nobody.get("parent").is_none());
             assert_eq!(with(base, &["--parent", "0198c"])["parent"], "0198c");
             for refused in [&["--parent", "0198c", "--no-parent"][..], &["--parent", ""], &["--parent"], &["--parent", "cloud:org:ws:s"]] {
                 assert_eq!(parse(&args(&[base, refused].concat())).unwrap_err().code, "invalid_arguments", "{refused:?}");

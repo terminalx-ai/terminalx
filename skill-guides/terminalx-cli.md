@@ -762,8 +762,9 @@ check of every tool call, a git configuration in which every push goes nowhere, 
 with no upstream. A refused command tells the worker to stop and report what is ready.
 Collect a worker's branch from the shared repository yourself (`git merge <its branch>` in
 your worktree); do not ask a worker to push or to merge. A worker gets no issue pipeline
-(`pipelines start` is refused for it: a pipeline would push and merge on its behalf), and a
-session a worker starts has the same limits as the worker.
+(a pipeline would push and merge on its behalf, so every `pipelines` command but `list` and
+`show` is refused for it) and starts no sessions or runs of its own; a session started for
+it all the same has the worker's limits.
 
 ### Permissions
 

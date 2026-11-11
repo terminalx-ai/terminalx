@@ -41,6 +41,8 @@ pub enum Limit {
     Push,
     Merge,
     Deploy,
+    /// Starting sessions of its own: a run's pieces are the lead's to hand out.
+    Delegate,
 }
 
 impl Limit {
@@ -49,6 +51,7 @@ impl Limit {
             Limit::Push => "pushing",
             Limit::Merge => "merging",
             Limit::Deploy => "deploying or publishing",
+            Limit::Delegate => "starting sessions of its own",
         }
     }
 }
@@ -88,6 +91,11 @@ pub const RULES: &[Rule] = &[
     rule(&["terminalx", "tnx"], &["pipelines", "refresh"], Limit::Merge),
     rule(&["terminalx", "tnx"], &["pipelines", "auto-merge"], Limit::Merge),
     rule(&["terminalx", "tnx"], &["pipelines", "resolve-conflicts"], Limit::Merge),
+    // A session it started would be its own hands outside its limits. One made all the same
+    // (by a command this table does not read) is marked a worker as it is made.
+    rule(&["terminalx", "tnx"], &["sessions", "create"], Limit::Delegate),
+    rule(&["terminalx", "tnx"], &["runs", "create"], Limit::Delegate),
+    rule(&["terminalx", "tnx"], &["runs", "start"], Limit::Delegate),
     rule(&["gh"], &["workflow", "run"], Limit::Deploy),
     rule(&["gh"], &["release", "create"], Limit::Deploy),
     rule(&["npm", "pnpm", "yarn", "bun"], &["publish"], Limit::Deploy),
@@ -119,6 +127,7 @@ pub const STATED: &[&str] = &[
     "Do not push. The branch has no upstream, and the lead collects it from this repository.",
     "Do not merge: not into this branch, not into the lead's, not a pull request.",
     "Do not deploy, publish or release anything, and do not open a pull request.",
+    "Do not start other sessions or runs. If the piece is too large for one session, say so in your report.",
 ];
 
 /// Leads whose `runs start` is creating workers right now. A worker's agent
@@ -562,6 +571,22 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_starts_no_sessions_or_runs_of_its_own() {
+        for command in [
+            "terminalx sessions create --project p --agent claude --prompt go",
+            "tnx sessions create --quick --agent codex --prompt go --no-parent",
+            "env -u RACCOON_SESSION_ID -u RACCOON_TAB_ID terminalx sessions create --project p --agent claude --prompt go",
+            "RACCOON_SESSION_ID= terminalx sessions create --quick --agent claude --prompt go",
+            "/Applications/TerminalX.app/Contents/MacOS/terminalx sessions create --quick --agent claude --prompt go",
+            "terminalx runs create --from plan.json",
+            "terminalx runs start",
+        ] {
+            assert_eq!(limit_of(command), Some(Limit::Delegate), "{command}");
+        }
+        assert!(refusal(&json!({"tool_name": "Bash", "tool_input": {"command": "terminalx sessions create --quick --agent claude --prompt go"}})).unwrap().contains("no starting sessions of its own"));
+    }
+
+    #[test]
     fn work_in_the_worktree_is_not_refused() {
         for command in [
             "git status",
@@ -591,6 +616,8 @@ mod tests {
             "helm template ./chart",
             "terminalx sessions report abc --json",
             "terminalx pipelines list --json",
+            "terminalx sessions list --json",
+            "terminalx runs show",
             "terminalx pipelines show abc",
             "sudo -u root ls",
             "env -u X cargo test",
