@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useEffect, useState, useSyncExternalStore } from "react";
 import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "@/icons";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -29,7 +29,8 @@ import { ShortcutsTab } from "./ShortcutsTab";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { OrganizationsTab } from "./OrganizationsTab";
 
-const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
+const EnvironmentsTab = lazy(() => import("@/components/localVm/EnvironmentsTab").then((module) => ({ default: module.EnvironmentsTab })));
+const TABS = ["account", "devices", "general", "appearance", "organizations", "environments", "agents", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
 /** The section Settings opens on when nothing asks for a particular one (PRO-81). */
 export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
@@ -40,6 +41,7 @@ const TAB_LABEL: Record<Tab, string> = {
   general: "General",
   appearance: "Appearance",
   organizations: "Organizations",
+  environments: "Environments",
   agents: "Agents",
   transcription: "Transcription",
   integrations: "Integrations",
@@ -125,6 +127,7 @@ export function SettingsPage({
             {tab === "general" && <GeneralTab />}
             {tab === "appearance" && <AppearanceTab onOpenUsage={onOpenUsage} />}
             {tab === "organizations" && <OrganizationsTab />}
+            {tab === "environments" && <Suspense fallback={<p role="status">Loading environments…</p>}><EnvironmentsTab /></Suspense>}
             {tab === "agents" && <AgentsTab onOpenSkills={onOpenSkills} />}
             {tab === "transcription" && <TranscriptionTab />}
             {tab === "integrations" && <IntegrationsTab />}

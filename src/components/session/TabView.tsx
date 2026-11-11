@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agent as agentApi, errorMessage, type ImageInput } from "@/lib/api";
 import { applyEvent, getTabLog, useTabLog } from "@/lib/agentEvents";
 import { buildTranscript, conversationEvents, type Transcript } from "@/lib/transcript";
@@ -38,6 +38,7 @@ import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEnt
 import { interruptUnanswered } from "@/types/events";
 
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
+const LocalVmTasks = lazy(() => import("@/components/localVm/LocalVmTasks").then((module) => ({ default: module.LocalVmTasks })));
 
 /**
  * One tab: its event log, the transcript built from it, and the composer.
@@ -429,7 +430,14 @@ export function TabView({
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       footer={
-        readOnly ? (
+        <>
+        {local ? <Suspense fallback={null}><LocalVmTasks
+          key={JSON.stringify([session.id, tab.id, conversation])}
+          sessionId={session.id} tab={tab} conversation={conversation} sourceRoot={session.cwd} draft={draft}
+          active={active && !terminalMode} canSubmit={!readOnly && !session.worktreeRemoved}
+          onDispatched={(prompt) => { if (getDraft(tab.id) === prompt) setDraft(tab.id, ""); }}
+        /></Suspense> : null}
+        {readOnly ? (
           // A conversation that is not running is read, and resumed from here: there is nobody to send to.
           <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-x-3 gap-y-2 px-4 pb-4 pt-2 text-xs text-muted-foreground" role="status" data-testid="conversation-read-only">
             <span className="min-w-0 flex-1">
@@ -513,7 +521,8 @@ export function TabView({
           autoFocus={active}
         />
         </>
-        )
+        )}
+        </>
       }
     />
   );

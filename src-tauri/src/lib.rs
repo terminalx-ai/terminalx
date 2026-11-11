@@ -99,6 +99,8 @@ mod installation;
 mod keychain;
 mod landed;
 mod local_sharing;
+#[cfg(unix)]
+pub mod local_vm;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;
