@@ -11,7 +11,6 @@ use crate::store::projects::{self, Project};
 use crate::{git, harness, names, store};
 
 pub use crate::session_ops::{NewSession, NewTab};
-pub(crate) use crate::session_ops::create_session_blocking;
 use crate::session_ops::{available_worktree_name, rename_workspace_entries};
 
 type CmdResult<T> = Result<T, String>;
@@ -1686,6 +1685,13 @@ pub fn list_projects() -> CmdResult<ProjectsResponse> {
     Ok(ProjectsResponse { projects, last_selected })
 }
 
+/// Preview effective copy patterns, including unsaved edits. No file contents leave Rust.
+#[tauri::command]
+pub async fn repository_files_preview(path: String, patterns: Option<Vec<String>>, snapshot: Option<String>) -> CmdResult<crate::worktree_files::Preview> {
+    tauri::async_runtime::spawn_blocking(move || crate::worktree_files::preview(Path::new(&path), patterns.as_deref(), snapshot.as_deref()).map_err(err))
+        .await.map_err(err)?
+}
+
 /// The project list changed: a window that did not make the change reads it again.
 pub(crate) const PROJECTS_CHANGED_EVENT: &str = "projects_changed";
 
@@ -1767,6 +1773,12 @@ pub async fn project_create(parent: String, name: String) -> StartResult<String>
 pub fn list_sessions(app: tauri::AppHandle) -> CmdResult<Vec<SessionEntry>> {
     store::message_activity::backfill(std::sync::Arc::new(app));
     store::conversation_titles::backfill().map_err(err)
+}
+
+#[tauri::command]
+pub async fn session_row_statuses(state: State<'_, AppState>, ids: Vec<String>) -> CmdResult<serde_json::Value> {
+    let sessions = state.sessions().map_err(err)?;
+    github_work(move || sessions.row_statuses(ids).map_err(err)).await.map_err(err)?
 }
 
 /// Personal local section metadata, read independently of agent processes.
@@ -1884,13 +1896,25 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// fail after it, so a session whose agent never starts is still visible and
 /// deletable.
 #[tauri::command]
-pub async fn create_session(app: AppHandle, mut req: NewSession) -> CmdResult<SessionEntry> {
-    github_work(move || {
+pub async fn create_session(app: AppHandle, state: State<'_, AppState>, mut req: NewSession) -> CmdResult<SessionEntry> {
+    let privacy = crate::github_process::ticket();
+    if !req.project_path.starts_with("cloud:") && crate::git::is_repo(std::path::Path::new(&req.project_path))
+        && !crate::configuration_commands::review(&app, &req.project_path).await? {
+        return Err("Repository configuration was not trusted. No workspace was created.".into());
+    }
+    let sessions = state.sessions().map_err(err)?;
+    github_work(move || crate::github_process::with_ticket(privacy, || {
         crate::session_ops::prefer_native_codex_session(&mut req);
-        create_session_blocking(&app, req)
-    })
+        sessions.create(&req).map_err(err)
+    }))
         .await
         .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn workspace_setup(state: State<'_, AppState>, operation: String, session_id: Option<String>, pane_id: Option<String>) -> CmdResult<serde_json::Value> {
+    let sessions = state.sessions().map_err(err)?;
+    github_work(move || sessions.workspace_setup(&operation, session_id.as_deref(), pane_id.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 /// Tell every window what a session is now. The window that made a change
@@ -1950,6 +1974,18 @@ pub fn rename_tab(app: AppHandle, session_id: String, tab_id: String, title: Opt
 #[tauri::command]
 pub fn tab_state() -> CmdResult<index::TabState> {
     index::tab_state().map_err(err)
+}
+
+#[tauri::command]
+pub async fn sidebar_order() -> CmdResult<index::SidebarOrder> {
+    tauri::async_runtime::spawn_blocking(index::sidebar_order).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_sidebar_order(app: AppHandle, patch: index::SidebarOrderPatch) -> CmdResult<index::SidebarOrder> {
+    let saved = tauri::async_runtime::spawn_blocking(move || index::set_sidebar_order(patch)).await.map_err(err)?.map_err(err)?;
+    let _ = app.emit("sidebar_order_changed", &saved);
+    Ok(saved)
 }
 
 /// Save one workspace's tab order, pins, mutes and titles, for every window and every device.
@@ -2256,8 +2292,14 @@ pub async fn skill_detail(dir_path: String) -> CmdResult<crate::skills::SkillDet
 
 /// The branch against its base, for the side panel's Branch tab.
 #[tauri::command]
-pub async fn branch_overview(cwd: String, base: Option<String>) -> CmdResult<crate::branch_overview::BranchOverview> {
-    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::overview(Path::new(&cwd), base.as_deref())).await.map_err(err)
+pub async fn branch_overview(cwd: String, base: Option<String>, local_only: Option<bool>) -> CmdResult<crate::branch_overview::BranchOverview> {
+    tauri::async_runtime::spawn_blocking(move || crate::branch_overview::overview(Path::new(&cwd), base.as_deref(), local_only.unwrap_or(false))).await.map_err(err)
+}
+
+/// Whether this project can use GitHub pull requests.
+#[tauri::command]
+pub async fn project_forge(cwd: String) -> CmdResult<crate::github::ProjectForge> {
+    github_work(move || crate::github::project_forge(Path::new(&cwd))).await.map_err(err)
 }
 
 /// Merges the checked-out branch into a local branch, for a project with no remote.
@@ -2375,6 +2417,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             tabs: vec![new_tab.clone()],
             active_tab: Some(new_tab.id.clone()),
             link: None,
+            parent: None,
             unknown: BTreeMap::new(),
         };
         if src.worktree_name.is_some() && !src.worktree_removed {
@@ -2676,6 +2719,13 @@ pub async fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: St
     tauri::async_runtime::spawn_blocking(move || m.stop(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
 
+/// Change a reader-owned follow-up queue, persisting before acknowledging.
+#[tauri::command]
+pub async fn change_held_queue(state: State<'_, AppState>, session_id: String, tab_id: String, change: crate::session::held::Change) -> CmdResult<SendOutcome> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.change_held(&session_id, &tab_id, change).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn reset_chat(state: State<'_, AppState>, session_id: String, tab_id: String, end_seq: Option<u64>, reset_files: bool) -> CmdResult<Option<String>> {
     let m = state.sessions().map_err(err)?;
@@ -2735,6 +2785,12 @@ pub async fn set_tab_permission_mode(state: State<'_, AppState>, session_id: Str
 pub async fn set_tab_effort(state: State<'_, AppState>, session_id: String, tab_id: String, effort: Option<String>) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.set_effort(&session_id, &tab_id, effort.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn set_tab_unread(state: State<'_, AppState>, session_id: String, tab_id: String, unread: bool) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.set_tab_unread(&session_id, &tab_id, unread).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2926,6 +2982,74 @@ pub async fn read_image_file(path: String) -> CmdResult<Option<ImageFile>> {
 
 // ------------------------------------------------------------------ git actions & PRs
 
+fn branch_neighbors(session: &index::SessionEntry) -> anyhow::Result<Vec<index::SessionEntry>> {
+    let cwd = std::fs::canonicalize(&session.cwd)?;
+    Ok(index::load()?.into_iter().filter(|neighbor| std::fs::canonicalize(&neighbor.cwd).ok().as_ref() == Some(&cwd)).collect())
+}
+
+fn neighbors_working(sessions: &crate::local_runtime::sessions::Sessions, neighbors: &[index::SessionEntry]) -> anyhow::Result<bool> {
+    // Several conversations may share one checkout. Use live runtime status,
+    // reusing the index/canonical paths during a refresh's two status checks.
+    for neighbor in neighbors {
+        for tab in &neighbor.tabs {
+            if matches!(sessions.status_of(&neighbor.id, &tab.id)?, index::TabStatus::InProgress | index::TabStatus::Waiting) { return Ok(true); }
+        }
+    }
+    Ok(false)
+}
+
+fn branch_agent_working(sessions: &crate::local_runtime::sessions::Sessions, session: &index::SessionEntry) -> anyhow::Result<bool> {
+    neighbors_working(sessions, &branch_neighbors(session)?)
+}
+
+#[tauri::command]
+pub async fn branch_step_refresh(app: AppHandle, state: State<'_, AppState>, session_id: String, mode: crate::branch_step::Refresh) -> CmdResult<crate::branch_step::Snapshot> {
+    let sessions = state.sessions().map_err(err)?;
+    github_work(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        let neighbors = branch_neighbors(&session).map_err(err)?;
+        let working = neighbors_working(&sessions, &neighbors).map_err(err)?;
+        let mut snapshot = crate::branch_step::preview(&session, working, mode).map_err(err)?;
+        if snapshot.state != crate::branch_step::Step::Hidden && neighbors_working(&sessions, &neighbors).map_err(err)? {
+            snapshot.state = crate::branch_step::Step::AgentWorking;
+            snapshot.actions.clear();
+        }
+        let _ = app.emit(crate::branch_step::EVENT, &snapshot);
+        Ok(snapshot)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn branch_step_account(session_id: String, action: crate::branch_step::Action, authority: Option<crate::data_privacy::Ticket>) -> CmdResult<crate::branch_step::Account> {
+    github_action_work(authority, move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::branch_step::account(&session, action).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn branch_step_action(state: State<'_, AppState>, session_id: String, request: crate::branch_step::Request, authority: Option<crate::data_privacy::Ticket>) -> CmdResult<String> {
+    let sessions = state.sessions().map_err(err)?;
+    github_action_work(authority, move || {
+        let session = index::get(&session_id).map_err(err)?;
+        let _guard = crate::branch_step::RunGuard::acquire(&session.cwd).map_err(err)?;
+        let working = branch_agent_working(&sessions, &session).map_err(err)?;
+        let now = crate::branch_step::read(&session, working, request.action).map_err(err)?;
+        if branch_agent_working(&sessions, &session).map_err(err)? { return Err("Wait for the agent to finish before running a Git action.".into()); }
+        match crate::branch_step::act(&session, &now, &request, || {
+            anyhow::ensure!(!branch_agent_working(&sessions, &session)?, "Wait for the agent to finish before running a Git action.");
+            Ok(())
+        }).map_err(err)? {
+            crate::branch_step::Outcome::Done(message) => Ok(message),
+            crate::branch_step::Outcome::Prompt(prompt) => {
+                let tab = request.tab_id.as_deref().and_then(|id| session.tab(id)).ok_or_else(|| "Select an agent tab first.".to_string())?;
+                sessions.send_confirmed(&session.id, &tab.id, prompt).map_err(err)?;
+                Ok("Sent to the agent. Progress and results appear in this conversation.".into())
+            }
+        }
+    }).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn git_commit(cwd: String, message: String, paths: Option<Vec<String>>) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || git::commit_all(Path::new(&cwd), &message, paths.as_deref()).map_err(err)).await.map_err(err)?
@@ -2939,6 +3063,32 @@ pub async fn git_identity() -> CmdResult<Option<git::Identity>> {
 #[tauri::command]
 pub async fn git_push(cwd: String) -> CmdResult<String> {
     github_work(move || git::push(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_has_remote(cwd: String) -> CmdResult<bool> {
+    tauri::async_runtime::spawn_blocking(move || git::has_remote(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_add_remote(cwd: String, url: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || git::add_remote(Path::new(&cwd), &url).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn gh_connection_status(cwd: Option<String>) -> CmdResult<crate::github::ConnectionStatus> {
+    github_work(move || crate::github::connection_status(cwd.as_deref().map(Path::new))).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn gh_login_start(state: State<'_, AppState>, id: String, hostname: String) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    github_work(move || runtime.terminals()?.github_login(&id, &hostname)).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn gh_create_repository(cwd: String, name: String, private: bool) -> CmdResult<()> {
+    github_work(move || crate::github::create_repository(Path::new(&cwd), &name, private).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2993,6 +3143,16 @@ pub async fn working_changes(cwd: String, hide_whitespace: Option<bool>) -> CmdR
 #[tauri::command]
 pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_associations::Association>) -> CmdResult<Vec<crate::pr_associations::Association>> {
     tauri::async_runtime::spawn_blocking(move || crate::pr_associations::for_session(&session_key, additions).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_search(cwd: String, query: String) -> CmdResult<Vec<crate::github::PullRequest>> {
+    github_work(move || crate::github::search_prs(Path::new(&cwd), &query).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_attach(cwd: String, number: u64) -> CmdResult<String> {
+    github_work(move || crate::github::attach_pr(Path::new(&cwd), number).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -3113,6 +3273,17 @@ pub async fn pty_spawn(state: State<'_, AppState>, id: String, cwd: String, cols
     tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.spawn(&id, &cwd, cols, rows, command.as_deref(), title.as_deref())).await.map_err(err)?.map_err(err)
 }
 
+#[tauri::command]
+pub async fn pty_local_links(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.local_links(&id)).await.map_err(err)?.map_err(err)
+}
+
+
+#[tauri::command]
+pub async fn listening_sessions(sessions: Vec<crate::sidebar_activity::SessionDirectory>) -> CmdResult<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || crate::sidebar_activity::listening_sessions(sessions)).await.map_err(err)
+}
 
 /// Which of these shell tabs are running a command now, for a close that would end it.
 #[tauri::command]
@@ -3149,6 +3320,20 @@ pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id:
 pub async fn pty_rename(state: State<'_, AppState>, id: String, title: String) -> CmdResult<()> {
     let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
     tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.rename(&id, &title)).await.map_err(err)?.map_err(err)
+}
+
+/// Move an existing shell between the dock and tabs in every window.
+#[tauri::command]
+pub async fn pty_set_docked(state: State<'_, AppState>, id: String, docked: bool) -> CmdResult<crate::pty::ShellPane> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.set_docked(&id, docked)).await.map_err(err)?.map_err(err)
+}
+
+/// Save selected terminal output privately alongside this session's attachments.
+#[tauri::command]
+pub async fn save_terminal_selection(state: State<'_, AppState>, session_id: String, tab_id: String, text: String) -> CmdResult<String> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.save_terminal_selection(&session_id, &tab_id, &text)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
@@ -3296,6 +3481,12 @@ pub async fn cloud_control_confirm(app: tauri::AppHandle, what: String, ok_label
 ///
 /// [`QUESTION_TTL`]: crate::cloud_control::QUESTION_TTL
 pub(crate) async fn cloud_control_question(app: tauri::AppHandle, title: String, message: String, ok_label: String) -> crate::cloud_control::Answer {
+    cloud_control_question_with_details(app, title, message, None, ok_label).await
+}
+
+/// Optional reveal stays inside the native consent boundary. It never grants
+/// consent or extends the deadline; only the explicit agreement button does.
+pub(crate) async fn cloud_control_question_with_details(app: tauri::AppHandle, title: String, message: String, revealed: Option<String>, ok_label: String) -> crate::cloud_control::Answer {
     use crate::cloud_control::{question_answered, question_begin, question_closed, question_expired, Confirming, QUESTION_TTL};
     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     // Kept short and on one line: the label comes from this app, but never trust its length.
@@ -3304,17 +3495,28 @@ pub(crate) async fn cloud_control_question(app: tauri::AppHandle, title: String,
         return answer;
     }
     let message = format!("{message}\n\nIf this is not answered within {} seconds the request is dropped, and answering later does nothing.", QUESTION_TTL.as_secs());
+    let revealed = revealed.map(|text| format!("{text}\n\nThis request expires after {} seconds, including time spent reviewing values.", QUESTION_TTL.as_secs()));
+    let deadline = std::time::Instant::now() + QUESTION_TTL;
     let agree = ok_label.clone();
     let mut dialog = tauri::async_runtime::spawn_blocking(move || {
         let _open = Confirming::begin();
-        let pressed = app
-            .dialog()
-            .message(message)
-            .title(title)
-            .kind(MessageDialogKind::Warning)
-            .buttons(cloud_control_buttons(&ok_label))
-            .blocking_show_with_result();
-        cloud_control_agreed(&pressed, &agree)
+        let mut show_values = false;
+        loop {
+            if std::time::Instant::now() >= deadline { return false; }
+            let toggle = if show_values { "Hide values" } else { "Reveal values" };
+            let buttons = if revealed.is_some() {
+                cloud_control_review_buttons(toggle, &ok_label)
+            } else { cloud_control_buttons(&ok_label) };
+            let pressed = app.dialog()
+                .message(if show_values { revealed.as_ref().unwrap_or(&message) } else { &message })
+                .title(&title).kind(MessageDialogKind::Warning).buttons(buttons)
+                .blocking_show_with_result();
+            if revealed.is_some() && matches!(&pressed, tauri_plugin_dialog::MessageDialogResult::Custom(label) if label == toggle) {
+                show_values = !show_values;
+                continue;
+            }
+            return cloud_control_agreed(&pressed, &agree);
+        }
     });
     match tokio::time::timeout(QUESTION_TTL, &mut dialog).await {
         Ok(pressed) => question_answered(pressed.unwrap_or(false), std::time::Instant::now()),
@@ -3346,6 +3548,12 @@ const CLOUD_CONTROL_CLOSE: &str = "Close";
 /// every dismissal would come back as agreement.
 fn cloud_control_buttons(agree: &str) -> tauri_plugin_dialog::MessageDialogButtons {
     tauri_plugin_dialog::MessageDialogButtons::YesNoCancelCustom(CLOUD_CONTROL_REFUSE.to_string(), agree.to_string(), CLOUD_CONTROL_CLOSE.to_string())
+}
+
+/// The review uses the default slot to toggle visibility, with the same
+/// explicit agreement and dismissal slots as ordinary native questions.
+fn cloud_control_review_buttons(toggle: &str, agree: &str) -> tauri_plugin_dialog::MessageDialogButtons {
+    tauri_plugin_dialog::MessageDialogButtons::YesNoCancelCustom(toggle.into(), agree.into(), CLOUD_CONTROL_CLOSE.into())
 }
 
 /// Whether the dialog's result is the explicit agree button, and nothing else.
@@ -3726,6 +3934,12 @@ pub async fn issue_pipeline_start(app: AppHandle, session_id: String, tab_id: St
 }
 
 #[tauri::command]
+pub async fn issue_pipeline_attach(app: AppHandle, session_id: String, tab_id: String, auto_merge: bool, resolve_conflicts: bool) -> CmdResult<StartedIssuePipeline> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("attach", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"autoMerge":auto_merge,"resolveConflicts":resolve_conflicts})).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn issue_pipeline_continue(app: AppHandle, session_id: String, tab_id: String, options: crate::issue_pipeline::LaunchOptions) -> CmdResult<Option<StartedIssuePipeline>> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
     github_work(move || sessions.pipeline("continue", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"options":options})).map_err(err)).await.map_err(err)?
@@ -3782,6 +3996,25 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    #[test]
+    fn revealing_configuration_never_grants_consent() {
+        use tauri_plugin_dialog::MessageDialogResult;
+        for toggle in ["Reveal values", "Hide values"] {
+            let buttons = super::cloud_control_review_buttons(toggle, "Trust settings");
+            let agreed = |native| super::cloud_control_agreed(&as_the_dialog_layer_reports(native, &buttons), "Trust settings");
+            assert!(!agreed(Native::Yes), "Return toggles visibility, never approves");
+            assert!(!agreed(Native::Cancel), "Dismissal cannot approve");
+            assert!(agreed(Native::No), "Only explicit Trust settings approves");
+        }
+        for label in ["Reveal values", "Hide values", "Close", "Refuse"] {
+            assert!(!super::cloud_control_agreed(&MessageDialogResult::Custom(label.into()), "Trust settings"));
+        }
+        for result in [MessageDialogResult::Yes, MessageDialogResult::No, MessageDialogResult::Cancel, MessageDialogResult::Ok] {
+            assert!(!super::cloud_control_agreed(&result, "Trust settings"));
+        }
+        assert!(super::cloud_control_agreed(&MessageDialogResult::Custom("Trust settings".into()), "Trust settings"));
+    }
+
     /// The idle sweep spares what a reader can see (#718): not what a closed
     /// window last showed, nor the floating window's session while it is put away.
     #[test]
@@ -4049,12 +4282,14 @@ mod command_tests {
         let before = git(&project, &["worktree", "list", "--porcelain"]);
 
         let session = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: None,
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4088,12 +4323,14 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let first = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: Some("old-workspace".into()),
             issue: None,
@@ -4108,12 +4345,14 @@ mod command_tests {
         })
         .unwrap();
         let second = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Second".into()),
             use_worktree: false,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4156,12 +4395,14 @@ mod command_tests {
         git(&project, &["commit", "-q", "-m", "initial"]);
 
         let session = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("First".into()),
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: Some("calm-ember".into()),
             issue: None,
@@ -4207,12 +4448,14 @@ mod command_tests {
         git(&project, &["worktree", "add", "-q", "-b", "feature/attached", worktree.to_str().unwrap()]);
 
         let created = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Attached session".into()),
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4233,12 +4476,14 @@ mod command_tests {
         })
         .unwrap();
         let companion = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Companion session".into()),
             use_worktree: true,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4248,12 +4493,14 @@ mod command_tests {
         })
         .unwrap();
         let bystander = create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some("Session on main".into()),
             use_worktree: false,
             on_main: true,
             checkout_branch: None,
+            checkout_pr: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4371,6 +4618,7 @@ mod command_tests {
             manual_status: Default::default(),
             tabs: Vec::new(),
             link: None,
+            parent: None,
             active_tab: None,
             unknown: Default::default(),
         };
@@ -4948,6 +5196,48 @@ pub async fn remove_workspace(app: AppHandle, project_path: String, path: String
     }).await.map_err(err)?
 }
 
+// Local session ids are resolved here; cloud/guest paths cannot select a root.
+#[tauri::command]
+pub async fn repo_mirror_status(session_id: String) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::repo_mirror::status(Path::new(&session.project_path)).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn repo_mirror_start(session_id: String, confirmed: bool) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        if session.worktree_name.is_none() || session.worktree_removed || session.is_quick() {
+            return Err("Choose a local worktree session to mirror.".into());
+        }
+        crate::repo_mirror::start(Path::new(&session.project_path), Path::new(&session.cwd), confirmed).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn repo_mirror_stop(session_id: String) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::repo_mirror::stop(Path::new(&session.project_path)).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn preview_workspace_restore(app: AppHandle, session_id: String) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("previewRestore", serde_json::json!({ "sessionId": session_id })).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch })).map_err(err)
+    }).await.map_err(err)?
+}
+
 // ---- The local mirror of a cloud workspace (PRO-25) -------------------------
 //
 // The frontend reads the workspace (`mirror.manifest`, `fs.read`) and hands
@@ -5072,6 +5362,13 @@ pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -
 #[tauri::command]
 pub async fn cloud_mirror_claim_owner(account: String, legacy_email: Option<String>) -> CmdResult<usize> {
     tauri::async_runtime::spawn_blocking(move || crate::cloud_mirror::claim_owner(&store::root().map_err(err)?, &account, legacy_email.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn review_comments(workspace: String, action: crate::store::review_comments::Action) -> CmdResult<Vec<crate::store::review_comments::Comment>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::store::review_comments::apply(&crate::store::root().map_err(err)?, &workspace, action).map_err(err)
+    }).await.map_err(err)?
 }
 
 #[tauri::command]

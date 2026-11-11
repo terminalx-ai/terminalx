@@ -300,7 +300,10 @@ impl Client {
     }
 
     /// A call that gives up with [`Unresponsive`] after `timeout`.
-    pub fn call_within<T: DeserializeOwned>(&self, command: &str, params: Value, timeout: Duration) -> Result<T> {
+    pub fn call_within<T: DeserializeOwned>(&self, command: &str, mut params: Value, timeout: Duration) -> Result<T> {
+        if matches!(command, "runtime.session.create" | "runtime.session.rowStatuses" | "runtime.session.workspaceSetup" | "runtime.pty.githubLogin") {
+            params["networkAuthority"] = serde_json::to_value(crate::github_process::ticket().forwarded(&self.epoch))?;
+        }
         serde_json::from_value(request(&self.socket, &self.token, command, params, timeout)?).context("decode local runtime result")
     }
 

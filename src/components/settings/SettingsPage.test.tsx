@@ -31,6 +31,17 @@ describe("Settings search", () => {
     expect(screen.getByRole("alert").textContent).toContain("preferences.sounds, line 3");
   });
 
+  it("keeps repository settings reachable through search and grouped navigation", () => {
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "Search settings" });
+    fireEvent.change(input, { target: { value: "worktreeinclude" } });
+    fireEvent.click(screen.getByRole("option", { name: /Repositories/ }));
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Repositories");
+    const navigation = screen.getByRole("navigation", { name: "Settings sections" });
+    expect(within(navigation).getByRole("group", { name: "Repositories" })).toBeTruthy();
+    expect(screen.getByText("Choose a repository to view its settings.")).toBeTruthy();
+  });
+
   it("focuses with the find shortcut, highlights font matches, and opens the section with Enter", () => {
     render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
     const input = screen.getByRole("combobox", { name: "Search settings" });
@@ -50,7 +61,7 @@ describe("Settings search", () => {
 
   it("wraps arrow navigation, resets selection when edited, and opens a clicked result", () => {
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
-    const input = screen.getByRole("combobox");
+    const input = screen.getByRole("combobox", { name: "Search settings" });
     fireEvent.change(input, { target: { value: "a" } });
     const results = screen.getAllByRole("option");
     expect(results.length).toBeGreaterThan(2);
@@ -70,7 +81,7 @@ describe("Settings search", () => {
   it("clears an empty-result search with Escape before closing Settings", () => {
     const onBack = vi.fn();
     render(<SettingsPage initialTab="appearance" onBack={onBack} />);
-    const input = screen.getByRole("combobox");
+    const input = screen.getByRole("combobox", { name: "Search settings" });
     fireEvent.change(input, { target: { value: "zzzz-no-such-setting" } });
     expect(screen.getByRole("status").textContent).toBe("No settings match zzzz-no-such-setting");
     fireEvent.keyDown(input, { key: "ArrowDown" });
@@ -86,7 +97,7 @@ describe("Settings search", () => {
   it("lets overlays keep Escape and find while search is active", () => {
     const onBack = vi.fn();
     render(<SettingsPage initialTab="appearance" onBack={onBack} />);
-    const input = screen.getByRole("combobox");
+    const input = screen.getByRole("combobox", { name: "Search settings" });
     fireEvent.change(input, { target: { value: "font" } });
     for (const role of ["dialog", "alertdialog", "menu", "listbox"]) {
       const overlay = document.createElement("div");
@@ -108,7 +119,7 @@ describe("Settings search", () => {
 
   it("does not navigate on an IME's Enter and clears search for an external open request", () => {
     const { rerender } = render(<SettingsPage initialTab="general" openRequest={1} onBack={vi.fn()} />);
-    const input = screen.getByRole("combobox");
+    const input = screen.getByRole("combobox", { name: "Search settings" });
     fireEvent.change(input, { target: { value: "font" } });
     fireEvent.keyDown(input, { key: "Enter", isComposing: true });
     expect(screen.getByRole("option", { name: /Appearance/ })).toBeTruthy();

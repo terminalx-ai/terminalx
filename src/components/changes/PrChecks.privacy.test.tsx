@@ -1,9 +1,13 @@
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { act, cleanup, fireEvent, render as renderView, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CheckAuthority, PullRequest } from "@/lib/api";
 import { PRIVACY_MESSAGE, refreshDataPrivacy, setDataPrivacy } from "@/lib/dataPrivacy";
 import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { PrPanel } from "./PrPanel";
+
+const render = (node: ReactNode) => renderView(<TooltipProvider>{node}</TooltipProvider>);
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
@@ -41,6 +45,8 @@ beforeEach(async () => {
     if (command === "data_privacy_set") { if (args.enabled && !policy.enabled) policy.epoch++; policy.enabled = args.enabled as boolean; return policy; }
     if (command === "data_privacy_status") return policy;
     if (command === "gh_available") return true;
+    if (command === "gh_connection_status") { admit(); return { state: "connected", hostname: "github.com", details: null }; }
+    if (command === "git_has_remote") return true;
     if (command === "workspace_disposition") return { exists: true, checked: true, branch: "feature", isMain: true };
     if (command === "work_status") return { branch: "feature", defaultBranch: "main", aheadOfBase: 1 };
     if (command === "pr_check_authority") { admit(); return { owner: "native", epoch: policy.epoch }; }
@@ -88,6 +94,7 @@ it.each(cases)("keeps the completed workflow and refuses the later batch continu
   await waitFor(() => expect(release).toBeTypeOf("function"));
   expect(writes).toEqual([12]); // Native reply is complete; only delivery is delayed.
   await act(async () => { await revoke(managed, cycle); release!(); });
+  fireEvent.click(await screen.findByRole("button", { name: "Show details" }));
   await screen.findByText(PRIVACY_MESSAGE);
   expect(writes).toEqual([12]);
   expect(screen.getByLabelText("test: queued")).toBeTruthy();
@@ -158,7 +165,10 @@ for (const count of [1, 2]) {
         expect(writes).toEqual(completed);
         await act(async () => { await revoke(managed, cycle); release!(); });
         if (outcome === "success") expect(screen.getByRole("status").textContent).toContain(`Re-run requested for ${count} Actions`);
-        else expect(screen.getByRole("alert").textContent).toContain("GitHub rejected this workflow rerun");
+        else {
+          fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+          expect(screen.getByRole("alert").textContent).toContain("GitHub rejected this workflow rerun");
+        }
         for (const check of current.checks) {
           expect(screen.getByLabelText(`${check.name}: ${completed.includes(check.actions!.runId) ? "queued" : "failure"}`)).toBeTruthy();
         }
@@ -166,9 +176,10 @@ for (const count of [1, 2]) {
         expect(writes).toEqual(completed); // no mutation replay
         await act(async () => { policy.enabled = false; policy.managed = false; await refreshDataPrivacy(); });
         expect(reads()).toEqual(before);
+        // Main refreshes discovery immediately and after rechecking the GitHub connection.
         await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh pull requests" })); });
-        expect(reads().filter(([command]) => command === "pr_list")).toHaveLength(2);
-        expect(reads().filter(([command]) => command === "workspace_disposition")).toHaveLength(2);
+        expect(reads().filter(([command]) => command === "pr_list")).toHaveLength(before.filter(([command]) => command === "pr_list").length + 2);
+        expect(reads().filter(([command]) => command === "workspace_disposition")).toHaveLength(before.filter(([command]) => command === "workspace_disposition").length + 2);
         expect(writes).toEqual(completed);
         if (outcome === "ordinary-error") expect(screen.getByRole("alert").textContent).toContain("GitHub rejected this workflow rerun");
       } finally {

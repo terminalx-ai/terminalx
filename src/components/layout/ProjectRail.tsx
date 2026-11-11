@@ -1,4 +1,5 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
+import { SessionRowData } from "./SessionRowExtras";
 import { useMemo, useState, type ReactNode } from "react";
 import { CalendarClock, CircleDot, Folder, FolderOpen, Home, ImagePlus, LayoutGrid } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -37,7 +38,7 @@ export interface RailProps {
 /** The sidebar in the shape the reader chose: the projects with their conversations, or one flat list of chats. */
 export function ProjectRail(props: RailProps) {
   const { sidebarLayout } = usePrefs();
-  return sidebarLayout !== "simple" ? <ChatListSidebar {...props} /> : <SessionSidebar {...props} />;
+  return <SessionRowData>{sidebarLayout !== "simple" ? <ChatListSidebar {...props} /> : <SessionSidebar {...props} />}</SessionRowData>;
 }
 
 /**

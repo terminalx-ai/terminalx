@@ -1,4 +1,5 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
+import { SessionStatus } from "@/components/ui/SessionStatus";
 import { useEffect, useState } from "react";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { FolderOpen, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest, Loader2, Plus, RefreshCw, SquarePen } from "@/icons";
@@ -8,8 +9,9 @@ import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { api, errorMessage, type ProjectOverview as Overview } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { githubAvatarUrl, useGithubIdentity } from "@/lib/githubIdentity";
-import { startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
+import { startChat, startSessionIn, selectSession, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
+import { ProjectLeftovers } from "./ProjectLeftovers";
 
 /** One accent per contributor's strip, in order. */
 const STRIP = ["bg-warning", "bg-info", "bg-add", "bg-accent", "bg-destructive", "bg-muted-foreground"];
@@ -48,6 +50,7 @@ export function ProjectOverview({ path }: { path: string }) {
     void startChat(checkout ? { projectPath: path, cwd: checkout.path } : { projectPath: path, fromBranch: branch }).catch((cause) => setError(errorMessage(cause)));
   };
   const prs = overview?.pullRequests ?? null;
+  const projectSessions = store.sessions.filter((session) => session.projectPath === path && !session.archived);
 
   return (
     <div className="h-full min-h-0 overflow-y-auto bg-chat scrollbar-thin" data-testid="project-overview">
@@ -105,6 +108,22 @@ export function ProjectOverview({ path }: { path: string }) {
           <Stat value={prs?.merged} label="Merged PRs" hint="Last 30 days" icon={GitMerge} loading={loading} />
           <Stat value={overview?.branches.length} label="Branches" hint="Local branches" icon={GitBranch} loading={loading} />
         </section>
+
+        <Section title="Sessions">
+          {projectSessions.length ? <ul className="flex flex-col gap-1">
+            {projectSessions.map((session) => (
+              <li key={session.id}>
+                <button type="button" onClick={() => selectSession(session.id)} className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left hover:bg-veil-raised">
+                  <span className="min-w-0 flex-1 truncate text-[13px]">{session.title}</span>
+                  <SessionStatus session={session} className="max-w-[50%]" />
+                </button>
+              </li>
+            ))}
+          </ul> : <Empty loading={false}>No active sessions.</Empty>}
+        </Section>
+
+        {/* What earlier sessions left behind, when there is something safe to remove. */}
+        <ProjectLeftovers path={path} />
 
         <Section title="Top contributors" note="Last 30 days">
           {overview?.contributors.length ? (

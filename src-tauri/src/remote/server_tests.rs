@@ -1643,9 +1643,11 @@ async fn shells_and_agent_terminals_need_the_same_right_on_every_call() {
 /// A session in the index, made by the same `session_ops` the runtime uses.
 fn seed_session(project: &Path, title: &str, cwd: Option<&Path>) -> SessionEntry {
     crate::session_ops::create_session_entry(crate::session_ops::NewSession {
+        parent: None,
         section_id: None,
         project_path: project.to_string_lossy().into_owned(),
         checkout_branch: None,
+        checkout_pr: None,
         title: Some(title.into()),
         use_worktree: false,
         base_ref: None,

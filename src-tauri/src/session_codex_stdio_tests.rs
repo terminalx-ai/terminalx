@@ -31,6 +31,14 @@ pub(super) fn observed_full_pipe() {
     FULL_PIPE.with(|hook| { if let Some(tx) = hook.borrow_mut().take() { tx.send(()).unwrap(); } });
 }
 
+pub(super) fn before_version_probe() {
+    if std::env::var(CASE).as_deref() == Ok("share-slow-start") {
+        // Delay asynchronous preparation beyond the fixture's protocol budget,
+        // outside the real version probe's five-second deadline.
+        std::thread::sleep(WAIT + Duration::from_secs(1));
+    }
+}
+
 #[test]
 fn empty_write_retries_revalidate_mobile_and_shared_authority() {
     for mobile in [true, false] {
@@ -187,8 +195,8 @@ fn recreated_runtime_reconciles_pending_prompts_and_acknowledged_turns() {
 #[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
     for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
-        "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
-        "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
+        "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-slow-start", "share-ended", "host-while-shared",
+        "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart", "resend-no-helper-tools",
         "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
         "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
         let dir = tempfile::tempdir().unwrap();
@@ -295,19 +303,25 @@ impl Sink for GateSink {
 /// file exists it does not answer the thread request, so a test can act
 /// between a send and the write of its prompt. A `mode` file beside it, read
 /// for each frame, makes it exit after `initialize` (`die`) or never answer
-/// the thread request (`hang`).
+/// the thread request (`hang`). Shell built-ins keep helper-process startup
+/// out of the protocol's existing deadlines.
 const RESUMING_CODEX: &str = r#"#!/bin/sh
-here=$(dirname "$0")
 if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
-while read -r line; do
+here=${0%/*}
+while IFS= read -r line; do
   printf '%s\n' "$line" >> "$here/received"
-  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
-  mode=$(cat "$here/mode" 2>/dev/null)
+  id=${line#'{"id":'}
+  id=${id%%,*}
+  mode=
+  if [ -f "$here/mode" ]; then IFS= read -r mode < "$here/mode"; fi
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id"; [ "$mode" = die ] && exit 0 ;;
     *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
       while [ -f "$here/hold" ]; do sleep 0.02; done
-      [ "$mode" = hang ] || printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$(cat "$here/answer")" ;;
+      if [ "$mode" != hang ]; then
+        IFS= read -r answer < "$here/answer"
+        printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$answer"
+      fi ;;
     *'"method":"thread/compact/start"'*)
       printf '{"id":%s,"result":{}}\n' "$id"
       printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
@@ -564,7 +578,16 @@ fn continuation_fixture(case: &str) {
     std::fs::write(bin.join("answer"), "thread-1").unwrap();
     std::fs::write(bin.join("mode"), match case { "continuation-undelivered" => "die", "continuation-stopped" => "hang", _ => "" }).unwrap();
     assert!(crate::binpath::set_priority_dir(&bin));
-    let restart = case == "resend-after-restart";
+    if case == "resend-no-helper-tools" {
+        // This fixture measures protocol settlement, not helper-process startup.
+        // A regression to dirname/sed/cat must fail without relaxing its clocks.
+        for name in ["dirname", "sed", "cat"] {
+            let helper = bin.join(name);
+            std::fs::write(&helper, "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"${0%/*}/unexpected-helper\"\nexit 1\n").unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let restart = matches!(case, "resend-after-restart" | "resend-no-helper-tools");
     // After a restart: a brief and a later prompt in the log, neither taken.
     let tab = if restart {
         json!({"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "providerSessionId":"thread-1", "continuation":1, "created":index::now()})
@@ -592,7 +615,7 @@ fn continuation_fixture(case: &str) {
     let settled = |n: usize| {
         let until = Instant::now() + WAIT;
         while events().iter().filter(|event| matches!(event.payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. })).count() < n || rt.lock().unwrap().turn_open {
-            assert!(Instant::now() < until, "{case}: turn {n} did not settle: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+            assert!(Instant::now() < until, "{case}: turn {n} did not settle: starting={}, received={:?}, events={:?}", rt.lock().unwrap().stdio_starting, frames(), events().iter().map(|event| &event.payload).collect::<Vec<_>>());
             std::thread::sleep(Duration::from_millis(20));
         }
     };
@@ -641,7 +664,7 @@ fn continuation_fixture(case: &str) {
             settled(1);
             assert_eq!(starts(), ["the brief"], "the brief goes once, when the reader resends it");
         }
-        "resend-after-restart" => {
+        "resend-after-restart" | "resend-no-helper-tools" => {
             manager.load_events("stdio-owner", "tab").unwrap();
             assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::DeliveryUnconfirmed), "missing acknowledgement cannot prove non-delivery");
             manager.resend_unsent("stdio-owner", "tab").unwrap();
@@ -653,6 +676,7 @@ fn continuation_fixture(case: &str) {
         _ => unreachable!(),
     }
     manager.stop("stdio-owner", "tab").unwrap();
+    assert!(!bin.join("unexpected-helper").exists(), "the protocol fixture must not launch dirname, sed or cat");
 }
 
 /// A phone, a share's guest and the host of a shared session reach a native
@@ -691,6 +715,14 @@ fn remote_input_fixture(case: &str) {
     };
     let last_frame = || -> serde_json::Value { serde_json::from_str(std::fs::read_to_string(bin.join("received")).unwrap().lines().last().unwrap()).unwrap() };
     let idle_after = |frames: usize| {
+        // Startup includes a version probe allowed five seconds by the owner.
+        // Start the protocol deadline only once the fixture reads a frame;
+        // the parent still bounds this entire case to fifteen seconds.
+        let startup_until = Instant::now() + Duration::from_secs(10);
+        while methods().is_empty() {
+            assert!(Instant::now() < startup_until, "{case}: did not start: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let until = Instant::now() + WAIT;
         while methods().len() < frames || manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().turn_open {
             assert!(Instant::now() < until, "{case}: did not settle: {:?} {:?}", methods(), events().iter().map(|event| &event.payload).collect::<Vec<_>>());
@@ -774,7 +806,7 @@ fn remote_input_fixture(case: &str) {
         let permit = share.write_permit("guest-connection", "tab").unwrap();
         manager.sharing.lock().unwrap().sessions.insert("stdio-owner".into(), share);
         match case {
-            "share-input" => {
+            "share-input" | "share-slow-start" => {
                 manager.send_shared("stdio-owner", "tab", "from a guest".into(), person, permit).unwrap();
                 idle_after(4);
                 assert_eq!(last_frame()["params"]["input"][0]["text"], "from a guest");
@@ -1691,8 +1723,8 @@ fn child_fixture() {
     std::env::set_var("SHELL", "/bin/sh");
     if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings" | "to-terminal" | "handover-stop" | "handover-exit") { return resume_fixture(&case); }
     if case.starts_with("native3-") { return remote_input_fixture(&case); }
-    if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
-    if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart") { return continuation_fixture(&case); }
+    if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-slow-start" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
+    if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart" | "resend-no-helper-tools") { return continuation_fixture(&case); }
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
     if case == "cloud-launch" { return cloud_launch_fixture(); }
     if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }

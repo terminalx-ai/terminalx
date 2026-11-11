@@ -622,7 +622,7 @@ pub fn actor(params: &Value) -> Result<Actor> {
 /// - `terminal`: `openTerminal`, and observations whose output says the pane's size.
 /// - `closeTab`: `closeTab`, closing a tab as the desktop's tab strip does.
 pub fn features() -> Value {
-    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1 })
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 1 })
 }
 
 /// What a runtime too old to name its features serves, by its version
@@ -666,6 +666,13 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
     let _privacy = grant.privacy.scope()?;
     #[cfg(test)]
     after_control_admission();
+    if method == "rowStatuses" {
+        drop(grant.enter()?);
+        let sessions: Vec<_> = crate::store::index::load()?.into_iter().filter(|s| !s.archived).collect();
+        let rows = serde_json::to_value(manager.row_statuses(&sessions))?;
+        drop(grant.enter()?);
+        return Ok(rows);
+    }
     if method == "release" {
         manager.mobile.release_driver(&actor,string("connection")?,string("sessionId")?,string("tabId")?)?;
         manager.mobile.publish_drivers(manager);
@@ -730,6 +737,11 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         // a phone may change on this Mac. The grant stays held while they act,
         // so a phone revoked meanwhile neither starts a session nor changes one.
         "create" => { grant.driver()?; create_session(manager, &params) }
+        "configuration" => {
+            let project = params["projectId"].as_str().map(crate::store::projects::by_public_id).transpose()?;
+            let resolved = crate::store::configuration::view(project.as_ref().map(|project| project.path.as_str()))?;
+            Ok(serde_json::to_value(resolved)?)
+        }
         "settings" => Ok(phone_settings(&crate::store::settings::load())),
         "setSettings" => {
             grant.driver()?;
@@ -814,7 +826,7 @@ fn phone_send(manager: &crate::session::SessionManager, actor: &Actor, grant: &G
 /// method.
 fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Grant, method: &str, params: &Value) -> Option<Result<Value>> {
     const CHANGES: &[&str] = &["stop", "interrupt", "setModel", "setEffort", "setMode", "resendUnsent", "continue", "closeTab"];
-    const READS: &[&str] = &["tab", "models", "prepareContinuation"];
+    const READS: &[&str] = &["tab", "models", "prepareContinuation", "markRead"];
     if !CHANGES.contains(&method) && !READS.contains(&method) { return None; }
     Some((|| {
         let string = |key: &str| -> Result<&str> { params[key].as_str().with_context(|| format!("{key} must be a string")) };
@@ -834,6 +846,7 @@ fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Gra
                 "requestedPermissionMode": current.requested_permission_mode, "status": manager.status_of(session, tab),
                 "transport": current.transport,
             }),
+            "markRead" => { manager.mark_read(session, tab)?; Value::Null }
             "stop" => { manager.stop(session, tab)?; Value::Null }
             // Closing a tab as the desktop's tab strip does: its agent stops, its history stays.
             "closeTab" => { manager.close_tab(session, tab)?; Value::Null }
@@ -921,7 +934,7 @@ fn create_session(manager: &crate::session::SessionManager, params: &Value) -> R
     let title = p.title.filter(|title| !title.trim().is_empty())
         .or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
     let entry = match (p.quick, p.project_id) {
-        (true, None) => crate::session_ops::create_quick_chat_blocking(&**manager.sink(), NewQuickChat { section_id: None, title, cwd: None, tab: Some(tab) })
+        (true, None) => crate::session_ops::create_quick_chat_blocking(&**manager.sink(), NewQuickChat { parent: None, section_id: None, title, cwd: None, tab: Some(tab) })
             .map_err(|error| anyhow::anyhow!(error))?,
         (false, Some(id)) => {
             let project = crate::store::projects::by_public_id(&id)?;
@@ -930,10 +943,12 @@ fn create_session(manager: &crate::session::SessionManager, params: &Value) -> R
             }
             let named = crate::names::from_prompt(&p.prompt);
             let req = NewSession {
+                parent: None,
                 section_id: None,
                 project_path: project.path, title, use_worktree: p.use_worktree, on_main: !p.use_worktree,
                 base_ref: None, worktree_name: (p.use_worktree && !named.is_empty()).then_some(named),
                 checkout_branch: None, issue: None, automation: None, cwd: None, tab: Some(tab),
+                checkout_pr: None,
             };
             crate::session_ops::validate_session_target(&req).map_err(|error| anyhow::anyhow!(error))?;
             crate::session_ops::create_session_blocking(&**manager.sink(), req).map_err(|error| anyhow::anyhow!(error))?

@@ -13,6 +13,7 @@ import { completeStreamingMarkdown, remarkCodexFileCitations } from "@/lib/codex
 import { LinkedText } from "./LinkedText";
 import { MarkdownTable } from "./MarkdownTable";
 import { LinkedCode } from "./LinkedCode";
+import { openImageViewer } from "@/lib/imageViewer";
 
 const codePlugin = createCodePlugin({ themes: ["github-light", "github-dark"] });
 // Codex file citations (#776) become links with or without a workspace; with one, every other link is routed too.
@@ -29,9 +30,9 @@ const Block = memo(function Block({ text, streaming, mode, linkContext, remoteIm
     } : chatLinkComponent(linkContext),
     table: MarkdownTable,
     // A picture on this computer is drawn under the message (ChatMedia); the web view cannot load its path.
-    img: ({ src, alt }: { src?: string | Blob; alt?: string }) => typeof src === "string" && /^(https?:|data:image\/)/i.test(src) ? !remoteImages && /^https?:/i.test(src) ? <span>{alt || "Remote image"} (image blocked)</span> : <PrivacyImage src={src} alt={alt ?? ""} className="max-h-96 max-w-full rounded-lg" /> : null,
+    img: ({ src, alt }: { src?: string | Blob; alt?: string }) => typeof src === "string" && /^(https?:|data:image\/)/i.test(src) ? !remoteImages && /^https?:/i.test(src) ? <span>{alt || "Remote image"} (image blocked)</span> : <ViewableImage src={src} alt={alt} /> : null,
     // Untrusted code stays literal instead of turning file: URLs into actions.
-    inlineCode: ({ children }: { children?: ReactNode }) => <code className="rounded bg-well px-1 py-0.5 font-mono text-[0.9em]">{webLinksOnly ? children : <LinkedText text={String(children ?? "")} context={linkContext} />}</code>,
+    inlineCode: ({ children }: { children?: ReactNode }) => <code>{webLinksOnly ? children : <LinkedText text={String(children ?? "")} context={linkContext} />}</code>,
     pre: ({ children }: { children?: ReactNode }) => {
       if (!isValidElement(children)) return children;
       const child = children as ReactElement<{ children?: ReactNode; className?: string; "data-block"?: string }>;
@@ -67,6 +68,30 @@ const Block = memo(function Block({ text, streaming, mode, linkContext, remoteIm
  * block re-renders in static mode. Routed links retain their originating
  * session and workspace context.
  */
+/**
+ * An image in a reply, inline as Markdown draws it, that opens the image viewer. Not a button: it may sit inside a
+ * link (a badge), where a button is invalid; there the click is the link's, and the viewer stays out of it.
+ */
+function ViewableImage({ src, alt }: { src: string; alt?: string }) {
+  const view = (event: { currentTarget: HTMLElement; preventDefault: () => void }) => {
+    if (event.currentTarget.closest("a")) return;
+    event.preventDefault();
+    openImageViewer([{ src, name: alt || "Image" }]);
+  };
+  return (
+    <PrivacyImage
+      src={src}
+      alt={alt ?? ""}
+      role="button"
+      tabIndex={0}
+      aria-label={`View ${alt || "image"}`}
+      onClick={view}
+      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") view(event); }}
+      className="inline-block max-h-96 max-w-full cursor-zoom-in rounded-lg [a_&]:cursor-pointer"
+    />
+  );
+}
+
 export const Markdown = memo(function Markdown({
   text,
   streaming,

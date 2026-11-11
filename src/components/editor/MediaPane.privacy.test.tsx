@@ -77,7 +77,9 @@ it.each([false, true])("keeps rendered/raw SVG revisions as local image document
 it("withdraws external image sources while retaining loopback media and restores them when disabled", async () => {
   const entry = (rel: string) => {
     const id = openFile("privacy-media", "/repo", rel);
-    return getEditors().editors.find((editor) => editor.id === id)!;
+    const editor = getEditors().editors.find((editor) => editor.id === id);
+    if (!editor || editor.kind === "diff" || editor.kind === "pr") throw new Error("Expected file editor");
+    return editor;
   };
   render(<><MediaPane entry={entry("local.png")} visible /><MediaPane entry={entry("remote.png")} visible /></>);
   await screen.findByRole("img", { name: "remote.png" });

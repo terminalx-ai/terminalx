@@ -60,12 +60,27 @@ export interface TerminalState {
   agents: Record<string, string>;
 }
 
-export type SelectedSessionTab = { kind: "agent" | "terminal" | "browser"; id: string };
+export type SelectedSessionTab = { kind: "agent" | "terminal" | "browser" | "review"; id: string };
 
-let state: TerminalState = { panes: [], active: {}, selected: {}, agents: {} };
+const SELECTION_KEY = "terminalx:selected-tabs:v1";
+export function restoreSessionTabSelection(raw: string | null): Record<string, SelectedSessionTab> {
+  try {
+    const saved = JSON.parse(raw ?? "{}");
+    return Object.fromEntries(Object.entries(saved).filter(([, value]) => {
+      const tab = value as SelectedSessionTab | null;
+      return tab && ["agent", "terminal", "browser", "review"].includes(tab.kind) && typeof tab.id === "string";
+    })) as Record<string, SelectedSessionTab>;
+  } catch { return {}; }
+}
+let state: TerminalState = { panes: [], active: {}, selected: restoreSessionTabSelection((() => {
+  try { return localStorage.getItem(SELECTION_KEY); } catch { return null; }
+})()), agents: {} };
 const listeners = new Set<() => void>();
 function set(patch: Partial<TerminalState>) {
   state = { ...state, ...patch };
+  if (patch.selected) {
+    try { localStorage.setItem(SELECTION_KEY, JSON.stringify(state.selected)); } catch { /* Optional persistence. */ }
+  }
   for (const l of listeners) l();
 }
 
@@ -284,6 +299,8 @@ export function subscribeTerminals(): Promise<void> {
 
 /** List a shell tab another window opened, or one that was open before this page loaded. */
 function adoptShell(shell: ShellPane) {
+  // Setup has its own persisted status and dock tab; never also list it as a shell.
+  if (shell.id.split(":")[1]?.startsWith("workspace-setup-")) return;
   const known = state.panes.find((pane) => pane.id === shell.id);
   if (known) {
     // Its name may have changed in the other window. And the backend's word on when it was opened is
@@ -291,10 +308,15 @@ function adoptShell(shell: ShellPane) {
     // the shell becomes an agent's (#437), and that place is the backend's time for it.
     const title = shell.title || known.title;
     const created = shell.created || known.created;
-    if (known.title !== title || known.created !== created) set({ panes: state.panes.map((pane) => (pane.id === shell.id ? { ...pane, title, created } : pane)) });
+    const docked = shell.docked ?? isDockPane(shell.id);
+    // Agent-owned panes are never repositioned by a late shell notification.
+    if (known.owned || (known.hidden && !known.docked)) return;
+    if (known.title !== title || known.created !== created || !!known.docked !== docked) {
+      set({ panes: state.panes.map((pane) => (pane.id === shell.id ? { ...pane, title, created, docked, hidden: docked } : pane)) });
+    }
     return;
   }
-  if (isDockPane(shell.id)) {
+  if (shell.docked ?? isDockPane(shell.id)) {
     // The right panel's terminal: listed in its dock in every window, never as a tab.
     const pane: TerminalPane = {
       id: shell.id,
@@ -554,7 +576,7 @@ export function isAgentPane(id: string): boolean {
 /**
  * A shell in the right panel's terminal dock. Its id names its session like
  * any shell's, so the backend closes it with the session, and marks it as the
- * dock's so no window lists it as a tab.
+ * dock's as its initial placement. A move keeps this id and overrides that mark.
  */
 export function isDockPane(id: string): boolean {
   const [, rest] = id.split(":", 2);
@@ -573,6 +595,23 @@ export async function openDockTerminal(sessionId: string, cwd: string, cols = 80
   counter++;
   const id = `${sessionId}:dock-${Date.now().toString(36)}${counter}${windowMark}`;
   return openTerminal(sessionId, cwd, cols, rows, { id, title, docked: true });
+}
+
+/** Move the same shell and cached xterm; only its view's parent changes. */
+export async function moveTerminal(id: string, docked: boolean) {
+  const pane = state.panes.find((pane) => pane.id === id);
+  if (!pane || pane.owned || (pane.hidden && !pane.docked) || isAgentPane(id)) throw new Error("Only shell terminals can be moved.");
+  const shell = await pty.setDocked(id, docked);
+  // It may have closed while the request was in flight; never resurrect it.
+  if (!state.panes.some((pane) => pane.id === id)) return;
+  adoptShell(shell);
+  const selected = { ...state.selected };
+  if (docked) {
+    if (selected[pane.sessionId]?.kind === "terminal" && selected[pane.sessionId].id === id) delete selected[pane.sessionId];
+  } else {
+    selected[pane.sessionId] = { kind: "terminal", id };
+  }
+  set({ selected, active: { ...state.active, [pane.sessionId]: id } });
 }
 
 /**
@@ -607,6 +646,13 @@ export function setActiveTerminal(sessionId: string, id: string) {
  */
 export function selectSessionTab(sessionId: string, tab: SelectedSessionTab) {
   set({ selected: { ...state.selected, [sessionId]: tab } });
+}
+
+export function clearSelectedReview(sessionId: string, id: string) {
+  if (state.selected[sessionId]?.kind !== "review" || state.selected[sessionId].id !== id) return;
+  const selected = { ...state.selected };
+  delete selected[sessionId];
+  set({ selected });
 }
 
 /** Forget the tab asked for in every session whose id starts with `prefix` (a cloud workspace whose content is gone for this person). */

@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 import { fs } from "@/lib/api";
 import { fileName } from "@/lib/paths";
 import { chatMediaKind, type ChatMediaKind } from "@/lib/chatMedia";
-import { openChatLink, parseChatLink, type ChatLinkContext } from "@/lib/chatLinks";
+import type { ChatLinkContext } from "@/lib/chatLinks";
+import { openImageViewer } from "@/lib/imageViewer";
 
 /** An SVG larger than this is left as its link. */
 const SVG_MOST = 2 * 1024 * 1024;
@@ -60,7 +61,6 @@ function MediaItem({ path, context }: { path: string; context: ChatLinkContext }
 
   if (!shown) return null;
   const name = path.startsWith("data:") ? "Image" : fileName(path);
-  const open = () => void openChatLink(parseChatLink(path), context).catch(() => {});
   return (
     <figure className="m-0 max-w-full" data-testid="chat-media-item">
       {shown.kind === "video" ? (
@@ -68,7 +68,7 @@ function MediaItem({ path, context }: { path: string; context: ChatLinkContext }
       ) : shown.kind === "audio" ? (
         <audio src={shown.src} controls preload="metadata" className="max-w-full" />
       ) : (
-        <button type="button" onClick={open} disabled={path.startsWith("data:")} aria-label={`Open ${name}`} className="block max-w-full cursor-zoom-in rounded-lg disabled:cursor-default">
+        <button type="button" onClick={() => openImageViewer([{ src: shown.src, name, path: path.startsWith("data:") ? undefined : path }])} aria-label={`View ${name}`} className="block max-w-full cursor-zoom-in rounded-lg">
           <PrivacyImage src={shown.src} alt={name} className="max-h-96 max-w-full rounded-lg object-contain hairline" />
         </button>
       )}

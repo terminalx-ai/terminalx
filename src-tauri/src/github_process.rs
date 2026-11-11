@@ -107,7 +107,7 @@ fn read_all(pipe: impl Read + Send + 'static, limit: Option<usize>) -> std::thre
 
 pub(crate) fn output_bounded(command: Command, timeout: Duration, stdout_limit: usize, stderr_limit: usize) -> Result<CapturedOutput> {
     output_process(command, timeout, None, ticket(), Execution {
-        git: false, stop: &|| false, progress: None, tail_limits: Some([stdout_limit, stderr_limit]),
+        git: false, git_ssh: false, stop: &|| false, progress: None, tail_limits: Some([stdout_limit, stderr_limit]),
     })
 }
 
@@ -116,7 +116,7 @@ pub(crate) fn output(command: Command, timeout: Duration, input: Option<Vec<u8>>
 }
 
 pub(crate) fn output_admitted(command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket) -> Result<Output> {
-    output_process(command, timeout, input, ticket, Execution { git: false, stop: &|| false, progress: None, tail_limits: None }).map(|captured| captured.output)
+    output_process(command, timeout, input, ticket, Execution { git: false, git_ssh: false, stop: &|| false, progress: None, tail_limits: None }).map(|captured| captured.output)
 }
 
 /// Only explicitly requested Git transfers may acquire promised objects. The
@@ -130,7 +130,25 @@ pub(crate) fn git_output_admitted(command: Command, timeout: Duration, ticket: T
 /// Verification fetches use Git's graceful lock cleanup without permitting
 /// implicit object acquisition by any inspection performed along the way.
 pub(crate) fn git_verification_output(command: Command, timeout: Duration) -> Result<Output> {
-    output_process(command, timeout, None, ticket(), Execution { git: true, stop: &|| false, progress: None, tail_limits: None }).map(|captured| captured.output)
+    output_process(command, timeout, None, ticket(), Execution { git: true, git_ssh: true, stop: &|| false, progress: None, tail_limits: None }).map(|captured| captured.output)
+}
+
+/// gh checkout delegates transfers to Git. Give those children the same
+/// repository-aware SSH adapter, and retain Git's graceful cancellation window.
+pub(crate) fn git_host_output(mut command: Command, cwd: &std::path::Path, timeout: Duration) -> Result<Output> {
+    #[cfg(unix)]
+    let _transport = {
+        let mut git = crate::git::git();
+        git.current_dir(cwd).arg("fetch");
+        let transport = crate::git::ssh::prepare(&mut git)?;
+        for (key, value) in git.get_envs().filter(|(key, _)| *key == "GIT_SSH_COMMAND" || *key == "GIT_SSH_VARIANT") {
+            if let Some(value) = value { command.env(key, value); }
+        }
+        transport
+    };
+    #[cfg(not(unix))]
+    let _ = cwd;
+    output_process(command, timeout, None, ticket(), Execution { git: true, git_ssh: false, stop: &|| false, progress: None, tail_limits: None }).map(|captured| captured.output)
 }
 
 type Progress = Box<dyn Fn(&str) + Send>;
@@ -138,7 +156,7 @@ type Progress = Box<dyn Fn(&str) + Send>;
 pub(crate) fn git_output_reporting(mut command: Command, timeout: Duration, ticket: Ticket, stop: &dyn Fn() -> bool, progress: Option<Progress>) -> Result<Output> {
     if let Some(value) = std::env::var_os("GIT_NO_LAZY_FETCH") { command.env("GIT_NO_LAZY_FETCH", value); }
     else { command.env_remove("GIT_NO_LAZY_FETCH"); }
-    output_process(command, timeout, None, ticket, Execution { git: true, stop, progress, tail_limits: None }).map(|captured| captured.output)
+    output_process(command, timeout, None, ticket, Execution { git: true, git_ssh: true, stop, progress, tail_limits: None }).map(|captured| captured.output)
 }
 
 fn read_progress(pipe: impl Read + Send + 'static, progress: Progress) -> std::thread::JoinHandle<std::io::Result<CapturedBytes>> {
@@ -172,20 +190,20 @@ fn read_progress(pipe: impl Read + Send + 'static, progress: Progress) -> std::t
     })
 }
 
-struct Execution<'a> { git: bool, stop: &'a dyn Fn() -> bool, progress: Option<Progress>, tail_limits: Option<[usize; 2]> }
+struct Execution<'a> { git: bool, git_ssh: bool, stop: &'a dyn Fn() -> bool, progress: Option<Progress>, tail_limits: Option<[usize; 2]> }
 
 #[cfg(unix)]
 #[path = "github_process_group.rs"]
 mod group;
 
 fn output_process(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, ticket: Ticket, execution: Execution<'_>) -> Result<CapturedOutput> {
-    let Execution { git, stop, progress, tail_limits } = execution;
+    let Execution { git, git_ssh, stop, progress, tail_limits } = execution;
     let _privacy = ticket.enter()?;
     if stop() { return Err(Stopped.into()); }
     #[cfg(unix)]
-    let _transport = if git { Some(crate::git::ssh::prepare(&mut command)?) } else { None };
+    let _transport = if git_ssh { Some(crate::git::ssh::prepare(&mut command)?) } else { None };
     #[cfg(not(unix))]
-    let _ = git;
+    let _ = (git, git_ssh);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

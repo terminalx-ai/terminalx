@@ -18,7 +18,7 @@ fn ready(text: &str) -> (Stdio, Vec<Action>) {
     let initialized = wire(&initialized);
     assert_eq!(initialized[0]["method"], "initialized");
     assert_eq!(initialized[1]["method"], "thread/start");
-    let actions = client.handle(&json!({"id": initialized[1]["id"], "result": {"thread": {"id":"thread"}}}).to_string()).unwrap();
+    let actions = client.handle(&json!({"id": initialized[1]["id"], "result": {"thread": {"id":"thread"}, "model":"gpt-6-astra"}}).to_string()).unwrap();
     (client, actions)
 }
 
@@ -82,11 +82,12 @@ fn a_known_thread_is_resumed_without_its_turns_before_the_first_prompt() {
     let params = &initialized[1]["params"];
     assert_eq!((&params["threadId"], &params["excludeTurns"]), (&json!("thread"), &json!(true)));
     assert_eq!((&params["approvalPolicy"], &params["sandbox"], &params["cwd"]), (&json!("on-request"), &json!("workspace-write"), &json!("/tmp/terminalx-stdio-contract")));
-    let actions = client.handle(&json!({"id": initialized[1]["id"], "result": {"thread": {"id":"thread"}}}).to_string()).unwrap();
+    let actions = client.handle(&json!({"id": initialized[1]["id"], "result": {"thread": {"id":"thread"}, "model":"gpt-5.4"}}).to_string()).unwrap();
     assert!(matches!(actions.first(), Some(Action::ThreadReady(id)) if id == "thread"));
     let requests = wire(&actions);
     assert_eq!(requests[0]["method"], "turn/start");
     assert_eq!(requests[0]["params"]["input"][0]["text"], "hello again");
+    assert!(matches!(&emitted(turn(&mut client))[..], [Payload::TurnStarted { model: Some(model), .. }] if model == "gpt-5.4"));
 }
 
 #[test]
@@ -406,4 +407,55 @@ fn a_reply_cut_off_by_the_connection_is_handed_over_once() {
     let left = client.unfinished();
     assert!(matches!(&left[..], [Payload::AssistantText { block: Some(block), text }] if *block == super::block("msg_2") && text == "Cut off"), "{left:?}");
     assert!(client.unfinished().is_empty());
+}
+
+#[test]
+fn turn_usage_normalizes_cached_input_and_ignores_late_or_repeated_counters() {
+    let (mut client, actions) = ready("hello");
+    assert!(wire(&actions)[0]["params"]["model"].is_null(), "default selection stays implicit");
+    turn(&mut client);
+    let reading = |turn: &str, input, cached, output| json!({"method":"thread/tokenUsage/updated","params":{
+        "threadId":"thread","turnId":turn,"tokenUsage":{
+            "total":{"inputTokens":input,"cachedInputTokens":cached,"outputTokens":output,"totalTokens":input + output},
+            "last":{"inputTokens":input,"cachedInputTokens":cached,"outputTokens":output,"totalTokens":input + output},
+            "modelContextWindow":200000
+        }
+    }}).to_string();
+    let mapped = emitted(client.handle(&reading("turn", 100u64, 80u64, 20u64)).unwrap());
+    assert!(matches!(&mapped[..], [Payload::UsageUpdate(Usage { model: Some(model), input_tokens: Some(20), output_tokens: Some(20), cache_read_tokens: Some(80), cache_write_tokens: Some(0), cost_usd: Some(_), .. })] if model == "gpt-6-astra"));
+    let repeated = emitted(client.handle(&reading("turn", 100, 80, 20)).unwrap());
+    assert!(matches!(&repeated[..], [Payload::UsageUpdate(Usage { input_tokens: Some(20), output_tokens: Some(20), cache_read_tokens: Some(80), .. })]));
+    assert!(emitted(client.handle(&reading("old-turn", 900, 800, 200)).unwrap()).is_empty());
+    client.handle(&ended("completed")).unwrap();
+    assert!(emitted(client.handle(&reading("turn", 100, 80, 20)).unwrap()).is_empty());
+}
+
+#[test]
+fn usage_model_follows_sent_overrides_and_null_keeps_the_threads_latest_model() {
+    let (mut client, _) = ready("hello");
+    turn(&mut client);
+    client.handle(&ended("completed")).unwrap();
+
+    client.set_model("gpt-5.4");
+    let requests = wire(&client.prompt("next".into(), vec![]).unwrap());
+    assert_eq!(requests[0]["params"]["model"], "gpt-5.4");
+    // A setting change after submitting this prompt applies only to the next.
+    client.set_model("gpt-6-astra");
+    assert!(matches!(&emitted(turn(&mut client))[..], [Payload::TurnStarted { model: Some(model), .. }] if model == "gpt-5.4"));
+    client.handle(&ended("completed")).unwrap();
+
+    client.set_model("");
+    let requests = wire(&client.prompt("continue".into(), vec![]).unwrap());
+    assert!(requests[0]["params"]["model"].is_null());
+    assert!(matches!(&emitted(turn(&mut client))[..], [Payload::TurnStarted { model: Some(model), .. }] if model == "gpt-5.4"));
+    client.handle(&ended("completed")).unwrap();
+
+    // An override withdrawn before writing never changes the thread's model.
+    client.set_model("gpt-6-astra");
+    let actions = client.prompt("withdrawn".into(), vec![]).unwrap();
+    let Action::Write(frame) = &actions[0] else { panic!("expected prompt frame") };
+    client.withdraw(frame);
+    client.set_model("");
+    client.prompt("continue again".into(), vec![]).unwrap();
+    assert!(matches!(&emitted(turn(&mut client))[..], [Payload::TurnStarted { model: Some(model), .. }] if model == "gpt-5.4"));
 }

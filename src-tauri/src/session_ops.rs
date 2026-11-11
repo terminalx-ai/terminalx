@@ -65,7 +65,7 @@ pub(crate) fn notify_sessions_deleted(sink: &dyn EventSink, removed: &[SessionEn
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTab {
     pub harness: String,
@@ -79,7 +79,7 @@ pub struct NewTab {
     pub permission_mode: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSession {
     #[serde(default)]
@@ -96,6 +96,9 @@ pub struct NewSession {
     /// An existing branch to check out in the new worktree, instead of a new branch.
     #[serde(default)]
     pub checkout_branch: Option<String>,
+    /// A PR head, fetched by gh (including forks) into an isolated worktree.
+    #[serde(default)]
+    pub checkout_pr: Option<u64>,
     /// Explicit acknowledgement that a requested worktree should be skipped.
     #[serde(default)]
     pub on_main: bool,
@@ -109,10 +112,18 @@ pub struct NewSession {
     /// The first agent conversation. Omitted when a checkout is opened directly.
     #[serde(default)]
     pub tab: Option<NewTab>,
+    /// The session that starts this one (PRO-270), recorded on the entry.
+    #[serde(default)]
+    pub parent: Option<index::ParentRef>,
 }
 
 pub(crate) fn validate_session_target(req: &NewSession) -> Result<()> {
     if let Some(tab) = &req.tab { validate_transport(tab)?; }
+    if let Some(number) = req.checkout_pr {
+        if number == 0 || !req.use_worktree || req.on_main || req.cwd.is_some() || req.checkout_branch.is_some() || req.base_ref.is_some() || req.tab.is_none() {
+            return Err("Starting from a pull request requires a new worktree and an agent.".into());
+        }
+    }
     let requested_worktree = req.worktree_name.as_deref().is_some_and(|name| !name.trim().is_empty());
     if !req.use_worktree && requested_worktree && !req.on_main {
         return Err("A requested worktree can only be skipped when onMain is explicitly true.".into());
@@ -188,6 +199,7 @@ fn requested_worktree_name(project: &Path, requested: &str, excluding: Option<&s
 
 pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
     TabEntry {
+        marked_unread: false,
         id: uuid::Uuid::now_v7().to_string(),
         harness: t.harness.clone(),
         transport: t.transport,
@@ -233,11 +245,19 @@ pub(crate) fn create_named_session_blocking(sink: &dyn EventSink, req: NewSessio
 
 fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
     let _request = crate::github_process::scope();
+    if crate::git::is_repo(Path::new(&req.project_path)) {
+        crate::store::configuration::view(Some(&req.project_path)).and_then(|r| r.require_trust())
+            .map_err(|e| WorkspaceError::InvalidArguments(e.to_string()))?;
+    }
     let _naming = WORKSPACE_NAMING.lock();
     validate_session_target(&req)?;
     let project = projects::canonical_directory(&req.project_path).map_err(err)?;
     projects::refuse_mirror(&project).map_err(err)?;
     let project_path = Path::new(&project);
+    if req.checkout_pr.is_some() && !git::is_repo(project_path) {
+        return Err(WorkspaceError::InvalidArguments("Pull requests require a Git project.".into()));
+    }
+    let starting_pr = req.checkout_pr.map(|number| crate::github::pr_details(project_path, number).map_err(err)).transpose()?;
     let id = uuid::Uuid::now_v7().to_string();
     let now = index::now();
     let requested_title = req.title.clone().filter(|t| !t.trim().is_empty())
@@ -274,6 +294,7 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         manual_status: Default::default(),
         active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
         link: None,
+        parent: req.parent.clone(),
         tabs: first_tab.into_iter().collect(),
         unknown: BTreeMap::new(),
     };
@@ -292,9 +313,13 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
             Some(name) => name,
             None => available_worktree_name(project_path, generated_name, None)?,
         };
-        let wt = match req.checkout_branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
-            Some(branch) => git::checkout_worktree(project_path, &name, branch).map_err(err)?,
-            None => git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?,
+        let wt = if let Some(number) = req.checkout_pr {
+            git::checkout_pr_worktree(project_path, &name, number).map_err(err)?
+        } else {
+            match req.checkout_branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
+                Some(branch) => git::checkout_worktree(project_path, &name, branch).map_err(err)?,
+                None => git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?,
+            }
         };
         entry.cwd = wt.path;
         entry.worktree_name = Some(wt.name);
@@ -312,6 +337,17 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
     });
 
     index::local_sections::insert_session(&entry, req.section_id.as_deref()).map_err(err)?;
+    if let Some(pr) = starting_pr {
+        // Association failure must not report an already-created session as failed.
+        if let Err(error) = crate::pr_associations::record_local(&entry.id, Path::new(&entry.cwd), &pr.url, entry.branch.as_deref().unwrap_or_default()) {
+            log::warn!("Could not associate the starting pull request: {error:#}");
+        }
+    }
+    // The checkout and index entry already exist. Setup bookkeeping must not
+    // turn a successful creation into an error that invites a duplicate retry.
+    if let Err(error) = crate::workspace_setup::prepare(&entry) {
+        log::warn!("Record workspace setup for {}: {error:#}", entry.id);
+    }
     Ok(entry)
 }
 
@@ -332,6 +368,9 @@ pub struct NewQuickChat {
     /// a terminal.
     #[serde(default)]
     pub tab: Option<NewTab>,
+    /// The session that starts this one (PRO-270), recorded on the entry.
+    #[serde(default)]
+    pub parent: Option<index::ParentRef>,
 }
 
 pub(crate) const QUICK_CHAT_TITLE: &str = "Quick chat";
@@ -364,6 +403,7 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
             id: id.clone(),
             kind: SessionKind::Quick,
             link: None,
+            parent: req.parent.clone(),
             project_path: scratch.clone(),
             // The scratch directory is on no branch even when the TerminalX
             // home happens to sit inside a repository (dotfiles kept in git).
@@ -934,6 +974,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
         let listed: Vec<String> = strays.iter().map(|stray| format!("{} {} ({})", stray.pid, stray.program, if stray.stopped { "stopped" } else { "left running" })).collect();
         log::info!("removing workspace {}: processes still working in it: {}", target.display(), listed.join("; "));
     }
+    let removed_workspace = on_disk.then(|| crate::workspace_restore::removal_record(&project, &target));
     let removal = if on_disk {
         let verified_head = if after.safe { after.head.as_deref() } else { None };
         let options = crate::workspaces::DeleteOptions { delete_branch: request.delete_branch, direct: request.direct, verified_head };
@@ -952,7 +993,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
             affected
         }
         SessionsFate::Keep => {
-            let moved = mark_workspace_sessions_removed(&project, &affected)?;
+            let moved = mark_workspace_sessions_removed(&project, &affected, removed_workspace.as_ref())?;
             notify_workspace_settled(sink, request.project_path, &moved);
             moved
         }
@@ -962,7 +1003,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
 
 /// Record that the workspace these sessions ran in is gone: they keep their
 /// conversations and work from the project root from now on.
-pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[SessionEntry]) -> Result<Vec<SessionEntry>> {
+pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[SessionEntry], removed: Option<&index::RemovedWorkspace>) -> Result<Vec<SessionEntry>> {
     for session in affected { crate::checkpoints::prune(session).map_err(err)?; }
     let affected_ids: std::collections::HashSet<_> = affected.iter().map(|session| session.id.clone()).collect();
     let branch = git::current_branch(project);
@@ -971,6 +1012,7 @@ pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[Sessio
         for session in sessions {
             if affected_ids.contains(&session.id) {
                 index::mark_workspace_removed(session, branch.clone());
+                if let Some(removed) = removed { session.removed_workspace = Some(removed.clone()); }
                 session.modified = index::now();
                 moved.push(session.clone());
             }
@@ -1188,6 +1230,17 @@ pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn pull_request_sessions_require_an_isolated_target() {
+        let valid = serde_json::json!({ "projectPath": "/repo", "useWorktree": true, "checkoutPr": 12, "tab": { "harness": "claude" } });
+        assert!(super::validate_session_target(&serde_json::from_value(valid.clone()).unwrap()).is_ok());
+        for (key, value) in [("checkoutPr", serde_json::json!(0)), ("useWorktree", serde_json::json!(false)), ("onMain", serde_json::json!(true)), ("cwd", serde_json::json!("/repo")), ("checkoutBranch", serde_json::json!("main")), ("baseRef", serde_json::json!("main")), ("tab", serde_json::Value::Null)] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            assert!(super::validate_session_target(&serde_json::from_value(invalid).unwrap()).is_err(), "accepted conflicting {key}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1208,7 +1261,7 @@ mod tests {
         let mut settings = store::settings::load();
         settings.experimental.native_codex = true;
         store::settings::save(&settings).unwrap();
-        let mut issue = NewSession { section_id: None, project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)) };
+        let mut issue = NewSession { parent: None, section_id: None, project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, checkout_pr: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)) };
         prefer_native_codex_session(&mut issue);
         assert_eq!(issue.tab.as_ref().unwrap().transport, index::AgentTransport::ExperimentalCodexStdio);
         issue.tab = Some(tab("codex", None));
@@ -1254,6 +1307,7 @@ mod tests {
 
     fn worktree_session(project: &Path) -> SessionEntry {
         create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: None,
@@ -1262,6 +1316,7 @@ mod tests {
             worktree_name: None,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             issue: None,
             automation: None,
             cwd: None,
@@ -1389,6 +1444,25 @@ mod tests {
         assert!(super::automatic_title("New session", ""));
         assert!(super::automatic_title("We can work on PRD", "We can work on PRD here\nand more"));
         assert!(!super::automatic_title("Pricing notes", "We can work on PRD here"));
+    }
+
+    #[test]
+    fn setup_persistence_failure_does_not_fail_an_existing_worktree_creation() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        projects::update(&project.path, projects::ProjectPatch {
+            scripts: Some(projects::RepositoryScripts { setup: "exit 0".into(), archive: String::new() }), ..Default::default()
+        }).unwrap();
+        // Setup cannot write its status after the index has landed. (Making the
+        // sessions folder a file would also stop the index, which lives in it.)
+        crate::workspace_setup::SAVE_FAILS.with(|fails| fails.set(true));
+        let created = create_session_entry(named_request(dir.path(), Some("setup save failure")));
+        crate::workspace_setup::SAVE_FAILS.with(|fails| fails.set(false));
+        let entry = created.unwrap();
+        assert!(Path::new(&entry.cwd).is_dir());
+        assert_eq!(index::get(&entry.id).unwrap(), entry);
+        assert!(!store::sessions_dir().unwrap().join(&entry.id).join("workspace-setup.json").exists());
     }
 
     #[test]
@@ -1581,6 +1655,7 @@ mod tests {
     /// Another session running in an existing checkout.
     fn session_in(project: &Path, cwd: &str, title: &str) -> SessionEntry {
         create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some(title.into()),
@@ -1589,6 +1664,7 @@ mod tests {
             worktree_name: None,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             issue: None,
             automation: None,
             cwd: Some(cwd.into()),
@@ -1715,6 +1791,7 @@ mod tests {
 
     fn quick_chat(cwd: Option<&Path>) -> SessionEntry {
         create_quick_chat_entry(NewQuickChat {
+            parent: None,
             section_id: None,
             title: None,
             cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
@@ -1733,7 +1810,7 @@ mod tests {
         assert!(projects::list().unwrap().0.is_empty());
         let sink = sink();
         let mut events = sink.subscribe();
-        let first = create_quick_chat_blocking(&sink, NewQuickChat { section_id: None, title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
+        let first = create_quick_chat_blocking(&sink, NewQuickChat { parent: None, section_id: None, title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
         assert_eq!(&*events.try_recv().unwrap().event, "session_created");
 
         assert_eq!(first.kind, SessionKind::Quick);
@@ -1785,7 +1862,7 @@ mod tests {
     fn a_quick_chat_that_cannot_be_created_leaves_no_session_and_no_directory() {
         let _home = crate::store::temp_home();
         let missing = tempfile::tempdir().unwrap().path().join("gone");
-        let error = create_quick_chat_entry(NewQuickChat { section_id: None, title: None, cwd: Some(missing.to_string_lossy().into_owned()), tab: None }).unwrap_err();
+        let error = create_quick_chat_entry(NewQuickChat { parent: None, section_id: None, title: None, cwd: Some(missing.to_string_lossy().into_owned()), tab: None }).unwrap_err();
         assert!(error.contains("resolve"), "{error}");
         assert!(index::load().unwrap().is_empty());
         assert_eq!(std::fs::read_dir(store::quick::root().unwrap()).unwrap().count(), 0);

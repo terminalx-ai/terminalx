@@ -1,4 +1,5 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
+import { TurnDetailsPopover } from "./UsagePopovers";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -13,7 +14,7 @@ import { HoverTime, MessageTime } from "./MessageTime";
 import { messageTime } from "@terminalx/portable/transcript";
 import { Markdown } from "./Markdown";
 import { LinkedText } from "./LinkedText";
-import { ToolCallRow, ToolGroupRow } from "./ToolCallRow";
+import { STEP_CHIP, ToolCallRow, ToolGroupRow } from "./ToolCallRow";
 import { usePrefs } from "@/lib/prefs";
 import { turnFileChanges } from "@/lib/turnChanges";
 import { TurnChanges } from "./TurnChanges";
@@ -22,6 +23,7 @@ import { ChatMedia } from "./ChatMedia";
 import { mediaMentions } from "@/lib/chatMedia";
 import { classifyRecovery } from "@/lib/recovery";
 import { useExposure, useInView, useRecoveryReporter } from "@/lib/recoveryReports";
+import { openImageViewer, type ViewerImage } from "@/lib/imageViewer";
 
 /**
  * One exchange: the prompt, the work under it, the answer, and a footer.
@@ -54,6 +56,7 @@ interface TurnProps {
   onSendQueuedNow?: (seq: number) => void;
   /** Send a message the agent dropped unanswered again, as a new message (#722); absent where that cannot be done. */
   onSendAgain?: (seq: number) => void;
+  onSecondOpinion?: (turn: Turn) => void;
   /** The time line above the turn when it opens a new sitting ("Yesterday, 5:21 PM"); see \`turnDivider\`. */
   divider?: string | null;
   onReset?: (endSeq: number) => void;
@@ -69,6 +72,7 @@ function TurnBody({
   streamingTool,
   onSendQueuedNow,
   onSendAgain,
+  onSecondOpinion,
   divider,
   onReset,
 }: TurnProps) {
@@ -158,9 +162,9 @@ function TurnBody({
         </div>
       )}
 
-      {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} />}
+      {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} onReset={onReset} />}
+      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} onReset={onReset} />}
     </div>
   );
 }
@@ -207,7 +211,7 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
  * A settled turn's one footer row: when the answer came, how the turn went
  * when no header said so, and a copy of the answer on hover.
  */
-function TurnFooter({ turn, outcome, onReset }: { turn: Turn; outcome: Outcome | null; onReset?: (endSeq: number) => void }) {
+function TurnFooter({ turn, outcome, onSecondOpinion, onReset }: { turn: Turn; outcome: Outcome | null; onSecondOpinion?: (turn: Turn) => void; onReset?: (endSeq: number) => void }) {
   const answer = turn.work.flatMap((w) => (w.kind === "text" && w.text.trim() ? [w] : []));
   const ts = answer.at(-1)?.messageTs;
   const text = answer.map((w) => w.text).join("\n\n");
@@ -218,20 +222,20 @@ function TurnFooter({ turn, outcome, onReset }: { turn: Turn; outcome: Outcome |
     return () => window.clearTimeout(id);
   }, [copied]);
   const quiet = outcome?.tone === "ok";
-  if (!messageTime(ts) && !outcome && !text && !onReset) return null;
+  if (!messageTime(ts) && !outcome && !text && !turn.completed && !onSecondOpinion && !onReset) return null;
   return (
     <div className="flex min-h-7 flex-wrap items-center gap-x-1.5 text-xs text-faint" data-testid="turn-footer">
       <MessageTime ts={ts} inline />
       {onReset && turn.completed?.status === "ok" && turn.completed.seq != null && (
         <button type="button" onClick={() => onReset(turn.completed!.seq!)} className="rounded px-1.5 py-1 hover:bg-veil-raised focus-visible:outline">Reset to here</button>
       )}
-      {outcome && (
-        <span className={cn("flex items-center gap-1.5", outcome.tone === "failed" && "text-destructive")}>
+      {turn.completed && !turn.live && <TurnDetailsPopover turn={turn}>
+        {outcome ? <>
           {!quiet && <OutcomeIcon tone={outcome.tone} />}
-          <span>{outcome.word}</span>
+          <span className={cn(outcome.tone === "failed" && "text-destructive")}>{outcome.word}</span>
           {outcome.duration && <span className="-ml-1">{outcome.duration}</span>}
-        </span>
-      )}
+        </> : <span>Details</span>}
+      </TurnDetailsPopover>}
       {text && (
           <button
             type="button"
@@ -242,6 +246,11 @@ function TurnFooter({ turn, outcome, onReset }: { turn: Turn; outcome: Outcome |
           >
             {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
           </button>
+      )}
+      {onSecondOpinion && (
+        <button type="button" onClick={() => onSecondOpinion(turn)} className="rounded-md px-1.5 py-1 text-muted-foreground hover:bg-veil-raised hover:text-foreground">
+          Second opinion
+        </button>
       )}
     </div>
   );
@@ -426,6 +435,38 @@ export function SendingMessage({ message, cwd }: { message: { text: string; imag
   );
 }
 
+/** A table's row of dashes: cells of `-` (with `:` for alignment) between pipes, at least one pipe. */
+const TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+/**
+ * A message split into its GitHub-style tables and the text around them: a table is a row with a pipe, the row of
+ * dashes under it, and the rows with pipes after that.
+ */
+export function splitMarkdownTables(text: string): { table: boolean; text: string }[] {
+  const lines = text.split("\n");
+  const parts: { table: boolean; text: string }[] = [];
+  const push = (table: boolean, line: string) => {
+    const last = parts.at(-1);
+    if (last && last.table === table) last.text += `\n${line}`;
+    else parts.push({ table, text: line });
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const rule = lines[i + 1];
+    if (lines[i].includes("|") && rule !== undefined && rule.includes("|") && TABLE_RULE.test(rule)) {
+      // A new block even right after another table, so two tables stay two.
+      parts.push({ table: true, text: `${lines[i]}\n${rule}` });
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) parts.at(-1)!.text += `\n${lines[i++]}`;
+      i--;
+    } else push(false, lines[i]);
+  }
+  return parts;
+}
+
+export function hasMarkdownTable(text: string): boolean {
+  return splitMarkdownTables(text).some((part) => part.table);
+}
+
 function ReaderMessage({
   message,
   cwd,
@@ -454,7 +495,18 @@ function ReaderMessage({
             {message.images.map((im, i) =>
               // A cloud tab's image is a file on its workspace, not here: its name, not a broken thumbnail.
               cwd || isLoadableUrl(im.url) ? (
-                <PrivacyImage key={i} src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
+                <button
+                  key={i}
+                  type="button"
+                  aria-label={`View ${im.name || "image"}`}
+                  onClick={() => {
+                    const all = viewable(message.images ?? [], cwd);
+                    openImageViewer(all, all.findIndex((v) => v.src === toAssetUrl(im.url)));
+                  }}
+                  className="cursor-zoom-in rounded-md outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  <PrivacyImage src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
+                </button>
               ) : (
                 <span key={i} className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-veil-raised px-2 py-1 text-xs text-muted-foreground" data-testid="prompt-image-name">
                   <ImageIcon className="size-3.5 shrink-0" />
@@ -465,7 +517,16 @@ function ReaderMessage({
           </div>
         ) : null}
         {message.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={message.author.userId}>{message.author.displayName}</div>}
-        <div {...(message.seq == null ? {} : section)} className={cn((message.replaced || message.withdrawn) && "text-muted-foreground")}><LinkedText text={message.text} context={linkContext} /></div>
+        <div {...(message.seq == null ? {} : section)} className={cn((message.replaced || message.withdrawn) && "text-muted-foreground")}>
+          {/* A pasted table reads as a table; every other line stays the plain text that was typed. Web links only, no
+              remote images: it is someone's paste, not the agent's reply. */}
+          {hasMarkdownTable(message.text)
+            ? splitMarkdownTables(message.text).map((part, i) =>
+                part.table
+                  ? <div key={i} className="my-2 whitespace-normal"><Markdown text={part.text} streaming={false} linkContext={linkContext} webLinksOnly remoteImages={false} /></div>
+                  : <LinkedText key={i} text={part.text.replace(/^\n+|\n+$/g, "")} context={linkContext} />)
+            : <LinkedText text={message.text} context={linkContext} />}
+        </div>
         {message.sent !== undefined && (
           <details className="mt-2 text-xs text-muted-foreground" data-testid="prompt-changed">
             <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded focus-visible:outline focus-visible:outline-2">
@@ -549,10 +610,13 @@ function ReasoningRow({ name, text, linkContext }: { name: string; text: string;
     <div>
       <div
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded-md -mx-1.5 px-1.5 py-1 text-left text-[13px] text-thinking hover:bg-veil-raised"
+        className="flex w-full items-center gap-2.5 rounded-md -mx-1.5 px-1.5 py-1.5 text-left text-[13.5px] hover:bg-veil-raised"
       >
-        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning" : "Expand reasoning"}><Brain className="size-3.5 shrink-0" /></button>
-        <span className="min-w-0 flex-1 truncate italic opacity-80">{open ? "Thinking" : <LinkedText text={first} context={linkContext} />}</span>
+        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning" : "Expand reasoning"}><Brain className="size-4 shrink-0 text-thinking" /></button>
+        <span className="shrink-0 text-foreground/90">Thinking</span>
+        <span className="flex min-w-0 flex-1">
+          {!open && first && <span className={cn(STEP_CHIP, "font-sans text-[12.5px]")}><LinkedText text={first} context={linkContext} /></span>}
+        </span>
         <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning details" : "Expand reasoning details"}><ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} /></button>
       </div>
       {open && <div {...section} className="ml-4.5 mb-2 whitespace-pre-wrap text-[13px] italic text-thinking/90 select-text"><LinkedText text={text} context={linkContext} /></div>}
@@ -564,6 +628,13 @@ function ReasoningRow({ name, text, linkContext }: { name: string; text: string;
 function isLoadableUrl(p: string): boolean {
   // `blob:`: a composer's own thumbnail, on a message drawn while it is being sent (#727).
   return p.startsWith("data:") || p.startsWith("blob:") || p.startsWith("http") || p.startsWith("asset:");
+}
+
+/** A message's images the viewer can draw: loadable ones, or files when there is a checkout to read them from. */
+function viewable(images: { url: string; name?: string | null }[], cwd?: string): ViewerImage[] {
+  return images
+    .filter((im) => cwd || isLoadableUrl(im.url))
+    .map((im) => ({ src: toAssetUrl(im.url), name: im.name || (isLoadableUrl(im.url) ? "Image" : im.url.split("/").pop() || "Image"), path: isLoadableUrl(im.url) ? undefined : im.url }));
 }
 
 export function toAssetUrl(p: string): string {

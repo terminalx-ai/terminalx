@@ -26,6 +26,7 @@ import type {
   SessionEntry,
   Workspace,
   WorkspaceDisposition,
+  WorkspaceRestorePreview,
   TabEntry,
   TabStatus,
   UnfinishedMerge,
@@ -39,6 +40,7 @@ import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
+import type { RepositoryFilesPreview } from "@/types/repositorySettings";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
 import type { IssueUser } from "@/lib/issueOps";
 import { noteCallFailure } from "@/lib/accountRoles";
@@ -212,6 +214,7 @@ export interface NewSession {
   worktreeName?: string | null;
   /** An existing branch to check out in the new worktree, instead of a new branch. */
   checkoutBranch?: string | null;
+  checkoutPr?: number | null;
   /** Explicit acknowledgement that a requested worktree should be skipped. */
   onMain?: boolean;
   issue?: IssueRef | null;
@@ -267,6 +270,8 @@ export interface ShellPane {
   title: string | null;
   /** The reader named it; `title` is otherwise the name it was opened with. */
   renamed?: boolean;
+  /** Explicit placement; absent for terminals opened by older runtimes. */
+  docked?: boolean | null;
   cwd: string;
   exited: boolean;
   /** When it was opened, so every window lists it in the same place. */
@@ -284,6 +289,12 @@ export interface PaneAgent {
  * session a tab belongs to. A tab is named `agent:<tab id>`,
  * `terminal:<pane id>` or `browser:<page id>` (`tabKey` in `@/lib/tabLayouts`).
  */
+export interface TabPane {
+  id: "left" | "right";
+  tabs: string[];
+  active: string | null;
+}
+
 export interface TabLayout {
   /** The tabs in the order the reader put them in; a tab not listed comes after these, oldest first. */
   order: string[];
@@ -293,6 +304,10 @@ export interface TabLayout {
   muted: string[];
   /** The reader's own title for a tab. */
   titles: Record<string, string>;
+  /** Optional for layouts saved before split panes. Preserved by the backend's extension fields. */
+  panes?: TabPane[];
+  focusedPane?: TabPane["id"];
+  splitRatio?: number;
 }
 
 /** An agent tab the reader closed, kept with its conversation so it can be reopened. */
@@ -306,6 +321,14 @@ export interface ClosedTab {
 export interface TabState {
   workspaces: Record<string, TabLayout>;
   closed: ClosedTab[];
+}
+
+/** One local repository's mirror; source stays set when cleanup is needed. */
+export interface RepoMirrorStatus {
+  root: string;
+  source: string | null;
+  active: boolean;
+  error: string | null;
 }
 
 /** How a workspace is removed. */
@@ -539,6 +562,7 @@ export const api = {
   setMachineName: (name: string | null) => invoke<MachineName>("set_machine_name", { name }),
 
   // projects
+  repositoryFilesPreview: (path: string, patterns?: string[], snapshot?: string) => invoke<RepositoryFilesPreview>("repository_files_preview", { path, patterns, snapshot }),
   listProjects: () => invoke<{ projects: Project[]; lastSelected: string | null }>("list_projects"),
   addProject: (path: string) => invoke<Project>("add_project", { path }),
   chatsDir: () => invoke<string>("chats_dir"),
@@ -547,6 +571,9 @@ export const api = {
   updateProject: (path: string, patch: ProjectPatch) => invoke<Project>("update_project", { path, patch }),
   setProjectLogo: (path: string, source: string | null) => invoke<Project>("set_project_logo", { path, source }),
   listWorkspaces: (projectPath: string) => invoke<Workspace[]>("list_workspaces", { projectPath }),
+  repoMirrorStatus: (sessionId: string) => invoke<RepoMirrorStatus>("repo_mirror_status", { sessionId }),
+  repoMirrorStart: (sessionId: string, confirmed: boolean) => invoke<RepoMirrorStatus>("repo_mirror_start", { sessionId, confirmed }),
+  repoMirrorStop: (sessionId: string) => invoke<RepoMirrorStatus>("repo_mirror_stop", { sessionId }),
   previewWorkspaceName: (projectPath: string, requested?: string | null) =>
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
@@ -582,8 +609,13 @@ export const api = {
   removeWorkspace: (projectPath: string, path: string, options: WorkspaceRemoveOptions) =>
     invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
 
+  previewWorkspaceRestore: (sessionId: string) => invoke<WorkspaceRestorePreview>("preview_workspace_restore", { sessionId }),
+  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) =>
+    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch }),
+
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
+  sessionRowStatuses: (ids: string[]) => invoke<Record<string, import("@terminalx/portable/sessionStatus").SessionStatusInput>>("session_row_statuses", { ids }),
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
   statsUsageSnapshot: () => invoke<StatsUsageState>("stats_usage_snapshot"),
@@ -669,10 +701,11 @@ export const api = {
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
   /** `base`: the ref the session's worktree was made from, read against instead of the default branch. */
-  branchOverview: (cwd: string, base?: string | null) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null }),
+  branchOverview: (cwd: string, base?: string | null, localOnly = false) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null, localOnly }),
+  projectForge: (cwd: string) => invoke<ProjectForge>("project_forge", { cwd }),
   /** Brings the remote's branches up to date; false when it could not (offline, no remote). */
   branchFetch: (cwd: string) => invoke<boolean>("branch_fetch", { cwd }),
-  /** Merges the checked-out branch into the local branch `into`; says what it did. */
+  /** Retained for command clients; the Branch panel sends an agent prompt instead. */
   branchMergeInto: (cwd: string, into: string) => invoke<string>("branch_merge_into", { cwd, into }),
   // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
   // None of these takes a local path: the native side derives the mirror's
@@ -2027,6 +2060,8 @@ export const agent = {
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
   /** Send a message the CLI holds behind its running turn now: the turn is interrupted and the message typed again. */
   sendQueuedNow: (sessionId: string, tabId: string, seq: number) => invoke<void>("send_queued_now", { sessionId, tabId, seq }),
+  changeHeldQueue: (sessionId: string, tabId: string, change: import("@/lib/heldQueue").HeldQueueChange) =>
+    invoke<SendOutcome>("change_held_queue", { sessionId, tabId, change }),
   listQueued: (sessionId: string, tabId: string) => invoke<QueuedMessage[]>("list_queued", { sessionId, tabId }),
   respondPermission: (sessionId: string, tabId: string, requestId: string, optionId: string) =>
     invoke<void>("respond_permission", { sessionId, tabId, requestId, optionId }),
@@ -2037,6 +2072,7 @@ export const agent = {
     invoke<void>("set_tab_permission_mode", { sessionId, tabId, mode }),
   setEffort: (sessionId: string, tabId: string, effort: string | null) =>
     invoke<void>("set_tab_effort", { sessionId, tabId, effort }),
+  setUnread: (sessionId: string, tabId: string, unread: boolean) => invoke<void>("set_tab_unread", { sessionId, tabId, unread }),
   markRead: (sessionId: string, tabId: string) => invoke<void>("mark_tab_read", { sessionId, tabId }),
   listModels: (refresh?: boolean) => invoke<ModelInfo[]>("list_models", { refresh: refresh ?? false }),
 };
@@ -2091,12 +2127,20 @@ export interface BranchContributor {
   last: string;
 }
 
+export type ProjectForge = "github" | "githubUnavailable" | "localOnly";
+
 /** A checkout's branch against the branch it merges into, read from refs already here. */
 export interface BranchOverview {
+  /** Resolved by the same native function as the session header. */
+  nextStep: "pull" | "reconcile" | "detached" | "conflicts" | "commit" | "empty" | "local" | "push" | null;
   branch: string | null;
   /** `origin/main`, else the local default branch; null outside a repository or without one. */
   base: string | null;
   onBase: boolean;
+  /** Main checkout path reported by Git. */
+  mainCheckout: string | null;
+  /** Compared using canonical checkout roots, including sessions reached through symlinks. */
+  inMainCheckout: boolean;
   forkPoint: CommitInfo | null;
   /** Commits only on the branch, and on the base since the fork. */
   ahead: number;
@@ -2144,6 +2188,8 @@ export interface PullRequest {
 }
 
 export const git = {
+  hasRemote: (cwd: string) => invoke<boolean>("git_has_remote", { cwd }),
+  addRemote: (cwd: string, url: string) => invoke<void>("git_add_remote", { cwd, url }),
   commit: (cwd: string, message: string, paths?: string[]) => invoke<string>("git_commit", { cwd, message, paths: paths ?? null }),
   push: (cwd: string) => invoke<string>("git_push", { cwd }),
   pull: (cwd: string) => invoke<string>("git_pull", { cwd }),
@@ -2170,8 +2216,19 @@ export interface PrAssociation {
  * across its IPC continuations. It holds no native lease or credentials. */
 export type CheckAuthority = Readonly<{ owner: string; epoch: number | null }>;
 
+export interface GitHubConnectionStatus {
+  state: "missing" | "signed_out" | "connected" | "unavailable";
+  details: string | null;
+  hostname?: string;
+}
+
 export const gh = {
   checkAuthority: () => invoke<CheckAuthority>("pr_check_authority"),
+  search: (cwd: string, query: string) => invoke<PullRequest[]>("pr_search", { cwd, query }),
+  attach: (cwd: string, number: number) => invoke<string>("pr_attach", { cwd, number }),
+  connectionStatus: (cwd?: string) => invoke<GitHubConnectionStatus>("gh_connection_status", { cwd: cwd ?? null }),
+  loginStart: (id: string, hostname: string) => invoke<void>("gh_login_start", { id, hostname }),
+  createRepository: (cwd: string, name: string, privateRepo: boolean) => invoke<void>("gh_create_repository", { cwd, name, private: privateRepo }),
   conversation: (url: string): PrConversationAccess => ({
     read: () => invoke("pr_conversation", { url }),
     act: (action) => invoke("pr_conversation_action", { url, action }),
@@ -2320,6 +2377,7 @@ export const agentSetup = {
 
 // ---- terminals
 export const pty = {
+  localLinks: (id: string) => invoke<{ sessionId: string; cwd: string; urls: string[] } | null>("pty_local_links", { id }),
   /** `title` names a shell tab for every window that lists it. */
   spawn: (id: string, cwd: string, cols: number, rows: number, command?: string, title?: string) =>
     invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null, title: title ?? null }),
@@ -2328,6 +2386,9 @@ export const pty = {
   /** The agents in front of terminals right now (#437), for a window that loads after they were started. */
   agents: () => invoke<PaneAgent[]>("pane_agents"),
   rename: (id: string, title: string) => invoke<void>("pty_rename", { id, title }),
+  /** Sessions with a TCP listener working in their checkout, including detached servers. */
+  listeningSessions: (sessions: Pick<SessionEntry, "id" | "cwd">[]) => invoke<string[]>("listening_sessions", { sessions }),
+  setDocked: (id: string, docked: boolean) => invoke<ShellPane>("pty_set_docked", { id, docked }),
   /** Which of these shell tabs are running a command now. */
   busy: (ids: string[]) => invoke<string[]>("pty_busy", { ids }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),

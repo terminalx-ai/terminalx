@@ -44,7 +44,8 @@ try {
         await page.setViewportSize({ width, height: 800 });
         await page.evaluate((zoom) => { document.documentElement.style.zoom = String(zoom); }, zoom);
         const result = await page.evaluate(({ text, code }) => {
-          const root = [...document.querySelectorAll("[data-chat-scroller]")].find((el) => el.getBoundingClientRect().width > 0);
+          // Workspace panes keep inactive tabs laid out but hidden (PRO-263): measure the chat on screen.
+          const root = [...document.querySelectorAll("[data-chat-scroller]")].find((el) => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility === "visible");
           const readers = [...root.querySelectorAll('[data-testid="reader-message"] > div')];
           const queued = root.querySelector('[data-testid="queued-message"]');
           const targets = [...readers.map((bubble) => ({ bubble, content: bubble.lastElementChild })), { bubble: queued, content: queued.querySelector('.whitespace-pre-wrap') }];
@@ -90,7 +91,7 @@ try {
         if (clipboard) {
           for (let index = 0; index < 3; index++) {
             await page.evaluate((index) => {
-              const root = [...document.querySelectorAll('[data-chat-scroller]')].find((el) => el.getBoundingClientRect().width > 0);
+              const root = [...document.querySelectorAll('[data-chat-scroller]')].find((el) => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility === "visible");
               const contents = [...root.querySelectorAll('[data-testid="reader-message"] > div')].map((bubble) => bubble.lastElementChild);
               contents.push(root.querySelector('[data-testid="queued-message"] .whitespace-pre-wrap'));
               contents[index].scrollIntoView();

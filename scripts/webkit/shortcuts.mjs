@@ -119,7 +119,7 @@ const fits = (layout) => ({
   // A changed shortcut works at the next keypress.
   await openShortcuts(page);
   await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').click();
-  await page.keyboard.press("Meta+Shift+Y");
+  await page.keyboard.press("Meta+Shift+V");
   await page.getByTestId("shortcut-editor").getByRole("button", { name: "Save", exact: true }).click();
   const shown = await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').textContent();
   await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
@@ -130,10 +130,10 @@ const fits = (layout) => ({
   await page.keyboard.press("Meta+B");
   await page.waitForTimeout(600);
   const afterOld = await sidebarShown() && await page.locator('[data-testid="panel-presence"][data-side="left"]').getAttribute("data-state") === "open";
-  await page.keyboard.press("Meta+Shift+Y");
+  await page.keyboard.press("Meta+Shift+V");
   const afterNew = await page.locator('[data-testid="sidebar-rail"]').waitFor({ state: "hidden", timeout: 2000 }).then(() => false, () => true);
-  await page.keyboard.press("Meta+Shift+Y");
-  await sidebar(page);
+  await page.keyboard.press("Meta+Shift+V");
+  await page.locator('[data-testid="panel-presence"][data-side="left"][data-state="open"]').waitFor();
   // The command palette shows the keys in force.
   await page.keyboard.press("Meta+K");
   await page.getByRole("dialog").locator("input").fill("Toggle sidebar");
@@ -144,10 +144,10 @@ const fits = (layout) => ({
   failed += report(
     "a changed shortcut",
     {
-      "the tab shows the new keys": shown === "⌘⇧Y",
+      "the tab shows the new keys": shown === "⌘⇧V",
       "the old keys do nothing": afterOld === true,
       "the new keys run the action": afterNew === false,
-      "the command palette shows the new keys": paletteKeys === "⌘⇧Y",
+      "the command palette shows the new keys": paletteKeys === "⌘⇧V",
     },
     { shown, afterOld, afterNew, paletteKeys },
   );

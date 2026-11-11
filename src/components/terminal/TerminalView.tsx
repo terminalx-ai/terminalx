@@ -3,7 +3,10 @@ import { cn } from "@/lib/cn";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { TerminalMoveButton } from "./TerminalMoveButton";
+import { TerminalTools } from "./TerminalTools";
 import { EnvironmentNotice } from "./EnvironmentNotice";
+import { LocalTerminalLinks } from "./LocalTerminalLinks";
 import { pty } from "@/lib/api";
 import { disposeInstance, getInstance, isAgentPane, peekInstance, registerTerminalFactory, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
@@ -207,20 +210,25 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
 export function TerminalView({
   id,
   visible,
+  focused = visible,
   create,
   fit = true,
   dropRefusal,
   redraw = true,
+  moveToDock = false,
   actions,
   pinned = false,
 }: {
   id: string;
   visible: boolean;
+  focused?: boolean;
   create?: (mode: "dark" | "light") => TerminalInstance;
   fit?: boolean;
   dropRefusal?: TerminalDropRefusal;
   /** The "Redraw terminal" control above it; a compact view leaves it out. */
   redraw?: boolean;
+  /** A standalone local shell can move into the session dock. */
+  moveToDock?: boolean;
   /** More controls for the same corner toolbar, beside Redraw. */
   actions?: ReactNode;
   /** Keep the toolbar on screen; otherwise it shows only while the pointer or focus is on the terminal. */
@@ -314,9 +322,13 @@ export function TerminalView({
     const inst = getInstance(id, make, el);
     showWebgl(inst.term);
     return () => {
-      hideWebgl(inst.term);
-      if (inst.el.parentNode === el) el.removeChild(inst.el);
-      trimTerminalInstances();
+      if (inst.el.parentNode === el) {
+        hideWebgl(inst.term);
+        el.removeChild(inst.el);
+      }
+      // A dock/tab move mounts its new host in this same commit. Trim only
+      // afterward, so an archived or full idle cache cannot evict it mid-move.
+      queueMicrotask(() => trimTerminalInstances());
     };
   }, [id, shown]);
 
@@ -330,18 +342,20 @@ export function TerminalView({
       try {
         if (fitting.current) fitTerminal(inst.term, el);
         inst.term.refresh(0, inst.term.rows - 1);
-        inst.term.focus();
+        if (focused) inst.term.focus();
       } catch {
         /* ignore */
       }
     });
     return () => cancelAnimationFrame(frame);
-  }, [id, shown, fit]);
+  }, [id, shown, fit, focused]);
 
   return (
     <div ref={frame} className="group/terminal relative flex h-full w-full flex-col bg-terminal" data-testid="terminal-drop-target" {...drop.zoneProps}>
+      <TerminalTools id={id} shown={shown} frame={frame} />
       <EnvironmentNotice id={id} active={visible && !create} />
-      {(redraw || actions) && (
+      {!create && <LocalTerminalLinks id={id} active={shown} />}
+      {(redraw || actions || moveToDock) && (
         // Floats over the terminal's corner rather than taking a row: nothing is drawn until it is wanted.
         <div
           className={cn(
@@ -351,6 +365,7 @@ export function TerminalView({
           data-testid="terminal-toolbar"
         >
           {actions}
+          {moveToDock && <TerminalMoveButton id={id} docked={false} />}
           {redraw && (
             <button
               type="button"

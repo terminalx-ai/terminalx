@@ -402,7 +402,7 @@ pub(super) fn dispatch(
     let result = match method {
         "sync.capabilities" => no_params(&params).map(|_| capabilities(connection.owner.build())),
         "transport.negotiate" => parse_params(params).map(|params| negotiate(connection, params)),
-        "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries()?, params.version)),
+        "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries(connection)?, params.version)),
         "session.sync" => parse_params(params).and_then(|params| session_sync(connection, request_id(request), params)),
         "session.tail" => parse_params(params).and_then(|params| session_tail(connection, request_id(request), params)),
         "session.image" => parse_params(params).and_then(|params: PromptImageParams| prompt_image(&params)),
@@ -421,6 +421,7 @@ pub(super) fn dispatch(
         }
         // Session controls (`sessionControls`): the desktop's own operations,
         // which the runtime checks against this device's grant again.
+        "session.markRead" => parse_params(params).and_then(|params: TabControlParams| connection.call("markRead", params.into_call())),
         "session.tab" => parse_params(params).and_then(|params: TabControlParams| connection.call("tab", params.into_call())),
         "models.list" => parse_params(params).and_then(|params: ModelsParams| connection.call("models", json!({"refresh": params.refresh}))),
         "session.prepareContinuation" => parse_params(params).and_then(|params: TabControlParams| connection.call("prepareContinuation", params.into_call())),
@@ -450,6 +451,12 @@ pub(super) fn dispatch(
         "sessions.options" => no_params(&params).and_then(|_| new_session_options(manager)),
         "sessions.create" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| create_session(manager, connection, params)))
+        }
+        "configuration.resolve" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Params { #[serde(default)] project_id: Option<String> }
+            parse_params(params).and_then(|p: Params| connection.call("configuration", json!({"projectId": p.project_id})))
         }
         "mac.settings" => no_params(&params).and_then(|_| connection.call("settings", json!({}))),
         "mac.setSettings" => {
@@ -483,7 +490,7 @@ fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
     // `terminal`: `terminal.open`, and terminal observations that carry the
     // pane's size, so the phone can emulate the screen and drive it.
     // `closeTab`: `session.closeTab` closes a tab as the desktop's tab strip does.
-    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1)] {
+    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1), ("layeredConfiguration", 1)] {
         if runtime.mobile.get(feature).and_then(Value::as_u64).is_some_and(|served| served >= level) {
             named[feature] = json!(level);
         }
@@ -650,7 +657,12 @@ fn row_branch(session: &SessionEntry, labels: Option<&std::collections::BTreeMap
 /// The group a paired phone files quick chats under.
 const QUICK_CHATS_PROJECT: &str = "Quick chats";
 
-fn session_summaries() -> Result<Value> {
+fn session_summaries(connection: &MobileConnection) -> Result<Value> {
+    summaries_with_row_statuses(connection.call("rowStatuses", json!({})).unwrap_or(Value::Null))
+}
+
+/// `row_statuses` maps a session id to its row status; a runtime without them leaves them out.
+fn summaries_with_row_statuses(row_statuses: Value) -> Result<Value> {
     let snippets: HashMap<_, _> = summaries::collect(None)?
         .into_iter()
         .map(|summary| (summary.session_id.clone(), summary))
@@ -687,11 +699,13 @@ fn session_summaries() -> Result<Value> {
             "lastPrompt": summary.and_then(|row| row.last_prompt.clone()),
             "lastReply": summary.and_then(|row| row.last_reply.clone()),
             "issueRef": session.issue.as_ref().map(|issue| issue.identifier.clone()),
+            "rowStatus": row_statuses[&session.id],
             "tabs": session.tabs.into_iter().map(|tab| json!({
                 "id": tab.id,
                 "title": tab.title,
                 "harness": tab.harness,
                 "status": tab.status,
+                "markedUnread": tab.marked_unread,
             })).collect::<Vec<_>>(),
         }));
     }
@@ -1194,6 +1208,7 @@ fn phone_projects() -> Result<Vec<Value>> {
         "id": store::projects::public_id(&project.path),
         "name": project.name,
         "git": project.kind == store::projects::ProjectKind::Git,
+        "repositorySettings": project.repository_settings,
         "lastUsed": last.as_deref() == Some(project.path.as_str()),
     })).collect())
 }
@@ -1771,13 +1786,13 @@ mod tests {
         runtime.configure(sink.clone()).unwrap();
         let (tx, mut rx) = mpsc::channel(8);
         runtime.register_client("phone", tx, Arc::new(std::sync::atomic::AtomicBool::new(false)));
-        let before = session_summaries().unwrap();
+        let before = summaries_with_row_statuses(Value::Null).unwrap();
         assert!(before["sessions"][0]["manualStatus"].is_null());
         let patch = crate::session_ops::SessionPatch { manual_status: Some(index::ManualStatus::InReview), ..Default::default() };
         let updated = crate::session_ops::update_session_meta("manual", &patch).unwrap();
         sink.emit("session_updated", &updated);
         assert_eq!(rx.try_recv().unwrap(), json!({"method":"sessions.changed"}));
-        let after = session_summaries().unwrap();
+        let after = summaries_with_row_statuses(Value::Null).unwrap();
         assert_eq!(after["sessions"][0]["manualStatus"], "in_review");
         // Conditional summary reads must also see the metadata change.
         assert_ne!(conditional(before, None).unwrap()["version"], conditional(after, None).unwrap()["version"]);
@@ -2467,8 +2482,9 @@ mod tests {
         let released = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
         let mut every = released.clone();
         every["closeTab"] = json!(1);
+        every["layeredConfiguration"] = json!(1);
         assert_eq!(capabilities(&current_runtime()), every);
-        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab came later");
+        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab and layered configuration came later");
         let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1 });
         assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,
             "no terminal, session controls, new sessions, Mac settings or send ids from a 0.2.21 runtime");
@@ -2616,8 +2632,9 @@ mod tests {
         let repo = store::projects::add(root.join("repo").to_str().unwrap()).unwrap();
         let old = store::projects::add(root.join("old").to_str().unwrap()).unwrap();
         store::projects::update(&old.path, store::projects::ProjectPatch { archived: Some(true), ..Default::default() }).unwrap();
+        store::projects::update(&repo.path, store::projects::ProjectPatch { repository_settings: Some(store::projects::RepositorySettings { files_to_copy: vec![".env*".into()] }), ..Default::default() }).unwrap();
         let projects = phone_projects().unwrap();
-        assert_eq!(projects, vec![json!({ "id": store::projects::public_id(&repo.path), "name": "repo", "git": false, "lastUsed": false })]);
+        assert_eq!(projects, vec![json!({ "id": store::projects::public_id(&repo.path), "name": "repo", "git": false, "repositorySettings": {"filesToCopy": [".env*"]}, "lastUsed": false })]);
         assert!(!serde_json::to_string(&projects).unwrap().contains(&root.to_string_lossy().into_owned()));
         assert_eq!(store::projects::by_public_id(projects[0]["id"].as_str().unwrap()).unwrap().path, repo.path);
     }

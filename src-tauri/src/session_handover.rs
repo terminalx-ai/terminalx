@@ -63,6 +63,8 @@ pub(crate) struct TabRecord {
     #[serde(default)]
     pub queued: Vec<PendingMessage>,
     #[serde(default)]
+    pub held_queue: held::Queue,
+    #[serde(default)]
     pub turn_open: bool,
     #[serde(default)]
     pub turn_opener: Option<(String, String)>,
@@ -76,6 +78,8 @@ pub(crate) struct TabRecord {
     pub compact_boundary_at: Option<String>,
     #[serde(default)]
     pub turn_started_ms: Option<u64>,
+    #[serde(default)]
+    pub turn_usage: crate::harness::metrics::CompletedUsage,
     #[serde(default)]
     pub last_activity_ms: u64,
     #[serde(default)]
@@ -196,6 +200,8 @@ pub(crate) struct TailRecord {
     pub began: u64,
     #[serde(default)]
     pub carried: Vec<String>,
+    #[serde(default)]
+    pub usage: crate::harness::metrics::TurnUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,6 +446,9 @@ impl SessionManager {
     /// carry. Fails with [`Unsettled`] while it is about to change.
     fn tab_record(&self, rt: &TabRuntime) -> Result<Option<TabRecord>> {
         let name = || format!("{}/{}", rt.session_id, rt.tab_id);
+        if rt.held_queue.sending.is_some() {
+            return Err(Unsettled(format!("A held follow-up in {} is being delivered", name())).into());
+        }
         if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting {
             return Err(Unsettled(format!("The agent in {} is starting or stopping", name())).into());
         }
@@ -460,6 +469,7 @@ impl SessionManager {
                 },
             }).collect(),
             queued: rt.queued.clone(),
+            held_queue: rt.held_queue.clone(),
             turn_open: rt.turn_open,
             turn_opener: rt.turn_opener.map(|(source, kind)| (source.to_string(), kind.to_string())),
             turn_by_command: rt.turn_by_command,
@@ -467,6 +477,7 @@ impl SessionManager {
             compact_completed: rt.compact_completed,
             compact_boundary_at: rt.compact_boundary_at.map(|at| at.to_rfc3339()),
             turn_started_ms: rt.turn_started_at.map(ago),
+            turn_usage: rt.turn_usage.clone(),
             last_activity_ms: ago(rt.last_activity),
             recovery: rt.recovery,
             stalled_ms: rt.stalled_at.map(ago),
@@ -478,7 +489,7 @@ impl SessionManager {
         };
         let Engine::Cli(p) = &rt.engine else {
             // Nothing runs for it: only what is waiting goes over.
-            let waiting = !record.queued.is_empty() || record.left_at.is_some();
+            let waiting = !record.held_queue.items.is_empty() || !record.queued.is_empty() || record.left_at.is_some();
             return Ok(waiting.then_some(record));
         };
         let (path, offset, began, carried) = p.tail.position();
@@ -505,7 +516,7 @@ impl SessionManager {
             announces_start: p.ready.announces_start(),
             ready_ms: p.ready.since().map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX)),
             recorded: p.recorded,
-            tail: TailRecord { path, offset, began, carried: carried.into_iter().collect() },
+            tail: TailRecord { path, offset, began, carried: carried.into_iter().collect(), usage: p.tail.usage() },
             echoed: p.echoed.iter().map(|echo| EchoRecord {
                 text: echo.text.clone(), image_count: echo.image_count, sent_ms: ago(echo.sent_at), typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
@@ -549,6 +560,7 @@ impl SessionManager {
             tool_use_id: ask.tool_use_id.clone(), tool_name: ask.tool_name.clone(), input: ask.input.clone(), suggestions: ask.suggestions.clone(),
         })).collect();
         rt.queued = record.queued;
+        rt.held_queue = record.held_queue;
         rt.turn_open = record.turn_open;
         rt.turn_opener = record.turn_opener.as_ref().and_then(|(source, kind)| Some((label(source)?, label(kind)?)));
         rt.turn_by_command = record.turn_by_command;
@@ -556,6 +568,7 @@ impl SessionManager {
         rt.compact_completed = record.compact_completed;
         rt.compact_boundary_at = record.compact_boundary_at.as_deref().and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok());
         rt.turn_started_at = record.turn_started_ms.map(back);
+        rt.turn_usage = record.turn_usage;
         rt.last_activity = back(record.last_activity_ms);
         rt.recovery = record.recovery;
         rt.stalled_at = record.stalled_ms.map(back);
@@ -568,7 +581,7 @@ impl SessionManager {
         let kind = cli_kind(&cli.kind).with_context(|| format!("no CLI called {}", cli.kind))?;
         anyhow::ensure!(self.terminals.is_live(&cli.pane_id), "its terminal {} was not handed over", cli.pane_id);
         let (decode, marker) = follow::decoders(kind);
-        let tail = Arc::new(tui::Tail::resumed(cli.tail.path, cli.tail.offset, cli.tail.began, decode, cli.tail.carried.into_iter().collect::<HashSet<_>>()).marking(marker));
+        let tail = Arc::new(tui::Tail::resumed(cli.tail.path, cli.tail.offset, cli.tail.began, decode, cli.tail.carried.into_iter().collect::<HashSet<_>>()).with_usage(cli.tail.usage).marking(marker));
         // Read on from where its CLI began: what the CLI started in the
         // background since is found again (#696).
         rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));

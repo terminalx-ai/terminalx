@@ -563,6 +563,7 @@ fn fresh_fixture(root: &Path) -> FetchFixture {
     real_git(&seed, &["remote", "add", "origin", root.join("fetch-origin.git").to_str().unwrap()]);
     let project = std::fs::canonicalize(root.join("fetch-project")).unwrap();
     let entry = crate::session_ops::create_session_entry(crate::session_ops::NewSession {
+        checkout_pr: None, parent: None,
         section_id: None,
         project_path: project.to_string_lossy().into_owned(), checkout_branch: None,
         title: Some("Fetch privacy".into()), use_worktree: true, base_ref: Some("main".into()),
@@ -885,3 +886,112 @@ mod checks;
 
 #[path = "github_conversation_privacy_tests.rs"]
 mod conversation;
+
+#[test]
+fn privacy_main_integration_entry_points() {
+    for kind in ["personal", "managed"] {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "github_process::tests::privacy_main_integration_child", "--nocapture"])
+            .env("TERMINALX_TEST_MAIN_PRIVACY", kind).env("TERMINALX_HOME", root.path()).output().unwrap();
+        assert!(output.status.success(), "{kind}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[test]
+fn privacy_main_integration_child() {
+    let Ok(kind) = std::env::var("TERMINALX_TEST_MAIN_PRIVACY") else { return };
+    let managed = kind == "managed";
+    let root = store::root().unwrap();
+    let (cwd, no_remote) = fixture(&root);
+    crate::git::run(&cwd, &["remote", "set-url", "origin", "https://opaque.example/owner/repo.git"]).unwrap();
+    crate::git::run(&no_remote, &["remote", "remove", "origin"]).unwrap();
+    let invoke = |operation: &str| match operation {
+        "forge" => matches!(crate::github::project_forge(&cwd), crate::github::ProjectForge::Github),
+        "connection" => crate::github::connection_status(Some(&cwd)).state == "connected",
+        "search" => crate::github::search_prs(&cwd, "privacy").is_ok(),
+        "attachment" => crate::github::attach_pr(&cwd, 7).is_ok(),
+        "create" => crate::github::create_repository(&no_remote, "privacy/new", true).is_ok(),
+        _ => unreachable!(),
+    };
+    for operation in ["forge", "connection", "search", "attachment", "create"] {
+        policy(true, managed);
+        let before = launches(&root);
+        assert!(!invoke(operation), "{operation} admitted while enabled");
+        assert_eq!(launches(&root), before);
+        policy(false, managed);
+        let queued = super::queued(|| invoke(operation));
+        policy(true, managed); policy(false, managed);
+        assert!(!queued(), "{operation} renewed stale authority");
+        assert_eq!(launches(&root), before);
+        assert!(invoke(operation), "{operation} did not restore");
+        assert!(launches(&root) > before);
+        std::fs::write(root.join("hold"), "all\n").unwrap();
+        std::thread::scope(|scope| {
+            let work = scope.spawn(super::queued(|| invoke(operation)));
+            let until = Instant::now() + Duration::from_secs(10);
+            while held(&root).is_empty() {
+                assert!(!work.is_finished() && Instant::now() < until, "{operation} never reached process");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            policy(true, managed);
+            for pid in held(&root) { assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "{operation} did not drain"); }
+            assert!(!work.join().unwrap());
+        });
+        std::fs::remove_file(root.join("hold")).unwrap();
+        for pid in held(&root) { std::fs::remove_file(root.join(format!("held-{pid}"))).unwrap(); }
+        policy(false, managed);
+        assert!(invoke(operation));
+    }
+    // Automatic lifecycle scripts share admission; user/agent terminals remain independent.
+    let script_terminals = std::sync::Arc::new(crate::pty::Terminals::new());
+    let script_sink: std::sync::Arc<dyn crate::sink::EventSink> = std::sync::Arc::new(crate::sink::BroadcastSink::new(32));
+    let script = "printf '%s' $$ > setup-pid; exec /bin/sleep 30";
+    let run_script = || {
+        let runner = crate::archive_script::Runner { terminals: &script_terminals, sink: &script_sink, unattended: false };
+        crate::archive_script::ScriptRun::spawn(runner, "privacy-setup", &cwd, script, &[], &|| {})?
+            .wait(Duration::from_secs(30), &std::sync::atomic::AtomicBool::new(false))
+    };
+    policy(true, managed);
+    assert!(run_script().is_err());
+    policy(false, managed);
+    let queued = super::queued(run_script);
+    policy(true, managed); policy(false, managed);
+    assert!(queued().is_err());
+    std::thread::scope(|scope| {
+        let work = scope.spawn(super::queued(run_script));
+        let marker = cwd.join("setup-pid");
+        let until = Instant::now() + Duration::from_secs(10);
+        while !marker.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
+        let pid: i32 = std::fs::read_to_string(marker).unwrap().parse().unwrap();
+        policy(true, managed);
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert!(work.join().unwrap().unwrap().stopped);
+    });
+    policy(false, managed);
+    let runner = crate::archive_script::Runner { terminals: &script_terminals, sink: &script_sink, unattended: false };
+    let restored = crate::archive_script::ScriptRun::spawn(runner, "privacy-setup-restored", &cwd, "exit 0", &[], &|| {}).unwrap()
+        .wait(Duration::from_secs(5), &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(restored.code, Some(0));
+    // The interactive gh login path holds admission after its RPC has returned.
+    let terminals = crate::pty::Terminals::new();
+    let sink: std::sync::Arc<dyn crate::sink::EventSink> = std::sync::Arc::new(crate::sink::BroadcastSink::new(32));
+    let command = "printf '%s' $$ > login-pid; exec /bin/sleep 30";
+    let start = || terminals.spawn_network(sink.clone(), "github-login-fixture", crate::pty::PaneSpec { cwd: cwd.to_str().unwrap(), cols:80, rows:20, command:Some(command), env:&[] });
+    policy(true, managed); assert!(start().is_err());
+    policy(false, managed);
+    let queued = super::queued(start);
+    policy(true, managed); policy(false, managed);
+    assert!(queued().is_err());
+    start().unwrap();
+    let marker = cwd.join("login-pid");
+    let until = Instant::now() + Duration::from_secs(10);
+    while !marker.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
+    let pid: i32 = std::fs::read_to_string(marker).unwrap().parse().unwrap();
+    policy(true, managed);
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    terminals.kill("github-login-fixture");
+    policy(false, managed);
+    terminals.spawn_network(sink, "github-login-restored", crate::pty::PaneSpec { cwd:cwd.to_str().unwrap(), cols:80, rows:20, command:Some("exit 0"), env:&[] }).unwrap();
+    policy(true, managed);
+}

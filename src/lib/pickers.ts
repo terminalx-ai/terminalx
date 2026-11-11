@@ -1,5 +1,5 @@
-/** The token around the caret that opens a picker: `/cmd` at position zero, or `@path` anywhere. */
-export function tokenAtCaret(text: string, caret: number): { kind: "slash" | "mention"; start: number; query: string } | null {
+/** The token around the caret that opens a picker: `/cmd` at position zero, or `@path` / `#PR` at a word boundary. */
+export function tokenAtCaret(text: string, caret: number): { kind: "slash" | "mention" | "pr"; start: number; query: string } | null {
   const before = text.slice(0, caret);
   if (before.startsWith("/") && !/\s/.test(before)) {
     return { kind: "slash", start: 0, query: before.slice(1) };
@@ -10,5 +10,6 @@ export function tokenAtCaret(text: string, caret: number): { kind: "slash" | "me
   if (word.startsWith("@") && word.length >= 1) {
     return { kind: "mention", start: i + 1, query: word.slice(1) };
   }
+  if (word.startsWith("#")) return { kind: "pr", start: i + 1, query: word.slice(1) };
   return null;
 }

@@ -16,6 +16,8 @@ pub struct Readiness {
     pub state: State,
     pub checked_at: String,
     pub version: Option<String>,
+    pub login_method: Option<String>,
+    pub plan: Option<String>,
 }
 
 /// A local login is evidence of configuration, not proof of entitlement or
@@ -38,6 +40,25 @@ fn claude_state(value: &Value) -> State {
     }
 }
 
+/// Only allowlisted display metadata reaches the webview, never the account
+/// document (which may gain credential fields in a future CLI release).
+fn account_details(agent: &str, value: &Value) -> (Option<String>, Option<String>) {
+    let (method, plan) = if agent == "claude" && claude_state(value) == State::Ready {
+        (value["authMethod"].as_str(), value["subscriptionType"].as_str())
+    } else if agent == "codex" && codex_state(value) == State::Ready {
+        (value["account"]["type"].as_str(), value["account"]["planType"].as_str())
+    } else { return (None, None); };
+    let method = match method {
+        Some("claude.ai" | "oauth") => Some("Claude account"),
+        Some("chatgpt" | "chatgptAuthTokens") => Some("ChatGPT account"),
+        Some("api_key" | "apiKey" | "console") => Some("API key"),
+        _ => None,
+    }.map(str::to_owned);
+    let plan = plan.filter(|plan| matches!(*plan, "free" | "pro" | "max" | "team" | "enterprise" | "plus" | "business" | "edu" | "go" | "api"))
+        .map(str::to_owned);
+    (method, plan)
+}
+
 /// `home::prepare` links the user's auth file when one exists, and otherwise
 /// preserves a login completed in the managed terminal. Inspect that same
 /// effective account without creating a home or reading credential contents.
@@ -51,7 +72,7 @@ fn codex_home_for_check(user: Option<PathBuf>, managed: Option<PathBuf>) -> Opti
 pub fn check(id: &str) -> Readiness {
     match super::offered().into_iter().find(|h| h.id == id) {
         Some(agent) => check_binary(id, agent.path),
-        None => Readiness { state: State::Unknown, checked_at: chrono::Utc::now().to_rfc3339(), version: None },
+        None => Readiness { state: State::Unknown, checked_at: chrono::Utc::now().to_rfc3339(), version: None, login_method: None, plan: None },
     }
 }
 
@@ -67,7 +88,7 @@ pub fn check(id: &str) -> Readiness {
 pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    let mut result = Readiness { state: State::Unknown, checked_at: String::new(), version: None };
+    let mut result = Readiness { state: State::Unknown, checked_at: String::new(), version: None, login_method: None, plan: None };
     if let Some(path) = path {
         let mut version = std::process::Command::new(&path);
         version.arg("--version").env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
@@ -81,14 +102,14 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
                 super::codex::appserver::ask_with_timeout(
                     super::codex::appserver::Where { codex_home: home.as_deref(), cwd: None },
                     "account/read", json!({ "refreshToken": false }), Duration::from_secs(5),
-                ).map(|value| codex_state(&value)).unwrap_or(State::Unknown)
+                ).map(|value| { (result.login_method, result.plan) = account_details("codex", &value); codex_state(&value) }).unwrap_or(State::Unknown)
             }
             "claude" => {
                 let mut command = std::process::Command::new(path);
                 command.args(["auth", "status", "--json"]).env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
                 crate::git::capture_within(command, Duration::from_secs(5)).ok()
                     .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-                    .map(|value| claude_state(&value)).unwrap_or(State::Unknown)
+                    .map(|value| { (result.login_method, result.plan) = account_details("claude", &value); claude_state(&value) }).unwrap_or(State::Unknown)
             }
             _ => State::Unknown,
         };
@@ -100,6 +121,14 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_details_only_keep_display_fields_of_a_known_login() {
+        assert_eq!(account_details("claude", &json!({"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","accessToken":"secret"})), (Some("Claude account".into()), Some("max".into())));
+        assert_eq!(account_details("codex", &json!({"requiresOpenaiAuth":true,"account":{"type":"chatgpt","planType":"plus","accessToken":"secret"}})), (Some("ChatGPT account".into()), Some("plus".into())));
+        assert_eq!(account_details("claude", &json!({"loggedIn":false,"authMethod":"claude.ai","subscriptionType":"max"})), (None, None));
+        assert_eq!(account_details("codex", &json!({"requiresOpenaiAuth":false,"account":{"type":"chatgpt","planType":"plus"}})), (None, None));
+    }
 
     #[test]
     fn a_login_completed_in_the_managed_terminal_is_not_reported_signed_out() {

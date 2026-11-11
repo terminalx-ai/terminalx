@@ -8,7 +8,7 @@ export function PrivacyImage(props: ComponentProps<"img">) {
   return <img {...props} />;
 }
 
-function externalImage(src: string): boolean {
+export function externalImage(src: string): boolean {
   if (!/^(https?:|\/\/)/i.test(src.trim())) return false;
   try {
     const url = new URL(src, "https://webview.invalid");

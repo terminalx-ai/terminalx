@@ -1,7 +1,7 @@
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
-import { useMemo, useState } from "react";
-import { Platform, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from "react-native";
-import { useRouter } from "expo-router";
+import { useCallback, useMemo, useState } from "react";
+import { AppState, Platform, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from "react-native";
+import { useFocusEffect, useRouter } from "expo-router";
 import { ChevronDown, ChevronRight, Laptop } from "lucide-react-native";
 import { branchChats, chatRows, projectGroups, shortTime, type ChatRow } from "@mobile/data/session-list";
 import { useApp } from "@mobile/state/AppProvider";
@@ -31,6 +31,13 @@ export default function SessionsScreen() {
   const insets = useSafeAreaInsets();
   const bar = useTabBarInset();
   const [headerHeight, setHeaderHeight] = useState(insets.top + 56);
+  // Row status facts are cached on the Mac; a silent refresh keeps them current while this list is in view.
+  useFocusEffect(useCallback(() => {
+    const timer = setInterval(() => {
+      if (AppState.currentState === "active" && app.connectionStage === "connected") void app.refreshSessions(true);
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [app.connectionStage, app.refreshSessions]));
   // Removing the computer from here goes back to the device list.
   const menu = useDeviceMenu({ onRemoved: () => router.navigate("/(tabs)") });
   const rows = useMemo(() => chatRows(app.sessions), [app.sessions]);
@@ -112,20 +119,22 @@ function ProjectChat({ row, onOpen }: { row: ChatRow; onOpen(tabId: string): voi
   const many = chats.length > 1;
   const state = row.state === "needs" ? "needs you" : row.state === "working" ? "working" : "";
   const manualStatus = manualStatusLabel(row.session.manualStatus);
+  const unread = row.unread ? "Unread" : "";
   return <View>
-    <Pressable accessibilityRole="button" accessibilityState={many ? { expanded: open } : undefined} accessibilityLabel={[row.name, many ? `${chats.length} chats` : "", manualStatus, state, row.preview].filter(Boolean).join(", ")} onPress={() => many ? setOpen(!open) : onOpen(row.tabId)} style={({ pressed }) => [styles.channel, row.branched ? styles.branchRow : styles.titleRow, pressed && { backgroundColor: palette.raised }]}>
+    <Pressable accessibilityRole="button" accessibilityState={many ? { expanded: open } : undefined} accessibilityLabel={[row.name, many ? `${chats.length} chats` : "", manualStatus, state, unread, row.preview].filter(Boolean).join(", ")} onPress={() => many ? setOpen(!open) : onOpen(row.tabId)} style={({ pressed }) => [styles.channel, row.branched ? styles.branchRow : styles.titleRow, pressed && { backgroundColor: palette.raised }]}>
       {row.branched ? <MacIcon name="GitBranch" size={16} color={palette.muted} strokeWidth={1.35} /> : null}
       <Text numberOfLines={1} style={[row.branched ? styles.branchName : styles.chatTitle, { color: palette.ink }]}>{row.name}</Text>
-      <Text style={[styles.time, { color: palette.muted }]}>{manualStatus}</Text>
+      <Text style={[styles.time, { color: palette.muted }]}>{[manualStatus, unread].filter(Boolean).join(" · ")}</Text>
       {row.state !== "done" ? <StateMark state={row.state} info={palette.info} warning={palette.warning} /> : many ? null : <Text style={[styles.time, { color: palette.faint }]}>{shortTime(row.time)}</Text>}
       {many ? <View style={[styles.count, { backgroundColor: palette.raised }]}>
         <Text style={[styles.countText, { color: palette.muted }]}>{chats.length}</Text>
         {open ? <ChevronDown size={13} color={palette.muted} /> : <ChevronRight size={13} color={palette.muted} />}
       </View> : null}
     </Pressable>
-    {many && open ? chats.map((chat) => <Pressable key={chat.id} accessibilityRole="button" accessibilityLabel={[chat.name, chat.state === "needs" ? "needs you" : chat.state === "working" ? "working" : ""].filter(Boolean).join(", ")} onPress={() => onOpen(chat.id)} style={({ pressed }) => [styles.tabRow, pressed && { backgroundColor: palette.raised }]}>
+    {many && open ? chats.map((chat) => <Pressable key={chat.id} accessibilityRole="button" accessibilityLabel={[chat.name, chat.state === "needs" ? "needs you" : chat.state === "working" ? "working" : "", chat.unread ? "Unread" : ""].filter(Boolean).join(", ")} onPress={() => onOpen(chat.id)} style={({ pressed }) => [styles.tabRow, pressed && { backgroundColor: palette.raised }]}>
       <AgentMark id={chat.harness} size={14} color={palette.muted} />
       <Text numberOfLines={1} style={[styles.tabName, { color: palette.ink }]}>{chat.name}</Text>
+      {chat.unread ? <Text style={[styles.time, { color: palette.muted }]}>Unread</Text> : null}
       <StateMark state={chat.state} info={palette.info} warning={palette.warning} />
     </Pressable>) : null}
   </View>;

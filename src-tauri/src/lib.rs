@@ -79,6 +79,7 @@ mod drag_text;
 mod transcription;
 mod events;
 mod files;
+mod workspace_file;
 mod foreground;
 #[cfg(feature = "desktop")]
 mod floating;
@@ -86,8 +87,13 @@ mod floating;
 mod media;
 mod media_types;
 mod branch_overview;
+#[cfg(feature = "desktop")]
+mod branch_step;
 mod git;
+#[cfg(feature = "desktop")]
+mod repo_mirror;
 mod checkpoints;
+mod worktree_files;
 mod git_media;
 mod github;
 mod github_process;
@@ -110,6 +116,8 @@ mod idle_agents;
 mod issue_control;
 #[cfg(feature = "desktop")]
 mod issue_confirmation;
+#[cfg(feature = "desktop")]
+mod self_ui;
 mod issue_pipeline;
 mod issue_ops;
 mod issues;
@@ -118,6 +126,10 @@ mod installation;
 mod keychain;
 #[cfg(feature = "desktop")]
 mod environment_commands;
+#[cfg(feature = "desktop")]
+mod configuration_commands;
+#[cfg(feature = "desktop")]
+mod configuration_watch;
 #[cfg(feature = "desktop")]
 mod secret_clipboard;
 mod landed;
@@ -141,12 +153,15 @@ mod chat_windows;
 mod relay_e2ee;
 pub mod remote;
 mod session;
+mod sidebar_activity;
 mod session_archive;
 mod session_ops;
+mod workspace_setup;
 mod stray_processes;
 pub mod serve;
 pub mod sink;
 mod recovery;
+mod reply_block;
 mod recovery_log;
 mod continuation;
 pub mod skills;
@@ -161,7 +176,9 @@ mod summaries;
 mod terminal_perf;
 #[cfg(feature = "desktop")]
 mod work_claims;
+mod worker_report;
 mod workspaces;
+mod workspace_restore;
 mod worktree_cleanup;
 mod worktree_control;
 
@@ -422,6 +439,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            configuration_commands::configuration_resolve,
+            configuration_watch::configuration_watch,
+            configuration_commands::configuration_write,
+            configuration_commands::configuration_review,
             environment_commands::environment_list,
             environment_commands::environment_reveal,
             environment_commands::environment_copy,
@@ -442,6 +463,7 @@ pub fn run() {
             data_privacy::data_privacy_set,
             updater::app_update_check,
             updater::app_update_install,
+            commands::repository_files_preview,
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,
@@ -591,6 +613,7 @@ pub fn run() {
             commands::project_start_defaults,
             commands::project_create,
             commands::list_sessions,
+            commands::session_row_statuses,
             commands::local_sections,
             commands::edit_local_section,
             commands::automations_list,
@@ -606,6 +629,7 @@ pub fn run() {
             commands::app_activity_summary,
             commands::stats_usage_refresh,
             commands::create_session,
+            commands::workspace_setup,
             commands::create_quick_chat,
             commands::set_quick_chat_cwd,
             commands::move_quick_chat_to_project,
@@ -622,6 +646,8 @@ pub fn run() {
             commands::reopen_tab,
             commands::rename_tab,
             commands::tab_state,
+            commands::sidebar_order,
+            commands::set_sidebar_order,
             commands::set_tab_layout,
             commands::tab_resume_conversation,
             commands::pane_agents,
@@ -642,6 +668,7 @@ pub fn run() {
             commands::skill_detail,
             commands::work_status,
             commands::branch_overview,
+            commands::project_forge,
             commands::branch_fetch,
             commands::branch_merge_into,
             commands::list_branches,
@@ -654,6 +681,7 @@ pub fn run() {
             commands::changes_between,
             commands::review_range,
             commands::file_contents_at,
+            commands::review_comments,
             commands::diff_media_content,
             commands::log_commits,
             commands::load_tab_events,
@@ -674,6 +702,7 @@ pub fn run() {
             commands::tab_pane,
             commands::cancel_queued,
             commands::send_queued_now,
+            commands::change_held_queue,
             commands::list_queued,
             commands::respond_permission,
             commands::answer_questions,
@@ -681,6 +710,7 @@ pub fn run() {
             commands::set_tab_permission_mode,
             commands::set_tab_effort,
             commands::mark_tab_read,
+            commands::set_tab_unread,
             commands::tab_status,
             commands::list_models,
             commands::frontend_log,
@@ -704,6 +734,14 @@ pub fn run() {
             commands::cloud_mirror_claim_owner,
             commands::cloud_mirror_note_unreadable,
             commands::git_push,
+            commands::branch_step_refresh,
+            commands::branch_step_account,
+            commands::branch_step_action,
+            commands::git_has_remote,
+            commands::git_add_remote,
+            commands::gh_connection_status,
+            commands::gh_login_start,
+            commands::gh_create_repository,
             commands::git_pull,
             commands::git_discard,
             commands::turn_checkpoint,
@@ -716,6 +754,8 @@ pub fn run() {
             commands::git_checkout,
             commands::working_changes,
             commands::pr_list,
+            commands::pr_search,
+            commands::pr_attach,
             commands::pr_associations,
             commands::pr_associations_batch,
             commands::pr_details,
@@ -740,9 +780,13 @@ pub fn run() {
             star_nag::star_nag_dismiss,
             star_nag::star_nag_act,
             commands::pty_spawn,
+            commands::pty_local_links,
             commands::pty_shells,
             commands::pty_rename,
+            commands::pty_set_docked,
+            commands::save_terminal_selection,
             commands::pty_busy,
+            commands::listening_sessions,
             commands::pty_write,
             commands::pty_attach,
             commands::pty_attach_sized,
@@ -754,6 +798,12 @@ pub fn run() {
             commands::pty_kill,
             commands::terminal_perf_reply,
             commands::cloud_control_reply,
+            self_ui::self_ui_claim,
+            self_ui::self_ui_validate,
+            self_ui::self_ui_reply,
+            self_ui::self_ui_start,
+            self_ui::self_ui_grants,
+            self_ui::self_ui_revoke,
             issue_confirmation::issue_confirmation_pending,
             issue_confirmation::issue_confirmation_reply,
             commands::cloud_control_setting,
@@ -776,6 +826,9 @@ pub fn run() {
             commands::update_project,
             commands::set_project_logo,
             commands::list_workspaces,
+            commands::repo_mirror_status,
+            commands::repo_mirror_start,
+            commands::repo_mirror_stop,
             commands::preview_workspace_name,
             commands::rename_workspace,
             commands::rename_branch,
@@ -789,6 +842,8 @@ pub fn run() {
             commands::copy_text,
             commands::workspace_disposition,
             commands::remove_workspace,
+            commands::preview_workspace_restore,
+            commands::restore_workspace,
             commands::workspace_size,
             commands::scan_leftovers,
             commands::remove_leftovers,
@@ -833,6 +888,7 @@ pub fn run() {
             commands::issues_list,
             commands::issue_pipelines_list,
             commands::issue_pipeline_start,
+            commands::issue_pipeline_attach,
             commands::issue_pipeline_continue,
             commands::issue_pipeline_set_auto_merge,
             commands::issue_pipeline_set_resolve_conflicts,

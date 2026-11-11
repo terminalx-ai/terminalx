@@ -48,7 +48,7 @@ const { sessionStore } = vi.hoisted(() => ({
       ],
     },
     workspacesLoading: {},
-    newSessionQuick: false,
+    newSessionChat: false,
     newSessionPreset: { projectPath: "/repo", cwd: "/outside/feature" } as { projectPath: string; cwd: string | null } | null,
   },
 }));
@@ -168,7 +168,7 @@ beforeEach(() => {
   sessionStore.projects = [{ path: "/repo", name: "Raccoon" }];
   sessionStore.lastProject = "/repo";
   sessionStore.selectedProject = "/repo";
-  sessionStore.newSessionQuick = false;
+  sessionStore.newSessionChat = false;
   sessionStore.newSessionPreset = { projectPath: "/repo", cwd: "/outside/feature" };
   sessionStore.selectedSessionId = null;
   sessionStore.selectedAutomationId = null;
@@ -184,7 +184,7 @@ afterEach(async () => {
 describe("new-session right panel", () => {
   it("opens a project-less composer with no projects and no project panel", () => {
     sessionStore.projects = [];
-    sessionStore.newSessionQuick = true;
+    sessionStore.newSessionChat = true;
     sessionStore.newSessionPreset = null;
     render(<AppShell />);
     expect(screen.getByTestId("new-session")).toBeTruthy();

@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
+import { ChevronDown, ChevronRight, CircleDot, ExternalLink, Maximize2, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
-import { api, type PullRequest } from "@/lib/api";
-import { sessionPrs, type SessionPr } from "@/lib/sessionPrs";
+import { api, type GitHubConnectionStatus, type PullRequest, type PrAssociation } from "@/lib/api";
+import { openPr } from "@/lib/editors";
+import { WithTooltip } from "@/components/ui/tooltip";
+import { AddRemote, CommandDetails, GitError, GitHubSetup } from "./GitRecovery";
+import { prIdentity, sessionPrs, type SessionPr } from "@/lib/sessionPrs";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -73,10 +76,13 @@ export function PrPanel({
   workspace,
   inline = false,
   held = false,
+  selectedPr,
   onFixErrors,
   fixBusy = false,
 }: {
   cwd?: string;
+  /** A centre tab stays on this exact PR, even after the branch changes. */
+  selectedPr?: PrAssociation;
   onFixErrors?: (pr: PullRequest) => Promise<unknown>;
   fixBusy?: boolean;
   sessionId?: string;
@@ -102,9 +108,13 @@ export function PrPanel({
   active = active && documentVisible;
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
   const [available, setAvailable] = useState<boolean | null>(null);
+  const [connection, setConnection] = useState<GitHubConnectionStatus | null>(null);
+  const [loginSource, setLoginSource] = useState<GitSource | null>(null);
+  const connecting = loginSource === source;
+  const [hasRemote, setHasRemote] = useState<boolean | null>(null);
   const [pendingRuns, setPendingRuns] = useState<PendingCheckRun[]>([]);
   const [rows, setRows] = useState<SessionPr[]>([]);
-  const selection = `${sessionId ?? ""}\0${source.key}\0${branch ?? ""}`;
+  const selection = `${sessionId ?? ""}\0${source.key}\0${branch ?? ""}\0${selectedPr?.url ?? ""}`;
   const selected = useRef({ key: selection, generation: 0 });
   if (selected.current.key !== selection) selected.current = { key: selection, generation: selected.current.generation + 1 };
   const generation = selected.current.generation;
@@ -135,12 +145,30 @@ export function PrPanel({
   const [conversationRefresh, setConversationRefresh] = useState(0);
   const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
+  useEffect(() => { setLoginSource(null); }, [source]);
+
   useEffect(() => {
+    // Returning from browser authentication must not unmount the login PTY.
+    // Recheck after its dialog closes, even if credentials become valid sooner.
+    if (!active || connecting) return;
     let cancelled = false;
     setAvailable(null);
-    source.ghAvailable().then((value) => !cancelled && setAvailable(value)).catch(() => !cancelled && setAvailable(false));
+    setConnection(null);
+    setHasRemote(null);
+    if (source.githubStatus) {
+      Promise.all([source.githubStatus(), source.hasRemote?.() ?? Promise.resolve(true)]).then(([status, remote]) => {
+        if (cancelled) return;
+        setConnection(status);
+        setHasRemote(remote);
+        setAvailable(status.state === "connected" && remote);
+      }).catch((error: unknown) => {
+        if (!cancelled) setConnection({ state: "unavailable", details: source.errorMessage(error) });
+      });
+    } else {
+      source.ghAvailable().then((value) => !cancelled && setAvailable(value)).catch(() => !cancelled && setAvailable(false));
+    }
     return () => { cancelled = true; };
-  }, [source]);
+  }, [source, active, tick, connecting]);
 
   useEffect(() => {
     if (!active || !available) return;
@@ -152,7 +180,10 @@ export function PrPanel({
       : Promise.resolve(null);
     Promise.all([
       source.workStatus().then(async (workStatus) => {
-        const pullRequests = await sessionPrs(source, sessionId, workStatus.branch !== workStatus.defaultBranch ? workStatus.branch : null, () => !cancelled);
+        const pullRequests: { rows: SessionPr[]; error?: string } = selectedPr
+          ? { rows: [{ identity: selectedPr.url, association: selectedPr, current: workStatus.branch === selectedPr.head, pr: await source.prAccess!(selectedPr).read() }] }
+          : await sessionPrs(source, sessionId, workStatus.branch !== workStatus.defaultBranch ? workStatus.branch : null, () => !cancelled);
+        if (selectedPr && prIdentity(pullRequests.rows[0].pr!.url) !== prIdentity(selectedPr.url)) throw new Error("GitHub returned a different pull request.");
         const needsLandedCheck = (workStatus.aheadOfBase ?? 0) > 0
           && pullRequests.rows.some((row) => row.current && row.pr?.state === "MERGED");
         const landedWork = !cancelled && needsLandedCheck && source.landed ? await source.landed() : null;
@@ -277,22 +308,32 @@ export function PrPanel({
       if (done) void requestMergedSweep();
     });
 
+  if (connection && connection.state !== "connected") {
+    return <GitHubSetup key={source.key} status={connection} onConnectingChange={(value) => setLoginSource(value ? source : null)} onRefresh={() => setTick((value) => value + 1)} />;
+  }
+  if (connection?.state === "connected" && hasRemote === false && source.addRemote) {
+    return <AddRemote key={source.key} source={source} onDone={() => setTick((value) => value + 1)} />;
+  }
   if (available === false) {
     if (inline) return held ? null : <div><NextLine tone="muted" text={<>Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span> to open a pull request</>} /></div>;
     return (
       <div className="px-3 py-4 text-xs text-muted-foreground">
-        Pull requests need the GitHub CLI. Install <span className="font-mono">gh</span> and run <span className="font-mono">gh auth login</span>.
+        GitHub is unavailable. Check the workspace’s GitHub connection and refresh.
       </div>
     );
   }
 
+  const openInTab = !selectedPr && !source.cloud && cwd ? (row: SessionPr) => {
+    const pr = row.pr!;
+    openPr(sessionId ?? `checkout:${cwd}`, cwd, row.association ?? { url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd } });
+  } : undefined;
   const open = prs.filter((p) => p.state === "OPEN");
   const currentBranch = status?.branch ?? branch;
   const fresh = loadedSelection === selection && !loading && (!error || errorFrom === "action") && !visibleRows.some((row) => row.error);
   const currentOpen = visibleRows.some((row) => row.current && row.pr?.state === "OPEN");
   const workLanded = status?.aheadOfBase === 0 || !!(landed?.safe && landed.head === status?.head && landed.branch === currentBranch);
   const needsLandedProof = visibleRows.some((row) => row.current && row.pr?.state === "MERGED");
-  const canCreate = fresh && (!needsLandedProof || landed !== null) && !workLanded && !currentOpen && status && status.defaultBranch && currentBranch && currentBranch !== status.defaultBranch && (status.aheadOfBase ?? 0) > 0;
+  const canCreate = !selectedPr && fresh && (!needsLandedProof || landed !== null) && !workLanded && !currentOpen && status && status.defaultBranch && currentBranch && currentBranch !== status.defaultBranch && (status.aheadOfBase ?? 0) > 0;
   const latestCurrent = visibleRows.filter((row) => row.current && row.pr?.head === currentBranch).sort((a, b) => (b.pr?.number ?? 0) - (a.pr?.number ?? 0))[0]?.pr;
   const merged = fresh && !busy && latestCurrent?.state === "MERGED" && open.length === 0
     && status && !status.dirty && status.ahead === 0 && workLanded;
@@ -313,7 +354,7 @@ export function PrPanel({
       {error && inline && errorFrom === "load" ? (
         // Not reaching GitHub is no fault of the reader's: said once, quietly, the detail on hover.
         <p className="px-4 text-[11px] text-faint" title={error} data-testid="pr-unreachable">Can't reach GitHub right now. Pull requests will show when it answers.</p>
-      ) : error && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(workspace || onSettle) && merged && (
         <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
@@ -335,7 +376,8 @@ export function PrPanel({
         const pr = row.pr;
         if (!pr) return <div key={row.identity} role="alert" className="border-b border-hairline px-3 py-3 text-xs">
           <button type="button" onClick={() => void openUrl(row.identity)} className="hover:underline">{row.identity}</button>
-          <div className="text-destructive">Could not refresh: {row.error}</div>
+          <div className="text-destructive">Could not refresh this pull request.</div>
+          <CommandDetails details={row.error} />
         </div>;
         // This owns the description as well as its editor, including in a PR tab.
         const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={conversationRefresh} onEdited={(title, body) => {
@@ -347,7 +389,7 @@ export function PrPanel({
         const checks = <PrChecks pr={pr} source={source} showSummary={!inline} disabled={!!working || loading || !fresh} fixBusy={fixBusy}
           onRerun={(failedOnly) => rerun(pr, failedOnly)}
           onFix={onFixErrors && pr.state === "OPEN" ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
-        if (inline) return <div key={row.identity}><InlinePr reviews={reviews} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
+        if (inline) return <div key={row.identity}><InlinePr reviews={reviews} onOpen={openInTab ? () => openInTab(row) : undefined} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
           <>
             {pr.isDraft && (
               <Button size="xs" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
@@ -370,6 +412,7 @@ export function PrPanel({
               ) : (
                 <X className="mt-0.5 size-4 shrink-0 text-destructive" />
               )}
+              {openInTab && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={() => openInTab(row)}><Maximize2 /></Button></WithTooltip>}
               <div className="min-w-0 flex-1">
                 <button type="button" onClick={() => void openUrl(pr.url)} className="group flex items-center gap-1 text-left text-[13px] font-medium hover:underline">
                   <span className="truncate">{pr.title}</span>
@@ -504,7 +547,7 @@ export function PrPanel({
           </div>
         </form>
       )}
-      {!inline && !loading && prs.length === 0 && !canCreate && status && (
+      {!inline && !loading && !error && prs.length === 0 && !canCreate && status && (
         <div className="px-3 py-4 text-xs text-muted-foreground">
           {status.branch === status.defaultBranch ? "On the default branch; nothing to open a pull request from." : "Nothing here yet."}
         </div>
@@ -522,7 +565,7 @@ function reviewLabel(decision: string): string {
  * number and state, its checks folded into a count (unfolded when one fails),
  * then, unless the branch has a step first, what to do with it now.
  */
-function InlinePr({ pr, ready, held, actions, checks, reviews }: { pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; checks: ReactNode; reviews: ReactNode }) {
+function InlinePr({ pr, ready, held, actions, checks, reviews, onOpen }: { onOpen?: () => void; pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; checks: ReactNode; reviews: ReactNode }) {
   const failing = pr.checks.filter(isFailingCheck).length;
   const [checksOpen, setChecksOpen] = useState(failing > 0);
   useEffect(() => {
@@ -546,6 +589,7 @@ function InlinePr({ pr, ready, held, actions, checks, reviews }: { pr: PullReque
           <span className="truncate text-foreground">{pr.title}</span>
           <ExternalLink className="size-3 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
         </button>
+        {onOpen && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={onOpen}><Maximize2 /></Button></WithTooltip>}
         <span className="shrink-0 text-[11px] text-faint">
           #{pr.number} · {state}
         </span>

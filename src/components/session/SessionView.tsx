@@ -1,8 +1,9 @@
+import { openWorkspaceRestore } from "@/lib/dialogs";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { PanelPresence } from "@/components/layout/PanelPresence";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
+import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, FolderSync, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import type { GithubIdentity } from "@/lib/api";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
@@ -20,15 +21,18 @@ import { openAutomations, renameWorkspace, selectSession, useSessionStore } from
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
+import { followedLayout, layoutOf, tabKey, useTabState, workspaceKey } from "@/lib/tabLayouts";
 import { TabView } from "./TabView";
+import { WorkspacePanes } from "./WorkspacePanes";
 import { EmptySession } from "./EmptySession";
 import { TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
 import { activateLatestTerminal, selectSessionTab, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
+import { TerminalChatProvider } from "@/components/terminal/TerminalChat";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { BrowserView } from "@/components/browser/BrowserView";
 import { bootBrowser, pagesFor, useBrowser } from "@/lib/browser";
-import { setLastFocused, useEditors } from "@/lib/editors";
+import { isReviewEditor, setLastFocused, useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { QuickOpen } from "@/components/editor/QuickOpen";
 import { ProjectSearch } from "@/components/editor/ProjectSearch";
@@ -62,6 +66,8 @@ import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
 import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
 import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { copyText } from "@/lib/clipboard";
+import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
+import { BranchGitButton } from "./BranchGitButton";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -207,6 +213,8 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
  *    (`HEADER_TIGHT_BUTTONS`), so the full-height buttons do not take the
  *    title's first characters either.
  *
+ * At that narrow width, breadcrumb padding, gaps and chip margins tighten
+ * to keep the title readable beside the full-height 40px action buttons.
  * The connection and role chips never shrink. The shrink factors do the
  * ordering: a larger one takes (nearly) all the squeeze until it is at its
  * minimum.
@@ -411,13 +419,13 @@ export function SessionView({
   const compact = !!chrome?.compact;
   // PRO-28: the side panel's Ports tab, from the header's menus; a compact window has no panel.
   const showPorts = cloud?.ports.offered && !compact ? () => showPanelTab("ports") : undefined;
-  const isGit = useSessionIsGit(session);
+  const backend = cloud?.backend ?? localSessionBackend(session.id);
+  const local = backend.caps.local;
+  const isGit = useSessionIsGit(session, local);
   const quick = isQuickChat(session);
   const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
   const prefs = usePrefs();
   const store = useSessionStore();
-  const backend = cloud?.backend ?? localSessionBackend(session.id);
-  const local = backend.caps.local;
   // The workspace's tabs as a row under the title bar: a local session's, unless the reader turned the row off
   // (the floating window says for itself whether it has one).
   const stripRow = local && !cloud && (chrome ? !!chrome.tabStrip : prefs.tabStrip);
@@ -426,8 +434,11 @@ export function SessionView({
   // What the chat's Delete workspace acts on; a cloud session's is its runtime's.
   const localWorkspace = cloud ? undefined : localRemovableWorkspace(session);
   const project = store.projects.find((p) => p.path === session.projectPath);
-  // The GitHub account the folder is connected to: a chat's is its linked repo's; a plain folder has none; a cloud session's is not this computer's to say.
-  const githubIdentity = useGithubIdentity(cloud || !isGit ? null : (session.link?.path ?? session.cwd));
+  // A chat's linked repository has its own identity even when its working folder has no Git panels.
+  // A cloud session's account is not this computer's to say.
+  const identityPath = cloud ? null : (session.link?.path ?? (isGit ? session.cwd : null));
+  const githubIdentity = useGithubIdentity(identityPath);
+  const ed = useEditors();
   const terminals = useTerminals();
   // A shell an agent was started in is that agent's tab (#437), drawn by its tab view and not as a shell beside it.
   const shellPanes = local ? terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden && !session.tabs.some((tab) => tab.pane === pane.id)) : [];
@@ -437,7 +448,16 @@ export function SessionView({
   useEffect(() => {
     if (local) void bootBrowser();
   }, [local]);
-  const requested = followedSelection(session, terminals.selected[session.id]);
+  const savedTabs = useTabState();
+  const savedLayout = followedLayout(layoutOf(savedTabs, workspaceKey(session, store.chatsPath)), [session]);
+  const candidates: SelectedSessionTab[] = [
+    ...session.tabs.map((tab) => ({ kind: "agent" as const, id: tab.id })),
+    ...shellPanes.map((pane) => ({ kind: "terminal" as const, id: pane.id })),
+    ...browserPages.map((page) => ({ kind: "browser" as const, id: page.id })),
+  ];
+  const savedPanes = [...(savedLayout.panes ?? [])].sort((a, b) => Number(b.id === savedLayout.focusedPane) - Number(a.id === savedLayout.focusedPane));
+  const restored = !cloud && !compact ? savedPanes.flatMap((pane) => candidates.filter((tab) => tabKey(tab.kind, tab.id) === pane.active))[0] : undefined;
+  const requested = followedSelection(session, terminals.selected[session.id] ?? restored);
   const terminalIds = local ? shellPanes.map((pane) => pane.id) : cloudTerminals.map((terminal) => terminal.id);
   // A cloud session's active tab is the runtime's, shared by everyone in it: it moves to a new tab
   // when anyone adds one. It decides what this view opens on, once: from then the view stays on
@@ -454,7 +474,11 @@ export function SessionView({
     activeTab: session.activeTab,
     terminalIds,
     browserIds: browserPages.map((page) => page.id),
+    reviewIds: local ? ed.editors.filter((e) => e.sessionId === session.id && isReviewEditor(e)).map((e) => e.id) : [],
   });
+  // The asked-for tab is restored across reloads, before its shell or page has loaded. Until it is the
+  // tab shown, the fallback on screen is no request: following it would rewrite the panes' saved tabs.
+  const selectionShown = !!terminals.selected[session.id] && !!requested && selected?.kind === requested.kind && selected.id === requested.id;
   const opened = !!kept || (!!session.activeTab && agentIds.includes(session.activeTab));
   shownTab.current = cloud && selected && opened ? { sessionId: session.id, tab: selected } : null;
   // The sidebar marks the row of the tab that is on screen.
@@ -482,6 +506,8 @@ export function SessionView({
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const baseNote = session.worktreeBase && !session.worktreeBase.warning ? `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}` : null;
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
+  // Sibling sessions share mounted pane bodies. Session-specific dialogs still reset.
+  useEffect(() => { setContinuationSource(null); }, [session.id]);
   // The title-bar button and workspace menu carry the open tab into the same continuation dialog.
   const continueTab = activeTab && local ? () => setContinuationSource(activeTab) : null;
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -500,7 +526,6 @@ export function SessionView({
   useShortcut("session.toggleTerminalView", () => {
     if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, viewPlace);
   });
-  const ed = useEditors();
   const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
   // Agents change files when their status changes; the explorer re-reads git then.
   const statusKey = session.tabs.map((t) => t.status).join(",");
@@ -539,6 +564,7 @@ export function SessionView({
     else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
   return (
+    <TerminalChatProvider session={local && !cloud ? session : undefined}>
     <div className="flex h-full min-h-0 min-w-0 flex-1">
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header
@@ -559,7 +585,7 @@ export function SessionView({
           /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
           <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden @max-[360px]/session-header:gap-0.5 @max-[360px]/session-header:px-0 @max-[360px]/session-header:[&>*]:ml-0")} data-testid="session-breadcrumb">
             {/* Where the project lives, first: GitHub's mark (the account on hover; a click asks GitHub again), GitLab's, another host, or this computer when it has no remote yet. */}
-            {githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(session.link?.path ?? session.cwd)} />}
+            {identityPath && githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(identityPath)} />}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
             {!(cloud && cloud.projectName === session.title) && (
               <>
@@ -607,6 +633,7 @@ export function SessionView({
                   <span className="truncate">{workspaceLabel}</span>
                 )}
                 {session.worktreeRemoved && <span className="shrink-0 text-[11px] text-faint">· workspace removed</span>}
+                {local && session.worktreeRemoved && <Button variant="ghost" size="sm" onClick={() => openWorkspaceRestore(session.id)}>Restore workspace…</Button>}
               </span>
               <WorkspaceMenu session={session} branch={movedTo ?? session.branch} folder={session.worktreeName && !session.worktreeRemoved ? session.worktreeName : null} base={baseNote} onContinue={continueTab} />
               </>
@@ -723,6 +750,7 @@ export function SessionView({
           {/* The header's actions fill the bar's height, square, so their hover is a full band. An icon on its own is
               20px in a 40px-wide button (32px when the header is tight); one beside a label (Share) stays at the label's scale. */}
           <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", HEADER_TIGHT_BUTTONS, !compact && "max-w-[70%]")}>
+            {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={session.id} session={session} tabId={activeTab?.id} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (
@@ -782,7 +810,7 @@ export function SessionView({
           </div>
         </header>
         {/* The row of tabs, ended by the "+" that opens one (keyed by session, as above). The floating window leaves out a row that would only repeat its one tab, and keeps its + in the title bar. */}
-        {stripRow && (
+        {stripRow && compact && (
           <WorkspaceTabStrip
             session={session}
             selected={selected}
@@ -805,6 +833,7 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
+              {!cloud && !compact ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
               {session.tabs.map((t) => (
                 <div
                   key={t.id}
@@ -835,7 +864,7 @@ export function SessionView({
                   aria-hidden={selected?.kind !== "terminal" || pane.id !== selected.id}
                   className={cn("absolute inset-0", (selected?.kind !== "terminal" || pane.id !== selected.id) && "invisible")}
                 >
-                  <TerminalView id={pane.id} visible={pane.id === activeShell?.id} />
+                  <TerminalView id={pane.id} visible={pane.id === activeShell?.id} moveToDock={!compact} />
                   {pane.exited && (
                     <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">
                       Process exited{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.
@@ -910,8 +939,9 @@ export function SessionView({
                   )}
                 </div>
               )}
+              </>}
             </div>
-            {hasEditors && <EditorSplit sessionId={session.id} active />}
+            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} reviewsInPanes={!cloud && !compact} />}
           </div>
         </section>
       </div>
@@ -954,47 +984,61 @@ export function SessionView({
         </>
       )}
     </div>
+    </TerminalChatProvider>
   );
 }
 
 /** The workspace's details, out of the title bar: the folder it lives in, the commit it started from, and a way to it. */
 function WorkspaceMenu({ session, branch, folder, base, onContinue }: { session: SessionEntry; branch: string | null | undefined; folder: string | null; base: string | null; onContinue: (() => void) | null }) {
+  // The crumb has no room for another control beside the issue, automation
+  // and pipeline chips: starting a mirror is a workspace action in this menu,
+  // and a running one shows in the title bar, where it can be stopped.
+  const mirror = useRepoMirror(session);
   return (
-    <DropdownMenu>
-      <WithTooltip label="Workspace">
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon-xs" aria-label="Workspace details" className="ml-0.5 shrink-0 text-faint hover:text-foreground">
-            <Ellipsis />
-          </Button>
-        </DropdownMenuTrigger>
-      </WithTooltip>
-      <DropdownMenuContent align="start" className="min-w-[15rem]">
-        {(folder || base) && (
-          <>
-            <DropdownMenuLabel className="flex flex-col gap-0.5 font-normal">
-              {folder && <span className="flex items-center gap-1.5 text-foreground"><Folder className="size-3.5 text-faint" />{folder}</span>}
-              {base && <span className="text-[11px] text-muted-foreground">{base}</span>}
-            </DropdownMenuLabel>
-            <DropdownMenuSeparator />
-          </>
-        )}
-        {branch && (
-          <DropdownMenuItem onSelect={() => void copyText(branch).catch(() => {})}>
-            <Copy /> Copy branch name
-          </DropdownMenuItem>
-        )}
-        <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd)}>
-          <FolderOpen /> Reveal in Finder
-        </DropdownMenuItem>
-        {onContinue && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onContinue}>
-              <SessionContinue /> Continue in New Session…
+    <>
+      {mirror.on && <RepoMirrorButton mirror={mirror} />}
+      {mirror.dialog}
+      <DropdownMenu>
+        <WithTooltip label="Workspace">
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-xs" aria-label="Workspace details" className="ml-0.5 shrink-0 text-faint hover:text-foreground">
+              <Ellipsis />
+            </Button>
+          </DropdownMenuTrigger>
+        </WithTooltip>
+        <DropdownMenuContent align="start" className="min-w-[15rem]">
+          {(folder || base) && (
+            <>
+              <DropdownMenuLabel className="flex flex-col gap-0.5 font-normal">
+                {folder && <span className="flex items-center gap-1.5 text-foreground"><Folder className="size-3.5 text-faint" />{folder}</span>}
+                {base && <span className="text-[11px] text-muted-foreground">{base}</span>}
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+            </>
+          )}
+          {branch && (
+            <DropdownMenuItem onSelect={() => void copyText(branch).catch(() => {})}>
+              <Copy /> Copy branch name
             </DropdownMenuItem>
-          </>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+          )}
+          <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd)}>
+            <FolderOpen /> Reveal in Finder
+          </DropdownMenuItem>
+          {mirror.eligible && !mirror.on && (
+            <DropdownMenuItem onSelect={mirror.show}>
+              <FolderSync /> {mirror.label}…
+            </DropdownMenuItem>
+          )}
+          {onContinue && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={onContinue}>
+                <SessionContinue /> Continue in New Session…
+              </DropdownMenuItem>
+            </>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
   );
 }

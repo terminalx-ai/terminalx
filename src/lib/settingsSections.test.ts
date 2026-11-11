@@ -43,4 +43,9 @@ describe("settings section search", () => {
     expect(searchSettingsSections("json")[0].item.tab).toBe("general");
     expect(searchSettingsSections("settings file")[0].item.tab).toBe("general");
   });
+
+  it("finds repository copy settings by their include-file name", () => {
+    expect(searchSettingsSections("worktreeinclude")[0].item.tab).toBe("repositories");
+    expect(searchSettingsSections("files to copy")[0].item.tab).toBe("repositories");
+  });
 });

@@ -26,6 +26,45 @@ const SESSION: &str = "watched-session";
 const TAB: &str = "watched-tab";
 const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.jsonl");
 
+#[test]
+fn row_status_distinguishes_live_permission_question_and_plan_and_clears_after_answer() {
+    let rig = Rig::new();
+    for (tool, expected) in [("Bash", "needs_permission"), ("AskUserQuestion", "needs_answer"), ("ExitPlanMode", "review_plan")] {
+        let mut rt = rig.rt.lock().unwrap();
+        rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            request_id: tool.into(), tool_use_id: tool.into(), tool_name: tool.into(), input: json!({}),
+            title: None, description: None, reason: None, cwd: None, options: vec![],
+        }, None);
+        assert_eq!(rt.status, TabStatus::Waiting);
+        assert_eq!(row_status::activity(&rt), Some(expected));
+        rig.manager.apply(&mut rt, Payload::PermissionDecided { request_id: tool.into(), tool_use_id: Some(tool.into()), allowed: true, label: "Allowed".into(), automatic: true }, None);
+        assert!(rt.pending.is_empty());
+        assert_ne!(row_status::activity(&rt), Some(expected));
+    }
+    let mut rt = rig.rt.lock().unwrap();
+    rt.stopping = true;
+    assert_eq!(row_status::activity(&rt), Some("stopping"));
+    rt.stopping = false;
+    rt.setup_failed = true;
+    assert_eq!(row_status::activity(&rt), Some("setup_failed"));
+}
+
+#[test]
+fn row_status_keeps_a_failed_launch_through_completion_and_idle_until_work_restarts() {
+    let rig = Rig::new();
+    let mut rt = rig.rt.lock().unwrap();
+    rt.engine = Engine::None;
+    rt.turn_open = true;
+    rig.manager.fail_open_turn(&mut rt, &recovery::EarlyExit::said("Agent exited before starting"));
+    assert!(!rt.turn_open);
+    assert_eq!(rt.status, TabStatus::Waiting);
+    assert_eq!(row_status::activity(&rt), Some("setup_failed"));
+    rig.manager.set_status(&mut rt, TabStatus::Idle);
+    assert_eq!(row_status::activity(&rt), Some("setup_failed"));
+    rig.manager.set_status(&mut rt, TabStatus::InProgress);
+    assert_eq!(row_status::activity(&rt), None);
+}
+
 #[derive(Default)]
 struct Observer {
     rt: Mutex<std::sync::Weak<Mutex<TabRuntime>>>,
@@ -246,7 +285,7 @@ impl Rig {
             seq: 0,
             source_timestamp: None,
             message_times: HashMap::new(),
-            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(), stdio_retiring: None,
+            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(), stdio_retiring: None,
             status: TabStatus::Idle,
             child: None,
             child_pid: None,
@@ -289,11 +328,13 @@ impl Rig {
             }),
             pending: HashMap::new(),
             queued: Vec::new(),
+            held_queue: Default::default(),
             turn_open: false,
             turn_opener: None,
             compact_completed: false,
             compact_boundary_at: None,
             turn_started_at: None,
+            turn_usage: Default::default(),
             turn_by_command: false,
             signed_out_in_turn: false,
             last_activity: now,
@@ -928,7 +969,7 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         let old = Instant::now() - PATIENCE.stall - MOMENT;
         rig.rt.lock().unwrap().last_activity = old;
         rig.drew.set(Some(old));
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
         // The production send path, up to dispatching the input thread. Do
         // not use `stamp`: the send itself must refresh the activity clock.
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
@@ -1203,7 +1244,7 @@ fn a_queued_compact_echo_preserves_command_classification() {
     for completed in [false, true] {
         let rig = Rig::new();
         rig.start_turn();
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
         let (sent, queued) = rig.manager.record_composer_prompt(
             &mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None,
         );

@@ -16,7 +16,7 @@ export const SETTINGS_SECTIONS = {
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
-  repositories: { title: "Repositories", group: "Repositories", entry: "repositories.mergedCleanup" },
+  repositories: { title: "Repositories", group: "Repositories", entry: "repositories.rootPath" },
   organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar" },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup" },
   shortcuts: { title: "Shortcuts", group: "More", entry: "shortcuts.systemWide" },
@@ -66,6 +66,12 @@ export const SETTINGS_ROWS = [
     description: "The user settings file reloads when edited. Create it here when absent.",
     searchTerms: ["settings", "file", "json", "config", "preferences", "reload"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json" },
+  }),
+  defineSetting({
+    id: "general.layeredConfiguration", section: "general", title: "Layered configuration",
+    description: "Resolve user, shared, local and managed settings; review repository trust and locked values.",
+    searchTerms: ["configuration", "repository", "trust", "managed", "locked", "branch prefix"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json, system managed policy and .terminalx/settings*.json" }, layout: "content",
   }),
   defineSetting({
     id: "about.updates", section: "about", title: "Updates",
@@ -128,6 +134,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "action", location: "Skills page" },
   }),
   defineSetting({
+    id: "agents.followUps", section: "agents", title: "Follow-ups while the agent works",
+    description: "For local desktop chats on this device. Held messages are not read mid-turn; they go one per finished turn. Idle messages send immediately. The “Send the other way” shortcut in Shortcuts reverses this choice: hold, or interrupt and send. Phone and cloud messages keep their current behavior.",
+    searchTerms: ["queue", "hold", "follow-ups", "pause", "composer"], scope: "user",
+    storage: { kind: "localStorage", location: "raccoon.prefs#followUps" },
+  }),
+  defineSetting({
     id: "agents.idleStop", section: "agents", title: "Stop idle agents after",
     description: "An agent sitting at its prompt still holds its memory, its MCP servers and its language server. Once it has had nothing to do for this long it is stopped; its conversation stays, and your next message starts it again where it left off. An agent at work, waiting for your answer, or waiting on something it started (a background command, monitor or agent, a wakeup or scheduled job, a process it left running) keeps running, and so does one you started yourself in a terminal. An agent in an archived session, or one whose workspace was removed, is stopped after 10 idle minutes.",
     searchTerms: ["agents", "stop", "idle", "after"], scope: "user",
@@ -182,6 +194,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.transcriptLayout" },
   }),
   defineSetting({
+    id: "appearance.customOrder", section: "appearance", title: "Custom order",
+    description: "Use your saved arrangement in this window; row order is shared across windows. Arrange sessions and projects with their drag handles. Press Space to pick up, arrows to move, Space to drop, or Escape to cancel. Pins do not change custom order. Off restores pin and recency order and keeps your arrangement.",
+    searchTerms: ["appearance", "custom order", "drag", "reorder", "sidebar", "sessions", "projects"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/sessions/index.json#sidebarOrder" },
+  }),
+  defineSetting({
     id: "appearance.tabBar", section: "appearance", title: "Tab bar",
     description: "A session's agents, terminals and browser pages as a row of tabs under the title bar, in the same order as the sidebar. Off leaves them in the sidebar only.",
     searchTerms: ["appearance", "tab", "bar"], scope: "user",
@@ -192,6 +210,12 @@ export const SETTINGS_ROWS = [
     description: "Several sessions on one branch: as tabs beside each other in the tab bar, with one row for the branch in the sidebar; or listed under the branch in the sidebar, with the tab bar holding only the open session's tabs. Without the tab bar they are in the sidebar.",
     searchTerms: ["appearance", "sessions", "on", "a", "branch"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.branchSessions" },
+  }),
+  defineSetting({
+    id: "appearance.colourLineCounts", section: "appearance", title: "Colour line counts on every row",
+    description: "Use green and red for added and removed lines even when the sidebar row is not selected.",
+    searchTerms: ["sidebar", "diff", "lines", "color", "colour"], scope: "user",
+    storage: { kind: "localStorage", location: "raccoon.prefs#colourLineCounts" },
   }),
   defineSetting({
     id: "appearance.openUsage", section: "appearance", title: "Usage",
@@ -297,7 +321,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "general.foldToolCalls", section: "general", title: "Fold tool calls",
-    description: "Once an agent starts answering, the tool calls it made collapse under one line. Off keeps every call expanded.",
+    description: "Once an agent starts answering, the tool calls it made collapse under one line. Off (the default) keeps every step in view.",
     searchTerms: ["general", "fold", "tool", "calls"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.foldToolCalls" },
   }),
@@ -474,6 +498,24 @@ export const SETTINGS_ROWS = [
     description: "Create or join an organization.",
     searchTerms: ["organizations", "create", "organization"], scope: "user",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.rootPath", section: "repositories", title: "Root path",
+    description: "Reveal or copy the repository's root path.",
+    searchTerms: ["repositories", "general", "root", "path"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects.path" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.workspacesPath", section: "repositories", title: "Workspaces path",
+    description: "Reveal or copy the directory used for new workspaces.",
+    searchTerms: ["repositories", "general", "workspaces", "worktrees", "path"], scope: "repository",
+    storage: { kind: "action", location: "Repository worktree directory" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.filesToCopy", section: "repositories", title: "Files to copy",
+    description: "Copy matching ignored, untracked files into new workspaces.",
+    searchTerms: ["repositories", "files", "copy", "ignored", "globs", "worktreeinclude", "env"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects.repositorySettings.filesToCopy; repository .worktreeinclude overrides" }, layout: "content",
   }),
   defineSetting({
     id: "repositories.mergedCleanup", section: "repositories", title: "Workspace cleanup",

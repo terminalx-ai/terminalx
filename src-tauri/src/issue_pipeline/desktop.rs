@@ -25,6 +25,11 @@ fn off_thread(app: &AppHandle, work: impl FnOnce(&LocalHost) + Send + 'static) {
 /// agent at once: everything a pipeline does about it happens elsewhere.
 pub fn turn_completed(app: &AppHandle, session_id: &str, tab_id: &str, final_message: Option<String>) {
     if !store::takes_part(session_id, tab_id) {
+        // Not a pipeline's tab: a worker that owes its lead a report is held to that instead.
+        if crate::worker_report::expected(session_id, tab_id) {
+            let (session_id, tab_id) = (session_id.to_string(), tab_id.to_string());
+            off_thread(app, move |host| host.worker_turn_completed(&session_id, &tab_id, final_message.as_deref()));
+        }
         return;
     }
     let (session_id, tab_id) = (session_id.to_string(), tab_id.to_string());

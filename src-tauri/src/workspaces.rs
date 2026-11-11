@@ -317,6 +317,9 @@ pub fn delete(project: &Path, path: &Path, options: DeleteOptions<'_>) -> Result
             anyhow::bail!("Could not remove the worktree at {}: {direct_error:#} ({git_error:#}). {}", p.display(), git::leftover_state(&p));
         }
     }
+    if let Err(error) = crate::store::root().and_then(|root| crate::store::review_comments::remove_workspace(&root, &p)) {
+        eprintln!("Could not remove review comments for {}: {error:#}", p.display());
+    }
     let _ = git::run(project, &["worktree", "prune"]);
     if let Some(b) = branch {
         // The commit the branch may be deleted at: the one the check

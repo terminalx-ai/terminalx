@@ -17,6 +17,9 @@ use crate::sink::EventSink;
 use crate::store::index::{self, SessionEntry, TabEntry, TabStatus};
 use crate::store::projects::{self, Project};
 
+#[path = "review_control.rs"]
+pub(crate) mod review;
+
 const APP_UNAVAILABLE_RECOVERY: &str =
     "Open TerminalX with the same TERMINALX_HOME, then retry status once.";
 const LINEAR_INTEGRATION_RECOVERY: &str =
@@ -123,7 +126,7 @@ impl ControlResponse {
 /// here so every command has identical authentication and recovery behavior.
 pub fn call(
     command: &str,
-    params: Value,
+    mut params: Value,
     timeout: Duration,
 ) -> Result<ControlResponse, ControlError> {
     #[cfg(unix)]
@@ -149,6 +152,9 @@ pub fn call(
                 Some("Restart an app-launched tab, or let a human shell read TERMINALX_HOME/run/control.token.".into()),
             )
         })?;
+    if command == "review.comment" {
+        params["hookToken"] = json!(std::env::var(crate::hooks::TOKEN_ENV).unwrap_or_default());
+    }
     let request = ControlRequest {
         id: uuid::Uuid::now_v7().to_string(),
         token,
@@ -327,6 +333,9 @@ impl WindowControl {
                 action => pairing.change_share(session, action, params.clone()),
             }.map_err(ControlError::internal);
         }
+        if let Some(method) = command.strip_prefix("computer.selfUi.") {
+            return crate::self_ui::call(self.sink.as_ref(), self.questions.as_ref(), method, params);
+        }
         if let Some(method) = command.strip_prefix("computer.") {
             return self.computer.call(method, params, request_id).map_err(computer_error);
         }
@@ -424,7 +433,7 @@ impl ControlService {
                 if let Some(method) = command.strip_prefix("runtime.sharing.") {
                     return crate::local_sharing::owner::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
                 }
-                if matches!(command, "runtime.session.workspace" | "runtime.session.pipeline") {
+                if matches!(command, "runtime.session.workspace" | "runtime.session.pipeline" | "runtime.session.create" | "runtime.session.rowStatuses" | "runtime.session.workspaceSetup" | "runtime.pty.githubLogin") {
                     // Missing/expired origin stamps still permit local facts,
                     // but never acquire today's authority after socket queues
                     // or a listener handover. Authentication preceded this.
@@ -505,6 +514,9 @@ impl ControlService {
                     action => pairing.change_share(session, action, params.clone()),
                 };
                 return result.map_err(ControlError::internal);
+            }
+            if let Some(method) = command.strip_prefix("computer.selfUi.") {
+                return crate::self_ui::call(self.sink.as_ref(), self.questions.as_ref(), method, params);
             }
             if let Some(method) = command.strip_prefix("computer.") {
                 // Computer-use errors keep their own codes: the skill guide
@@ -620,6 +632,11 @@ impl ControlService {
                     Err(()) => Err(ControlError::not_found(format!("No terminal benchmark request {id}."))),
                 }
             }
+            "config.show" => {
+                let project = optional_string(&params, "project").map(|selector| resolve_project(&selector)).transpose()?;
+                let resolved = crate::store::configuration::view(project.as_ref().map(|p| p.path.as_str())).map_err(ControlError::internal)?;
+                serde_json::to_value(resolved).map_err(ControlError::internal)
+            }
             "projects.list" => {
                 let (projects, last_selected) = projects::list().map_err(ControlError::internal)?;
                 Ok(json!({"projects": projects, "lastSelected": last_selected}))
@@ -627,10 +644,17 @@ impl ControlService {
             "sessions.list" => self.sessions_list(params),
             "sessions.show" => {
                 let selector = required_string(&params, "session")?;
-                Ok(serde_json::to_value(resolve_session(&selector)?)
-                    .map_err(ControlError::internal)?)
+                let mut session = resolve_session(&selector)?;
+                self.manager.annotate_row_statuses(std::slice::from_mut(&mut session));
+                Ok(serde_json::to_value(session).map_err(ControlError::internal)?)
             }
             "sessions.create" => self.sessions_create(params),
+            "sessions.report" => self.sessions_report(params),
+            // Commands of their own, not switches on `sessions.list`: a
+            // runtime that does not know them refuses, where one handed an
+            // unknown switch would answer with every session there is.
+            "sessions.children" => self.sessions_children(params),
+            "sessions.stop" => self.sessions_stop(params),
             // The floating window is the desktop app's; the request is handed
             // to it as an event, so this service needs no window of its own.
             "floating.show" | "floating.hide" | "floating.toggle" => {
@@ -710,6 +734,7 @@ impl ControlService {
                 serde_json::to_value(renamed).map_err(ControlError::internal)
             }
             "worktrees.delete" => self.worktree_delete(params),
+            "review.comment" | "review.comments" => self.review_comments(command, params),
             "issues.list" => self.issues_list(params),
             // Creation uses the local owner's credentials and never needs a
             // desktop attachment. Cloud workspace capabilities stay unchanged.
@@ -722,7 +747,7 @@ impl ControlService {
                 format!("{command} needs the TerminalX desktop app; terminalx-serve lists issues only."),
                 None::<String>,
             )),
-            "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
+            "pipelines.start" | "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -767,7 +792,8 @@ impl ControlService {
                 return Err(ControlError::invalid("--worktree lists every session in the worktree, quick chats and archived ones included; it cannot be combined with --quick or --archived."));
             }
             let (project, worktree) = resolve_worktree(&params)?;
-            let held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+            let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+            self.manager.annotate_row_statuses(&mut held);
             return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
         }
         if let Some(selector) = optional_string(&params, "project") {
@@ -783,7 +809,60 @@ impl ControlService {
             sessions.retain(SessionEntry::is_quick);
         }
         sessions.retain(|session| session.archived == archived);
+        self.manager.annotate_row_statuses(&mut sessions);
         Ok(json!({"sessions": sessions}))
+    }
+
+    /// `sessions list --children-of`: the sessions a lead started (PRO-270),
+    /// in every project and worktree, quick chats and archived ones included.
+    fn sessions_children(&self, params: Value) -> Result<Value, ControlError> {
+        let sessions = index::load().map_err(ControlError::internal)?;
+        let lead = resolve_lead(&sessions, &required_string(&params, "childrenOf")?)?;
+        let children: Vec<_> = sessions.into_iter().filter(|session| session.started_by(&lead.session_id)).collect();
+        let workers: Vec<_> = children.iter().map(|session| self.worker(session)).collect();
+        Ok(json!({"parent": lead, "workers": workers, "sessions": children}))
+    }
+
+    /// One row of `sessions list --children-of`: what a lead asks of a worker
+    /// without reading its whole entry. Model, effort and status are those of
+    /// the session's own agent, the first it was given.
+    fn worker(&self, session: &SessionEntry) -> Value {
+        let agents = || session.tabs.iter().filter(|tab| !tab.is_terminal());
+        let tab = agents().min_by(|a, b| a.created.cmp(&b.created));
+        json!({
+            "sessionId": session.id, "title": session.title, "kind": session.kind,
+            "tabId": tab.map(|tab| &tab.id), "agent": tab.map(|tab| &tab.harness),
+            "status": tab.map(|tab| tab.status), "model": tab.map(|tab| &tab.model), "effort": tab.and_then(|tab| tab.effort.as_ref()),
+            "running": agents().any(|tab| self.manager.is_running(&session.id, &tab.id)),
+            "worktree": session.worktree_name, "path": session.cwd, "branch": session.branch,
+            "archived": session.archived, "created": session.created, "parent": session.parent,
+        })
+    }
+
+    /// `sessions stop --children-of`: stop every running agent of the
+    /// sessions a lead started. As Stop in the window does, it ends the
+    /// agent and keeps the conversation, which its next prompt resumes. A
+    /// terminal, and an agent a person started by hand in one, are theirs
+    /// and are left running. The lead itself is not touched.
+    fn sessions_stop(&self, params: Value) -> Result<Value, ControlError> {
+        let sessions = index::load().map_err(ControlError::internal)?;
+        let lead = resolve_lead(&sessions, &required_string(&params, "childrenOf")?)?;
+        let (mut stopped, mut failed, mut workers) = (Vec::new(), Vec::new(), 0);
+        for session in sessions.iter().filter(|session| session.started_by(&lead.session_id)) {
+            workers += 1;
+            for tab in session.tabs.iter().filter(|tab| !tab.is_terminal() && !tab.by_hand()) {
+                if !self.manager.is_running(&session.id, &tab.id) {
+                    continue;
+                }
+                let row = json!({"sessionId": session.id, "tabId": tab.id, "title": session.title});
+                match self.manager.stop(&session.id, &tab.id) {
+                    Ok(()) => stopped.push(row),
+                    // One that would not stop does not keep the rest running.
+                    Err(error) => failed.push(json!({"sessionId": session.id, "tabId": tab.id, "title": session.title, "error": format!("{error:#}")})),
+                }
+            }
+        }
+        Ok(json!({"parent": lead, "workers": workers, "stopped": stopped, "failed": failed}))
     }
 
     fn sessions_create(&self, params: Value) -> Result<Value, ControlError> {
@@ -832,9 +911,28 @@ impl ControlService {
             effort: Option<String>,
             #[serde(default)]
             mode: Option<String>,
+            /// A worker: told to end with a report block, and held to it (`worker_report`).
+            #[serde(default)]
+            report: bool,
+            /// `--parent`: the session to record as having started this one.
+            #[serde(default)]
+            parent: Option<String>,
+            /// `--no-parent`: record none, whoever asks.
+            #[serde(default)]
+            no_parent: bool,
+            /// Where the command ran, as the CLI found it in its environment.
+            #[serde(default)]
+            caller: Value,
         }
         let mut p: Params = serde_json::from_value(params)
             .map_err(|e| ControlError::invalid(format!("Invalid session request: {e}")))?;
+        if p.report && (p.issue.is_some() || p.auto_merge.is_some() || p.resolve_conflicts.is_some()) {
+            return Err(ControlError::invalid("--report is for a worker that answers the session that started it; a session with a pipeline (--issue, --auto-merge, --resolve-conflicts) reports to its pipeline instead."));
+        }
+        // A worker is reminded of its report where a turn's end is heard: the terminal engine, as for a pipeline's sessions.
+        if p.report && (p.experimental_codex_stdio || !matches!(crate::harness::HarnessId::parse(&p.agent), crate::harness::HarnessId::Claude | crate::harness::HarnessId::Codex)) {
+            return Err(ControlError::invalid("--report needs an agent in its own terminal (claude, or codex without --experimental-codex-stdio): no other can be reminded of its report. Start the session without --report; `terminalx sessions report` still reads its reply."));
+        }
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = crate::store::index::requested_mode(p.mode.take());
         if p.prompt.trim().is_empty() && p.issue.is_none() {
@@ -862,6 +960,9 @@ impl ControlService {
                 return Err(ControlError::invalid("--name requires a new worktree and cannot be used with --on-main."));
             }
         }
+        // Settled before anything is created: a parent nobody knows must not
+        // leave a session or a worktree behind.
+        let parent = parent_of_new_session(p.parent.as_deref(), p.no_parent, &p.caller)?;
         let available = crate::harness::offered()
             .into_iter()
             .find(|h| h.id == p.agent)
@@ -888,13 +989,13 @@ impl ControlService {
         }
         let mut first_tab = NewTab { transport: if p.experimental_codex_stdio { index::AgentTransport::ExperimentalCodexStdio } else { index::AgentTransport::Pty }, harness: p.agent, model: p.model, effort: p.effort, permission_mode: p.mode };
         // Without the flag, Settings → Experimental → Native Codex decides.
-        if !p.experimental_codex_stdio { crate::session_ops::prefer_native_codex(&mut first_tab, p.issue.is_some()); }
+        if !p.experimental_codex_stdio { crate::session_ops::prefer_native_codex(&mut first_tab, p.issue.is_some() || p.report); }
         let mut issue = None;
         let entry = match p.project.as_deref() {
             None => {
                 // The title a quick chat started from the window gets: the prompt's first line.
                 let title = p.title.or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
-                let quick = crate::session_ops::NewQuickChat { section_id: None, title, cwd: p.cwd, tab: Some(first_tab) };
+                let quick = crate::session_ops::NewQuickChat { section_id: None, title, cwd: p.cwd, tab: Some(first_tab), parent };
                 crate::session_ops::create_quick_chat_blocking(&*self.sink, quick).map_err(ControlError::invalid)?
             }
             Some(selector) => {
@@ -910,12 +1011,14 @@ impl ControlService {
                 crate::session_ops::create_named_session_blocking(
                     &*self.sink,
                     NewSession {
+                        parent,
                         section_id: None,
                         project_path: project.path,
                         title: p.title,
                         use_worktree: p.use_worktree,
                         on_main: p.on_main,
                         checkout_branch: None,
+                        checkout_pr: None,
                         base_ref: None,
                         worktree_name: None,
                         issue: issue.as_ref().map(|issue| issue.reference.clone()),
@@ -944,7 +1047,8 @@ impl ControlService {
         let mut pipeline_note = Value::Null;
         // A session not started from an issue gets a pipeline only where the project turned a switch on.
         let pipeline_default = crate::store::projects::issue_pipeline_settings(&entry.project_path).is_ok_and(|settings| settings.enabled && (settings.auto_merge == Some(true) || settings.resolve_conflicts == Some(true)));
-        if (issue.is_some() || p.auto_merge.is_some() || p.resolve_conflicts.is_some() || pipeline_default) && !p.no_pipeline {
+        // A worker hands its result to its lead, not to a pipeline of its own.
+        if (issue.is_some() || p.auto_merge.is_some() || p.resolve_conflicts.is_some() || pipeline_default) && !p.no_pipeline && !p.report {
             match self.start_pipeline(&entry.id, &tab.id, p.auto_merge, p.resolve_conflicts, issue.as_ref().and_then(|issue| issue.body.as_deref())) {
                 Ok((started, brief)) => {
                     prompt = format!("{prompt}\n\n{brief}");
@@ -954,13 +1058,73 @@ impl ControlService {
                 Err(reason) => pipeline_note = json!(reason),
             }
         }
+        let mut report_note = Value::Null;
+        if p.report {
+            // Recorded before the prompt goes: the turn it starts may end first.
+            // The session exists by now, so it still starts if this cannot be
+            // written; it is told how to report and just is not reminded, and says so.
+            if let Err(error) = crate::worker_report::expect(&entry.id, &tab.id) {
+                log::warn!("record that {}/{} owes a report: {error:#}", entry.id, tab.id);
+                report_note = json!(format!("The session was told how to report, but TerminalX could not record that it owes one ({error:#}), so it will not be reminded."));
+            }
+            prompt = format!("{prompt}\n\n{}", crate::worker_report::brief());
+        }
         let outcome = self
             .manager
             .send(&entry.id, &tab.id, prompt, Vec::new())
             .map_err(ControlError::internal)?;
-        Ok(json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title, "kind": entry.kind,
-            "worktreeName": entry.worktree_name, "branch": entry.branch, "path": entry.cwd,
-            "session": entry, "outcome": outcome, "pipeline": pipeline, "pipelineNote": pipeline_note}))
+        let mut created = json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title, "kind": entry.kind,
+            "worktreeName": entry.worktree_name, "branch": entry.branch, "path": entry.cwd, "parent": entry.parent,
+            "session": entry, "outcome": outcome, "pipeline": pipeline, "pipelineNote": pipeline_note});
+        // Only a worker's start says so; every other response is word for word what it was.
+        if p.report {
+            created["report"] = json!(true);
+            created["reportNote"] = report_note;
+        }
+        Ok(created)
+    }
+
+    /// The report a tab's last turn ended with (`worker_report`).
+    fn sessions_report(&self, params: Value) -> Result<Value, ControlError> {
+        if params.get("childrenOf").is_some() {
+            return self.sessions_reports(params);
+        }
+        let target = resolve_target(&required_string(&params, "session")?)?;
+        let events = self.manager.load_events(&target.session.id, &target.tab.id).map_err(ControlError::internal)?;
+        Ok(self.report_of(&target.session.id, &target.tab.id, &events))
+    }
+
+    /// What `tab`'s last turn reported, as `sessions report` returns it.
+    fn report_of(&self, session_id: &str, tab_id: &str, events: &[crate::events::AgentEvent]) -> Value {
+        // Held to a report, and so reminded of one: asked for it at its start, and no pipeline's tab.
+        let owed = crate::worker_report::expected(session_id, tab_id) && !crate::issue_pipeline::store::takes_part(session_id, tab_id);
+        let mut report = crate::worker_report::of_tab(events, open_turn(&self.manager.wait_view(session_id, tab_id)), owed);
+        report["sessionId"] = json!(session_id);
+        report["tabId"] = json!(tab_id);
+        report
+    }
+
+    /// `sessions report --children-of`: one report row for each session a
+    /// lead started, the sessions `sessions list --children-of` lists. A row
+    /// is read from the worker's own agent, the first it was given, which is
+    /// the one `--report` holds to a report. One worker that cannot be read
+    /// does not hide the others: its row is `missing` and says why.
+    fn sessions_reports(&self, params: Value) -> Result<Value, ControlError> {
+        let sessions = index::load().map_err(ControlError::internal)?;
+        let lead = resolve_lead(&sessions, &required_string(&params, "childrenOf")?)?;
+        let reports: Vec<Value> = sessions.iter().filter(|session| session.started_by(&lead.session_id)).map(|session| {
+            let tab = session.tabs.iter().filter(|tab| !tab.is_terminal()).min_by(|a, b| a.created.cmp(&b.created));
+            let mut row = match tab {
+                Some(tab) => match self.manager.load_events(&session.id, &tab.id) {
+                    Ok(events) => self.report_of(&session.id, &tab.id, &events),
+                    Err(error) => json!({"status": "missing", "reason": "unreadable", "detail": format!("{error:#}"), "sessionId": session.id, "tabId": tab.id}),
+                },
+                None => json!({"status": "missing", "reason": "noAgent", "detail": "This session has no agent tab.", "sessionId": session.id, "tabId": null}),
+            };
+            row["title"] = json!(session.title);
+            row
+        }).collect();
+        Ok(json!({"parent": lead, "reports": reports}))
     }
 
     fn pipeline_host(&self) -> crate::issue_pipeline::host::LocalHost {
@@ -977,6 +1141,17 @@ impl ControlService {
 
     fn pipelines(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::issue_pipeline::{engine, store};
+        if command == "pipelines.start" {
+            let target = resolve_target(&required_string(&params, "target")?)?;
+            self.manager.accepting_work().map_err(ControlError::internal)?;
+            let pipeline = engine::start_existing(&self.pipeline_host(), &target.session.id, &target.tab.id,
+                params["autoMerge"].as_bool(), params["resolveConflicts"].as_bool(), params["adoptPr"].as_bool().unwrap_or(false),
+                crate::issue_pipeline::SwitchActor::Cli {
+                    session_id: params["caller"]["session"].as_str().map(str::to_owned),
+                    tab_id: params["caller"]["tab"].as_str().map(str::to_owned),
+                }).map_err(ControlError::internal)?;
+            return Ok(json!({"pipeline": pipeline, "authorBrief": crate::issue_pipeline::prompts::author_brief()}));
+        }
         if command == "pipelines.list" {
             let mut pipelines = store::list().map_err(ControlError::internal)?;
             if let Some(selector) = optional_string(&params, "project") {
@@ -1032,6 +1207,12 @@ impl ControlService {
     }
 
     fn wait(&self, params: Value) -> Result<Value, ControlError> {
+        if params.get("childrenOf").is_some() {
+            return self.wait_children(params);
+        }
+        if params.get("targets").is_some() {
+            return self.wait_many(params);
+        }
         let target = resolve_target(&required_string(&params, "target")?)?;
         let timeout = params
             .get("timeoutSeconds")
@@ -1058,6 +1239,79 @@ impl ControlService {
                 return Ok(
                     json!({"sessionId": target.session.id, "tabId": target.tab.id, "reason": "timeout", "status": view.status}),
                 );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// `wait --children-of` (PRO-328): `wait_many` on the sessions a lead
+    /// started, as `sessions list --children-of` finds them (archived ones and
+    /// quick chats included). They are found once, when the call begins; a
+    /// session the lead starts later is not waited on. A lead with none has
+    /// nothing to wait for, which is an answer, not an error.
+    fn wait_children(&self, mut params: Value) -> Result<Value, ControlError> {
+        let mode = optional_string(&params, "mode").unwrap_or_else(|| "any".into());
+        let listed = self.sessions_children(json!({"childrenOf": required_string(&params, "childrenOf")?}))?;
+        let workers: Vec<Value> = listed["sessions"].as_array().into_iter().flatten().map(|session| session["id"].clone()).collect();
+        if workers.is_empty() {
+            return Ok(json!({"mode": mode, "timedOut": false, "targets": [], "reason": "nothing to wait for: that session started no sessions"}));
+        }
+        params["targets"] = json!(workers);
+        self.wait_many(params)
+    }
+
+    /// `wait` on several tabs at once (PRO-271). `any` returns as soon as one
+    /// of them has settled, `all` when every one has; either returns at the
+    /// timeout with what has not settled marked `timedOut`. A target already
+    /// settled when the call begins counts at once, so nothing that ended
+    /// between two calls is missed. Every target is listed, with `changed`
+    /// on the ones whose state differs from when the call began.
+    fn wait_many(&self, params: Value) -> Result<Value, ControlError> {
+        let selectors: Vec<String> = params
+            .get("targets")
+            .and_then(Value::as_array)
+            .and_then(|targets| targets.iter().map(|target| target.as_str().map(String::from)).collect())
+            .filter(|targets: &Vec<String>| !targets.is_empty())
+            .ok_or_else(|| ControlError::invalid("targets takes one or more sessions or tabs."))?;
+        let mode = optional_string(&params, "mode").unwrap_or_else(|| "any".into());
+        if !matches!(mode.as_str(), "any" | "all") {
+            return Err(ControlError::invalid(format!("mode takes any or all, not {mode}.")));
+        }
+        // A target that names nothing fails the call before any waiting.
+        let targets = selectors.iter().map(|selector| resolve_target(selector)).collect::<Result<Vec<_>, _>>()?;
+        let timeout = params.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600).min(86_400);
+        let deadline = Instant::now() + Duration::from_secs(timeout);
+        // As for one target: it only waits and reads (#765).
+        let _resumable = crate::hooks::resumable();
+        let mut began: Option<Vec<Option<WaitEnd>>> = None;
+        loop {
+            if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
+                return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));
+            }
+            let views: Vec<WaitView> = targets.iter().map(|target| self.manager.wait_view(&target.session.id, &target.tab.id)).collect();
+            let ends: Vec<Option<WaitEnd>> = views.iter().map(wait_end).collect();
+            let began = began.get_or_insert_with(|| ends.clone());
+            let settled = ends.iter().flatten().count();
+            let done = if mode == "all" { settled == ends.len() } else { settled > 0 };
+            let timed_out = !done && Instant::now() >= deadline;
+            if done || timed_out {
+                let listed: Vec<Value> = (0..targets.len())
+                    .map(|i| {
+                        let state = ends[i].map_or(if timed_out { "timedOut" } else { "running" }, WaitEnd::state);
+                        let mut entry = json!({
+                            "target": selectors[i], "sessionId": targets[i].session.id, "tabId": targets[i].tab.id,
+                            "state": state, "status": views[i].status, "changed": ends[i] != began[i],
+                        });
+                        if let Some(end) = ends[i] {
+                            entry["reason"] = json!(end.reason());
+                            if let WaitEnd::Recovery(kind) = end {
+                                entry["recovery"] = json!(kind);
+                            }
+                        }
+                        entry
+                    })
+                    .collect();
+                return Ok(json!({"mode": mode, "timedOut": timed_out, "targets": listed}));
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1542,6 +1796,66 @@ fn validate_control_session_target(use_worktree: bool, on_main: bool) -> Result<
     Ok(())
 }
 
+/// Who a new session is recorded as started by (PRO-270). `--no-parent`
+/// records nobody and `--parent` the session it names, which must exist.
+/// Otherwise it is the session the command ran in, when the app knows it:
+/// that is only what the command's environment says, which is enough for a
+/// record that grants nothing, and a session the app does not know (the
+/// environment of one since deleted) is simply not recorded.
+fn parent_of_new_session(parent: Option<&str>, no_parent: bool, caller: &Value) -> Result<Option<index::ParentRef>, ControlError> {
+    if no_parent {
+        return match parent {
+            Some(_) => Err(ControlError::invalid("--parent and --no-parent are mutually exclusive.")),
+            None => Ok(None),
+        };
+    }
+    let calling = caller["session"].as_str().and_then(|id| index::get(id).ok());
+    let session = match parent.map(str::trim) {
+        Some("") => return Err(ControlError::invalid("--parent needs a session.")),
+        Some(selector) => resolve_session(selector).map_err(|error| match error.code.as_str() {
+            "not_found" => ControlError::new(
+                "parent_not_found",
+                format!("No session matches --parent {selector}."),
+                Some("Use a session id from `terminalx sessions list --json`, or --no-parent to record none.".into()),
+            ),
+            _ => error,
+        })?,
+        None => match calling.clone() {
+            Some(session) => session,
+            None => return Ok(None),
+        },
+    };
+    // The tab is the caller's own: `--parent` naming another session says
+    // nothing of which of its tabs asked.
+    let tab_id = calling.filter(|calling| calling.id == session.id)
+        .and_then(|_| caller["tab"].as_str())
+        .filter(|tab| session.tab(tab).is_some())
+        .map(str::to_owned);
+    Ok(Some(index::ParentRef { session_id: session.id, tab_id }))
+}
+
+/// The lead `--children-of` names.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Lead {
+    session_id: String,
+    title: Option<String>,
+    /// False once the lead was deleted: its workers still name it.
+    exists: bool,
+}
+
+/// A session by id or the start of one, as everywhere else; or the full id
+/// of a lead that is gone, which the sessions it started still record.
+fn resolve_lead(sessions: &[SessionEntry], selector: &str) -> Result<Lead, ControlError> {
+    match resolve_session(selector) {
+        Ok(session) => Ok(Lead { session_id: session.id, title: Some(session.title), exists: true }),
+        Err(error) if error.code == "not_found" && sessions.iter().any(|session| session.started_by(selector)) => {
+            Ok(Lead { session_id: selector.to_owned(), title: None, exists: false })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn resolve_target(selector: &str) -> Result<Target, ControlError> {
     let sessions = index::load().map_err(ControlError::internal)?;
     if let Some(session) = sessions
@@ -1624,6 +1938,15 @@ impl WaitEnd {
             Self::Stopped => "stopped",
         }
     }
+
+    /// What a wait on several tabs calls it: the reason says which of them.
+    fn state(self) -> &'static str {
+        match self {
+            Self::Permission | Self::Terminal => "needsPermission",
+            Self::Recovery(_) => "failed",
+            Self::Stop | Self::Stopped => "stopped",
+        }
+    }
 }
 
 /// The same rules as a cloud tab's wait (`settledReason` in cloudControl.ts),
@@ -1646,6 +1969,17 @@ fn wait_end(view: &WaitView) -> Option<WaitEnd> {
         TabStatus::Idle if !view.running => Some(WaitEnd::Stopped),
         _ => None,
     }
+}
+
+/// The turn a tab is in, for `sessions report`: a report an earlier turn
+/// ended with is not the answer of one still open. A tab that only sits idle
+/// with its agent running is in none.
+fn open_turn(view: &WaitView) -> Option<crate::worker_report::OpenTurn> {
+    use crate::worker_report::OpenTurn;
+    if view.asks || view.status == TabStatus::Waiting {
+        return Some(OpenTurn::Waiting);
+    }
+    (view.status == TabStatus::InProgress || (view.queued && view.running)).then_some(OpenTurn::Working)
 }
 
 fn resolve_permission(
@@ -1819,6 +2153,7 @@ mod tests {
         })).unwrap()).unwrap();
         // Pointed at the project's own folder: still not one of the project's sessions.
         let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            parent: None,
             section_id: None,
             title: Some("Quick question".into()), cwd: Some(project.path.clone()), tab: None,
         }).unwrap();
@@ -1843,6 +2178,78 @@ mod tests {
     /// `terminalx sessions archive|unarchive` run the app's own archive, so
     /// the sidebar hears of each session at once; `list --archived` lists
     /// what the sidebar keeps under Show archived (#718).
+    #[test]
+    fn a_sessions_report_is_read_from_its_tabs_last_turn_and_a_worker_is_recorded_as_owing_one() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let session = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "title": "worker", "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let tab = session.tabs[0].id.clone();
+        let (service, _sink) = headless_service();
+        let log = crate::store::log_path(&session.id, &tab).unwrap();
+        let mut seq = 0;
+        let mut say = |payload: Value| {
+            seq += 1;
+            let event = json!({"id": format!("e{seq}"), "sessionId": session.id, "tabId": tab, "harness": "codex", "seq": seq, "ts": "2026-11-10T10:00:00.000Z", "payload": payload});
+            crate::store::append_line(&log, &event.to_string()).unwrap();
+        };
+
+        // Nothing said yet: missing, by the session's id or the start of it, or by its tab.
+        let report = service.execute("sessions.report", json!({"session": &session.id[..session.id.len() - 2]}), "r1").unwrap();
+        assert_eq!((report["status"].as_str(), report["reason"].as_str(), report["sessionId"].as_str(), report["tabId"].as_str()), (Some("missing"), Some("noTurn"), Some(session.id.as_str()), Some(tab.as_str())));
+
+        say(json!({"type": "user_message", "text": "Audit the handlers."}));
+        say(json!({"type": "turn_started"}));
+        say(json!({"type": "assistant_text", "text": "Audited.\n\n```terminalx-report\n{\"status\":\"done\",\"result\":\"Every handler checks the token.\",\"couldNotRead\":[\"vendor/closed.bin\"]}\n```"}));
+        say(json!({"type": "turn_completed", "status": "ok"}));
+        let report = service.execute("sessions.report", json!({"session": tab}), "r2").unwrap();
+        assert_eq!((report["status"].as_str(), report["result"].as_str(), report["noEvidence"].as_bool(), report["seq"].as_u64()), (Some("done"), Some("Every handler checks the token."), Some(true), Some(3)));
+        assert_eq!((&report["couldNotRead"], &report["changed"], report["sessionId"].as_str()), (&json!(["vendor/closed.bin"]), &Value::Null, Some(session.id.as_str())));
+
+        say(json!({"type": "user_message", "text": "And the admin ones?"}));
+        say(json!({"type": "turn_started"}));
+        say(json!({"type": "assistant_text", "text": "They look fine to me."}));
+        say(json!({"type": "turn_completed", "status": "ok"}));
+        let report = service.execute("sessions.report", json!({"session": session.id}), "r3").unwrap();
+        assert_eq!((report["status"].as_str(), report["reason"].as_str(), report["tail"].as_str()), (Some("missing"), Some("noBlock"), Some("They look fine to me.")));
+        assert!(report.get("reminderPending").is_none(), "nobody asked this session for a report");
+        assert_eq!(service.execute("sessions.report", json!({"session": "no-such-session"}), "r4").unwrap_err().code, "not_found");
+        assert_eq!(service.execute("sessions.report", json!({}), "r5").unwrap_err().code, "invalid_arguments");
+
+        // Only a tab asked for a report owes one, and a worker has no pipeline of its own to report to.
+        assert!(!crate::worker_report::expected(&session.id, &tab));
+        crate::worker_report::expect(&session.id, &tab).unwrap();
+        crate::worker_report::expect(&session.id, &tab).unwrap();
+        crate::worker_report::expect("a-session-that-is-gone", "t").unwrap();
+        assert!(crate::worker_report::expected(&session.id, &tab) && !crate::worker_report::expected(&session.id, "another-tab"));
+        assert_eq!(service.execute("sessions.report", json!({"session": session.id}), "r5b").unwrap()["reminderPending"], json!(true));
+        crate::worker_report::expect(&session.id, "another-tab").unwrap();
+        assert!(!crate::worker_report::expected("a-session-that-is-gone", "t"), "a deleted session's tabs are dropped");
+        // Nor an agent or engine whose turn ends nobody hears, which could never be reminded.
+        for switch in [json!({"issue": "433"}), json!({"autoMerge": true}), json!({"resolveConflicts": false}), json!({"experimentalCodexStdio": true}), json!({"agent": "opencode"}), json!({"agent": "cursor"})] {
+            let mut params = json!({"project": project.path, "agent": "codex", "prompt": "go", "useWorktree": true, "report": true});
+            params.as_object_mut().unwrap().extend(switch.as_object().unwrap().clone());
+            let refused = service.execute("sessions.create", params, "r6").unwrap_err();
+            assert!(refused.code == "invalid_arguments" && refused.message.contains("--report"), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_report_is_not_read_while_its_tabs_turn_is_open() {
+        use crate::worker_report::OpenTurn;
+        let view = |status, asks, queued, running| WaitView { status, asks, recovery: None, queued, running };
+        assert_eq!(open_turn(&view(TabStatus::InProgress, false, false, true)), Some(OpenTurn::Working));
+        assert_eq!(open_turn(&view(TabStatus::Completed, false, true, true)), Some(OpenTurn::Working), "a prompt behind the turn starts as it ends");
+        assert_eq!(open_turn(&view(TabStatus::Waiting, false, false, true)), Some(OpenTurn::Waiting));
+        assert_eq!(open_turn(&view(TabStatus::InProgress, true, false, true)), Some(OpenTurn::Waiting));
+        // Finished, looked at or not, with the agent still there or gone: the last turn is the answer.
+        for (status, running) in [(TabStatus::Completed, true), (TabStatus::Idle, true), (TabStatus::Idle, false)] {
+            assert_eq!(open_turn(&view(status, false, false, running)), None, "{status:?} {running}");
+        }
+    }
+
     #[test]
     fn the_cli_archives_and_brings_back_sessions_as_the_app_does_and_lists_the_archived_ones() {
         let _home = crate::store::temp_home();
@@ -1930,6 +2337,7 @@ mod tests {
             "projectPath": other.path, "title": "Another project's", "useWorktree": false, "cwd": cwd,
         })).unwrap()).unwrap();
         let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            parent: None,
             section_id: None,
             title: Some("Quick look".into()), cwd: Some(cwd.clone()), tab: None,
         }).unwrap();
@@ -2029,6 +2437,163 @@ mod tests {
         // Another folder is still another project.
         let unrelated = projects::add(links.path().to_str().unwrap()).unwrap();
         assert!(ids(&service.execute("sessions.list", json!({"project": unrelated.path}), "r").unwrap()["sessions"]).is_empty());
+    }
+
+    /// PRO-270: who started a new session, settled before it is created.
+    #[test]
+    fn a_new_sessions_parent_is_the_caller_the_named_session_or_nobody() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let session = || crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let (lead, other) = (session(), session());
+        let lead_tab = lead.tabs[0].id.clone();
+        let from_lead = json!({"session": lead.id, "tab": lead_tab});
+        let parent = |session: &SessionEntry, tab: Option<&str>| Some(index::ParentRef { session_id: session.id.clone(), tab_id: tab.map(str::to_owned) });
+
+        // Run in a session: that session and the tab that asked.
+        assert_eq!(parent_of_new_session(None, false, &from_lead).unwrap(), parent(&lead, Some(&lead_tab)));
+        // A tab that is not the session's is not recorded as one of its tabs.
+        assert_eq!(parent_of_new_session(None, false, &json!({"session": lead.id, "tab": other.tabs[0].id})).unwrap(), parent(&lead, None));
+        // Run anywhere else, or in a session the app no longer has: nobody, and no failure.
+        for nobody in [Value::Null, json!({}), json!({"session": null, "tab": null}), json!({"session": "gone", "tab": "t"}), json!({"session": &lead.id[..lead.id.len() - 2]})] {
+            assert_eq!(parent_of_new_session(None, false, &nobody).unwrap(), None, "{nobody}");
+        }
+        // --parent wins over where it ran, by id or the start of one; the tab is known only when it is the caller's own session.
+        assert_eq!(parent_of_new_session(Some(&other.id), false, &from_lead).unwrap(), parent(&other, None));
+        assert_eq!(parent_of_new_session(Some(&lead.id[..lead.id.len() - 2]), false, &from_lead).unwrap(), parent(&lead, Some(&lead_tab)));
+        assert_eq!(parent_of_new_session(Some(&lead.id), false, &Value::Null).unwrap(), parent(&lead, None));
+        // --no-parent: nobody, whoever asks.
+        assert_eq!(parent_of_new_session(None, true, &from_lead).unwrap(), None);
+        assert_eq!(parent_of_new_session(Some(&lead.id), true, &from_lead).unwrap_err().code, "invalid_arguments");
+        // An unknown parent is its own error, and an ambiguous one stays ambiguous.
+        let unknown = parent_of_new_session(Some("no-such-session"), false, &from_lead).unwrap_err();
+        assert_eq!(unknown.code, "parent_not_found");
+        assert!(unknown.message.contains("no-such-session") && unknown.recovery.unwrap().contains("--no-parent"));
+        assert_eq!(parent_of_new_session(Some(""), false, &from_lead).unwrap_err().code, "invalid_arguments");
+        let shared: String = lead.id.chars().zip(other.id.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect();
+        assert!(!shared.is_empty(), "two ids made in the same moment share their timestamp");
+        assert_eq!(parent_of_new_session(Some(&shared), false, &Value::Null).unwrap_err().code, "ambiguous_selector");
+
+        // The request refuses an unknown parent before it creates anything.
+        let (service, _sink) = headless_service();
+        for request in [
+            json!({"project": project.path, "agent": "claude", "prompt": "hi", "useWorktree": true, "parent": "no-such-session"}),
+            json!({"quick": true, "agent": "claude", "prompt": "hi", "parent": "no-such-session"}),
+        ] {
+            let before = index::load().unwrap().len();
+            let refused = service.execute("sessions.create", request, "r").unwrap_err();
+            assert_eq!(refused.code, "parent_not_found");
+            assert_eq!(index::load().unwrap().len(), before);
+        }
+    }
+
+    /// PRO-270: exactly the sessions a lead started, wherever they are.
+    #[test]
+    fn a_leads_workers_are_listed_across_projects_and_worktrees_and_outlive_it() {
+        let _home = crate::store::temp_home();
+        let (repo, elsewhere) = (git_repo(), tempfile::tempdir().unwrap());
+        let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+        let second = projects::add(elsewhere.path().to_str().unwrap()).unwrap();
+        let started_by = |lead: Option<&SessionEntry>| lead.map(|lead| json!({"sessionId": lead.id, "tabId": lead.tabs[0].id})).unwrap_or(Value::Null);
+        let create = |project: &Project, worktree: bool, lead: Option<&SessionEntry>| crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": worktree, "title": "worker", "parent": started_by(lead),
+            "tab": {"harness": "codex", "model": "gpt-5.5", "effort": "high"},
+        })).unwrap()).unwrap();
+        let lead = create(&project, false, None);
+        let rival = create(&project, false, None);
+        // The lead's: one in a worktree of its own project, one in another project, a quick chat, an archived one.
+        let in_worktree = create(&project, true, Some(&lead));
+        let in_other_project = create(&second, false, Some(&lead));
+        let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            parent: Some(index::ParentRef { session_id: lead.id.clone(), tab_id: None }),
+            section_id: None, title: Some("Quick look".into()), cwd: None, tab: None,
+        }).unwrap();
+        let archived = create(&project, false, Some(&lead));
+        // Not the lead's: another lead's worker, a worker's own worker, and one nobody started.
+        let rivals = create(&project, true, Some(&rival));
+        let grandchild = create(&project, false, Some(&in_worktree));
+        let unowned = create(&project, true, None);
+        let (service, _sink) = headless_service();
+        service.execute("sessions.archive", json!({"sessions": [archived.id]}), "r").unwrap();
+
+        let listed = service.execute("sessions.children", json!({"childrenOf": lead.id}), "r").unwrap();
+        let mine: std::collections::BTreeSet<String> = [&in_worktree, &in_other_project, &quick, &archived].iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids(&listed["sessions"]), mine);
+        assert_eq!(listed["parent"], json!({"sessionId": lead.id, "title": lead.title, "exists": true}));
+        let workers = listed["workers"].as_array().unwrap();
+        assert_eq!(workers.iter().map(|worker| worker["sessionId"].as_str().unwrap().to_string()).collect::<std::collections::BTreeSet<_>>(), mine);
+        let row = |session: &SessionEntry| workers.iter().find(|worker| worker["sessionId"] == session.id.as_str()).unwrap().clone();
+        let worker = row(&in_worktree);
+        assert_eq!(worker, json!({
+            "sessionId": in_worktree.id, "title": "worker", "kind": "project",
+            "tabId": in_worktree.tabs[0].id, "agent": "codex", "status": "idle", "model": "gpt-5.5", "effort": "high", "running": false,
+            "worktree": in_worktree.worktree_name, "path": in_worktree.cwd, "branch": in_worktree.branch,
+            "archived": false, "created": in_worktree.created, "parent": {"sessionId": lead.id, "tabId": lead.tabs[0].id},
+        }));
+        assert!(worker["worktree"].is_string() && worker["branch"].is_string() && worker["path"] != json!(project.path));
+        assert_eq!((&row(&in_other_project)["path"], &row(&in_other_project)["worktree"]), (&json!(in_other_project.cwd), &Value::Null));
+        assert_eq!(row(&archived)["archived"], true);
+        // A quick chat with no agent yet has none of an agent's fields.
+        assert_eq!((&row(&quick)["kind"], &row(&quick)["tabId"], &row(&quick)["status"], &row(&quick)["model"]), (&json!("quick"), &Value::Null, &Value::Null, &Value::Null));
+
+        // By the start of the id too; each lead has its own, and a worker is a lead of what it started.
+        assert_eq!(ids(&service.execute("sessions.children", json!({"childrenOf": &rival.id[..rival.id.len() - 1]}), "r").unwrap()["sessions"]), [rivals.id.clone()].into());
+        assert_eq!(ids(&service.execute("sessions.children", json!({"childrenOf": in_worktree.id}), "r").unwrap()["sessions"]), [grandchild.id.clone()].into());
+        assert!(ids(&service.execute("sessions.children", json!({"childrenOf": unowned.id}), "r").unwrap()["sessions"]).is_empty());
+        // The plain list is what it was: the link filters nothing there.
+        assert_eq!(service.execute("sessions.list", json!({}), "r").unwrap()["sessions"].as_array().unwrap().len(), 8);
+        for (params, code) in [(json!({}), "invalid_arguments"), (json!({"childrenOf": "no-such-session"}), "not_found")] {
+            assert_eq!(service.execute("sessions.children", params.clone(), "r").unwrap_err().code, code);
+            assert_eq!(service.execute("sessions.stop", params, "r").unwrap_err().code, code);
+        }
+
+        // One report row for each of them, read from the worker's own agent; a worker that has said nothing is missing.
+        let log = crate::store::log_path(&in_worktree.id, &in_worktree.tabs[0].id).unwrap();
+        for (seq, payload) in [
+            json!({"type": "user_message", "text": "Audit the handlers."}), json!({"type": "turn_started"}),
+            json!({"type": "assistant_text", "text": "Audited.\n\n```terminalx-report\n{\"status\":\"partial\",\"result\":\"Two of three handlers checked.\",\"notDone\":[\"admin handler: no access\"]}\n```"}),
+            json!({"type": "turn_completed", "status": "ok"}),
+        ].into_iter().enumerate() {
+            let event = json!({"id": format!("e{seq}"), "sessionId": in_worktree.id, "tabId": in_worktree.tabs[0].id, "harness": "codex", "seq": seq + 1, "ts": "2026-11-10T10:00:00.000Z", "payload": payload});
+            crate::store::append_line(&log, &event.to_string()).unwrap();
+        }
+        let read = service.execute("sessions.report", json!({"childrenOf": lead.id}), "r").unwrap();
+        assert_eq!(read["parent"], listed["parent"]);
+        let reports = read["reports"].as_array().unwrap();
+        assert_eq!(reports.iter().map(|report| report["sessionId"].as_str().unwrap().to_string()).collect::<std::collections::BTreeSet<_>>(), mine);
+        let report = |session: &SessionEntry| reports.iter().find(|report| report["sessionId"] == session.id.as_str()).unwrap().clone();
+        let done = report(&in_worktree);
+        assert_eq!((done["status"].as_str(), done["result"].as_str(), &done["notDone"], done["seq"].as_u64()), (Some("partial"), Some("Two of three handlers checked."), &json!(["admin handler: no access"]), Some(3)));
+        assert_eq!((done["tabId"].as_str(), done["title"].as_str()), (Some(in_worktree.tabs[0].id.as_str()), Some("worker")));
+        // The row is the one `sessions report <session>` gives, with the session's title.
+        let mut alone = service.execute("sessions.report", json!({"session": in_worktree.id}), "r").unwrap();
+        alone["title"] = json!("worker");
+        assert_eq!(done, alone);
+        for silent in [&in_other_project, &archived] {
+            assert_eq!((report(silent)["status"].as_str(), report(silent)["reason"].as_str()), (Some("missing"), Some("noTurn")));
+        }
+        assert_eq!((report(&quick)["status"].as_str(), report(&quick)["reason"].as_str(), &report(&quick)["tabId"], report(&quick)["title"].as_str()), (Some("missing"), Some("noAgent"), &Value::Null, Some("Quick look")));
+        // A lead with no workers has no reports, which is not an error; a session that is not there is.
+        assert_eq!(service.execute("sessions.report", json!({"childrenOf": unowned.id}), "r").unwrap()["reports"], json!([]));
+        assert_eq!(service.execute("sessions.report", json!({"childrenOf": "no-such-session"}), "r").unwrap_err().code, "not_found");
+
+        // Nothing of the lead's is running: stopping them stops nothing, and says how many it looked at.
+        let stopped = service.execute("sessions.stop", json!({"childrenOf": lead.id}), "r").unwrap();
+        assert_eq!((&stopped["workers"], &stopped["stopped"], &stopped["failed"]), (&json!(4), &json!([]), &json!([])));
+
+        // Archiving the lead, then deleting it, leaves its workers and their record as they are.
+        service.execute("sessions.archive", json!({"sessions": [lead.id]}), "r").unwrap();
+        assert_eq!(ids(&service.execute("sessions.children", json!({"childrenOf": lead.id}), "r").unwrap()["sessions"]), mine);
+        index::update(|sessions| { sessions.retain(|session| session.id != lead.id); Ok(()) }).unwrap();
+        let orphaned = service.execute("sessions.children", json!({"childrenOf": lead.id}), "r").unwrap();
+        assert_eq!(ids(&orphaned["sessions"]), mine);
+        assert_eq!(orphaned["parent"], json!({"sessionId": lead.id, "title": null, "exists": false}));
+        assert!(orphaned["sessions"].as_array().unwrap().iter().all(|session| session["parent"]["sessionId"] == lead.id.as_str()));
+        // A lead that is gone is named in full: the start of its id matches nothing any more.
+        assert_eq!(service.execute("sessions.children", json!({"childrenOf": &lead.id[..lead.id.len() - 1]}), "r").unwrap_err().code, "not_found");
     }
 
     #[test]
@@ -2168,6 +2733,7 @@ mod tests {
             tabs: Vec::new(),
             active_tab: None,
             link: None,
+            parent: None,
             unknown: std::collections::BTreeMap::new(),
         };
         index::update(|sessions| {
@@ -2334,3 +2900,7 @@ mod tests {
 #[cfg(all(test, unix))]
 #[path = "control_issue_tests.rs"]
 mod issue_tests;
+
+#[cfg(test)]
+#[path = "control_wait_tests.rs"]
+mod wait_tests;

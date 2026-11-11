@@ -176,7 +176,7 @@ fn worktree_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry],
 
 fn branch_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
     let project_path = Path::new(&project.path);
-    let prefix = crate::store::settings::load().branch_prefix;
+    let Ok(prefix) = crate::store::configuration::branch_prefix(project_path) else { return };
     // Without a prefix every branch would look like one of Raccoon's.
     if prefix.is_empty() {
         return;
@@ -423,7 +423,7 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
             // The scan's fetch is no longer proof once its request expires,
             // including a privacy toggle in a progress callback between items.
             let _verified = crate::github_process::ticket().enter().map_err(|error| error.to_string())?;
-            let prefix = crate::store::settings::load().branch_prefix;
+            let prefix = crate::store::configuration::branch_prefix(project).map_err(|e| e.to_string())?;
             let plain = leftover.name.strip_prefix(&prefix).is_some_and(|name| !prefix.is_empty() && !name.is_empty() && !name.contains("..") && !name.starts_with('-'));
             if !plain || leftover.name.starts_with('-') {
                 return Err("refusing to delete: not one of Raccoon's branches".into());
@@ -634,6 +634,7 @@ mod tests {
                 manual_status: Default::default(),
                 active_tab: None,
                 link: None,
+                parent: None,
                 tabs,
                 unknown: BTreeMap::new(),
             }
@@ -657,7 +658,7 @@ mod tests {
     }
 
     fn tab(harness: &str, conversation: &str) -> TabEntry {
-        TabEntry { transport: Default::default(),
+        TabEntry { marked_unread: false, transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: harness.into(),
             title: None,
@@ -1088,7 +1089,7 @@ mod tests {
 
         // A session settled out of the worktree still resumes from the old folder.
         let mut settled = f.session(f.path(), vec![tab("claude", CONV_A)]);
-        settled.removed_workspace = Some(index::RemovedWorkspace { path: gone.to_string_lossy().into_owned(), name: "gone".into(), branch: None });
+        settled.removed_workspace = Some(index::RemovedWorkspace { path: gone.to_string_lossy().into_owned(), name: "gone".into(), branch: None, ..Default::default() });
         assert_eq!(f.scan(&[settled]), vec![]);
 
         // A session elsewhere that holds one of the Codex conversations keeps that one.

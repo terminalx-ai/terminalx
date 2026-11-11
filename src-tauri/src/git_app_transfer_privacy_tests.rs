@@ -157,7 +157,7 @@ pub(super) fn run(root: &Path, managed: bool) {
         assert_eq!(f.transfers(), before, "enabled/stale {action} transferred");
         assert!(invoke(&f, action, 2), "fresh {action} did not restore");
         assert!(f.transfers() > before);
-        assert!(crate::branch_overview::overview(&f.cwd, None).branch.is_some());
+        assert!(crate::branch_overview::overview(&f.cwd, None, false).branch.is_some());
 
         // Pause a real transport, not the queue or a synthetic runner. This
         // fixture's own SSH process and sleeping descendant hold the pipes.

@@ -27,6 +27,8 @@ const extra = `(() => {
   a.branch_overview = { branch: "feature", base: "origin/main", onBase: false, forkPoint: null, ahead: 1, behind: 0, commits: [], baseCommits: [], contributors: [], baseContributors: [], upstream: "origin/feature", unpushed: 0, unpulled: 0, incoming: [], dirty: false, changed: 0, hasRemote: true, merge: { state: "clean", conflicted: [] } };
   a.branch_fetch = false;
   a.gh_available = true;
+  a.gh_connection_status = { state: "connected", details: null };
+  a.git_has_remote = true;
   a.pr_associations = [{ url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd: "/repos/p0" } }];
   a.pr_list = () => { window.__PR_TEST__.lists++; return [pr]; };
   a.pr_conversation = () => { window.__PR_TEST__.reads++; return structuredClone(data); };
