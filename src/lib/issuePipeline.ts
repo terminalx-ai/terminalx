@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { issuePipelines as pipelinesApi } from "@/lib/api";
+import { issuePipelines as pipelinesApi, type PrCheck } from "@/lib/api";
+import { checkBucket, requiredCheckCounts } from "@/lib/checks";
 import { actOnCloudPipeline, getCloudPipelines, mergeCloudPipeline, subscribeCloudPipelines } from "@/lib/cloudPipelines";
 import { notePipelineState } from "@/lib/notify";
 import { getPrefs } from "@/lib/prefs";
@@ -179,7 +180,8 @@ export function pipelineForSession(pipelines: IssuePipeline[], sessionId: string
   return found ? { pipeline: found, role: found.author.sessionId === sessionId ? "author" : "reviewer" } : null;
 }
 
-export type PipelineTone = "add" | "warning" | "info" | "merged" | "faint";
+/** `failed`: a required check failed, as the issue page's check list says it. */
+export type PipelineTone = "add" | "warning" | "info" | "merged" | "faint" | "failed";
 
 /** Where a pipeline stands, in the two or three words a chip can hold. */
 export function pipelineHeadline(pipeline: IssuePipeline): { label: string; tone: PipelineTone } {
@@ -261,11 +263,65 @@ function stepDetail(pipeline: IssuePipeline, stage: PipelineStage, status: StepS
       return pipeline.verdict ? `${pipeline.verdict.findings.length === 0 ? "No findings" : countOf(pipeline.verdict.findings.length, "finding")} at ${short(pipeline.verdict.commit)}` : `Round ${pipeline.round} of ${pipeline.maxRounds}`;
     case "address":
       return status === "skipped" ? "Nothing to address" : null;
-    case "merge":
-      return pipeline.merged ? `${short(pipeline.merged.commit)} into ${pipeline.pr?.base ?? "the base branch"}` : pipeline.state === "readyToMerge" ? "Ready" : null;
+    case "merge": {
+      if (pipeline.merged) return `${short(pipeline.merged.commit)} into ${pipeline.pr?.base ?? "the base branch"}`;
+      if (pipeline.state === "readyToMerge") return "Ready";
+      const checks = pipelineChecksView(pipeline);
+      if (checks?.outcome === "waiting") return "waiting for checks";
+      if (checks?.outcome === "failed") return checks.counts.failed.length === 1 ? "a required check failed" : "required checks failed";
+      if (checks?.outcome === "stalled") return "checks ran out of time";
+      return null;
+    }
     default:
       return null;
   }
+}
+
+export interface PipelineChecksView {
+  /** Waiting on them, stopped on a failed one, or stopped because they never finished. */
+  outcome: "waiting" | "failed" | "stalled";
+  commit: string;
+  /** The checks the merge waits on, in GitHub's order, then the optional ones. */
+  required: PrCheck[];
+  optional: PrCheck[];
+  counts: ReturnType<typeof requiredCheckCounts>;
+  /** The required checks that failed, each the run that failed it. */
+  failing: PrCheck[];
+  /** How long the wait has lasted or lasted, in whole minutes; null when it never began. */
+  waitedMinutes: number | null;
+  limitMinutes: number;
+}
+
+/**
+ * The checks the merge stage is waiting on or stopped on, for the issue page
+ * to list (#881). Null where there is no such list: then the note says what
+ * it can, as it did before checks were carried.
+ */
+export function pipelineChecksView(pipeline: IssuePipeline, now = Date.now()): PipelineChecksView | null {
+  const carried = pipeline.checks;
+  if (!carried || pipeline.stage !== "merge") return null;
+  const kind = pipeline.reason?.kind;
+  const outcome = pipeline.state === "waiting" ? "waiting" : pipeline.state === "needsYou" && kind === "checksFailed" ? "failed" : pipeline.state === "needsYou" && kind === "checksStalled" ? "stalled" : null;
+  if (!outcome) return null;
+  const required = new Set(carried.required);
+  const since = carried.since ? Date.parse(carried.since) : NaN;
+  const until = carried.until ? Date.parse(carried.until) : now;
+  const counts = requiredCheckCounts(carried.checks, carried.required);
+  return {
+    outcome,
+    commit: carried.commit,
+    required: carried.checks.filter((check) => required.has(check.name)),
+    optional: carried.checks.filter((check) => !required.has(check.name)),
+    counts,
+    failing: counts.failed.map((name) => carried.checks.find((check) => check.name === name && checkBucket(check.state) === "failed")!),
+    waitedMinutes: Number.isNaN(since) || Number.isNaN(until) ? null : Math.max(0, Math.floor((until - since) / 60_000)),
+    limitMinutes: carried.limitMinutes,
+  };
+}
+
+/** "2 of 3 passed": where the required checks stand, beside the headline. */
+export function requiredChecksLine(view: PipelineChecksView): string {
+  return `${view.counts.passed} of ${view.counts.total} passed`;
 }
 
 /**

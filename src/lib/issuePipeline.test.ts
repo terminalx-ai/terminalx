@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IssuePipeline } from "@/types/issuePipeline";
 // A pipeline exactly as the Rust side writes it; a Rust test holds it to that.
 import stored from "../../src-tauri/src/fixtures/issue_pipeline.json?raw";
+import storedChecks from "../../src-tauri/src/fixtures/issue_pipeline_checks.json?raw";
 
 const { list, start, setAutoMerge, act, notePipelineState, listeners } = vi.hoisted(() => ({
   list: vi.fn(),
@@ -383,5 +384,72 @@ describe("after a gap in the live connection", () => {
     expect(p3.note).toBe("started meanwhile");
     expect(notePipelineState).toHaveBeenCalledOnce();
     expect(notePipelineState).toHaveBeenCalledWith(expect.objectContaining({ id: "p1", state: "readyToMerge" }));
+  });
+});
+
+describe("the checks a merge waits on, as the app stores them (#881)", () => {
+  const fixture = JSON.parse(storedChecks) as IssuePipeline;
+  const at = (iso: string) => Date.parse(iso);
+
+  it("lists the required checks apart from the optional ones, counted as the gate counts them", async () => {
+    const { pipelineChecksView, pipelineHeadline, pipelineSteps, requiredChecksLine } = await load();
+    const view = pipelineChecksView(fixture, at("2026-11-11T10:23:40.000Z"))!;
+    expect(view.outcome).toBe("waiting");
+    expect(view.required.map((check) => [check.name, check.state])).toEqual([["check", "in_progress"], ["headless-serve", "success"], ["desktop-platforms", "expected"]]);
+    expect(view.optional.map((check) => check.name)).toEqual(["lint"]);
+    expect(requiredChecksLine(view)).toBe("1 of 3 passed");
+    expect([view.waitedMinutes, view.limitMinutes]).toEqual([23, 60]);
+    expect(pipelineHeadline(fixture)).toEqual({ label: "Waiting for checks", tone: "info" });
+    expect(pipelineSteps(fixture).at(-1)).toMatchObject({ stage: "merge", status: "current", detail: "waiting for checks" });
+    // The clock reads what the stall stop reads: whole minutes since the wait began.
+    expect(pipelineChecksView(fixture, at("2026-11-11T10:59:59.000Z"))!.waitedMinutes).toBe(59);
+    expect(pipelineChecksView(fixture, at("2026-11-11T11:00:00.000Z"))!.waitedMinutes).toBe(60);
+  });
+
+  it("names a failed required check by the run that failed it, and keeps the wait it ended", async () => {
+    const { pipelineChecksView, pipelineSteps } = await load();
+    const failed: IssuePipeline = {
+      ...fixture, state: "needsYou", reason: { kind: "checksFailed", names: ["check"] }, waitingSince: null,
+      checks: { ...fixture.checks!, until: "2026-11-11T10:41:00.000Z", checks: [...fixture.checks!.checks, { name: "check", state: "failure", url: "https://github.com/acme/widgets/actions/runs/92/job/9" }] },
+    };
+    const view = pipelineChecksView(failed, at("2026-11-11T12:00:00.000Z"))!;
+    expect(view.outcome).toBe("failed");
+    expect(view.counts.failed).toEqual(["check"]);
+    expect(view.failing.map((check) => check.url)).toEqual(["https://github.com/acme/widgets/actions/runs/92/job/9"]);
+    expect(view.waitedMinutes).toBe(41);
+    expect(pipelineSteps(failed).at(-1)).toMatchObject({ status: "attention", detail: "a required check failed" });
+  });
+
+  it("has no list where the merge is not waiting on checks or the checks were not read", async () => {
+    const { pipelineChecksView } = await load();
+    expect(pipelineChecksView({ ...fixture, checks: null })).toBeNull();
+    expect(pipelineChecksView({ ...fixture, state: "readyToMerge", reason: { kind: "autoMergeOff" } })).toBeNull();
+    expect(pipelineChecksView({ ...fixture, state: "needsYou", reason: { kind: "conflicts" } })).toBeNull();
+  });
+});
+
+describe("what a check's state and time are said as", () => {
+  it("says queued, running, passed, failed, cancelled and skipped", async () => {
+    const { checkStateLabel } = await import("./checks");
+    expect(["queued", "expected", "waiting", "in_progress", "pending", "success", "failure", "timed_out", "cancelled", "skipped", "neutral"].map(checkStateLabel))
+      .toEqual(["Queued", "Queued", "Queued", "Running", "Running", "Passed", "Failed", "Failed", "Cancelled", "Skipped", "Skipped"]);
+  });
+
+  it("times a running check from its start and a finished one by how long it ran", async () => {
+    const { checkMinutes, minutesLabel } = await import("./checks");
+    const now = Date.parse("2026-11-11T10:23:30Z");
+    expect(checkMinutes({ name: "a", state: "in_progress", startedAt: "2026-11-11T10:00:00Z" }, now)).toBe(23);
+    expect(checkMinutes({ name: "a", state: "success", startedAt: "2026-11-11T10:00:00Z", completedAt: "2026-11-11T10:04:59Z" }, now)).toBe(4);
+    expect(checkMinutes({ name: "a", state: "queued" }, now)).toBeNull();
+    expect([minutesLabel(0), minutesLabel(41)]).toEqual(["<1 min", "41 min"]);
+  });
+
+  it("counts a check run more than once by its worst run, and a required one not reported as waiting", async () => {
+    const { requiredCheckCounts } = await import("./checks");
+    const counts = requiredCheckCounts([
+      { name: "build", state: "success" }, { name: "build", state: "failure" },
+      { name: "test", state: "success" }, { name: "docs", state: "skipped" }, { name: "lint", state: "failure" },
+    ], ["build", "test", "docs", "e2e"]);
+    expect(counts).toEqual({ total: 4, passed: 2, failed: ["build"], waiting: 1 });
   });
 });

@@ -864,6 +864,33 @@ fn checks_still_running_are_waited_for_and_left_to_a_person_if_they_never_finish
     assert_eq!(run.poll().state, State::Merged);
 }
 
+/// A pipeline waiting on checks, as the issue page's check list reads it
+/// (`issuePipeline.test.ts` reads the same file).
+#[test]
+fn a_wait_on_checks_is_stored_in_the_shape_the_issue_page_reads() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!("../fixtures/issue_pipeline_checks.json")).unwrap();
+    let pipeline: Pipeline = serde_json::from_value(fixture.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&pipeline).unwrap(), fixture);
+    let checks = pipeline.checks.as_ref().unwrap();
+    assert_eq!((pipeline.state, checks.limit_minutes, checks.since.as_deref()), (State::Waiting, engine::CHECKS_WAIT_MINUTES, pipeline.waiting_since.as_deref()));
+    // What the engine produces has the same keys, for the list and for each kind of check in it.
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![
+        PrCheck { actions: Some(crate::github::checks::ActionsCheck { run_id: 90, job_id: Some(5) }), summary: Some("macOS".into()), ..timed("check", "in_progress", "2026-11-11T10:00:00Z") },
+        PrCheck { completed_at: Some("2026-11-11T10:04:00Z".into()), actions: Some(crate::github::checks::ActionsCheck { run_id: 90, job_id: Some(6) }), ..timed("headless-serve", "success", "2026-11-11T10:00:00Z") },
+    ];
+    let run = Run::start_in(host, true);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().required_checks = Some(vec!["check".into(), "desktop-platforms".into(), "headless-serve".into()]);
+    let produced = serde_json::to_value(run.reviewer(&reviewed(C1, "merge", "[]"))).unwrap();
+    let keys = |value: &serde_json::Value| value.as_object().map(|object| object.keys().cloned().collect::<std::collections::BTreeSet<_>>()).unwrap_or_default();
+    assert_eq!(keys(&produced["checks"]), keys(&fixture["checks"]));
+    let by_name = |value: &serde_json::Value, name: &str| value["checks"]["checks"].as_array().unwrap().iter().find(|check| check["name"] == name).cloned().unwrap();
+    for name in ["check", "headless-serve", "desktop-platforms"] {
+        assert_eq!(keys(&by_name(&produced, name)), keys(&by_name(&fixture, name)), "{name}");
+    }
+}
+
 fn timed(name: &str, state: &str, started: &str) -> PrCheck {
     PrCheck { name: name.into(), state: state.into(), url: Some(format!("https://github.com/o/r/actions/runs/7/job/{}", name.len())), started_at: Some(started.into()), ..Default::default() }
 }
