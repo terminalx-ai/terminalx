@@ -119,7 +119,7 @@ describe("cloud organizations in the sidebar", () => {
     expect(within(org).getByRole("button", { name: "In review 1" })).toBeTruthy();
     expect(within(org).queryByRole("button", { name: /Reorder/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Reorder Talk here" })).toBeTruthy();
-    const cloud = within(org).getByRole("button", { name: /^Fix login redirect/, description: "Status: In review" });
+    const cloud = within(org).getByRole("button", { name: /^Fix login redirect/, description: /Status: In review$/ });
     cloud.focus();
     fireEvent.keyDown(cloud, { key: " ", code: "Space" });
     fireEvent.keyDown(document, { key: "ArrowDown", code: "ArrowDown" });
@@ -190,10 +190,12 @@ describe("cloud organizations in the sidebar", () => {
     expect(within(acme).getAllByRole("group").map((group) => group.getAttribute("aria-label"))).toEqual(["acme/api", "image-only"]);
     const api = within(acme).getByRole("group", { name: "acme/api" });
     expect(within(api).getAllByTestId("cloud-workspace-group").map((row) => row.getAttribute("data-workspace"))).toEqual(["ws-1", "ws-2"]);
-    const fix = within(api).getByRole("button", { name: /^Fix login redirect/, description: "Status: Backlog" });
-    // A row ends in its branch; a working one shows the working sign there instead.
-    expect(fix.textContent).toContain("terminalx/fix-login");
-    expect(within(api).getByRole("button", { name: /^Add tests/, description: "Status: Backlog" })).toBeTruthy();
+    const fix = within(api).getByRole("button", { name: /^Fix login redirect/, description: /Status: Backlog$/ });
+    // As 02.04: the mark leads, and the row ends in its PR number or its time, not its branch.
+    expect(fix.querySelector("[data-session-status]")).toBeTruthy();
+    expect(fix.querySelector("[data-row-meta]")).toBeTruthy();
+    expect(fix.textContent).not.toContain("terminalx/fix-login");
+    expect(within(api).getByRole("button", { name: /^Add tests/, description: /Status: Backlog$/ })).toBeTruthy();
     // Beta's one workspace lists its sessions directly under the project.
     const beta = orgSection(OTHER);
     expect(within(beta).queryAllByTestId("cloud-workspace-group")).toHaveLength(0);
