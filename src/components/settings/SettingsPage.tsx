@@ -1,6 +1,7 @@
+import { useExperimental } from "@/lib/experimental";
 import { SettingsFileError } from "./SettingsFile";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Bot, Building2, FlaskConical, HardDrive, Info, Keyboard, KeyRound, Mic, Palette, Plug, Search, Settings2, Smartphone, UserRound, X } from "@/icons";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, Bot, Building2, FlaskConical, HardDrive, Info, Keyboard, KeyRound, Mic, Palette, Plug, Search, Settings2, Smartphone, UserRound, X, Network } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { Button } from "@/components/ui/button";
@@ -24,6 +25,7 @@ const SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   general: Settings2,
   appearance: Palette,
   agents: Bot,
+  orchestrator: Network,
   environment: KeyRound,
   transcription: Mic,
   integrations: Plug,
@@ -56,7 +58,10 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const [selectionRequest, setSelectionRequest] = useState(0);
-  const results = useMemo(() => searchSettingsSections(query), [query]);
+  // A section behind a switch in Settings → Experimental is listed, and found, only while the switch is on.
+  const { orchestratorRuns } = useExperimental();
+  const offered = useCallback((key: string) => key !== "orchestrator" || orchestratorRuns, [orchestratorRuns]);
+  const results = useMemo(() => searchSettingsSections(query).filter((match) => offered(match.item.tab)), [query, offered]);
   const searching = !!query.trim();
   const changeQuery = (value: string) => {
     setQuery(value);
@@ -194,7 +199,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                     </button>
                   );
                 }) : <p className="px-2 py-2 text-xs text-faint">No repositories added.</p>
-              ) : Object.entries(SETTINGS_SECTIONS).filter(([, entry]) => entry.group === group).map(([key, entry]) => (
+              ) : Object.entries(SETTINGS_SECTIONS).filter(([key, entry]) => entry.group === group && offered(key)).map(([key, entry]) => (
                 <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => choose(key as SettingsSection)} className={navClass(section === key)}>
                   {(() => { const Icon = SECTION_ICONS[key as SettingsSection]; return <Icon aria-hidden className="size-4 shrink-0" />; })()}
                   <span className="truncate">{entry.title}</span>

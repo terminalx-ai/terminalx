@@ -5013,6 +5013,19 @@ pub async fn orchestration_runs(app: AppHandle) -> CmdResult<serde_json::Value> 
     tauri::async_runtime::spawn_blocking(move || sessions.orchestration("list", serde_json::json!({})).map_err(err)).await.map_err(err)?
 }
 
+/// Store a plan a person chose from a file as a run of `session_id`.
+#[tauri::command]
+pub async fn orchestration_create(app: AppHandle, session_id: String, plan: serde_json::Value) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("create", serde_json::json!({"sessionId": session_id, "plan": plan})).map_err(err)).await.map_err(err)?
+}
+
+/// What holds for runs in one project: its own answers where it gave them, the app's otherwise.
+#[tauri::command]
+pub fn orchestrator_limits(project_path: String) -> crate::store::settings::OrchestratorLimits {
+    store::settings::load().orchestrator.for_project(&project_path)
+}
+
 /// A person approves a run's plan: its first workers start. Here and not in
 /// the `terminalx` CLI, which the lead itself runs.
 #[tauri::command]

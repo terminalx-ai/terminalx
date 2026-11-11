@@ -183,14 +183,15 @@ pub fn git_config(session_id: &str, cwd: &Path) -> anyhow::Result<std::path::Pat
             explicit.extend(urls.lines().map(|url| url.trim().to_string()).filter(|url| !url.is_empty()));
         }
     }
-    // A push to an address written out: every form git takes one in.
-    out.push_str(&format!("[url {}]\n", quoted(REFUSED_URL)));
-    for prefix in ["https://", "http://", "ssh://", "git://", "git+ssh://", "ssh+git://", "ftp://", "ftps://", "file://", "git@", "/", "./", "../", "~"] {
-        out.push_str(&format!("\tpushInsteadOf = {}\n", quoted(prefix)));
-    }
+    // A push to an address written out. The empty prefix is the start of every
+    // address, so no form of one (a path, a URL of any scheme, `user@host:path`)
+    // is left to a list to remember.
+    out.push_str(&format!("[url {}]\n\tpushInsteadOf = \"\"\n", quoted(REFUSED_URL)));
     for url in explicit {
         out.push_str(&format!("\tinsteadOf = {}\n", quoted(&url)));
     }
+    // Transports that run a command of the caller's choosing in place of a remote.
+    out.push_str("[protocol \"ext\"]\n\tallow = never\n[protocol \"fd\"]\n\tallow = never\n");
     let dir = crate::store::ensure_dir(crate::store::root()?.join("run-workers"))?;
     let path = dir.join(format!("{session_id}.gitconfig"));
     crate::store::write_atomic(&path, out.as_bytes())?;
@@ -669,6 +670,9 @@ mod tests {
             vec!["push", &remote_url, "HEAD:refs/heads/by-worker"],
             vec!["push", &file_url, "HEAD:refs/heads/by-worker"],
             vec!["push", "../remote.git", "HEAD:refs/heads/by-worker"],
+            vec!["push", "someone@example.invalid:team/repo.git", "HEAD:refs/heads/by-worker"],
+            vec!["push", "unheard+of://example.invalid/repo", "HEAD:refs/heads/by-worker"],
+            vec!["push", "ext::sh -c true", "HEAD:refs/heads/by-worker"],
             vec!["-c", "alias.send=push", "send", "origin", "HEAD:refs/heads/by-worker"],
         ] {
             let output = as_worker(&push);

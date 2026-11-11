@@ -1,3 +1,7 @@
+import { RunStrip } from "@/components/orchestration/RunStrip";
+import { RunView } from "@/components/orchestration/RunView";
+import { useExperimental } from "@/lib/experimental";
+import { showRunView, useRun, useRunViewShown } from "@/lib/orchestration";
 import { openWorkspaceRestore } from "@/lib/dialogs";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
@@ -424,6 +428,10 @@ export function SessionView({
   const isGit = useSessionIsGit(session, local);
   const quick = isQuickChat(session);
   const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
+  // Orchestration runs (PRO-274), behind Settings → Experimental: a session of a git project on this computer can lead one.
+  const runOffered = useExperimental().orchestratorRuns && local && !cloud && !compact && !quick && isGit;
+  const run = useRun(session.id, runOffered);
+  const runShown = useRunViewShown(session.id) && runOffered;
   const prefs = usePrefs();
   const store = useSessionStore();
   // The workspace's tabs as a row under the title bar: a local session's, unless the reader turned the row off
@@ -809,6 +817,8 @@ export function SessionView({
             {chrome?.trailing}
           </div>
         </header>
+        {runOffered && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} onChange={(shown) => showRunView(session.id, shown)} />}
+        {runShown && <RunView session={session} onShowChat={() => showRunView(session.id, false)} />}
         {/* The row of tabs, ended by the "+" that opens one (keyed by session, as above). The floating window leaves out a row that would only repeat its one tab, and keeps its + in the title bar. */}
         {stripRow && compact && (
           <WorkspaceTabStrip
@@ -826,7 +836,8 @@ export function SessionView({
           <span className={cn("min-w-0 flex-1", checkFix.error ? "text-destructive" : "text-muted-foreground")}>{checkFix.busy ? "Collecting failed check logs…" : checkFix.error ?? checkFix.notice}</span>
           {!checkFix.busy && <Button size="xs" variant="ghost" onClick={checkFix.clear}>Dismiss</Button>}
         </div>}
-        <section className="flex min-h-0 flex-1 flex-col">
+        {/* Hidden, not unmounted, behind the Run view: the chat and its terminals stay as they are. */}
+        <section className={cn("flex min-h-0 flex-1 flex-col", runShown && "hidden")}>
           <div className="@container/editor-host relative flex min-h-0 flex-1">
             <div
               className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col"

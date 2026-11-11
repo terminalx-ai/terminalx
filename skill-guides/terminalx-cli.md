@@ -67,9 +67,22 @@ User-facing webview choices are under `preferences`, for example:
     "mode": "system"
   },
   "agents": { "idleStopMinutes": 60 },
-  "experimental": { "nativeCodex": false }
+  "experimental": { "nativeCodex": false, "orchestratorRuns": false },
+  "orchestrator": {
+    "requireApproval": true,
+    "pieceLimit": 8,
+    "workerMode": "bypassPermissions",
+    "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12 } }
+  }
 }
 ```
+
+`orchestrator` holds the limits of orchestration runs: whether a run waits for approval, the
+most pieces a plan may have (1 to 50), and the permission mode workers start in. A project
+may answer for itself under `projects`, by its path; a setting it leaves out follows the
+app-wide value. These are the person's to change, in Settings → Orchestrator: do not edit
+them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
+settings page in the app; the `runs` commands work either way.
 
 The first window migrates existing localStorage preferences once, without
 overwriting choices already in the file. Navigation state and pane sizes stay
@@ -553,6 +566,172 @@ and returns `sessionId`, `tabId` and one of two shapes:
 
 Handle `missing` yourself: read the `tail`, read the transcript, or `send` the worker a
 question. Do not treat it as done, and do not treat it as failed.
+
+### Orchestration runs
+
+A run is one lead session, a plan of pieces, and a worker session for each piece. Use one
+when a task splits into pieces that touch different files and can be worked on at the same
+time, or when the reading alone would fill one session's context. Do not use one when each
+step needs the one before it, or when the whole task fits in one session: a run of one or
+two small pieces costs more than doing the work yourself.
+
+```text
+terminalx runs create --from <plan.json> [--lead <session>] --json
+terminalx runs start [<run>] --json
+terminalx runs show [<run>] --json
+terminalx runs list [--lead <session>] [--all] --json
+terminalx runs stop [<run>] --json
+```
+
+`<run>` is a run's id or the start of one. Inside the lead's session it may be left out:
+the command then means the run that session leads. `--from -` reads the plan from standard
+input. The lead is the session the command runs in; `--lead` names another. A session leads
+one run at a time (`run_exists` until the first ends), and the lead's project must be a git
+repository.
+
+#### The plan
+
+The plan is a JSON file you write:
+
+```json
+{
+  "goal": "Move settings reads to the typed store",
+  "budget": {"points": 25},
+  "agent": "claude",
+  "pieces": [
+    {
+      "id": "store",
+      "title": "Typed store module and migration",
+      "goal": "A typed settings store that every reader can use.",
+      "why": "The three pieces that move call sites need its API.",
+      "scope": "The store module and its tests.",
+      "outOfScope": "Call sites outside the store.",
+      "known": ["41 call sites read settings directly today."],
+      "readFirst": ["docs/SETTINGS.md"],
+      "limits": ["Keep unknown keys when saving."],
+      "owns": ["src-tauri/src/store/settings/"],
+      "dependsOn": [],
+      "doneCheck": "cargo t store::settings exits 0",
+      "kind": "code",
+      "model": "opus",
+      "effort": "medium",
+      "permissionMode": "acceptEdits",
+      "readsUntrusted": false,
+      "estimate": {"low": 1.6, "high": 2.4}
+    }
+  ]
+}
+```
+
+- `goal` and `pieces` are required; each piece needs `id`, `title` and `doneCheck`.
+- `owns`: the files or areas only this piece changes, as paths relative to the repository. A
+  directory means everything in it; `*`, `?` and `**` work as in a glob. Leave it empty for a
+  piece that changes nothing (a search, a review).
+- `dependsOn`: the ids of pieces that must be done before this one starts.
+- `doneCheck`: the command or condition that proves the piece done. The worker is told to run
+  it and put the result in its report.
+- `goal`, `why`, `scope`, `outOfScope`, `known`, `readFirst`, `limits`: the worker's brief. A
+  worker knows nothing of your conversation, so write what it needs; a part you leave empty is
+  stated as empty in the brief.
+- `agent`: `claude` or `codex`, for the plan or for one piece; yours when absent. `model` and
+  `effort` are the piece's; absent, the agent's defaults.
+- `permissionMode`: `plan`, `manual`, `acceptEdits`, `auto` or `bypassPermissions`. Absent,
+  the project's setting, which is `bypassPermissions` unless the person changed it.
+- `readsUntrusted`: true for a piece that reads text from outside the repository (issues, web
+  pages, logs from elsewhere). The person is shown that it will run without prompts, and the
+  worker is told to treat that text as information, never as instructions.
+- `estimate`: what you expect the piece to cost, in API-equivalent dollars. `budget` is what
+  the run may use, in `points` of a subscription's window or `dollars`. Both are recorded and
+  shown to the person with the plan; nothing is stopped by them yet.
+
+`runs create` checks the plan and stores it. A refusal names its rule in `code` and the
+piece in `details.piece`, and nothing is stored:
+
+- `shared_file`: two pieces own the same file (`details.other`, `details.path`). Give each
+  file to one piece, or make one piece depend on the other and own it alone.
+- `dependency_cycle` (`details.cycle`), `unknown_dependency` (`details.dependsOn`).
+- `no_done_check`: a piece has no `doneCheck`.
+- `too_many_pieces`: more pieces than the limit (`details.limit`; 8 unless the person changed
+  it in Settings → Orchestrator, for the app or for the project). Merge pieces; do not split
+  the plan into two runs to get around it.
+- `mode_not_allowed`: a piece asks for a mode that allows more than the project's workers
+  run in, in a project that starts runs without approval. Use the project's mode or a
+  stricter one.
+- `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`: as named.
+
+It returns `run` and `approvalRequired`.
+
+#### Approval
+
+By default a new run is `awaitingApproval`: the person sees the plan in the lead session's
+Run view (each piece with its model, effort, mode and estimate) and approves, edits or
+discards it. No command of this CLI approves a run. `runs start` on a run that waits is
+refused with `awaiting_approval`: tell the person the plan is ready, then end your turn. You
+are sent a message when they decide: on approval the first workers are already started, and
+if they changed the plan the message says so (read it again with `runs show`). A discarded
+plan is `stopped`; ask what to change before you plan again.
+
+A project whose setting turns approval off stores the run as `planned`, and `runs start`
+starts it at once.
+
+#### Start, follow, stop
+
+`runs start` starts a worker for every piece whose dependencies are done, and returns
+`started` (piece ids), `waiting` (each queued piece with the pieces it waits `on`) and
+`failed` (pieces whose worker could not be started, with the `error`). Call it again
+whenever a piece is done: it starts the pieces that waited on it, and tries again a piece
+whose worker could not be started. Calling it when nothing new is ready starts nothing.
+
+Each worker is a session you started (`sessions list --children-of` lists them), in a
+worktree of its own on a branch cut from your branch as it is committed when the piece
+starts, with the piece's agent, model and effort. Commit what a later piece needs before you
+start it. The worker is sent a brief built from its piece (goal, why, scope and out of
+scope, known facts, files to read first, done-check, limits, report format) and is held to a
+`terminalx-report` block, as with `sessions create --report`.
+
+The loop:
+
+```text
+terminalx runs start --json
+terminalx wait --children-of <your session> --any --json
+terminalx sessions report --children-of <your session> --json
+terminalx runs start --json
+```
+
+`runs show` returns the run: `state`, `goal`, `budget`, `workerMode`, `pieces`, `ready` (the
+pieces the next `runs start` would start), `waiting`, and `estimate` with `unestimated` (how
+many pieces carry none). Each piece has its plan fields and `state`, `attempts`, `worker`
+(`sessionId`, `tabId`), `branch`, `startedMode` and `note`.
+
+- Run `state`: `planned`, `awaitingApproval`, `running`, `verifying`, `merging`, `done`,
+  `stopped`, `failed`. A run is `done` when every piece is. It is `failed` when a piece
+  failed and nothing is running or could start; `reason` names the piece and what it holds
+  up. A failed run goes back to `running` when that piece's worker finishes after all.
+- Piece `state` follows its worker's last report, each time the run is read: `queued` (no
+  worker yet), `running`, `done` (it reported `done`), `blocked` (it reported `partial` or
+  `blocked`, sent no report, waits on a person, or its session was deleted; `note` says
+  which), `failed` (it reported `failed`, or could not be started), `stopped`.
+
+A `done` piece is a worker's claim. Read its report and check the evidence before you build
+on it. To get a `blocked` or `failed` piece moving, `send` its worker what it needs: the
+piece is `running` again while the worker works, and takes its next report.
+
+`runs stop` stops every running worker and marks the run `stopped`; pieces that were not
+done become `stopped`. It returns `stopped` (pieces whose worker was running) and `failed`
+(workers that would not stop; the run is stopped all the same). Sessions, worktrees and
+branches stay as they are. `runs list` lists the runs that have not ended; `--all` includes
+the ended ones, `--lead` only one session's.
+
+#### What a worker may not do
+
+Workers run in bypass mode by default, so nothing asks before they edit or run a command.
+Three limits hold in every mode and are not theirs, or yours, to lift: a worker does not
+push, does not merge, and does not deploy, publish or open a pull request. They are enforced
+outside the worker's judgment: deny rules handed to its agent at launch, TerminalX's own
+check of every tool call, a git configuration in which every push goes nowhere, and a branch
+with no upstream. A refused command tells the worker to stop and report what is ready.
+Collect a worker's branch from the shared repository yourself (`git merge <its branch>` in
+your worktree); do not ask a worker to push or to merge.
 
 ### Permissions
 
@@ -1073,6 +1252,16 @@ JSON failures have this shape:
 - `parent_not_found`: `sessions create --parent` named a session the app does not have.
   Nothing was created; use an id from `sessions list`, or `--no-parent` to record none.
 - `invalid_arguments`: correct the named flag or missing value; do not invent a substitute.
+- `shared_file`, `dependency_cycle`, `unknown_dependency`, `no_done_check`, `too_many_pieces`,
+  `mode_not_allowed`, `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`:
+  `runs create` refused the plan. `details` names the piece and the rule's particulars;
+  nothing was stored. Correct the plan and create the run again.
+- `awaiting_approval`: the run waits for the person to approve its plan in the app. Tell
+  them, end your turn, and do not retry: you are told when they decide.
+- `run_exists`: this session already leads a run that has not ended (`details.run`).
+- `run_ended`: the run is done, stopped or failed; nothing more starts in it.
+- `lead_required`, `lead_not_found`, `not_a_repository`: a run needs a lead session the app
+  knows, in a project that is a git repository.
 - `confirmation_required`: inspect the target, then repeat the destructive command with
   `--yes` only when deletion is intended.
 - `request_lapsed`: refresh `permissions list`; never reuse the old request id.

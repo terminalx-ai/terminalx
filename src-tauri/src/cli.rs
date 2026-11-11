@@ -1483,6 +1483,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn runs_are_created_from_a_plan_file_and_driven_by_id_or_from_inside_their_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.json");
+        let plan = json!({"goal": "Move settings reads", "pieces": [{"id": "a", "title": "A", "doneCheck": "cargo t"}]});
+        std::fs::write(&path, plan.to_string()).unwrap();
+        let path = path.to_str().unwrap();
+
+        // Outside a session the request names no caller; the app then asks for --lead.
+        let (command, params, _) = rpc_of(&["runs", "create", "--from", path, "--json"]);
+        assert_eq!((command.as_str(), params), ("runs.create", json!({"plan": plan, "lead": null, "caller": null})));
+        assert_eq!(rpc_of(&["runs", "create", "--from", path, "--lead", "0198c"]).1["lead"], "0198c");
+        // Inside one, the session and tab it runs in lead the run, and name it when no run is named.
+        let caller = json!({"session": "lead", "tab": "lead-tab"});
+        CALLING_SESSION.with(|calling| *calling.borrow_mut() = Some(caller.clone()));
+        let inside = rpc_of(&["runs", "create", "--from", path]).1;
+        let unnamed = rpc_of(&["runs", "start"]);
+        CALLING_SESSION.with(|calling| *calling.borrow_mut() = None);
+        assert_eq!(inside["caller"], caller);
+        assert_eq!((unnamed.0.as_str(), unnamed.1, unnamed.2), ("runs.start", json!({"run": null, "caller": caller}), Duration::from_secs(300)));
+
+        // The plan may come on standard input.
+        let mut stdin = || Ok(plan.to_string());
+        let Action::Rpc { params, .. } = parse_with_stdin(&args(&["runs", "create", "--from", "-"]), &mut stdin).unwrap().action else { panic!("expected rpc") };
+        assert_eq!(params["plan"], plan);
+
+        for (words, command) in [(&["runs", "show", "01a1"][..], "runs.show"), (&["runs", "start", "01a1"], "runs.start"), (&["runs", "stop", "01a1", "--json"], "runs.stop")] {
+            let (sent, params, _) = rpc_of(words);
+            assert_eq!((sent.as_str(), params), (command, json!({"run": "01a1", "caller": null})));
+        }
+        assert_eq!(rpc_of(&["runs", "list"]), ("runs.list".into(), json!({"lead": null, "all": false}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["runs", "list", "--lead", "0198c", "--all"]).1, json!({"lead": "0198c", "all": true}));
+
+        // A plan that cannot be read is refused here, with the file's own line; nothing is sent.
+        std::fs::write(dir.path().join("broken.json"), "{\n  \"goal\": \"x\",\n  pieces\n}").unwrap();
+        let broken = parse(&args(&["runs", "create", "--from", dir.path().join("broken.json").to_str().unwrap()])).unwrap_err();
+        assert_eq!(broken.code, "plan_invalid");
+        assert!(broken.message.contains("is not JSON") && broken.message.contains("line 3"), "{}", broken.message);
+        let missing = parse(&args(&["runs", "create", "--from", &format!("{path}.missing")])).unwrap_err();
+        assert!(missing.code == "invalid_arguments" && missing.message.contains("Could not read --from"), "{}", missing.message);
+        for refused in [
+            &["runs"][..], &["runs", "create"], &["runs", "create", "--from"], &["runs", "create", "--from", path, "--lead", ""],
+            &["runs", "create", "--from", path, "--lead", "cloud:org-a:ws-1:s1"], &["runs", "create", "--from", path, "extra"],
+            &["runs", "start", "01a1", "extra"], &["runs", "list", "01a1"], &["runs", "approve", "01a1"], &["runs", "pause"],
+        ] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        // A lead does not approve its own plan: there is no such command, and the guide says so.
+        assert!(parse(&args(&["runs", "approve", "01a1"])).unwrap_err().message.contains("Use create, start, show, list or stop"));
+        for said in ["terminalx runs create --from PLAN.json|- [--lead SESSION]", "terminalx runs start|show|stop [RUN]", "terminalx runs list [--lead SESSION] [--all]"] {
+            assert!(help_text().contains(said), "{said}");
+        }
+        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`awaiting_approval`", "`doneCheck`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8"] {
+            assert!(GUIDE.contains(said), "the guide does not say {said:?}");
+        }
+    }
+
     fn rpc_of(values: &[&str]) -> (String, Value, Duration) {
         match parse(&args(values)).unwrap().action {
             Action::Rpc { command, params, timeout } => (command, params, timeout),

@@ -5,6 +5,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
 import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
 import { onProjectSettingsRequest } from "@/lib/projectAdded";
+import { onOrchestratorSettingsRequest } from "@/lib/orchestration";
 import { ProjectAddedNotice } from "@/components/ui/ProjectAddedNotice";
 import { PanelLeft, PanelRight } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -176,6 +177,13 @@ export function AppShell() {
   useEffect(() => onProjectSettingsRequest((projectPath) => {
     setSettingsTab("repositories.scripts");
     setSettingsProjectPath(projectPath);
+    setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
+  }), []);
+  // A run's limits, from a session's Run view.
+  useEffect(() => onOrchestratorSettingsRequest(() => {
+    setSettingsTab("orchestrator");
+    setSettingsProjectPath(undefined);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }), []);

@@ -860,6 +860,8 @@ pub fn run() {
             commands::set_orchestrator_settings,
             commands::orchestration_run_for_session,
             commands::orchestration_runs,
+            commands::orchestration_create,
+            commands::orchestrator_limits,
             commands::orchestration_approve,
             commands::orchestration_stop,
             commands::orchestration_update_plan,
