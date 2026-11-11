@@ -669,7 +669,8 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
     if method == "rowStatuses" {
         drop(grant.enter()?);
         let sessions: Vec<_> = crate::store::index::load()?.into_iter().filter(|s| !s.archived).collect();
-        let rows = serde_json::to_value(manager.row_statuses(&sessions))?;
+        // Archived sessions never carry a branch, so the live ones are every session the choice needs.
+        let rows = serde_json::to_value(manager.row_statuses_among(&sessions, &sessions))?;
         drop(grant.enter()?);
         return Ok(rows);
     }

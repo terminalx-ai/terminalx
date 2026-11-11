@@ -18,7 +18,7 @@ export interface SessionTableHandle { focusRow: (id: string) => void }
 const ROW_HEIGHT = 40;
 const HEADER_HEIGHT = 40;
 const OVERSCAN = 6;
-const WIDTHS: Record<TableColumnId, number> = { status: 112, name: 240, project: 160, branch: 180, agent: 140, pr: 120, changes: 112, owner: 160, updated: 112, created: 112 };
+const WIDTHS: Record<TableColumnId, number> = { status: 112, name: 380, project: 160, branch: 180, agent: 140, pr: 120, changes: 112, owner: 160, updated: 112, created: 112 };
 
 export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns, sort, onSort, selectedId, onFocus, onOpen, loading }: {
   containerRef: RefObject<HTMLDivElement | null>;
@@ -123,7 +123,8 @@ function cell(row: SessionTableRow, column: TableColumnId, tabbable: boolean): R
   // mounts only for visible rows, sharing the sidebar's cached status polling.
   if (column === "name") return <span className="flex min-w-0 items-center gap-2">
     <span data-session-title className="min-w-0 flex-1 truncate">{row.name}</span>
-    {row.session && <SessionStatus session={row.session} className="max-w-[55%] shrink font-normal" />}
+    {/* The full label keeps its width (PR number and all); the name gives way first. */}
+    {row.session && <SessionStatus session={row.session} className="max-w-[65%] shrink-0 font-normal" />}
   </span>;
   if (column === "pr") return row.prs.length ? row.prs.map((pr, index) => (
     <button key={pr.url} type="button" tabIndex={tabbable ? 0 : -1} className="mr-2 text-foreground hover:underline" aria-label={`Open PR #${pr.number}`} title={pr.url}

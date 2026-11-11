@@ -1,10 +1,10 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionStatus } from "./SessionStatus";
+import { rowMeta, SessionStatus, SessionStatusMark, StatusBadge } from "./SessionStatus";
 import { api } from "@/lib/api";
 import type { SessionEntry } from "@/types/session";
 import { useSessionRowStatus } from "@/lib/sessionRowStatus";
-import type { SessionStatusInput } from "@terminalx/portable/sessionStatus";
+import type { SessionStatusInput, StatusDescription } from "@terminalx/portable/sessionStatus";
 
 vi.mock("@/lib/api", () => ({ api: { sessionRowStatuses: vi.fn() } }));
 vi.mock("@/lib/prefs", () => ({ usePrefs: () => ({ animations: false }) }));
@@ -21,10 +21,13 @@ describe("visible session rows", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(api.sessionRowStatuses).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.sessionRowStatuses).mock.calls[0][0]).toHaveLength(50);
-    expect(screen.getAllByText("Needs permission")).toHaveLength(51);
+    expect(screen.getAllByText("Needs approval")).toHaveLength(51);
+    expect(screen.getAllByTitle(/permission to run a tool/)).toHaveLength(51);
     input = { tabs: [{ status: "waiting", activity: "needs_answer" }] };
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    expect(screen.getAllByText("Needs answer")).toHaveLength(51);
+    // One label for every kind of waiting; the tooltip names which one.
+    expect(screen.getAllByText("Needs approval")).toHaveLength(51);
+    expect(screen.getAllByTitle(/asked a question/)).toHaveLength(51);
     cleanup();
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(api.sessionRowStatuses).toHaveBeenCalledTimes(2);
@@ -44,7 +47,7 @@ describe("visible session rows", () => {
     const before = counts.get("two");
     rows = { ...rows, one: { tabs: [{ status: "waiting", activity: "needs_permission" }] } };
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    expect(screen.getByText("Needs permission")).toBeTruthy();
+    expect(screen.getByText("Needs approval")).toBeTruthy();
     expect(counts.get("two")).toBe(before);
   });
 
@@ -54,9 +57,41 @@ describe("visible session rows", () => {
     } }).mockRejectedValue(new Error("disconnected"));
     render(<SessionStatus session={session("one")} />);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(screen.getByText("Ready to merge")).toBeTruthy();
+    expect(screen.getByText("Ready to merge · PR #1")).toBeTruthy();
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    expect(screen.queryByText("Ready to merge")).toBeNull();
-    expect(screen.getByText("Idle")).toBeTruthy();
+    expect(screen.queryByText(/Ready to merge/)).toBeNull();
+    expect(screen.getByText("No changes")).toBeTruthy();
+  });
+
+  it("a sidebar mark has no label, only the mark and a tooltip", async () => {
+    vi.mocked(api.sessionRowStatuses).mockResolvedValue({ one: {
+      tabs: [{ status: "idle" }], branch: "feature", branchStatus: { branch: "feature", checked: true, headMatches: true, pr: { number: 781, state: "OPEN", draft: false, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", checks: "FAILURE", inMergeQueue: false } },
+    } });
+    const { container } = render(<SessionStatusMark session={session("one")} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    const mark = screen.getByRole("img", { name: "Checks failing · PR #781" });
+    expect(mark.getAttribute("data-session-status")).toBe("checks_failing");
+    expect(mark.title).toMatch(/failing\. PR #781\.$/);
+    expect(container.textContent).toBe("");
+  });
+
+  it("names the state behind the label where a session's detail shows", () => {
+    const plan = { id: "review_plan", label: "Needs approval", detail: "Review plan", icon: "approval", color: "accent", tooltip: "t", pr: null };
+    const queued = { id: "in_merge_queue", label: "Ready to merge", detail: "In merge queue", icon: "ready", color: "add", tooltip: "t", pr: 779 };
+    const { container } = render(<><StatusBadge status={plan} detail /><StatusBadge status={queued} detail /><StatusBadge status={queued} /><StatusBadge status={{ ...plan, detail: "Needs approval" }} detail /></>);
+    expect([...container.querySelectorAll("[data-session-status]")].map((badge) => badge.textContent)).toEqual([
+      "Needs approval — Review plan", "Ready to merge · PR #779 — In merge queue", "Ready to merge · PR #779", "Needs approval",
+    ]);
+  });
+
+  it.each([
+    [{ label: "Checks failing", pr: 781 }, { additions: 5, deletions: 1 }, { kind: "pr", number: 781 }],
+    [{ label: "Working", pr: null }, { additions: 93, deletions: 10 }, { kind: "time" }],
+    [{ label: "Merged", pr: null }, { additions: 24, deletions: 1 }, { kind: "time" }],
+    [{ label: "Needs approval", pr: null }, { additions: 48, deletions: 6 }, { kind: "lines" }],
+    [{ label: "Uncommitted", pr: null }, { additions: 120, deletions: 14 }, { kind: "lines" }],
+    [{ label: "No changes", pr: null }, { additions: 0, deletions: 0 }, { kind: "time" }],
+  ])("a %o row with %o shows %o after its title, as in 02.04", (status, lines, meta) => {
+    expect(rowMeta(status as StatusDescription, lines)).toEqual(meta);
   });
 });
