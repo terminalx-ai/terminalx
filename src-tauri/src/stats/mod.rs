@@ -749,6 +749,12 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
     let mut current_model: Option<String> = None;
     let mut unpriced_tier = false;
     let mut previous_totals: Option<RawUsage> = None;
+    // A turn just opened: its first reading is measured by its own `last`,
+    // as the turn mapper does (`harness::metrics`). Codex may start its
+    // cumulative counter again for a turn, and a restarted total that is
+    // still larger than the previous turn's would otherwise read as a small
+    // increase and lose a whole request.
+    let mut turn_opened = false;
     let mut seen_records = HashSet::new();
     let mut events = Vec::new();
 
@@ -782,6 +788,7 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
                 }
             }
             Some("turn_context") => {
+                turn_opened = true;
                 unpriced_tier = nonstandard_tier(payload);
                 if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
                     current_cwd = Some(cwd.to_string());
@@ -809,6 +816,9 @@ fn parse_codex(path: &Path) -> Result<Vec<UsageEvent>> {
                 // Replayed records must not rewind the cumulative baseline.
                 if !seen_records.insert(event_key.clone()) {
                     continue;
+                }
+                if std::mem::take(&mut turn_opened) && last.is_some() {
+                    previous_totals = None;
                 }
                 let Some(resolved) = codex_delta(total, last, previous_totals) else {
                     continue;
@@ -1617,6 +1627,20 @@ mod tests {
         assert_eq!(events[0].total_tokens, 34);
         assert_eq!(events[0].day, "2026-09-02");
         assert_eq!(events[0].cwd.as_deref(), Some("/code/raccoon/0"));
+    }
+
+    #[test]
+    fn a_turn_whose_codex_counter_starts_again_keeps_its_first_request() {
+        // Recorded: each turn's `total_token_usage` starts again, and the
+        // second turn's first total (18339) is still above the first's (18282).
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness/codex/fixtures/rollout.jsonl");
+        let events = parse_codex(&path).unwrap();
+        let sum = |field: fn(&UsageEvent) -> u64| events.iter().map(field).sum::<u64>();
+        assert_eq!(events.len(), 7, "one event per request");
+        assert_eq!(sum(|e| e.new_input_tokens + e.cache_read_tokens), 130_454);
+        assert_eq!(sum(|e| e.cache_read_tokens), 113_536);
+        assert_eq!(sum(|e| e.output_tokens), 563);
+        assert!(events.iter().all(|e| !e.unpriced), "each delta is its request's own `last`");
     }
 
     #[test]

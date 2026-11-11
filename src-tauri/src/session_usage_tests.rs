@@ -162,8 +162,8 @@ fn subagents_and_earlier_conversations_of_the_tab_are_counted() {
     for model in [HAIKU, "claude-sonnet-5-5", "gpt-5.6-sol"] {
         assert!(models.contains(&model), "{model} missing from {models:?}");
     }
-    // The costliest first.
-    assert_eq!(models[0], "gpt-5.6-sol");
+    // The costliest first: the Codex conversation's 130k prompt tokens.
+    assert_eq!(models[0], "gpt-5.6-sol", "{:?}", usage.models);
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn a_tab_with_no_readable_agent_carries_nothing() {
 
 fn session(tabs: Vec<TabEntry>) -> SessionEntry {
     let mut session: SessionEntry = serde_json::from_value(json!({
-        "id": "s1", "projectPath": "/w", "cwd": "/w", "title": "Two models", "created": "2026-11-11T10:00:00Z", "tabs": []
+        "id": "s1", "projectPath": "/w", "cwd": "/w", "title": "Two models", "created": "2026-11-11T10:00:00Z", "modified": "2026-11-11T10:00:00Z", "tabs": []
     }))
     .unwrap();
     session.tabs = tabs;

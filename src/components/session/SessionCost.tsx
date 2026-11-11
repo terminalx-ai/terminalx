@@ -93,7 +93,7 @@ const SUBTITLE: Record<Billing, string> = {
   unknown: "at API list prices",
 };
 
-const COLUMNS = { gridTemplateColumns: "minmax(0,1fr) 54px 54px 62px 54px" };
+const COLUMNS = { gridTemplateColumns: "minmax(0,1fr) 48px 48px 56px 54px" };
 
 function windowName(window: UsageWindow): string {
   const kind = window.key === "five_hour" || (window.windowMinutes != null && Math.abs(window.windowMinutes - 300) <= 1) ? "5h"
@@ -134,7 +134,7 @@ function UsagePopover({ session, models, total, onClose }: { session: SessionEnt
   const command = `terminalx sessions usage ${session.id} --json`;
   return <>
     <div className="flex items-center gap-2 px-3.5 pt-3 pb-2.5">
-      <span className="font-medium">Session usage</span>
+      <span className="shrink-0 whitespace-nowrap font-medium">Session usage</span>
       <span className="truncate text-[11px] text-faint" data-testid="session-usage-billing">{SUBTITLE[billing]}</span>
       <span className="ml-auto shrink-0 text-right leading-4">
         <span className="font-mono text-[15px] font-semibold" data-testid="session-usage-total">{formatCost(total.costUsd)}</span>
