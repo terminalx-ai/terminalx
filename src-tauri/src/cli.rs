@@ -52,7 +52,7 @@ Usage:
   terminalx sessions stop --children-of SESSION [--json]
   terminalx sessions archive|unarchive SESSION... [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
-      [--title TEXT] [--name NAME] [--experimental-codex-stdio] [--parent SESSION|--no-parent]
+      [--title TEXT] [--name NAME] [--experimental-codex-stdio] [--report] [--parent SESSION|--no-parent]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --issue ISSUE [--prompt TEXT]
       [--provider github|linear] [--auto-merge|--no-auto-merge]
@@ -60,10 +60,12 @@ Usage:
       [--title TEXT] [--name NAME] [--on-main] [--parent SESSION|--no-parent]
       [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --quick --agent AGENT --prompt TEXT
-      [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--parent SESSION|--no-parent]
+      [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--report] [--parent SESSION|--no-parent]
       [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx floating show|hide|toggle [--session SESSION] [--json]
   terminalx sessions show SESSION [--json]
+  terminalx sessions report SESSION_OR_TAB [--json]
+  terminalx sessions report --children-of SESSION [--json]
   terminalx share create SESSION [--can-drive|--read-only] [--people EMAIL,EMAIL]
       [--expires-in SECONDS] [--no-approve|--approve] [--can-approve] [--max-people COUNT]
       [--single-use] [--local-only] [--json]
@@ -316,6 +318,29 @@ fn wait_many(first: String, tokens: &mut Tokens, all: bool, tab: &Option<String>
     })
 }
 
+/// `wait` on named targets: one session or tab, a cloud session, or several.
+fn wait_named(tokens: &mut Tokens, (any, all): (bool, bool), tab: &Option<String>, seconds: u64) -> Result<Action, ControlError> {
+    let target = tokens.required_front("session or tab")?;
+    // Several targets, or one with --any or --all, get the answer that lists each (PRO-271).
+    if any || all || !tokens.values.is_empty() {
+        wait_many(target, tokens, all, tab, seconds)
+    } else if is_cloud_key(&target) {
+        // Asked in short calls until the timeout (see `cloud_wait`), so nothing outlives this process in the app.
+        Ok(Action::Rpc {
+            command: "cloud.wait".into(),
+            params: json!({"target": target, "timeoutSeconds": seconds, "tab": tab}),
+            timeout: CLOUD_TIMEOUT,
+        })
+    } else {
+        local_only(tab, "--tab")?;
+        Ok(Action::Rpc {
+            command: "wait".into(),
+            params: json!({"target": target, "timeoutSeconds": seconds}),
+            timeout: Duration::from_secs(seconds.saturating_add(10).max(30)),
+        })
+    }
+}
+
 /// `wait` on a cloud session: the app waits at most
 /// [`crate::cloud_control::WAIT_CHUNK_SECONDS`] per call, so the wait is asked
 /// for again until the tab settles or the caller's timeout passes. When this
@@ -467,27 +492,22 @@ fn parse_with_stdin(
             let seconds = tokens.option_u64("--timeout")?.unwrap_or(600);
             let tab = tokens.option("--tab")?;
             let (any, all) = (tokens.flag("--any")?, tokens.flag("--all")?);
-            let target = tokens.required_front("session or tab")?;
-            // Several targets, or one with --any or --all, get the answer that lists each (PRO-271).
             if any && all {
                 return Err(invalid("Pass --any or --all, not both."));
             }
-            if any || all || !tokens.values.is_empty() {
-                wait_many(target, &mut tokens, all, &tab, seconds)
-            } else if is_cloud_key(&target) {
-                // Asked in short calls until the timeout (see `cloud_wait`), so nothing outlives this process in the app.
-                Ok(Action::Rpc {
-                    command: "cloud.wait".into(),
-                    params: json!({"target": target, "timeoutSeconds": seconds, "tab": tab}),
-                    timeout: CLOUD_TIMEOUT,
-                })
-            } else {
+            // Every session a lead started, found once when the call begins (PRO-328).
+            if let Some(lead) = children_of(&mut tokens)? {
+                if let Some(extra) = tokens.take_front() {
+                    return Err(invalid(format!("--children-of waits on the sessions that session started; it cannot be combined with a named target ({extra}).")));
+                }
                 local_only(&tab, "--tab")?;
                 Ok(Action::Rpc {
                     command: "wait".into(),
-                    params: json!({"target": target, "timeoutSeconds": seconds}),
+                    params: json!({"childrenOf": lead, "mode": if all { "all" } else { "any" }, "timeoutSeconds": seconds}),
                     timeout: Duration::from_secs(seconds.saturating_add(10).max(30)),
                 })
+            } else {
+                wait_named(&mut tokens, (any, all), &tab, seconds)
             }
         }
         "permissions" => parse_permissions(&mut tokens),
@@ -626,6 +646,18 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let session = tokens.required_front("session")?;
             rpc("sessions.show", json!({"session": session}), tokens)
         }
+        // What a worker's last turn reported (`worker_report`), parsed.
+        "report" => {
+            // Every worker a lead started (PRO-270), one row each.
+            if let Some(lead) = children_of(tokens)? {
+                return rpc("sessions.report", json!({"childrenOf": lead}), tokens);
+            }
+            let session = tokens.required_front("session or tab")?;
+            if is_cloud_key(&session) {
+                return Err(invalid("sessions report reads a session on this computer; read a cloud session's transcript with `terminalx read`."));
+            }
+            rpc("sessions.report", json!({"session": session}), tokens)
+        }
         // Every running agent of the sessions a lead started (PRO-270).
         "stop" => {
             let lead = children_of(tokens)?.ok_or_else(|| invalid("sessions stop needs --children-of SESSION: it stops the running agents of the sessions that session started."))?;
@@ -676,6 +708,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                     "mode": mode,
                 });
             if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
+            if tokens.flag("--report")? { params["report"] = json!(true); }
             started_by(&mut params, tokens)?;
             rpc("sessions.create", params, tokens)
         }
@@ -724,6 +757,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 "mode": mode,
             });
             if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
+            if tokens.flag("--report")? { params["report"] = json!(true); }
             started_by(&mut params, tokens)?;
             // Only an issue start carries these, so every other request is
             // word for word what it was.
@@ -1421,6 +1455,37 @@ mod tests {
     }
 
     #[test]
+    fn a_workers_report_is_asked_for_at_its_start_and_read_with_one_command() {
+        let (command, params, _) = rpc_of(&["sessions", "report", "0198a", "--json"]);
+        assert_eq!((command.as_str(), params), ("sessions.report", json!({"session": "0198a"})));
+        for refused in [&["sessions", "report"][..], &["sessions", "report", "0198a", "0198b"], &["sessions", "report", "cloud:org-a:ws-1:s1"]] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        // Every worker of a lead at once: the lead `sessions list --children-of` takes, refused the same way.
+        assert_eq!(rpc_of(&["sessions", "report", "--children-of", "0198c", "--json"]), ("sessions.report".into(), json!({"childrenOf": "0198c"}), Duration::from_secs(30)));
+        for refused in [
+            &["sessions", "report", "--children-of"][..], &["sessions", "report", "--children-of", ""], &["sessions", "report", "--children-of", "cloud:org-a:ws-1:s1"],
+            &["sessions", "report", "--children-of", "0198c", "0198a"], &["sessions", "report", "0198a", "--children-of", "0198c"],
+        ] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        // Asked for when the worker is started, in a project or as a quick chat; never said otherwise.
+        let (_, params, _) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "claude", "--prompt", "Audit the handlers", "--report"]);
+        assert_eq!(params["report"], json!(true));
+        let (_, params, _) = rpc_of(&["sessions", "create", "--quick", "--report", "--agent", "claude", "--prompt", "Read the spec"]);
+        assert_eq!(params["report"], json!(true));
+        assert!(rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "claude", "--prompt", "go"]).1.get("report").is_none());
+        for text in [help_text(), GUIDE.to_string()] {
+            for said in ["sessions report", "sessions report --children-of", "--report"] {
+                assert!(text.contains(said), "missing {said}");
+            }
+        }
+        for field in ["terminalx-report", "`status`", "`result`", "`evidence`", "`changed`", "`notDone`", "`couldNotRead`", "`uncertain`", "noEvidence", "`missing`", "truncated"] {
+            assert!(GUIDE.contains(field), "the guide does not document {field}");
+        }
+    }
+
+    #[test]
     fn manual_session_status_accepts_only_the_five_workflow_values() {
         for status in ["backlog", "in_progress", "in_review", "done", "canceled"] {
             let (command, params, _) = rpc_of(&["sessions", "status", "s1", "--status", status, "--json"]);
@@ -1582,6 +1647,19 @@ mod tests {
         // A cloud session is waited on in short calls of its own (`cloud_wait`).
         assert!(refused(&["wait", "s1", "cloud:org-a:ws-1:s1"]).contains("cloud session by itself"));
         assert!(refused(&["wait", "s1", "s2", "--tab", "t1"]).contains("cloud session"));
+
+        // Every session a lead started (PRO-328).
+        let (command, params, timeout) = rpc_of(&["wait", "--children-of", "lead", "--timeout", "40"]);
+        assert_eq!((command.as_str(), params, timeout), ("wait", json!({"childrenOf": "lead", "mode": "any", "timeoutSeconds": 40}), Duration::from_secs(50)));
+        assert_eq!(rpc_of(&["wait", "--all", "--children-of", "lead"]).1, json!({"childrenOf": "lead", "mode": "all", "timeoutSeconds": 600}));
+        assert_eq!(rpc_of(&["wait", "--children-of", "lead", "--any"]).1["mode"], "any");
+        assert!(refused(&["wait", "--children-of", "lead", "s1"]).contains("named target"));
+        assert!(refused(&["wait", "s1", "--children-of", "lead"]).contains("named target"));
+        assert!(refused(&["wait", "--children-of", ""]).contains("--children-of needs a session"));
+        assert!(refused(&["wait", "--children-of", "cloud:org-a:ws-1:s1"]).contains("cloud session"));
+        assert!(refused(&["wait", "--children-of", "lead", "--any", "--all"]).contains("not both"));
+        assert!(refused(&["wait", "--children-of", "lead", "--tab", "t1"]).contains("cloud session"));
+        assert!(refused(&["wait", "--children-of"]).contains("--children-of"));
     }
 
     #[test]

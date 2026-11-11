@@ -72,6 +72,8 @@ function open(tab: Partial<TabEntry>, log: AgentEvent[] = []) {
     if (command === "list_sessions") return [session];
     if (command === "list_harnesses") return [{ id: "claude", name: "Claude Code", available: true }, { id: "codex", name: "Codex", available: true }];
     if (command === "list_models" || command === "list_workspaces") return [];
+    if (command === "chats_dir") return "/home/.raccoon/Chats";
+    if (command === "work_status") return { isRepo: true, dirty: false, branch: "main", ahead: 0, behind: 0 };
     return null;
   });
   return render(<Tab />);
@@ -85,7 +87,12 @@ beforeEach(async () => {
   };
   mocks.views.views = {};
   for (const mock of [mocks.invoke, mocks.start, mocks.forget, mocks.leave]) mock.mockReset();
-  mocks.invoke.mockImplementation(async (command: string) => (command === "list_harnesses" ? [{ id: "claude", name: "Claude Code", available: true }, { id: "codex", name: "Codex", available: true }] : command === "list_projects" ? { projects: [], lastSelected: null } : []));
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "chats_dir") return "/home/.raccoon/Chats";
+    if (command === "list_harnesses") return [{ id: "claude", name: "Claude Code", available: true }, { id: "codex", name: "Codex", available: true }];
+    if (command === "list_projects") return { projects: [], lastSelected: null };
+    return [];
+  });
   await bootSessions();
 });
 afterEach(cleanup);

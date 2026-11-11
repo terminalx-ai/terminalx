@@ -16,10 +16,19 @@
 - Keep native resend regression fixtures within their existing deadlines by
   removing shell helper launches from the simulated protocol. (PRO-166 validation)
 
+- Keep sidebar New chat conversations in Chats with ordinary retention and
+  project linking, while using the shared composer and saved agent settings.
+  Branch drafts retain their requested project and advertised source branch.
+  Chat Git panels follow the working folder's actual repository status;
+  linked chats keep their repository account indicator and refresh control.
+  (PRO-173 follow-up)
 - A session started with `terminalx sessions create` from inside another
   session records it as its `parent` (`--parent`, `--no-parent`).
   `sessions list --children-of` lists the sessions a session started, and
   `sessions stop --children-of` stops their running agents. (PRO-270)
+- `terminalx wait --children-of <session>` waits on every session that session
+  started, with `--any` or `--all`, and returns at once when it started none.
+  (PRO-328)
 
 ## 0.2.29
 

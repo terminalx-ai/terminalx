@@ -194,3 +194,66 @@ fn one_target_keeps_its_answer_and_a_list_is_checked_before_any_waiting() {
     assert_eq!(refused(json!({"targets": [session, 7]})).code, "invalid_arguments");
     assert_eq!(refused(json!({"targets": [session], "mode": "most"})).code, "invalid_arguments");
 }
+
+/// Marks sessions `workers` of `lead` as started by it, the way `sessions create` does.
+fn start_workers(fixture: &Fixture, lead: &str, workers: &[usize]) {
+    for &i in workers {
+        let id = &fixture.sessions[i].0;
+        index::update_session(id, |session| {
+            session.parent = Some(index::ParentRef { session_id: lead.to_owned(), tab_id: None });
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn children_of_waits_on_the_leads_workers_and_lists_them_as_naming_them_does() {
+    let fixture = Fixture::new(4);
+    let lead = fixture.sessions[0].0.clone();
+    start_workers(&fixture, &lead, &[1, 2, 3]);
+    let ends = fixture.set_later(SOON, 2, TabStatus::Completed, false);
+    let waited = fixture.service.execute("wait", json!({"childrenOf": lead, "mode": "any", "timeoutSeconds": 30}), "w").unwrap();
+    ends.join().unwrap();
+    assert_eq!(waited, json!({"mode": "any", "timedOut": false, "targets": [
+        fixture.listed(1, "running", "in_progress", false, None),
+        fixture.listed(2, "stopped", "completed", true, Some("stop")),
+        fixture.listed(3, "running", "in_progress", false, None),
+    ]}));
+    // The same sessions named give the same answer.
+    let named = fixture.service.execute("wait", json!({"targets": [fixture.sessions[1].0, fixture.sessions[2].0, fixture.sessions[3].0], "mode": "all", "timeoutSeconds": 1}), "w").unwrap();
+    let all = fixture.service.execute("wait", json!({"childrenOf": lead, "mode": "all", "timeoutSeconds": 1}), "w").unwrap();
+    assert_eq!(all, named);
+    assert_eq!(all["timedOut"], true);
+}
+
+#[test]
+fn children_of_includes_archived_workers_and_resolves_them_once() {
+    let fixture = Fixture::new(3);
+    let lead = fixture.sessions[0].0.clone();
+    start_workers(&fixture, &lead, &[1]);
+    index::update_session(&fixture.sessions[1].0, |session| {
+        session.archived = true;
+        Ok(())
+    })
+    .unwrap();
+    fixture.set(1, TabStatus::Completed, false);
+    // Started after the call begins, so not part of it: resolved before the wait loop runs.
+    let waited = fixture.service.execute("wait", json!({"childrenOf": lead, "mode": "all", "timeoutSeconds": 1}), "w").unwrap();
+    start_workers(&fixture, &lead, &[2]);
+    assert_eq!(waited["targets"], json!([fixture.listed(1, "stopped", "completed", false, Some("stop"))]));
+}
+
+#[test]
+fn a_lead_with_no_workers_returns_at_once_and_a_bad_lead_is_refused() {
+    let fixture = Fixture::new(2);
+    let lead = fixture.sessions[0].0.clone();
+    let began = Instant::now();
+    let waited = fixture.service.execute("wait", json!({"childrenOf": lead, "mode": "all", "timeoutSeconds": 30}), "w").unwrap();
+    assert!(began.elapsed() < Duration::from_secs(10), "{:?}", began.elapsed());
+    assert_eq!(waited["targets"], json!([]));
+    assert_eq!(waited["timedOut"], false);
+    assert!(waited["reason"].as_str().unwrap().contains("nothing to wait for"), "{waited}");
+    let refused = fixture.service.execute("wait", json!({"childrenOf": "no-such-session", "timeoutSeconds": 1}), "w").unwrap_err();
+    assert_eq!(refused.code, "not_found");
+}

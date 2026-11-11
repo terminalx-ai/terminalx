@@ -275,30 +275,77 @@ describe("a refreshed session list", () => {
 });
 
 describe("new chat", () => {
+  it("creates an ordinary session in Chats on send, without the disposable quick-chat kind", async () => {
+    const chatsPath = "/Users/me/.raccoon/Chats";
+    const chat: SessionEntry = { ...attached, id: "ordinary-chat", projectPath: chatsPath, cwd: chatsPath, branch: null, worktreeName: null };
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command, args) => command === "chats_dir" ? Promise.resolve(chatsPath)
+      : command === "create_session" ? Promise.resolve(chat) : original(command, args));
+    const tab = { harness: "codex", model: "gpt-6-astra", effort: "high", permissionMode: "bypassPermissions" };
+    const saved = await sessions.createChat({ title: "Keep this chat", tab });
+    expect(mocks.invoke).toHaveBeenCalledWith("create_session", { req: { projectPath: chatsPath, cwd: chatsPath, title: "Keep this chat", useWorktree: false, tab } });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "create_quick_chat" || command === "add_project")).toBe(false);
+    expect(saved.kind).toBeUndefined();
+    expect(sessions.getSessionStore().chatsPath).toBe(chatsPath);
+    expect(sessions.getSessionStore().sessions).toContainEqual(chat);
+  });
+
+  it("keeps a chosen folder and personal section when creating an ordinary chat", async () => {
+    const chatsPath = "/Users/me/.raccoon/Chats";
+    const chat = { ...attached, projectPath: chatsPath, cwd: "/notes" };
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command, args) => command === "chats_dir" ? Promise.resolve(chatsPath)
+      : command === "create_session" ? Promise.resolve(chat) : original(command, args));
+    await sessions.createChat({ title: "Keep my notes", cwd: "/notes", sectionId: "release" });
+    expect(mocks.invoke).toHaveBeenCalledWith("create_session", { req: {
+      projectPath: chatsPath, cwd: "/notes", title: "Keep my notes", sectionId: "release", useWorktree: false, tab: undefined,
+    } });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "create_quick_chat" || command === "add_project")).toBe(false);
+  });
+
+  it("resolves a removed conversation's project before opening its branch composer", async () => {
+    const removed = "/repos/removed";
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command, args) => command === "add_project"
+      ? Promise.resolve({ path: removed, name: "removed", kind: "git" }) : original(command, args));
+    await sessions.startChat({ projectPath: removed, cwd: `${removed}/worktrees/task` });
+    expect(mocks.invoke).toHaveBeenCalledWith("add_project", { path: removed });
+    expect(sessions.getSessionStore().projects.some((p) => p.path === removed)).toBe(true);
+    expect(sessions.getSessionStore().newSessionPreset).toEqual({ projectPath: removed, cwd: `${removed}/worktrees/task` });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+  });
+
+  it("keeps the existing conversation selected when its removed project cannot be resolved", async () => {
+    sessions.selectSession(attached.id);
+    await expect(sessions.startChat({ projectPath: "/gone", fromBranch: "feature/login" })).rejects.toThrow();
+    expect(sessions.getSessionStore()).toMatchObject({ selectedSessionId: attached.id, newSessionPreset: null });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+  });
+
   it("opens the shared composer without creating a session or scratch folder, even with no agents", async () => {
     sessions.selectSession(attached.id);
     mocks.invoke.mockClear();
     await sessions.startChat();
-    expect(sessions.getSessionStore()).toMatchObject({ view: "new", selectedSessionId: null, newSessionQuick: true, newSessionReturn: { sessionId: attached.id } });
+    expect(sessions.getSessionStore()).toMatchObject({ view: "new", selectedSessionId: null, newSessionChat: true, newSessionReturn: { sessionId: attached.id } });
     expect(sessions.getSessionStore().sessions).toEqual([attached]);
     expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat", "chats_dir", "add_project"].includes(command))).toBe(false);
     sessions.closeNewSession();
-    expect(sessions.getSessionStore()).toMatchObject({ selectedSessionId: attached.id, newSessionQuick: false });
+    expect(sessions.getSessionStore()).toMatchObject({ selectedSessionId: attached.id, newSessionChat: false });
   });
 
   it("switches between project and project-less destinations without starting anything", async () => {
     mocks.invoke.mockClear();
     await sessions.startChat();
     sessions.startSessionIn(projectPath, null);
-    expect(sessions.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: false, newSessionPreset: { projectPath, cwd: null } });
+    expect(sessions.getSessionStore()).toMatchObject({ view: "new", newSessionChat: false, newSessionPreset: { projectPath, cwd: null } });
     await sessions.startChat();
-    expect(sessions.getSessionStore()).toMatchObject({ newSessionQuick: true, newSessionPreset: null, cloudSessionPreset: null });
+    expect(sessions.getSessionStore()).toMatchObject({ newSessionChat: true, newSessionPreset: null, cloudSessionPreset: null });
     expect(mocks.invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
   });
 
   it("keeps the project branch or checkout as an unsent composer destination", async () => {
     await sessions.startChat({ projectPath, fromBranch: "feature/login" });
-    expect(sessions.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: false, newSessionPreset: { projectPath, cwd: null, fromBranch: "feature/login" } });
+    expect(sessions.getSessionStore()).toMatchObject({ view: "new", newSessionChat: false, newSessionPreset: { projectPath, cwd: null, fromBranch: "feature/login" } });
     await sessions.startChat({ projectPath, cwd: worktreePath });
     expect(sessions.getSessionStore().newSessionPreset).toEqual({ projectPath, cwd: worktreePath });
     expect(sessions.getSessionStore().sessions).toEqual([attached]);
