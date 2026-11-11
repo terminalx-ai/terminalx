@@ -63,10 +63,51 @@ pub fn for_worker(session_id: &str) -> Result<Option<(Run, String)>> {
     }))
 }
 
+/// The verifier tabs this process knows of, as (session, tab): the stored
+/// ones, read once, and each one made since ([`note_verifier`]).
+static VERIFIERS: Mutex<Option<std::collections::HashSet<(String, String)>>> = Mutex::new(None);
+
+fn stored_verifiers() -> Result<std::collections::HashSet<(String, String)>> {
+    Ok(list()?
+        .iter()
+        .flat_map(|run| &run.pieces)
+        .flat_map(|piece| &piece.tries)
+        .filter_map(|attempt| attempt.verification.as_ref()?.review.as_ref())
+        .flat_map(|review| &review.verifiers)
+        .filter_map(|verifier| verifier.session.as_ref())
+        .filter_map(|verifier| Some((verifier.session_id.clone(), verifier.tab_id.clone()?)))
+        .collect())
+}
+
 /// Whether a tab is a verifier of some piece's result (`verify`): a
 /// conversation in the worker's worktree that reads and never edits.
-pub fn is_verifier(session_id: &str, tab_id: &str) -> Result<bool> {
-    Ok(list()?.iter().flat_map(|run| &run.pieces).flat_map(|piece| &piece.tries).filter_map(|attempt| attempt.verification.as_ref()?.review.as_ref()).flat_map(|review| &review.verifiers).filter_map(|verifier| verifier.session.as_ref()).any(|verifier| verifier.session_id == session_id && verifier.tab_id.as_deref() == Some(tab_id)))
+///
+/// Asked for every tool call that would edit a file, in any session, so it
+/// is answered from memory. If the runs cannot be read it says no, and reads
+/// again the next time: an unreadable file must not stop every agent on this
+/// computer from editing. A verifier is still started in a mode that edits
+/// nothing ([`super::guard::VERIFIER_MODE`]).
+pub fn is_verifier(session_id: &str, tab_id: &str) -> bool {
+    let mut known = VERIFIERS.lock().unwrap_or_else(|error| error.into_inner());
+    if known.is_none() {
+        match stored_verifiers() {
+            Ok(stored) => *known = Some(stored),
+            Err(error) => {
+                log::warn!("read the runs to see which tabs are verifiers: {error:#}");
+                return false;
+            }
+        }
+    }
+    known.as_ref().is_some_and(|known| known.contains(&(session_id.to_string(), tab_id.to_string())))
+}
+
+/// A verifier was made: it is one from now, before it is sent anything.
+pub fn note_verifier(session_id: &str, tab_id: &str) {
+    let mut known = VERIFIERS.lock().unwrap_or_else(|error| error.into_inner());
+    // Not read yet: it is in the store by the time it is, or noted again when stored.
+    if let Some(known) = known.as_mut() {
+        known.insert((session_id.to_string(), tab_id.to_string()));
+    }
 }
 
 pub fn insert(run: &Run) -> Result<()> {

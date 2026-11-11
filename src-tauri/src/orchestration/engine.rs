@@ -748,7 +748,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         let checked = host.check(&run, piece, &worker);
         let limits = host.limits(&run.project_path);
         let failed = checked.gates.iter().find(|gate| !gate.passed).map(gate_failure);
-        let reasons = if failed.is_none() { checks::review_reasons(piece, &checked.facts, limits.review_diff_lines) } else { Vec::new() };
+        let reasons = if checked.passed() { checks::review_reasons(piece, &checked.facts, limits.review_diff_lines) } else { Vec::new() };
         // Gates 1 to 4 passed and nothing calls for a reader, or a gate failed: settled with no session.
         if reasons.is_empty() {
             let models = if failed.is_some() { host.models() } else { Vec::new() };
@@ -796,6 +796,9 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         announce(host, &run, &after);
         if !kept {
             continue;
+        }
+        for verifier in verifiers.iter().filter_map(|verifier| verifier.session.as_ref()) {
+            store::note_verifier(&verifier.session_id, verifier.tab_id.as_deref().unwrap_or_default());
         }
         let unsent: Vec<(usize, String)> = verifiers
             .iter()

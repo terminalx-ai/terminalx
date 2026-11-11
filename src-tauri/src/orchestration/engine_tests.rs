@@ -1226,8 +1226,8 @@ fn a_review_is_read_by_a_verifier_on_the_verify_row_that_sees_the_diff_and_none_
     assert_eq!(review.verifiers[0].session, Some(SessionRef { session_id: "w1-guide".into(), tab_id: Some(verifier.session.clone()) }));
     assert_eq!((review.verifiers[0].model.as_str(), review.verifiers[0].effort.as_deref()), ("sonnet", Some("medium")));
     // It is known as a verifier from before its first turn: an edit by it is refused.
-    assert!(store::is_verifier("w1-guide", "w1-guide-verifier-1").unwrap());
-    assert!(!store::is_verifier("w1-guide", "w1-guide-tab").unwrap(), "the worker's own tab is not one");
+    assert!(store::is_verifier("w1-guide", "w1-guide-verifier-1"));
+    assert!(!store::is_verifier("w1-guide", "w1-guide-tab"), "the worker's own tab is not one");
     // The prompt: the goal, the done-check, the diff and what the gates said.
     for said in ["The guide documents every settings key.", "- Every key in src/store/settings is named in the guide.", "diff --git a/docs/guide.md b/docs/guide.md", "- No command proves this piece: it is checked by review alone.", "- report: passed", "- scope: passed", "- branch state: passed", "against `settings-typed-store`"] {
         assert!(prompt.contains(said), "{said:?} is missing from:\n{prompt}");

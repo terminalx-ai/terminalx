@@ -6414,9 +6414,8 @@ impl SessionManager {
                 return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
             }
             // A verifier of a run's result reads it and changes nothing: an edit is refused in
-            // every permission mode. The runs are read only for a call that would edit; if they
-            // cannot be read, a tab of a run's worker session is held to reading all the same.
-            if let Some(reason) = crate::orchestration::guard::verifier_refusal(&frame.payload).filter(|_| crate::orchestration::store::is_verifier(&frame.session, &frame.tab).unwrap_or(true)) {
+            // every permission mode, whatever its tab is switched to later.
+            if let Some(reason) = crate::orchestration::guard::verifier_refusal(&frame.payload).filter(|_| crate::orchestration::store::is_verifier(&frame.session, &frame.tab)) {
                 log::info!("run verifier {}/{}: {reason}", frame.session, frame.tab);
                 return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
             }
