@@ -7,6 +7,8 @@ pub mod audio;
 pub mod catalog;
 pub mod download;
 pub mod engine;
+// Only macOS dictation consumes live audio; its portable logic stays tested on Linux.
+#[cfg(any(target_os = "macos", test))]
 pub mod live;
 pub mod noise;
 pub mod commands;

@@ -2,6 +2,8 @@
 //! See the ignored test for the explicit fixture manifest contract.
 use serde::{Deserialize, Serialize};
 
+// Real-model evaluation uses the macOS engine; scoring tests remain portable.
+#[cfg(target_os = "macos")]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Manifest {
@@ -75,6 +77,7 @@ fn score(reference: &str, hypothesis: &str, terms: &[String]) -> Score {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Outcome {
@@ -86,6 +89,7 @@ struct Outcome {
     processing_us: u128,
     noise: super::noise::NoiseResult,
 }
+#[cfg(target_os = "macos")]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Report {
