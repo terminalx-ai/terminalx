@@ -42,6 +42,8 @@ pub struct Lead {
     pub model: String,
     /// Workers need worktrees, so the project must be a git repository.
     pub repository: bool,
+    /// The lead's own checkout: where a path a piece owns is looked up.
+    pub cwd: String,
 }
 
 /// A worker session, just created for a piece.
@@ -152,7 +154,7 @@ fn stored(id: &str) -> Result<Run, EngineError> {
 }
 
 fn rules_for<'a>(limits: &'a OrchestratorLimits, lead: &'a Lead, agents: &'a [String], models: &'a [Model]) -> plan::Rules<'a> {
-    plan::Rules { piece_limit: limits.piece_limit, default_agent: &lead.agent, agents, worker_mode: &limits.worker_mode, approval: limits.require_approval, routing: &limits.routing, models, lead_model: &lead.model }
+    plan::Rules { piece_limit: limits.piece_limit, default_agent: &lead.agent, agents, worker_mode: &limits.worker_mode, approval: limits.require_approval, routing: &limits.routing, models, lead_model: &lead.model, checkout: Some(std::path::Path::new(&lead.cwd)) }
 }
 
 /// The installed models, when the plan leaves a model or an effort to the
@@ -653,7 +655,9 @@ pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> 
         error.details = json!({"piece": piece_id, "state": piece.state});
         return Err(error);
     }
-    let failure = format!("The done-check did not hold: {}\n{}", piece.done_check, failure_text(output));
+    // The checks as the plan wrote them: the next worker is held to the same ones.
+    let checks: Vec<&str> = piece.done_checks.iter().map(super::Check::text).collect();
+    let failure = format!("The done-check did not hold: {}\n{}", checks.join("; "), failure_text(output));
     let models = host.models();
     let (run, ()) = store::update(id, |run| {
         // A run that was done is not, with a piece whose check failed.

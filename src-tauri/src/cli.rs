@@ -833,10 +833,9 @@ fn started_by(params: &mut Value, tokens: &mut Tokens) -> Result<(), ControlErro
         (Some(parent), false) if parent.trim().is_empty() => return Err(invalid("--parent needs a session.")),
         (Some(parent), false) if is_cloud_key(&parent) => return Err(invalid("--parent names a session on this computer, not a cloud session.")),
         (Some(parent), false) => params["parent"] = json!(parent),
-        (None, true) => {
-            params["noParent"] = json!(true);
-            return Ok(());
-        }
+        // No parent is recorded, but where the command ran is still said: a run's worker
+        // is held to its limits by who asks, not by what the request records.
+        (None, true) => params["noParent"] = json!(true),
         (None, false) => {}
     }
     if let Some(caller) = calling_session() {
@@ -1239,7 +1238,12 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let project = tokens.option("--project")?;
             let pipeline = tokens.required_front("pipeline")?;
             tokens.finish()?;
-            Ok(Action::Rpc { command: "pipelines.act".into(), params: json!({"pipeline": pipeline, "project": project, "action": command}), timeout: PIPELINE_TIMEOUT })
+            let mut params = json!({"pipeline": pipeline, "project": project, "action": command});
+            // Who asks, when it is asked from inside a session: a run's worker steers no pipeline.
+            if let Some(caller) = calling_session() {
+                params["caller"] = caller;
+            }
+            Ok(Action::Rpc { command: "pipelines.act".into(), params, timeout: PIPELINE_TIMEOUT })
         }
         other => Err(invalid(format!("Unknown pipelines command {other}."))),
     }
@@ -1484,9 +1488,9 @@ mod tests {
             assert!(inside.get("parent").is_none() && inside.get("noParent").is_none());
             // The named parent goes with the caller, whose tab is recorded when they are the same session.
             assert_eq!((&named["parent"], &named["caller"]), (&json!("0198c"), &caller));
-            // Nobody: not even where it ran.
-            assert_eq!(nobody["noParent"], true);
-            assert!(nobody.get("caller").is_none() && nobody.get("parent").is_none());
+            // Nobody is recorded as its parent; where it ran is still said.
+            assert_eq!((&nobody["noParent"], &nobody["caller"]), (&json!(true), &caller));
+            assert!(nobody.get("parent").is_none());
             assert_eq!(with(base, &["--parent", "0198c"])["parent"], "0198c");
             for refused in [&["--parent", "0198c", "--no-parent"][..], &["--parent", ""], &["--parent"], &["--parent", "cloud:org:ws:s"]] {
                 assert_eq!(parse(&args(&[base, refused].concat())).unwrap_err().code, "invalid_arguments", "{refused:?}");
@@ -1524,7 +1528,7 @@ mod tests {
     fn runs_are_created_from_a_plan_file_and_driven_by_id_or_from_inside_their_lead() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plan.json");
-        let plan = json!({"goal": "Move settings reads", "pieces": [{"id": "a", "title": "A", "kind": "code", "doneCheck": "cargo t"}]});
+        let plan = json!({"goal": "Move settings reads", "pieces": [{"id": "a", "title": "A", "kind": "code", "doneChecks": [{"type": "command", "run": "cargo t"}]}]});
         std::fs::write(&path, plan.to_string()).unwrap();
         let path = path.to_str().unwrap();
 
@@ -1585,7 +1589,7 @@ mod tests {
         for said in ["terminalx runs create --from PLAN.json|- [--lead SESSION]", "terminalx runs start|show|stop [RUN]", "terminalx runs list [--lead SESSION] [--all]", "terminalx runs check-failed PIECE [--run RUN] [--output FILE|-] [--reason TEXT]"] {
             assert!(help_text().contains(said), "{said}");
         }
-        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneCheck`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8", "#### Model and effort", "`no_kind`", "`unknown_kind`", "#### When a piece falls short", "terminalx runs check-failed <piece>", "never past\n   `high`", "`piece_not_done`", "`modelNote`", "| top | Fable | Astra |"] {
+        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneChecks`", "{\"type\": \"command\", \"run\":", "{\"type\": \"review\", \"text\":", "`no_command_check`", "`review_only_without_reason`", "\"reviewOnly\": true", "`owns_outside_repository`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8", "#### Model and effort", "`no_kind`", "`unknown_kind`", "#### When a piece falls short", "terminalx runs check-failed <piece>", "never past\n   `high`", "`piece_not_done`", "`modelNote`", "| top | Fable | Astra |"] {
             assert!(GUIDE.contains(said), "the guide does not say {said:?}");
         }
     }

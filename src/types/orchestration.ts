@@ -69,6 +69,13 @@ export interface RunEstimate {
   high: number;
 }
 
+/** One thing that proves a piece done: a command run in the worker's worktree (exit 0 passes),
+ * what a reviewer must confirm from the diff, or a claim several reviewers vote on. */
+export type RunCheck =
+  | { type: "command"; run: string }
+  | { type: "review"; text: string }
+  | { type: "vote"; text: string; voters?: number; threshold?: number };
+
 export interface PieceBrief {
   goal: string;
   why: string;
@@ -85,7 +92,11 @@ export interface RunPiece {
   brief: PieceBrief;
   owns: string[];
   dependsOn: string[];
-  doneCheck: string;
+  /** What proves the piece done, in order: at least one, a command among them unless `reviewOnly`. */
+  doneChecks: RunCheck[];
+  /** No command can prove this piece: review alone checks it, for the reason given. */
+  reviewOnly?: boolean;
+  reviewOnlyReason?: string;
   kind?: string;
   agent: string;
   /** The model of its current try. Empty for the agent's own default model. */
@@ -166,7 +177,11 @@ export interface RunPlanPiece {
   limits: string[];
   owns: string[];
   dependsOn: string[];
-  doneCheck: string;
+  /** What proves the piece done, in order: at least one, a command among them unless `reviewOnly`. */
+  doneChecks: RunCheck[];
+  /** No command can prove this piece: review alone checks it, for the reason given. */
+  reviewOnly?: boolean;
+  reviewOnlyReason?: string;
   kind?: string;
   agent: string;
   model: string;

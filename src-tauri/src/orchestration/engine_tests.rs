@@ -83,7 +83,7 @@ impl Host for Fake {
         if session_id == "nobody" {
             return Err(EngineError::new("lead_not_found", "No session nobody to lead the run.", None));
         }
-        Ok(Lead { project_path: "/repo".into(), agent: "claude".into(), model: "fable".into(), repository: self.repository })
+        Ok(Lead { project_path: "/repo".into(), agent: "claude".into(), model: "fable".into(), repository: self.repository, cwd: "/repo".into() })
     }
 
     fn worker_agents(&self) -> Vec<String> {
@@ -166,12 +166,12 @@ fn plan() -> Plan {
         "goal": "Move settings reads to the typed store",
         "budget": {"points": 25},
         "pieces": [
-            {"id": "map", "title": "Map every settings read", "doneCheck": "the list covers every call", "model": "haiku", "kind": "search", "estimate": {"low": 0.05, "high": 0.05}},
-            {"id": "store", "title": "Typed store module", "doneCheck": "cargo t store::settings", "kind": "code", "owns": ["src/store/settings/"], "dependsOn": ["map"], "model": "opus", "effort": "medium", "estimate": {"low": 1.6, "high": 2.4}},
-            {"id": "session", "title": "Move session code", "doneCheck": "cargo t session", "kind": "scoped-code", "owns": ["src/session*.rs"], "dependsOn": ["store"], "model": "sonnet", "effort": "medium"},
-            {"id": "pipeline", "title": "Move pipeline code", "doneCheck": "cargo t issue_pipeline", "kind": "scoped-code", "owns": ["src/issue_pipeline/"], "dependsOn": ["store"], "model": "sonnet", "permissionMode": "acceptEdits"},
-            {"id": "cli", "title": "Move CLI code", "doneCheck": "cargo t control", "kind": "code", "owns": ["src/cli.rs", "src/control.rs"], "dependsOn": ["store"], "agent": "codex", "model": "gpt-terra", "effort": "high"},
-            {"id": "docs", "title": "Update the docs", "doneCheck": "every documented key exists", "kind": "scoped-code", "owns": ["docs/"], "dependsOn": ["session", "pipeline", "cli"], "readsUntrusted": true},
+            {"id": "map", "title": "Map every settings read", "doneChecks": [{"type": "command", "run": "the list covers every call"}], "model": "haiku", "kind": "search", "estimate": {"low": 0.05, "high": 0.05}},
+            {"id": "store", "title": "Typed store module", "kind": "code", "doneChecks": [{"type": "command", "run": "cargo t store::settings"}], "owns": ["src/store/settings/"], "dependsOn": ["map"], "model": "opus", "effort": "medium", "estimate": {"low": 1.6, "high": 2.4}},
+            {"id": "session", "title": "Move session code", "kind": "scoped-code", "doneChecks": [{"type": "command", "run": "cargo t session"}], "owns": ["src/session*.rs"], "dependsOn": ["store"], "model": "sonnet", "effort": "medium"},
+            {"id": "pipeline", "title": "Move pipeline code", "kind": "scoped-code", "doneChecks": [{"type": "command", "run": "cargo t issue_pipeline"}], "owns": ["src/issue_pipeline/"], "dependsOn": ["store"], "model": "sonnet", "permissionMode": "acceptEdits"},
+            {"id": "cli", "title": "Move CLI code", "kind": "code", "doneChecks": [{"type": "command", "run": "cargo t control"}], "owns": ["src/cli.rs", "src/control.rs"], "dependsOn": ["store"], "agent": "codex", "model": "gpt-terra", "effort": "high"},
+            {"id": "docs", "title": "Update the docs", "kind": "scoped-code", "doneChecks": [{"type": "command", "run": "every documented key exists"}], "owns": ["docs/"], "dependsOn": ["session", "pipeline", "cli"], "readsUntrusted": true},
         ],
     }))
     .unwrap()
@@ -227,7 +227,7 @@ fn a_plan_is_refused_with_the_rule_and_the_piece_and_nothing_is_stored() {
     let error = refused(&|plan| plan.pieces[1].depends_on.push("docs".into()));
     assert_eq!((error.code, error.details["piece"].as_str()), ("dependency_cycle", Some("store")));
     assert_eq!(error.details["cycle"], json!(["store", "docs", "session", "store"]));
-    let error = refused(&|plan| plan.pieces[2].done_check = String::new());
+    let error = refused(&|plan| plan.pieces[2].done_checks.clear());
     assert_eq!((error.code, error.details["piece"].as_str()), ("no_done_check", Some("session")));
     assert!(error.recovery.as_deref().unwrap().contains("Nothing was stored"));
     assert!(store::list().unwrap().is_empty());
@@ -383,8 +383,8 @@ fn the_projects_mode_is_the_default_of_its_workers_and_a_piece_may_choose_within
     }
     let two = |mode: &str| -> Plan {
         serde_json::from_value(json!({"goal": "Two", "pieces": [
-            {"id": "a", "title": "A", "doneCheck": "x", "kind": "code"},
-            {"id": "b", "title": "B", "doneCheck": "x", "kind": "code", "permissionMode": mode},
+            {"id": "a", "title": "A", "kind": "code", "doneChecks": [{"type": "command", "run": "x"}]},
+            {"id": "b", "title": "B", "kind": "code", "doneChecks": [{"type": "command", "run": "x"}], "permissionMode": mode},
         ]}))
         .unwrap()
     };
@@ -485,8 +485,8 @@ fn one_piece() -> (Fake, String) {
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
     let plan: Plan = serde_json::from_value(json!({"goal": "Move CLI reads", "pieces": [
-        {"id": "cli", "title": "Move CLI code", "kind": "scoped-code", "doneCheck": "cargo t control", "owns": ["src/cli.rs"]},
-        {"id": "docs", "title": "Update the docs", "kind": "scoped-code", "doneCheck": "every key is documented", "owns": ["docs/"], "dependsOn": ["cli"]},
+        {"id": "cli", "title": "Move CLI code", "kind": "scoped-code", "doneChecks": [{"type": "command", "run": "cargo t control"}], "owns": ["src/cli.rs"]},
+        {"id": "docs", "title": "Update the docs", "kind": "scoped-code", "doneChecks": [{"type": "command", "run": "every key is documented"}], "owns": ["docs/"], "dependsOn": ["cli"]},
     ]}))
     .unwrap();
     let run = engine::create(&host, &plan, "lead", Some("lead-tab".into())).unwrap();
@@ -497,7 +497,7 @@ fn one_piece() -> (Fake, String) {
 fn one_piece_for(lead: &str) -> (Fake, String) {
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
-    let plan: Plan = serde_json::from_value(json!({"goal": "Move CLI reads", "pieces": [{"id": "cli", "title": "Move CLI code", "kind": "scoped-code", "doneCheck": "cargo t control", "owns": ["src/cli.rs"]}]})).unwrap();
+    let plan: Plan = serde_json::from_value(json!({"goal": "Move CLI reads", "pieces": [{"id": "cli", "title": "Move CLI code", "kind": "scoped-code", "doneChecks": [{"type": "command", "run": "cargo t control"}], "owns": ["src/cli.rs"]}]})).unwrap();
     let run = engine::create(&host, &plan, lead, None).unwrap();
     engine::start(&host, &run.id).unwrap();
     (host, run.id)
@@ -514,10 +514,10 @@ fn a_plan_with_kinds_and_no_models_starts_each_worker_on_the_tables_model_and_ef
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
     let plan: Plan = serde_json::from_value(json!({"goal": "Kinds only", "pieces": [
-        {"id": "map", "title": "Map", "kind": "search", "doneCheck": "x"},
-        {"id": "build", "title": "Build", "kind": "code", "doneCheck": "x", "owns": ["src/"]},
-        {"id": "port", "title": "Port", "kind": "code", "agent": "codex", "doneCheck": "x", "owns": ["lib/"]},
-        {"id": "study", "title": "Study", "kind": "research", "agent": "codex", "doneCheck": "x"},
+        {"id": "map", "title": "Map", "kind": "search", "doneChecks": [{"type": "command", "run": "x"}]},
+        {"id": "build", "title": "Build", "kind": "code", "doneChecks": [{"type": "command", "run": "x"}], "owns": ["src/"]},
+        {"id": "port", "title": "Port", "kind": "code", "agent": "codex", "doneChecks": [{"type": "command", "run": "x"}], "owns": ["lib/"]},
+        {"id": "study", "title": "Study", "kind": "research", "agent": "codex", "doneChecks": [{"type": "command", "run": "x"}]},
     ]}))
     .unwrap();
     let run = engine::create(&host, &plan, "lead", None).unwrap();
@@ -679,7 +679,7 @@ fn a_piece_with_no_tier_above_it_is_blocked_after_two_tries() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
-    let plan: Plan = serde_json::from_value(json!({"goal": "Reshape", "pieces": [{"id": "shape", "title": "Reshape the store", "kind": "refactor", "doneCheck": "cargo t"}]})).unwrap();
+    let plan: Plan = serde_json::from_value(json!({"goal": "Reshape", "pieces": [{"id": "shape", "title": "Reshape the store", "kind": "refactor", "doneChecks": [{"type": "command", "run": "cargo t"}]}]})).unwrap();
     let run = engine::create(&host, &plan, "lead", None).unwrap();
     engine::start(&host, &run.id).unwrap();
     host.reports("shape", Status::Failed, "It does not compile.");
@@ -757,9 +757,9 @@ fn a_worker_that_cannot_be_started_fails_its_piece_and_the_next_start_tries_agai
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
     let plan: Plan = serde_json::from_value(json!({"goal": "Three", "pieces": [
-        {"id": "a", "title": "A", "doneCheck": "x", "kind": "code"},
-        {"id": "b", "title": "B", "doneCheck": "x", "kind": "code"},
-        {"id": "c", "title": "C", "doneCheck": "x", "kind": "code"},
+        {"id": "a", "title": "A", "kind": "code", "doneChecks": [{"type": "command", "run": "x"}]},
+        {"id": "b", "title": "B", "kind": "code", "doneChecks": [{"type": "command", "run": "x"}]},
+        {"id": "c", "title": "C", "kind": "code", "doneChecks": [{"type": "command", "run": "x"}]},
     ]}))
     .unwrap();
     let run = engine::create(&host, &plan, "lead", None).unwrap();
@@ -789,8 +789,8 @@ fn a_session_that_cannot_be_made_safe_is_kept_and_tried_again_never_made_twice()
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
     let plan: Plan = serde_json::from_value(json!({"goal": "Two", "pieces": [
-        {"id": "a", "title": "A", "doneCheck": "x", "kind": "code"},
-        {"id": "b", "title": "B", "doneCheck": "x", "kind": "code"},
+        {"id": "a", "title": "A", "kind": "code", "doneChecks": [{"type": "command", "run": "x"}]},
+        {"id": "b", "title": "B", "kind": "code", "doneChecks": [{"type": "command", "run": "x"}]},
     ]}))
     .unwrap();
     let run = engine::create(&host, &plan, "lead", None).unwrap();
@@ -893,7 +893,7 @@ fn a_person_may_change_the_plan_before_approving_or_discard_it() {
     let after = engine::update_plan(&host, &run.id, &edited).unwrap();
     assert_eq!((after.pieces.len(), after.piece("store").unwrap().model.as_str(), after.plan_edited, after.state), (5, "sonnet", true, RunState::AwaitingApproval));
     let mut broken = plan();
-    broken.pieces[0].done_check.clear();
+    broken.pieces[0].done_checks.clear();
     let error = engine::update_plan(&host, &run.id, &broken).unwrap_err();
     assert_eq!((error.code, error.details["piece"].as_str()), ("no_done_check", Some("map")));
     assert_eq!(store::get(&run.id).unwrap(), after, "a refused edit changes nothing");

@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-  appRouting, budgetText, costText, defaultRoute, estimateText, fellShort, gaveUp, PIECE_KINDS, pieceCost, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf, sameRoute, TIERS,
-  withoutPiece,
+  appRouting, budgetText, checksFrom, checkText, costText, defaultRoute, estimateText, fellShort, gaveUp, PIECE_KINDS, pieceCost, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf, sameRoute,
+  TIERS, withoutPiece,
 } from "./orchestration";
 import type { Run, RunPiece } from "@/types/orchestration";
 
 const piece = (id: string, extra: Partial<RunPiece> = {}): RunPiece => ({
-  id, title: `Piece ${id}`, owns: [], dependsOn: [], doneCheck: "cargo t", agent: "claude", model: "sonnet", readsUntrusted: false, attempts: 0, state: "queued",
+  id, title: `Piece ${id}`, owns: [], dependsOn: [], doneChecks: [{ type: "command", run: "cargo t" }], agent: "claude", model: "sonnet", readsUntrusted: false, attempts: 0, state: "queued",
   brief: { goal: `Do ${id}`, why: "", scope: "", outOfScope: "", known: [], readFirst: [], limits: [] }, ...extra,
 });
 
@@ -41,7 +41,7 @@ describe("orchestration runs (PRO-274)", () => {
     expect(plan.budget).toEqual({ points: 25 });
     expect(plan.pieces[1]).toEqual({
       id: "b", title: "Piece b", goal: "A typed store", why: "The rest needs it", scope: "The store", outOfScope: "Call sites", known: ["41 call sites"], readFirst: ["docs/SETTINGS.md"],
-      limits: ["Keep unknown keys"], owns: ["src/store/"], dependsOn: ["a"], doneCheck: "cargo t", kind: undefined, agent: "claude", model: "sonnet", effort: "high", permissionMode: "manual",
+      limits: ["Keep unknown keys"], owns: ["src/store/"], dependsOn: ["a"], doneChecks: [{ type: "command", run: "cargo t" }], reviewOnly: undefined, reviewOnlyReason: undefined, kind: undefined, agent: "claude", model: "sonnet", effort: "high", permissionMode: "manual",
       readsUntrusted: true, estimate: undefined,
     });
     expect(plan.pieces[0].estimate).toEqual({ low: 0.05, high: 0.05 });
@@ -79,6 +79,15 @@ describe("orchestration runs (PRO-274)", () => {
     expect(budgetText({ budget: { dollars: 15 } })).toBe("$15.00");
     expect(budgetText({ budget: { points: 25, dollars: 15 } })).toBe("25 points · $15.00");
     expect(budgetText({ budget: {} })).toBeNull();
+  });
+
+  it("reads a piece's checks back from what Edit holds, keeping the votes it had", () => {
+    const before = [{ type: "command" as const, run: "old" }, { type: "vote" as const, text: "No key lost.", voters: 3, threshold: 2 }, { type: "review" as const, text: "old point" }];
+    expect(checksFrom(" cargo t \n\npnpm tsc --noEmit\n", "Unknown keys survive.\n  ", before)).toEqual([
+      { type: "command", run: "cargo t" }, { type: "command", run: "pnpm tsc --noEmit" }, { type: "review", text: "Unknown keys survive." }, { type: "vote", text: "No key lost.", voters: 3, threshold: 2 },
+    ]);
+    expect(checksFrom("", "", [])).toEqual([]);
+    expect([checkText({ type: "command", run: "cargo t" }), checkText({ type: "review", text: "Reads well." }), checkText({ type: "vote", text: "Sound." })]).toEqual(["cargo t", "Reads well.", "Sound."]);
   });
 
   it("numbers pieces by their place in the plan", () => {

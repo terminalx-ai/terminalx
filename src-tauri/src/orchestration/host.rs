@@ -44,7 +44,7 @@ impl Host for ManagerHost {
         let session = index::get(session_id).map_err(|_| EngineError::new("lead_not_found", format!("No session {session_id} to lead the run."), Some("Run the command inside the lead's session, or name it with --lead.")))?;
         let (agent, model) = session.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| (tab.harness.clone(), tab.model.clone())).unwrap_or_default();
         let repository = session.kind == SessionKind::Project && crate::git::is_repo(Path::new(&session.cwd));
-        Ok(Lead { project_path: session.project_path, agent, model, repository })
+        Ok(Lead { project_path: session.project_path, agent, model, repository, cwd: session.cwd })
     }
 
     fn worker_agents(&self) -> Vec<String> {

@@ -9,7 +9,9 @@
   dependencies are done: its own worktree and branch cut from the lead's, the
   piece's model and effort, and a brief built from the piece. A plan is refused,
   naming the piece, when two pieces own the same file, a dependency loops, a piece
-  has no done-check or there are more pieces than the limit (8 by default). By
+  has no done-check or there are more pieces than the limit (8 by default). A
+  done-check is a command run in the worker's worktree or a point for a reviewer
+  to confirm; a piece needs a command unless it says why review alone can check it. By
   default a run waits until you approve its plan in the session's new Run view,
   where you can also edit or discard it; no command approves one. Workers start
   in bypass unless the repository or the plan says otherwise, and never push,

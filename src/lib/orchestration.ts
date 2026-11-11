@@ -2,7 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { orchestration } from "@/lib/api";
 import type {
-  PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunEstimate, RunPiece, RunPlan, RunRefusal, RunState, Tier, TryOutcome, TryStep,
+  PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunPiece, RunPlan, RunRefusal, RunState, Tier, TryOutcome, TryStep,
 } from "@/types/orchestration";
 
 /** The runs this window has heard of, by the session that leads each: a lead has one run to show, its newest. */
@@ -102,7 +102,9 @@ export function planOf(run: Run): RunPlan {
       limits: piece.brief.limits,
       owns: piece.owns,
       dependsOn: piece.dependsOn,
-      doneCheck: piece.doneCheck,
+      doneChecks: piece.doneChecks,
+      reviewOnly: piece.reviewOnly,
+      reviewOnlyReason: piece.reviewOnlyReason,
       kind: piece.kind,
       agent: piece.agent,
       model: piece.model,
@@ -129,6 +131,21 @@ const ALLOWS = ["plan", "manual", "acceptEdits", "auto", "bypassPermissions"];
 /** Whether a piece asks for more than the run's own mode: what the person approving is shown. */
 export function raisesMode(run: Pick<Run, "workerMode">, piece: Pick<RunPiece, "permissionMode">): boolean {
   return !!piece.permissionMode && ALLOWS.indexOf(piece.permissionMode) > ALLOWS.indexOf(run.workerMode);
+}
+
+/** A check in a line: the command, or the words to confirm. */
+export function checkText(check: RunCheck): string {
+  return check.type === "command" ? check.run : check.text;
+}
+
+/** A piece's checks from what Edit holds: commands and review points a line each, and the votes it had, untouched. */
+export function checksFrom(commands: string, reviews: string, before: RunCheck[]): RunCheck[] {
+  const lines = (text: string) => text.split("\n").map((line) => line.trim()).filter(Boolean);
+  return [
+    ...lines(commands).map((run): RunCheck => ({ type: "command", run })),
+    ...lines(reviews).map((text): RunCheck => ({ type: "review", text })),
+    ...before.filter((check) => check.type === "vote"),
+  ];
 }
 
 /** `$0.05`, `$1.60–2.40`: one figure when the range is a point. */

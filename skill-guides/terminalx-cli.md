@@ -612,9 +612,12 @@ The plan is a JSON file you write:
       "known": ["41 call sites read settings directly today."],
       "readFirst": ["docs/SETTINGS.md"],
       "limits": ["Keep unknown keys when saving."],
-      "owns": ["src-tauri/src/store/settings/"],
+      "owns": ["src-tauri/src/store/settings/", "docs/SETTINGS.md"],
       "dependsOn": [],
-      "doneCheck": "cargo t store::settings exits 0",
+      "doneChecks": [
+        {"type": "command", "run": "cd src-tauri && cargo t store::settings"},
+        {"type": "review", "text": "Unknown keys in an existing file survive a save."}
+      ],
       "kind": "code",
       "permissionMode": "acceptEdits",
       "readsUntrusted": false,
@@ -624,19 +627,34 @@ The plan is a JSON file you write:
 }
 ```
 
-- `goal` and `pieces` are required; each piece needs `id`, `title`, `kind` and `doneCheck`.
+- `goal` and `pieces` are required; each piece needs `id`, `title`, `kind` and
+  `doneChecks`. A key the format does not have is refused, not ignored.
 - `kind`: what sort of work the piece is. Its model and effort come from it (see "Model and
   effort" below), so name the kind that fits and leave `model` and `effort` out:
   - `search`: finding files, listing call sites. `logs`: reading test output and logs.
   - `scoped-code`: a bug fix or a change with a clear spec. `code`: everyday engineering.
   - `refactor`: architecture and large refactors. `research`: deep research and analysis.
   - `review`: reviewing a diff. `verify`: checking a worker's result.
-- `owns`: the files or areas only this piece changes, as paths relative to the repository. A
-  directory means everything in it; `*`, `?` and `**` work as in a glob. Leave it empty for a
-  piece that changes nothing (a search, a review).
+- `owns`: the files only this piece changes, as paths or globs relative to the repository's
+  root, written as `git diff --name-only` prints them. A directory means everything in it;
+  `*` and `?` match within one name and `**` across directories. They are stored as globs
+  (`src/store/` becomes `src/store/**`), and a worker's diff is later held to them: a file
+  it changed that it does not own fails its piece. An absolute path or one with `..` is
+  refused (`owns_outside_repository`). Leave it empty for a piece that changes nothing (a
+  search, a review).
 - `dependsOn`: the ids of pieces that must be done before this one starts.
-- `doneCheck`: the command or condition that proves the piece done. The worker is told to run
-  it and put the result in its report.
+- `doneChecks`: what proves the piece done, as a list of typed checks:
+  - `{"type": "command", "run": "<shell command>"}`: run at the root of the worker's
+    worktree; exit code 0 passes. TerminalX runs it itself, so it costs no tokens. Prefer
+    one wherever a test, a build, a type check or a search that must find nothing exists.
+  - `{"type": "review", "text": "<what a reviewer must confirm>"}`: for what no command can
+    show. The reviewer sees the diff and this text, not the worker's reasoning.
+  - `{"type": "vote", "text": "…", "voters": 3, "threshold": 2}`: several reviewers judge
+    it separately. For high-cost claims only; it is stored with the plan.
+  A piece needs at least one `command` check. If no command can prove it (prose, a design
+  note), set `"reviewOnly": true` and say why in `"reviewOnlyReason"`; without the reason
+  the piece is refused. The worker is told every check and to run the commands itself
+  before it reports.
 - `goal`, `why`, `scope`, `outOfScope`, `known`, `readFirst`, `limits`: the worker's brief. A
   worker knows nothing of your conversation, so write what it needs; a part you leave empty is
   stated as empty in the brief.
@@ -658,7 +676,12 @@ piece in `details.piece`, and nothing is stored:
 - `shared_file`: two pieces own the same file (`details.other`, `details.path`). Give each
   file to one piece, or make one piece depend on the other and own it alone.
 - `dependency_cycle` (`details.cycle`), `unknown_dependency` (`details.dependsOn`).
-- `no_done_check`: a piece has no `doneCheck`.
+- `no_done_check`: a piece has no `doneChecks`. `empty_check`: one of them says nothing
+  (`details.check` is its place in the list).
+- `no_command_check`: a piece has no `command` check and is not `reviewOnly`.
+  `review_only_without_reason`: it is `reviewOnly` and `reviewOnlyReason` is empty.
+- `owns_outside_repository`: a piece owns a path that is not inside the repository
+  (`details.path`).
 - `no_kind`: a piece has no `kind`. `unknown_kind`: it names one that does not exist
   (`details.kinds` lists the eight).
 - `too_many_pieces`: more pieces than the limit (`details.limit`; 8 unless the person changed
@@ -827,8 +850,9 @@ check of every tool call, a git configuration in which every push goes nowhere, 
 with no upstream. A refused command tells the worker to stop and report what is ready.
 Collect a worker's branch from the shared repository yourself (`git merge <its branch>` in
 your worktree); do not ask a worker to push or to merge. A worker gets no issue pipeline
-(`pipelines start` is refused for it: a pipeline would push and merge on its behalf), and a
-session a worker starts has the same limits as the worker.
+(a pipeline would push and merge on its behalf, so every `pipelines` command but `list` and
+`show` is refused for it) and starts no sessions or runs of its own; a session started for
+it all the same has the worker's limits.
 
 ### Tokens and cost (`sessions usage`)
 
@@ -1405,7 +1429,8 @@ JSON failures have this shape:
   Nothing was created; use an id from `sessions list`, or `--no-parent` to record none.
 - `invalid_arguments`: correct the named flag or missing value; do not invent a substitute.
 - `shared_file`, `dependency_cycle`, `unknown_dependency`, `no_done_check`, `too_many_pieces`,
-  `mode_not_allowed`, `unknown_key`, `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`:
+  `mode_not_allowed`, `no_command_check`, `review_only_without_reason`, `empty_check`,
+  `owns_outside_repository`, `unknown_key`, `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`:
   `runs create` refused the plan. `details` names the piece and the rule's particulars;
   nothing was stored. Correct the plan and create the run again.
 - `awaiting_approval`: the run waits for the person to approve its plan in the app. Tell
