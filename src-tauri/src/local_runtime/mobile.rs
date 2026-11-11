@@ -619,7 +619,7 @@ pub fn actor(params: &Value) -> Result<Actor> {
 /// - `terminal`: `openTerminal`, and observations whose output says the pane's size.
 /// - `closeTab`: `closeTab`, closing a tab as the desktop's tab strip does.
 pub fn features() -> Value {
-    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1 })
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 1 })
 }
 
 /// What a runtime too old to name its features serves, by its version
@@ -722,6 +722,11 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         // a phone may change on this Mac. The grant stays held while they act,
         // so a phone revoked meanwhile neither starts a session nor changes one.
         "create" => { grant.driver()?; create_session(manager, &params) }
+        "configuration" => {
+            let project = params["projectId"].as_str().map(crate::store::projects::by_public_id).transpose()?;
+            let resolved = crate::store::configuration::view(project.as_ref().map(|project| project.path.as_str()))?;
+            Ok(serde_json::to_value(resolved)?)
+        }
         "settings" => Ok(phone_settings(&crate::store::settings::load())),
         "setSettings" => {
             grant.driver()?;

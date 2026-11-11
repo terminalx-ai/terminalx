@@ -684,7 +684,7 @@ impl Terminals {
             command.chars().any(char::is_whitespace)
                 || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
         });
-        let environment = crate::store::environment::launch(cwd);
+        let environment = crate::store::environment::launch(cwd)?;
         // Lifecycle hooks must not perform cleanup with missing credentials
         // or endpoints. Check the exact snapshot that this process receives.
         if executable.is_some() {

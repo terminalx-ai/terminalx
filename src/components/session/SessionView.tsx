@@ -211,6 +211,8 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
  *    (`HEADER_TIGHT_BUTTONS`), so the full-height buttons do not take the
  *    title's first characters either.
  *
+ * At that narrow width, breadcrumb padding, gaps and chip margins tighten
+ * to keep the title readable beside the full-height 40px action buttons.
  * The connection and role chips never shrink. The shrink factors do the
  * ordering: a larger one takes (nearly) all the squeeze until it is at its
  * minimum.

@@ -176,7 +176,7 @@ fn worktree_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry],
 
 fn branch_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
     let project_path = Path::new(&project.path);
-    let prefix = crate::store::settings::load().branch_prefix;
+    let Ok(prefix) = crate::store::configuration::branch_prefix(project_path) else { return };
     // Without a prefix every branch would look like one of Raccoon's.
     if prefix.is_empty() {
         return;
@@ -417,7 +417,7 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
             Ok(leftover.size_bytes)
         }
         LeftoverKind::Branch => {
-            let prefix = crate::store::settings::load().branch_prefix;
+            let prefix = crate::store::configuration::branch_prefix(project).map_err(|e| e.to_string())?;
             let plain = leftover.name.strip_prefix(&prefix).is_some_and(|name| !prefix.is_empty() && !name.is_empty() && !name.contains("..") && !name.starts_with('-'));
             if !plain || leftover.name.starts_with('-') {
                 return Err("refusing to delete: not one of Raccoon's branches".into());

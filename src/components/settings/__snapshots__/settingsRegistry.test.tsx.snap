@@ -3,6 +3,7 @@
 exports[`settings registry > keeps a reviewable inventory of stable, unique row ids 1`] = `
 [
   "general.settingsFile",
+  "general.layeredConfiguration",
   "about.updates",
   "about.version",
   "about.checkUpdates",

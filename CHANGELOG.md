@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Branch prefixes and local launch environment can now inherit shared repository
+  configuration, local overrides and managed locks. Settings → General → Layered
+  configuration shows sources and offers explicit repository saves. Shared values
+  require native consent tied to the repository and file contents; changed files
+  need approval again. CLI and paired phones can inspect redacted sources. Setup
+  and archive scripts and files to copy are not read from the shared file yet.
+
 - Sidebar rows show change counts, command/server activity and the current
   window's unsent prompt previews. Mark rows read or unread from their menu
   (R), archive on hover, and cycle waiting sessions with ⌘⌥L. Unread reminders

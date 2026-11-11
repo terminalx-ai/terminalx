@@ -707,14 +707,15 @@ pub fn worktree_path(project: &Path, name: &str) -> PathBuf {
     worktree_root(project).join(name)
 }
 
-pub fn worktree_branch(name: &str) -> String {
-    format!("{}{}", crate::store::settings::load().branch_prefix, name)
+pub fn worktree_branch_for(project: &Path, name: &str) -> Result<String> {
+    Ok(format!("{}{}", crate::store::configuration::branch_prefix(project)?, name))
 }
 
 /// Every `raccoon/*` branch, local and remote-tracking, so a name whose PR
 /// already landed is never redrawn.
 pub fn worktree_branch_names(project: &Path) -> Vec<String> {
-    let prefix = crate::store::settings::load().branch_prefix;
+    let Ok(prefix) = crate::store::configuration::branch_prefix(project) else { return Vec::new(); };
+    if prefix.is_empty() { return Vec::new(); }
     run(project, &["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"])
         .map(|s| {
             s.lines()
@@ -837,11 +838,11 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     if !crate::names::is_worktree_name(name) && name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
         bail!("bad worktree name");
     }
+    let branch = worktree_branch_for(project, name)?;
     let (fetched, warning) = fetch_worktree_base(project, base, timeout);
     let base = resolve_base(project, base)?;
     let path = worktree_path(project, name);
     std::fs::create_dir_all(worktree_root(project))?;
-    let branch = worktree_branch(name);
     run(project, &["worktree", "add", "--no-track", "-b", &branch, arg(&path)?, &base])?;
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
@@ -857,6 +858,7 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
 /// branch is checked out as it is, its commits and upstream kept. A remote
 /// branch (`origin/fix-x`) gets a local branch of its name tracking it.
 pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<CreatedWorktree> {
+    crate::store::configuration::branch_prefix(project)?;
     if name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
         bail!("bad worktree name");
     }
@@ -956,7 +958,7 @@ pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<Create
         bail!("only TerminalX-managed workspaces can be renamed");
     }
     let old_name = path.file_name().and_then(|part| part.to_str()).ok_or_else(|| anyhow::anyhow!("workspace has no usable name"))?;
-    let old_branch = worktree_branch(old_name);
+    let old_branch = worktree_branch_for(&project, old_name)?;
     let branch = current_branch(&path).ok_or_else(|| anyhow::anyhow!("workspace has no branch"))?;
     if branch != old_branch {
         bail!("workspace branch does not match its TerminalX name");
@@ -969,7 +971,7 @@ pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<Create
     if destination.exists() {
         bail!("workspace {name} already exists");
     }
-    let new_branch = worktree_branch(name);
+    let new_branch = worktree_branch_for(&project, name)?;
     run(&project, &["worktree", "move", arg(&path)?, arg(&destination)?])?;
     if let Err(rename_error) = run(&destination, &["branch", "-m", &new_branch]) {
         let rollback = run(&project, &["worktree", "move", arg(&destination)?, arg(&path)?]);
@@ -1065,7 +1067,7 @@ pub fn worktree_disposition(project: &Path, name: &str) -> WorktreeDisposition {
     if std::fs::symlink_metadata(&path).is_err() {
         return WorktreeDisposition::default();
     }
-    let branch = worktree_branch(name);
+    let Ok(branch) = worktree_branch_for(project, name) else { return WorktreeDisposition { exists: true, ..Default::default() }; };
     let unchecked = WorktreeDisposition { exists: true, checked: false, uncommitted: 0, unpushed: 0, branch: Some(branch.clone()) };
     if !is_worktree_of(project, &path) {
         return unchecked;
@@ -1250,7 +1252,7 @@ pub fn rescue_detached(project: &Path, name: &str, commit: &str) -> Option<Strin
     if unheld == 0 {
         return None;
     }
-    let branch = format!("{}rescued/{name}-{}", crate::store::settings::load().branch_prefix, &commit[..8]);
+    let branch = format!("{}rescued/{name}-{}", crate::store::configuration::branch_prefix(project).ok()?, &commit[..8]);
     run(project, &["branch", "--", &branch, commit]).ok().map(|_| branch)
 }
 
@@ -1318,7 +1320,7 @@ pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Resu
         }
     }
     let _ = run(project, &["worktree", "prune"]);
-    let branch = worktree_branch(name);
+    let Ok(branch) = worktree_branch_for(project, name) else { return Ok(removal); };
     if !branch_exists(project, &branch) {
         return Ok(removal);
     }

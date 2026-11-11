@@ -68,6 +68,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json" },
   }),
   defineSetting({
+    id: "general.layeredConfiguration", section: "general", title: "Layered configuration",
+    description: "Resolve user, shared, local and managed settings; review repository trust and locked values.",
+    searchTerms: ["configuration", "repository", "trust", "managed", "locked", "branch prefix"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json, system managed policy and .terminalx/settings*.json" }, layout: "content",
+  }),
+  defineSetting({
     id: "about.updates", section: "about", title: "Updates",
     description: "Beta gets builds earlier. Either way nothing installs without your say-so.",
     searchTerms: ["about", "updates"], scope: "user",

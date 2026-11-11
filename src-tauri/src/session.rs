@@ -2515,7 +2515,7 @@ impl SessionManager {
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         self.accepting_work()?;
         let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
-        let environment = crate::store::environment::launch(cwd);
+        let environment = crate::store::environment::launch(cwd)?;
         let mut env: Vec<_> = environment.values.into_iter().collect();
         env.extend([
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
