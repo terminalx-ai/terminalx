@@ -52,7 +52,7 @@ Usage:
   terminalx sessions stop --children-of SESSION [--json]
   terminalx sessions archive|unarchive SESSION... [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
-      [--title TEXT] [--name NAME] [--experimental-codex-stdio] [--parent SESSION|--no-parent]
+      [--title TEXT] [--name NAME] [--experimental-codex-stdio] [--report] [--parent SESSION|--no-parent]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --issue ISSUE [--prompt TEXT]
       [--provider github|linear] [--auto-merge|--no-auto-merge]
@@ -60,10 +60,12 @@ Usage:
       [--title TEXT] [--name NAME] [--on-main] [--parent SESSION|--no-parent]
       [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --quick --agent AGENT --prompt TEXT
-      [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--parent SESSION|--no-parent]
+      [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--report] [--parent SESSION|--no-parent]
       [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx floating show|hide|toggle [--session SESSION] [--json]
   terminalx sessions show SESSION [--json]
+  terminalx sessions report SESSION_OR_TAB [--json]
+  terminalx sessions report --children-of SESSION [--json]
   terminalx share create SESSION [--can-drive|--read-only] [--people EMAIL,EMAIL]
       [--expires-in SECONDS] [--no-approve|--approve] [--can-approve] [--max-people COUNT]
       [--single-use] [--local-only] [--json]
@@ -644,6 +646,18 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let session = tokens.required_front("session")?;
             rpc("sessions.show", json!({"session": session}), tokens)
         }
+        // What a worker's last turn reported (`worker_report`), parsed.
+        "report" => {
+            // Every worker a lead started (PRO-270), one row each.
+            if let Some(lead) = children_of(tokens)? {
+                return rpc("sessions.report", json!({"childrenOf": lead}), tokens);
+            }
+            let session = tokens.required_front("session or tab")?;
+            if is_cloud_key(&session) {
+                return Err(invalid("sessions report reads a session on this computer; read a cloud session's transcript with `terminalx read`."));
+            }
+            rpc("sessions.report", json!({"session": session}), tokens)
+        }
         // Every running agent of the sessions a lead started (PRO-270).
         "stop" => {
             let lead = children_of(tokens)?.ok_or_else(|| invalid("sessions stop needs --children-of SESSION: it stops the running agents of the sessions that session started."))?;
@@ -694,6 +708,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                     "mode": mode,
                 });
             if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
+            if tokens.flag("--report")? { params["report"] = json!(true); }
             started_by(&mut params, tokens)?;
             rpc("sessions.create", params, tokens)
         }
@@ -742,6 +757,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 "mode": mode,
             });
             if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
+            if tokens.flag("--report")? { params["report"] = json!(true); }
             started_by(&mut params, tokens)?;
             // Only an issue start carries these, so every other request is
             // word for word what it was.
@@ -1436,6 +1452,37 @@ mod tests {
         assert_eq!(rpc_of(&["sessions", "list", "--project", "api"]).1, json!({"project": "api", "quick": false, "archived": false, "worktree": null}));
         assert!(parse(&args(&["sessions", "list", "--quick", "--project", "api"])).is_err());
         assert!(parse(&args(&["sessions", "list", "--quick", "--cloud"])).is_err());
+    }
+
+    #[test]
+    fn a_workers_report_is_asked_for_at_its_start_and_read_with_one_command() {
+        let (command, params, _) = rpc_of(&["sessions", "report", "0198a", "--json"]);
+        assert_eq!((command.as_str(), params), ("sessions.report", json!({"session": "0198a"})));
+        for refused in [&["sessions", "report"][..], &["sessions", "report", "0198a", "0198b"], &["sessions", "report", "cloud:org-a:ws-1:s1"]] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        // Every worker of a lead at once: the lead `sessions list --children-of` takes, refused the same way.
+        assert_eq!(rpc_of(&["sessions", "report", "--children-of", "0198c", "--json"]), ("sessions.report".into(), json!({"childrenOf": "0198c"}), Duration::from_secs(30)));
+        for refused in [
+            &["sessions", "report", "--children-of"][..], &["sessions", "report", "--children-of", ""], &["sessions", "report", "--children-of", "cloud:org-a:ws-1:s1"],
+            &["sessions", "report", "--children-of", "0198c", "0198a"], &["sessions", "report", "0198a", "--children-of", "0198c"],
+        ] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        // Asked for when the worker is started, in a project or as a quick chat; never said otherwise.
+        let (_, params, _) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "claude", "--prompt", "Audit the handlers", "--report"]);
+        assert_eq!(params["report"], json!(true));
+        let (_, params, _) = rpc_of(&["sessions", "create", "--quick", "--report", "--agent", "claude", "--prompt", "Read the spec"]);
+        assert_eq!(params["report"], json!(true));
+        assert!(rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "claude", "--prompt", "go"]).1.get("report").is_none());
+        for text in [help_text(), GUIDE.to_string()] {
+            for said in ["sessions report", "sessions report --children-of", "--report"] {
+                assert!(text.contains(said), "missing {said}");
+            }
+        }
+        for field in ["terminalx-report", "`status`", "`result`", "`evidence`", "`changed`", "`notDone`", "`couldNotRead`", "`uncertain`", "noEvidence", "`missing`", "truncated"] {
+            assert!(GUIDE.contains(field), "the guide does not document {field}");
+        }
     }
 
     #[test]

@@ -57,6 +57,13 @@ impl LocalHost {
         Self { sink, manager, place: Place::Desktop }
     }
 
+    /// A turn ended in a tab that owes a report (`worker_report`): it is asked
+    /// once more when the reply has none.
+    pub(crate) fn worker_turn_completed(&self, session_id: &str, tab_id: &str, final_message: Option<&str>) {
+        let to = SessionRef { session_id: session_id.into(), tab_id: tab_id.into() };
+        crate::worker_report::turn_completed(final_message, || self.manager.load_events(session_id, tab_id), |prompt| Host::send(self, &to, prompt));
+    }
+
     /// The host of a cloud workspace's runtime.
     pub fn cloud_workspace(sink: Arc<dyn EventSink>, manager: SessionManager, tab_added: TabAdded) -> Self {
         Self { sink, manager, place: Place::CloudWorkspace { tab_added } }
@@ -93,14 +100,7 @@ fn last_reply(events: &[crate::events::AgentEvent]) -> Option<(DateTime<Utc>, St
     use crate::events::{Payload, TurnStatus};
     let end = events.iter().rposition(|event| event.subagent.is_none() && matches!(event.payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. }))?;
     let at = DateTime::parse_from_rfc3339(&events[end].ts).ok()?.with_timezone(&Utc);
-    let said = |event: &crate::events::AgentEvent| match &event.payload {
-        Payload::AssistantText { text, .. } if event.subagent.is_none() && !text.trim().is_empty() => Some(text.clone()),
-        _ => None,
-    };
-    let reply = match &events[end].payload {
-        Payload::TurnCompleted { final_text: Some(text), .. } if !text.trim().is_empty() => text.clone(),
-        _ => events[..end].iter().rev().take_while(|event| !matches!(event.payload, Payload::TurnStarted { .. })).find_map(said)?,
-    };
+    let (_, reply) = crate::reply_block::turn_reply(events, end)?;
     Some((at, reply))
 }
 
