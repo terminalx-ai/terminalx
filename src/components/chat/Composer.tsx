@@ -109,6 +109,7 @@ export function Composer({
   files: givenFiles,
   remote = false,
   busy,
+  setupRunning = false,
   draft,
   onDraftChange,
   onSend,
@@ -151,6 +152,7 @@ export function Composer({
   /** The tab runs on another machine (a cloud workspace): a file dropped from this computer is not mentioned to it. */
   remote?: boolean;
   busy: boolean;
+  setupRunning?: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
   onSend: (text: string, images: ImageInput[], alternate?: boolean) => Promise<void> | void;
@@ -722,6 +724,7 @@ export function Composer({
           </div>
         </div>
       </div>
+      {setupRunning && <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status">Setup running</div>}
       {pendingNote && (
         <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status" data-testid="composer-settings-pending">
           {pendingNote}

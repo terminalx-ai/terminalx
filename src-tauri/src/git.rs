@@ -914,7 +914,7 @@ pub fn checkout_pr_worktree(project: &Path, name: &str, number: u64) -> Result<C
 
 fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: impl FnOnce(&Path, u64, &str) -> Result<()>) -> Result<CreatedWorktree> {
     if name.is_empty() || name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') || number == 0 { bail!("Invalid pull request worktree"); }
-    let branch = worktree_branch(name);
+    let branch = worktree_branch_for(project, name)?;
     if branch_exists(project, &branch) { bail!("Branch {branch} already exists"); }
     let path = worktree_path(project, name);
     if path.exists() { bail!("Worktree path already exists: {}", path.display()); }
@@ -1600,7 +1600,7 @@ mod tests {
             bail!("GitHub unavailable")
         }).is_err());
         assert!(!worktree_path(project, "broken-pr").exists());
-        assert!(!branch_exists(project, &worktree_branch("broken-pr")));
+        assert!(!branch_exists(project, &worktree_branch_for(project, "broken-pr").unwrap()));
         // A collision never deletes the earlier worktree or branch.
         assert!(checkout_pr_worktree_with(project, "pr-12", 12, |_, _, _| unreachable!()).is_err());
         assert!(Path::new(&wt.path).exists());
