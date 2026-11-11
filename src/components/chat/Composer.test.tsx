@@ -273,6 +273,26 @@ describe("composer pickers", () => {
   // hidden: an open modal menu hides the rest of the page from the accessibility tree.
   const picker = (name: RegExp) => screen.getByRole("button", { name, hidden: true });
 
+  it("offers handoff as a new tab and warns about the cache before a mid-chat setting change", async () => {
+    const run = vi.fn();
+    const onSetModel = vi.fn();
+    const props = { tab, busy: false, draft: "", onDraftChange: vi.fn(), onSend: vi.fn(), onStop: vi.fn(), onSetModel, onSetEffort: vi.fn(), onSetMode: vi.fn() };
+    const { rerender } = render(<Composer {...props} hasConversation agentHandoff={{ id: "claude", name: "Claude Code", run }} />);
+    mouseClick(screen.getByTestId("model-picker"));
+    const handoff = await screen.findByRole("menuitem", { name: /Hand off to Claude Code/ });
+    expect(handoff.textContent).toContain("Opens in a new tab");
+    expect(screen.getByRole("note").textContent).toContain("rebuild the prompt cache");
+    expect(onSetModel).not.toHaveBeenCalled();
+    fireEvent.click(handoff);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(onSetModel).not.toHaveBeenCalled();
+    rerender(<Composer {...props} />);
+    mouseClick(screen.getByTestId("model-picker"));
+    await screen.findByRole("menu");
+    expect(screen.queryByRole("menuitem", { name: /Hand off/ })).toBeNull();
+    expect(screen.queryByRole("note")).toBeNull();
+  });
+
   it("the model picker opens on a real mouse click and closes on a second one", async () => {
     const models = await import("@/lib/models");
     render(<TestComposer onSend={vi.fn()} />);

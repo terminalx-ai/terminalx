@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelInfo } from "@/lib/api";
 import type { Project, SessionEntry, TabEntry } from "@/types/session";
@@ -54,6 +55,31 @@ async function pickAgent(name: string) {
   fireEvent.click(screen.getByTitle("Agent"));
   fireEvent.click(await screen.findByRole("menuitem", { name }));
 }
+it("preselects the requested counterpart and preserves the source permission mode", async () => {
+  mocks.launch.mockResolvedValue({ stage: "delivered" });
+  render(<ContinuationDialog session={session} source={source} initialHarness="codex" onClose={vi.fn()} />);
+  await loaded();
+  expect(shown()).toEqual(["Codex", "GPT-6 Mini", "Medium", "Plan"]);
+  fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, expect.objectContaining({ harness: "codex", permissionMode: "plan" }), continuationPrompt(context, "focused"), expect.any(Function), undefined, expect.any(Function)));
+});
+it("automatically asks once for a second opinion, without exporting history or carrying automation", async () => {
+  mocks.launch.mockResolvedValue({ stage: "delivered" });
+  render(<StrictMode><ContinuationDialog session={session} source={{ ...source, permissionMode: "bypassPermissions" }} initialHarness="codex" reviewPrompt="Review this recorded diff" onClose={vi.fn()} /></StrictMode>);
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledTimes(1));
+  expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session.id, cwd: session.cwd }), { harness: "codex", model: "gpt-6-mini", effort: "medium", permissionMode: "plan" }, "Review this recorded diff", expect.any(Function), undefined, expect.any(Function), "review");
+  expect(mocks.prepare).not.toHaveBeenCalled();
+  expect(screen.queryByRole("group", { name: "New session settings" })).toBeNull();
+  expect(screen.getByTestId("review-settings").textContent).toContain("Codex · GPT-6 Mini · Plan (read-only)");
+  expect(screen.getByText(/Share the selected turn's prompt, answer and recorded file diffs with Codex/)).toBeTruthy();
+});
+it("does not fall back to the source agent when the requested counterpart disappears", async () => {
+  mocks.providers.mockResolvedValue([providers[0]]);
+  render(<ContinuationDialog session={session} source={source} initialHarness="codex" reviewPrompt="Review" onClose={vi.fn()} />);
+  await screen.findByRole("alert");
+  expect(mocks.launch).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Start New Session" }).hasAttribute("disabled")).toBe(true);
+});
 it("shows accessible source details, the source's launch settings, focused default and active-turn notice", async () => {
   open(); await loaded();
   expect(screen.getByRole("dialog").getAttribute("aria-labelledby")).toBeTruthy();

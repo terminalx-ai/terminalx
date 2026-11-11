@@ -268,6 +268,8 @@ export interface ShellPane {
   title: string | null;
   /** The reader named it; `title` is otherwise the name it was opened with. */
   renamed?: boolean;
+  /** Explicit placement; absent for terminals opened by older runtimes. */
+  docked?: boolean | null;
   cwd: string;
   exited: boolean;
   /** When it was opened, so every window lists it in the same place. */
@@ -2344,6 +2346,7 @@ export const pty = {
   /** The agents in front of terminals right now (#437), for a window that loads after they were started. */
   agents: () => invoke<PaneAgent[]>("pane_agents"),
   rename: (id: string, title: string) => invoke<void>("pty_rename", { id, title }),
+  setDocked: (id: string, docked: boolean) => invoke<ShellPane>("pty_set_docked", { id, docked }),
   /** Which of these shell tabs are running a command now. */
   busy: (ids: string[]) => invoke<string[]>("pty_busy", { ids }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
