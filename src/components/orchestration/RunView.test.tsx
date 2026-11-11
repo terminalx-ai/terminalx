@@ -351,7 +351,9 @@ describe("a session with no run (PRO-274)", () => {
 });
 
 describe("limits and budget (PRO-280)", () => {
-  const resets = new Date(2026, 10, 11, 16, 10).getTime();
+  // Today at 16:10: resetClock names the weekday for a reset on another day.
+  const today = new Date();
+  const resets = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 16, 10).getTime();
   const fiveHour = { agent: "claude", key: "five_hour", label: "5h", percent: 41, start: 32, resetsAt: resets, points: 9 };
   const running = (extra: Partial<Run> = {}): Run => ({
     ...waiting(),
