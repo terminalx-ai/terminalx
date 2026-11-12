@@ -285,6 +285,10 @@ async fn search_results_are_bounded_and_say_so() {
 
     let case = call(&f.rpc, &participant, "fs.search", json!({ "searchId": "search-0003", "query": "NEEDLE", "caseSensitive": true })).await.unwrap();
     assert_eq!(case["hits"].as_array().unwrap().len(), 0);
+    // `needle_1` is not the word `needle`; `needle;` is.
+    let word = call(&f.rpc, &participant, "fs.search", json!({ "searchId": "search-0005", "query": "needle", "wholeWord": true, "maxResults": 5 })).await.unwrap();
+    let hits = word["hits"].as_array().unwrap();
+    assert!(!hits.is_empty() && hits.iter().all(|hit| hit["path"] == "bundle.js"));
     assert_eq!(
         call(&f.rpc, &participant, "fs.search", json!({ "searchId": "search-0004", "query": "(", "regex": true })).await.unwrap_err(),
         "invalid_params"
@@ -299,7 +303,7 @@ fn searches_stop_when_cancelled_replaced_or_disconnected() {
 
     // A search whose flag is already set reads nothing and says it stopped.
     let set = AtomicBool::new(true);
-    let (found, cancelled) = crate::files::search_text_under(&root, &root, "needle", false, false, 10, None, &set).unwrap();
+    let (found, cancelled) = crate::files::search_text_under(&root, &root, "needle", false, false, false, 10, None, &set).unwrap();
     assert!(cancelled);
     assert!(found.hits.is_empty());
 

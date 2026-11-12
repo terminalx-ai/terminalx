@@ -1,16 +1,16 @@
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useRef, useState } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mouseClick } from "@/test/press";
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const { invoke, heard, openUrl } = vi.hoisted(() => ({ invoke: vi.fn(), heard: new Map<string, (event: { payload: unknown }) => void>(), openUrl: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => { heard.set(event, handler); return () => {}; }) }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 
-const { useDictationInto, MicButton } = await import("./Dictation");
+const { useDictationInto, MicButton, DictationStatus } = await import("./Dictation");
 const { TranscriptionTab } = await import("@/components/settings/TranscriptionTab");
 const { TranscriptionInputSubmenu } = await import("./TranscriptionInputPicker");
 const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } = await import("@/components/ui/menu");
@@ -41,7 +41,7 @@ function ComposerDictation({ target = "tab-1" }: { target?: string }) {
   const [draft, setDraft] = useState("");
   const field = useRef<HTMLTextAreaElement>(null);
   const dictation = useDictationInto(target, draft, setDraft, field);
-  return <><textarea ref={field} value={draft} onChange={(event) => setDraft(event.target.value)} /><MicButton dictation={dictation} /></>;
+  return <><DictationStatus dictation={dictation} /><textarea ref={field} value={draft} onChange={(event) => setDraft(event.target.value)} /><MicButton dictation={dictation} /></>;
 }
 
 afterEach(() => {
@@ -135,5 +135,31 @@ describe("passive dictation surfaces", () => {
     // A whole mouse click: the picker opens on the click, not on pointerdown alone.
     mouseClick(screen.getByRole("button", { name: /System default/i }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcription_inputs"));
+  });
+
+  it("says microphone access is off with the pane, the steps and the reader's own dictation key", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "dictation_available") return true;
+      if (command === "transcription_preferences") return { model: "apple", inputDevice: null, muteWhileRecording: false };
+      if (command === "transcription_models") return [];
+      return undefined;
+    });
+    render(<TooltipProvider><ComposerDictation /></TooltipProvider>);
+    // The reader pressed the mic; macOS has the microphone off for the app.
+    mouseClick(await screen.findByRole("button", { name: "Dictate" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("dictation_start", expect.anything()));
+    await waitFor(() => expect(heard.has("dictation")).toBe(true));
+    // The message dictation.rs sends for a denied microphone (MIC_DENIED).
+    act(() => heard.get("dictation")!({ payload: { kind: "error", settings: "microphone", message: "Dictation needs it. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press the dictation shortcut again." } }));
+
+    const row = await screen.findByRole("alert");
+    expect(row.textContent).toContain("Microphone access is off for TerminalX");
+    const { keycaps, isMac } = await import("@/lib/shortcuts");
+    const key = keycaps("mod+shift+d").join(isMac ? "" : "+");
+    expect(row.textContent).toContain(`Dictation needs it. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press ${key} again.`);
+    fireEvent.click(screen.getByRole("button", { name: "Open System Settings" }));
+    expect(openUrl).toHaveBeenCalledWith("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
