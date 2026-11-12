@@ -170,6 +170,24 @@ describe("Pair a phone dialog", () => {
     expect(screen.getByText("Relay is ready")).toBeTruthy();
   });
 
+  it("makes the Relay code by itself once Relay comes back while the dialog is open", async () => {
+    const connecting = { ...emptyStatus, relay: { phase: "connecting" as const, message: null, attempt: 1 } };
+    await boot(connecting, (command, args) => {
+      if (command === "pairing_generate" && args.connectionMode === "automatic") return { ...connecting, relay: relayReady, activePairing: code() };
+      throw new Error(`${command} ${String(args.connectionMode)}`);
+    });
+    act(() => pairing.openPairPhone());
+    render(<PairPhoneDialogHost />);
+    await screen.findByText("Relay is connecting…");
+    expect(screen.getByText("A Relay code needs Relay. Choose Only this network to pair nearby.")).toBeTruthy();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("pairing_generate", expect.anything());
+
+    push({ ...connecting, relay: relayReady });
+    await screen.findByAltText("TerminalX phone pairing QR code");
+    expect(mocks.invoke).toHaveBeenCalledWith("pairing_generate", { connectionMode: "automatic" });
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "pairing_generate")).toHaveLength(1);
+  });
+
   it("asks a signed-out person to sign in for Relay", async () => {
     mocks.signedIn = false;
     await boot({ ...emptyStatus, relay: relayReady }, (command) => {
@@ -260,6 +278,21 @@ describe("approval prompt", () => {
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pairing_decline", { requestId: "req-1" }));
     await waitFor(() => expect(screen.queryByRole("group", { name: "Approve this phone" })).toBeNull());
     expect(screen.getByRole("button", { name: "Generate a new code" })).toBeTruthy();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("pairing_approve", expect.anything());
+    // Declining leaves the choice to the person: no new code is made behind their back.
+    expect(mocks.invoke).not.toHaveBeenCalledWith("pairing_generate", expect.anything());
+  });
+
+  it("closing the dialog while a phone waits declines it", async () => {
+    await boot(waiting, (command, args) => {
+      if (command === "pairing_decline") return { ...emptyStatus, relay: relayReady };
+      throw new Error(`${command} ${JSON.stringify(args)}`);
+    });
+    render(<PairPhoneDialogHost />);
+    await screen.findByRole("group", { name: "Approve this phone" });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pairing_decline", { requestId: "req-1" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(mocks.invoke).not.toHaveBeenCalledWith("pairing_approve", expect.anything());
   });
 

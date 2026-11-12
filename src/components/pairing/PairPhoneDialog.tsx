@@ -37,11 +37,15 @@ export function PairPhoneDialogHost() {
 
 function PairPhoneDialog() {
   const privacy = useDataPrivacy();
+  const pending = usePairing().status.pendingApproval;
   return (
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) closePairPhone();
+        if (open) return;
+        // The dialog stays up while a phone waits, so closing it is an answer: the phone was not approved.
+        if (pending) void declinePairing(pending.requestId);
+        closePairPhone();
       }}
     >
       {/* Below the connected bar, which sits top-centre over everything (top-1.5, 28px tall). */}
@@ -79,13 +83,20 @@ function PairPhoneBody() {
   const canGenerate = (next: PairingConnectionMode) => next === "local-only" || relayUsable(signedIn, status);
 
   // Opening the dialog is asking for a code: make one unless a live one for this path is already showing.
+  // While the path cannot make one yet (Relay down, signed out) keep waiting, so the code appears once it can.
   const asked = useRef(false);
   useEffect(() => {
     if (asked.current || !pairing.ready || !account.ready || pairing.busy) return;
-    asked.current = true;
+    // A phone already waits on the code: after the answer the dialog offers a new code rather than making one.
+    if (status.pendingApproval) {
+      asked.current = true;
+      return;
+    }
     const offer = status.activePairing;
     const live = offer && offer.connectionMode === mode && offer.expiresAt > Date.now();
-    if (!live && !status.pendingApproval && canGenerate(mode)) void generatePairing(mode);
+    if (!live && !canGenerate(mode)) return;
+    asked.current = true;
+    if (!live) void generatePairing(mode);
   });
 
   const changeMode = (next: PairingConnectionMode) => {
