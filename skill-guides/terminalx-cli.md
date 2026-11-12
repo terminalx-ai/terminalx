@@ -1008,9 +1008,20 @@ resolver starts there, and no other conversation in it starts a turn. It is refu
 nothing merged, when the checkout is not free (`checkout_busy`), has uncommitted changes
 in tracked files (`lead_checkout_dirty`), is part way through a merge or rebase
 (`lead_checkout_unfinished`), is on no branch (`lead_detached`) or on another branch than
-the merge began on (`lead_branch_changed`). It runs the plan's commands, so with nobody's
+the merge began on (`lead_branch_changed`). It merges only into a branch of your own: on
+the repository's default branch, a branch that tracks it, the base of an open pull request,
+or a branch whose upstream has commits someone else pushed, it is refused with
+`lead_on_shared_branch` before git changes anything (`details.shared.kind` says which:
+`base`, `tracksBase`, `pullRequestBase`, `pushedByOthers`). Create a branch of your own
+there (`git switch -c <name>`) and merge again. It runs the plan's commands, so with nobody's
 approval of the plan and a lead that is asked before it runs commands it is refused with
 `checks_not_approved`: the person presses Merge in the Run view instead.
+
+A merge is git work and asks no model, so it also runs while the run is paused on its
+budget (`needsYou`): a conflict you resolve by hand is merged, and `--skip` leaves a piece
+out, as in a running run. What asks a model waits for the budget: the lead resolving a
+conflict (`budget_reached`) and a piece sent back to its worker. Neither is asked of a run
+that was stopped or is done (`run_ended`).
 
 The checks can take long. Give the command a long timeout and wait for it. Do not work in
 your checkout meanwhile: until the merge has ended your other tool calls there are refused,

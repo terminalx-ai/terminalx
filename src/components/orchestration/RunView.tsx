@@ -106,7 +106,9 @@ function RunBoard({ run, lead }: { run: Run; lead: SessionEntry }) {
   // Once results are being brought together, the table is the merge: a row a branch.
   const merging = !editable && (!!run.merge || run.state === "merging");
   // Something accepted is not in the lead's branch yet, or every piece is and the checks on the whole have not passed.
-  const mergeable = (run.state === "merging" || run.state === "running" || run.state === "needsYou" || run.state === "failed") && run.pieces.some((candidate) => candidate.state === "done") && (run.state === "merging" || run.pieces.some((candidate) => candidate.state === "done" && !pieceMerged(candidate)));
+  // A run paused on its budget is merged too: a merge is git work and asks no model.
+  const everyPieceIn = run.pieces.length > 0 && run.pieces.every((candidate) => candidate.state === "done" && pieceMerged(candidate));
+  const mergeable = (run.state === "merging" || run.state === "running" || run.state === "needsYou" || run.state === "failed") && run.pieces.some((candidate) => candidate.state === "done") && (run.state === "merging" || (run.state === "needsYou" && everyPieceIn) || run.pieces.some((candidate) => candidate.state === "done" && !pieceMerged(candidate)));
   const merge = (skip: string[] = []) => act("merge", () => orchestration.merge(run.id, { skip }));
   // In one column the piece opens under the plan: bring it into view when a row is picked.
   const select = (id: string) => {
@@ -334,6 +336,7 @@ function PausedNotice({ run, busy, act }: { run: Run; busy: boolean; act: Act })
           <div className="font-medium">{pause?.window ? `Paused: the ${windowName(pause.window)} window` : pause?.kind === "dollars" ? "Paused: the dollar budget" : "Paused"}</div>
           <p className="mt-0.5 text-muted-foreground">{pause?.message ?? run.reason}</p>
           <p className="mt-1 text-xs text-faint">Workers already in a turn finish it; no new piece starts until you let the run go on.</p>
+          {run.pieces.some((piece) => piece.state === "done") && <p className="mt-1 text-xs text-faint" data-testid="run-paused-merge">Merging the accepted pieces asks no model, so Merge and Skip work while the run is paused. Having the lead resolve a conflict does not.</p>}
         </div>
       </div>
       {resumeAt ? (
@@ -972,8 +975,11 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSend
   const brief = piece.brief;
   const tries = piece.tries ?? [];
   const maxTries = run.maxTries ?? 3;
-  // What stopped its merge, while the run can still act on it.
-  const merge = !editable && (run.state === "merging" || run.state === "running" || run.state === "failed") ? currentMerge(piece) : undefined;
+  // What stopped its merge, while the run can still act on it. Paused on its budget, the person may still
+  // resolve it by hand and merge, or skip it: git work only. Sending it back or to the lead asks a model.
+  const paused = run.state === "needsYou";
+  const merge = !editable && (run.state === "merging" || run.state === "running" || run.state === "failed" || paused) ? currentMerge(piece) : undefined;
+  const asksModel = paused ? "The run is paused on its budget, and this asks a model. Resolve it by hand and merge, or skip it." : undefined;
   const unmerged = merge && (merge.state === "conflict" || merge.state === "integrationFailed" || merge.state === "failed") ? merge : undefined;
   return (
     <aside aria-label={`Piece ${number}: ${piece.title}`} data-testid="piece-detail" className={cn("flex w-full shrink-0 flex-col border-t border-hairline bg-background @[900px]/run:min-h-0 @[900px]/run:border-l @[900px]/run:border-t-0", unmerged ? "@[900px]/run:w-[min(26.5rem,36%)]" : "@[900px]/run:w-[min(24rem,36%)]")}>
@@ -1045,8 +1051,8 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSend
             <Button variant="outline" disabled={busy} onClick={() => setEditing(true)}><Pencil />Edit brief</Button>
             <Button variant="outline" disabled={busy || run.pieces.length < 2} title={run.pieces.length < 2 ? "A run needs at least one piece. Discard the plan instead." : undefined} onClick={onRemove}><Trash2 />Remove piece</Button>
           </> : unmerged ? <>
-            <Button size="sm" variant="accent" disabled={busy || !!run.mergeUnderWay} onClick={onSendBack}><CornerUpLeft />Send back to worker</Button>
-            {unmerged.state === "conflict" && <Button size="sm" variant="outline" disabled={busy || !!run.mergeUnderWay} onClick={onResolve}><Sparkles />Resolve in lead</Button>}
+            <Button size="sm" variant="accent" disabled={busy || !!run.mergeUnderWay || paused} title={asksModel} onClick={onSendBack}><CornerUpLeft />Send back to worker</Button>
+            {unmerged.state === "conflict" && <Button size="sm" variant="outline" disabled={busy || !!run.mergeUnderWay || paused} title={asksModel} onClick={onResolve}><Sparkles />Resolve in lead</Button>}
             <Button size="sm" variant="outline" disabled={busy || !!run.mergeUnderWay} onClick={onSkip}><SkipForward />Skip</Button>
           </> : piece.worker ? (
             <>

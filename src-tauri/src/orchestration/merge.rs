@@ -25,6 +25,17 @@
 //! branch but the lead's, and never deletes a worker's branch or worktree:
 //! that is [`cleanup`], which a person or the lead asks for by name and which
 //! refuses a worktree with work that is not committed or not merged.
+//!
+//! The lead's branch must be a branch of its own. A lead working in the
+//! project's own checkout may be on the default branch, or on one that others
+//! build on: the base of an open pull request, or one whose upstream someone
+//! else pushes to. Those are refused before git is asked to change anything
+//! ([`SharedBranch`]).
+//!
+//! A pass is pure git work and costs no model tokens, so it runs in a run
+//! paused on its budget (`needsYou`) as in a live one. The one model call of
+//! the merge stage, the lead resolving a conflict, is what the budget holds
+//! back (`engine::resolve_in_lead`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -71,6 +82,9 @@ pub trait Checkouts: Send + Sync {
     fn reserve(&self, run: &Run, cwd: &Path, by_lead: bool) -> Result<Box<dyn std::any::Any + Send>, String>;
     /// The project's own check command: the integration check of a plan that names none.
     fn project_check(&self, project_path: &str) -> Option<String>;
+    /// The open pull requests whose base is `branch` in the checkout's repository: none for a
+    /// repository with no remote, `None` when the forge cannot be asked.
+    fn open_prs_into(&self, cwd: &Path, branch: &str) -> Option<Vec<u64>>;
     /// A worker's worktree. `None` when its session is gone, or runs in no worktree of its own.
     fn worktree(&self, worker: &SessionRef) -> Option<Worktree>;
     /// Remove a worker's worktree and the session in it. Its branch stays.
@@ -80,38 +94,74 @@ pub trait Checkouts: Send + Sync {
     fn changed(&self, run: &Run);
 }
 
-/// The run whose pieces are being merged now. One pass at a time: two would
-/// both move the same branch.
-static MERGING: Mutex<Option<String>> = Mutex::new(None);
+/// What keeps a pass from beginning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    /// A pass is merging the run.
+    Merge,
+    /// A piece of the run is being sent back to its worker (`engine::send_back`): a pass
+    /// beginning meanwhile could merge the commit that is being sent back.
+    SendBack,
+    /// The run's worktrees are being cleaned up ([`cleanup`]).
+    Cleanup,
+}
 
-struct Pass;
+/// Who holds which run. One pass at a time across runs: two would both move
+/// the same branch where runs share a lead. Nothing else of a run goes on
+/// while a pass or another hold is on it.
+static HOLDS: Mutex<Vec<(String, Holder)>> = Mutex::new(Vec::new());
 
-impl Pass {
-    fn begin(id: &str) -> Result<Self, EngineError> {
-        let mut merging = MERGING.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(other) = merging.as_deref() {
-            let mut error = EngineError::new(
-                "merge_in_progress",
-                if other == id { format!("Run {id} is being merged already: its checks are running.") } else { format!("Run {other} is being merged. One run is merged at a time.") },
-                Some("Read how far it is with `terminalx runs show --json`, and call `terminalx runs merge` again once `mergeUnderWay` is false."),
-            );
-            error.details = json!({"run": other});
+/// A run held from merging, or held by a pass merging it, until this is dropped.
+pub struct Hold {
+    id: String,
+    holder: Holder,
+}
+
+impl Hold {
+    fn take(id: &str, holder: Holder) -> Result<Self, EngineError> {
+        let mut holds = HOLDS.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some((other, by)) = holds.iter().find(|(other, by)| other == id || (holder == Holder::Merge && *by == Holder::Merge)) {
+            let message = match (*by, other == id) {
+                (Holder::Merge, true) => format!("Run {id} is being merged already: its checks are running."),
+                (Holder::Merge, false) => format!("Run {other} is being merged. One run is merged at a time."),
+                (Holder::SendBack, _) => format!("A piece of run {other} is being sent back to its worker."),
+                (Holder::Cleanup, _) => format!("The worktrees of run {other} are being cleaned up."),
+            };
+            let recovery = match by {
+                Holder::Merge => "Read how far it is with `terminalx runs show --json`, and call `terminalx runs merge` again once `mergeUnderWay` is false.",
+                Holder::SendBack | Holder::Cleanup => "It ends by itself in a moment: try again then.",
+            };
+            let mut error = EngineError::new("merge_in_progress", message, Some(recovery));
+            let holder = match by {
+                Holder::Merge => "merge",
+                Holder::SendBack => "sendBack",
+                Holder::Cleanup => "cleanup",
+            };
+            error.details = json!({"run": other, "holder": holder});
             return Err(error);
         }
-        *merging = Some(id.to_string());
-        Ok(Self)
+        holds.push((id.to_string(), holder));
+        Ok(Self { id: id.to_string(), holder })
     }
 }
 
-impl Drop for Pass {
+impl Drop for Hold {
     fn drop(&mut self) {
-        *MERGING.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        let mut holds = HOLDS.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(at) = holds.iter().position(|(id, holder)| *id == self.id && *holder == self.holder) {
+            holds.remove(at);
+        }
     }
+}
+
+/// Hold the run from merging while a piece of it is sent back: refused while a pass merges it.
+pub fn hold_for_send_back(id: &str) -> Result<Hold, EngineError> {
+    Hold::take(id, Holder::SendBack)
 }
 
 /// Whether a pass is merging this run now.
 pub fn under_way(id: &str) -> bool {
-    MERGING.lock().unwrap_or_else(|error| error.into_inner()).as_deref() == Some(id)
+    HOLDS.lock().unwrap_or_else(|error| error.into_inner()).iter().any(|(other, holder)| other == id && *holder == Holder::Merge)
 }
 
 /// What a pass is asked.
@@ -247,12 +297,110 @@ fn tracked_changes(cwd: &Path) -> anyhow::Result<Vec<String>> {
     Ok(crate::git::run(cwd, &["status", "--porcelain", "--untracked-files=no", "--"])?.lines().filter(|line| !line.trim().is_empty()).map(str::to_owned).collect())
 }
 
-/// The lead's checkout as a merge needs it: on its branch, nothing part way,
-/// nothing uncommitted in tracked files (an undone merge would take it along).
-fn preflight(cwd: &Path, run: &Run) -> Result<String, EngineError> {
+/// Why the branch the lead's checkout is on is not one a run merges into:
+/// a branch others build on. Said in `details.shared` of `lead_on_shared_branch`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SharedBranch {
+    /// The repository's default branch: a remote's `HEAD`, or where no remote names one,
+    /// `init.defaultBranch`, `main` or `master`.
+    Base,
+    /// It tracks a remote's default branch.
+    TracksBase { upstream: String },
+    /// Its upstream has commits someone else made: others push to it.
+    PushedByOthers { upstream: String, commits: usize, by: String },
+    /// Open pull requests are to be merged into it.
+    PullRequestBase { pull_requests: Vec<u64> },
+}
+
+impl SharedBranch {
+    fn said(&self, branch: &str) -> String {
+        let what = match self {
+            Self::Base => "the project's base branch".to_string(),
+            Self::TracksBase { upstream } => format!("which tracks `{upstream}`, the project's base branch"),
+            Self::PushedByOthers { upstream, commits, by } => format!("whose upstream `{upstream}` has {} by someone else ({by})", count(*commits, "commit", "commits")),
+            Self::PullRequestBase { pull_requests } => format!("the base of open pull {} {}", if pull_requests.len() == 1 { "request" } else { "requests" }, pull_requests.iter().map(|number| format!("#{number}")).collect::<Vec<_>>().join(", ")),
+        };
+        format!("The lead is on `{branch}`, {what}; runs merge only into a branch of its own. Nothing was merged.")
+    }
+}
+
+/// The default branch of each remote (its `HEAD`) or, where no remote names one, the
+/// branches git and most projects start with that exist here.
+fn base_branches(cwd: &Path) -> Vec<String> {
+    let mut bases: Vec<String> = Vec::new();
+    for target in git(cwd, &["for-each-ref", "--format=%(symref)", "refs/remotes"]).unwrap_or_default().lines() {
+        if let Some((_, name)) = target.trim().strip_prefix("refs/remotes/").and_then(|rest| rest.split_once('/')) {
+            if !name.is_empty() && !bases.iter().any(|known| known == name) {
+                bases.push(name.to_string());
+            }
+        }
+    }
+    if bases.is_empty() {
+        let configured = git(cwd, &["config", "--get", "init.defaultBranch"]).ok().filter(|name| !name.is_empty());
+        for name in configured.into_iter().chain(["main".to_string(), "master".to_string()]) {
+            let exists = git(cwd, &["for-each-ref", "--count=1", "--format=%(refname)", &format!("refs/heads/{name}"), &format!("refs/remotes/*/{name}")]).is_ok_and(|found| !found.is_empty());
+            if exists && !bases.contains(&name) {
+                bases.push(name);
+            }
+        }
+    }
+    bases
+}
+
+/// Whether `branch` is one others build on, so a run must not merge into it. Only reads:
+/// the refs and config of the checkout, and the forge for open pull requests.
+fn shared_branch(host: &dyn Checkouts, cwd: &Path, branch: &str) -> Option<SharedBranch> {
+    let bases = base_branches(cwd);
+    if bases.iter().any(|base| base == branch) {
+        return Some(SharedBranch::Base);
+    }
+    // `origin/feature`, `refs/heads/feature` on the remote, and `refs/remotes/origin/feature`; for a local upstream the last two are `refs/heads/…`.
+    let tracked = git(cwd, &["for-each-ref", "--format=%(upstream:short)%00%(upstream:remoteref)%00%(upstream)", &format!("refs/heads/{branch}")]).unwrap_or_default();
+    let mut parts = tracked.split('\0').map(str::trim);
+    let (short_name, remote_ref, local_ref) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+    if !local_ref.is_empty() {
+        let name = remote_ref.strip_prefix("refs/heads/").or_else(|| local_ref.strip_prefix("refs/heads/")).unwrap_or_default();
+        if bases.iter().any(|base| base == name) {
+            return Some(SharedBranch::TracksBase { upstream: short_name.to_string() });
+        }
+        // What the upstream has beyond the base branches: commits someone else made there were pushed by them.
+        let me = git(cwd, &["config", "--get", "user.email"]).ok().filter(|email| !email.is_empty());
+        let not: Vec<String> = git(cwd, &["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"])
+            .unwrap_or_default()
+            .lines()
+            .filter(|reference| bases.iter().any(|base| reference.strip_prefix("refs/heads/") == Some(base.as_str()) || reference.strip_prefix("refs/remotes/").and_then(|rest| rest.split_once('/')).is_some_and(|(_, name)| name == base)))
+            .map(str::to_owned)
+            .collect();
+        if let (Some(me), false, true) = (me, not.is_empty(), local_ref.starts_with("refs/remotes/")) {
+            let mut args = vec!["log", "--max-count=500", "--format=%ae%x00%ce", local_ref, "--not"];
+            args.extend(not.iter().map(String::as_str));
+            let others: Vec<String> = git(cwd, &args)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.split('\0').find(|email| !email.trim().is_empty() && !email.trim().eq_ignore_ascii_case(&me)).map(|email| email.trim().to_string()))
+                .collect();
+            if let Some(by) = others.first() {
+                return Some(SharedBranch::PushedByOthers { upstream: short_name.to_string(), commits: others.len(), by: by.clone() });
+            }
+        }
+    }
+    host.open_prs_into(cwd, branch).filter(|prs| !prs.is_empty()).map(|pull_requests| SharedBranch::PullRequestBase { pull_requests })
+}
+
+/// The lead's checkout as a merge needs it: on a branch of its own, nothing
+/// part way, nothing uncommitted in tracked files (an undone merge would take
+/// it along). Everything here only reads; nothing has asked git to change
+/// anything yet.
+fn preflight(host: &dyn Checkouts, cwd: &Path, run: &Run) -> Result<String, EngineError> {
     let Some(branch) = crate::git::current_branch(cwd) else {
         return Err(EngineError::new("lead_detached", "The lead's checkout is on no branch, so there is no branch to merge the pieces into.", Some("Check out the lead's branch in the lead's checkout, then run `terminalx runs merge` again.")));
     };
+    if let Some(shared) = shared_branch(host, cwd, &branch) {
+        let mut error = EngineError::new("lead_on_shared_branch", shared.said(&branch), Some("Create a branch of the lead's own in the lead's checkout (`git switch -c <name>`), then run `terminalx runs merge` again."));
+        error.details = json!({"branch": branch, "shared": shared});
+        return Err(error);
+    }
     if let Some(into) = run.merge.as_ref().map(|merge| merge.into.as_str()).filter(|into| !into.is_empty() && *into != branch) {
         let mut error = EngineError::new("lead_branch_changed", format!("This run's pieces are being merged into `{into}`, and the lead's checkout is now on `{branch}`."), Some("Check out the branch the merge began on, then run `terminalx runs merge` again."));
         error.details = json!({"into": into, "branch": branch});
@@ -414,7 +562,7 @@ fn outcome(state: MergeState, commit: &str, before: &str) -> PieceMerge {
 /// branch is: what is merged stays merged, and what conflicted or failed is
 /// tried again.
 pub fn merge(host: &dyn Checkouts, id: &str, options: &Options) -> Result<Merged, EngineError> {
-    let _pass = Pass::begin(id)?;
+    let _pass = Hold::take(id, Holder::Merge)?;
     let run = stored(id)?;
     match run.state {
         RunState::Planned | RunState::AwaitingApproval => {
@@ -445,7 +593,7 @@ pub fn merge(host: &dyn Checkouts, id: &str, options: &Options) -> Result<Merged
         ));
     }
     let _reserved = host.reserve(&run, &cwd, options.from_lead).map_err(|why| EngineError::new("checkout_busy", format!("The lead's checkout is in use: {why} Nothing was merged."), Some("Run `terminalx runs merge` again once it is free.")))?;
-    let into = preflight(&cwd, &run)?;
+    let into = preflight(host, &cwd, &run)?;
     recover(host, id, &cwd, &run)?;
     let (begun, ()) = store::update(id, |run| {
         let merge = run.merge.get_or_insert_with(RunMerge::default);
@@ -463,8 +611,9 @@ pub fn merge(host: &dyn Checkouts, id: &str, options: &Options) -> Result<Merged
     let mut stopped_at: Option<String> = None;
     for piece_id in &order {
         let run = stored(id)?;
-        // Stopped meanwhile: what is merged stays, and nothing more is.
-        if !run.state.live() {
+        // Stopped meanwhile: what is merged stays, and nothing more is. A run paused on its
+        // budget goes on: merging asks no model, and the person merging is the one it waits for.
+        if !run.state.followed() {
             break;
         }
         let Some(piece) = run.piece(piece_id).filter(|piece| piece.state == PieceState::Done) else { continue };
@@ -613,7 +762,7 @@ pub fn merge(host: &dyn Checkouts, id: &str, options: &Options) -> Result<Merged
     })
     .map_err(EngineError::internal)?;
     host.changed(&after);
-    let after = if stopped_at.is_none() && after.state.live() && after.pieces.iter().all(Piece::merged) { finish(host, id, &cwd, check.as_ref(), options)? } else { after };
+    let after = if stopped_at.is_none() && after.state.followed() && after.pieces.iter().all(Piece::merged) { finish(host, id, &cwd, check.as_ref(), options)? } else { after };
     Ok(summary(after, &cwd, check.map(|(command, _)| command), stopped_at))
 }
 
@@ -899,7 +1048,7 @@ fn keeps(worktree: &Worktree, lead_head: &str, into: &str) -> Option<String> {
 pub fn cleanup(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, EngineError> {
     // Held to the end: no pass may begin, make a merge this counts as in the lead's branch, and
     // then undo it once the worktree is gone.
-    let _no_merge = Pass::begin(id).map_err(|error| EngineError::new("merge_in_progress", format!("{} Worktrees are cleaned up once that has ended.", error.message), None))?;
+    let _no_merge = Hold::take(id, Holder::Cleanup).map_err(|error| EngineError::new("merge_in_progress", format!("{} Worktrees are cleaned up once that has ended.", error.message), None))?;
     let run = stored(id)?;
     let cwd = host.lead_checkout(&run).map_err(|error| EngineError::new("lead_not_found", format!("The lead's checkout cannot be found, so nothing says what is merged: {error:#}"), None))?;
     let lead_head = head(&cwd).map_err(EngineError::internal)?;

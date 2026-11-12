@@ -789,6 +789,34 @@ describe("merging accepted pieces into the lead's branch (PRO-279)", () => {
     expect(screen.queryByRole("button", { name: /merge/i })).toBeNull();
   });
 
+  it("merges and skips from a run paused on its budget, since merging asks no model", async () => {
+    const pause = { kind: "dollars" as const, message: "This run has spent $4.00 of its $3.00 budget." };
+    const paused: Run = { ...stopped(), state: "needsYou", reason: pause.message, pause };
+    answers.orchestration_merge = paused;
+    await open(paused);
+    expect(screen.getByTestId("run-paused").textContent).toContain("Paused: the dollar budget");
+    expect(screen.getByTestId("run-paused-merge").textContent).toBe("Merging the accepted pieces asks no model, so Merge and Skip work while the run is paused. Having the lead resolve a conflict does not.");
+    // The conflict resolved by hand in the lead's checkout: Continue merge goes on from there.
+    fireEvent.click(screen.getByRole("button", { name: "Continue merge" }));
+    await waitFor(() => expect(calls("orchestration_merge")).toEqual([{ id: "run-1", skip: [], recheck: false }]));
+    fireEvent.click(within(row("cli")).getByRole("button", { name: "Move CLI code to the store" }));
+    // The conflict is shown to be resolved by hand; what would ask a model waits for the budget.
+    expect(within(detail()).getByTestId("merge-panel").dataset.mergeState).toBe("conflict");
+    await waitFor(() => expect(within(detail()).getByRole("button", { name: "Skip" }).hasAttribute("disabled")).toBe(false));
+    for (const name of ["Send back to worker", "Resolve in lead"]) {
+      const button = within(detail()).getByRole("button", { name });
+      expect([button.hasAttribute("disabled"), button.getAttribute("title")]).toEqual([true, "The run is paused on its budget, and this asks a model. Resolve it by hand and merge, or skip it."]);
+    }
+    fireEvent.click(within(detail()).getByRole("button", { name: "Skip" }));
+    await waitFor(() => expect(calls("orchestration_merge")[1]).toEqual({ id: "run-1", skip: ["cli"], recheck: false }));
+    cleanup();
+    resetRunsForTests();
+    // Every branch in and a check failed on the whole: still the person's to merge again once it is fixed.
+    const all = paused.pieces.map((p) => (p.id === "cli" || p.id === "docs" ? { ...p, merge: merged(pieceCommit(p), "e77a1200000", `${p.id}aaaa0000`, 60_000) } : p));
+    await open({ ...paused, pieces: all, merge: { into: "settings-typed-store", finalHead: "5d5d5d50000", finalChecks: [{ piece: "docs", run: "pnpm docs:check", passed: false, exitCode: 2, millis: 900 }] } });
+    expect(screen.getByRole("button", { name: "Continue merge" })).toBeTruthy();
+  });
+
   it("offers Merge once a result is accepted, and shows the plan's integration check to whoever approves it", async () => {
     const run = stopped();
     answers.orchestration_merge = { ...run, mergeUnderWay: true };

@@ -437,6 +437,21 @@ impl Checkouts for ManagerHost {
         crate::store::projects::issue_pipeline_settings(project_path).ok().and_then(|settings| settings.local_check_command)
     }
 
+    fn open_prs_into(&self, cwd: &Path, branch: &str) -> Option<Vec<u64>> {
+        // A repository with no remote has no pull request to ask about.
+        if crate::git::run(cwd, &["remote"]).ok()?.trim().is_empty() {
+            return Some(Vec::new());
+        }
+        match crate::github::list_prs(cwd, &["--base", branch, "--state", "open", "--json", "number", "--limit", "20"]) {
+            Ok(prs) => Some(prs.iter().filter_map(|pr| pr["number"].as_u64()).collect()),
+            Err(error) => {
+                // Not a GitHub repository, or gh is missing or signed out: the branch checks on refs still hold.
+                log::info!("open pull requests into {branch} could not be read: {error:#}");
+                None
+            }
+        }
+    }
+
     fn worktree(&self, worker: &SessionRef) -> Option<Worktree> {
         let session = index::get(&worker.session_id).ok()?;
         let path = PathBuf::from(&session.cwd);
