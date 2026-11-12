@@ -1375,7 +1375,7 @@ fn archive_finished_run(app: &impl AutomationHost, finished: &AutomationRun) {
     };
     let runs = if automation.keep_latest_run_visible { automation_store::list_runs(&automation.id).unwrap_or_default() } else { Vec::new() };
     for id in sessions_to_archive(&automation, &runs, finished) {
-        if let Err(error) = crate::session_archive::set_archived(app.sink().as_ref(), &[id.clone()], true, crate::session_archive::By::Automation) {
+        if let Err(error) = crate::session_archive::set_archived(app.sink().as_ref(), std::slice::from_ref(&id), true, crate::session_archive::By::Automation) {
             log::warn!("automation {}: archive run session {id}: {error:#}", automation.id);
         }
     }
