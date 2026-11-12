@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- Experimental: a session can lead an orchestration run. The lead writes a plan
+  of pieces (`terminalx runs create --from plan.json`), each with a brief, the
+  files it owns, what it depends on and the check that proves it done, and
+  `terminalx runs start` starts a worker session for every piece whose
+  dependencies are done: its own worktree and branch cut from the lead's, the
+  piece's model and effort, and a brief built from the piece. A plan is refused,
+  naming the piece, when two pieces own the same file, a dependency loops, a piece
+  has no done-check or there are more pieces than the limit (8 by default). A
+  done-check is a command run in the worker's worktree or a point for a reviewer
+  to confirm; a piece needs a command unless it says why review alone can check it. By
+  default a run waits until you approve its plan in the session's new Run view,
+  where you can also edit or discard it; no command approves one. Workers start
+  in bypass unless the repository or the plan says otherwise, and never push,
+  merge or deploy: deny rules are handed to the agent at launch, TerminalX checks
+  every tool call, and the worker's git sends a push nowhere. Turn it on under
+  Settings → Experimental → Orchestration runs; the limits are in Settings →
+  Orchestrator and per repository. (PRO-274)
+
+- Experimental: an orchestration run picks each piece's model and effort from
+  the piece's kind. Every piece of a plan names a kind (`search`, `logs`,
+  `scoped-code`, `code`, `refactor`, `research`, `review`, `verify`), and a
+  routing table gives each kind a model tier and an effort, with one column for
+  Claude Code workers and one for Codex workers: small (Haiku, Luna) for
+  searching and reading logs, mid (Sonnet, Terra) for bounded changes and
+  checks, large (Opus, Sol) for everyday engineering, top (Fable, Astra) for
+  refactors and research. The table names tiers, not versions, so a new release
+  takes its place; a tier with no installed model falls back to the lead's
+  model, and the piece says so. A plan may still name a model or an effort for
+  a piece. Edit the table under Settings → Orchestrator, and per repository in
+  its own settings.
+
+  A piece that reports `failed` or `partial`, or whose done-check fails
+  (`terminalx runs check-failed`), is tried again without being asked: first
+  with the failure text and one more level of effort (never past high), then one
+  model tier up at one effort level lower. Each try is a fresh worker that is
+  told what the one before fell short on, and after three tries the piece is
+  blocked and goes back to the lead with what was tried. The Run view shows
+  every try with its model, effort, cost and outcome. (PRO-275)
+
 - Each release also uploads its notarized DMG as `TerminalX-latest-aarch64.dmg`
   and lists it in `SHA256SUMS`, so
   [one link](https://github.com/terminalx-ai/terminalx/releases/latest/download/TerminalX-latest-aarch64.dmg)

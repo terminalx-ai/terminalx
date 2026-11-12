@@ -8,11 +8,14 @@ import type { Project } from "@/types/session";
 import type { RepositoryFilesPreview } from "@/types/repositorySettings";
 import { RegisteredSetting, type SettingId } from "./settingsRegistry";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
+import { RepositoryOrchestratorSettings } from "./OrchestratorSettings";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { RepositoryScriptsTab } from "./RepositoryScriptsTab";
 
 export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath?: string; row?: string | null; onSelectRow?: (row: SettingId) => void }) {
   const { projects } = useSessionStore();
   const project = projects.find((project) => !project.archived && project.path === projectPath);
+  const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
   if (!project) return <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>;
   if (project.kind === "folder") return <MergedCleanupSettings projectPath={project.path} />;
   const files = row === "repositories.filesToCopy";
@@ -25,6 +28,7 @@ export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath
     <div hidden={files}>
       <div className="mt-8"><MergedCleanupSettings projectPath={project.path} /></div>
       <div className="mt-8"><RepositoryScriptsTab projectPath={project.path} /></div>
+      {orchestratorRuns && <div className="mt-8"><RepositoryOrchestratorSettings projectPath={project.path} /></div>}
     </div>
   </>;
 }

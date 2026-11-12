@@ -199,6 +199,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
             manager.sink().emit("session_updated", &session);
             return Ok(Value::Null);
         }
+        "orchestration" => return manager.orchestration(string(&params, "operation")?, params["params"].clone()),
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
         "automations" => return Ok(serde_json::to_value(crate::store::automations::list()?)?),
         "automationRuns" => return Ok(serde_json::to_value(crate::store::automations::list_runs(string(&params, "id")?)?)?),

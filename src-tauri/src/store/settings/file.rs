@@ -48,6 +48,7 @@ static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
 // These object keys are user-defined, rather than settings field names.
 static DYNAMIC_MAPS: LazyLock<BTreeMap<&str, Value>> = LazyLock::new(|| BTreeMap::from([
     ("mergedCleanup.projects", Value::Bool(false)),
+    ("orchestrator.projects", serde_json::json!({"requireApproval": false, "pieceLimit": 0, "workerMode": "", "reviewDiffLines": 0})),
     ("preferences.shortcuts", serde_json::json!([""])),
 ]));
 
@@ -97,6 +98,7 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_line
         "preferences.organizationDisplay" => &["all", "one"],
         "preferences.theme" => &["den", "slate", "moss", "ember"],
         "preferences.mode" => &["system", "light", "dark"],
+        "orchestrator.workerMode" => &super::WORKER_MODES,
         _ => &[],
     };
     if !choices.is_empty() && !value.as_str().is_some_and(|text| choices.contains(&text)) {
@@ -111,6 +113,12 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_line
     };
     if !numbers.is_empty() && !value.as_u64().is_some_and(|n| numbers.iter().any(|v| u64::from(*v) == n)) {
         return Err(error("choose one of the supported intervals"));
+    }
+    if key == "orchestrator.pieceLimit" && !value.as_u64().is_some_and(|n| (1..=u64::from(super::MAX_PIECE_LIMIT)).contains(&n)) {
+        return Err(error("expected a number of pieces from 1 to 50"));
+    }
+    if key == "orchestrator.reviewDiffLines" && !value.as_u64().is_some_and(|n| (1..=u64::from(super::MAX_REVIEW_DIFF_LINES)).contains(&n)) {
+        return Err(error("expected a number of changed lines from 1 to 100000"));
     }
     if key == "floating.retentionDays" && !value.as_u64().is_some_and(|n| n <= u64::from(super::MAX_RETENTION_DAYS)) {
         return Err(error("expected days from 0 to 3650"));
