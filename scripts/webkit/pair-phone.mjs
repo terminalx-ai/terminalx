@@ -8,16 +8,19 @@
 // 11 px, the fingerprints are mono, device rows are 56 px, and the connected
 // bar sits top-centre, whole, clear of the dialog.
 //
-// Pictures of every case go to PAIR_PHONE_SHOTS, by default scripts/webkit/output/pair-phone.
+// Pictures of every case go to PAIR_PHONE_SHOTS, by default scripts/webkit/output/pair-phone;
+// that default folder ignores itself, so a run leaves the worktree clean.
 //
 //   pnpm build && npx playwright install webkit && node scripts/webkit/pair-phone.mjs
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launch, open, report, serve } from "./harness.mjs";
 
-const shots = process.env.PAIR_PHONE_SHOTS ?? fileURLToPath(new URL("./output/pair-phone/", import.meta.url));
+const output = fileURLToPath(new URL("./output/", import.meta.url));
+const shots = process.env.PAIR_PHONE_SHOTS ?? join(output, "pair-phone");
 await mkdir(shots, { recursive: true });
+if (!process.env.PAIR_PHONE_SHOTS) await writeFile(join(output, ".gitignore"), "*\n");
 
 const RELAY_DOWN = "TerminalX Relay service is temporarily unavailable. Retrying automatically. You can pair on this network meanwhile.";
 
