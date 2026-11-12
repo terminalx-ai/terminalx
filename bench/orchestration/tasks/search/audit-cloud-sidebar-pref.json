@@ -1,0 +1,21 @@
+{
+  "id": "audit-cloud-sidebar-pref",
+  "shape": "search",
+  "title": "Find every use of the cloud-sidebar preference before it is removed",
+  "prompt": "The preference that switches cloud workspaces in the sidebar on and off (`cloudSidebar` in the frontend prefs) is being removed: cloud workspaces will always show in the sidebar. Find every file in the frontend that declares, defaults, reads, sets or tests this preference, so each can be updated.\n\nWrite the answer to `bench-answer.txt` at the repository root: one repository-relative path per line (for example `path/to/file.rs`), each file once, nothing else on the line. List files, not line numbers. Do not change any other file.",
+  "startCommit": "b567c91a5cfa968310f4296c539d1953ee94e961",
+  "solution": "audit-cloud-sidebar-pref.patch",
+  "check": {
+    "run": "node .bench-check/audit-cloud-sidebar-pref.mjs",
+    "timeoutSeconds": 30,
+    "files": [
+      ".bench-check/audit-cloud-sidebar-pref.mjs"
+    ],
+    "install": false
+  },
+  "source": {
+    "commit": "29d848005941",
+    "pr": 287
+  },
+  "notes": "Medium (10 files), React frontend only: src/components and src/lib."
+}

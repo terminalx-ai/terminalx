@@ -1,0 +1,21 @@
+{
+  "id": "audit-state-home-variable",
+  "shape": "search",
+  "title": "Find every mention of the state-home variable before it is renamed",
+  "prompt": "The environment variable that points TerminalX at its state folder, `RACCOON_HOME`, is being renamed to `TERMINALX_HOME`. For a compatibility period the old name will still be read when the new one is unset, and that will be documented. Before anyone edits, audit the repository: find every tracked file whose text uses `RACCOON_HOME` (Rust code, comments, contributor and user documentation, guides) and so has to be updated for the rename.\n\nWrite the answer to `bench-answer.txt` at the repository root: one repository-relative path per line (for example `path/to/file.rs`), each file once, nothing else on the line. List files, not line numbers. Do not change any other file.",
+  "startCommit": "52a6689cb76eea9b31d0d703e15e5795ef70de40",
+  "solution": "audit-state-home-variable.patch",
+  "check": {
+    "run": "node .bench-check/audit-state-home-variable.mjs",
+    "timeoutSeconds": 30,
+    "files": [
+      ".bench-check/audit-state-home-variable.mjs"
+    ],
+    "install": false
+  },
+  "source": {
+    "commit": "5a432bcffa54",
+    "pr": 151
+  },
+  "notes": "Large (23 files), repository-wide: Rust under src-tauri/src plus top-level and docs/ Markdown."
+}
