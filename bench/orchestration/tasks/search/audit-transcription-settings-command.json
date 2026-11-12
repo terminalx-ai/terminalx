@@ -1,0 +1,21 @@
+{
+  "id": "audit-transcription-settings-command",
+  "shape": "search",
+  "title": "Find every end of the transcription settings command",
+  "prompt": "The desktop app's `transcription_settings` command enumerates audio input devices, which can raise the macOS microphone prompt when Settings or the composer merely renders. It is being split into a command that returns preferences only and one that lists inputs on demand. Find every file on either side of the app boundary that defines, registers, invokes, mocks or mentions the `transcription_settings` command.\n\nWrite the answer to `bench-answer.txt` at the repository root: one repository-relative path per line (for example `path/to/file.rs`), each file once, nothing else on the line. List files, not line numbers. Do not change any other file.",
+  "startCommit": "33da9d6ecf84f7bec03de1ff16442e51fa52704c",
+  "solution": "audit-transcription-settings-command.patch",
+  "check": {
+    "run": "node .bench-check/audit-transcription-settings-command.mjs",
+    "timeoutSeconds": 30,
+    "files": [
+      ".bench-check/audit-transcription-settings-command.mjs"
+    ],
+    "install": false
+  },
+  "source": {
+    "commit": "bf88c53f6e8f",
+    "pr": 52
+  },
+  "notes": "Small (7 files), across the Tauri boundary: Rust command and registration, TypeScript API, dictation and settings, test mocks."
+}
