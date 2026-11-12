@@ -1,0 +1,21 @@
+{
+  "id": "codex-file-citations",
+  "shape": "feature",
+  "title": "Show Codex file citations as links instead of raw markers",
+  "prompt": "Codex replies can contain file citation markers such as `:codex-file-citation{path=\"/abs/report.xlsx\" sheet=\"Revenue Model\" range=\"C27\" purpose=\"source\"}`. TerminalX shows them as raw text, on the desktop and on the phone. Show each one as a link to the file instead, labelled with its name and location, and never break one apart.\n\nShared parsing (packages/portable/src/codexCitations.ts, exported as `@terminalx/portable/codexCitations`):\n- `matchCodexFileCitation(text)` reads a marker at the start of `text`: `{ citation, end }` or `null`. A marker is `:codex-file-citation{...}` on one line with space-separated `key=value` attributes; values are double-quoted, single-quoted or bare. `path` is required and non-empty; a path is kept exactly (spaces, Markdown punctuation, braces, backslashes, non-ASCII). Known keys map to camelCase fields: path, purpose, artifact_kind → artifactKind, sheet, range, object_id → objectId, label, page_number → pageNumber (kept as a string). Unknown keys are ignored. Anything malformed (missing path, empty path, unclosed brace or quote, a newline inside, a stray attribute without a value, square brackets, missing leading colon) is not a marker. A `javascript:` path is refused.\n- `codexFileCitationName(path)`: the file name of a path or URL, percent-decoded (`file:///tmp/My%20notes.md` → `My notes.md`), including Windows paths.\n- `codexFileCitationLabel(citation)`: the file name, plus \" · Sheet!Range\", \" · Sheet\" or \" · p. N\" when given. Google URLs are named by kind: \"Google Sheets file\", \"Google Docs file\", \"Google Slides file\", \"Google Drive file\".\n- `isCodexFileOutput(citation)`: true when purpose is \"output\".\n- `codexFileCitationParts(text)`: split plain text into `{ text }` and `{ text, citation }` parts whose texts join back to the input exactly; text without markers is one part.\n- `withoutPartialCodexFileCitation(text)`: while a reply streams, hold back a trailing marker that is not finished yet (including a partial `:codex-fi` prefix), and nothing else. A marker that is closed, or ended by its line, is left as it is.\n\nPhone (mobile/src/ui/markdown-blocks.ts): `markdownTokens` must read a marker as one inline token of type `codexFileCitation` with its `raw` text and `citation`, before emphasis or autolinks can touch the path. Markers inside inline code or code blocks stay literal; malformed ones stay text. `markdownBlocks`, which splits long paragraphs into rows, must never split a citation. Draw the token as a link in the phone's Markdown.\n\nDesktop: render the same markers as file links in chat Markdown and in plain linked text, opening the file the way other local chat links open, and hold back a streaming marker.",
+  "startCommit": "ac08d133e660f83320faa94880542294e3016866",
+  "solution": "8cdaad57b92e9a154e4ed981026995b89532746a",
+  "check": {
+    "run": "pnpm exec vitest run mobile/src/ui/markdown-blocks.test.ts packages/portable/src/codexCitations.test.ts",
+    "timeoutSeconds": 600,
+    "files": [
+      "mobile/src/ui/markdown-blocks.test.ts",
+      "packages/portable/src/codexCitations.test.ts"
+    ]
+  },
+  "source": {
+    "pr": 782,
+    "commit": "8cdaad57b92e9a154e4ed981026995b89532746a"
+  },
+  "notes": "Modules touched by the change: packages/portable (marker parser), mobile/src (phone Markdown lexer and rows), src/lib and src/components/chat (desktop chat links and Markdown), scripts/webkit. Check: vitest, 4.3 s failing at the start, 1.3 s passing (the solution changes the lockfile, so check-task reinstalls) measured by check-task on 2026-11-12 (a fresh pnpm install adds 8 to 17 s; a cached one about 1 s). Start is the merge's first parent; solution is the merge commit."
+}

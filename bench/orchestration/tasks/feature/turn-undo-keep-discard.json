@@ -1,0 +1,22 @@
+{
+  "id": "turn-undo-keep-discard",
+  "shape": "feature",
+  "title": "Keep turn checkpoints and offer Undo, Keep and Discard",
+  "prompt": "After an agent's turn, the chat lists the files tools reported editing, and nothing more: edits made through a shell are missed, and there is no way to undo a turn. Record a checkpoint (the tree before and after) for every turn, retain them within a per-workspace limit, and let the reader Undo, Keep or Discard.\n\nRuntime (src-tauri): snapshot the worktree at each turn's start and end and publish a `turn_checkpoint` event payload `{ type: \"turn_checkpoint\", seq, base, head }` (add it to the shared event types). Commands, exposed in src/lib/api.ts as `api.turnCheckpoint(sessionId, tabId, seq)` (the turn's checkpoint `{ number, reviewed, undone, files: [{ path, status, additions, deletions }], backupRef?, unavailableReason? }` or null for legacy turns), `api.keepTurn(sessionId, tabId, seq)`, `api.undoTurn(sessionId, tabId, seq, token | null)` and `api.restoreUndo(sessionId, tabId, seq, token | null)`. Undo and restore first return `{ overlap: string[], token, undone }`: with no overlap they act at once; when other tabs or sessions changed the same files, they return the overlap and a preview token without acting, and a second call with that token proceeds. Undo keeps what it removed under a backup ref (`refs/raccoon-checkpoints/...`) reported as `backupRef`. Refuse while the agent is working. Expired checkpoints report an `unavailableReason`.\n\nWebview:\n- `changeRange(events)` in src/lib/changes.ts: a turn that has its own `turn_checkpoint` uses that pinned base and head, so queued and autonomous turns no longer borrow a preceding prompt's baseline.\n- src/components/chat/TurnChanges.tsx: `TurnChanges({ changes, cwd?, checkpoint: { sessionId, tabId, seq } })` loads the checkpoint and lists its files (even when no tool reported an edit). It shows Undo and Keep buttons; Keep persists and shows a role=\"status\" \"Kept\"; a reviewed turn shows \"Kept\" without buttons after remounting; Undo shows \"Undone\". On overlap, a dialog says \"Other tabs or sessions worked on these files during this turn\", lists them, and offers \"Undo anyway\" (sends the token) or Cancel. While a request runs, the other button is disabled and repeated clicks do nothing; a failure shows a role=\"alert\" and re-enables the actions. After Undo with a backup, a \"Restore what Undo removed\" button (its title includes the backup ref) restores and shows \"Restored\"; on overlap its dialog says \"These files changed after Undo\" with \"Restore anyway\". An expired checkpoint shows its reason and the files with no actions. Turns without a checkpoint keep the old file chips.\n- src/components/changes/DiscardDialog.tsx: `DiscardDialog({ source, file: { path, oldPath? }, base?, onClose, onDiscarded })` asks for confirmation in a dialog and only then calls `source.discard(path, base, oldPath)` (extend `GitSource.discard` with the base and the rename's old path), then calls onDiscarded and onClose. A failure shows a role=\"alert\" and keeps the dialog open. Offer it from the changes panel's file list.",
+  "startCommit": "40e1f40b37cefb2471bf27493a72b211e49a11dd",
+  "solution": "78d5de63dbd2b42da1774e1775005864d5ed134c",
+  "check": {
+    "run": "pnpm exec vitest run src/components/changes/DiscardDialog.test.tsx src/components/chat/TurnChanges.test.tsx src/lib/changes.test.ts",
+    "timeoutSeconds": 600,
+    "files": [
+      "src/components/changes/DiscardDialog.test.tsx",
+      "src/components/chat/TurnChanges.test.tsx",
+      "src/lib/changes.test.ts"
+    ]
+  },
+  "source": {
+    "pr": 843,
+    "commit": "78d5de63dbd2b42da1774e1775005864d5ed134c"
+  },
+  "notes": "Modules touched by the change: src-tauri (git checkpoints, retention, undo/restore commands, a turn_checkpoint event), packages/portable (events, transcript), src/lib (api, changes, git source), src/components/chat and src/components/changes. Check: vitest, 17.3 s failing at the start (cold transform after a fresh install), 2.4 s passing measured by check-task on 2026-11-12 (a fresh pnpm install adds 8 to 17 s; a cached one about 1 s). Start is the merge's first parent; solution is the merge commit."
+}
