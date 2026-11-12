@@ -39,10 +39,17 @@ export function noteExperimentalSettings(next: ExperimentalSettings) {
   set(next);
 }
 
-export function useExperimentalSettings(): ExperimentalSettings | null {
+/** The switches as last read, outside a component (`null` until read). The first call starts reading them. */
+export function getExperimentalSettings(): ExperimentalSettings | null {
+  void boot();
+  return current;
+}
+
+/** `wanted: false` reads nothing: for a view no switch could change (a cloud session, a quick chat). */
+export function useExperimentalSettings(wanted = true): ExperimentalSettings | null {
   useEffect(() => {
-    void boot();
-  }, []);
+    if (wanted) void boot();
+  }, [wanted]);
   return useSyncExternalStore(
     (listener) => {
       listeners.add(listener);
