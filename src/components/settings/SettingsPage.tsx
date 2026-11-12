@@ -101,11 +101,14 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   };
   const { projects } = useSessionStore();
   const repositories = projects.filter((project) => !project.archived);
-  const project = repositories.find((candidate) => candidate.path === projectPath);
+  // A row of a repository's settings (⌘K, a toast's Open setting, a copied link) names no repository: it opens on the
+  // one already open, else the first listed, as the search does. Without a row, none is chosen for the person.
+  const project = repositories.find((candidate) => candidate.path === projectPath)
+    ?? (section === "repositories" && target ? repositories[0] : undefined);
 
   useEffect(() => {
     setSection(initial.section);
-    setProjectPath(initial.section === "repositories" ? initialProjectPath : undefined);
+    setProjectPath((open) => initial.section === "repositories" ? initialProjectPath ?? open : undefined);
     setTarget(initialTab === initial.id ? initial.id : null);
     setQuery("");
     setSelected(0);
@@ -143,7 +146,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     const observer = new MutationObserver(() => { if (reveal()) observer.disconnect(); });
     observer.observe(root, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [section, projectPath, target, openRequest, selectionRequest, highlightRow]);
+  }, [section, projectPath, project?.path, target, openRequest, selectionRequest, highlightRow]);
 
   useEffect(() => {
     resultsRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
@@ -238,7 +241,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
               {group === "Repositories" ? (
                 // One row a repository, its badge and name, opening its settings: no expander holding a single item.
                 repositories.length ? repositories.map((repository) => {
-                  const selected = section === "repositories" && projectPath === repository.path;
+                  const selected = section === "repositories" && project?.path === repository.path;
                   return (
                     <button key={repository.path} type="button" title={repository.path} aria-current={selected ? "page" : undefined} className={navClass(selected)} onClick={() => choose("repositories", repository.path)}>
                       <ProjectGlyph project={repository} size={16} />
