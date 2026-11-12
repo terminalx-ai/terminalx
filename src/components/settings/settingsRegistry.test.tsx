@@ -65,9 +65,29 @@ describe("settings registry", () => {
   it("keeps the linkable allowlist to reversible, local display and sound switches", () => {
     // A link from another app can turn these on, and nothing else. Review any change here as a security boundary.
     expect(SETTINGS_ROWS.filter((row) => "linkable" in row && row.linkable).map((row) => row.id)).toEqual(["general.sounds", "general.turnChanges", "general.promptMap"]);
-    for (const id of ["agents.readOnlyCommands", "orchestrator.workerMode", "orchestrator.requireApproval", "general.cloudControl", "general.computerUse", "general.dataPrivacy", "account.workStatus", "integrations.linear", "experimental.orchestratorRuns", "experimental.nativeCodex"]) {
+    for (const id of ["agents.readOnlyCommands", "orchestrator.workerMode", "orchestrator.requireApproval", "general.cloudControl", "general.computerUse", "general.dataPrivacy", "general.websiteLinks", "general.linkActions", "general.useWorktree", "account.workStatus", "account.sharing", "integrations.linear", "experimental.orchestratorRuns", "experimental.nativeCodex", "experimental.sessionCost", "transcription.remoteContext"]) {
+      // resolveSetting falls back to account.identity for an unknown id, so check the row is the one named.
+      expect(resolveSetting(id).id).toBe(id);
       expect("linkable" in resolveSetting(id) && resolveSetting(id).linkable, id).toBeFalsy();
     }
+  });
+
+  it("keeps every linkable row a per-person on/off preference in settings.json", () => {
+    for (const row of SETTINGS_ROWS) {
+      if (!("linkable" in row && row.linkable)) continue;
+      expect(row.scope, row.id).toBe("user");
+      expect(row.storage, row.id).toEqual({ kind: "file", location: expect.stringMatching(/^\$TERMINALX_HOME\/settings\.json#preferences\.[a-zA-Z]+$/) });
+      const key = row.storage.location.split("#preferences.")[1];
+      expect(typeof (preferenceDefaults as Record<string, unknown>)[key], row.id).toBe("boolean");
+    }
+  });
+
+  it("has no Desktop notifications row to link yet, and never links Send key", () => {
+    // Design 09.04/09.33 link "Desktop notifications" (general.notifications) and refuse "Send key". Neither row
+    // exists: the Rust `notifications` flag has no webview setter. When that row lands, mark it linkable and
+    // replace this assertion with one that it is; Send key (any row so titled) must stay off the allowlist.
+    expect(SETTINGS_ROWS.some((row) => (row.id as string) === "general.notifications" || /desktop notifications/i.test(row.title))).toBe(false);
+    for (const row of SETTINGS_ROWS.filter((row) => /send key/i.test(row.title))) expect("linkable" in row && row.linkable, row.id).toBeFalsy();
   });
 
   it("gives every row-layout setting an actions menu, and content rows none", () => {
