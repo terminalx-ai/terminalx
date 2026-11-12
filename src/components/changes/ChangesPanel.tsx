@@ -1,7 +1,8 @@
 import { ReviewCommentsProvider, useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
 import { useEffect, useId, useMemo, useState } from "react";
-import { openConflict, openDiff } from "@/lib/editors";
+import { openConflict, openDiff, useEditors } from "@/lib/editors";
+import { useTerminals } from "@/lib/terminal";
 import { changeRange, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { cn } from "@/lib/cn";
@@ -171,6 +172,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   const merge = result?.merge ?? null;
   // While a merge is in progress, its card is the uncommitted view: conflicts, what was changed here, what it brought in.
   const mergeOnly = !!merge && choice.scope === "uncommitted";
+  const openPath = useOpenConflictPath(editor);
   const onOpenConflict = editor && merge && source.conflictFile ? (path: string) => openConflict(editor.sessionId, editor.root, path, merge, merge.conflictCounts[path] ?? 0) : undefined;
   const onOpenMergeFile = editor && result?.mergeWork ? (file: ChangedFile) => openDiff(editor.sessionId, editor.root, file.path,
     { scope: "all", range: result.mergeWork!.range, oldPath: file.oldPath, target: null, uncommitted: true }) : undefined;
@@ -209,7 +211,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
       <DiffOptions />
       {merge && <div className={cn("overflow-y-auto pb-2 scrollbar-thin", mergeOnly ? "min-h-0 flex-1" : "max-h-[55%] shrink-0 border-b border-hairline")}>
         <MergeInProgress source={source} merge={merge} files={result?.mergeWork?.files ?? []} allChanges={choice.scope === "all"} sessionId={sessionId}
-          onChanged={() => setTick((t) => t + 1)} onOpenConflict={onOpenConflict} onOpenFile={onOpenMergeFile} />
+          onChanged={() => setTick((t) => t + 1)} onOpenConflict={onOpenConflict} onOpenFile={onOpenMergeFile} openPath={openPath} />
       </div>}
       {result?.mergeError && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">Whether a merge is in progress could not be read: {result.mergeError}</div>}
       {!mergeOnly && <div className="min-h-0 flex-1">
@@ -220,6 +222,21 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
       </div>}
     </div>
   );
+}
+
+/**
+ * The conflicted file whose tab is being looked at in this checkout: the
+ * selected workspace tab, or the file pane's active entry where a checkout
+ * has no workspace tab strip.
+ */
+function useOpenConflictPath(editor: { root: string; sessionId: string } | undefined): string | null {
+  const editors = useEditors();
+  const selected = useTerminals().selected;
+  if (!editor) return null;
+  const pick = selected[editor.sessionId];
+  const id = pick ? (pick.kind === "review" ? pick.id : null) : editors.active[editor.sessionId];
+  const open = editors.editors.find((e) => e.id === id);
+  return open?.kind === "conflict" && open.root === editor.root ? open.rel : null;
 }
 
 function ChangesBody({

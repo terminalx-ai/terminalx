@@ -362,10 +362,14 @@ it("says why the agent cannot be asked without an agent tab", async () => {
 it("opens a conflicted file in a centre conflict tab from its row", async () => {
   const source = merging("local:/merge-repo", ["src/deep/seats.ts"], { "src/deep/seats.ts": 2 });
   render(<ChangesPanel source={source} cwd="/merge-repo" sessionId="centre-conflict" events={[]} version={0} active live={false} />);
-  fireEvent.click(await screen.findByTitle("Unresolved · src/deep/seats.ts"));
+  const row = await screen.findByTitle("Unresolved · src/deep/seats.ts");
+  expect(row.getAttribute("aria-current")).toBeNull();
+  fireEvent.click(row);
   expect(getEditors().editors.find((e) => e.sessionId === "centre-conflict")).toMatchObject({
     kind: "conflict", rel: "src/deep/seats.ts", name: "seats.ts · 2 conflicts", conflict: { head: HEAD, mergeHead: BASE, conflicts: 2 },
   });
+  // The row of the file being looked at is marked, as the design draws it.
+  await waitFor(() => expect(screen.getByTitle("Unresolved · src/deep/seats.ts").getAttribute("aria-current")).toBe("page"));
   dropEditors((e) => e.sessionId === "centre-conflict");
 });
 

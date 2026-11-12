@@ -54,7 +54,9 @@ function Heading({ children }: { children: React.ReactNode }) {
 }
 
 /** A row of the merge's lists: badge, name, directory, and what is on the right. Clickable when it opens something. */
-function Row({ badge, path, title, trailing, onOpen }: { badge: React.ReactNode; path: string; title: string; trailing: React.ReactNode; onOpen?: () => void }) {
+function Row({ badge, path, title, trailing, onOpen, current = false }: { badge: React.ReactNode; path: string; title: string; trailing: React.ReactNode; onOpen?: () => void;
+  /** Its tab is the one being looked at. */
+  current?: boolean }) {
   const inner = <>
     {badge}
     <span className="min-w-0 shrink truncate font-mono text-[12.5px]">{fileName(path)}</span>
@@ -63,7 +65,8 @@ function Row({ badge, path, title, trailing, onOpen }: { badge: React.ReactNode;
   </>;
   const className = "flex h-8 w-full min-w-0 items-center gap-2 px-3 text-left";
   return onOpen
-    ? <button type="button" title={title} className={cn(className, "rounded-md outline-none hover:bg-selected/50 focus-visible:ring-2 focus-visible:ring-ring/40")} onClick={onOpen}>{inner}</button>
+    ? <button type="button" title={title} aria-current={current ? "page" : undefined}
+      className={cn(className, "outline-none focus-visible:ring-2 focus-visible:ring-ring/40", current ? "bg-selected" : "hover:bg-selected/50")} onClick={onOpen}>{inner}</button>
     : <div title={title} className={className}>{inner}</div>;
 }
 
@@ -86,7 +89,7 @@ function FileRows({ files, onOpenFile }: { files: ChangedFile[]; onOpenFile?: (f
  * it brought in, and Ask the agent to resolve, Commit merge or Abort merge.
  * Both act on exactly the merge that was read; one that moved on since is refused.
  */
-export function MergeInProgress({ source, merge, files, allChanges, sessionId, onChanged, onOpenConflict, onOpenFile }: {
+export function MergeInProgress({ source, merge, files, allChanges, sessionId, onChanged, onOpenConflict, onOpenFile, openPath = null }: {
   source: GitSource;
   merge: UnfinishedMerge;
   /** The uncommitted files, as Git reports them against HEAD. */
@@ -100,6 +103,8 @@ export function MergeInProgress({ source, merge, files, allChanges, sessionId, o
   /** Open a conflicted file to resolve it; absent where the source cannot. */
   onOpenConflict?: (path: string) => void;
   onOpenFile?: (file: ChangedFile) => void;
+  /** The conflicted file whose tab is being looked at, to mark its row. */
+  openPath?: string | null;
 }) {
   const [busy, setBusy] = useState<"commit" | "abort" | "agent" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -171,7 +176,7 @@ export function MergeInProgress({ source, merge, files, allChanges, sessionId, o
       <Heading>Unresolved conflicts · {conflicts}</Heading>
       <div className="flex flex-col">{merge.conflicted.map((path) => {
         const n = merge.conflictCounts[path] ?? 0;
-        return <Row key={path} path={path} title={`Unresolved · ${path}`} onOpen={onOpenConflict && (() => onOpenConflict(path))}
+        return <Row key={path} path={path} title={`Unresolved · ${path}`} onOpen={onOpenConflict && (() => onOpenConflict(path))} current={!!onOpenConflict && openPath === path}
           badge={<span className="w-3 shrink-0 font-mono text-[11px] text-destructive" aria-label="Unresolved">U</span>}
           trailing={<span className="text-[11.5px] text-warning">{n > 0 ? count(n, "conflict", "conflicts") : "Whole file"}</span>} />;
       })}</div>

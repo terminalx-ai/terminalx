@@ -13,6 +13,8 @@ import { createRoot } from 'react-dom/client';
 import { ConflictView } from '/src/components/changes/ConflictView.tsx';
 import { MergeInProgress } from '/src/components/changes/MergeInProgress.tsx';
 import { getEditors, openConflict } from '/src/lib/editors.ts';
+import { upsertSession } from '/src/lib/sessions.ts';
+import { TabIcon } from '/src/components/session/WorkspaceTabStrip.tsx';
 import '/src/styles/app.css';
 
 const head = '8e2d1f0' + '0'.repeat(33), mergeHead = '5'.repeat(40);
@@ -51,22 +53,42 @@ const source = {
   errorMessage: String,
 };
 const watcher = { kind: 'local', stat: async () => ({ version: '1' }), watch: () => () => {} };
-const id = openConflict('checkout:/repo', '/repo', path, merge, 2);
+// The session the tab belongs to, with its agent tab open in chat: the Ask buttons send to it.
+upsertSession({ id: 's1', kind: 'quick', title: 'Seat-based Teams billing', projectPath: '/repo', cwd: '/repo', activeTab: 't1', tabs: [{ id: 't1', front: 'chat', status: 'idle' }] });
+const id = openConflict('s1', '/repo', path, merge, 2);
 function App() {
   const editors = React.useSyncExternalStore((cb) => { const t = setInterval(cb, 100); return () => clearInterval(t); }, () => getEditors());
   const tab = editors.editors.find((e) => e.id === id);
   return <div style={{ display: 'flex', width: '100vw', height: '100vh' }}>
     <main data-testid="centre" style={{ flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-      <div data-testid="tab-title" className="h-9 shrink-0 border-b border-hairline px-3 text-[13px] leading-9">{tab.name}</div>
+      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-hairline px-3 text-[13px]">
+        <TabIcon tab={{ kind: 'review', id, key: id, sessionId: 's1', editor: tab }} />
+        <span data-testid="tab-title">{tab.name}</span>
+      </div>
       <div style={{ flex: 1, minHeight: 0 }}><ConflictView entry={tab} visible source={source} files={watcher} /></div>
     </main>
     <aside data-testid="panel" className="border-l border-hairline" style={{ width: 'var(--panel-w)', flex: 'none', overflowY: 'auto', overflowX: 'hidden' }}>
-      <MergeInProgress source={source} merge={merge} files={files} allChanges={false} onChanged={() => {}} onOpenConflict={() => {}} onOpenFile={() => {}} />
+      <MergeInProgress source={source} merge={merge} files={files} allChanges={false} sessionId="s1" openPath={path}
+        onChanged={() => {}} onOpenConflict={() => {}} onOpenFile={() => {}} />
     </aside>
   </div>;
 }
 createRoot(document.getElementById('root')).render(<App />);
 `;
+
+/** The app's Tauri bridge: the agent tab takes what is sent to it; any other command fails the check. */
+const BRIDGE = `
+window.sent = [];
+window.__TAURI_INTERNALS__ = {
+  invoke: async (command, args) => {
+    if (command === "send_message") { window.sent.push(args); return { events: [], queued: false }; }
+    // The app's theme follows the page; the window chrome has nothing to answer.
+    if (command === "plugin:window|set_theme") return null;
+    throw new Error(command + " is not part of this check");
+  },
+  transformCallback: () => 0,
+  metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
+};`;
 
 async function serve() {
   const { createServer, transformWithEsbuild } = await import("vite");
@@ -81,7 +103,7 @@ async function serve() {
       });
       server.middlewares.use("/merge-conflicts-test", async (_request, response) => {
         response.setHeader("Content-Type", "text/html");
-        response.end(await server.transformIndexHtml("/merge-conflicts-test", '<div id="root"></div><script type="module" src="/merge-conflicts.tsx"></script>'));
+        response.end(await server.transformIndexHtml("/merge-conflicts-test", `<script>${BRIDGE}</script><div id="root"></div><script type="module" src="/merge-conflicts.tsx"></script>`));
       });
     },
   }] });
@@ -131,6 +153,13 @@ try {
       const button = await page.getByTestId("panel").getByRole("button", { name: label }).boundingBox();
       assert(button && button.x >= width - panel - 0.5 && button.x + button.width <= width + 0.5, `${name}: ${label} stays visible in the panel`);
     }
+    // With an agent tab in chat, both Ask buttons are live, as the design draws them.
+    assert(await page.getByRole("button", { name: "Ask the agent to combine them" }).isEnabled(), `${name}: Ask the agent to combine them is enabled`);
+    assert(await page.getByRole("button", { name: "Ask the agent to resolve" }).isEnabled(), `${name}: Ask the agent to resolve is enabled`);
+    // The row of the file open in the centre is marked.
+    assert.equal(await page.getByTitle(`Unresolved · ${"apps/api/src/billing/seats.ts"}`).getAttribute("aria-current"), "page", `${name}: the open file's row is current`);
+    assert.equal(await page.getByTitle("Unresolved · apps/api/src/billing/webhooks.ts").getAttribute("aria-current"), null);
+    assert(await page.getByTestId("centre").getByLabel("Merge conflict").isVisible(), `${name}: the tab shows the warning icon`);
     for (const id of ["centre", "panel"]) {
       const fit = await fits(page, id);
       assert.deepEqual(fit.scrollers, [], `${name}: nothing in the ${id} scrolls sideways`);
@@ -143,6 +172,16 @@ try {
     await page.screenshot({ path: `${SHOTS}/merge-conflicts-${name}.png` });
     console.log(`ok ${name}: ${width - panel}px centre, ${panel}px panel; sides stack, buttons visible, no sideways scroll; ${SHOTS}/merge-conflicts-${name}.png`);
   }
+  // Asking the agent sends to the session's agent tab: one conflict, then every conflicted file.
+  await page.getByRole("button", { name: "Ask the agent to combine them" }).click();
+  await page.getByText("Conflict 1 sent to the agent tab.").waitFor();
+  await page.getByRole("button", { name: "Ask the agent to resolve" }).click();
+  await page.getByText("Sent to the agent tab.", { exact: true }).waitFor();
+  const sent = await page.evaluate(() => window.sent);
+  assert.deepEqual(sent.map(({ sessionId, tabId }) => [sessionId, tabId]), [["s1", "t1"], ["s1", "t1"]]);
+  assert.match(sent[0].text, /the file "apps\/api\/src\/billing\/seats\.ts" has 2 conflicts\. Resolve conflict 1 of 2, the one whose <<<<<<< marker is on line 5/);
+  assert.match(sent[1].text, /- "apps\/api\/src\/billing\/seats\.ts": 2 conflicts\n- "apps\/api\/src\/billing\/webhooks\.ts": 1 conflict/);
+  console.log("ok Ask the agent sends conflict 1 of seats.ts, then every conflicted file, to the session's agent tab");
   // A Keep shows the file the backend returned, and the tab title follows.
   await page.getByRole("group", { name: "Conflict 1 of 2, line 5" }).getByRole("button", { name: "Keep both" }).click();
   await page.getByText("Conflict 1 of 1").waitFor();
