@@ -2,205 +2,60 @@ import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PairingStatus } from "@/types/pairing";
-import type { QRCodeToDataURLOptions } from "qrcode";
-
-const empty: PairingStatus = {
-  relay: { phase: "off", message: null, attempt: 0 },
-  host: null,
-  devices: [],
-  activePairing: null,
-  pendingApproval: null,
-  keepAwake: true,
-  lastError: null,
-};
-const ready: PairingStatus = {
-  relay: { phase: "connected", message: "Connected", attempt: 0 },
-  host: null,
-  devices: [
-    {
-      id: "phone-1",
-      label: "Priya's iPhone",
-      platform: "iOS",
-      token: "hash",
-      scope: "driver",
-      provenance: "explicit",
-      bindingGeneration: 0,
-      publicKey: "key",
-      createdAt: "2026-09-03T00:00:00Z",
-    },
-  ],
-  activePairing: {
-    pairingUrl: "terminalx://pair?code=typed-fallback",
-    expiresAt: Date.now() + 300_000,
-    connectionMode: "automatic",
-    directAvailable: true,
-    transport: "relay",
-  },
-  pendingApproval: null,
-  keepAwake: true,
-  lastError: null,
-};
-const localReady: PairingStatus = {
-  ...ready,
-  activePairing: {
-    pairingUrl: "terminalx://pair?code=local-fallback",
-    expiresAt: Date.now() + 300_000,
-    connectionMode: "local-only",
-    directAvailable: true,
-    transport: "direct",
-  },
-};
+import { code, device, emptyStatus, relayReady } from "@/components/pairing/pairingFixtures.test-utils";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  qr: vi.fn(async (_value: string, _options: QRCodeToDataURLOptions) => "data:image/png;base64,qr"),
-  signIn: vi.fn(),
-  statusListener: null as null | ((event: { payload: PairingStatus }) => void),
+  qr: vi.fn(async () => "data:image/png;base64,qr"),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (_name, listener) => {
-    mocks.statusListener = listener;
-    return () => {};
-  }),
-}));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("qrcode", () => ({ default: { toDataURL: mocks.qr } }));
 vi.mock("@/lib/account", () => ({
-  signIn: mocks.signIn,
+  signIn: vi.fn(),
   useAccount: () => ({
     ready: true,
     busy: false,
-    status: {
-      state: "signed-in",
-      identity: { name: "Priya", email: "priya@example.com", organization: null },
-      expiresAt: Date.now() + 300_000,
-      lastError: null,
-    },
+    status: { state: "signed-in", identity: { name: "Priya", email: "priya@example.com", organization: null }, expiresAt: Date.now() + 300_000, lastError: null },
   }),
 }));
 
-const { bootPairing } = await import("@/lib/pairing");
+const pairing = await import("@/lib/pairing");
 const { DevicesTab } = await import("./DevicesTab");
+const { PairPhoneDialogHost } = await import("@/components/pairing/PairPhoneDialog");
 
 afterEach(cleanup);
 
-describe("paired devices settings", () => {
-  it("generates the QR locally and revokes a device through the native registry", async () => {
-    mocks.invoke.mockImplementation(async (command: string, args?: { connectionMode?: string }) => {
-      if (command === "pairing_status") return { ...empty, relay: ready.relay };
-      if (command === "pairing_generate") return args?.connectionMode === "local-only" ? localReady : ready;
-      if (command === "pairing_revoke") return { ...ready, devices: [] };
+describe("Settings → Devices", () => {
+  it("opens the Pair a phone dialog and lists paired devices with their fingerprints", async () => {
+    const status: PairingStatus = { ...emptyStatus, relay: relayReady, devices: [device({ connection: { transport: "relay", since: "2026-11-12T09:00:00Z" } })] };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "pairing_status") return status;
+      if (command === "pairing_generate") return { ...status, activePairing: code() };
+      if (command === "pairing_revoke") return { ...status, devices: [] };
       throw new Error(`Unexpected command: ${command}`);
     });
-    await act(async () => bootPairing());
-    render(<DevicesTab />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
-    await screen.findByText("typed-fallback");
-    expect(mocks.invoke).toHaveBeenCalledWith("pairing_generate", { connectionMode: "automatic" });
-    expect(mocks.qr).toHaveBeenCalledWith(ready.activePairing?.pairingUrl, expect.any(Object));
-    const qrOptions = mocks.qr.mock.calls.at(-1)![1];
-    // Preserve the QR quiet zone and sufficient source pixels per module as
-    // offers grow. A fixed bitmap width undersamples dense relay offers.
-    expect(qrOptions.margin).toBeGreaterThanOrEqual(4);
-    expect(qrOptions.scale).toBeGreaterThanOrEqual(4);
-    expect(qrOptions.width).toBeUndefined();
+    await act(async () => pairing.bootPairing());
+    render(
+      <>
+        <DevicesTab />
+        <PairPhoneDialogHost />
+      </>,
+    );
     expect(screen.getByText("Priya's iPhone")).toBeTruthy();
+    expect(screen.getByText("Connected now · through TerminalX Relay")).toBeTruthy();
+    expect(screen.getByText("7F3A·91C2")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("radio", { name: /LAN/ }));
-    await screen.findByText("local-fallback");
-    expect(mocks.invoke).toHaveBeenCalledWith("pairing_generate", { connectionMode: "local-only" });
+    fireEvent.click(screen.getByRole("button", { name: "Pair a phone…" }));
+    await screen.findByRole("dialog", { name: "Pair a phone" });
+    await screen.findByAltText("TerminalX phone pairing QR code");
+    expect(mocks.invoke).toHaveBeenCalledWith("pairing_generate", { connectionMode: "automatic" });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
     fireEvent.click(screen.getByRole("button", { name: "Revoke Priya's iPhone" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pairing_revoke", { deviceId: "phone-1" }));
     expect(await screen.findByText("No paired devices")).toBeTruthy();
-  });
-
-  it("shows a service outage and enables Relay pairing after automatic recovery", async () => {
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "pairing_status") return empty;
-      if (command === "pairing_generate") return ready;
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    await act(async () => bootPairing());
-    const message = "TerminalX Relay service is temporarily unavailable. Retrying automatically. You can use LAN meanwhile.";
-    act(() => mocks.statusListener!({
-      payload: { ...empty, relay: { phase: "offline", message, attempt: 12 } },
-    }));
-    render(<DevicesTab />);
-    expect(screen.getByText(message)).toBeTruthy();
-    expect(screen.queryByText(/unavailable for this account or network/)).toBeNull();
-    expect(screen.getByRole("button", { name: "Choose LAN to pair" }).matches(":disabled")).toBe(true);
-    act(() => mocks.statusListener!({ payload: { ...empty, relay: { phase: "connecting", message: null, attempt: 13 } } }));
-    expect(screen.getByRole("button", { name: "Choose LAN to pair" }).matches(":disabled")).toBe(true);
-    act(() => mocks.statusListener!({ payload: { ...empty, relay: ready.relay } }));
-    expect(screen.getByText("Relay is ready. Nearby phones may connect directly over LAN; other networks use Relay.")).toBeTruthy();
-    expect(screen.queryByText(message)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
-    await screen.findByText("typed-fallback");
-    expect(mocks.invoke).toHaveBeenCalledWith("pairing_generate", { connectionMode: "automatic" });
-  });
-
-  it("shows a usable Relay code with a quiet nearby warning until the listener recovers", async () => {
-    const relayOnly: PairingStatus = {
-      ...ready,
-      activePairing: { ...ready.activePairing!, directAvailable: false },
-    };
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "pairing_generate") return relayOnly;
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    act(() => mocks.statusListener!({ payload: { ...empty, relay: ready.relay } }));
-    render(<DevicesTab />);
-    fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
-
-    await screen.findByAltText("TerminalX phone pairing QR code");
-    expect(screen.getByText("typed-fallback")).toBeTruthy();
-    expect(screen.getByText("Nearby connections are temporarily unavailable. This code works through Relay.")).toBeTruthy();
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.queryByText("Includes direct and Relay paths. The phone uses the first secure connection that succeeds.")).toBeNull();
-
-    act(() => mocks.statusListener!({ payload: ready }));
-    expect(screen.queryByText(/Nearby connections are temporarily unavailable/)).toBeNull();
-    expect(screen.getByText("Includes direct and Relay paths. The phone uses the first secure connection that succeeds.")).toBeTruthy();
-    expect(screen.getByText("typed-fallback")).toBeTruthy();
-  });
-
-  it("keeps a LAN bind error beside Retry across status updates and clears it after a successful retry", async () => {
-    const message = "Another program, or another copy of TerminalX, is using port 6768. Close it and retry.";
-    const status = { ...empty, relay: ready.relay };
-    let portBusy = true;
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "pairing_status") return status;
-      if (command === "pairing_generate") {
-        if (portBusy) throw new Error(message);
-        return localReady;
-      }
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    act(() => mocks.statusListener!({ payload: status }));
-    render(<DevicesTab />);
-    fireEvent.click(screen.getByRole("radio", { name: /LAN/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Create LAN pairing code" }));
-
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toBe(message);
-    const retry = screen.getByRole("button", { name: "Retry" });
-    expect(alert.closest("section")).toBe(retry.closest("section"));
-    expect(screen.getAllByText(message)).toHaveLength(1);
-    expect(screen.queryByAltText("TerminalX phone pairing QR code")).toBeNull();
-
-    act(() => mocks.statusListener!({ payload: status }));
-    expect(screen.getByRole("alert").textContent).toBe(message);
-    fireEvent.click(screen.getByRole("radio", { name: /TerminalX Relay/ }));
-    expect(screen.queryByRole("alert")).toBeNull();
-    fireEvent.click(screen.getByRole("radio", { name: /LAN/ }));
-    portBusy = false;
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await screen.findByText("local-fallback");
-    expect(mocks.invoke).toHaveBeenLastCalledWith("pairing_generate", { connectionMode: "local-only" });
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 });
