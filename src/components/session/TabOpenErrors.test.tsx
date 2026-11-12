@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { TabEntry } from "@/types/session";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -56,7 +57,7 @@ const { bootBrowser, refreshBrowserPages } = await import("@/lib/browser");
 const { dropSessionTerminals, setSelectedAgent, getTerminalState } = await import("@/lib/terminal");
 const { resetTabLayouts } = await import("@/lib/tabLayouts");
 const { useTabRow } = await import("@/lib/sessionTabs");
-const { TabMenuItems, settingsFileIn, openAgentTabTelling } = await import("./TabMenu");
+const { TabMenuItems, settingsFileIn, openAgentTabTelling, START_WATCH_MS } = await import("./TabMenu");
 const { Toasts } = await import("@/components/ui/Toasts");
 const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
 const { resetTabViews } = await import("@/lib/tabViews");
@@ -212,5 +213,85 @@ describe("a chat tab that would not close", () => {
     const alert = screen.getByRole("alert");
     expect(within(alert).getByText("“Fix flaky test” is still open.")).toBeTruthy();
     expect(within(alert).getByText("Stop is already in progress")).toBeTruthy();
+  });
+});
+
+describe("a new chat tab whose agent exits after it was started", () => {
+  // The first start answers at once; asked again after the exit, the backend says how the start went.
+  const startsThen = (again: () => unknown) => {
+    let asked = 0;
+    failing.commands.set("ensure_tab_started", () => (++asked === 1 ? null : again()));
+  };
+  const added = () => tabsOf("a").find((id) => id.startsWith("new-"));
+
+  it("opens without waiting for its agent to get going", async () => {
+    startsThen(() => null);
+    render(<Menu tab="agent:a1" />);
+    const began = performance.now();
+    await choose("Claude Code");
+    // Started once, and the tab is there: its pane is shown as it always is.
+    expect(performance.now() - began).toBeLessThan(START_WATCH_MS / 4);
+    expect(backend.callsOf("ensure_tab_started")).toHaveLength(1);
+    expect(added()).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("is closed again with the toast when it exited while starting", async () => {
+    startsThen(() => Promise.reject(EXITED));
+    render(<Menu tab="agent:a1" />);
+    await choose("Claude Code");
+    const id = added()!;
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    act(() => backend.emit("pty_exit", { id: `tab:${id}`, code: 1 }));
+    await flush();
+    const alert = screen.getByRole("alert");
+    expect(within(alert).getByText("Couldn't open a new Claude Code tab: claude exited while starting")).toBeTruthy();
+    expect(within(alert).getByText("~/.claude/settings.json line 14: Unexpected token }")).toBeTruthy();
+    expect(within(alert).getByRole("button", { name: "Open settings.json" })).toBeTruthy();
+    expect(backend.callsOf("remove_tab")).toEqual([expect.objectContaining({ sessionId: "a", tabId: id })]);
+    expect(tabsOf("a")).toEqual(["a1", "a2", "a3"]);
+    expect(getTerminalState().selected.a).toEqual({ kind: "agent", id: "a1" });
+  });
+
+  it("stays when its agent went otherwise, or another pane exited", async () => {
+    startsThen(() => null);
+    render(<Menu tab="agent:a1" />);
+    await choose("Claude Code");
+    const id = added()!;
+    act(() => backend.emit("pty_exit", { id: "tab:a2", code: 0 }));
+    await flush();
+    expect(backend.callsOf("ensure_tab_started")).toHaveLength(1);
+    act(() => backend.emit("pty_exit", { id: `tab:${id}`, code: 0 }));
+    await flush();
+    expect(backend.callsOf("ensure_tab_started")).toHaveLength(2);
+    expect(added()).toBe(id);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("is not told apart once the watch is over, nor for a tab closed meanwhile", async () => {
+    vi.useFakeTimers();
+    try {
+      startsThen(() => Promise.reject(EXITED));
+      const tab = { id: "new-x", harness: "claude" } as TabEntry;
+      const opened = openAgentTabTelling({ id: "a", cwd: FEATURE }, "claude", async () => tab);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(opened).resolves.toBe(true);
+      await vi.advanceTimersByTimeAsync(START_WATCH_MS);
+      backend.emit("pty_exit", { id: "tab:new-x", code: 1 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(backend.callsOf("ensure_tab_started")).toHaveLength(1);
+      expect(getErrorToasts()).toEqual([]);
+
+      // Closed while watched: its pane exits, and the tab is no longer found.
+      startsThen(() => Promise.reject("tab not found"));
+      await expect(openAgentTabTelling({ id: "a", cwd: FEATURE }, "claude", async () => tab)).resolves.toBe(true);
+      backend.emit("pty_exit", { id: "tab:new-x", code: 1 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(backend.callsOf("ensure_tab_started")).toHaveLength(3);
+      expect(getErrorToasts()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

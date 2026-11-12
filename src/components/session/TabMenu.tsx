@@ -45,10 +45,11 @@ import { isQuickChat } from "@/lib/quickChats";
 import { archiveSession, forkSession, getSessionStore, openSkills, removeTab, selectSession, useSessionStore } from "@/lib/sessions";
 import { useTabRow, activatePeer, closePeer, hasOwnTitle, isShellPeer, peerAgent, peerIsLive, peerLabel, peerShell, peerStatus, sessionOfPeer, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { BULK_CLOSE_LABEL, canMoveTab, canReopenTab, canRestartAgent, duplicateTab, moveTabBy, newTab, moveTabToPane, otherPane, planBulkClose, renamePeer, reopenClosedTab, restartTab, setTabMuted, setTabPinned, type BulkClose, type NewTabKind, type TabMove } from "@/lib/tabActions";
-import { tabViewIn } from "@/lib/tabFront";
+import { tabPaneId, tabViewIn } from "@/lib/tabFront";
 import { panesOf, useTabState } from "@/lib/tabLayouts";
 import { subscribeTabPty, toggleTabView, useTabViews } from "@/lib/tabViews";
 import { getTerminalState, type SelectedSessionTab } from "@/lib/terminal";
+import { listen } from "@tauri-apps/api/event";
 import { IssueLinkContextItems } from "@/components/session/IssueLinkMenuItems";
 import { copyText } from "@/lib/clipboard";
 import { agent as agentApi, errorMessage } from "@/lib/api";
@@ -78,11 +79,42 @@ async function openSettingsFile(sessionId: string, cwd: string, file: string) {
 }
 
 /**
+ * How long a new tab is watched for its agent exiting while starting: as long
+ * as the backend tells its first start apart (`FIRST_START_WATCH`).
+ */
+export const START_WATCH_MS = 10_000;
+
+/** The pane exits heard from now on: listening before an agent starts, so a quick exit is not missed. */
+async function hearPaneExits() {
+  const gone = new Set<string>();
+  let wake: (() => void) | null = null;
+  let unlisten: (() => void) | null = null;
+  try {
+    unlisten = await listen<{ id: string }>("pty_exit", (event) => { gone.add(event.payload.id); wake?.(); });
+  } catch { /* outside a webview */ }
+  return {
+    /** Whether one of `panes` exits within `ms`, or has. */
+    within(panes: () => Iterable<string>, ms: number): Promise<boolean> {
+      return new Promise<boolean>((resolve) => {
+        const finish = (exited: boolean) => { window.clearTimeout(timer); wake = null; resolve(exited); };
+        const check = () => { if ([...panes()].some((pane) => gone.has(pane))) finish(true); };
+        const timer = window.setTimeout(() => finish(false), ms);
+        wake = check;
+        check();
+      });
+    },
+    stop: () => { wake = null; unlisten?.(); },
+  };
+}
+
+/**
  * Open an agent tab and see its agent start (PRO-291). A tab that cannot be
  * added, or whose agent exits while starting, is not left behind empty: it
  * is closed, and the toast says why, with the agent's own last line under it,
  * Try again, and Open settings.json when that line names the agent's
- * settings file. Resolves whether the tab opened.
+ * settings file. Resolves whether the tab opened, as soon as its agent was
+ * started: nothing waits on it, its pane is shown as it always is, and it is
+ * watched for [`START_WATCH_MS`] after.
  */
 export async function openAgentTabTelling(session: Pick<SessionEntry, "id" | "cwd">, harness: string, add: () => Promise<TabEntry>): Promise<boolean> {
   const key = `open:${session.id}:${harness}`;
@@ -97,24 +129,53 @@ export async function openAgentTabTelling(session: Pick<SessionEntry, "id" | "cw
     showError("", undefined, { title: `Couldn't open a new ${name} tab: ${errorMessage(error).trim().replace(/[.:]+$/, "")}`, key, actions: [retry] });
     return false;
   }
-  try {
-    // Listening first, as the tab's own view does, so its pane is not missed.
-    await subscribeTabPty().catch(() => undefined);
-    await agentApi.startOnOpen(session.id, tab.id);
-  } catch (error) {
-    // Nothing to keep: a tab whose agent never got going is closed again.
+  const notStarted = async (error: unknown) => {
+    // Nothing to keep: a tab whose agent never got going is closed again,
+    // and what was on screen before is again if this tab still was.
+    const now = getTerminalState().selected[session.id];
+    const shown = !now || (now.kind === "agent" && now.id === tab.id);
     await removeTab(session.id, tab.id).catch(failed("closing the tab that did not start"));
-    if (before && before.id !== tab.id) activatePeer(session.id, before);
+    if (shown && before && before.id !== tab.id) activatePeer(session.id, before);
     const [reason, ...rest] = errorMessage(error).trim().split("\n");
     const detail = rest.join("\n").trim();
     const file = settingsFileIn(detail);
     const actions: ErrorToastAction[] = [retry];
     if (file) actions.push({ label: `Open ${file.split("/").pop()}`, keepOpen: true, run: () => openSettingsFile(session.id, session.cwd, file) });
     showError("", detail || undefined, { title: `Couldn't open a new ${name} tab: ${reason.replace(/[.:]+$/, "")}`, key, actions });
+  };
+  const exits = await hearPaneExits();
+  try {
+    // Listening first, as the tab's own view does, so its pane is not missed.
+    await subscribeTabPty().catch(() => undefined);
+    await agentApi.startOnOpen(session.id, tab.id);
+  } catch (error) {
+    exits.stop();
+    await notStarted(error);
     return false;
   }
   dismissErrorKey(key);
+  void watchStart(session.id, tab, exits, notStarted);
   return true;
+}
+
+/**
+ * Watch a new tab whose agent was started: if its pane exits within
+ * [`START_WATCH_MS`], ask the backend again, which says whether it exited
+ * while starting (and starts nothing when it went otherwise, or was stopped).
+ */
+async function watchStart(sessionId: string, tab: TabEntry, exits: Awaited<ReturnType<typeof hearPaneExits>>, notStarted: (error: unknown) => Promise<void>) {
+  const panes = new Set([tabPaneId(tab)]);
+  void agentApi.tabPane(sessionId, tab.id).then((pane) => { if (pane) panes.add(pane.paneId); }, () => undefined);
+  const exited = await exits.within(() => panes, START_WATCH_MS);
+  exits.stop();
+  if (!exited) return;
+  try {
+    await agentApi.startOnOpen(sessionId, tab.id);
+  } catch (error) {
+    // Only the backend's word that it exited while starting: a tab being
+    // closed meanwhile is not found, which is no failure to tell.
+    if (/exited while starting/.test(errorMessage(error))) await notStarted(error);
+  }
 }
 
 /**
