@@ -1055,6 +1055,7 @@ impl Starter for ManagerStarter {
                 automation: None,
                 cwd: (cwd != Path::new(&self.root)).then(|| cwd.to_string_lossy().into_owned()),
                 tab: Some(new_tab(claim)),
+                orchestrate: false,
             },
         )
         .map_err(|error| StartError::NotStarted(anyhow!("{error}")))?;

@@ -184,6 +184,8 @@ export interface SessionEntry {
   kind?: SessionKind;
   /** Absent for a session no other session started. */
   parent?: SessionParent | null;
+  /** Started with Orchestrate (PRO-337): a run this session leads waits for the person's Approve, whatever the project's setting. */
+  orchestrateStart?: boolean;
   /**
    * The session's project. A quick chat has none: this is then its scratch
    * directory under the TerminalX home, which is in no project list. Ask

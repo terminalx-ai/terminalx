@@ -161,6 +161,7 @@ fn session(f: &Fixture, title: &str, worktree: Option<&str>) -> crate::store::in
         automation: None,
         cwd: None,
         tab: Some(crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
+        orchestrate: false,
     })
     .unwrap()
 }

@@ -4337,6 +4337,7 @@ mod command_tests {
             automation: None,
             cwd: Some(external.to_string_lossy().into_owned()),
             tab: None,
+            orchestrate: false,
         })
         .unwrap();
 
@@ -4383,6 +4384,7 @@ mod command_tests {
                 effort: None,
                 permission_mode: None,
             }),
+            orchestrate: false,
         })
         .unwrap();
         let second = create_session_entry(NewSession {
@@ -4400,6 +4402,7 @@ mod command_tests {
             automation: None,
             cwd: Some(first.cwd.clone()),
             tab: None,
+            orchestrate: false,
         })
         .unwrap();
         std::fs::write(Path::new(&first.cwd).join("dirty.txt"), "kept\n").unwrap();
@@ -4450,6 +4453,7 @@ mod command_tests {
             automation: None,
             cwd: None,
             tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }),
+            orchestrate: false,
         })
         .unwrap();
         let attached = crate::store::projects::add(project.to_str().unwrap()).unwrap();
@@ -4508,6 +4512,7 @@ mod command_tests {
                 effort: None,
                 permission_mode: None,
             }),
+            orchestrate: false,
         })
         .unwrap();
         let attached = crate::store::index::update_session(&created.id, |session| {
@@ -4531,6 +4536,7 @@ mod command_tests {
             automation: None,
             cwd: Some(worktree.to_string_lossy().into_owned()),
             tab: None,
+            orchestrate: false,
         })
         .unwrap();
         let bystander = create_session_entry(NewSession {
@@ -4548,6 +4554,7 @@ mod command_tests {
             automation: None,
             cwd: None,
             tab: None,
+            orchestrate: false,
         })
         .unwrap();
         let tab_id = attached.active_tab.as_deref().unwrap();

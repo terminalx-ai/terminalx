@@ -756,7 +756,8 @@ if they changed the plan the message says so (read it again with `runs show`). A
 plan is `stopped`; ask what to change before you plan again.
 
 A project whose setting turns approval off stores the run as `planned`, and `runs start`
-starts it at once.
+starts it at once. A lead session the person started with Orchestrate is the exception: its
+runs are always `awaitingApproval`, whatever the setting (`approvalRequired` says so).
 
 #### Start, follow, stop
 

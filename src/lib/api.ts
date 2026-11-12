@@ -222,6 +222,8 @@ export interface NewSession {
   automation?: AutomationRef | null;
   /** The first agent conversation. Omit to open the checkout by itself. */
   tab?: NewTab;
+  /** Started with Orchestrate (PRO-337): any run the session leads waits for the person's Approve. */
+  orchestrate?: boolean;
 }
 
 export interface WorkspaceRename {

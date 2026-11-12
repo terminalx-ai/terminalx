@@ -115,6 +115,10 @@ pub struct NewSession {
     /// The session that starts this one (PRO-270), recorded on the entry.
     #[serde(default)]
     pub parent: Option<index::ParentRef>,
+    /// Started with Orchestrate (PRO-337): a run this session leads waits for
+    /// a person's Approve even where the project asks for none.
+    #[serde(default)]
+    pub orchestrate: bool,
 }
 
 /// A session started by an orchestration run's worker, or for a run's piece, has the
@@ -309,6 +313,9 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         unknown: BTreeMap::new(),
     };
     inherit_run_limits(&mut entry);
+    if req.orchestrate {
+        entry.mark_orchestrate_start();
+    }
 
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
         let cwd = projects::canonical_directory(cwd).map_err(err)?;
@@ -1304,7 +1311,7 @@ mod tests {
         let mut settings = store::settings::load();
         settings.experimental.native_codex = true;
         store::settings::save(&settings).unwrap();
-        let mut issue = NewSession { parent: None, section_id: None, project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, checkout_pr: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)) };
+        let mut issue = NewSession { parent: None, section_id: None, project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, checkout_pr: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)), orchestrate: false };
         prefer_native_codex_session(&mut issue);
         assert_eq!(issue.tab.as_ref().unwrap().transport, index::AgentTransport::ExperimentalCodexStdio);
         issue.tab = Some(tab("codex", None));
@@ -1364,6 +1371,7 @@ mod tests {
             automation: None,
             cwd: None,
             tab: Some(NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            orchestrate: false,
         })
         .unwrap()
     }
@@ -1775,6 +1783,7 @@ mod tests {
             automation: None,
             cwd: Some(cwd.into()),
             tab: None,
+            orchestrate: false,
         })
         .unwrap()
     }
