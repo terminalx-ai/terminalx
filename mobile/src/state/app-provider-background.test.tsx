@@ -22,6 +22,7 @@ vi.mock("expo-secure-store", () => ({ WHEN_UNLOCKED_THIS_DEVICE_ONLY: 1, getItem
 vi.mock("react-native", () => ({
   AppState: { addEventListener: (_event: string, listener: (state: string) => void) => { fake.appState = listener; return { remove: () => { fake.removed++; } }; } },
   Linking: { getInitialURL: async () => null, addEventListener: () => ({ remove: () => undefined }) },
+  Platform: { OS: "ios", constants: { interfaceIdiom: "phone" } },
 }));
 vi.mock("../auth/native", () => ({ beginSignIn: vi.fn(), finishSignIn: vi.fn(), readSession: async () => null, refreshStoredSession: vi.fn(), signOut: vi.fn() }));
 vi.mock("../auth/protocol", () => ({ isAuthCallbackUrl: () => false }));
