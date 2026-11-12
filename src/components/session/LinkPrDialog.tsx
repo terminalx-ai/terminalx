@@ -89,7 +89,6 @@ export function LinkPrDialog({ session, onClose }: { session: SessionEntry; onCl
     }
   };
 
-  const count = found ? `${found.total} open PR${found.total === 1 ? "" : "s"} in ${found.repository}.` : "";
   const shown = found && found.total > found.prs.length ? ` The ${found.prs.length} most recent are listed.` : "";
 
   return (
@@ -102,7 +101,8 @@ export function LinkPrDialog({ session, onClose }: { session: SessionEntry; onCl
           <div className="min-w-0 flex-1">
             <DialogTitle className="text-[15px] font-semibold leading-6">Link a pull request</DialogTitle>
             <DialogDescription className="mt-1 text-[13px] text-muted-foreground">
-              Show an open PR’s checks and review in this session.{found && ` ${count}${shown}`}
+              Show an open PR’s checks and review in this session.
+              {found && <> {found.total} open PR{found.total === 1 ? "" : "s"} in <span className="whitespace-nowrap">{found.repository}</span>.{shown}</>}
             </DialogDescription>
           </div>
         </div>
