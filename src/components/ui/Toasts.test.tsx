@@ -4,7 +4,8 @@ import type { SessionEntry } from "@/types/session";
 import type { IssuePipeline } from "@/types/issuePipeline";
 
 const { openCloudSession } = vi.hoisted(() => ({ openCloudSession: vi.fn() }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => []) }));
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async (..._args: unknown[]): Promise<unknown> => []) }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-notification", () => ({
   isPermissionGranted: vi.fn(async () => true),
   requestPermission: vi.fn(),
@@ -20,6 +21,7 @@ const { dismissNotice, notePipelineState, noteSessionStarted, noteStatusChange, 
 const { getSessionStore, openIssues, upsertSession } = await import("@/lib/sessions");
 const { NoticeForeground, useNoticeDeferral } = await import("@/lib/noticeDeferral");
 const { Dialog, DialogContent, DialogTitle } = await import("./dialog");
+const { dismissError, getErrorToasts, showError } = await import("@/lib/errorToasts");
 
 const session: SessionEntry = {
   id: "started-session", projectPath: "/repo", cwd: "/repo/worktree", title: "#785 Stay on Issues",
@@ -39,6 +41,7 @@ afterEach(() => {
   cleanup(); // Release any decision before clearing its retained notices.
   const { result } = renderHook(useNotices);
   act(() => result.current.forEach((notice) => dismissNotice(notice.id)));
+  act(() => getErrorToasts().forEach((toast) => dismissError(toast.id)));
   cleanup();
   vi.clearAllTimers();
   vi.useRealTimers();
@@ -195,4 +198,56 @@ it("replaces a start when its issue pipeline needs the reader", () => {
   expect(screen.getAllByRole("status")).toHaveLength(1);
   expect(screen.getByRole("status").textContent).toContain("#785 needs you");
   expect(screen.queryByText("Session started")).toBeNull();
+});
+
+it("keeps an error until it is closed, stacked under the notices, and copies its whole text", async () => {
+  render(<Toasts />);
+  act(() => {
+    noteSessionStarted(session.id, "started-tab", "codex", "#785 Stay on Issues");
+    showError("Couldn't move “Notarize release builds” to Release", new Error("database is locked (SQLITE_BUSY)"));
+    showError("Couldn't pin “web”", "locked");
+  });
+  act(() => vi.advanceTimersByTime(30_000));
+  expect(screen.queryByRole("status")).toBeNull();
+  const alerts = screen.getAllByRole("alert");
+  expect(alerts).toHaveLength(2);
+  expect(alerts[0].textContent).toContain("Something went wrong");
+  expect(alerts[0].textContent).toContain("Couldn't move “Notarize release builds” to Release: database is locked (SQLITE_BUSY)");
+  expect(within(alerts[0]).getByText("database is locked (SQLITE_BUSY)").className).toContain("font-mono");
+
+  invoke.mockClear();
+  await act(async () => fireEvent.click(within(alerts[0]).getByRole("button", { name: "Copy error" })));
+  expect(invoke).toHaveBeenCalledWith("copy_text", { text: "Couldn't move “Notarize release builds” to Release: database is locked (SQLITE_BUSY)" });
+  expect(within(alerts[0]).getByRole("button", { name: "Copied" })).toBeTruthy();
+  act(() => vi.advanceTimersByTime(2000));
+  expect(within(alerts[0]).getByRole("button", { name: "Copy error" })).toBeTruthy();
+  expect(screen.getAllByRole("alert")).toHaveLength(2);
+});
+
+it("says when the copy failed", async () => {
+  render(<Toasts />);
+  act(() => { showError("Couldn't pin “web”", "locked"); });
+  invoke.mockRejectedValueOnce(new Error("no clipboard"));
+  const writeText = vi.fn(async () => { throw new Error("denied"); });
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy error" })));
+  expect(screen.getByRole("button", { name: "Couldn't copy" })).toBeTruthy();
+});
+
+it("closes an error by its button or by Escape, and counts a repeat instead of stacking it", () => {
+  render(<Toasts />);
+  act(() => {
+    showError("Couldn't pin “web”", "locked");
+    showError("Couldn't archive “web”", "locked");
+    showError("Couldn't pin “web”", "locked");
+  });
+  const alerts = screen.getAllByRole("alert");
+  expect(alerts).toHaveLength(2);
+  expect(within(alerts[1]).getByLabelText("2 times")).toBeTruthy();
+  const close = within(alerts[1]).getByRole("button", { name: "Close" });
+  close.focus();
+  fireEvent.keyDown(close, { key: "Escape" });
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(screen.queryByRole("alert")).toBeNull();
 });
