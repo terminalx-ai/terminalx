@@ -31,7 +31,8 @@
 
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { ROUTING_FILE, WARM_UP_PROMPT, loadRouting, resolveArrangement, taskPrompt } from "./arrangements.mjs";
 import { ARRANGEMENTS, formatResultLine } from "./schema.mjs";
@@ -77,6 +78,7 @@ check there, and appends one result line per run. Every run costs real money
   --agent <name>          claude (default; the only agent the runner can start)
   --poll-seconds <n>      wait slice between cost readings (default ${DEFAULT_POLL_SECONDS})
   --timeout-minutes <n>   stop a run after this long (default ${DEFAULT_TIMEOUT_MINUTES})
+  --wait-for-approval     let --all start lead runs while plans need a person's approval
 
 Arrangements (tiers from ${ROUTING_FILE}):
   top-single          one session on the top tier
@@ -88,8 +90,10 @@ Arrangements (tiers from ${ROUTING_FILE}):
 Costs are terminalx's estimates at API list prices. A run is stopped at the
 first reading at or over its cap, so it can go over by what one wait slice
 spends. A lead run waits for the person to approve its plan unless the
-project's Settings → Orchestrator turns approval off. Run it from an ordinary
-shell, not from inside a run's worker.`;
+project's Settings → Orchestrator turns approval off, and that wait counts in
+its wall time; --all refuses lead runs while approval is on, unless
+--wait-for-approval. Run it from an ordinary shell, not from inside a run's
+worker.`;
 
 /** A mistake in the command line: printed with the usage, exit 2. */
 export class UsageError extends Error {}
@@ -120,6 +124,7 @@ export function parseArgs(argv) {
     agent: "claude",
     pollSeconds: DEFAULT_POLL_SECONDS,
     timeoutMinutes: DEFAULT_TIMEOUT_MINUTES,
+    waitForApproval: false,
     help: false,
   };
   const valued = {
@@ -144,6 +149,7 @@ export function parseArgs(argv) {
     if (arg === "--help" || arg === "-h") options.help = true;
     else if (arg === "--all") options.all = true;
     else if (arg === "--dry-run") options.dryRun = true;
+    else if (arg === "--wait-for-approval") options.waitForApproval = true;
     else if (arg in valued) {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) throw new UsageError(`${arg} needs a value`);
@@ -252,7 +258,7 @@ export function describeRun(run, { project, cap, out, pollSeconds, timeoutMinute
     `${commandLine("git", ["-C", "<worktree>", "reset", "--hard", "--quiet", task.startCommit])} && ${commandLine("git", ["-C", "<worktree>", "clean", "-fdq"])}`,
     task.check.install === false ? "# no dependency install: the task's check.install is false" : `(cd <worktree> && pnpm install --frozen-lockfile --prefer-offline)   # when the worktree has a pnpm-lock.yaml`,
     `${T(cli.usage("<session>", lead))}   # baseline, left out of the result`,
-    T(cli.send("<session>", taskPrompt(task, arrangement))),
+    T(cli.send("<session>", taskPrompt(task, arrangement, { capDollars: cap }))),
     `every ${pollSeconds} s, for up to ${timeoutMinutes} min, until ${lead ? "the lead's turn has ended and no run it leads is under way" : "the turn has ended"}, or $${cap.toFixed(2)} is spent:`,
     `  ${T(cli.wait("<session>", pollSeconds))}`,
     `  ${T(cli.usage("<session>", lead))}`,
@@ -343,6 +349,58 @@ export function appendRecord(file, record) {
 export function mainCheckout(repo) {
   const common = git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
   return common.endsWith("/.git") ? dirname(common) : repoRoot(repo);
+}
+
+/** The user settings file, where the CLI guide places it: $TERMINALX_HOME, then the legacy $RACCOON_HOME, then ~/.raccoon. */
+export function settingsFile(env) {
+  const home = env.TERMINALX_HOME || env.RACCOON_HOME || join(env.HOME || homedir(), ".raccoon");
+  return join(home, "settings.json");
+}
+
+const samePath = (a, b) => {
+  const real = (path) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  return real(a) === real(b);
+};
+
+/**
+ * Whether a lead's run in `project` waits for a person to approve its plan,
+ * from the settings file's text (null when there is no file): the project's
+ * own `orchestrator.projects[path].requireApproval`, else the app-wide
+ * `orchestrator.requireApproval`, else the app's default, which is on. Reads
+ * nothing else from the file. Returns `{ required, source }`.
+ */
+export function approvalRequired(settingsText, project) {
+  if (settingsText === null) return { required: true, source: "the app's default (no settings file)" };
+  let settings;
+  try {
+    settings = JSON.parse(settingsText);
+  } catch {
+    return { required: true, source: "assumed: the settings file is not JSON" };
+  }
+  const orchestrator = settings?.orchestrator;
+  const projects = orchestrator?.projects && typeof orchestrator.projects === "object" ? orchestrator.projects : {};
+  for (const [path, own] of Object.entries(projects)) {
+    if (typeof own?.requireApproval === "boolean" && samePath(path, project)) return { required: own.requireApproval, source: "this project's setting" };
+  }
+  if (typeof orchestrator?.requireApproval === "boolean") return { required: orchestrator.requireApproval, source: "the app-wide setting" };
+  return { required: true, source: "the app's default" };
+}
+
+/** `approvalRequired` for the settings file `env` points at. */
+export function readApproval(env, project) {
+  let text = null;
+  try {
+    text = readFileSync(settingsFile(env), "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") return { required: true, source: `assumed: the settings file could not be read (${error.code ?? error.message})` };
+  }
+  return approvalRequired(text, project);
 }
 
 /** The terminalx executable, as the CLI guide picks it: on PATH, then tnx, then the app bundle. */
@@ -454,7 +512,7 @@ async function runOne(run, ctx) {
 
     startedAt = new Date().toISOString();
     sentAt = process.hrtime.bigint();
-    await tx(cli.send(session, taskPrompt(run.task, arrangement)));
+    await tx(cli.send(session, taskPrompt(run.task, arrangement, { capDollars: cap })));
     say(`task sent to ${arrangement.model}; cap ${money(cap)}`);
 
     const deadline = Date.now() + timeoutMinutes * 60 * 1000;
@@ -635,10 +693,19 @@ export async function main(argv, io) {
 
   const runs = planRuns(chosen, Object.keys(arrangements), options.repeat);
   const budget = new Budget(options.budgetDollars, options.capDollars);
+  const leads = Object.values(arrangements).some((item) => item.lead);
+  const approval = leads ? readApproval(io.env, project) : null;
   const header = [
     `${options.dryRun ? "Would run" : "Running"} ${runs.length} run${runs.length === 1 ? "" : "s"} in project ${project}.`,
     `Budget: ${budget.total === null ? "none (a single task)" : money(budget.total)}; each run stops at ${money(budget.capForNext())}.`,
     `Results go to ${out}.`,
+    ...(approval
+      ? [
+          approval.required
+            ? `Plan approval is on (${approval.source}): each lead run waits for a person to approve its plan in the Run view, and the wait counts in its wall time.`
+            : `Plan approval is off (${approval.source}): lead runs start their plans unattended.`,
+        ]
+      : []),
     `Tiers from ${ROUTING_FILE}: ${Object.values(arrangements).map((item) => `${item.name} → ${item.model}${item.workers ? ` (workers ${item.workers.model ?? "by kind"}, effort ${item.workers.effort ?? "by kind"})` : ""}`).join("; ")}.`,
   ];
   io.stdout.write(`${header.join("\n")}\n`);
@@ -652,6 +719,13 @@ export async function main(argv, io) {
     });
     io.stdout.write(`\nDry run: nothing was started.\n`);
     return 0;
+  }
+
+  if (approval?.required && options.all && !options.waitForApproval) {
+    io.stderr.write(
+      "run: --all would leave every lead run waiting for a person to approve its plan. Turn approval off for this project in Settings → Orchestrator, or pass --wait-for-approval to approve each plan by hand.\n",
+    );
+    return 1;
   }
 
   let bin;

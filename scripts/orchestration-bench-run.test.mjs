@@ -17,6 +17,7 @@ import {
   DEFAULT_CAP_DOLLARS,
   UsageError,
   appendRecord,
+  approvalRequired,
   buildRecord,
   cli,
   findTerminalx,
@@ -25,8 +26,10 @@ import {
   moveToStart,
   parseArgs,
   planRuns,
+  readApproval,
   runCheck,
   sessionsToDelete,
+  settingsFile,
   shellQuote,
   worktreeName,
 } from "./orchestration-bench/run.mjs";
@@ -50,11 +53,17 @@ function tempDir(prefix) {
   return dir;
 }
 
-function capture(cwd) {
+/**
+ * An io for `main`. Its TerminalX home is a fresh folder, so no test reads
+ * this machine's settings; `settings`, when given, is written there.
+ */
+function capture(cwd, { settings } = {}) {
   const out = [];
   const err = [];
+  const home = tempDir("home");
+  if (settings !== undefined) writeFileSync(join(home, "settings.json"), typeof settings === "string" ? settings : JSON.stringify(settings));
   return {
-    io: { stdout: { write: (text) => out.push(text) }, stderr: { write: (text) => err.push(text) }, cwd, env: process.env },
+    io: { stdout: { write: (text) => out.push(text) }, stderr: { write: (text) => err.push(text) }, cwd, env: { ...process.env, TERMINALX_HOME: home, RACCOON_HOME: "" } },
     out: () => out.join(""),
     err: () => err.join(""),
   };
@@ -194,6 +203,21 @@ describe("arrangements from the routing table", () => {
     expect(single).not.toContain("orchestrator");
     expect(WARM_UP_PROMPT).toMatch(/ready/);
   });
+
+  it("puts the run's cap in a lead's plan budget, and tells an escalating lead to let the run's own retries go first", () => {
+    const routing = loadRouting(ROOT);
+    const task = { prompt: "Make add add." };
+    const low = taskPrompt(task, resolveArrangement("lead-low-escalate", routing), { capDollars: 4.5 });
+    expect(low).toContain('"budget": {"dollars": 4.5}');
+    expect(low).toMatch(/tried again by the run without you/);
+    expect(low.indexOf("tried again by the run")).toBeLessThan(low.indexOf('"effort": "high"'));
+    expect(low).toMatch(/still blocked after those tries/);
+    const mid = taskPrompt(task, resolveArrangement("lead-mid-workers", routing), { capDollars: 10 });
+    expect(mid).toContain('"budget": {"dollars": 10}');
+    expect(mid).not.toMatch(/tried again by the run/);
+    expect(taskPrompt(task, resolveArrangement("lead-mid-workers", routing))).not.toContain('"budget"');
+    expect(taskPrompt(task, resolveArrangement("top-single", routing), { capDollars: 10 })).not.toContain('"budget"');
+  });
 });
 
 describe("reading terminalx answers", () => {
@@ -313,6 +337,64 @@ describe("budget and plan", () => {
     for (const text of ["plain", "it's here", 'say "hi"\nnext line', "$HOME `x` \\ !", ""]) {
       expect(execFileSync("/bin/sh", ["-c", `printf %s ${shellQuote(text)}`], { encoding: "utf8" })).toBe(text);
     }
+  });
+});
+
+describe("plan approval", () => {
+  it("takes the project's own setting, then the app-wide one, then the default of on", () => {
+    const project = tempDir("project");
+    const linked = join(tempDir("link"), "project");
+    execFileSync("ln", ["-s", project, linked]);
+    const app = (requireApproval, projects) => JSON.stringify({ orchestrator: { requireApproval, ...(projects ? { projects } : {}) } });
+    expect(approvalRequired(null, project)).toEqual({ required: true, source: "the app's default (no settings file)" });
+    expect(approvalRequired("{}", project)).toEqual({ required: true, source: "the app's default" });
+    expect(approvalRequired("not json", project).required).toBe(true);
+    expect(approvalRequired(app(false), project)).toEqual({ required: false, source: "the app-wide setting" });
+    expect(approvalRequired(app(true, { [project]: { requireApproval: false } }), project)).toEqual({ required: false, source: "this project's setting" });
+    // The same folder by another path is the same project; another project's row does not count.
+    expect(approvalRequired(app(true, { [linked]: { requireApproval: false } }), project).required).toBe(false);
+    expect(approvalRequired(app(false, { [tempDir("other")]: { requireApproval: true } }), project)).toEqual({ required: false, source: "the app-wide setting" });
+    expect(approvalRequired(app(true, { [project]: { pieceLimit: 12 } }), project)).toEqual({ required: true, source: "the app-wide setting" });
+  });
+
+  it("reads the settings file where the CLI guide puts it", () => {
+    const home = tempDir("tx-home");
+    const project = tempDir("project");
+    expect(settingsFile({ TERMINALX_HOME: home, RACCOON_HOME: "/elsewhere", HOME: "/h" })).toBe(join(home, "settings.json"));
+    expect(settingsFile({ RACCOON_HOME: home, HOME: "/h" })).toBe(join(home, "settings.json"));
+    expect(settingsFile({ HOME: "/h" })).toBe("/h/.raccoon/settings.json");
+    expect(readApproval({ TERMINALX_HOME: home }, project)).toEqual({ required: true, source: "the app's default (no settings file)" });
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ linear: { apiKey: "unused" }, orchestrator: { requireApproval: false } }));
+    expect(readApproval({ TERMINALX_HOME: home }, project)).toEqual({ required: false, source: "the app-wide setting" });
+  });
+
+  it("shows the approval setting in a lead dry run, and leaves it out of a single-session one", async () => {
+    const { repo } = makeRepo();
+    const on = capture(repo);
+    expect(await main(["--task", "fix-add", "--arrangement", "lead-low-escalate", "--dry-run"], on.io)).toBe(0);
+    expect(on.out()).toContain("Plan approval is on (the app's default (no settings file))");
+    const off = capture(repo, { settings: { orchestrator: { projects: { [repo]: { requireApproval: false } } } } });
+    expect(await main(["--task", "fix-add", "--arrangement", "lead-mid-workers", "--dry-run"], off.io)).toBe(0);
+    expect(off.out()).toContain("Plan approval is off (this project's setting)");
+    const single = capture(repo);
+    expect(await main(["--task", "fix-add", "--arrangement", "top-single", "--dry-run"], single.io)).toBe(0);
+    expect(single.out()).not.toContain("Plan approval");
+  });
+
+  it("refuses --all while plans need approval, before it looks for terminalx or starts anything", async () => {
+    const { repo } = makeRepo();
+    const before = git(repo, "for-each-ref");
+    const results = join(repo, "results.jsonl");
+    const out = capture(repo, { settings: { orchestrator: { requireApproval: true } } });
+    // No terminalx on PATH either: the refusal must come first.
+    out.io.env.PATH = tempDir("empty-path");
+    expect(await main(["--all", "--budget-dollars", "5", "--out", results], out.io)).toBe(1);
+    expect(out.err()).toContain("--all would leave every lead run waiting for a person to approve its plan");
+    expect(out.err()).not.toContain("no terminalx command");
+    expect(existsSync(results)).toBe(false);
+    expect(worktrees(repo)).toBe(1);
+    expect(git(repo, "for-each-ref")).toBe(before);
+    expect(parseArgs(["--all", "--budget-dollars", "5", "--wait-for-approval"]).waitForApproval).toBe(true);
   });
 });
 

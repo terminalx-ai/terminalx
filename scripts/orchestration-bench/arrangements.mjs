@@ -111,8 +111,13 @@ export const WARM_UP_PROMPT = "Reply with the single word ready. Do not read any
 
 const UNATTENDED = "Nobody is watching this session: do not stop to ask questions. Do not push, open a pull request, deploy or publish.";
 
-/** What the session is sent as its task, after the warm-up. */
-export function taskPrompt(task, arrangement) {
+/**
+ * What the session is sent as its task, after the warm-up. `capDollars`, for
+ * a lead, goes into its plan's `budget`, so the run itself also stops starting
+ * workers at the run's cap (for workers on an API key; the runner's own
+ * readings hold it for every login).
+ */
+export function taskPrompt(task, arrangement, { capDollars = null } = {}) {
   if (!arrangement.lead) {
     return `${task.prompt}\n\n${UNATTENDED} When you are done, your work is judged by a check run on this checkout.`;
   }
@@ -126,9 +131,13 @@ export function taskPrompt(task, arrangement) {
     "Hand the task's work to workers through a run: plan it (`terminalx runs create`), start it, check what comes back, and bring the accepted pieces into your branch with `terminalx runs merge --json`. Keep for yourself only the planning, the checking, the merge, and edits that span pieces.",
     `Workers: ${workers.join(", and ")}.`,
   ];
+  if (Number.isFinite(capDollars) && capDollars > 0) {
+    lines.push(`Put "budget": {"dollars": ${Number(capDollars.toFixed(2))}} in the plan: the benchmark stops the whole run, you included, at that many dollars.`);
+  }
   if (arrangement.escalateEffort) {
     lines.push(
-      `When a piece ends blocked or failed, run it again at ${arrangement.escalateEffort} effort: once nothing else in the run is under way, stop the run (\`terminalx runs stop --json\`) and create a new run for the pieces still missing, each with "effort": "${arrangement.escalateEffort}".`,
+      "A piece whose try falls short is tried again by the run without you: first on the same model one effort level up, then one model tier up. Do not stop the run, re-plan or message a worker while such a try is queued or running.",
+      `When a piece is still blocked after those tries, run it again at ${arrangement.escalateEffort} effort: once nothing else in the run is under way, stop the run (\`terminalx runs stop --json\`) and create a new run for the pieces still missing, each with "effort": "${arrangement.escalateEffort}".`,
     );
   }
   lines.push(`${UNATTENDED} When your run has ended, your work is judged by a check run on your checkout.`, "", "The task:", "", task.prompt);
