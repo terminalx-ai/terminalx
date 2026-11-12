@@ -2,8 +2,8 @@ import { useEffect, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { orchestration } from "@/lib/api";
 import type {
-  PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunGate, RunPiece, RunPlan, RunRefusal, RunReview, RunState, RunVerification, Tier, TryOutcome,
-  TryStep,
+  PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunGate, RunHold, RunLimits, RunPiece, RunPlan, RunRefusal, RunReview, RunState, RunVerification,
+  RunWindowUse, Tier, TryOutcome, TryStep,
 } from "@/types/orchestration";
 
 /** The runs this window has heard of, by the session that leads each: a lead has one run to show, its newest. */
@@ -318,6 +318,7 @@ export const RUN_STATE_LABEL: Record<RunState, string> = {
   planned: "Ready to start",
   awaitingApproval: "Plan waiting for you",
   running: "Run",
+  needsYou: "Run paused, needs you",
   verifying: "Checking results",
   merging: "Merging",
   done: "Run done",
@@ -328,6 +329,7 @@ export const RUN_STATE_LABEL: Record<RunState, string> = {
 export const PIECE_STATE_LABEL: Record<PieceState, string> = {
   queued: "Queued",
   running: "Running",
+  stalled: "Stalled",
   verifying: "Verifying",
   done: "Done",
   blocked: "Blocked",
@@ -412,4 +414,42 @@ export function useRunViewShown(sessionId: string): boolean {
     () => runViews,
   );
   return !!all[sessionId];
+}
+
+/** `16:10`, or `Tue 16:10` when not today: when a usage window resets. */
+export function resetClock(at: number, now = Date.now()): string {
+  const date = new Date(at);
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  return new Date(now).toDateString() === date.toDateString() ? time : `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+
+/** `Claude 5h`: a window by its agent, as the status bar labels it. */
+export function windowName(window: Pick<RunWindowUse, "agent" | "label">): string {
+  const agent = window.agent === "claude" ? "Claude" : window.agent === "codex" ? "Codex" : window.agent;
+  return `${agent} ${window.label}`;
+}
+
+/** `5h window at 41% · resets 16:10`. */
+export function windowLine(window: RunWindowUse, now = Date.now()): string {
+  const reset = window.resetsAt ? ` · resets ${resetClock(window.resetsAt, now)}` : "";
+  return `${window.label} window at ${Math.round(window.percent)}%${reset}`;
+}
+
+/** The window the run has used most of: what its points budget is read against. */
+export function mainWindow(run: Pick<Run, "usage">): RunWindowUse | null {
+  const windows = run.usage?.windows ?? [];
+  if (!windows.length) return null;
+  return [...windows].sort((a, b) => b.points - a.points || b.percent - a.percent)[0];
+}
+
+/** Why a queued piece the lead asked for has not started. */
+export function holdText(run: { limits: RunLimits }, hold: RunHold): string {
+  switch (hold) {
+    case "runLimit":
+      return `Queued: ${run.limits.workers} ${run.limits.workers === 1 ? "worker" : "workers"} at a time in this run`;
+    case "appLimit":
+      return "Queued: the app runs as many workers as it allows";
+    case "budget":
+      return "Waits for you: the run reached its budget";
+  }
 }

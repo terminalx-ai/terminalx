@@ -666,3 +666,94 @@ describe("a session with no run (PRO-274)", () => {
     expect(calls("orchestration_create")).toEqual([]);
   });
 });
+
+describe("limits and budget (PRO-280)", () => {
+  // Today at 16:10: resetClock names the weekday for a reset on another day.
+  const today = new Date();
+  const resets = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 16, 10).getTime();
+  const fiveHour = { agent: "claude", key: "five_hour", label: "5h", percent: 41, start: 32, resetsAt: resets, points: 9 };
+  const running = (extra: Partial<Run> = {}): Run => ({
+    ...waiting(),
+    state: "running",
+    approval: { at: "2026-11-11T00:00:00Z" },
+    limits: { workers: 4, dollars: 15, points: 25, ceiling: 85 },
+    usage: { dollars: 0, subscription: true, windows: [fiveHour] },
+    inTurn: 1,
+    fit: [],
+    pieces: [
+      piece("map", "Map every settings read", { state: "done", attempts: 1, note: "41 call sites" }),
+      piece("store", "Typed store module", { state: "stalled", attempts: 1, note: "Stalled: no tool call or file change for 12 minutes, no command running, and its agent is idle." }),
+      piece("docs", "Update the docs", { state: "queued", queuedFor: "runLimit" }),
+    ],
+    ...extra,
+  });
+
+  it("shows a subscription run's points of its window, the window and its reset, and its worker limit", async () => {
+    await open(running());
+    const budget = screen.getByTestId("run-budget").textContent ?? "";
+    expect(budget).toContain("Budget · subscription");
+    expect(budget).toContain("9 of 25 points");
+    expect(budget).toContain("5h window at 41% · resets 16:10");
+    expect(screen.getByTestId("run-workers").textContent).toContain("running · 4 at a time");
+    expect(row("store").getAttribute("data-piece-state")).toBe("stalled");
+    expect(row("store").textContent).toContain("Stalled");
+    expect(row("docs").textContent).toContain("Queued: 4 workers at a time in this run");
+    expect(screen.getByText(/Dollar figures are API-equivalent, not billed/)).toBeTruthy();
+  });
+
+  it("shows a run on an API key in dollars", async () => {
+    await open(running({ usage: { dollars: 4.37, apiKey: true } }));
+    const budget = screen.getByTestId("run-budget").textContent ?? "";
+    expect(budget).toContain("Budget · API key");
+    expect(budget).toContain("$4.37 of $15.00");
+  });
+
+  it("names the window that paused a run and its reset, and resumes it after the reset when asked", async () => {
+    const pause = { kind: "window" as const, message: "The Claude 5h window is at 87%, past the 85% this run stops at. It resets at 16:10.", window: { ...fiveHour, percent: 87 } };
+    const paused = running({ state: "needsYou", reason: pause.message, pause });
+    answers.orchestration_resume = ({ afterReset }: { afterReset: boolean }) => ({ run: { ...paused, pause: { ...pause, resumeAt: afterReset ? resets : undefined } }, started: [], waiting: [], failed: [] });
+    await open(paused);
+    expect(screen.getByTestId("run-state").textContent).toBe("Run paused, needs you");
+    const notice = screen.getByTestId("run-paused");
+    expect(notice.textContent).toContain("Paused: the Claude 5h window");
+    expect(notice.textContent).toContain("It resets at 16:10.");
+    fireEvent.click(within(notice).getByRole("button", { name: "Resume after the reset, 16:10" }));
+    await waitFor(() => expect(calls("orchestration_resume")).toEqual([{ id: "run-1", afterReset: true }]));
+    await waitFor(() => expect(screen.getByTestId("run-resumes-at").textContent).toContain("Goes on by itself at 16:10"));
+  });
+
+  it("raises a paused run's budget and resumes it now", async () => {
+    const pause = { kind: "points" as const, message: "This run has used about 26 points of the Claude 5h window, past its budget of 25.", window: { ...fiveHour, points: 26 } };
+    const paused = running({ state: "needsYou", reason: pause.message, pause });
+    answers.orchestration_set_limits = ({ limits }: { limits: Run["limits"] }) => ({ ...paused, limits });
+    answers.orchestration_resume = () => ({ run: { ...paused, state: "running", pause: undefined, reason: undefined, limits: { workers: 4, dollars: 15, points: 40, ceiling: 85 } }, started: ["docs"], waiting: [], failed: [] });
+    await open(paused);
+    const notice = screen.getByTestId("run-paused");
+    fireEvent.click(within(notice).getByRole("button", { name: "Raise the budget" }));
+    const points = within(notice).getByRole("spinbutton", { name: "Points of a window this run may use" });
+    fireEvent.change(points, { target: { value: "40" } });
+    fireEvent.blur(points);
+    await waitFor(() => expect(calls("orchestration_set_limits")).toEqual([{ id: "run-1", limits: { workers: 4, dollars: 15, points: 40, ceiling: 85 } }]));
+    fireEvent.click(within(screen.getByTestId("run-paused")).getByRole("button", { name: "Resume now" }));
+    await waitFor(() => expect(calls("orchestration_resume")).toEqual([{ id: "run-1", afterReset: false }]));
+    await waitFor(() => expect(screen.getByTestId("run-view").getAttribute("data-run-state")).toBe("running"));
+  });
+
+  it("warns before approval when the run would not fit in what is left of a window, and changes its limits for this run", async () => {
+    const warning = "The Claude 5h window is at 70%. This run may use up to 25 points, but it stops at 85%, about 15 points from now. It resets at 16:10.";
+    const plan: Run = { ...waiting(), limits: { workers: 4, dollars: 15, points: 25, ceiling: 85 }, usage: { dollars: 0, subscription: true, windows: [{ ...fiveHour, percent: 70, start: undefined, points: 0 }] }, inTurn: 0, fit: [warning] };
+    answers.orchestration_set_limits = ({ limits }: { limits: Run["limits"] }) => ({ ...plan, limits });
+    await open(plan);
+    const summary = screen.getByRole("region", { name: "Plan summary" });
+    expect(within(summary).getByRole("alert").textContent).toBe(warning);
+    expect(summary.textContent).toContain("Budget25 points");
+    expect(screen.getByTestId("run-windows").textContent).toContain("Claude 5h at 70%, resets 16:10");
+    expect(screen.getByTestId("run-windows").textContent).toContain("the window is shared with everything else you run");
+    const workers = within(summary).getByRole("spinbutton", { name: "Workers at once in this run" });
+    fireEvent.change(workers, { target: { value: "2" } });
+    fireEvent.blur(workers);
+    await waitFor(() => expect(calls("orchestration_set_limits")).toEqual([{ id: "run-1", limits: { workers: 2, dollars: 15, points: 25, ceiling: 85 } }]));
+    // The dollar budget is not offered to a run with no worker on an API key.
+    expect(within(summary).queryByRole("spinbutton", { name: "Dollars this run may spend" })).toBeNull();
+  });
+});
