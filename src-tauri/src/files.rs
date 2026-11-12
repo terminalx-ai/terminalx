@@ -343,9 +343,29 @@ pub struct ReplaceReport {
 /// How much of a line to ship back with a hit.
 const SHOWN_CHARS: usize = 400;
 
-fn text_pattern(query: &str, regex: bool, case_sensitive: bool) -> Result<regex::Regex> {
-    let pattern = if regex { query.to_string() } else { regex::escape(query) };
+fn text_pattern(query: &str, regex: bool, case_sensitive: bool, whole_word: bool) -> Result<regex::Regex> {
+    let pattern = if regex {
+        query.to_string()
+    } else if whole_word {
+        // A literal needs a boundary only on a side that ends in a word
+        // character, so `foo(` still matches the start of `foo(x)`.
+        let edge = |c: Option<char>| if c.is_some_and(is_word_char) { r"\b" } else { "" };
+        format!("{}{}{}", edge(query.chars().next()), regex::escape(query), edge(query.chars().last()))
+    } else {
+        regex::escape(query)
+    };
     Ok(regex::RegexBuilder::new(&pattern).case_insensitive(!case_sensitive).build()?)
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether `line[start..end]` stands as a whole word: neither edge cuts
+/// through a run of word characters, the rule the editor's find uses.
+fn whole_word_at(line: &str, start: usize, end: usize) -> bool {
+    let cuts = |before: Option<char>, after: Option<char>| before.is_some_and(is_word_char) && after.is_some_and(is_word_char);
+    !cuts(line[..start].chars().next_back(), line[start..].chars().next()) && !cuts(line[..end].chars().next_back(), line[end..].chars().next())
 }
 
 /// Every regular file under `root` that a text search should read: the
@@ -446,13 +466,24 @@ struct Rewriter {
     re: regex::Regex,
     template: Option<String>,
     regex: bool,
+    /// A regex's matches are checked for word edges one by one; a literal
+    /// carries its boundaries in the pattern.
+    word_filter: bool,
 }
 
 impl Rewriter {
-    fn new(query: &str, replacement: Option<&str>, regex: bool, case_sensitive: bool) -> Result<Self> {
-        let re = text_pattern(query, regex, case_sensitive)?;
+    fn new(query: &str, replacement: Option<&str>, regex: bool, case_sensitive: bool, whole_word: bool) -> Result<Self> {
+        let re = text_pattern(query, regex, case_sensitive, whole_word)?;
         let template = replacement.map(|r| if regex { normalize_replacement(r) } else { r.to_string() });
-        Ok(Self { re, template, regex })
+        Ok(Self { re, template, regex, word_filter: regex && whole_word })
+    }
+
+    /// The matches in a line that count, in order.
+    fn captures<'a>(&'a self, line: &'a str) -> impl Iterator<Item = regex::Captures<'a>> + 'a {
+        self.re.captures_iter(line).filter(move |caps| {
+            let m = caps.get(0).expect("group 0");
+            !self.word_filter || (!m.is_empty() && whole_word_at(line, m.start(), m.end()))
+        })
     }
 
     /// What one match turns into.
@@ -471,7 +502,7 @@ impl Rewriter {
         let mut out = String::with_capacity(line.len());
         let mut last = 0;
         let mut n = 0;
-        for caps in self.re.captures_iter(line) {
+        for caps in self.captures(line) {
             let m = caps.get(0).expect("group 0");
             out.push_str(&line[last..m.start()]);
             out.push_str(&self.expand(&caps));
@@ -483,12 +514,14 @@ impl Rewriter {
     }
 }
 
-/// Grep the tree: literal or regex, case-sensitive or not, binary files
-/// skipped, capped by hit count so a broad query returns promptly. With a
-/// replacement, each hit also carries what its matches would become.
-pub fn search_text(root: &Path, query: &str, regex: bool, case_sensitive: bool, limit: usize, replacement: Option<&str>) -> Result<TextSearch> {
+/// Grep the tree: literal or regex, case-sensitive or not, whole words or
+/// not, binary files skipped, capped by hit count so a broad query returns
+/// promptly. With a replacement, each hit also carries what its matches
+/// would become.
+#[allow(clippy::too_many_arguments)]
+pub fn search_text(root: &Path, query: &str, regex: bool, case_sensitive: bool, whole_word: bool, limit: usize, replacement: Option<&str>) -> Result<TextSearch> {
     let never = std::sync::atomic::AtomicBool::new(false);
-    Ok(search_text_under(root, root, query, regex, case_sensitive, limit, replacement, &never)?.0)
+    Ok(search_text_under(root, root, query, regex, case_sensitive, whole_word, limit, replacement, &never)?.0)
 }
 
 /// [`search_text`] over the tree at `base` (inside `root`, which hit paths
@@ -501,6 +534,7 @@ pub fn search_text_under(
     query: &str,
     regex: bool,
     case_sensitive: bool,
+    whole_word: bool,
     limit: usize,
     replacement: Option<&str>,
     cancel: &std::sync::atomic::AtomicBool,
@@ -508,7 +542,7 @@ pub fn search_text_under(
     if query.is_empty() {
         return Ok((TextSearch { hits: vec![], files: 0, capped: false }, false));
     }
-    let rw = Rewriter::new(query, replacement, regex, case_sensitive)?;
+    let rw = Rewriter::new(query, replacement, regex, case_sensitive, whole_word)?;
     let mut hits = Vec::new();
     let mut files = 0usize;
     let mut capped = false;
@@ -552,7 +586,7 @@ fn line_hit(rw: &Rewriter, rel: &str, number: u32, line: &str, preview: bool) ->
         byte_at = to;
         chars_at
     };
-    for caps in rw.re.captures_iter(line) {
+    for caps in rw.captures(line) {
         let m = caps.get(0).expect("group 0");
         let start = advance(m.start());
         let end = advance(m.end());
@@ -580,19 +614,21 @@ fn line_hit(rw: &Rewriter, rel: &str, number: u32, line: &str, preview: bool) ->
 /// paths in `skip` (open buffers the caller updates itself). Files are only
 /// written when something changed, and a file that is not valid UTF-8 is
 /// left alone rather than written back lossily.
+#[allow(clippy::too_many_arguments)]
 pub fn replace_text(
     root: &Path,
     query: &str,
     replacement: &str,
     regex: bool,
     case_sensitive: bool,
+    whole_word: bool,
     targets: Option<Vec<ReplaceTarget>>,
     skip: &[String],
 ) -> Result<ReplaceReport> {
     if query.is_empty() {
         return Ok(ReplaceReport { files: 0, replacements: 0 });
     }
-    let rw = Rewriter::new(query, Some(replacement), regex, case_sensitive)?;
+    let rw = Rewriter::new(query, Some(replacement), regex, case_sensitive, whole_word)?;
     let root = root.canonicalize()?;
     let jobs: Vec<(PathBuf, Option<Vec<u32>>)> = match targets {
         Some(targets) => targets
@@ -671,13 +707,39 @@ mod tree_tests {
         let m = write_text(&p.join("src/new.ts"), "hi").unwrap();
         assert!(m > 0);
         assert_eq!(stat_mtime(&p.join("src/new.ts")), Some(m));
-        let s = search_text(p, "find", false, false, 100, None).unwrap();
+        let s = search_text(p, "find", false, false, false, 100, None).unwrap();
         assert_eq!(s.hits.len(), 2);
         assert!(s.hits.iter().all(|h| h.path != "ignored.txt"));
-        let s = search_text(p, "find", false, true, 1, None).unwrap();
+        let s = search_text(p, "find", false, true, false, 1, None).unwrap();
         assert!(s.capped && s.hits.len() == 1);
-        let s = search_text(p, "f.nd.?me", true, false, 100, None).unwrap();
+        let s = search_text(p, "f.nd.?me", true, false, false, 100, None).unwrap();
         assert_eq!(s.files, 2);
+    }
+
+    #[test]
+    fn whole_word_skips_partial_hits_in_search_and_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join("a.rs"), "let id = ids + id_x + Id;\nfoo(id)\n").unwrap();
+        let s = search_text(p, "id", false, false, true, 100, None).unwrap();
+        let spans: Vec<_> = s.hits.iter().map(|h| (h.line, h.matches.clone())).collect();
+        assert_eq!(spans, vec![(1, vec![(4, 6), (22, 24)]), (2, vec![(4, 6)])]);
+        let s = search_text(p, "id", false, true, true, 100, None).unwrap();
+        assert_eq!(s.hits.iter().map(|h| h.matches.len()).sum::<usize>(), 2);
+        // Without the toggle every partial hit is back.
+        let s = search_text(p, "id", false, false, false, 100, None).unwrap();
+        assert_eq!(s.hits.iter().map(|h| h.matches.len()).sum::<usize>(), 5);
+        // A literal edge that is not a word character needs no boundary.
+        let s = search_text(p, "foo(", false, false, true, 100, None).unwrap();
+        assert_eq!(s.hits.len(), 1);
+        // A regex is checked match by match.
+        let s = search_text(p, "i.", true, true, true, 100, None).unwrap();
+        assert_eq!(s.hits.iter().map(|h| h.matches.len()).sum::<usize>(), 2);
+        let r = replace_text(p, "id", "key", false, true, true, None, &[]).unwrap();
+        assert_eq!((r.files, r.replacements), (1, 2));
+        assert_eq!(std::fs::read_to_string(p.join("a.rs")).unwrap(), "let key = ids + id_x + Id;\nfoo(key)\n");
+        let r = replace_text(p, "k.y", "id", true, true, true, None, &[]).unwrap();
+        assert_eq!(r.replacements, 2);
     }
 
     #[test]
@@ -723,16 +785,16 @@ mod tree_tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         std::fs::write(p.join("a.txt"), "héllo foo, foo again\nnothing\nfoo\n").unwrap();
-        let s = search_text(p, "foo", false, false, 100, Some("bar")).unwrap();
+        let s = search_text(p, "foo", false, false, false, 100, Some("bar")).unwrap();
         assert_eq!(s.hits.len(), 2);
         // Columns count characters, so the accent before the first match is one column wide.
         assert_eq!(s.hits[0].col, 6);
         assert_eq!(s.hits[0].matches, vec![(6, 9), (11, 14)]);
         assert_eq!(s.hits[0].replacements.as_deref(), Some(&["bar".to_string(), "bar".to_string()][..]));
         assert_eq!(s.hits[1].line, 3);
-        let s = search_text(p, "f(o+)", true, false, 100, Some("<$1>")).unwrap();
+        let s = search_text(p, "f(o+)", true, false, false, 100, Some("<$1>")).unwrap();
         assert_eq!(s.hits[0].replacements.as_deref(), Some(&["<oo>".to_string(), "<oo>".to_string()][..]));
-        let s = search_text(p, "foo", false, false, 100, None).unwrap();
+        let s = search_text(p, "foo", false, false, false, 100, None).unwrap();
         assert!(s.hits[0].replacements.is_none());
     }
 
@@ -758,30 +820,30 @@ mod tree_tests {
         std::fs::write(p.join("ignored.txt"), "foo\n").unwrap();
 
         // Only the second line of a.ts, leaving the first alone.
-        let r = replace_text(p, "foo", "bar", false, false, Some(vec![ReplaceTarget { path: "src/a.ts".into(), lines: Some(vec![2]) }]), &[]).unwrap();
+        let r = replace_text(p, "foo", "bar", false, false, false, Some(vec![ReplaceTarget { path: "src/a.ts".into(), lines: Some(vec![2]) }]), &[]).unwrap();
         assert_eq!(r, ReplaceReport { files: 1, replacements: 2 });
         assert_eq!(std::fs::read_to_string(p.join("src/a.ts")).unwrap(), "foo();\nbar(); bar();\nkeep();\n");
 
         // The whole tree, minus a path the caller handles itself; CRLF endings survive.
-        let r = replace_text(p, "foo", "baz", false, false, None, &["src/a.ts".to_string()]).unwrap();
+        let r = replace_text(p, "foo", "baz", false, false, false, None, &["src/a.ts".to_string()]).unwrap();
         assert_eq!(r, ReplaceReport { files: 1, replacements: 2 });
         assert_eq!(std::fs::read_to_string(p.join("b.txt")).unwrap(), "baz\r\nbaz\r\n");
         assert_eq!(std::fs::read_to_string(p.join("src/a.ts")).unwrap(), "foo();\nbar(); bar();\nkeep();\n");
         assert_eq!(std::fs::read_to_string(p.join("ignored.txt")).unwrap(), "foo\n");
         // Untouched files keep their mtime: nothing was written to c.txt.
-        let r = replace_text(p, "foo", "qux", false, false, Some(vec![ReplaceTarget { path: "c.txt".into(), lines: None }]), &[]).unwrap();
+        let r = replace_text(p, "foo", "qux", false, false, false, Some(vec![ReplaceTarget { path: "c.txt".into(), lines: None }]), &[]).unwrap();
         assert_eq!(r, ReplaceReport { files: 0, replacements: 0 });
 
         // Regex with a capture group and a literal replacement that looks like one.
-        let r = replace_text(p, "(ba)([rz])", "$2$1", true, false, None, &[]).unwrap();
+        let r = replace_text(p, "(ba)([rz])", "$2$1", true, false, false, None, &[]).unwrap();
         assert_eq!(r, ReplaceReport { files: 2, replacements: 4 });
         assert_eq!(std::fs::read_to_string(p.join("b.txt")).unwrap(), "zba\r\nzba\r\n");
-        let r = replace_text(p, "zba", "$1", false, false, None, &[]).unwrap();
+        let r = replace_text(p, "zba", "$1", false, false, false, None, &[]).unwrap();
         assert_eq!(r.replacements, 2);
         assert_eq!(std::fs::read_to_string(p.join("b.txt")).unwrap(), "$1\r\n$1\r\n");
 
         // Paths cannot escape the root.
-        let err = replace_text(p, "x", "y", false, false, Some(vec![ReplaceTarget { path: "../outside".into(), lines: None }]), &[]);
+        let err = replace_text(p, "x", "y", false, false, false, Some(vec![ReplaceTarget { path: "../outside".into(), lines: None }]), &[]);
         assert!(err.is_err());
     }
 }

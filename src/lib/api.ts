@@ -2516,14 +2516,15 @@ export const fs = {
   inspectPath: (base: string, path: string) => invoke<LocalPathInfo>("inspect_local_path", { base, path }),
   /** Native default-app opening, restricted to existing local files/folders. */
   openPath: (path: string) => invoke<void>("open_local_path", { path }),
-  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500, replacement?: string) =>
-    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit, replacement: replacement ?? null }),
+  /** `wholeWord` skips matches inside a longer word, as the editor's find does. */
+  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500, replacement?: string, wholeWord = false) =>
+    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, wholeWord, limit, replacement: replacement ?? null }),
   /**
    * Rewrite matches on disk. Without `targets` every searchable file under
    * the root is a candidate except those in `skip`.
    */
-  replaceText: (root: string, query: string, replacement: string, regex: boolean, caseSensitive: boolean, targets: ReplaceTarget[] | null, skip: string[] = []) =>
-    invoke<ReplaceReport>("replace_text", { root, query, replacement, regex, caseSensitive, targets, skip }),
+  replaceText: (root: string, query: string, replacement: string, regex: boolean, caseSensitive: boolean, targets: ReplaceTarget[] | null, skip: string[] = [], wholeWord = false) =>
+    invoke<ReplaceReport>("replace_text", { root, query, replacement, regex, caseSensitive, wholeWord, targets, skip }),
 };
 
 // ---- issues (GitHub through gh, Linear through its API)

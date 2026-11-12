@@ -3644,11 +3644,12 @@ pub async fn search_text(
     query: String,
     regex: bool,
     case_sensitive: bool,
+    whole_word: Option<bool>,
     limit: Option<usize>,
     replacement: Option<String>,
 ) -> CmdResult<crate::files::TextSearch> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::files::search_text(Path::new(&root), &query, regex, case_sensitive, limit.unwrap_or(500), replacement.as_deref())
+        crate::files::search_text(Path::new(&root), &query, regex, case_sensitive, whole_word.unwrap_or(false), limit.unwrap_or(500), replacement.as_deref())
     })
     .await
     .map_err(err)?
@@ -3656,17 +3657,19 @@ pub async fn search_text(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn replace_text(
     root: String,
     query: String,
     replacement: String,
     regex: bool,
     case_sensitive: bool,
+    whole_word: Option<bool>,
     targets: Option<Vec<crate::files::ReplaceTarget>>,
     skip: Option<Vec<String>>,
 ) -> CmdResult<crate::files::ReplaceReport> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::files::replace_text(Path::new(&root), &query, &replacement, regex, case_sensitive, targets, &skip.unwrap_or_default())
+        crate::files::replace_text(Path::new(&root), &query, &replacement, regex, case_sensitive, whole_word.unwrap_or(false), targets, &skip.unwrap_or_default())
     })
     .await
     .map_err(err)?
