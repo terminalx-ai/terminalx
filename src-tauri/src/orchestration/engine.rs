@@ -9,14 +9,23 @@
 //! decides it, each time the run is read. Nothing here polls. A worker's turn
 //! ending refreshes its run ([`worker_turn_ended`]), and so does every
 //! command that reads one.
+//!
+//! A try that falls short (a `failed` or `partial` report, or a done-check
+//! that does not hold, [`check_failed`]) is followed by the next step of the
+//! ladder ([`super::ladder`]): the piece is queued again on what that step
+//! names, and a fresh worker is started for it with the failure text in its
+//! brief. No model decides any of this. When the ladder runs out the piece
+//! is `blocked`, with what was tried in its note.
 
 use std::sync::Mutex;
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use super::ladder::{self, Step, Verdict};
 use super::plan::{self, Plan, PlanError};
-use super::{brief, guard, store, Approval, Piece, PieceState, Run, RunState, SessionRef};
+use super::{brief, guard, store, Approval, Outcome, Piece, PieceState, Run, RunState, SessionRef, Try};
+use crate::models::Model;
 use crate::store::settings::OrchestratorLimits;
 use crate::worker_report::Status;
 
@@ -28,6 +37,9 @@ pub struct Lead {
     pub project_path: String,
     /// The agent of the lead's own tab: the default for its pieces.
     pub agent: String,
+    /// The model of the lead's own tab: what a piece runs on when its tier
+    /// has no installed model. Empty for the agent's default.
+    pub model: String,
     /// Workers need worktrees, so the project must be a git repository.
     pub repository: bool,
     /// The lead's own checkout: where a path a piece owns is looked up.
@@ -54,10 +66,27 @@ pub enum WorkerNow {
     Gone,
 }
 
+/// What a worker's session has used, at API list prices.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Cost {
+    /// `None` before any usage was read, and when no model used has a price.
+    pub usd: Option<f64>,
+    /// Models whose tokens the cost leaves out.
+    pub unpriced_models: Vec<String>,
+}
+
 pub trait Host: Send + Sync {
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError>;
     /// The agents a worker can be here.
     fn worker_agents(&self) -> Vec<String>;
+    /// The models the agents' CLIs list: a tier is resolved against them.
+    fn models(&self) -> Vec<Model>;
+    /// What a worker's session has used so far (`session_usage`).
+    fn worker_cost(&self, worker: &SessionRef) -> Cost;
+    /// A piece of `run_id` fell short and its next try waits for a worker: start it
+    /// ([`start_retries`]), off the caller's thread. Whoever read the run first is told, a
+    /// worker's turn ending or a command that shows it, and nobody is told twice.
+    fn retry_waits(&self, run_id: &str);
     fn limits(&self, project_path: &str) -> OrchestratorLimits;
     /// Make the piece's worker: a session of the lead, in a worktree of its
     /// own on a branch cut from the lead's, with the piece's agent, model and
@@ -128,8 +157,18 @@ fn stored(id: &str) -> Result<Run, EngineError> {
     store::get(id).map_err(|_| EngineError::not_found(id))
 }
 
-fn rules_for<'a>(limits: &'a OrchestratorLimits, lead: &'a Lead, agents: &'a [String]) -> plan::Rules<'a> {
-    plan::Rules { piece_limit: limits.piece_limit, default_agent: &lead.agent, agents, worker_mode: &limits.worker_mode, approval: limits.require_approval, checkout: Some(std::path::Path::new(&lead.cwd)) }
+fn rules_for<'a>(limits: &'a OrchestratorLimits, lead: &'a Lead, agents: &'a [String], models: &'a [Model]) -> plan::Rules<'a> {
+    plan::Rules { piece_limit: limits.piece_limit, default_agent: &lead.agent, agents, worker_mode: &limits.worker_mode, approval: limits.require_approval, routing: &limits.routing, models, lead_model: &lead.model, checkout: Some(std::path::Path::new(&lead.cwd)) }
+}
+
+/// The installed models, when the plan leaves a model or an effort to the
+/// routing table. A plan that names both for every piece asks no CLI.
+fn models_for(host: &dyn Host, plan: &Plan) -> Vec<Model> {
+    let named = |text: Option<&str>| text.is_some_and(|text| !text.trim().is_empty());
+    match plan.pieces.iter().all(|piece| named(Some(&piece.model)) && named(piece.effort.as_deref())) {
+        true => Vec::new(),
+        false => host.models(),
+    }
 }
 
 /// Validate a plan and store it as a run of `lead_session`. It waits for
@@ -146,7 +185,8 @@ pub fn create(host: &dyn Host, plan: &Plan, lead_session: &str, lead_tab: Option
     }
     let limits = host.limits(&lead.project_path);
     let agents = host.worker_agents();
-    let pieces = plan::validate(plan, &rules_for(&limits, &lead, &agents))?;
+    let models = models_for(host, plan);
+    let pieces = plan::validate(plan, &rules_for(&limits, &lead, &agents, &models))?;
     let now = crate::store::index::now();
     let run = Run {
         id: uuid::Uuid::now_v7().to_string(),
@@ -181,7 +221,8 @@ pub fn update_plan(host: &dyn Host, id: &str, plan: &Plan) -> Result<Run, Engine
     // The run asks for approval or not as it did when it was made: an edit does not change who must see it.
     let mut limits = host.limits(&run.project_path);
     limits.require_approval = run.state == RunState::AwaitingApproval;
-    let pieces = plan::validate(plan, &rules_for(&limits, &lead, &agents))?;
+    let models = models_for(host, plan);
+    let pieces = plan::validate(plan, &rules_for(&limits, &lead, &agents, &models))?;
     let (run, ()) = store::update(id, |run| {
         run.goal = plan.goal.trim().to_string();
         run.budget = plan.budget.clone();
@@ -238,8 +279,32 @@ pub fn start(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
             Err(error)
         }
         state if state.ended() => Err(EngineError::new("run_ended", format!("Run {id} has ended ({}). Nothing more starts in it.", state_name(state)), Some("Create a new run for what is left."))),
-        _ => launch_ready(host, id),
+        _ => launch_ready(host, id, Launch::Ready),
     }
+}
+
+/// Which pieces a launch starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Launch {
+    /// Every piece whose dependencies are done: what the lead asks for.
+    Ready,
+    /// Only pieces whose last try fell short and whose next one waits. What
+    /// a worker's turn ending starts by itself: a piece a `done` report
+    /// unblocked is the lead's to start, once it has read that report.
+    Retries,
+}
+
+/// Start the next try of every piece whose last one fell short. Called by
+/// the host when a read of the run took the ladder's step
+/// ([`Host::retry_waits`]), off that read's thread.
+pub fn start_retries(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let run = stored(id)?;
+    if !matches!(run.state, RunState::Running | RunState::Failed) {
+        let waiting = waiting(&run);
+        return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new() });
+    }
+    launch_ready(host, id, Launch::Retries)
 }
 
 /// A person approved the plan: the run starts.
@@ -255,7 +320,7 @@ pub fn approve(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    let start = launch_ready(host, id)?;
+    let start = launch_ready(host, id, Launch::Ready)?;
     let run = &start.run;
     let lead = &run.lead.session_id;
     let edited = if run.plan_edited { format!(" They changed the plan first: read it again with `terminalx runs show {id} --json`.") } else { String::new() };
@@ -272,12 +337,15 @@ pub fn approve(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     Ok(start)
 }
 
-fn launch_ready(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
+fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, EngineError> {
     let run = stored(id)?;
     // Until its piece is stored, a worker is known as one by who started it.
     let _limited = guard::starting(&run.lead.session_id);
     // Pieces with no worker yet, and pieces whose worker has a session it was never briefed in.
-    let ready: Vec<String> = run.pieces.iter().filter(|piece| piece.held.is_some() && piece.worker.is_some()).chain(run.ready()).map(|piece| piece.id.clone()).collect();
+    let ready: Vec<String> = match launch {
+        Launch::Ready => run.pieces.iter().filter(|piece| piece.held.is_some() && piece.worker.is_some()).chain(run.ready()).map(|piece| piece.id.clone()).collect(),
+        Launch::Retries => run.ready().into_iter().filter(|piece| piece.retry_waits()).map(|piece| piece.id.clone()).collect(),
+    };
     let (mut started, mut failed) = (Vec::new(), Vec::new());
     for piece_id in ready {
         // Read again each time: the brief of a later piece names what earlier ones reported.
@@ -308,6 +376,14 @@ fn launch_ready(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
                     piece.branch = worker.branch.clone();
                     piece.started_mode = Some(mode.clone());
                     piece.attempts += 1;
+                    // The try the ladder planned, or the first one.
+                    if piece.tries.last().is_none_or(|last| last.worker.is_some()) {
+                        piece.tries.push(Try::planned(Step::First, &piece.model, piece.effort.as_deref(), piece.tier));
+                    }
+                    let attempt = piece.tries.last_mut().expect("a try was just planned");
+                    attempt.worker = Some(reference.clone());
+                    attempt.branch = worker.branch.clone();
+                    attempt.started = Some(crate::store::index::now());
                 })?;
                 (reference, worker.branch)
             }
@@ -381,18 +457,25 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         return Ok(run);
     }
     // Workers are read outside the store's lock: a transcript is a file read.
-    let seen: Vec<(String, SessionRef, WorkerNow)> = run
+    let seen: Vec<(String, SessionRef, WorkerNow, Option<Cost>)> = run
         .pieces
         .iter()
         // A piece whose worker was never briefed says why until it is; there is nothing to read from it.
         .filter(|piece| piece.state != PieceState::Stopped && piece.held.is_none())
-        .filter_map(|piece| piece.worker.clone().map(|worker| (piece.id.clone(), worker.clone(), host.worker(&worker))))
+        .filter_map(|piece| {
+            let worker = piece.worker.clone()?;
+            // A try that has ended has its cost: only one still open is read again.
+            let cost = piece.tries.last().is_some_and(|attempt| attempt.outcome.is_none()).then(|| host.worker_cost(&worker));
+            Some((piece.id.clone(), worker.clone(), host.worker(&worker), cost))
+        })
         .collect();
+    // The ladder needs the installed models only when a try fell short.
+    let models = if seen.iter().any(|(_, _, now, _)| fell_short(now)) { host.models() } else { Vec::new() };
     let (after, ()) = store::update(id, |run| {
         if !matches!(run.state, RunState::Running | RunState::Failed) {
             return Ok(());
         }
-        for (piece_id, worker, now) in seen {
+        for (piece_id, worker, now, cost) in seen {
             // A piece whose worker was replaced meanwhile is not this worker's to decide.
             let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.worker.as_ref() == Some(&worker) && piece.state != PieceState::Stopped && piece.held.is_none()) else { continue };
             // What a worker reported stands when its session is deleted afterwards: the report
@@ -400,11 +483,40 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             if piece.state == PieceState::Done && now == WorkerNow::Gone {
                 continue;
             }
+            if let Some(attempt) = piece.tries.last_mut() {
+                // A deleted session has no usage left to read: what was read stands.
+                if let Some(cost) = cost.filter(|_| now != WorkerNow::Gone) {
+                    attempt.cost_usd = cost.usd;
+                    attempt.cost_unpriced_models = cost.unpriced_models;
+                }
+                // A failed done-check stands over the `done` its worker reported, until that worker works again.
+                if attempt.outcome == Some(Outcome::CheckFailed) && now != WorkerNow::Working {
+                    continue;
+                }
+            }
+            let short = fell_short(&now).then(|| failure_of(&now));
+            let outcome = outcome_of(&now);
             let (state, note) = follows(now);
             piece.state = state;
             // A worker back at work keeps the line it last reported until it reports again.
             if state != PieceState::Running {
-                piece.note = note;
+                piece.note = note.clone();
+            }
+            if let Some(attempt) = piece.tries.last_mut() {
+                match outcome {
+                    // Back at work: the try is open again.
+                    None => (attempt.outcome, attempt.ended) = (None, None),
+                    Some(outcome) => {
+                        if attempt.outcome != Some(outcome) || attempt.ended.is_none() {
+                            attempt.ended = Some(crate::store::index::now());
+                        }
+                        attempt.outcome = Some(outcome);
+                        attempt.detail = short.clone().or(note);
+                    }
+                }
+            }
+            if let Some(failure) = short {
+                climb(piece, &failure, &models);
             }
         }
         settle(run);
@@ -414,7 +526,37 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     if after != run {
         host.changed(&after);
     }
+    // This read is the one that took the ladder's step: the next try is started from here,
+    // whichever read it was. A later read finds the piece already waiting and says nothing.
+    if after.pieces.iter().any(|piece| piece.retry_waits() && !run.piece(&piece.id).is_some_and(Piece::retry_waits)) {
+        host.retry_waits(&after.id);
+    }
     Ok(after)
+}
+
+/// The worker's report says the try fell short: `failed` or `partial`.
+fn fell_short(now: &WorkerNow) -> bool {
+    matches!(now, WorkerNow::Reported { status: Status::Failed | Status::Partial, .. })
+}
+
+/// What the next try is told went wrong: the worker's own words.
+fn failure_of(now: &WorkerNow) -> String {
+    match now {
+        WorkerNow::Reported { status: Status::Partial, result } => format!("The worker reported partial: {result}"),
+        WorkerNow::Reported { result, .. } => format!("The worker reported failed: {result}"),
+        _ => String::new(),
+    }
+}
+
+/// How the current try ended, from what its worker is doing; `None` while it works.
+fn outcome_of(now: &WorkerNow) -> Option<Outcome> {
+    Some(match now {
+        WorkerNow::Working => return None,
+        WorkerNow::Reported { status: Status::Done, .. } => Outcome::Done,
+        WorkerNow::Reported { status: Status::Failed, .. } => Outcome::Failed,
+        WorkerNow::Reported { status: Status::Partial, .. } => Outcome::Partial,
+        WorkerNow::Reported { status: Status::Blocked, .. } | WorkerNow::Stuck(_) | WorkerNow::Gone => Outcome::Blocked,
+    })
 }
 
 /// The state a piece takes from what its worker is doing.
@@ -430,22 +572,150 @@ fn follows(now: WorkerNow) -> (PieceState, Option<String>) {
     }
 }
 
+/// The most of a failure text a piece keeps and a retry is briefed with. The
+/// end is kept: a test run says what failed in its last lines.
+const FAILURE_TEXT_LIMIT: usize = 6000;
+
+fn failure_text(text: &str) -> String {
+    let text = text.trim();
+    if text.len() <= FAILURE_TEXT_LIMIT {
+        return text.to_string();
+    }
+    let mut from = text.len() - FAILURE_TEXT_LIMIT;
+    while !text.is_char_boundary(from) {
+        from += 1;
+    }
+    format!("[…the start was left out]\n{}", &text[from..])
+}
+
+/// A model and effort as a line names them.
+fn on(model: &str, effort: Option<&str>) -> String {
+    let model = if model.is_empty() { "the agent's default model" } else { model };
+    match effort {
+        Some(effort) => format!("{model} at {effort}"),
+        None => model.to_string(),
+    }
+}
+
+/// The current try of `piece` fell short with `failure`: take the next step
+/// of the ladder. Either the piece is queued again on what that step names,
+/// for a fresh worker, or it is blocked with what was tried. Its last try
+/// already carries its outcome. Safe to repeat on a piece that is blocked.
+fn climb(piece: &mut Piece, failure: &str, models: &[Model]) {
+    // A piece stored before tries were kept has no ladder to climb.
+    let Some(last) = piece.tries.last().cloned() else { return };
+    let tries = piece.tries.len();
+    match ladder::next(&piece.agent, tries, &last.model, last.effort.as_deref(), last.tier, models) {
+        Verdict::Again(next) => {
+            piece.note = Some(format!("Try {tries} fell short on {}. Try {} runs on {} ({}).", on(&last.model, last.effort.as_deref()), tries + 1, on(&next.model, next.effort.as_deref()), ladder::describe(next.step)));
+            piece.tries.push(Try::planned(next.step, &next.model, next.effort.as_deref(), next.tier));
+            piece.model = next.model;
+            piece.effort = next.effort;
+            piece.tier = next.tier;
+            // The worker that fell short is done with: the next try is a fresh session
+            // on a fresh branch. Its session and branch stay, named on its try.
+            piece.worker = None;
+            piece.branch = None;
+            piece.started_mode = None;
+            piece.state = PieceState::Queued;
+        }
+        Verdict::Blocked(why) => {
+            let tried: Vec<String> = piece.tries.iter().map(|attempt| on(&attempt.model, attempt.effort.as_deref())).collect();
+            piece.state = PieceState::Blocked;
+            piece.note = Some(format!("Blocked after {tries} {}: {}. {why} Last failure: {failure}", if tries == 1 { "try" } else { "tries" }, tried.join(", then ")));
+        }
+    }
+}
+
+/// What a failed done-check did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckFailed {
+    pub run: Run,
+    pub piece: String,
+    /// A worker was started for the piece's next try.
+    pub retried: bool,
+    /// The piece is blocked: the ladder ran out.
+    pub blocked: bool,
+    pub failed: Vec<NotStarted>,
+}
+
+/// The done-check of `piece_id` did not hold, though its worker reported
+/// `done`: `output` is what the check said. The piece takes the next step of
+/// the ladder, with `output` as the failure text its next worker is given.
+pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> Result<CheckFailed, EngineError> {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let run = refreshed(host, id)?;
+    if !matches!(run.state, RunState::Running | RunState::Failed | RunState::Done) {
+        return Err(EngineError::new("run_not_running", format!("Run {id} is not running ({}). A done-check is reported for a piece of a run that is.", state_name(run.state)), None));
+    }
+    let Some(piece) = run.piece(piece_id) else {
+        let mut error = EngineError::new("piece_not_found", format!("Run {id} has no piece {piece_id}."), Some("Use a piece id from `terminalx runs show --json`."));
+        error.details = json!({"pieces": run.pieces.iter().map(|piece| piece.id.clone()).collect::<Vec<_>>()});
+        return Err(error);
+    };
+    if piece.state != PieceState::Done || piece.tries.is_empty() {
+        let why = match piece.state {
+            PieceState::Running => "its worker is still working".to_string(),
+            PieceState::Queued => "it has no worker yet".to_string(),
+            PieceState::Blocked if piece.gave_up() => format!("it is already blocked after {} tries", piece.tries.len()),
+            _ => format!("it is {}", serde_json::to_value(piece.state).ok().and_then(|state| state.as_str().map(str::to_owned)).unwrap_or_default()),
+        };
+        let mut error = EngineError::new("piece_not_done", format!("Piece {piece_id} did not report done: {why}. A failed done-check is reported for a piece whose worker said it was done."), Some("A piece that reports `failed` or `partial` is tried again without being asked."));
+        error.details = json!({"piece": piece_id, "state": piece.state});
+        return Err(error);
+    }
+    // The checks as the plan wrote them: the next worker is held to the same ones.
+    let checks: Vec<&str> = piece.done_checks.iter().map(super::Check::text).collect();
+    let failure = format!("The done-check did not hold: {}\n{}", checks.join("; "), failure_text(output));
+    let models = host.models();
+    let (run, ()) = store::update(id, |run| {
+        // A run that was done is not, with a piece whose check failed.
+        if run.state == RunState::Done {
+            run.state = RunState::Running;
+        }
+        if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id) {
+            if let Some(attempt) = piece.tries.last_mut() {
+                attempt.outcome = Some(Outcome::CheckFailed);
+                attempt.detail = Some(failure.clone());
+                attempt.ended = Some(crate::store::index::now());
+            }
+            climb(piece, &failure, &models);
+        }
+        settle(run);
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    host.changed(&run);
+    let blocked = run.piece(piece_id).is_some_and(Piece::gave_up);
+    let start = launch_ready(host, id, Launch::Retries)?;
+    Ok(CheckFailed { retried: start.started.iter().any(|started| started == piece_id), run: start.run, piece: piece_id.to_string(), blocked, failed: start.failed })
+}
+
 /// What the pieces make of a started run. Done when every piece is; failed
-/// when a piece failed and nothing is running or could start; running otherwise.
+/// when a piece failed or ran out of tries and nothing is running or could
+/// start; running otherwise.
 fn settle(run: &mut Run) {
     if !matches!(run.state, RunState::Running | RunState::Failed) {
         return;
     }
-    let failed: Vec<&Piece> = run.pieces.iter().filter(|piece| piece.state == PieceState::Failed && piece.worker.is_some()).collect();
+    let failed: Vec<&Piece> = run.pieces.iter().filter(|piece| (piece.state == PieceState::Failed && piece.worker.is_some()) || piece.gave_up()).collect();
     let (state, reason) = if run.pieces.iter().all(|piece| piece.state == PieceState::Done) {
         (RunState::Done, None)
     } else if run.pieces.iter().any(|piece| piece.state == PieceState::Running) || !run.ready().is_empty() || failed.is_empty() {
         (RunState::Running, None)
     } else {
         let names: Vec<String> = failed.iter().map(|piece| piece.id.clone()).collect();
+        let said: Vec<String> = failed
+            .iter()
+            .map(|piece| match piece.gave_up() {
+                true => format!("{} is blocked after {} {}.", piece.id, piece.tries.len(), if piece.tries.len() == 1 { "try" } else { "tries" }),
+                false => format!("{} failed.", piece.id),
+            })
+            .collect();
         let held: Vec<String> = waiting(run).into_iter().filter(|waiting| waiting.on.iter().any(|on| names.contains(on))).map(|waiting| waiting.piece).collect();
-        let held = if held.is_empty() { String::new() } else { format!(" {} cannot start without it.", held.join(", ")) };
-        (RunState::Failed, Some(format!("{} failed.{held}", names.join(", "))))
+        let held = if held.is_empty() { String::new() } else { format!(" {} cannot start without {}.", held.join(", "), if names.len() == 1 { "it" } else { "them" }) };
+        (RunState::Failed, Some(format!("{}{held}", said.join(" "))))
     };
     run.state = state;
     run.reason = reason;
@@ -492,6 +762,11 @@ pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
     let (after, ()) = store::update(id, |run| {
         for piece in run.pieces.iter_mut().filter(|piece| piece.state != PieceState::Done) {
             piece.state = PieceState::Stopped;
+            // A try that was under way, or planned and never started, ends here.
+            if let Some(attempt) = piece.tries.last_mut().filter(|attempt| attempt.outcome.is_none()) {
+                attempt.outcome = Some(Outcome::Stopped);
+                attempt.ended = Some(crate::store::index::now());
+            }
         }
         run.state = RunState::Stopped;
         run.reason = Some(match (by, waited) {
@@ -513,20 +788,24 @@ pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
 }
 
 /// A turn ended in `session_id`: if it is a run's worker, its piece follows.
-pub fn worker_turn_ended(host: &dyn Host, session_id: &str) {
+/// Returns the run when a piece of it now waits for its next try. Starting
+/// that try is not the caller's: the read that took the ladder's step asked
+/// the host for it ([`Host::retry_waits`]), and that read may have been
+/// another one (`runs show`, the Run view) that got there first.
+pub fn worker_turn_ended(host: &dyn Host, session_id: &str) -> Option<String> {
     match store::for_worker(session_id) {
-        Ok(Some((run, _))) => {
-            if let Err(error) = refreshed(host, &run.id) {
-                log::warn!("refresh run {} after its worker {session_id} ended a turn: {error}", run.id);
-            }
-        }
+        Ok(Some((run, _))) => match refreshed(host, &run.id) {
+            Ok(after) => return after.pieces.iter().any(Piece::retry_waits).then_some(after.id),
+            Err(error) => log::warn!("refresh run {} after its worker {session_id} ended a turn: {error}", run.id),
+        },
         Ok(None) => {}
         Err(error) => log::warn!("read the runs after {session_id} ended a turn: {error:#}"),
     }
+    None
 }
 
-/// A run as `runs show` returns it: the run, what it would start next, and
-/// what waits on what.
+/// A run as `runs show` returns it: the run, what it would start next, what
+/// waits on what, and what its workers cost so far.
 pub fn shown(run: &Run) -> Value {
     let (estimate, unestimated) = run.estimate();
     let mut value = serde_json::to_value(run).unwrap_or_else(|_| json!({}));
@@ -534,6 +813,24 @@ pub fn shown(run: &Run) -> Value {
     value["waiting"] = json!(waiting(run));
     value["estimate"] = json!(estimate);
     value["unestimated"] = json!(unestimated);
+    value["maxTries"] = json!(ladder::MAX_TRIES);
+    // What each piece's tries cost so far, and the run's workers together.
+    let (mut total, mut unpriced) = (None::<f64>, Vec::<String>::new());
+    for (index, piece) in run.pieces.iter().enumerate() {
+        let (cost, missing) = piece.cost();
+        value["pieces"][index]["costUsd"] = json!(cost);
+        value["pieces"][index]["costUnpricedModels"] = json!(missing);
+        if let Some(cost) = cost {
+            total = Some(total.unwrap_or(0.0) + cost);
+        }
+        for model in missing {
+            if !unpriced.contains(&model) {
+                unpriced.push(model);
+            }
+        }
+    }
+    value["costUsd"] = json!(total);
+    value["costUnpricedModels"] = json!(unpriced);
     value
 }
 

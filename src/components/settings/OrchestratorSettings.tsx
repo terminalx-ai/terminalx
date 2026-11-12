@@ -6,6 +6,7 @@ import { useSettingsFile } from "@/lib/settingsFile";
 import { useSessionStore } from "@/lib/sessions";
 import type { OrchestratorPatch, OrchestratorSettings as Settings } from "@/types/orchestration";
 import { RegisteredSetting } from "./settingsRegistry";
+import { RoutingTableSettings } from "./RoutingTableSettings";
 
 /** The most pieces the setting takes (`MAX_PIECE_LIMIT` in store/settings.rs). */
 const MAX_PIECES = 50;
@@ -86,7 +87,7 @@ export function OrchestratorTab() {
   const ready = settings !== null;
   return (
     <div className="flex flex-col" data-testid="orchestrator-settings">
-      <p className="pb-3 text-[13px] text-muted-foreground">How a lead session splits work across worker sessions: whether it asks first, how far it may split, and the permissions its workers run with. A repository can answer for itself in its own settings.</p>
+      <p className="pb-3 text-[13px] text-muted-foreground">How a lead session splits work across worker sessions: whether it asks first, how far it may split, the permissions its workers run with, and which model each kind of piece starts on. A repository can answer for itself in its own settings.</p>
       <div className="mb-1 mt-2 text-xs font-medium uppercase tracking-wide text-faint">Runs</div>
       <RegisteredSetting setting="orchestrator.requireApproval"
         control={<Switch aria-label="Ask before a run starts" checked={settings?.requireApproval ?? true} disabled={!ready} onCheckedChange={(on) => void save({ requireApproval: on })} />}
@@ -101,6 +102,9 @@ export function OrchestratorTab() {
           </select>
         }
       />
+      <RegisteredSetting setting="orchestrator.routing">
+        <div><RoutingTableSettings settings={settings} save={(patch) => void save(patch)} /></div>
+      </RegisteredSetting>
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>
   );
@@ -155,6 +159,7 @@ export function RepositoryOrchestratorSettings({ projectPath }: { projectPath: s
             {WORKER_MODES.map((mode) => <option key={mode} value={mode}>{modeName(mode)}</option>)}
           </select>
         </div>
+        <RoutingTableSettings settings={settings} project={{ path: projectPath, name: project.name }} save={(patch) => void save(patch)} />
         <p className="text-xs text-muted-foreground">The defaults are in Settings → Orchestrator.</p>
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
       </section>

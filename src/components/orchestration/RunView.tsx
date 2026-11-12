@@ -9,12 +9,12 @@ import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { EFFORT_LABEL, effortChoices, modeLabel, modelForTab, modelLabel, modelOptionText, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
-  budgetText, checksFrom, checkText, estimateText, noteRun, PIECE_STATE_LABEL, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf, requestOrchestratorSettings,
-  RUN_STATE_LABEL, useRun, withoutPiece,
+  budgetText, checksFrom, checkText, costText, estimateText, fellShort, gaveUp, noteRun, PIECE_STATE_LABEL, pieceCost, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf,
+  requestOrchestratorSettings, RUN_STATE_LABEL, TIER_DOT, TRY_OUTCOME_LABEL, TRY_STEP_LABEL, useRun, withoutPiece,
 } from "@/lib/orchestration";
 import { selectSession } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
-import type { PieceState, Run, RunPiece, RunPlan, RunPlanPiece } from "@/types/orchestration";
+import type { PieceState, PieceTry, Run, RunPiece, RunPlan, RunPlanPiece, Tier } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
 /** What the lead is asked when a person presses Plan a run. The lead decides whether splitting helps at all. */
@@ -195,6 +195,7 @@ function RunSummary({ run }: { run: Run }) {
   const done = run.pieces.filter((piece) => piece.state === "done").length;
   const budget = budgetText(run);
   const estimate = estimateText(run.estimate);
+  const spent = costText(run.costUsd, run.costUnpricedModels);
   return (
     <section aria-label="Run summary" className="mx-6 grid grid-cols-1 gap-3 @[640px]/run:grid-cols-3">
       <div className="rounded-lg bg-well px-3.5 py-3 hairline">
@@ -208,7 +209,10 @@ function RunSummary({ run }: { run: Run }) {
       <div className="rounded-lg bg-well px-3.5 py-3 hairline">
         <div className="text-[11px] text-faint">Budget</div>
         <div className="mt-1 text-[13px]">{budget ? <span className="font-mono">{budget}</span> : <span className="text-muted-foreground">None set by the plan</span>}</div>
-        <div className="mt-2 text-[11px] text-faint">{estimate ? `Estimated ${estimate} API-equivalent` : "The plan carries no estimate"}</div>
+        <div className="mt-2 text-[11px] text-faint">
+          {spent ? <><span className="font-mono text-muted-foreground" data-testid="run-cost">{spent}</span> used by workers so far · </> : null}
+          {estimate ? `${spent ? "estimated" : "Estimated"} ${estimate} API-equivalent` : spent ? "no estimate in the plan" : "The plan carries no estimate"}
+        </div>
       </div>
       <div className="rounded-lg bg-well px-3.5 py-3 hairline">
         <div className="text-[11px] text-faint">Workers</div>
@@ -268,9 +272,9 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, onSelect,
   // The plan's columns before it starts; the run's once it has.
   const columns = editable
     ? "grid-cols-[minmax(0,1fr)_13.5rem] @[760px]/run:grid-cols-[minmax(0,1.4fr)_13.5rem_minmax(0,1fr)_3.5rem_5.5rem]"
-    : "grid-cols-[minmax(0,1.5fr)_6.5rem] @[760px]/run:grid-cols-[minmax(0,1.5fr)_minmax(0,0.9fr)_6.5rem_3rem_minmax(0,1.2fr)]";
+    : "grid-cols-[minmax(0,1.5fr)_6.5rem] @[760px]/run:grid-cols-[minmax(0,1.3fr)_minmax(8.75rem,1fr)_6rem_2.5rem_3.5rem_minmax(0,1fr)]";
   const wide = "hidden @[760px]/run:block";
-  const heads = editable ? [["Piece", ""], ["Model and effort", ""], ["Done when", wide], ["After", wide], ["Estimate", wide]] : [["Piece", ""], ["Model", wide], ["State", ""], ["Tries", wide], ["Report", wide]];
+  const heads = editable ? [["Piece", ""], ["Model and effort", ""], ["Done when", wide], ["After", wide], ["Estimate", wide]] : [["Piece", ""], ["Model", wide], ["State", ""], ["Tries", wide], ["Cost", wide], ["Report", wide]];
   return (
     <div role="table" aria-label={editable ? "Plan" : "Pieces"} className="mt-4 border-t border-hairline">
       <div role="row" className={cn("grid items-center gap-x-4 border-b border-hairline px-6 py-2.5", columns)}>
@@ -310,7 +314,8 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, onSelect,
               <div role="cell" className={cn("font-mono text-xs", wide)}>{estimateText(piece.estimate) ?? <span className="text-faint">–</span>}</div>
             </> : <>
               <div role="cell"><PieceStateMark state={piece.state} /></div>
-              <div role="cell" className={cn("font-mono text-xs text-muted-foreground", wide)}>{piece.attempts || "–"}</div>
+              <div role="cell" className={cn("font-mono text-xs text-muted-foreground", wide)}>{piece.tries?.length || piece.attempts || "–"}</div>
+              <div role="cell" className={cn("font-mono text-xs", wide)}>{pieceCostText(piece) ?? <span className="text-faint">–</span>}</div>
               <div role="cell" className={cn("min-w-0 truncate text-xs text-muted-foreground", wide)}>{piece.note ?? (piece.state === "queued" && after ? `Waits for ${after}` : "")}</div>
             </>}
           </div>
@@ -320,11 +325,65 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, onSelect,
   );
 }
 
-function ModelName({ piece }: { piece: RunPiece }) {
+function pieceCostText(piece: RunPiece): string | null {
+  const { cost, unpriced } = pieceCost(piece);
+  return costText(cost, unpriced);
+}
+
+/** A model and effort as a row names them, marked with its tier's colour when it has a tier. */
+function ModelName({ piece }: { piece: Pick<RunPiece, "agent" | "model" | "effort"> & { tier?: Tier } }) {
   return <>
+    {piece.tier && <span aria-hidden className={cn("mr-1.5 inline-block size-1.5 rounded-full bg-current align-middle", TIER_DOT[piece.tier])} />}
     <span>{piece.model ? modelLabel(piece.agent, piece.model) : `${piece.agent === "codex" ? "Codex" : "Claude"} default`}</span>{" "}
     <span className="text-muted-foreground">{piece.effort ? EFFORT_LABEL[piece.effort] ?? piece.effort : "Default"}</span>
   </>;
+}
+
+/** What a try came to, in the words its row shows: a label, the line after it, and for a failed check what the check printed. */
+function tryResult(attempt: PieceTry): { label: string; text: string; output: string[]; tone: string } {
+  if (!attempt.outcome) return attempt.worker ? { label: "Running", text: "", output: [], tone: "text-accent" } : { label: "Waiting for its worker", text: "", output: [], tone: "text-faint" };
+  const detail = attempt.detail ?? "";
+  const tone = fellShort(attempt) ? "text-destructive" : attempt.outcome === "done" ? "text-foreground" : "text-warning";
+  const label = TRY_OUTCOME_LABEL[attempt.outcome];
+  if (attempt.outcome === "checkFailed") {
+    const [first = "", ...rest] = detail.split("\n");
+    // The end of what the check printed: that is where a test run says what failed.
+    return { label, text: first.replace(/^The done-check did not hold:\s*/, ""), output: rest.filter((line) => line.trim()).slice(-8), tone };
+  }
+  return { label, text: detail.replace(/^The worker reported (failed|partial):\s*/, "").replace(/^Reported (partial|blocked):\s*/, ""), output: [], tone };
+}
+
+/** Every try of a piece, oldest first: what it ran on, what it cost, why it was made, and how it ended. */
+function Tries({ piece }: { piece: RunPiece }) {
+  const tries = piece.tries ?? [];
+  return (
+    <ol aria-label="Tries" className="mt-2" data-testid="piece-tries">
+      {tries.map((attempt, index) => {
+        const result = tryResult(attempt);
+        const cost = costText(attempt.costUsd, attempt.costUnpricedModels);
+        return (
+          <li key={index} className="flex gap-3" data-try={index + 1} data-try-outcome={attempt.outcome ?? (attempt.worker ? "running" : "waiting")}>
+            <div className="flex flex-col items-center">
+              <span className="grid size-5 shrink-0 place-items-center rounded-full bg-veil-raised text-[11px] text-muted-foreground">{index + 1}</span>
+              {index < tries.length - 1 && <span aria-hidden className="mt-1 flex-1 border-l border-hairline" />}
+            </div>
+            <div className="min-w-0 flex-1 pb-3">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="min-w-0 truncate"><ModelName piece={{ agent: piece.agent, model: attempt.model, effort: attempt.effort, tier: attempt.tier }} /></span>
+                {attempt.worker && <button type="button" className="ml-auto shrink-0 text-[11.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:underline" onClick={() => selectSession(attempt.worker!.sessionId)}>Open worker</button>}
+                <span className={cn("shrink-0 font-mono text-[11.5px] text-faint", !attempt.worker && "ml-auto")} title={attempt.costUnpricedModels?.length ? `Without ${attempt.costUnpricedModels.join(", ")}: no price is known for it` : "At API list prices"}>{cost ?? "–"}</span>
+              </div>
+              <div className="mt-0.5 text-[11.5px] leading-4 text-faint">{TRY_STEP_LABEL[attempt.step]}</div>
+              <div className={cn("mt-1 line-clamp-3 break-words text-[12.5px] leading-[18px]", result.tone)} title={result.text || undefined}>
+                {result.label}{result.text ? `: ${result.text}` : ""}
+              </div>
+              {result.output.length > 0 && <pre className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1.5 font-mono text-[11.5px] leading-[17px] text-muted-foreground hairline scrollbar-thin">{result.output.join("\n")}</pre>}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
 }
 
 /** A piece's model and effort, changed where they are read: each change is saved as part of the plan. */
@@ -333,20 +392,24 @@ function ModelAndEffort({ piece, disabled, onChange }: { piece: RunPiece; disabl
   const current = modelForTab(models, piece.model);
   const listed = models.some((model) => model.id === piece.model);
   const efforts = effortChoices(current, piece.effort);
+  // The empty choice is "not named by the plan": the piece's kind decides, and it shows what that came to.
+  const byKind = piece.kind ? `by kind: ${piece.kind}` : "by kind";
+  const kindModel = piece.model ? modelLabel(piece.agent, piece.model) : `${piece.agent === "codex" ? "Codex" : "Claude"} default`;
   return (
     <span className="flex min-w-0 items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
-      <select aria-label={`Model of ${piece.title}`} className={cn(cellSelect, "flex-1")} value={piece.model} disabled={disabled}
+      <select aria-label={`Model of ${piece.title}`} className={cn(cellSelect, "flex-1")} value={piece.modelByKind ? "" : piece.model} disabled={disabled} title={piece.modelByKind ? `From the routing table, ${byKind}` : undefined}
         onChange={(event) => {
           const next = modelForTab(models, event.target.value);
-          // An effort the new model does not have goes back to that model's default.
-          onChange({ model: event.target.value, effort: piece.effort && next?.efforts.includes(piece.effort) ? piece.effort : undefined });
+          // An effort the new model does not have goes back to that model's default; one the kind chose stays the kind's.
+          onChange({ model: event.target.value, effort: !piece.effortByKind && piece.effort && next?.efforts.includes(piece.effort) ? piece.effort : undefined });
         }}>
-        <option value="">{piece.agent === "codex" ? "Codex" : "Claude"} default</option>
+        {/* No model named: the plan is stored again with the routing table's model for the piece's kind. */}
+        <option value="">{piece.modelByKind ? `${kindModel} (${byKind})` : `By kind${piece.kind ? ` (${piece.kind})` : ""}`}</option>
         {piece.model && !listed && <option value={piece.model}>{modelLabel(piece.agent, piece.model)}</option>}
         {models.map((model) => <option key={model.id} value={model.id} title={modelOptionText(model, models)}>{model.label}</option>)}
       </select>
-      <select aria-label={`Effort of ${piece.title}`} className={cn(cellSelect, "w-[5.25rem] shrink-0")} value={piece.effort ?? ""} disabled={disabled} onChange={(event) => onChange({ effort: event.target.value || undefined })}>
-        <option value="">Default</option>
+      <select aria-label={`Effort of ${piece.title}`} className={cn(cellSelect, "w-[5.25rem] shrink-0")} value={piece.effortByKind ? "" : piece.effort ?? ""} disabled={disabled} title={piece.effortByKind ? `From the routing table, ${byKind}` : undefined} onChange={(event) => onChange({ effort: event.target.value || undefined })}>
+        <option value="">{piece.effortByKind && piece.effort ? EFFORT_LABEL[piece.effort] ?? piece.effort : "Default"}</option>
         {efforts.map((effort) => <option key={effort} value={effort}>{EFFORT_LABEL[effort] ?? effort}</option>)}
       </select>
     </span>
@@ -409,6 +472,8 @@ function PieceDetail({ run, piece, number, editable, busy, onClose, onSave, onRe
   const [editing, setEditing] = useState(false);
   const mode = pieceMode(run, piece);
   const brief = piece.brief;
+  const tries = piece.tries ?? [];
+  const maxTries = run.maxTries ?? 3;
   return (
     <aside aria-label={`Piece ${number}: ${piece.title}`} data-testid="piece-detail" className="flex w-full shrink-0 flex-col border-t border-hairline bg-background @[900px]/run:min-h-0 @[900px]/run:w-[min(24rem,36%)] @[900px]/run:border-l @[900px]/run:border-t-0">
       <header className="flex h-10 shrink-0 items-center gap-2 border-b border-hairline px-4">
@@ -423,8 +488,13 @@ function PieceDetail({ run, piece, number, editable, busy, onClose, onSave, onRe
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 scrollbar-thin">
           <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1.5">
             {editable ? (piece.kind ? <span className={chip}>{piece.kind}</span> : null) : <PieceStateMark state={piece.state} />}
+            {!editable && (tries.length > 1 || gaveUp(piece)) && <span className="text-xs text-muted-foreground" data-testid="piece-tries-used">· {tries.length} of {maxTries} tries used</span>}
             <span className="ml-auto text-[13px]"><ModelName piece={piece} /></span>
           </div>
+          {piece.modelNote && (
+            <p role="note" className="-mt-2 mb-4 flex items-start gap-1.5 text-xs text-warning"><CircleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />{piece.modelNote}</p>
+          )}
+          {!editable && tries.length > 0 && <Section title="Tries"><Tries piece={piece} /></Section>}
           {!editable && (
             <Section title={piece.state === "done" ? "Result" : "Where it stands"}>
               {piece.note ?? (piece.state === "queued" ? (piece.dependsOn.length ? `Waits for ${piece.dependsOn.join(", ")}.` : "Not started yet.") : piece.state === "running" ? "Its worker is working." : "No report.")}

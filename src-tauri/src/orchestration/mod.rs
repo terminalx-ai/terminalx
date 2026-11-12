@@ -16,6 +16,12 @@
 //! judgment ([`guard`]): deny rules handed to the agent at launch, and a
 //! branch with no upstream.
 //!
+//! A piece that names no model gets one from its kind ([`routing`]): a table
+//! of kind to tier and effort, a column per agent, resolved against the
+//! models the agent offers. A try that falls short is followed by another on
+//! more effort and then on the next model up ([`ladder`]), each a fresh
+//! worker, three tries at most; every try is kept on the piece.
+//!
 //! [`engine`] reaches sessions through [`engine::Host`], so the scheduling is
 //! the same code in the app and under test.
 
@@ -25,7 +31,9 @@ pub mod engine;
 mod engine_tests;
 pub mod guard;
 pub mod host;
+pub mod ladder;
 pub mod plan;
+pub mod routing;
 pub mod store;
 
 use serde::{Deserialize, Serialize};
@@ -166,6 +174,77 @@ pub struct Brief {
     pub limits: Vec<String>,
 }
 
+/// How a try ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Outcome {
+    /// Its worker reported `done`.
+    Done,
+    /// Its worker reported `failed`.
+    Failed,
+    /// Its worker reported `partial`.
+    Partial,
+    /// Its worker reported `done` and the piece's done-check did not hold.
+    CheckFailed,
+    /// Its worker stopped without finishing: a `blocked` report, no report,
+    /// a question for a person, or a deleted session.
+    Blocked,
+    /// The run was stopped first.
+    Stopped,
+}
+
+impl Outcome {
+    /// The try fell short in a way another try may fix.
+    pub fn fell_short(self) -> bool {
+        matches!(self, Self::Failed | Self::Partial | Self::CheckFailed)
+    }
+}
+
+/// One try at a piece: the worker it ran in, on what, at what cost, to what end.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Try {
+    /// What made it differ from the try before.
+    pub step: ladder::Step,
+    /// Empty for the agent's own default model.
+    #[serde(default)]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<routing::Tier>,
+    /// Absent until its worker is started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<SessionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Absent while it runs, and before it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Outcome>,
+    /// The worker's result line, or the failure text the next try is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// What its worker's session used, at API list prices
+    /// (`session_usage`). Absent before any was read, and when no model it
+    /// used has a price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Models whose tokens the cost leaves out: with names here it is partial.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cost_unpriced_models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<String>,
+}
+
+impl Try {
+    /// A try that has no worker yet.
+    pub fn planned(step: ladder::Step, model: &str, effort: Option<&str>, tier: Option<routing::Tier>) -> Self {
+        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, outcome: None, detail: None, cost_usd: None, cost_unpriced_models: Vec::new(), started: None, ended: None }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Piece {
@@ -190,15 +269,32 @@ pub struct Piece {
     /// Why no command can, in the lead's words. Never empty when `review_only`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub review_only_reason: String,
-    /// The kind of work, as the lead named it (`search`, `code`, …).
+    /// The kind of work, one of [`routing::KINDS`]: what its model and
+    /// effort come from when the plan names none. Absent only on a run
+    /// stored before kinds were required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub agent: String,
-    /// Empty for the agent's own default model.
+    /// The model of its current try: the plan's, else the routing table's
+    /// for its kind, then whatever escalation moved it to. Empty for the
+    /// agent's own default model.
     #[serde(default)]
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The tier its model belongs to, when it belongs to one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<routing::Tier>,
+    /// Why its model is not the routing table's: the tier has no installed model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_note: Option<String>,
+    /// The plan named no model: the one here is its kind's. A plan made from this run
+    /// (`Edit` in the Run view) leaves the model out again, so the kind still decides.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_by_kind: bool,
+    /// The plan named no effort: the one here is its kind's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub effort_by_kind: bool,
     /// The plan's own choice; the project's setting when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
@@ -210,6 +306,10 @@ pub struct Piece {
     /// How many workers were started for it.
     #[serde(default)]
     pub attempts: u32,
+    /// Every try, oldest first: the last is the current one. A try that fell
+    /// short is followed by the next step of the ladder ([`ladder`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tries: Vec<Try>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker: Option<SessionRef>,
     /// The worker's branch, cut from the lead's.
@@ -232,6 +332,29 @@ impl Piece {
     /// The mode its worker runs in: the plan's, else the project's.
     pub fn mode<'a>(&'a self, project_default: &'a str) -> &'a str {
         self.permission_mode.as_deref().unwrap_or(project_default)
+    }
+
+    /// A try fell short and the next one waits for its worker.
+    pub fn retry_waits(&self) -> bool {
+        self.state == PieceState::Queued && self.worker.is_none() && self.tries.len() > 1 && self.tries.last().is_some_and(|last| last.worker.is_none())
+    }
+
+    /// The ladder ran out: its last try fell short and no further one is made.
+    pub fn gave_up(&self) -> bool {
+        self.state == PieceState::Blocked && self.tries.last().and_then(|last| last.outcome).is_some_and(Outcome::fell_short)
+    }
+
+    /// What its tries cost so far, and the models that sum leaves out.
+    /// `None` before any cost was read.
+    pub fn cost(&self) -> (Option<f64>, Vec<String>) {
+        let known: Vec<f64> = self.tries.iter().filter_map(|attempt| attempt.cost_usd).collect();
+        let mut unpriced: Vec<String> = Vec::new();
+        for model in self.tries.iter().flat_map(|attempt| &attempt.cost_unpriced_models) {
+            if !unpriced.contains(model) {
+                unpriced.push(model.clone());
+            }
+        }
+        ((!known.is_empty()).then(|| known.iter().sum()), unpriced)
     }
 }
 

@@ -127,6 +127,7 @@ Usage:
   terminalx runs create --from PLAN.json|- [--lead SESSION] [--json]
   terminalx runs start|show|stop [RUN] [--json]
   terminalx runs list [--lead SESSION] [--all] [--json]
+  terminalx runs check-failed PIECE [--run RUN] [--output FILE|-] [--reason TEXT] [--json]
   terminalx vm status|start|stop [--json]
   terminalx vm tools [TOOL] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--json]
@@ -1251,7 +1252,7 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
 /// Orchestration runs: a lead's plan of pieces, and the workers started for
 /// them. Approving a run is not here: a person does that in the app.
 fn parse_runs(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, ControlError>) -> Result<Action, ControlError> {
-    let command = tokens.required_front("runs command (create, start, show, list or stop)")?;
+    let command = tokens.required_front("runs command (create, start, show, list, stop or check-failed)")?;
     // Where the command runs: the lead of a new run, and the run meant when none is named.
     let caller = calling_session();
     match command.as_str() {
@@ -1282,7 +1283,26 @@ fn parse_runs(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, Con
             let timeout = if command == "start" { RUN_START_TIMEOUT } else { Duration::from_secs(60) };
             Ok(Action::Rpc { command: format!("runs.{command}"), params: json!({"run": run, "caller": caller}), timeout })
         }
-        other => Err(invalid(format!("Unknown runs command {other}. Use create, start, show, list or stop."))),
+        // A piece's worker said `done` and its done-check did not hold: the piece takes the next step of the ladder.
+        "check-failed" => {
+            let piece = tokens.required_front("piece id")?;
+            let run = tokens.option("--run")?;
+            let output = tokens.option("--output")?;
+            let reason = tokens.option("--reason")?;
+            tokens.finish()?;
+            let output = match output.as_deref() {
+                Some("-") => Some(stdin()?),
+                Some(path) => Some(std::fs::read_to_string(path).map_err(|error| invalid(format!("Could not read --output {path}: {error}")))?),
+                None => None,
+            };
+            // What the next worker is told failed: the reason in a line, then what the check printed.
+            let said: Vec<String> = [reason, output].into_iter().flatten().map(|text| text.trim().to_string()).filter(|text| !text.is_empty()).collect();
+            if said.is_empty() {
+                return Err(invalid("Say what failed: --output FILE (or - for standard input) with what the check printed, --reason TEXT, or both. The next worker is given it."));
+            }
+            Ok(Action::Rpc { command: "runs.checkFailed".into(), params: json!({"run": run, "piece": piece, "output": said.join("\n"), "caller": caller}), timeout: RUN_START_TIMEOUT })
+        }
+        other => Err(invalid(format!("Unknown runs command {other}. Use create, start, show, list, stop or check-failed."))),
     }
 }
 
@@ -1508,7 +1528,7 @@ mod tests {
     fn runs_are_created_from_a_plan_file_and_driven_by_id_or_from_inside_their_lead() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plan.json");
-        let plan = json!({"goal": "Move settings reads", "pieces": [{"id": "a", "title": "A", "doneChecks": [{"type": "command", "run": "cargo t"}]}]});
+        let plan = json!({"goal": "Move settings reads", "pieces": [{"id": "a", "title": "A", "kind": "code", "doneChecks": [{"type": "command", "run": "cargo t"}]}]});
         std::fs::write(&path, plan.to_string()).unwrap();
         let path = path.to_str().unwrap();
 
@@ -1552,11 +1572,24 @@ mod tests {
             assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
         }
         // A lead does not approve its own plan: there is no such command, and the guide says so.
-        assert!(parse(&args(&["runs", "approve", "01a1"])).unwrap_err().message.contains("Use create, start, show, list or stop"));
-        for said in ["terminalx runs create --from PLAN.json|- [--lead SESSION]", "terminalx runs start|show|stop [RUN]", "terminalx runs list [--lead SESSION] [--all]"] {
+        assert!(parse(&args(&["runs", "approve", "01a1"])).unwrap_err().message.contains("Use create, start, show, list, stop or check-failed"));
+
+        // A failed done-check names the piece and carries what the check printed.
+        std::fs::write(dir.path().join("check.log"), "test control::tests::reads_default ... FAILED\n").unwrap();
+        let log = dir.path().join("check.log");
+        let (command, params, timeout) = rpc_of(&["runs", "check-failed", "cli", "--run", "01a1", "--output", log.to_str().unwrap(), "--reason", "exit 101", "--json"]);
+        assert_eq!((command.as_str(), params, timeout), ("runs.checkFailed", json!({"run": "01a1", "piece": "cli", "output": "exit 101\ntest control::tests::reads_default ... FAILED", "caller": null}), Duration::from_secs(300)));
+        assert_eq!(rpc_of(&["runs", "check-failed", "cli", "--reason", "the list misses two call sites"]).1, json!({"run": null, "piece": "cli", "output": "the list misses two call sites", "caller": null}));
+        let mut printed = || Ok("FAILED on stdin\n".to_string());
+        let Action::Rpc { params, .. } = parse_with_stdin(&args(&["runs", "check-failed", "cli", "--output", "-"]), &mut printed).unwrap().action else { panic!("expected rpc") };
+        assert_eq!(params["output"], "FAILED on stdin");
+        for refused in [&["runs", "check-failed"][..], &["runs", "check-failed", "cli"], &["runs", "check-failed", "cli", "--reason", "  "], &["runs", "check-failed", "cli", "--output", "/no/such/file"], &["runs", "check-failed", "cli", "--reason", "x", "extra"]] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        for said in ["terminalx runs create --from PLAN.json|- [--lead SESSION]", "terminalx runs start|show|stop [RUN]", "terminalx runs list [--lead SESSION] [--all]", "terminalx runs check-failed PIECE [--run RUN] [--output FILE|-] [--reason TEXT]"] {
             assert!(help_text().contains(said), "{said}");
         }
-        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneChecks`", "{\"type\": \"command\", \"run\":", "{\"type\": \"review\", \"text\":", "`no_command_check`", "`review_only_without_reason`", "\"reviewOnly\": true", "`owns_outside_repository`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8"] {
+        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneChecks`", "{\"type\": \"command\", \"run\":", "{\"type\": \"review\", \"text\":", "`no_command_check`", "`review_only_without_reason`", "\"reviewOnly\": true", "`owns_outside_repository`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8", "#### Model and effort", "`no_kind`", "`unknown_kind`", "#### When a piece falls short", "terminalx runs check-failed <piece>", "never past\n   `high`", "`piece_not_done`", "`modelNote`", "| top | Fable | Astra |"] {
             assert!(GUIDE.contains(said), "the guide does not say {said:?}");
         }
     }

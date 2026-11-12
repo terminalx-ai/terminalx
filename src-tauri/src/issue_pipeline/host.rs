@@ -63,6 +63,7 @@ impl LocalHost {
         let to = SessionRef { session_id: session_id.into(), tab_id: tab_id.into() };
         crate::worker_report::turn_completed(final_message, || self.manager.load_events(session_id, tab_id), |prompt| Host::send(self, &to, prompt));
         // A run's worker: its piece follows what it just reported.
+        // A try that fell short is followed by the next without anything more from here: the read of the run asks its host for that.
         crate::orchestration::engine::worker_turn_ended(&crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone()), session_id);
     }
 
