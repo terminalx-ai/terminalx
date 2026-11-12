@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import nacl from "tweetnacl";
 import { deriveKeySchedule } from "./e2ee-session";
 import { encodeBase64, encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello } from "./e2ee-contract";
 import { openFrame, sealFrame } from "./e2ee-framing";
-import { RelayClient, RelayOuterError } from "./relay-client";
+import { PAIRING_APPROVAL_WAIT_MS, PairingNotApprovedError, RelayClient, RelayOuterError } from "./relay-client";
 import { MAC_NEEDS_UPDATE } from "./refusal";
 import { encodeFragments, RELAY_MESSAGE_BYTES_LIMIT, textPlaintextLimit } from "./wire";
 
@@ -64,8 +64,19 @@ class EncryptedPeer extends FakeSocket {
   largestToPhone = 0;
   requests: { method: string; params?: unknown }[] = [];
 
-  /** `fragments`: whether this Mac agrees to them, as a desktop from #669 on does. `unanswered`: a method it never replies to. `refuse`: the error it answers a method with, if any. */
-  constructor(private readonly options: { fragments?: boolean; reply?: (method: string) => unknown; unanswered?: string; refuse?: (method: string) => { code: string; message: string } | undefined } = {}) { super(); }
+  /** The e2ee_auth a gating Mac holds until the person approves (PRO-314). */
+  private held: string | null = null;
+
+  /** `fragments`: whether this Mac agrees to them, as a desktop from #669 on does. `unanswered`: a method it never replies to. `refuse`: the error it answers a method with, if any. `gate`: hold e2ee_auth until `approve()`, as a Mac does for a QR pairing. */
+  constructor(private readonly options: { fragments?: boolean; reply?: (method: string) => unknown; unanswered?: string; refuse?: (method: string) => { code: string; message: string } | undefined; gate?: boolean } = {}) { super(); }
+
+  get waiting() { return this.held !== null; }
+  /** The person approved on the Mac: the held connection is authenticated. */
+  approve() {
+    const hash = this.held!;
+    this.held = null;
+    this.encrypted({ type: "e2ee_authenticated", v: 2, transcriptHashB64: hash });
+  }
 
   private emit(value: unknown) { queueMicrotask(() => this.onmessage?.({ data: JSON.stringify(value) })); }
   private encrypted(value: unknown) {
@@ -132,7 +143,8 @@ class EncryptedPeer extends FakeSocket {
     if (value.type === "e2ee_auth") {
       expect(value.deviceToken).toBe("test-device-token");
       expect(value.transcriptHashB64).toBe(encodeBase64(schedule.transcriptHash));
-      this.encrypted({ type: "e2ee_authenticated", v: 2, transcriptHashB64: value.transcriptHashB64 });
+      if (this.options.gate) this.held = value.transcriptHashB64;
+      else this.encrypted({ type: "e2ee_authenticated", v: 2, transcriptHashB64: value.transcriptHashB64 });
     } else if (value.method && value.method === this.options.unanswered) {
       // Still in flight when the socket closes.
     } else if (value.method && this.options.refuse?.(value.method)) {
@@ -229,7 +241,8 @@ function relayClient(socket: EncryptedPeer): RelayClient {
 // A 3 MB attachment: about 4 MB of base64 in one request, four times what the relay cell accepts in one message (#669).
 const attachment = { mediaType: "image/png", data: "A".repeat(4_000_000), name: "photo.png" };
 
-describe("messages larger than one relay frame (#669)", () => {
+// Sealing and opening 4 MB takes 1–2 s on an idle machine and more than 5 s on a loaded one, which is not a failure.
+describe("messages larger than one relay frame (#669)", { timeout: 30_000 }, () => {
   it("cross as fragments both ways once the Mac agrees, and the connection stays usable", async () => {
     const transcript = { events: [], blob: "🦝 \"tool\" output\n".repeat(150_000) };
     const socket = new EncryptedPeer({ fragments: true, reply: (method) => method === "session.sync" ? transcript : undefined });
@@ -302,4 +315,87 @@ it("says the Mac needs updating when it refuses an operation it does not know, a
     expect(await client.request("session.stop", { sessionId: "s", tabId: "t" })).toEqual({ ok: false, refusal: { code: "unavailable", message: "The tab is not running." } });
     expect(await client.request("sessions.summaries")).toEqual({ ok: true, value: { sessions: [] } });
   } finally { client.close(); }
+});
+
+// PRO-314: the Mac holds a QR pairing until the person compares the fingerprint and approves (docs/PAIRING-APPROVAL.md).
+describe("waiting for the Mac's approval while pairing", () => {
+  afterEach(() => { vi.useRealTimers(); });
+  const pairing = (socket: EncryptedPeer, onWaiting = vi.fn()) => ({ onWaiting, client: new RelayClient({
+    transport: "direct", endpoint: "ws://example.test", deviceToken: "test-device-token",
+    desktopPublicKeyB64: encodeBase64(socket.key.publicKey), createSocket: () => socket as unknown as WebSocket,
+    awaitApproval: { onWaiting },
+  }) });
+  const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+
+  it("waits past the usual 15 s handshake deadline, says it is waiting, and connects once approved", async () => {
+    vi.useFakeTimers();
+    const socket = new EncryptedPeer({ gate: true });
+    const { client, onWaiting } = pairing(socket);
+    let connected = false;
+    const connecting = client.connect().then(() => { connected = true; });
+    socket.onopen?.(); await flush();
+    expect(socket.waiting).toBe(true);
+    expect(onWaiting).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(connected).toBe(false);
+    socket.approve(); await flush();
+    await connecting;
+    expect(connected).toBe(true);
+    client.close();
+  });
+
+  it("maps a close before e2ee_authenticated to not approved", async () => {
+    const socket = new EncryptedPeer({ gate: true });
+    const { client } = pairing(socket);
+    const connecting = client.connect();
+    socket.onopen?.(); await flush();
+    expect(socket.waiting).toBe(true);
+    socket.onclose?.({ code: 1000, reason: "pairing declined" });
+    const error = await connecting.catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(PairingNotApprovedError);
+    expect((error as PairingNotApprovedError).closeCause).toBeInstanceOf(RelayOuterError);
+  });
+
+  it("gives up as not approved after the approval wait", async () => {
+    vi.useFakeTimers();
+    const socket = new EncryptedPeer({ gate: true });
+    const { client } = pairing(socket);
+    const connecting = client.connect().catch((cause: unknown) => cause);
+    socket.onopen?.(); await flush();
+    await vi.advanceTimersByTimeAsync(PAIRING_APPROVAL_WAIT_MS);
+    expect(await connecting).toBeInstanceOf(PairingNotApprovedError);
+  });
+
+  it("connects at once to a Mac that does not gate (an older Mac)", async () => {
+    const socket = new EncryptedPeer();
+    const { client } = pairing(socket);
+    const connecting = client.connect();
+    socket.onopen?.();
+    await connecting;
+    expect(await client.request("status.get")).toMatchObject({ ok: true });
+    client.close();
+  });
+
+  it("keeps a local protocol error while waiting an ordinary failure, not a refusal by the Mac", async () => {
+    const socket = new EncryptedPeer({ gate: true });
+    const { client } = pairing(socket);
+    const connecting = client.connect();
+    socket.onopen?.(); await flush();
+    expect(socket.waiting).toBe(true);
+    // Something that is not a frame the Mac sealed (a relay injecting bytes): rejected as such.
+    socket.onmessage?.({ data: "not-a-sealed-frame" });
+    const error = await connecting.catch((cause: unknown) => cause);
+    expect(error).not.toBeInstanceOf(PairingNotApprovedError);
+  });
+
+  it("leaves an ordinary connection's close as it was", async () => {
+    const socket = new EncryptedPeer({ gate: true });
+    const client = new RelayClient({ transport: "direct", endpoint: "ws://example.test", deviceToken: "test-device-token",
+      desktopPublicKeyB64: encodeBase64(socket.key.publicKey), createSocket: () => socket as unknown as WebSocket });
+    const connecting = client.connect();
+    socket.onopen?.(); await flush();
+    socket.onclose?.({ code: 1000 });
+    const error = await connecting.catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(RelayOuterError);
+  });
 });

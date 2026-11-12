@@ -11,7 +11,9 @@ import {
   type PairingOffer,
 } from "./contracts";
 import { base64Url, utf8 } from "./bytes";
-import { RelayClient, RelayOuterError } from "../transport/relay-client";
+import { PairingNotApprovedError, RelayClient, RelayOuterError } from "../transport/relay-client";
+import { describeDevice, type DeviceDescription } from "../transport/device-describe";
+import { fingerprintForOffer } from "./fingerprint";
 import { loadOrCreateE2EESecretKey } from "../transport/e2ee-keypair";
 import { savePairedHost, type StoredHost } from "../store/hosts";
 import {
@@ -23,6 +25,15 @@ import {
   type PairingJournal,
 } from "./journal";
 import { isSameInstalledCredential } from "./install-reconciliation";
+
+/**
+ * What the pairing screen shows while a QR pairing runs: the fingerprint the
+ * Mac shows too, and whether a connection has reached the Mac and waits for
+ * the person to approve it there (docs/PAIRING-APPROVAL.md).
+ */
+export type PairingProgress = { fingerprint: string; waitingForApproval: boolean };
+/** Called once a connection waits for the Mac's approval. */
+type Progress = (() => void) | undefined;
 
 type PairingCandidate = {
   client: RelayClient;
@@ -42,31 +53,69 @@ export async function pairFromOffer(args: {
   label: string;
   preferredHostId?: string;
   provenance: StoredHost["provenance"];
+  onProgress?: (progress: PairingProgress) => void;
+  /** This phone, told to the Mac once a connection is up (`device.describe`). */
+  device?: DeviceDescription | null;
 }): Promise<StoredHost> {
   const { offer } = args;
   const clientSecretKey = await pairingStep("persistence", loadOrCreateE2EESecretKey);
-  if (!offer.relay) return pairDirect(args, clientSecretKey);
+  const progress = approvalProgress(offer.publicKeyB64, clientSecretKey, args.onProgress);
+  if (!offer.relay) return pairDirect(args, clientSecretKey, progress);
+  const device = args.device ?? null;
   const existing = await pairingStep("persistence", readPairingJournal);
   if (existing && !journalMatchesOffer(existing, offer)) await pairingStep("persistence", clearPairingJournal);
-  if (existing && journalMatchesOffer(existing, offer)) return recoverPairing(existing, clientSecretKey);
+  if (existing && journalMatchesOffer(existing, offer)) return recoverPairing(existing, clientSecretKey, progress, device);
   const journal = await pairingStep("persistence", () => createPairingJournal({
     ...args,
     offer: offer as PairingOffer & { relay: NonNullable<PairingOffer["relay"]> },
   }));
-  return finishNewPairing(journal, clientSecretKey);
+  return finishNewPairing(journal, clientSecretKey, progress, device);
 }
 
-export async function recoverPendingPairing(): Promise<StoredHost | null> {
+export async function recoverPendingPairing(options: { onProgress?: (progress: PairingProgress) => void; device?: DeviceDescription | null } = {}): Promise<StoredHost | null> {
   const journal = await pairingStep("persistence", readPairingJournal);
-  return journal ? recoverPairing(journal, await pairingStep("persistence", loadOrCreateE2EESecretKey)) : null;
+  if (!journal) return null;
+  const clientSecretKey = await pairingStep("persistence", loadOrCreateE2EESecretKey);
+  return recoverPairing(journal, clientSecretKey, approvalProgress(offerFromJournal(journal).publicKeyB64, clientSecretKey, options.onProgress), options.device ?? null);
 }
 
-async function finishNewPairing(journal: PairingJournal, clientSecretKey: Uint8Array): Promise<StoredHost> {
+/** Says the fingerprint at once (it needs no connection), and again once a connection waits for the Mac's approval. */
+function approvalProgress(hostPublicKeyB64: string, clientSecretKey: Uint8Array, onProgress: ((progress: PairingProgress) => void) | undefined): Progress {
+  if (!onProgress) return undefined;
+  const fingerprint = fingerprintForOffer(hostPublicKeyB64, clientSecretKey);
+  let waiting = false;
+  onProgress({ fingerprint, waitingForApproval: false });
+  return () => {
+    if (waiting) return;
+    waiting = true;
+    onProgress({ fingerprint, waitingForApproval: true });
+  };
+}
+
+/**
+ * The Mac discards a pairing it was not allowed to finish (its device entry,
+ * token and Relay invite), so the journal for it can never be recovered:
+ * dropped, so neither Retry nor the next launch tries it again. Used only for
+ * a new pairing, where no connection authenticated and so no credential can
+ * have been installed. Never on recovery: there the Mac may already have
+ * committed the install, and the journal holds the only copy of its resume
+ * token, so a close (which a relay or the network can cause) must not lose it.
+ */
+async function forgetIfNotApproved<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (cause) {
+    if (cause instanceof PairingFailure && cause.category === "not-approved") await clearPairingJournal().catch(() => undefined);
+    throw cause;
+  }
+}
+
+async function finishNewPairing(journal: PairingJournal, clientSecretKey: Uint8Array, progress: Progress, device: DeviceDescription | null): Promise<StoredHost> {
   const offer = offerFromJournal(journal);
-  const candidates: PairingCandidate[] = directEndpoints(offer).map((endpoint) => directCandidate({ ...offer, endpoint }, clientSecretKey));
-  if (offer.relay.inviteExpiresAt > Date.now()) candidates.push(inviteCandidate(offer, clientSecretKey));
-  const winner = await firstVerified(candidates);
+  const candidates: PairingCandidate[] = directEndpoints(offer).map((endpoint) => directCandidate({ ...offer, endpoint }, clientSecretKey, progress));
+  if (offer.relay.inviteExpiresAt > Date.now()) candidates.push(inviteCandidate(offer, clientSecretKey, progress));
+  const winner = await forgetIfNotApproved(() => firstVerified(candidates));
   try {
+    await describeDevice(winner.client, device);
     const { installed, endpoints } = await provisionCredential(winner, journal);
     return publishCommitted(journal, installed, endpoints);
   } finally {
@@ -74,13 +123,13 @@ async function finishNewPairing(journal: PairingJournal, clientSecretKey: Uint8A
   }
 }
 
-async function recoverPairing(journal: PairingJournal, clientSecretKey: Uint8Array): Promise<StoredHost> {
+async function recoverPairing(journal: PairingJournal, clientSecretKey: Uint8Array, progress: Progress, device: DeviceDescription | null): Promise<StoredHost> {
   const offer = offerFromJournal(journal);
   const candidates: (() => Promise<PairingCandidate>)[] = [
     async () => resumeCandidate(offer, journal.secrets.pendingResumeToken, clientSecretKey),
-    ...directEndpoints(offer).map((endpoint) => async () => directCandidate({ ...offer, endpoint }, clientSecretKey)),
+    ...directEndpoints(offer).map((endpoint) => async () => directCandidate({ ...offer, endpoint }, clientSecretKey, progress)),
   ];
-  if (offer.relay.inviteExpiresAt > Date.now()) candidates.push(async () => inviteCandidate(offer, clientSecretKey));
+  if (offer.relay.inviteExpiresAt > Date.now()) candidates.push(async () => inviteCandidate(offer, clientSecretKey, progress));
 
   let lastError: unknown = new Error("Pairing recovery has no usable credential");
   for (const createCandidate of candidates) {
@@ -88,6 +137,7 @@ async function recoverPairing(journal: PairingJournal, clientSecretKey: Uint8Arr
     try {
       candidate = await createCandidate();
       await verifyCandidate(candidate);
+      await describeDevice(candidate.client, device);
       const endpoints = await pairingEndpoints(candidate.client, journal.metadata.installReqId);
       if (endpoints.installStatus?.state === "committed") {
         return publishCommitted(journal, endpoints.installStatus.result, endpoints);
@@ -97,7 +147,8 @@ async function recoverPairing(journal: PairingJournal, clientSecretKey: Uint8Arr
         return publishCommitted(journal, provisioned.installed, provisioned.endpoints);
       }
     } catch (cause) {
-      lastError = cause;
+      // A refusal by the person on the Mac says more than whichever path failed after it.
+      if (!isNotApproved(lastError)) lastError = cause;
     } finally {
       candidate?.client.close();
     }
@@ -110,9 +161,11 @@ async function pairDirect(args: {
   label: string;
   preferredHostId?: string;
   provenance: StoredHost["provenance"];
-}, clientSecretKey: Uint8Array): Promise<StoredHost> {
-  const { client } = await firstVerified(directEndpoints(args.offer).map((endpoint) => directCandidate({ ...args.offer, endpoint }, clientSecretKey)));
+  device?: DeviceDescription | null;
+}, clientSecretKey: Uint8Array, progress: Progress): Promise<StoredHost> {
+  const { client } = await firstVerified(directEndpoints(args.offer).map((endpoint) => directCandidate({ ...args.offer, endpoint }, clientSecretKey, progress)));
   try {
+    await describeDevice(client, args.device);
     const host: StoredHost = {
       id: args.preferredHostId ?? args.offer.pairedDeviceId ?? hostIdForPublicKey(args.offer.publicKeyB64)!,
       label: args.label,
@@ -151,7 +204,8 @@ function firstVerified(candidates: PairingCandidate[]): Promise<PairingCandidate
         });
       }).catch((error: unknown) => {
         candidate.client.close();
-        lastError = error;
+        // The person declining on the Mac is the answer, whatever another path failed with.
+        if (!isNotApproved(lastError)) lastError = error;
         failures++;
         if (!settled && failures === candidates.length && successes.length === 0) reject(lastError);
       });
@@ -163,6 +217,7 @@ async function verifyCandidate(candidate: PairingCandidate): Promise<void> {
   await pairingStep("transport", async () => {
     try { await candidate.client.connect(); }
     catch (cause) {
+      if (cause instanceof PairingNotApprovedError) throw new PairingFailure("approval");
       if (cause instanceof RelayOuterError) throw new PairingFailure("transport", cause.code >= 4000 ? "relay-rejected" : "connection-failed", cause.code);
       throw cause;
     }
@@ -174,9 +229,14 @@ async function verifyCandidate(candidate: PairingCandidate): Promise<void> {
   });
 }
 
-function directCandidate(offer: PairingOffer, clientSecretKey: Uint8Array): PairingCandidate {
+const isNotApproved = (error: unknown) => error instanceof PairingFailure && error.category === "not-approved";
+/** Every pairing connection waits for the Mac's approval; a Mac that does not gate answers at once. */
+const awaitApproval = (onWaiting: Progress) => ({ awaitApproval: onWaiting ? { onWaiting } : {} });
+
+function directCandidate(offer: PairingOffer, clientSecretKey: Uint8Array, progress: Progress): PairingCandidate {
   return {
     client: new RelayClient({
+      ...awaitApproval(progress),
       transport: "direct",
       endpoint: offer.endpoint,
       deviceToken: offer.deviceToken,
@@ -188,9 +248,10 @@ function directCandidate(offer: PairingOffer, clientSecretKey: Uint8Array): Pair
   };
 }
 
-function inviteCandidate(offer: PairingOffer & { relay: NonNullable<PairingOffer["relay"]> }, clientSecretKey: Uint8Array): PairingCandidate {
+function inviteCandidate(offer: PairingOffer & { relay: NonNullable<PairingOffer["relay"]> }, clientSecretKey: Uint8Array, progress: Progress): PairingCandidate {
   return {
     client: new RelayClient({
+      ...awaitApproval(progress),
       relay: offer.relay,
       credential: offer.relay.inviteToken,
       credentialKind: "invite",
@@ -209,6 +270,7 @@ async function resumeCandidate(
   clientSecretKey: Uint8Array,
 ): Promise<PairingCandidate> {
   const relay = await resolveResumeRelay(offer.relay, resumeToken).catch(() => offer.relay);
+  // A resume credential exists only once the Mac has approved and installed it: no approval wait, and a close is an ordinary failure.
   return {
     client: new RelayClient({
       relay,
