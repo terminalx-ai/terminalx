@@ -96,7 +96,7 @@ describe("a plan waiting for approval (PRO-274)", () => {
     expect(screen.getByTestId("run-estimate").textContent).toBe("$1.65–2.45");
     expect(screen.getByText("API-equivalent, for 2 of 3 pieces")).toBeTruthy();
     const summary = screen.getByRole("region", { name: "Plan summary" }).textContent;
-    for (const said of ["Budget25 points", "Workers run inBypass permissions", "No shared files"]) expect(summary).toContain(said);
+    for (const said of ["Budget25 points", "Workers run inBypass", "No shared files"]) expect(summary).toContain(said);
 
     const store = within(row("store"));
     await waitFor(() => expect((store.getByRole("combobox", { name: "Model of Typed store module" }) as HTMLSelectElement).value).toBe("sonnet"));
@@ -275,7 +275,8 @@ describe("a run with workers (PRO-274)", () => {
     // A piece with no worker yet offers none.
     fireEvent.click(within(row("docs")).getByRole("button", { name: "Update the docs" }));
     expect(within(detail()).queryByRole("button", { name: "Open worker" })).toBeNull();
-    expect(detail().textContent).toContain("Waits for store.");
+    // By number, as the table names pieces, never by the plan's id.
+    expect(detail().textContent).toContain("Waits for 2.");
   });
 
   it("follows the run as the runtime announces it, and ignores another lead's", async () => {
@@ -328,20 +329,16 @@ describe("a run's cost and what it waits on (PRO-281)", () => {
     expect(screen.getByTestId("piece-detail-cost").textContent).toBe("$0.04");
   });
 
-  it("raises Needs you with the reason for a blocked piece and for spend past the budget, each opening where it is answered", async () => {
+  it("raises Needs you for spend past the budget, and says a blocked piece in the run's line, not in the list (18.03)", async () => {
     mocks.sessions = [worker("w-map", 2.5), worker("w-store", 3)];
     const run = started({ dollars: 5 });
     run.pieces[1] = { ...run.pieces[1], state: "blocked", note: "Check still fails after 3 tries" };
     await open(run);
     const needs = screen.getByTestId("run-needs");
     expect(within(needs).getByText("Needs you")).toBeTruthy();
-    expect(within(needs).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
-      "Over budget: $5.50 of $5.00",
-      "Typed store module: Check still fails after 3 tries" + "Open worker",
-    ]);
+    expect(within(needs).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Over budget: $5.50 of $5.00"]);
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("Piece 2 is blocked. Piece 3 waits for it; nothing else is running.");
     expect(screen.getByTestId("run-spend").textContent).toBe("$5.50 of $5.00");
-    fireEvent.click(within(needs).getByRole("button", { name: "Open worker" }));
-    expect(mocks.selectSession).toHaveBeenCalledWith("w-store");
   });
 
   it("a points budget is shown as set: a run's share of a usage window is not measured, so it is never over", async () => {
@@ -378,7 +375,8 @@ describe("a piece's tries and what they cost (PRO-275)", () => {
     const run = waiting();
     const worker = (n: number) => ({ sessionId: `w-cli-${n}`, tabId: "t" });
     return {
-      ...run, state: "failed", reason: "cli is blocked after 3 tries. docs cannot start without it.", approval: { at: new Date(Date.now() - 40 * 60_000).toISOString() }, maxTries: 3, costUsd: 3.75, costUnpricedModels: [],
+      // A blocked piece leaves the run running: it waits on the person (PRO-361).
+      ...run, state: "running", approval: { at: new Date(Date.now() - 40 * 60_000).toISOString() }, maxTries: 3, costUsd: 3.75, costUnpricedModels: [],
       pieces: [
         {
           ...run.pieces[0], state: "done", attempts: 1, tier: "small", note: "41 call sites in 9 files.", worker: { sessionId: "w-map", tabId: "t" }, costUsd: 0.04,
@@ -413,9 +411,11 @@ describe("a piece's tries and what they cost (PRO-275)", () => {
     expect(within(row("cli")).getAllByRole("cell").slice(1, 5).map((cell) => cell.textContent)).toEqual(["Opus 5.5 Medium", "Blocked", "3", "$3.71"]);
     expect(within(row("docs")).getAllByRole("cell").slice(3, 5).map((cell) => cell.textContent)).toEqual(["–", "–"]);
     expect(screen.getByTestId("run-spend").textContent).toBe("$3.75 · budget 25 points");
-    expect(screen.getAllByRole("status").map((status) => status.textContent)).toContain("cli is blocked after 3 tries. docs cannot start without it.");
-    // The blocked piece also waits on the person (PRO-281), and its entry opens its last worker.
-    expect(within(screen.getByTestId("run-needs")).getAllByRole("listitem").map((item) => item.textContent)).toEqual([`Move CLI code to the store: ${blocked().pieces[1].note}Open worker`]);
+    // One line says what holds the run up, by number, in 18.03's words: no "Run failed", no ids, no banner (PRO-361).
+    expect(screen.getByTestId("run-state").textContent).toBe("Run");
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("Piece 2 is blocked. Piece 3 waits for it; nothing else is running.");
+    expect(screen.queryByTestId("run-needs")).toBeNull();
+    expect(document.body.textContent).not.toContain("cli is blocked");
   });
 
   it("lists a blocked piece's tries: what each ran on, what it cost, why it was made, and how it ended", async () => {
@@ -444,9 +444,9 @@ describe("a piece's tries and what they cost (PRO-275)", () => {
       ...run, state: "running", reason: undefined,
       pieces: [run.pieces[0], { ...cli, state: "queued", worker: undefined, model: "sonnet", effort: "high", tier: "mid", tries: [cli.tries![0], { step: "effort", model: "sonnet", effort: "high", tier: "mid" }], costUsd: 0.61 }, run.pieces[2]],
     });
-    // One try, done: the count is not worth a line.
+    // One try, done: neither the count nor the list is worth showing (18.01).
     expect(within(detail()).queryByTestId("piece-tries-used")).toBeNull();
-    expect(tries().map((item) => item.dataset.tryOutcome)).toEqual(["done"]);
+    expect(within(detail()).queryByRole("list", { name: "Tries" })).toBeNull();
     fireEvent.click(within(row("cli")).getByRole("button", { name: "Move CLI code to the store" }));
     expect(within(detail()).getByTestId("piece-tries-used").textContent).toBe("· 2 of 3 tries used");
     expect(tries().map((item) => item.dataset.tryOutcome)).toEqual(["failed", "waiting"]);
@@ -752,9 +752,9 @@ describe("merging accepted pieces into the lead's branch (PRO-279)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Merging" }).hasAttribute("disabled")).toBe(true));
     expect(within(detail()).getByRole("button", { name: "Send back to worker" }).hasAttribute("disabled")).toBe(true);
     act(() => mocks.listeners.get("orchestration_run")!({ payload: run }));
-    fireEvent.click(await screen.findByRole("button", { name: "Continue merge" }));
-    await waitFor(() => expect(calls("orchestration_merge")[1]).toEqual({ id: "run-1", skip: [], recheck: false }));
-    act(() => mocks.listeners.get("orchestration_run")!({ payload: run }));
+    // Stopped on a conflict nobody resolved: Continue merge waits for one of the three ways out (18.04).
+    const resume = await screen.findByRole("button", { name: "Continue merge" });
+    expect([resume.hasAttribute("disabled"), resume.getAttribute("title")]).toEqual([true, "Piece 5 conflicts. Send it back, resolve it in the lead, or skip it, then continue."]);
     await waitFor(() => expect(within(detail()).getByRole("button", { name: "Send back to worker" }).hasAttribute("disabled")).toBe(false));
     fireEvent.click(within(detail()).getByRole("button", { name: "Send back to worker" }));
     await waitFor(() => expect(calls("orchestration_send_back")).toEqual([{ id: "run-1", piece: "cli" }]));
@@ -803,9 +803,8 @@ describe("merging accepted pieces into the lead's branch (PRO-279)", () => {
     await open(paused);
     expect(screen.getByTestId("run-paused").textContent).toContain("Paused: the dollar budget");
     expect(screen.getByTestId("run-paused-merge").textContent).toBe("Merging the accepted pieces asks no model, so Merge and Skip work while the run is paused. Having the lead resolve a conflict does not.");
-    // The conflict resolved by hand in the lead's checkout: Continue merge goes on from there.
-    fireEvent.click(screen.getByRole("button", { name: "Continue merge" }));
-    await waitFor(() => expect(calls("orchestration_merge")).toEqual([{ id: "run-1", skip: [], recheck: false }]));
+    // Stopped on a conflict: Continue merge waits until it is sent back, resolved or skipped (18.04).
+    expect(screen.getByRole("button", { name: "Continue merge" }).hasAttribute("disabled")).toBe(true);
     fireEvent.click(within(row("cli")).getByRole("button", { name: "Move CLI code to the store" }));
     // The conflict is shown to be resolved by hand; what would ask a model waits for the budget.
     expect(within(detail()).getByTestId("merge-panel").dataset.mergeState).toBe("conflict");
@@ -815,13 +814,13 @@ describe("merging accepted pieces into the lead's branch (PRO-279)", () => {
       expect([button.hasAttribute("disabled"), button.getAttribute("title")]).toEqual([true, "The run is paused on its budget, and this asks a model. Resolve it by hand and merge, or skip it."]);
     }
     fireEvent.click(within(detail()).getByRole("button", { name: "Skip" }));
-    await waitFor(() => expect(calls("orchestration_merge")[1]).toEqual({ id: "run-1", skip: ["cli"], recheck: false }));
+    await waitFor(() => expect(calls("orchestration_merge")).toEqual([{ id: "run-1", skip: ["cli"], recheck: false }]));
     cleanup();
     resetRunsForTests();
     // Every branch in and a check failed on the whole: still the person's to merge again once it is fixed.
     const all = paused.pieces.map((p) => (p.id === "cli" || p.id === "docs" ? { ...p, merge: merged(pieceCommit(p), "e77a1200000", `${p.id}aaaa0000`, 60_000) } : p));
     await open({ ...paused, pieces: all, merge: { into: "settings-typed-store", finalHead: "5d5d5d50000", finalChecks: [{ piece: "docs", run: "pnpm docs:check", passed: false, exitCode: 2, millis: 900 }] } });
-    expect(screen.getByRole("button", { name: "Continue merge" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continue merge" }).hasAttribute("disabled")).toBe(false);
   });
 
   it("offers Merge once a result is accepted, and shows the plan's integration check to whoever approves it", async () => {
@@ -874,10 +873,10 @@ describe("limits and budget (PRO-280)", () => {
   it("shows a subscription run's points of its window, the window and its reset, and its worker limit", async () => {
     await open(running());
     const budget = screen.getByTestId("run-budget").textContent ?? "";
-    expect(budget).toContain("Budget · subscription");
-    expect(budget).toContain("9 of 25 points");
-    expect(budget).toContain("5h window at 41% · resets 16:10");
-    expect(screen.getByTestId("run-workers").textContent).toContain("running · 4 at a time");
+    // Dollars first, the subscription's points as a second line (owner decision, PRO-361).
+    expect(budget).toContain("Spend$0.00 of $15.00");
+    expect(screen.getByTestId("run-points").textContent).toBe("9 of 25 points · 5h window at 41% · resets 16:10 · pauses past 85%");
+    expect(screen.getByTestId("run-workers").textContent).toContain("1 running·4 workers at a time");
     expect(row("store").getAttribute("data-piece-state")).toBe("stalled");
     expect(row("store").textContent).toContain("Stalled");
     expect(row("docs").textContent).toContain("Queued: 4 workers at a time in this run");
@@ -887,8 +886,8 @@ describe("limits and budget (PRO-280)", () => {
   it("shows a run on an API key in dollars", async () => {
     await open(running({ usage: { dollars: 4.37, apiKey: true } }));
     const budget = screen.getByTestId("run-budget").textContent ?? "";
-    expect(budget).toContain("Budget · API key");
-    expect(budget).toContain("$4.37 of $15.00");
+    expect(budget).toContain("Spend$4.37 of $15.00");
+    expect(screen.queryByTestId("run-points")).toBeNull();
   });
 
   it("names the window that paused a run and its reset, and resumes it after the reset when asked", async () => {
@@ -950,6 +949,8 @@ describe("limits and budget (PRO-280)", () => {
     expect(budget).toContain("$12345.60 spentNo limit");
     expect(budget).not.toContain(" of $");
     expect(budget).toContain("5h window at 41% · pauses past 85%");
+    // Dollars come first.
+    expect(budget.indexOf("$12345.60")).toBeLessThan(budget.indexOf("9 points"));
     expect(screen.getAllByTestId("run-no-limit")).toHaveLength(2);
   });
 
@@ -980,5 +981,189 @@ describe("limits and budget (PRO-280)", () => {
     // Off, its button is named for what it now does.
     expect(within(summary).getByRole("button", { name: "Pause when a window passes: Set a limit" })).toBeTruthy();
     expect(within(summary).queryByRole("button", { name: "Pause when a window passes: Turn off" })).toBeNull();
+  });
+});
+
+describe("a blocked piece, a worker's report, and the buttons a run offers (PRO-361)", () => {
+  const worker = (n: number) => ({ sessionId: `w-cli-${n}`, tabId: "t" });
+  const said = "The default mode now comes from the store, but `sessions_create` still reads the old file. That path is in `store/projects.rs`, which piece 2 owns.";
+  /** 18.03: piece 2 ran out of tries, its last worker says the fix is in another piece's file, and piece 3 waits for it. */
+  const blockedRun = (extra: Partial<Run> = {}): Run => {
+    const run = waiting();
+    return {
+      ...run, state: "running", approval: { at: new Date(Date.now() - 40 * 60_000).toISOString() }, maxTries: 3, waiting: [{ piece: "docs", on: ["store"] }], limits: { workers: 4, dollars: 15, points: 25, ceiling: 85 },
+      pieces: [
+        {
+          ...run.pieces[0], state: "done", attempts: 1, note: "41 call sites in 9 files.", worker: { sessionId: "w-map", tabId: "t" }, branch: "piece-1-map",
+          tries: [{
+            step: "first", model: "haiku", worker: { sessionId: "w-map", tabId: "t" }, branch: "piece-1-map", outcome: "done", costUsd: 0.04, outputTokens: 41_200,
+            report: { result: "Added a typed settings store with a one-way migration.", evidence: ["cargo t store::settings: exit 0 · 14 passed", "`cargo clippy -p raccoon`: exit 0"], changed: { files: ["store/settings/mod.rs"] }, uncertain: ["Whether the Windows settings path needs the same migration."] },
+            verification: { gates: [{ gate: "report", passed: true }, { gate: "scope", passed: true }, { gate: "branch", passed: true }, { gate: "commands", passed: true, commands: [{ run: "cargo t store::settings", passed: true, exitCode: 0, millis: 38_000 }] }], outcome: "passed", facts: { files: ["store/settings/mod.rs", "store/settings/migrate.rs", "store/mod.rs"], changedLines: 312, commit: "4c1e9a70000", changes: [{ path: "store/settings/mod.rs", added: 212 }, { path: "store/settings/migrate.rs", added: 96 }, { path: "store/mod.rs", added: 3, removed: 1 }] } },
+          }],
+        },
+        {
+          ...run.pieces[1], state: "blocked", attempts: 3, model: "opus", effort: "medium", worker: worker(3), branch: "raccoon/store-try3", outside: [{ path: "store/projects.rs", owner: "map" }],
+          note: "Blocked after 3 tries: sonnet at medium, then sonnet at high, then opus at medium. It used all 3 tries.",
+          tries: [
+            { step: "first", model: "sonnet", effort: "medium", worker: worker(1), outcome: "checkFailed", detail: "The done-check did not hold: cargo t control", costUsd: 0.61 },
+            { step: "effort", model: "sonnet", effort: "high", worker: worker(2), outcome: "checkFailed", detail: "The done-check did not hold: cargo t control", costUsd: 0.92 },
+            { step: "tier", model: "opus", effort: "medium", worker: worker(3), outcome: "failed", detail: `The worker reported failed: ${said}`, costUsd: 2.18, report: { result: said, evidence: ["cargo t control: exit 101"] } },
+          ],
+        },
+        { ...run.pieces[2], state: "queued" },
+      ],
+      ...extra,
+    };
+  };
+  const pick = (id: string, title: string) => fireEvent.click(within(row(id)).getByRole("button", { name: title }));
+
+  it("keeps Merge disabled until every piece is done, and a failed or stopped run shows neither Stop run nor Merge", async () => {
+    await open(blockedRun());
+    const merge = screen.getByTestId("run-merge");
+    expect([merge.textContent, merge.hasAttribute("disabled"), merge.getAttribute("title")]).toEqual(["Merge", true, "Merge unlocks when every piece is done."]);
+    expect(screen.getByRole("button", { name: "Stop run" })).toBeTruthy();
+    for (const state of ["failed", "stopped"] as const) {
+      cleanup();
+      resetRunsForTests();
+      await open(blockedRun({ state, reason: state === "failed" ? "It cannot go on." : "A person stopped the run." }));
+      expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+      expect(screen.queryByTestId("run-merge")).toBeNull();
+    }
+    // Every piece done, or left out on purpose: Merge is the person's to press.
+    cleanup();
+    resetRunsForTests();
+    const run = blockedRun();
+    answers.orchestration_merge = { ...run, mergeUnderWay: true };
+    await open({ ...run, pieces: [run.pieces[0], { ...run.pieces[1], state: "skipped" }, { ...run.pieces[2], state: "skipped" }] });
+    expect(screen.getByTestId("run-merge").hasAttribute("disabled")).toBe(false);
+    fireEvent.click(screen.getByTestId("run-merge"));
+    await waitFor(() => expect(calls("orchestration_merge")).toEqual([{ id: "run-1", skip: [], recheck: false }]));
+  });
+
+  it("colours only the done pieces' segments, and counts a piece stopped at its merge as not done (18.04)", async () => {
+    const run = blockedRun();
+    await open(run);
+    expect(screen.getByTestId("run-done").textContent).toBe("1");
+    expect([...screen.getByTestId("run-pieces").querySelectorAll<HTMLElement>("[data-segment]")].map((segment) => segment.dataset.segment)).toEqual(["done", "open", "open"]);
+    expect(screen.getByTestId("run-pieces").textContent).toContain("2 left");
+    cleanup();
+    resetRunsForTests();
+    const conflict = { state: "conflict" as const, commit: "aaaa", before: "bbbb", at: "2026-11-12T09:10:00Z", files: [] };
+    const store = { ...run.pieces[1], state: "done" as const, tries: [{ step: "first" as const, model: "sonnet", outcome: "done" as const, verification: { gates: [], outcome: "passed" as const, facts: { files: ["a"], changedLines: 1, commit: "aaaa" } } }], merge: conflict };
+    await open({ ...run, state: "merging", merge: { into: "settings-typed-store", stoppedAt: "store" }, pieces: [run.pieces[0], store, { ...run.pieces[2], state: "done" }] });
+    expect(screen.getByTestId("run-done").textContent).toBe("2");
+    expect(screen.getByTestId("run-pieces").textContent).toContain("2 of 3 done");
+  });
+
+  it("opens a blocked piece on what was tried, its worker's last report and the file outside it, with the four ways on (18.03)", async () => {
+    const run = blockedRun();
+    await open(run);
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("Piece 2 is blocked. Piece 3 waits for it; nothing else is running.");
+    // Blocked is red, in the row and in the panel.
+    expect(within(row("store")).getByText("Blocked").closest("span")?.className).toContain("text-destructive");
+    pick("store", "Typed store module");
+    const panel = detail();
+    expect(within(panel).getByTestId("piece-tries-used").textContent).toBe("· 3 of 3 tries used");
+    expect(panel.textContent).toContain("Worker's last report" + said.replace(/`/g, ""));
+    expect([...panel.querySelectorAll("code")].map((element) => element.textContent)).toEqual(expect.arrayContaining(["sessions_create", "store/projects.rs"]));
+    expect(within(panel).getByTestId("piece-outside").textContent).toBe("The fix is outside this piece's files. A worker may not edit another piece's files.store/projects.rs · piece 1 owns it");
+    const actions = within(within(panel).getByTestId("blocked-actions")).getAllByRole("button").map((button) => button.textContent);
+    expect(actions).toEqual(["Take over in lead", "Widen scope and retry", "Send a note to the worker", "Skip piece"]);
+  });
+
+  it("takes a blocked piece over in the lead, widens it with the files it names, sends its worker a note, and skips it with what waits on it", async () => {
+    const run = blockedRun();
+    const back = { ...run, pieces: [run.pieces[0], { ...run.pieces[1], state: "running" as const }, run.pieces[2]] };
+    Object.assign(answers, { orchestration_take_over: run, orchestration_widen: back, orchestration_note: back, orchestration_skip: run });
+    await open(run);
+    pick("store", "Typed store module");
+    const button = (name: string) => within(detail()).getByRole("button", { name });
+    fireEvent.click(button("Take over in lead"));
+    await waitFor(() => expect(calls("orchestration_take_over")).toEqual([{ id: "run-1", piece: "store" }]));
+
+    // Widen: the files its report names outside it, which the person may change before it goes.
+    fireEvent.click(button("Widen scope and retry"));
+    const files = within(detail()).getByRole("textbox") as HTMLTextAreaElement;
+    expect(files.value).toBe("store/projects.rs");
+    fireEvent.change(files, { target: { value: "store/projects.rs\n  src/store/override.rs  \n" } });
+    fireEvent.click(button("Widen and retry"));
+    await waitFor(() => expect(calls("orchestration_widen")).toEqual([{ id: "run-1", piece: "store", own: ["store/projects.rs", "src/store/override.rs"] }]));
+
+    // The run the answer brings shows the piece at work again; open a blocked one again for the note.
+    act(() => mocks.listeners.get("orchestration_run")!({ payload: run }));
+    await waitFor(() => expect(within(detail()).getByTestId("blocked-actions")).toBeTruthy());
+    fireEvent.click(button("Send a note to the worker"));
+    expect(button("Send note").hasAttribute("disabled")).toBe(true);
+    fireEvent.change(within(detail()).getByRole("textbox", { name: "Note" }), { target: { value: "Call the reader in store/projects.rs; do not copy it." } });
+    fireEvent.click(button("Send note"));
+    await waitFor(() => expect(calls("orchestration_note")).toEqual([{ id: "run-1", piece: "store", text: "Call the reader in store/projects.rs; do not copy it." }]));
+
+    act(() => mocks.listeners.get("orchestration_run")!({ payload: run }));
+    await waitFor(() => expect(within(detail()).getByTestId("blocked-actions")).toBeTruthy());
+    fireEvent.click(button("Skip piece"));
+    // Skipping says what goes with it: a piece that depends on it and has not started.
+    expect(within(detail()).getByRole("group", { name: "Skip piece" }).textContent).toContain("Skip piece 2, and piece 3 with it, which depends on it? The run is merged without them.");
+    fireEvent.click(within(within(detail()).getByRole("group", { name: "Skip piece" })).getByRole("button", { name: "Skip" }));
+    await waitFor(() => expect(calls("orchestration_skip")).toEqual([{ id: "run-1", piece: "store" }]));
+  });
+
+  it("holds what asks a model while the run is paused on its budget, and says why the note needs a worker", async () => {
+    const pause = { kind: "dollars" as const, message: "This run has spent $16.00 of its $15.00 budget." };
+    const run = blockedRun({ state: "needsYou", reason: pause.message, pause });
+    run.pieces[1] = { ...run.pieces[1], worker: undefined, tries: run.pieces[1].tries!.map((attempt) => ({ ...attempt, worker: undefined })) };
+    await open(run);
+    pick("store", "Typed store module");
+    const button = (name: string) => within(detail()).getByRole("button", { name });
+    for (const name of ["Take over in lead", "Widen scope and retry", "Send a note to the worker"]) {
+      expect([button(name).hasAttribute("disabled"), button(name).getAttribute("title")]).toEqual([true, "The run is paused on its budget, and this asks a model. Raise the budget and resume, or skip the piece."]);
+    }
+    expect(button("Skip piece").hasAttribute("disabled")).toBe(false);
+  });
+
+  it("shows every section of a done piece's report, says plainly when one is empty, and its diff and what it used", async () => {
+    await open(blockedRun());
+    const panel = detail();
+    expect(panel.textContent).toContain("Done· check passed");
+    expect(panel.textContent).toContain("ResultAdded a typed settings store with a one-way migration.");
+    const sections = within(panel).getByTestId("piece-report-sections").textContent;
+    expect(sections).toContain("Evidencecargo t store::settings exit 0 · 14 passedcargo clippy -p raccoon exit 0");
+    // What git counted when it was checked, each file with its lines, then where it is.
+    expect([...within(panel).getByTestId("piece-changed").querySelectorAll("li")].map((item) => item.textContent)).toEqual(["store/settings/mod.rs+212", "store/settings/migrate.rs+96", "store/mod.rs+3−1"]);
+    expect(sections).toContain("piece-1-map · 4c1e9a7");
+    expect(sections).toContain("Not doneNothing");
+    expect(sections).toContain("Could not readNothing");
+    expect(sections).toContain("UncertainWhether the Windows settings path needs the same migration.");
+    expect(within(panel).getByTestId("piece-detail-cost").textContent).toBe("$0.04 · 41k out");
+    fireEvent.click(within(panel).getByRole("button", { name: "View diff" }));
+    expect(mocks.selectSession).toHaveBeenCalledWith("w-map");
+  });
+
+  it("offers a piece the lead took over to be checked and finished, the lead's chat, or a skip", async () => {
+    const run = blockedRun();
+    const taken = { ...run, pieces: [run.pieces[0], { ...run.pieces[1], state: "lead" as const, note: "Taken over by the lead: it finishes the piece in its own checkout." }, run.pieces[2]] };
+    answers.orchestration_finish = () => Promise.reject(new Error(JSON.stringify({ code: "checks_failed", message: "Piece store is not done: `cargo t` exited 1 in the lead's checkout. It stays with the lead.", details: { piece: "store" } })));
+    const onShowChat = await open(taken);
+    expect(screen.getByTestId("run-subtitle").textContent).not.toContain("blocked");
+    pick("store", "Typed store module");
+    expect(detail().textContent).toContain("With the lead");
+    fireEvent.click(within(detail()).getByRole("button", { name: "Check and finish" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("is not done: `cargo t` exited 1 in the lead's checkout"));
+    expect(calls("orchestration_finish")).toEqual([{ id: "run-1", piece: "store" }]);
+    fireEvent.click(within(detail()).getByRole("button", { name: "Open lead chat" }));
+    expect(onShowChat).toHaveBeenCalled();
+    expect(within(detail()).getByRole("button", { name: "Skip piece" })).toBeTruthy();
+  });
+
+  it("lets a piece title wrap rather than cut it short", async () => {
+    await open(blockedRun());
+    for (const title of screen.getAllByTestId("piece-title")) expect(title.className).not.toContain("truncate");
+  });
+});
+
+describe("a session with no run (18.08)", () => {
+  it("states what a run in this project may use: workers at once, then the budget in dollars and in points", async () => {
+    answers.orchestrator_limits = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, budgetDollars: 15, budgetPoints: 25 };
+    await open(null);
+    await waitFor(() => expect(screen.getByTestId("run-limits").textContent).toBe("Waits for your approvalOnPieces, at most8Workers at once4Budget, API key$15.00Budget, subscription25 pointsWorkers run inBypass"));
   });
 });

@@ -162,8 +162,8 @@ try {
         const budget = await view.getByTestId("run-budget").textContent();
         const label = await resetLabel(page);
         const checks = {
-          "the budget is in points of the window it draws on, with the window's level and reset": budget.includes("Budget · subscription") && budget.includes("9 of 25 points") && budget.includes(`5h window at 41% · resets ${label}`),
-          "the workers card says how many run and how many may at once": (await view.getByTestId("run-workers").textContent()).includes("2 running · 2 at a time"),
+          "spend is in dollars first, with the window's points, level and reset as a second line (PRO-361)": budget.startsWith("Spend$") && budget.includes(" of $15.00") && (await view.getByTestId("run-points").textContent()).startsWith(`9 of 25 points · 5h window at 41% · resets ${label}`) && budget.indexOf("$") < budget.indexOf("9 of 25 points"),
+          "the lead card says how many run and how many may at once": (await view.getByTestId("run-workers").textContent()).includes("2 running·2 workers at a time"),
           "a stalled worker's piece says so": (await view.locator('[data-piece="pipeline"]').getAttribute("data-piece-state")) === "stalled" && (await view.locator('[data-piece="pipeline"]').textContent()).includes("Stalled"),
           "a queued piece says the run's limit holds it": size.width < 1200 || (await view.locator('[data-piece="cli"]').textContent()).includes("Queued: 2 workers at a time in this run"),
           "dollar figures are said to be API-equivalent": (await view.getByText(/Dollar figures are API-equivalent, not billed/).count()) === 1,

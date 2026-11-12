@@ -168,8 +168,8 @@ describe("a lead and its workers in the sidebar (PRO-281)", () => {
     await boot(family(), [runOf(blocked, { budget: { dollars: 1 } })]);
     mount();
     await waitFor(() => expect(workerRows()).toHaveLength(3));
-    // Open, the lead carries the run's own: the budget. The blocked piece is its worker's row.
-    expect(within(leadRow()).getByTestId("lead-needs").getAttribute("title")).toBe("Needs you\nOver budget: $1.86 of $1.00");
+    // Open, the lead carries the run's own: the budget, and the blocked piece, which is answered in its Run view (PRO-361, 18.03).
+    expect(within(leadRow()).getByTestId("lead-needs").getAttribute("title")).toBe("Needs you\nOver budget: $1.86 of $1.00\nTyped store module: Check still fails after 3 tries");
     fireEvent.click(within(leadRow()).getByRole("button", { name: "Fold the workers of Talk lead" }));
     const needs = within(leadRow()).getByTestId("lead-needs");
     expect(needs.dataset.needs).toBe("attention");

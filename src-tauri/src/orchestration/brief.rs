@@ -73,6 +73,10 @@ fn earlier_tries(piece: &Piece) -> Option<String> {
         if count == 1 { "its" } else { "their" },
         indent(last.detail.as_deref().unwrap_or("It gave no reason.")),
     );
+    // A person widened the piece after the ladder ran out: this try has more files than the ones before had.
+    if piece.tries.last().is_some_and(|current| current.step == super::ladder::Step::Widened) {
+        out.push_str(&format!("\n\nA person gave this piece more files after those tries were blocked: it owns {} now (see Scope). The fix may lie in them.", piece.owns.join(", ")));
+    }
     let branches: Vec<String> = earlier.iter().enumerate().filter_map(|(index, attempt)| Some(format!("try {}: `{}`", index + 1, attempt.branch.as_deref()?))).collect();
     if !branches.is_empty() {
         out.push_str(&format!(
@@ -81,6 +85,58 @@ fn earlier_tries(piece: &Piece) -> Option<String> {
         ));
     }
     Some(out)
+}
+
+/// What the lead is sent when a person has it take a blocked piece over
+/// (`engine::take_over`): the piece as its workers had it, what each try came
+/// to and where its work is, and how to hand the piece back. Built from what
+/// the run recorded; nothing of a worker's conversation.
+pub fn take_over(run: &Run, piece: &Piece, head: &str) -> String {
+    let brief = &piece.brief;
+    let mut out = format!(
+        "The person asked you to take over piece {} (\"{}\") of run {}: its workers could not finish it. Finish it yourself, in your own checkout. You are not held to the files it owns: its workers were.\n\n",
+        piece.id, piece.title, run.id
+    );
+    section(&mut out, "Goal", &brief.goal);
+    if !brief.scope.trim().is_empty() {
+        section(&mut out, "Scope", &brief.scope);
+    }
+    section(&mut out, "Files it owned", &if piece.owns.is_empty() { "None: it was to change nothing.".to_string() } else { bullets(&piece.owns) });
+    let tries: Vec<String> = piece
+        .tries
+        .iter()
+        .enumerate()
+        .filter(|(_, attempt)| attempt.step != super::ladder::Step::Lead)
+        .map(|(index, attempt)| {
+            let on = if attempt.model.is_empty() { "the agent's default model".to_string() } else { attempt.model.clone() };
+            let branch = attempt.branch.as_deref().map(|branch| format!(" Its work is on `{branch}`.")).unwrap_or_default();
+            format!("Try {} on {on}: {}{branch}", index + 1, attempt.detail.as_deref().unwrap_or("it gave no reason.").lines().next().unwrap_or_default())
+        })
+        .collect();
+    if !tries.is_empty() {
+        section(&mut out, "What its tries came to", &format!("{}\n\n{QUOTED}", bullets(&tries)));
+    }
+    if let Some(report) = piece.tries.iter().rev().find_map(|attempt| attempt.report.as_ref()) {
+        let mut said = vec![format!("Result: {}", report.result)];
+        said.extend(report.not_done.iter().map(|line| format!("Not done: {line}")));
+        said.extend(report.uncertain.iter().map(|line| format!("Uncertain: {line}")));
+        section(&mut out, "Its worker's last report", &indent(&said.join("\n")));
+    }
+    let outside: Vec<String> = piece.outside(run).into_iter().map(|outside| match outside.owner {
+        Some(owner) => format!("{} (owned by piece {owner})", outside.path),
+        None => outside.path,
+    }).collect();
+    if !outside.is_empty() {
+        section(&mut out, "Outside its files", &format!("Its last report or check names files it did not own, where the fix may lie:\n{}", bullets(&outside)));
+    }
+    section(&mut out, "Done when", &done_when(piece));
+    out.push_str(&format!(
+        "## When it is done\n\nYour branch was at {} when you took this over: what you commit from here is the piece's result. Take what is right from a try's branch with `git merge` or `git cherry-pick`, or write it yourself, and commit. Then run `terminalx runs finish {} --json`: TerminalX runs the piece's commands in your checkout, and once they pass the piece is done and what waits for it can start. If it cannot be done, say so to the person; `terminalx runs skip {} --json` leaves it out of the run.",
+        &head[..head.len().min(7)],
+        piece.id,
+        piece.id
+    ));
+    out
 }
 
 /// A quoted block: the text is what something else said, not this brief.

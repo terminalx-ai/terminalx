@@ -769,8 +769,8 @@ impl ControlService {
             "pipelines.start" | "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
             // A run's workers are sessions of a project on this computer, each in a worktree of its own:
             // the desktop's runtime has those. A cloud workspace's runtime has one checkout, and says so.
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.cleanup" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -786,8 +786,8 @@ impl ControlService {
         // The session the command runs in, when it runs in one the app knows.
         let caller = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok());
         // A run's worker leads no run and steers none, its own lead's included: it may read them.
-        if matches!(command, "runs.create" | "runs.start" | "runs.stop" | "runs.merge" | "runs.sendBack" | "runs.cleanup") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
-            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start, stop, merge or clean up a run. Report what is ready; the lead decides what happens next.", None::<String>));
+        if matches!(command, "runs.create" | "runs.start" | "runs.stop" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
+            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start, stop, merge, steer or clean up a run. Report what is ready; the lead decides what happens next.", None::<String>));
         }
         if command == "runs.create" {
             let lead = match optional_string(&params, "lead") {
@@ -867,6 +867,39 @@ impl ControlService {
                 let piece = optional_string(&params, "piece").ok_or_else(|| ControlError::invalid("Name the piece to send back to its worker."))?;
                 let sent = engine::send_back(&host, &run.id, &piece).map_err(ControlError::of_run)?;
                 Ok(json!({"run": engine::shown(&sent.run), "piece": sent.piece, "freshWorker": sent.fresh_worker, "blocked": sent.blocked, "failed": sent.failed}))
+            }
+            // A blocked piece (PRO-361), as the Run view's four actions do it.
+            "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" => {
+                let piece = optional_string(&params, "piece").ok_or_else(|| ControlError::invalid("Name the piece."))?;
+                match command {
+                    "runs.takeOver" => {
+                        self.manager.accepting_work().map_err(ControlError::internal)?;
+                        let run = engine::take_over(&host, &run.id, &piece).map_err(ControlError::of_run)?;
+                        Ok(json!({"run": engine::shown(&run), "piece": piece}))
+                    }
+                    "runs.finish" => {
+                        self.manager.accepting_work().map_err(ControlError::internal)?;
+                        let from_lead = params["caller"]["session"].as_str() == Some(run.lead.session_id.as_str());
+                        let finished = engine::finish(&host, &run.id, &piece, engine::By::Cli, from_lead).map_err(ControlError::of_run)?;
+                        Ok(json!({"run": engine::shown(&finished.run), "piece": finished.piece, "commit": finished.commit, "checks": finished.checks}))
+                    }
+                    "runs.widen" => {
+                        self.manager.accepting_work().map_err(ControlError::internal)?;
+                        let own: Vec<String> = params["own"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
+                        let widened = engine::widen(&host, &run.id, &piece, &own, engine::By::Cli).map_err(ControlError::of_run)?;
+                        Ok(json!({"run": engine::shown(&widened.run), "piece": widened.piece, "added": widened.added, "started": widened.started, "failed": widened.failed}))
+                    }
+                    "runs.note" => {
+                        self.manager.accepting_work().map_err(ControlError::internal)?;
+                        let text = params["text"].as_str().unwrap_or_default();
+                        let run = engine::note(&host, &run.id, &piece, text, engine::By::Cli).map_err(ControlError::of_run)?;
+                        Ok(json!({"run": engine::shown(&run), "piece": piece}))
+                    }
+                    _ => {
+                        let skipped = engine::skip(&host, &run.id, &piece, engine::By::Cli).map_err(ControlError::of_run)?;
+                        Ok(json!({"run": engine::shown(&skipped.run), "skipped": skipped.skipped}))
+                    }
+                }
             }
             "runs.cleanup" => {
                 let cleaned = crate::orchestration::merge::cleanup(&host, &run.id, params["confirmed"].as_bool().unwrap_or(false)).map_err(ControlError::of_run)?;

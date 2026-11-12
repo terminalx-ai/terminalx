@@ -132,6 +132,9 @@ pub struct Facts {
     pub files: Vec<String>,
     /// Lines added and removed, together.
     pub changed_lines: u32,
+    /// Each changed file with its lines added and removed, as `git diff --numstat` counts them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<FileChange>,
     /// The piece has commands and TerminalX did not run them: nobody approved
     /// the plan, and the piece's worker is asked before it runs a command
     /// ([`may_run_commands`]). A verifier reads the result instead.
@@ -145,6 +148,36 @@ pub struct Facts {
     /// them for its security pass (`issue_pipeline::categories::security_areas`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub security_areas: Vec<String>,
+}
+
+/// One changed file and its lines. A binary file has no lines to count.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChange {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u32>,
+}
+
+/// `git diff --numstat` read file by file. A rename's path is the one it has now.
+pub fn numstat(text: &str) -> Vec<FileChange> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let (added, removed, path) = (fields.next()?, fields.next()?, fields.next()?.trim());
+            // `a => b` and `dir/{a => b}/c` name a rename: the file is where it is now.
+            let path = match path.split_once(" => ") {
+                Some((from, to)) => match (from.rfind('{'), to.find('}')) {
+                    (Some(open), Some(close)) => format!("{}{}{}", &from[..open], &to[..close], &to[close + 1..]).replace("//", "/"),
+                    _ => to.to_string(),
+                },
+                None => path.to_string(),
+            };
+            (!path.is_empty()).then(|| FileChange { path, added: added.parse().ok(), removed: removed.parse().ok() })
+        })
+        .collect()
 }
 
 /// What a verifier's session used.
@@ -573,6 +606,7 @@ pub fn gates(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, ti
     let numbers = git(checkout, &["diff", "--numstat", &range, "--"]).unwrap_or_default();
     // A binary file counts as changed, with no lines to count.
     checked.facts.changed_lines = numbers.lines().map(|line| line.split('\t').take(2).filter_map(|count| count.parse::<u32>().ok()).sum::<u32>()).sum();
+    checked.facts.changes = numstat(&numbers);
     checked.facts.security_areas = crate::issue_pipeline::categories::security_areas(&checked.facts.files, &checked.diff);
     checked
 }
@@ -1041,7 +1075,7 @@ mod tests {
 
     #[test]
     fn a_model_reads_a_result_only_for_the_listed_reasons() {
-        let small = Facts { files: vec!["src/store/mod.rs".into()], changed_lines: 400, security_areas: Vec::new(), commands_not_run: false, commit: None };
+        let small = Facts { files: vec!["src/store/mod.rs".into()], changed_lines: 400, changes: Vec::new(), security_areas: Vec::new(), commands_not_run: false, commit: None };
         // A command, a diff at the threshold, no security area, not a refactor, no review asked: no model.
         assert_eq!(review_reasons(&piece(json!({})), &small, 400), Vec::<String>::new());
         let reason = |fields: Value, facts: &Facts, lines: u32| review_reasons(&piece(fields), facts, lines).join(" | ");
@@ -1071,7 +1105,7 @@ mod tests {
     }
 
     fn checked_with(diff: String, files: &[&str], lines: u32) -> Checked {
-        Checked { gates: vec![GateResult::passed(Gate::Scope, "2 files changed, all within what the piece owns."), GateResult::passed(Gate::Branch, "Committed, clean, and `lead` merges into it without conflicts."), GateResult { gate: Gate::Commands, passed: true, detail: Some("1 command exited 0.".into()), commands: vec![CommandRun { run: "cargo t store::settings".into(), project: false, exit_code: Some(0), passed: true, millis: 37_400, output: None }] }], facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, security_areas: Vec::new(), commands_not_run: false, commit: None }, diff, base: "lead".into() }
+        Checked { gates: vec![GateResult::passed(Gate::Scope, "2 files changed, all within what the piece owns."), GateResult::passed(Gate::Branch, "Committed, clean, and `lead` merges into it without conflicts."), GateResult { gate: Gate::Commands, passed: true, detail: Some("1 command exited 0.".into()), commands: vec![CommandRun { run: "cargo t store::settings".into(), project: false, exit_code: Some(0), passed: true, millis: 37_400, output: None }] }], facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, changes: Vec::new(), security_areas: Vec::new(), commands_not_run: false, commit: None }, diff, base: "lead".into() }
     }
 
     #[test]

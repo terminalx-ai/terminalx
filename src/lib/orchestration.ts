@@ -292,6 +292,8 @@ export const TRY_STEP_LABEL: Record<TryStep, string> = {
   retry: "Retried with the failure text",
   effort: "Retried with the failure text, effort raised one level",
   tier: "Moved up one model at one effort level lower",
+  widened: "Tried again with its files widened",
+  lead: "Taken over by the lead",
 };
 
 /** How a try ended, in a word or two; a try with no outcome is under way or not yet started. */
@@ -351,6 +353,8 @@ export const PIECE_STATE_LABEL: Record<PieceState, string> = {
   blocked: "Blocked",
   failed: "Failed",
   stopped: "Stopped",
+  skipped: "Skipped",
+  lead: "With the lead",
 };
 
 /** A gate as a row names it (`verify::Gate`), in the order they run. */
@@ -485,7 +489,8 @@ export function mergeRows(run: Run): MergeRow[] {
     if (merge?.state === "nothingToMerge") return [];
     const waitsFor = piece.dependsOn.filter((on) => !run.pieces.some((other) => other.id === on && pieceMerged(other))).map((on) => numbers[on]).filter(Boolean);
     const merging = !!run.mergeUnderWay && run.merge?.pending?.piece === piece.id;
-    const state: MergeRowState = merging ? "merging" : merge ? merge.state : piece.state === "done" ? "waiting" : "notAccepted";
+    // A piece a person skipped (PRO-361) is left out as one skipped from a merge is: shown, never merged.
+    const state: MergeRowState = merging ? "merging" : merge ? merge.state : piece.state === "skipped" ? "skipped" : piece.state === "done" ? "waiting" : "notAccepted";
     return [{ piece, number: numbers[piece.id], state, waitsFor }];
   });
 }
@@ -522,7 +527,7 @@ export function mergeNote(run: Run, row: MergeRow): string {
     case "merged":
       return merge?.byHand ? "Merged by the lead" : "";
     case "skipped":
-      return "Left out of the last merge";
+      return row.piece.state === "skipped" ? "Skipped: the run goes on without it" : "Left out of the last merge";
     case "failed":
       return merge?.note ?? "Git could not merge it";
     case "merging":
@@ -538,7 +543,8 @@ export function mergeNote(run: Run, row: MergeRow): string {
 
 /** The line under a run's goal while its pieces are merged: how far, and what holds it up. */
 export function mergeSubtitle(run: Run): string {
-  const rows = mergeRows(run);
+  // What a person skipped is not a branch to bring in.
+  const rows = mergeRows(run).filter((row) => row.piece.state !== "skipped");
   const numbers = pieceNumbers(run);
   const merged = rows.filter((row) => row.state === "merged").length;
   const count = `${merged} of ${rows.length} ${rows.length === 1 ? "branch is" : "branches are"} in`;
@@ -602,4 +608,70 @@ export function holdText(run: { limits: RunLimits }, hold: RunHold): string {
     case "budget":
       return "Waits for you: the run reached its budget";
   }
+}
+
+/** A piece whose accepted result did not get into the lead's branch: it conflicts, failed the integration check, or git could not merge it. */
+export function unresolvedMerge(piece: RunPiece): boolean {
+  const state = currentMerge(piece)?.state;
+  return state === "conflict" || state === "integrationFailed" || state === "failed";
+}
+
+/** Pieces counted as done: accepted, and not stopped at the merge (18.04 counts a conflicted piece as not done). */
+export function donePieces(run: Pick<Run, "pieces">): RunPiece[] {
+  return run.pieces.filter((piece) => piece.state === "done" && !unresolvedMerge(piece));
+}
+
+/** Nothing more comes of it in this run: done, or left out by a person. */
+export function pieceSettled(piece: RunPiece): boolean {
+  return piece.state === "done" || piece.state === "skipped";
+}
+
+/**
+ * The header's Merge button (18.01, 18.04): shown while the run is live, enabled only once every
+ * piece is done (or skipped) and no merge stopped on an unresolved conflict. `null` for a run that
+ * shows none: one not started, and one that failed, was stopped or is done.
+ */
+export function mergeButton(run: Run): { label: string; disabled: boolean; why?: string } | null {
+  if (!["running", "needsYou", "verifying", "merging"].includes(run.state)) return null;
+  const label = run.mergeUnderWay ? "Merging" : run.merge?.into ? "Continue merge" : "Merge";
+  if (!run.pieces.every(pieceSettled)) return { label, disabled: true, why: "Merge unlocks when every piece is done." };
+  const stopped = run.merge?.stoppedAt ? run.pieces.find((piece) => piece.id === run.merge?.stoppedAt) : undefined;
+  if (stopped && currentMerge(stopped)?.state === "conflict") {
+    return { label, disabled: true, why: `Piece ${pieceNumbers(run)[stopped.id] ?? stopped.id} conflicts. Send it back, resolve it in the lead, or skip it, then continue.` };
+  }
+  return { label, disabled: !!run.mergeUnderWay };
+}
+
+/** The pieces that depend on `id` and have not started, directly or through one another: what skipping it leaves out with it. */
+export function skippedWith(run: Pick<Run, "pieces">, id: string): RunPiece[] {
+  const out = new Set([id]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const piece of run.pieces) {
+      if (!out.has(piece.id) && piece.state === "queued" && !piece.worker && piece.dependsOn.some((on) => out.has(on))) {
+        out.add(piece.id);
+        grew = true;
+      }
+    }
+  }
+  return run.pieces.filter((piece) => piece.id !== id && out.has(piece.id));
+}
+
+/**
+ * The line under a started run's goal while a piece is blocked, in 18.03's words: which pieces are
+ * blocked, what waits for them, and whether anything else is running. `null` while none is.
+ */
+export function blockedSubtitle(run: Run): string | null {
+  const blocked = run.pieces.filter((piece) => piece.state === "blocked" || piece.state === "failed");
+  if (!blocked.length) return null;
+  const numbers = pieceNumbers(run);
+  const ids = new Set(blocked.map((piece) => piece.id));
+  const held = run.pieces.filter((piece) => piece.state === "queued" && piece.dependsOn.some((on) => ids.has(on))).map((piece) => numbers[piece.id]);
+  const running = run.pieces.filter((piece) => ["running", "stalled", "verifying", "lead"].includes(piece.state)).length;
+  const first = `${blocked.length === 1 ? `Piece ${numbers[blocked[0].id]} is` : `Pieces ${numberList(blocked.map((piece) => numbers[piece.id]))} are`} blocked.`;
+  const parts = [
+    held.length ? `${held.length === 1 ? `Piece ${held[0]} waits` : `Pieces ${numberList(held)} wait`} for ${blocked.length === 1 ? "it" : "them"}` : null,
+    running ? `${running} ${running === 1 ? "piece is" : "pieces are"} under way` : held.length ? "nothing else is running" : "Nothing else is running",
+  ].filter(Boolean) as string[];
+  return `${first} ${parts.join("; ")}.`;
 }
