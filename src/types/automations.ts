@@ -67,6 +67,10 @@ export interface Automation {
   workspace: AutomationWorkspace;
   sessionId?: string | null;
   reuseSession: boolean;
+  /** Archive a run's session when the run completes. A failed run, a stopped one and one waiting on a person stay in the sidebar. */
+  archiveOnComplete: boolean;
+  /** With archiveOnComplete: the newest completed run's session stays in the sidebar; the one it replaces is archived. */
+  keepLatestRunVisible: boolean;
   baseRef?: string | null;
   schedule: AutomationSchedule;
   precheck?: AutomationPrecheck | null;
