@@ -6,7 +6,7 @@
 //! Show archived, found by the command palette and by
 //! `terminalx sessions list --archived`. Every way in or out goes through
 //! [`set_archived`]: a row's menu, the sidebar's bulk bar, removing a
-//! project, the CLI, the idle sweep, and a new message, so whichever did it
+//! project, the CLI, the idle sweep, a completed automation run, and a new message, so whichever did it
 //! the windows hear of it the same way (`session_updated`) at once.
 //!
 //! **The idle sweep.** A session nobody has written in for the limit in
@@ -48,6 +48,9 @@ pub enum By {
     Person,
     /// The idle sweep.
     Idle,
+    /// An automation whose run completed (#887). Set aside on purpose, so
+    /// retention leaves it alone, as for a person.
+    Automation,
     /// A new message in it.
     Message,
 }
