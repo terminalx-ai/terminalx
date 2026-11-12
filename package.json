@@ -49,7 +49,8 @@
     "build:terminalx-launcher": "node scripts/build-terminalx-launcher.mjs",
     "test:terminalx-launcher": "vitest run scripts/build-terminalx-launcher.test.mjs",
     "test:webkit-helper-titles": "node scripts/webkit/helper-titles.mjs",
-    "test:webkit-automatic-session-status": "node scripts/webkit/automatic-session-status.mjs"
+    "test:webkit-automatic-session-status": "node scripts/webkit/automatic-session-status.mjs",
+    "bench:orchestration": "node scripts/orchestration-bench/cli.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
