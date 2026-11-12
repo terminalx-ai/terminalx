@@ -128,12 +128,26 @@ describe("settings in the command palette", () => {
     expect(screen.getByRole("option", { name: /^Environment/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /^Projects/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /^Repositories/ }).textContent).toBe("RepositoriesRepository paths, files to copy, scripts and workspace cleanup");
+    // The footer says the pages are not all there is (design 07.05).
+    expect(screen.getByText("Type to search every setting, not only pages")).toBeTruthy();
+    expect(screen.getByText("↑↓ to move")).toBeTruthy();
+    expect(screen.getByText("↵ to open")).toBeTruthy();
     fireEvent.keyDown(input, { key: "ArrowUp" });
     expect(input.getAttribute("aria-activedescendant")).toBe(results.at(-1)!.id);
     fireEvent.keyDown(input, { key: "ArrowDown" });
     expect(input.getAttribute("aria-activedescendant")).toBe(results[0].id);
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(onOpenSettings).toHaveBeenCalledWith("account"));
+  });
+
+  it("drops the pages hint once a setting is typed for, and outside the Settings tab", async () => {
+    const { input } = palette();
+    expect(screen.queryByText("Type to search every setting, not only pages")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
+    expect(screen.getByText("Type to search every setting, not only pages")).toBeTruthy();
+    fireEvent.change(input, { target: { value: "theme" } });
+    await screen.findByRole("option", { name: /^Theme/ });
+    expect(screen.queryByText("Type to search every setting, not only pages")).toBeNull();
   });
 
   it("leaves the settings scope with Backspace or the All tab", async () => {
