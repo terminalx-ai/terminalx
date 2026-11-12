@@ -15,7 +15,7 @@ import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/R
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { SidebarTitlebar } from "./SidebarTitlebar";
 import { AgentMark } from "@/components/AgentMark";
-import { SessionStatus } from "@/components/ui/SessionStatus";
+import { SessionStatusMark } from "@/components/ui/SessionStatus";
 import { cn } from "@/lib/cn";
 import { isUnread } from "@/lib/dashboard";
 import { errorMessage } from "@/lib/api";
@@ -262,7 +262,7 @@ function ChatRow({
                   </span>
                 )}
                 {/* Status is shared across views; unread remains a separate reading indicator. */}
-                <SessionStatus session={session} className={cn("max-w-[60%]", yieldsToRowActions)} />
+                <SessionStatusMark session={session} className={yieldsToRowActions} />
                 {isUnread(session) && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
               </span>
             </span>

@@ -48,7 +48,7 @@ static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
 // These object keys are user-defined, rather than settings field names.
 static DYNAMIC_MAPS: LazyLock<BTreeMap<&str, Value>> = LazyLock::new(|| BTreeMap::from([
     ("mergedCleanup.projects", Value::Bool(false)),
-    ("orchestrator.projects", serde_json::json!({"requireApproval": false, "pieceLimit": 0, "workerMode": "", "budgetDollars": 0.5, "budgetPoints": 0.5, "windowCeiling": 0.5})),
+    ("orchestrator.projects", serde_json::json!({"requireApproval": false, "pieceLimit": 0, "workerMode": "", "reviewDiffLines": 0, "budgetDollars": 0.5, "budgetPoints": 0.5, "windowCeiling": 0.5})),
     ("preferences.shortcuts", serde_json::json!([""])),
 ]));
 
@@ -116,6 +116,9 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_line
     }
     if key == "orchestrator.pieceLimit" && !value.as_u64().is_some_and(|n| (1..=u64::from(super::MAX_PIECE_LIMIT)).contains(&n)) {
         return Err(error("expected a number of pieces from 1 to 50"));
+    }
+    if key == "orchestrator.reviewDiffLines" && !value.as_u64().is_some_and(|n| (1..=u64::from(super::MAX_REVIEW_DIFF_LINES)).contains(&n)) {
+        return Err(error("expected a number of changed lines from 1 to 100000"));
     }
     // PRO-280: a run's limits. The budget and the window level take fractions; the counts do not.
     if key.starts_with("orchestrator.") && !value.is_object() {

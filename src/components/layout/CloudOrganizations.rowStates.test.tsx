@@ -155,7 +155,7 @@ describe("row states from the server's list", () => {
     await load([item("second", { repositories: [acmeApi], ...online(1) })], { second: { sessions: [session("s1", "Echo hello")], capabilities: ["session/1", "session/2"] } });
     mount();
     const key = `cloud:${ORG}:second:s1`;
-    await waitFor(() => expect(within(sessionRow(key)).getByTestId("working-mark")).toBeTruthy());
+    await waitFor(() => expect(within(sessionRow(key)).getByTestId("status-working")).toBeTruthy());
     expect(getCloudDashboard().find((entry) => entry.key === key)?.tabs[0].status).toBe("in_progress");
     expectNoAttachOrResume();
   });
@@ -163,14 +163,14 @@ describe("row states from the server's list", () => {
   it("and Needs you while the list says it waits on an approval", async () => {
     await load([item("second", { repositories: [acmeApi], ...online(0, 1) })], { second: { sessions: [session("s1", "Echo hello")], capabilities: ["session/1"] } });
     mount();
-    await waitFor(() => expect(within(sessionRow(`cloud:${ORG}:second:s1`)).getByText("Needs attention")).toBeTruthy());
+    await waitFor(() => expect(within(sessionRow(`cloud:${ORG}:second:s1`)).getByRole("button", { description: /^Needs you\./ })).toBeTruthy());
   });
 
   it("a cached working tab is not believed without a live connection or the list's word", async () => {
     await load([item("second", { repositories: [acmeApi], ...online(0) })], { second: { sessions: [session("s1", "Echo hello", { tabs: [tab("s1", "in_progress")] })], capabilities: ["session/1"] } });
     mount();
     await screen.findAllByTestId("cloud-session-row");
-    expect(within(sessionRow(`cloud:${ORG}:second:s1`)).queryByTestId("working-mark")).toBeNull();
+    expect(within(sessionRow(`cloud:${ORG}:second:s1`)).queryByTestId("status-working")).toBeNull();
   });
 
   it("a stopped workspace says Stopped, and its sessions are never Working, whatever the list last said", async () => {
@@ -178,7 +178,7 @@ describe("row states from the server's list", () => {
     mount();
     await screen.findAllByTestId("cloud-session-row");
     expect(rowState("acme/api")).toContain("Stopped");
-    expect(within(sessionRow(`cloud:${ORG}:perf:s1`)).queryByTestId("working-mark")).toBeNull();
+    expect(within(sessionRow(`cloud:${ORG}:perf:s1`)).queryByTestId("status-working")).toBeNull();
   });
 
   it("with several workspaces, each names its own state: Stopped on the stopped one", async () => {
@@ -190,7 +190,7 @@ describe("row states from the server's list", () => {
     await screen.findAllByTestId("cloud-session-row");
     const states = screen.getAllByTestId("cloud-workspace-group").map((group) => [group.getAttribute("data-workspace"), within(group).getByTestId("cloud-workspace-row-state").textContent]);
     expect(states).toEqual([["fix", "1"], ["perf", "Stopped"]]);
-    expect(within(sessionRow(`cloud:${ORG}:fix:s1`)).getByTestId("working-mark")).toBeTruthy();
+    expect(within(sessionRow(`cloud:${ORG}:fix:s1`)).getByTestId("status-working")).toBeTruthy();
   });
 });
 

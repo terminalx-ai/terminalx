@@ -398,20 +398,42 @@ mod tests {
         assert_eq!(*rig.changes.borrow(), [Some("claude"), None, Some("codex"), None, Some("claude")]);
     }
 
-    /// The whole of it against a real terminal: an interactive shell in a
-    /// PTY, and a program named as an agent's CLI started in it by hand. The
-    /// program is `sleep` under another name, and the terminal is put in raw
-    /// mode for it the way a full-screen program does for itself.
+    #[cfg(unix)]
+    const AGENT_FIXTURE: &str = "TERMINALX_FOREGROUND_TEST_AGENT";
+
+    #[cfg(unix)]
+    #[test]
+    fn real_terminal_agent_fixture() {
+        let Ok(mode) = std::env::var(AGENT_FIXTURE) else { return };
+        assert!(matches!(mode.as_str(), "plain" | "raw"));
+        if mode == "raw" {
+            // SAFETY: this child owns its PTY stdin; tcgetattr initializes
+            // the termios passed to cfmakeraw and tcsetattr.
+            unsafe {
+                let mut terminal: libc::termios = std::mem::zeroed();
+                assert_eq!(libc::tcgetattr(libc::STDIN_FILENO, &mut terminal), 0);
+                libc::cfmakeraw(&mut terminal);
+                assert_eq!(libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &terminal), 0);
+            }
+        }
+        std::thread::sleep(Duration::from_secs(if mode == "raw" { 600 } else { 1 }));
+    }
+
+    /// A real shell and foreground job on every supported Unix platform.
+    /// Use our test binary, not the host's sleep: multicall utilities dispatch
+    /// on their name and cannot be renamed to an agent. The child itself takes
+    /// the terminal raw, as a CLI does, without relying on shell stty handling.
     #[cfg(unix)]
     #[test]
     fn a_program_typed_into_a_real_shell_is_seen_by_its_name_once_the_terminal_is_raw() {
         use std::sync::mpsc;
 
         let dir = tempfile::tempdir().unwrap();
-        let sleep = ["/bin/sleep", "/usr/bin/sleep"].into_iter().find(|path| std::path::Path::new(path).exists()).expect("a sleep to stand for the agent");
+        let fixture = std::env::current_exe().unwrap();
         for name in ["claude", "codex"] {
-            std::os::unix::fs::symlink(sleep, dir.path().join(name)).unwrap();
+            std::os::unix::fs::symlink(&fixture, dir.path().join(name)).unwrap();
         }
+        let run = |name: &str, mode: &str| format!("{AGENT_FIXTURE}={mode} ./{name} --exact foreground::tests::real_terminal_agent_fixture --nocapture\n");
         let terminals = Arc::new(Terminals::new());
         let sink: Arc<dyn crate::sink::EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
         let spec = crate::pty::PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("bash --norc --noprofile -i"), env: &[] };
@@ -442,7 +464,7 @@ mod tests {
         at_prompt();
 
         // Printing and exiting, as `claude --version` does: never a session.
-        terminals.write("s:1", b"./claude 1\n").unwrap();
+        terminals.write("s:1", run("claude", "plain").as_bytes()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(60);
         while own(&terminals) {
             assert!(Instant::now() < deadline, "the job never came to the front");
@@ -455,7 +477,7 @@ mod tests {
         assert!(changes.try_recv().is_err(), "a job that left the terminal as it was is not an agent's session");
 
         // Full screen, as the CLI itself is.
-        terminals.write("s:1", b"stty raw -echo; ./claude 600\n").unwrap();
+        terminals.write("s:1", run("claude", "raw").as_bytes()).unwrap();
         let claude = until("claude in front", &|change| change.as_ref().is_some_and(|agent| agent.harness == "claude")).unwrap();
         assert_eq!(claude.pids, [claude.pid]);
         assert!(crate::harness::host::is_alive(claude.pid));
@@ -464,7 +486,7 @@ mod tests {
         until("claude gone", &|change| change.is_none());
         at_prompt();
         // Another agent in the same terminal.
-        terminals.write("s:1", b"stty raw -echo; ./codex 600\n").unwrap();
+        terminals.write("s:1", run("codex", "raw").as_bytes()).unwrap();
         let codex = until("codex in front", &|change| change.as_ref().is_some_and(|agent| agent.harness == "codex")).unwrap();
         // The pane is closed with it running.
         terminals.kill_all();

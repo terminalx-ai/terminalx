@@ -6,6 +6,7 @@ import { useSettingsFile } from "@/lib/settingsFile";
 import { useSessionStore } from "@/lib/sessions";
 import type { OrchestratorPatch, OrchestratorSettings as Settings } from "@/types/orchestration";
 import { RegisteredSetting } from "./settingsRegistry";
+import { RoutingTableSettings } from "./RoutingTableSettings";
 
 /** The most pieces the setting takes (`MAX_PIECE_LIMIT` in store/settings.rs). */
 const MAX_PIECES = 50;
@@ -44,10 +45,13 @@ function useOrchestratorSettings() {
   return { settings, error, save };
 }
 
+/** The most changed lines the diff threshold takes (`MAX_REVIEW_DIFF_LINES` in orchestration/verify.rs). */
+const MAX_DIFF_LINES = 100_000;
+
 /** A number typed into a field: saved when the field is left or Enter is pressed, and only when it is in range.
  * Empty is "no value of its own", which only a repository has (`placeholder` is then the app's value). */
-function NumberField({ value, placeholder, disabled, label, min, max, step = 1, prefix, suffix, onSave }: {
-  value: number | undefined; placeholder?: string; disabled: boolean; label: string; min: number; max: number; step?: number; prefix?: string; suffix?: string; onSave: (value: number | null) => void;
+function NumberField({ value, placeholder, disabled, label, min, max, step = 1, prefix, suffix, wide, onSave }: {
+  value: number | undefined; placeholder?: string; disabled: boolean; label: string; min: number; max: number; step?: number; prefix?: string; suffix?: string; wide?: boolean; onSave: (value: number | null) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const shown = draft ?? (value === undefined ? "" : String(value));
@@ -71,7 +75,7 @@ function NumberField({ value, placeholder, disabled, label, min, max, step = 1, 
       max={max}
       step={step}
       aria-label={label}
-      className={prefix || suffix ? "w-14 bg-transparent text-right text-xs tabular-nums outline-none disabled:opacity-60" : numberClass}
+      className={prefix || suffix ? "w-14 bg-transparent text-right text-xs tabular-nums outline-none disabled:opacity-60" : wide ? numberClass.replace("w-16", "w-20") : numberClass}
       value={shown}
       placeholder={placeholder}
       disabled={disabled}
@@ -103,7 +107,7 @@ export function OrchestratorTab() {
   const ready = settings !== null;
   return (
     <div className="flex flex-col" data-testid="orchestrator-settings">
-      <p className="pb-3 text-[13px] text-muted-foreground">How a lead session splits work across worker sessions: whether it asks first, how far it may split, the permissions its workers run with, and the limits a run stays inside. A repository can answer for itself in its own settings.</p>
+      <p className="pb-3 text-[13px] text-muted-foreground">How a lead session splits work across worker sessions: whether it asks first, how far it may split, the permissions its workers run with, which model each kind of piece starts on, and the limits a run stays inside. A repository can answer for itself in its own settings.</p>
       <div className="mb-1 mt-2 text-xs font-medium uppercase tracking-wide text-faint">Runs</div>
       <RegisteredSetting setting="orchestrator.requireApproval"
         control={<Switch aria-label="Ask before a run starts" checked={settings?.requireApproval ?? true} disabled={!ready} onCheckedChange={(on) => void save({ requireApproval: on })} />}
@@ -137,6 +141,14 @@ export function OrchestratorTab() {
       <RegisteredSetting setting="orchestrator.stallMinutes"
         control={<NumberField label="Mark a worker stalled after" value={settings?.stallMinutes} min={1} max={MAX_STALL_MINUTES} suffix="min" disabled={!ready} onSave={(value) => value !== null && void save({ stallMinutes: value })} />}
       />
+      <div className="mb-1 mt-4 text-xs font-medium uppercase tracking-wide text-faint">Checking results</div>
+      <p className="pb-1 text-xs leading-relaxed text-muted-foreground">When a worker reports done, TerminalX checks the result itself before the piece is done: its report, the files it touched, its branch, and the plan's commands. None of that uses a model. A verifier session reads the diff only when the piece has no command, the change touches a security area, the piece is a refactor, the plan asks for a review, or the diff is large. The verifier's model is the <span className="font-mono">verify</span> row of the table below.</p>
+      <RegisteredSetting setting="orchestrator.reviewDiffLines"
+        control={<NumberField wide min={1} max={MAX_DIFF_LINES} label="Changed lines a result is accepted at without a verifier, at most" value={settings?.reviewDiffLines} disabled={!ready} onSave={(lines) => void save({ reviewDiffLines: lines })} />}
+      />
+      <RegisteredSetting setting="orchestrator.routing">
+        <div><RoutingTableSettings settings={settings} save={(patch) => void save(patch)} /></div>
+      </RegisteredSetting>
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>
   );
@@ -204,6 +216,14 @@ export function RepositoryOrchestratorSettings({ projectPath }: { projectPath: s
             <NumberField label={`${title} in ${project.name}`} value={own[key]} placeholder={settings ? String(settings[key]) : ""} disabled={!ready} {...bounds} onSave={(value) => void save({ project: projectPath, [key]: value })} />
           </div>
         ))}
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2">
+          <div className="min-w-0">
+            <div className="text-[13px] font-medium">A verifier reads a diff over</div>
+            <div className="text-xs leading-relaxed text-muted-foreground">Changed lines. A smaller result whose commands pass is accepted without a model. Leave empty to follow the default.</div>
+          </div>
+          <NumberField wide min={1} max={MAX_DIFF_LINES} label={`Changed lines a result in ${project.name} is accepted at without a verifier, at most`} value={own.reviewDiffLines} placeholder={settings ? String(settings.reviewDiffLines) : ""} disabled={!ready} onSave={(lines) => void save({ project: projectPath, reviewDiffLines: lines })} />
+        </div>
+        <RoutingTableSettings settings={settings} project={{ path: projectPath, name: project.name }} save={(patch) => void save(patch)} />
         <p className="text-xs text-muted-foreground">The defaults are in Settings → Orchestrator.</p>
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
       </section>

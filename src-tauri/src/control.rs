@@ -769,8 +769,8 @@ impl ControlService {
             "pipelines.start" | "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
             // A run's workers are sessions of a project on this computer, each in a worktree of its own:
             // the desktop's runtime has those. A cloud workspace's runtime has one checkout, and says so.
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -798,7 +798,9 @@ impl ControlService {
             let tab = caller.filter(|caller| caller.id == lead.id).and_then(|_| params["caller"]["tab"].as_str()).filter(|tab| lead.tab(tab).is_some()).map(str::to_owned);
             let plan: Plan = crate::orchestration::plan::parse(&params["plan"]).map_err(|error| ControlError::of_run(error.into()))?;
             let run = engine::create(&host, &plan, &lead.id, tab).map_err(ControlError::of_run)?;
-            return Ok(json!({"run": engine::shown(&run), "approvalRequired": run.state == crate::orchestration::RunState::AwaitingApproval}));
+            // Said where the lead reads it: a piece whose tier has no installed model, and what it runs on instead.
+            let notes: Vec<Value> = run.pieces.iter().filter_map(|piece| Some(json!({"piece": piece.id, "note": piece.model_note.as_deref()?}))).collect();
+            return Ok(json!({"run": engine::shown(&run), "approvalRequired": run.state == crate::orchestration::RunState::AwaitingApproval, "notes": notes}));
         }
         if command == "runs.list" {
             let lead = optional_string(&params, "lead").map(|selector| resolve_session(&selector)).transpose()?;
@@ -813,6 +815,8 @@ impl ControlService {
                 .collect::<Result<_, _>>()?;
             return Ok(json!({"runs": runs}));
         }
+        // A worker does not judge a piece, its own or another's: that is its lead's, and TerminalX's.
+        let from_worker = caller.as_ref().is_some_and(|caller| caller.run_worker());
         let run = match optional_string(&params, "run") {
             Some(selector) => {
                 let mut matching = store::matching(&selector).map_err(ControlError::internal)?;
@@ -831,6 +835,16 @@ impl ControlService {
                 self.manager.accepting_work().map_err(ControlError::internal)?;
                 let start = engine::start(&host, &run.id).map_err(ControlError::of_run)?;
                 Ok(json!({"run": engine::shown(&start.run), "started": start.started, "waiting": start.waiting, "failed": start.failed}))
+            }
+            "runs.checkFailed" => {
+                if from_worker {
+                    return Err(ControlError::new("not_the_lead", "A run's worker does not report a done-check as failed. Say what does not hold in your own report: `partial` or `failed`.", None::<String>));
+                }
+                self.manager.accepting_work().map_err(ControlError::internal)?;
+                let piece = optional_string(&params, "piece").ok_or_else(|| ControlError::invalid("Name the piece whose done-check failed."))?;
+                let output = params["output"].as_str().unwrap_or_default();
+                let failed = engine::check_failed(&host, &run.id, &piece, output).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&failed.run), "piece": failed.piece, "retried": failed.retried, "blocked": failed.blocked, "failed": failed.failed}))
             }
             "runs.stop" => {
                 let stop = engine::stop(&host, &run.id, engine::By::Cli).map_err(ControlError::of_run)?;
@@ -867,6 +881,8 @@ impl ControlService {
 
     fn sessions_list(&self, params: Value) -> Result<Value, ControlError> {
         let mut sessions = index::load().map_err(ControlError::internal)?;
+        // Read once: which session on a branch carries its PR is chosen among all of them.
+        let stored = sessions.clone();
         let quick = params.get("quick").and_then(Value::as_bool).unwrap_or(false);
         // What the sidebar lists, or with `archived` what it lists under Show archived (#718).
         let archived = params.get("archived").and_then(Value::as_bool).unwrap_or(false);
@@ -879,7 +895,7 @@ impl ControlService {
             }
             let (project, worktree) = resolve_worktree(&params)?;
             let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
-            self.manager.annotate_row_statuses(&mut held);
+            self.manager.annotate_row_statuses_among(&mut held, &stored);
             let held: Vec<Value> = held.iter().map(crate::session_usage::with_cost).collect();
             return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
         }
@@ -896,7 +912,7 @@ impl ControlService {
             sessions.retain(SessionEntry::is_quick);
         }
         sessions.retain(|session| session.archived == archived);
-        self.manager.annotate_row_statuses(&mut sessions);
+        self.manager.annotate_row_statuses_among(&mut sessions, &stored);
         let sessions: Vec<Value> = sessions.iter().map(crate::session_usage::with_cost).collect();
         Ok(json!({"sessions": sessions}))
     }
@@ -1390,12 +1406,62 @@ impl ControlService {
     fn wait_children(&self, mut params: Value) -> Result<Value, ControlError> {
         let mode = optional_string(&params, "mode").unwrap_or_else(|| "any".into());
         let listed = self.sessions_children(json!({"childrenOf": required_string(&params, "childrenOf")?}))?;
+        // A lead whose run is under way waits on the run, not on each worker's turn.
+        if let Some(run) = listed["parent"]["sessionId"].as_str().and_then(|lead| crate::orchestration::store::open_for_lead(lead).ok().flatten()).filter(|run| run.state == crate::orchestration::RunState::Running) {
+            return self.wait_run(&run.id, &mode, &params);
+        }
         let workers: Vec<Value> = listed["sessions"].as_array().into_iter().flatten().map(|session| session["id"].clone()).collect();
         if workers.is_empty() {
             return Ok(json!({"mode": mode, "timedOut": false, "targets": [], "reason": "nothing to wait for: that session started no sessions"}));
         }
         params["targets"] = json!(workers);
         self.wait_many(params)
+    }
+
+    /// `wait --children-of` for a lead whose orchestration run is under way
+    /// (PRO-278): it returns when the run has something for the lead
+    /// (`orchestration::engine::wake`), not each time a worker's turn ends. A
+    /// worker's `done` is checked by the app first, and a result that fails a
+    /// check goes back to a fresh worker without the lead, so a run costs its
+    /// lead about one turn for each piece settled.
+    ///
+    /// The stored run is what is watched: a worker's or a verifier's turn
+    /// ending and the gates finishing each write it. It is brought up to date
+    /// from the transcripts now and then as well, for a worker that stopped
+    /// on a request nobody answered, which ends no turn.
+    fn wait_run(&self, run_id: &str, mode: &str, params: &Value) -> Result<Value, ControlError> {
+        use crate::orchestration::{engine, host::ManagerHost, store};
+        if !matches!(mode, "any" | "all") {
+            return Err(ControlError::invalid(format!("mode takes any or all, not {mode}.")));
+        }
+        let host = ManagerHost::new(self.sink.clone(), self.manager.clone());
+        let timeout = params.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600).min(86_400);
+        let deadline = Instant::now() + Duration::from_secs(timeout);
+        let _resumable = crate::hooks::resumable();
+        // What the lead last saw is at least this old: a piece settled since then wakes it at once
+        // only through `ready` or the run's end, which a missed change always shows up as.
+        let began = engine::refreshed(&host, run_id).map_err(ControlError::of_run)?;
+        let mut read = Instant::now();
+        loop {
+            if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
+                return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));
+            }
+            let now = if read.elapsed() >= Duration::from_secs(5) {
+                read = Instant::now();
+                engine::refreshed(&host, run_id).map_err(ControlError::of_run)?
+            } else {
+                store::get(run_id).map_err(ControlError::internal)?
+            };
+            let timed_out = Instant::now() >= deadline;
+            if let Some(mut woken) = engine::wake(&began, &now, mode == "all").or_else(|| timed_out.then(|| json!({"run": now.id, "state": now.state, "why": [], "ready": [], "pieces": now.pieces.iter().map(|piece| json!({"piece": piece.id, "state": piece.state, "changed": false, "note": piece.note})).collect::<Vec<_>>()}))) {
+                woken["mode"] = json!(mode);
+                woken["timedOut"] = json!(timed_out && woken["why"].as_array().is_none_or(|why| why.is_empty()));
+                // No tab is listed: the run is what was waited on. `runs show` has each worker.
+                woken["targets"] = json!([]);
+                return Ok(woken);
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     /// `wait` on several tabs at once (PRO-271). `any` returns as soon as one

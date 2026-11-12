@@ -49,6 +49,8 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "orchestrator.budgetPoints",
   "orchestrator.windowCeiling",
   "orchestrator.stallMinutes",
+  "orchestrator.reviewDiffLines",
+  "orchestrator.routing",
   "general.dataPrivacy",
   "general.websiteLinks",
   "general.linkActions",

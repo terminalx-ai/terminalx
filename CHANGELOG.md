@@ -20,6 +20,27 @@
   Settings → Experimental → Orchestration runs; the limits are in Settings →
   Orchestrator and per repository. (PRO-274)
 
+- Experimental: an orchestration run picks each piece's model and effort from
+  the piece's kind. Every piece of a plan names a kind (`search`, `logs`,
+  `scoped-code`, `code`, `refactor`, `research`, `review`, `verify`), and a
+  routing table gives each kind a model tier and an effort, with one column for
+  Claude Code workers and one for Codex workers: small (Haiku, Luna) for
+  searching and reading logs, mid (Sonnet, Terra) for bounded changes and
+  checks, large (Opus, Sol) for everyday engineering, top (Fable, Astra) for
+  refactors and research. The table names tiers, not versions, so a new release
+  takes its place; a tier with no installed model falls back to the lead's
+  model, and the piece says so. A plan may still name a model or an effort for
+  a piece. Edit the table under Settings → Orchestrator, and per repository in
+  its own settings.
+
+  A piece that reports `failed` or `partial`, or whose done-check fails
+  (`terminalx runs check-failed`), is tried again without being asked: first
+  with the failure text and one more level of effort (never past high), then one
+  model tier up at one effort level lower. Each try is a fresh worker that is
+  told what the one before fell short on, and after three tries the piece is
+  blocked and goes back to the lead with what was tried. The Run view shows
+  every try with its model, effort, cost and outcome. (PRO-275)
+
 - Experimental: an orchestration run no longer starts more workers than the
   Mac can carry. At most 4 workers of one run, and 8 across every run, are in a
   turn at once; the rest queue and start by themselves as workers finish.

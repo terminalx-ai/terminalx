@@ -78,19 +78,22 @@ User-facing webview choices are under `preferences`, for example:
     "budgetPoints": 25,
     "windowCeiling": 85,
     "stallMinutes": 10,
+    "reviewDiffLines": 400,
     "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12, "budgetPoints": 15 } }
   }
 }
 ```
 
 `orchestrator` holds the limits of orchestration runs: whether a run waits for approval, the
-most pieces a plan may have (1 to 50), the permission mode workers start in, how many
-workers run at once (per run, and across every run of the app), each run's budget (dollars
-for workers on an API key; points of a usage window, and the window level past which nothing
-new starts, for workers on a subscription), and after how many minutes of nothing a worker
-counts as stalled. A project may answer for itself under `projects`, by its path, for approval,
-the piece limit, the worker mode and the three budget values; a setting it leaves out follows
-the app-wide value. These are the person's to change, in Settings → Orchestrator: do not edit
+most pieces a plan may have (1 to 50), the permission mode workers start in, over how many
+changed lines a result is read by a verifier though its commands pass (`reviewDiffLines`,
+1 to 100000), how many workers run at once (per run, and across every run of the app), each
+run's budget (dollars for workers on an API key; points of a usage window, and the window
+level past which nothing new starts, for workers on a subscription), and after how many
+minutes of nothing a worker counts as stalled. A project may answer for itself under
+`projects`, by its path, for approval, the piece limit, the worker mode, the diff threshold,
+its routing rows and the three budget values; a setting it leaves out follows the app-wide
+value. These are the person's to change, in Settings → Orchestrator: do not edit
 them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
 settings page in the app; the `runs` commands work either way.
 
@@ -593,6 +596,7 @@ terminalx runs start [<run>] --json
 terminalx runs show [<run>] --json
 terminalx runs list [--lead <session>] [--all] --json
 terminalx runs stop [<run>] --json
+terminalx runs check-failed <piece> [--run <run>] [--output <file>|-] [--reason <text>] --json
 ```
 
 `<run>` is a run's id or the start of one. Inside the lead's session it may be left out:
@@ -628,8 +632,6 @@ The plan is a JSON file you write:
         {"type": "review", "text": "Unknown keys in an existing file survive a save."}
       ],
       "kind": "code",
-      "model": "opus",
-      "effort": "medium",
       "permissionMode": "acceptEdits",
       "readsUntrusted": false,
       "estimate": {"low": 1.6, "high": 2.4}
@@ -638,8 +640,14 @@ The plan is a JSON file you write:
 }
 ```
 
-- `goal` and `pieces` are required; each piece needs `id`, `title` and `doneChecks`. A key
-  the format does not have is refused, not ignored.
+- `goal` and `pieces` are required; each piece needs `id`, `title`, `kind` and
+  `doneChecks`. A key the format does not have is refused, not ignored.
+- `kind`: what sort of work the piece is. Its model and effort come from it (see "Model and
+  effort" below), so name the kind that fits and leave `model` and `effort` out:
+  - `search`: finding files, listing call sites. `logs`: reading test output and logs.
+  - `scoped-code`: a bug fix or a change with a clear spec. `code`: everyday engineering.
+  - `refactor`: architecture and large refactors. `research`: deep research and analysis.
+  - `review`: reviewing a diff. `verify`: checking a worker's result.
 - `owns`: the files only this piece changes, as paths or globs relative to the repository's
   root, written as `git diff --name-only` prints them. A directory means everything in it;
   `*` and `?` match within one name and `**` across directories. They are stored as globs
@@ -653,9 +661,11 @@ The plan is a JSON file you write:
     worktree; exit code 0 passes. TerminalX runs it itself, so it costs no tokens. Prefer
     one wherever a test, a build, a type check or a search that must find nothing exists.
   - `{"type": "review", "text": "<what a reviewer must confirm>"}`: for what no command can
-    show. The reviewer sees the diff and this text, not the worker's reasoning.
-  - `{"type": "vote", "text": "…", "voters": 3, "threshold": 2}`: several reviewers judge
-    it separately. For high-cost claims only; it is stored with the plan.
+    show. A verifier session sees the diff and this text, not the worker's reasoning. It
+    costs tokens on every try of the piece, so ask for one only where a command cannot show it.
+  - `{"type": "vote", "text": "…", "voters": 3, "threshold": 2}`: several verifiers judge
+    it separately, and the piece passes when `threshold` of them do (three and two when you
+    name neither). For high-cost claims only: it runs only when the plan asks for it.
   A piece needs at least one `command` check. If no command can prove it (prose, a design
   note), set `"reviewOnly": true` and say why in `"reviewOnlyReason"`; without the reason
   the piece is refused. The worker is told every check and to run the commands itself
@@ -663,8 +673,9 @@ The plan is a JSON file you write:
 - `goal`, `why`, `scope`, `outOfScope`, `known`, `readFirst`, `limits`: the worker's brief. A
   worker knows nothing of your conversation, so write what it needs; a part you leave empty is
   stated as empty in the brief.
-- `agent`: `claude` or `codex`, for the plan or for one piece; yours when absent. `model` and
-  `effort` are the piece's; absent, the agent's defaults.
+- `agent`: `claude` or `codex`, for the plan or for one piece; yours when absent.
+- `model`, `effort`: only to override what the piece's kind gives it. Either may be named
+  without the other; what you leave out still comes from the kind.
 - `permissionMode`: `plan`, `manual`, `acceptEdits`, `auto` or `bypassPermissions`. Absent,
   the project's setting, which is `bypassPermissions` unless the person changed it.
 - `readsUntrusted`: true for a piece that reads text from outside the repository (issues, web
@@ -682,10 +693,14 @@ piece in `details.piece`, and nothing is stored:
 - `dependency_cycle` (`details.cycle`), `unknown_dependency` (`details.dependsOn`).
 - `no_done_check`: a piece has no `doneChecks`. `empty_check`: one of them says nothing
   (`details.check` is its place in the list).
+- `check_not_allowed`: a `command` check pushes, merges or deploys (`details.command`).
+  TerminalX runs the checks itself and does none of those; use a command that only checks.
 - `no_command_check`: a piece has no `command` check and is not `reviewOnly`.
   `review_only_without_reason`: it is `reviewOnly` and `reviewOnlyReason` is empty.
 - `owns_outside_repository`: a piece owns a path that is not inside the repository
   (`details.path`).
+- `no_kind`: a piece has no `kind`. `unknown_kind`: it names one that does not exist
+  (`details.kinds` lists the eight).
 - `too_many_pieces`: more pieces than the limit (`details.limit`; 8 unless the person changed
   it in Settings → Orchestrator, for the app or for the project). Merge pieces; do not split
   the plan into two runs to get around it.
@@ -698,7 +713,32 @@ piece in `details.piece`, and nothing is stored:
   dropped.
 - `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`: as named.
 
-It returns `run` and `approvalRequired`.
+It returns `run`, `approvalRequired` and `notes`: one `{piece, note}` for each piece that
+does not run on the model its kind names (see below). Tell the person what a note says when
+you tell them the plan is ready.
+
+#### Model and effort
+
+A routing table gives each kind a model tier and an effort. The tiers are the same four for
+both agents, and a worker uses the column of the agent it runs on:
+
+| Tier | Claude Code | Codex | Kinds that start there |
+| -- | -- | -- | -- |
+| small | Haiku | Luna | `search`, `logs`, at the model's own default effort |
+| mid | Sonnet | Terra | `scoped-code`, `review`, `verify`, at medium |
+| large | Opus | Sol | `code`, at medium |
+| top | Fable | Astra | `refactor`, `research`, at medium |
+
+That is the built-in table. The person may have changed rows in Settings → Orchestrator, for
+the app or for the project, and the project's table is the one used. `runs create` resolves
+each tier against the models the agent has installed, and the run then shows every piece's
+`model`, `effort` and `tier`. When an agent has no model of a tier, the piece runs on your
+own model (or, for a worker on another agent than yours, on that agent's default), and its
+`modelNote` says so.
+
+Do not put every piece on your own model, and do not put everything on the smallest one: a
+search on a top model wastes most of what it costs, and a refactor on a small one fails. Name
+the kind honestly and let the table choose.
 
 #### Approval
 
@@ -735,28 +775,145 @@ The loop:
 
 ```text
 terminalx runs start --json
-terminalx wait --children-of <your session> --any --json
-terminalx sessions report --children-of <your session> --json
+terminalx wait --children-of <your session> --json
+terminalx runs show --json
 terminalx runs start --json
 ```
 
+Do not poll, and do not wait on single workers. While your run is under way,
+`wait --children-of <your session>` waits on the run itself: it does not return each time a
+worker's turn ends, but when a piece's result is accepted (`done`), when a piece stops for
+good (`blocked`, `failed`), when a piece is ready for you to start, or when the run has
+ended. It also returns at once when nothing is under way and nothing can start (a piece
+blocked on a question, say): waiting would change nothing. It returns `why` (a line for each
+of those), `ready` (the pieces `runs start` would
+start now), `state`, and every piece with its `state` and whether it `changed` since the
+wait began. `--all` returns only when nothing is under way any more. At the timeout it
+returns `timedOut: true`; wait again.
+
+#### How a result is checked
+
+A worker's `done` is a claim. The piece is `verifying`, not `done`, until TerminalX has
+checked the result itself, and nothing that depends on it starts before then. The checks run
+in this order and stop at the first that fails; the first four use no model:
+
+1. **Report.** The worker's report block parses and says `done`. A worker that ends without
+   a report that can be read, after one reminder, fails here.
+2. **Scope.** `git diff --name-only` against your branch names only files the piece `owns`.
+   A file outside them fails the piece, naming the file.
+3. **Branch state.** The work is committed on the piece's branch, the worktree is clean, and
+   your branch merges into it without conflicts (`git merge-tree`).
+4. **Command checks.** Every `command` done-check, then the project's own check command if
+   it has one and the piece changed files. TerminalX runs them in the worker's worktree. A
+   failure keeps the exit code and the last 100 lines. They are run unasked only where a
+   person approved the plan, or the piece's worker runs in `bypassPermissions`; in a project
+   that starts runs without approval and asks its workers before a command, they are left
+   unrun (`facts.commandsNotRun`) and a verifier reads the result instead.
+5. **Review**, only when one of these holds: the piece has no `command` check, or its
+   commands were not run; the diff
+   touches a security area (the ones an issue pipeline runs its security pass for); the diff
+   is over 400 changed lines (a setting, `reviewDiffLines`); the piece's kind is `refactor`;
+   or the plan asks for one with a `review` or `vote` check.
+
+A piece with a passing `command` check, a small diff, no security area and a kind other than
+`refactor` is accepted after step 4 with no verifier session at all. So give every piece a
+command that really proves it, and keep pieces small: that is what keeps checking free.
+
+A verifier is a conversation of its own in the worker's worktree that cannot edit files and
+runs only commands that read (`git diff`, `cat`, `rg`, `grep`, `ls`); anything else, and every
+tool of a connected server, is refused. It
+is sent the piece's goal, its done-checks, the diff and what the gates printed, and none of
+the worker's transcript or report. It runs on the routing table's `verify` row (mid, at
+medium, unless the person changed it), not on the worker's model, and ends with a verdict:
+pass, or fail with `file:line` evidence.
+
+A result that fails any check is a try that fell short: the piece takes the next step below
+with what the check printed (or the verifier's evidence) as the failure text. You do not
+re-run the checks, rewrite the failure or brief the next worker. A review that nobody could
+answer (the verifier gave no verdict that can be read) leaves the piece `blocked` with that
+in its `note`: nothing says the result is wrong; read the diff yourself, or tell the person.
+
+Each try records its check under `verification`: `gates` (each one that ran, with `passed`,
+`detail`, and for the commands each `run`, `exitCode`, `millis` and, for one that failed,
+its `output`), `facts` (`files`, `changedLines`, `securityAreas`, and the `commit` that was
+checked), `review` when a model was asked (`reasons`, `voters`, `threshold`, and each
+verifier's `model`, `verdict`, `evidence` and `tokens`), and `outcome` (`passed`, `failed`,
+`inconclusive`). `runs show` also returns `verifierTokens`: what every verifier in the run
+used, apart from what the workers used.
+
+#### When a piece falls short
+
+A piece whose worker reports `failed` or `partial`, or whose result fails a check, is tried
+again without you asking, and you do not start, brief or message anything for it. Each try is a new worker session in a
+new worktree, on what the next step names, briefed with the piece again plus what the try
+before fell short on and the branch it left. It never gets the earlier worker's
+conversation. A piece gets at most three tries:
+
+1. The first, on its kind's model and effort.
+2. The same model with the failure text, and the effort raised one level, never past
+   `high` (at `high` or above, or on a model with no effort levels, the same effort again).
+3. One model tier up, at one effort level lower.
+
+After the third try, or the second when no model tier above it is installed, the piece is
+`blocked` and its `note` says what was tried and what failed last. Three is also the most
+rounds of checking and fixing a piece gets: each try is checked once, and there is no fourth. A run in which nothing
+else can run is then `failed`, and `reason` names the piece. From there the choice is
+yours: `send` its last worker what it is missing (the piece is `running` again and takes
+its next report), do the piece yourself, or tell the person.
+
+So after `wait` returns, read the run, not only the reports: `sessions report` still lists
+the worker that fell short with its `failed` report (or with a `done` report whose result
+failed a check), while `runs show` says the piece is `queued` or `running` on its next try.
+Do not `send` a worker whose piece moved on.
+
+A worker that reports `blocked`, sends no report or waits on a person is not tried again: a
+different model would not have what it lacks. That piece is `blocked` after one try and
+waits on you.
+
+TerminalX runs the done-checks, so you seldom need to. When a piece is `done` and you find
+something its checks did not catch, say so instead of fixing it yourself or messaging the
+worker:
+
+```text
+terminalx runs check-failed <piece> --output check.log --reason "exit 101" --json
+```
+
+`--output` is a file with what the check printed (`-` for standard input); `--reason` is a
+line of your own; give at least one. The piece takes the same next step as above, with that
+text as what its next worker is told failed. It returns `run`, `piece`, `retried` (a worker
+was started for the next try) and `blocked` (the piece ran out of tries). Run the check
+before you call `runs start` for the pieces that depend on it: they are cut from what is
+committed when they start. It is refused with `piece_not_done` for a piece that did not
+report `done`, and a run's worker cannot call it (`not_the_lead`).
+
 `runs show` returns the run: `state`, `goal`, `budget`, `workerMode`, `pieces`, `ready` (the
 pieces the next `runs start` would start), `waiting`, `estimate` with `unestimated` (how
-many pieces carry none), `limits`, `usage`, `pause`, `inTurn` (its workers in a turn now)
-and `fit`. Each piece has its plan fields and `state`, `attempts`, `worker` (`sessionId`,
-`tabId`), `branch`, `startedMode`, `login` (`apiKey` or `subscription`), `queuedFor` and
-`note`.
+many pieces carry none), `maxTries`, `costUsd` (what its workers used so far, at API list
+prices, as `sessions usage` counts it; `null` before any was read), `limits`, `usage`,
+`pause`, `inTurn` (its workers in a turn now) and `fit`. Each piece has its plan fields and
+`state`, `tier`, `modelNote`, `modelByKind` and `effortByKind` (true when the plan left that
+one to the piece's kind), `attempts`, `worker` (`sessionId`, `tabId`), `branch`,
+`startedMode`, `login` (`apiKey` or `subscription`), `queuedFor`, `note`, `costUsd` and
+`tries`. `model`, `effort`, `worker` and `branch` are those of its current try.
+
+`tries` is every try, oldest first: `step` (`first`, `retry`, `effort` or `tier`: what made
+it differ from the one before), `model`, `effort`, `tier`, `worker`, `branch`, `outcome`
+(`done`, `failed`, `partial`, `checkFailed`, `blocked`, `stopped`; absent while it runs),
+`detail` (the result line, or the failure text the next try was given), `costUsd`,
+`verification` (how its result was checked, above), `started` and `ended`.
 
 - Run `state`: `planned`, `awaitingApproval`, `running`, `needsYou`, `verifying`, `merging`,
   `done`, `stopped`, `failed`. A run is `done` when every piece is. It is `failed` when a
-  piece failed and nothing is running or could start; `reason` names the piece and what it
-  holds up. A failed run goes back to `running` when that piece's worker finishes after all.
-  `needsYou`: it reached its budget (see below).
+  piece ran out of tries and nothing is running or could start; `reason` names the piece and
+  what it holds up. A failed run goes back to `running` when that piece's worker finishes
+  after all. `needsYou`: it reached its budget (see below).
 - Piece `state` follows its worker's last report, each time the run is read: `queued` (no
-  worker yet), `running`, `stalled` (see below), `done` (it reported `done`), `blocked` (it reported `partial` or
-  `blocked`, sent no report, waits on a person, or its session was deleted; `note` says
-  which), `failed` (it reported `failed`, or could not be started), `stopped`. A `done`
-  piece stays done when its worker's session is deleted afterwards.
+  worker yet, or its next try waits for one), `running`, `verifying` (it reported `done`
+  and its result is being checked), `done` (its result passed every check), `blocked` (it
+  ran out of tries, reported `blocked`, waits on a person, its review could not be finished,
+  or its session was deleted; `note` says which), `failed` (its worker could not be
+  started), `stopped`. A `done` piece stays done when its worker's session is deleted
+  afterwards.
 
 #### Limits and budget
 
@@ -769,10 +926,14 @@ less; the person can change them for the run in the approval view, or when it st
   rest `queued` with `queuedFor: "runLimit"` or `"appLimit"`. Those start by themselves when
   a worker's turn ends, in this run or another: do not call `runs start` for them, and do not
   poll. A piece that becomes ready only because a piece it depends on finished still waits
-  for your `runs start`, so you can collect that branch first. A stalled worker still holds
-  its slot. Sessions a person starts by hand are never counted, queued or refused.
+  for your `runs start`, so you can collect that branch first. A retry or an escalated try
+  (`tries`) takes a slot like any other worker: it queues when none is free, and starts by
+  itself when one is. A stalled worker still holds its slot. A `verifying` piece does not:
+  its worker's turn has ended, its verifiers are not counted, and a result that fails its
+  checks goes to a fresh try that waits for a slot. Sessions a person starts by hand are
+  never counted, queued or refused.
 - **Budget.** A worker on an API key (Settings → Agents) draws on `dollars`: `usage.dollars`
-  sums its recorded cost. A worker on a subscription draws on its account's usage windows,
+  sums the recorded cost (`costUsd`) of every try of its pieces, not only the current one. A worker on a subscription draws on its account's usage windows,
   and on the model windows of its own model (`usage.windows`, each with the `percent` it is
   at, the `start` it was at when the run began, the run's `points` and `resetsAt`). The run's
   points are an estimate: the window is shared with everything the person runs. The run
@@ -792,9 +953,10 @@ less; the person can change them for the run in the approval view, or when it st
 - `fit`, before a run starts: warnings that what the run may use would not fit in what is
   left of a window, or that your estimate is over the dollar budget. The person sees them.
 
-A `done` piece is a worker's claim. Read its report and check the evidence before you build
-on it. To get a `blocked` or `failed` piece moving, `send` its worker what it needs: the
-piece is `running` again while the worker works, and takes its next report.
+
+A `done` piece passed its checks; that is as much as they prove. When you find something
+they did not catch, report it with `runs check-failed`. To get a `blocked` piece moving, `send` its worker what it needs: the piece is `running` again while
+the worker works, and takes its next report.
 
 `runs stop` stops every running worker and marks the run `stopped`; pieces that were not
 done become `stopped`. It returns `stopped` (pieces whose worker was running) and `failed`

@@ -68,6 +68,8 @@ fn emit(app: &AppHandle, kind: &'static str, text: Option<String>, message: Opti
     emit_segment(app, kind, text, message, None);
 }
 
+// Only macOS dictation requests access through the system privacy services.
+#[cfg(target_os = "macos")]
 fn emit_privacy_error(app: &AppHandle, message: String, settings: &'static str) {
     trace("error", None, Some(&message), None);
     let _ = app.emit(
@@ -77,6 +79,8 @@ fn emit_privacy_error(app: &AppHandle, message: String, settings: &'static str) 
 }
 
 /// The microphone is open and the engine is ready to hear it.
+// The listening engines are currently implemented only by macOS dictation.
+#[cfg(target_os = "macos")]
 fn emit_listening(app: &AppHandle, live: bool) {
     trace("listening", None, Some(if live { "live" } else { "words at stop" }), None);
     let _ = app.emit("dictation", DictationEvent { kind: "listening", text: None, raw: None, message: None, settings: None, segment: None, live: Some(live) });

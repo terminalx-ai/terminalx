@@ -1,4 +1,4 @@
-import { ManualStatusIcon, ManualStatusMenu } from "@/components/session/ManualStatus";
+import { ManualStatusMenu } from "@/components/session/ManualStatus";
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { StatusGroups } from "../StatusGroups";
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
@@ -19,8 +19,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { StatusBadge } from "@/components/ui/SessionStatus";
-import { sessionStatus as detailedStatus } from "@terminalx/portable/sessionStatus";
+import { StatusMarkIcon } from "@/components/ui/SessionStatus";
+import { sessionStatus as detailedStatus, statusText } from "@terminalx/portable/sessionStatus";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { archiveLine, deletionLine } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { archivingText, describeWorkspace } from "@/components/cloud/CloudWorkspaceView";
@@ -507,6 +507,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
  */
 function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row: CloudSessionRow; status: TabStatus; manage: boolean; canSetStatus: boolean; selected: boolean }) {
   const statusDescriptionId = useId();
+  const rowStatus = detailedStatus(row.rowStatus ?? { tabs: [{ status }] });
   const menu = useRowMenu();
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(row.title);
@@ -587,17 +588,14 @@ function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row
             aria-current={selected ? "true" : undefined}
             className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
-            <span title={manualStatusLabel(row.manualStatus)}><ManualStatusIcon status={row.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(row.manualStatus)}</span></span>
+            {/* As local rows (02.04): the status mark leads; the PR number or the time follows the title. */}
+            <StatusMarkIcon status={rowStatus} decorative /><span id={statusDescriptionId} hidden>{statusText(rowStatus)}. Status: {manualStatusLabel(row.manualStatus)}</span>
             {row.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             <span className={cn("min-w-0 flex-1 truncate text-[13px]", row.archived && "text-faint")}>{row.title}</span>
-            <StatusBadge status={detailedStatus(row.rowStatus ?? { tabs: [{ status }] })} className="max-w-[48%]" />
-            {status === "in_progress" ? null : row.branch ? (
-              <span className={cn("flex max-w-[45%] shrink-0 items-center gap-1 font-mono text-[10px] text-faint", yieldsToRowActions)}>
-                <GitBranch className="size-3 shrink-0" />
-                <span className="truncate">{row.branch}</span>
-              </span>
+            {rowStatus.pr ? (
+              <span data-row-meta="pr" className={cn("shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground", yieldsToRowActions)}>PR #{rowStatus.pr}</span>
             ) : (
-              <RowTime at={row.modified} />
+              <span data-row-meta="time" className="font-mono text-[11px]"><RowTime at={row.modified} /></span>
             )}
           </button>
         )}

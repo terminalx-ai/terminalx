@@ -198,8 +198,8 @@ fn counted(run: &Run) -> impl Iterator<Item = &Piece> {
 }
 
 /// Bring `run.usage` up to date. `windows` are the usage windows as the
-/// status bar has them now; `cost` is what a started worker's session has
-/// cost so far (`None` when not read yet); `login_now` is how an agent is
+/// status bar has them now; `cost` is what a piece's tries have cost so far, every
+/// try included (`None` when none was read); `login_now` is how an agent is
 /// signed in for a new tab; `active` is whether the run has workers started,
 /// which is when its share of a window begins to count.
 pub fn update(run: &mut Run, windows: &[UsageWindow], cost: &dyn Fn(&Piece) -> Option<f64>, login_now: &dyn Fn(&str) -> Login, active: bool) {
@@ -208,9 +208,7 @@ pub fn update(run: &mut Run, windows: &[UsageWindow], cost: &dyn Fn(&Piece) -> O
         match login_of(piece, login_now) {
             Login::ApiKey => {
                 usage.api_key = true;
-                if piece.worker.is_some() {
-                    usage.dollars += cost(piece).unwrap_or(0.0);
-                }
+                usage.dollars += cost(piece).unwrap_or(0.0);
             }
             Login::Subscription => usage.subscription = true,
         }

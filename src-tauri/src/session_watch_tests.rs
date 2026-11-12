@@ -708,6 +708,18 @@ fn a_denied_codex_command_run_again_is_asked_about_again() {
     stale_clicks_do_nothing(&rig, &cards);
 }
 
+/// The status and output of a read-only command TerminalX ran itself, from
+/// the hook reply that answers for it in the provider's place.
+fn ran_by_terminalx(reply: &HookReply, kind: CliKind) -> Option<(i32, String)> {
+    let output = &reply.output.as_ref()?["hookSpecificOutput"];
+    let (decision, report) = match kind {
+        CliKind::Codex => (&output["permissionDecision"], &output["permissionDecisionReason"]),
+        CliKind::Claude => (&output["decision"]["behavior"], &output["decision"]["message"]),
+    };
+    assert_eq!(decision, "deny", "only a denial keeps the provider from running it: {output}");
+    crate::harness::read_only::ran_result(report.as_str()?)
+}
+
 fn command_frame(rig: &Rig, gate: &str, command: &str, cwd: &str) -> HookFrame {
     HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(),
         payload: json!({"cwd": cwd, "tool_name":"Bash", "tool_input":{"command":command}}) }
@@ -762,18 +774,84 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
-        let mut commands = vec!["pwd; ls", "ls; cat file", "cat file | grep -n hello"];
-        if which::which("rg").is_ok() { commands.push("pwd; rg --files"); }
-        for command in commands {
-            let frame = command_frame(&rig, gate, command, "/workspace/app");
-            let updated = crate::harness::read_only::approved_input("Bash", &frame.payload["tool_input"], Some("/workspace/app")).unwrap();
-            let reply = rig.manager.on_hook(frame);
-            assert_eq!(reply.output, Some(if kind == CliKind::Codex { codex::pty::pre_tool_rewrite(updated) } else { claude::pty::permission_decision(true, Some(updated), vec![]) }));
+        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        std::fs::create_dir(&app).unwrap();
+        std::fs::write(app.join("file"), "hello\n").unwrap();
+        let app_path = app.to_str().unwrap();
+        let mut commands = vec![
+            ("pwd; ls", format!("{app_path}\nfile\n")),
+            ("ls; cat file", "file\nhello\n".into()),
+            ("cat file | grep -n hello", "1:hello\n".into()),
+        ];
+        if which::which("rg").is_ok() { commands.push(("pwd; rg --files", format!("{app_path}\nfile\n"))); }
+        for (command, expected) in commands {
+            let reply = rig.manager.on_hook(command_frame(&rig, gate, command, app_path));
+            // TerminalX ran it and answers with its result: the provider
+            // is given nothing to run in the user's shell (PRO-330).
+            assert_eq!(ran_by_terminalx(&reply, kind), Some((0, expected)), "{command}");
             assert!(rig.manager.pending_permissions().is_empty());
             assert!(!rig.events().iter().any(|event| matches!(event.payload, Payload::PermissionRequested { .. })));
         }
         for command in ["pwd; touch file", "ls && rm file", "cat file | curl example.com", "ls > file"] {
             answer_command(&rig, command_frame(&rig, gate, command, "/workspace/app"), "deny", true);
+        }
+    }
+}
+
+/// Codex records no item for a call its hook answered, so TerminalX shows
+/// the command it ran as a row of its own, with the command's own result.
+/// Claude's transcript carries the call and its result already.
+#[test]
+#[cfg(unix)]
+fn a_command_terminalx_ran_for_codex_gets_its_own_row() {
+    for kind in [CliKind::Codex, CliKind::Claude] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        let app = std::fs::canonicalize(rig._dir.path()).unwrap();
+        std::fs::write(app.join("file"), "hello\n").unwrap();
+        let mut frame = command_frame(&rig, gate, "grep hello file", app.to_str().unwrap());
+        frame.payload["tool_use_id"] = json!("call_ran");
+        assert_eq!(ran_by_terminalx(&rig.manager.on_hook(frame), kind), Some((0, "hello\n".into())));
+        let events = rig.events();
+        let started = events.iter().find_map(|e| match &e.payload {
+            Payload::ToolCallStarted { call_id, input, .. } if call_id == "terminalx-ran-call_ran" => Some(input.clone()),
+            _ => None,
+        });
+        let completed = events.iter().find_map(|e| match &e.payload {
+            Payload::ToolCallCompleted { call_id, result } if call_id == "terminalx-ran-call_ran" => Some(result.clone()),
+            _ => None,
+        });
+        if kind == CliKind::Codex {
+            assert_eq!(started, Some(json!({"command":"grep hello file", "cwd": app.to_str().unwrap()})));
+            let completed = completed.expect("the row completes");
+            assert_eq!((completed.text.as_str(), completed.is_error, completed.exit_code), ("hello\n", false, Some(0)));
+        } else {
+            assert!(started.is_none() && completed.is_none(), "Claude's transcript shows the call");
+        }
+    }
+}
+
+/// TerminalX runs discovery outside the provider's sandbox, so a sandbox
+/// that could narrow reads keeps every command on the card (PRO-330
+/// review); the CLI then runs an allowed one inside its sandbox.
+#[test]
+#[cfg(unix)]
+fn a_provider_sandbox_that_could_narrow_reads_keeps_discovery_on_the_card() {
+    for (kind, file, text) in [
+        (CliKind::Claude, ".claude/settings.local.json", r#"{"sandbox":{"enabled":true,"filesystem":{"denyRead":["~/.ssh"]}}}"#),
+        (CliKind::Codex, ".codex/config.toml", "[permissions.filesystem]\ndeny_read = [\"~/.ssh\"]\n"),
+    ] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        let project = rig._dir.path().join("project");
+        std::fs::create_dir_all(project.join(file).parent().unwrap()).unwrap();
+        std::fs::write(project.join(file), text).unwrap();
+        // answer_command fails unless the command waits on a card.
+        let reply = answer_command(&rig, command_frame(&rig, gate, "pwd", project.to_str().unwrap()), "allow", true);
+        let output = reply.output.unwrap();
+        match kind {
+            CliKind::Claude => assert_eq!(output["hookSpecificOutput"]["decision"], json!({"behavior":"allow"}), "the CLI runs it, in its sandbox"),
+            CliKind::Codex => assert_eq!(output, json!({}), "the CLI runs it, in its sandbox"),
         }
     }
 }
@@ -827,8 +905,12 @@ fn codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution(
         std::process::Command::new("/bin/sh").current_dir(cwd).args(["-c", command]).output().unwrap()
     };
     let discovery = rig.manager.on_hook(codex_0164_frame(&rig, &a, "pwd; cat relative-file | grep hello"));
-    assert!(execute(&discovery, &a).status.success(), "normal Codex discovery must run without a card");
-    assert_eq!(execute(&discovery, &b).status.code(), Some(125), "a session directory must not stand in for another execution workdir");
+    // TerminalX runs discovery itself, only ever in the reported directory,
+    // and says so: Codex's hook leaves out the workdir it would have used.
+    assert_eq!(ran_by_terminalx(&discovery, CliKind::Codex), Some((0, format!("{}\nhello\n", a.display()))), "normal Codex discovery must run without a card");
+    let reason = discovery.output.as_ref().unwrap()["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+    assert!(reason.contains("does not tell TerminalX a call's workdir"), "{reason}");
+    assert!(discovery.output.as_ref().unwrap()["hookSpecificOutput"].get("updatedInput").is_none(), "Codex must not run anything in its shell for discovery");
     assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionRequested { .. })));
 
     let first = answer_command(&rig, codex_0164_frame(&rig, &a, "rm relative-file"), crate::harness::read_only::SESSION_OPTION, true);
@@ -861,7 +943,8 @@ fn turning_the_builtin_list_off_asks_on_the_next_command_in_a_running_tab() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
-        assert!(rig.manager.on_hook(command_frame(&rig, gate, "pwd", "/workspace/app")).output.is_some());
+        let app = rig._dir.path().to_str().unwrap();
+        assert_eq!(ran_by_terminalx(&rig.manager.on_hook(command_frame(&rig, gate, "pwd", app)), kind).map(|(status, _)| status), Some(0));
         let mut settings = store::settings::load();
         settings.agents.read_only_commands = false;
         store::settings::save(&settings).unwrap();
@@ -898,7 +981,8 @@ fn session_allowance_matches_the_exact_input_directory_and_tab_across_turns() {
 #[cfg(unix)]
 fn automatic_discovery_and_session_grants_never_answer_codex_escalation() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
-    assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "pwd", "/workspace/app")).output.is_some());
+    let app = rig._dir.path().to_str().unwrap();
+    assert_eq!(ran_by_terminalx(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "pwd", app)), CliKind::Codex).map(|(status, _)| status), Some(0));
     answer_command(&rig, command_frame(&rig, "PermissionRequest", "pwd", "/workspace/app"), "deny", false);
     answer_command(&rig, command_frame(&rig, "PreToolUse", "touch note", "/workspace/app"), crate::harness::read_only::SESSION_OPTION, true);
     assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "touch note", "/workspace/app")).output.is_some());
@@ -1756,6 +1840,21 @@ impl Drop for Rig {
     }
 }
 
+#[test]
+fn dropping_the_last_manager_releases_its_background_watcher() {
+    let rig = Rig::new();
+    let observer = Arc::downgrade(&rig.observer);
+    let manager = rig.manager.clone();
+    drop(rig);
+    assert!(observer.upgrade().is_some(), "a live manager still owns its observer");
+    drop(manager);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while observer.upgrade().is_some() && Instant::now() < deadline {
+        std::thread::sleep(MOMENT);
+    }
+    assert!(observer.upgrade().is_none(), "the poll thread must not retain a dropped manager forever");
+}
+
 // ---- #404: one model and effort, whichever side changed it
 
 const STATUS_FRAMES: &str = include_str!("harness/claude/fixtures/status_line.jsonl");
@@ -2562,8 +2661,15 @@ fn no_enter_is_written_into_a_cli_that_has_not_read_its_input() {
     let _receipt = continuation_entered_unacknowledged(&rig, 5);
     // The handoff's Enter, still in the queue: the CLI has stopped reading.
     rig.manager.terminals.write(&rig.pane, tui::SUBMIT).unwrap();
-    let unread = rig.manager.terminals.unread_input(&rig.pane);
-    assert!(unread.is_some_and(|n| n > 0), "the platform reports unread input");
+    // Linux can finish the master write before its line discipline exposes
+    // the byte on the slave. Observe the queued input before nudging it.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let unread = loop {
+        let unread = rig.manager.terminals.unread_input(&rig.pane);
+        if unread.is_some_and(|n| n > 0) { break unread; }
+        assert!(Instant::now() < deadline, "the platform never reported unread input: {unread:?}");
+        std::thread::sleep(MOMENT);
+    };
     for _ in 0..tui::NUDGES {
         rig.advance(tui::NUDGE_AFTER);
         rig.tick();

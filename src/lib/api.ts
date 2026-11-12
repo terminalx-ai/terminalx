@@ -1,5 +1,5 @@
 import { privacyBlocksCommand, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
-import type { OrchestratorPatch, OrchestratorSettings, Run, RunLimits, RunPlan, RunStart, RunStop } from "@/types/orchestration";
+import type { OrchestratorLimits, OrchestratorPatch, OrchestratorSettings, Run, RunLimits, RunPlan, RunStart, RunStop, TierModels } from "@/types/orchestration";
 import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -2712,7 +2712,9 @@ export const orchestration = {
   /** Store a plan a person chose from a file as a run of `sessionId`; refused as `runs create` refuses. */
   create: (sessionId: string, plan: unknown) => invoke<Run>("orchestration_create", { sessionId, plan }),
   /** What holds for runs in one project: its own answers, the app's where it gave none. */
-  limits: (projectPath: string) => invoke<{ requireApproval: boolean; pieceLimit: number; workerMode: string; workersPerRun: number; workersAtOnce: number; budgetDollars: number; budgetPoints: number; windowCeiling: number; stallMinutes: number }>("orchestrator_limits", { projectPath }),
+  limits: (projectPath: string) => invoke<OrchestratorLimits>("orchestrator_limits", { projectPath }),
+  /** The model each tier of the routing table runs on today, per agent. */
+  tierModels: (refresh = false) => invoke<TierModels>("orchestrator_tier_models", { refresh }),
   approve: (id: string) => invoke<RunStart>("orchestration_approve", { id }),
   /** Stop a run, or discard a plan nobody approved. */
   stop: (id: string) => invoke<RunStop>("orchestration_stop", { id }),

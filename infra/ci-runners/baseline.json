@@ -1,0 +1,152 @@
+[
+  {
+    "id": 42187021437,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42187021437",
+    "sha": "1cee963a2c392364ad0c9899f2d1ac9bbc5fb99a",
+    "event": "pull_request",
+    "started_at": "2026-11-06T08:20:55Z",
+    "minutes": {
+      "Whole run": 53.63333333333333,
+      "desktop-platforms (ubuntu-latest)": 7.533333333333333,
+      "legacy-runtime-probe (macos-latest)": 0.15,
+      "legacy-runtime-probe (ubuntu-latest)": 0.13333333333333333,
+      "headless-serve": 3.2333333333333334,
+      "check": 53.416666666666664
+    }
+  },
+  {
+    "id": 42182759310,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42182759310",
+    "sha": "ef15312fad9ae5884c83a71b0ba73e0ad3a58206",
+    "event": "pull_request",
+    "started_at": "2026-11-06T07:43:37Z",
+    "minutes": {
+      "Whole run": 58.266666666666666,
+      "legacy-runtime-probe (macos-latest)": 0.16666666666666666,
+      "headless-serve": 3.933333333333333,
+      "desktop-platforms (ubuntu-latest)": 6.916666666666667,
+      "legacy-runtime-probe (ubuntu-latest)": 0.11666666666666667,
+      "check": 58.016666666666666
+    }
+  },
+  {
+    "id": 42182220329,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42182220329",
+    "sha": "ce2f2110582fe44515738454d1af60e45611bca0",
+    "event": "pull_request",
+    "started_at": "2026-11-06T07:38:37Z",
+    "minutes": {
+      "Whole run": 20.55,
+      "check": 20.516666666666666,
+      "legacy-runtime-probe (ubuntu-latest)": 0.13333333333333333,
+      "legacy-runtime-probe (macos-latest)": 0.16666666666666666,
+      "desktop-platforms (ubuntu-latest)": 5.933333333333334,
+      "headless-serve": 2.9166666666666665
+    }
+  },
+  {
+    "id": 42181472026,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42181472026",
+    "sha": "c5562d809ebde17ecbaee83dc623bcb5aa9b557f",
+    "event": "pull_request",
+    "started_at": "2026-11-06T07:31:52Z",
+    "minutes": {
+      "Whole run": 59.81666666666667,
+      "check": 59.766666666666666,
+      "legacy-runtime-probe (ubuntu-latest)": 0.13333333333333333,
+      "desktop-platforms (ubuntu-latest)": 7.966666666666667,
+      "legacy-runtime-probe (macos-latest)": 0.15,
+      "headless-serve": 2.6333333333333333
+    }
+  },
+  {
+    "id": 42180827149,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42180827149",
+    "sha": "8edc397e3119a21d25a9d43ee2ad9be6980a324d",
+    "event": "pull_request",
+    "started_at": "2026-11-06T07:25:53Z",
+    "minutes": {
+      "Whole run": 74.08333333333333,
+      "headless-serve": 3.15,
+      "legacy-runtime-probe (macos-latest)": 0.15,
+      "desktop-platforms (ubuntu-latest)": 9.016666666666667,
+      "check": 74.03333333333333,
+      "legacy-runtime-probe (ubuntu-latest)": 0.13333333333333333
+    }
+  },
+  {
+    "id": 42083542482,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42083542482",
+    "sha": "9d129c44ccad430582d556b4fec89e22625222d6",
+    "event": "pull_request",
+    "started_at": "2026-11-05T18:22:07Z",
+    "minutes": {
+      "Whole run": 74.81666666666666,
+      "desktop-platforms (ubuntu-latest)": 7.55,
+      "check": 60.6,
+      "legacy-runtime-probe (macos-latest)": 0.2,
+      "legacy-runtime-probe (ubuntu-latest)": 0.15,
+      "headless-serve": 3.033333333333333
+    }
+  },
+  {
+    "id": 42081866999,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42081866999",
+    "sha": "76b522c487d357fd302f3f2481257eeebe428ded",
+    "event": "pull_request",
+    "started_at": "2026-11-05T18:11:39Z",
+    "minutes": {
+      "Whole run": 55.016666666666666,
+      "headless-serve": 3.3,
+      "legacy-runtime-probe (macos-latest)": 0.2,
+      "desktop-platforms (ubuntu-latest)": 44.766666666666666,
+      "check": 54.96666666666667,
+      "legacy-runtime-probe (ubuntu-latest)": 0.15
+    }
+  },
+  {
+    "id": 42078671635,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42078671635",
+    "sha": "1acbdee62d4d25ac1276212211cb8245a4d7bb0d",
+    "event": "pull_request",
+    "started_at": "2026-11-05T17:51:25Z",
+    "minutes": {
+      "Whole run": 55.5,
+      "check": 55.43333333333333,
+      "headless-serve": 2.8833333333333333,
+      "legacy-runtime-probe (ubuntu-latest)": 0.13333333333333333,
+      "legacy-runtime-probe (macos-latest)": 0.25,
+      "desktop-platforms (ubuntu-latest)": 6.7
+    }
+  },
+  {
+    "id": 42078411228,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/42078411228",
+    "sha": "78d9293d62a9866d2dcfb1065bf7a9ee02b40c3d",
+    "event": "pull_request",
+    "started_at": "2026-11-05T17:49:47Z",
+    "minutes": {
+      "Whole run": 60.083333333333336,
+      "desktop-platforms (ubuntu-latest)": 7.366666666666666,
+      "check": 60.016666666666666,
+      "legacy-runtime-probe (macos-latest)": 0.21666666666666667,
+      "headless-serve": 3.1333333333333333,
+      "legacy-runtime-probe (ubuntu-latest)": 0.2
+    }
+  },
+  {
+    "id": 41801072107,
+    "url": "https://github.com/terminalx-ai/terminalx/actions/runs/41801072107",
+    "sha": "6a1c10b41cff508bd768092e62de8d830fe6f3f2",
+    "event": "pull_request",
+    "started_at": "2026-11-04T08:38:30Z",
+    "minutes": {
+      "Whole run": 63.53333333333333,
+      "desktop-platforms (ubuntu-latest)": 6.966666666666667,
+      "legacy-runtime-probe (ubuntu-latest)": 0.11666666666666667,
+      "legacy-runtime-probe (macos-latest)": 0.21666666666666667,
+      "check": 63.483333333333334,
+      "headless-serve": 3.4166666666666665
+    }
+  }
+]

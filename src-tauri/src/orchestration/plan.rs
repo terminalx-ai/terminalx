@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::routing::{self, LeadModel, Table, KINDS};
 use super::{Brief, Budget, Check, Estimate, Piece, PieceState};
+use crate::models::Model;
 
 /// The modes a worker may be started in: the ones `sessions create --mode` takes.
 pub const MODES: [&str; 5] = ["plan", "manual", "auto", "acceptEdits", "bypassPermissions"];
@@ -140,6 +142,12 @@ pub struct Rules<'a> {
     /// A person approves the plan before anything starts. Without that, no
     /// piece may ask for a mode that allows more than the project's.
     pub approval: bool,
+    /// The project's routing table: the model and effort of a piece whose plan names none.
+    pub routing: &'a Table,
+    /// What the agents' CLIs list: a tier is resolved against it.
+    pub models: &'a [Model],
+    /// The lead's own model: a tier nobody installed falls back to it.
+    pub lead_model: &'a str,
     /// The lead's checkout, to tell a directory a piece owns from a file. Without it only
     /// an entry written with a trailing slash is a directory.
     pub checkout: Option<&'a std::path::Path>,
@@ -156,9 +164,9 @@ fn allows(mode: &str) -> usize {
 ///
 /// Refused, in this order: a plan with no goal or no pieces; more pieces
 /// than the limit; a piece without an id or a title, or with an id another
-/// piece has; an agent that is not on offer, an unknown permission mode, or
-/// one that allows more than the project's where nobody approves the plan; a
-/// piece with no done-check; a dependency on a piece the plan does not have;
+/// piece has; an agent that is not on offer, no kind or one that does not
+/// exist, an unknown permission mode, or one that allows more than the
+/// project's where nobody approves the plan; a piece with no done-check; a dependency on a piece the plan does not have;
 /// a dependency cycle; two pieces that own the same file.
 pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
     if plan.goal.trim().is_empty() {
@@ -196,6 +204,19 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
                 format!("Piece {id} names the agent {agent}, which cannot be a worker here. Use one of: {}.", rules.agents.join(", ")),
                 json!({"agent": agent, "agents": rules.agents}),
             ));
+        }
+        // Every piece has a kind: its model and effort come from it, and so does how its result is checked.
+        let kind = piece.kind.as_deref().map(str::trim).unwrap_or_default();
+        if kind.is_empty() {
+            return Err(PlanError::new(
+                "no_kind",
+                Some(id),
+                format!("Piece {id} has no kind. Say in `kind` what sort of work it is, one of: {}. Its model and effort come from its kind unless the plan names them.", KINDS.join(", ")),
+                json!({"kinds": KINDS}),
+            ));
+        }
+        if !KINDS.contains(&kind) {
+            return Err(PlanError::new("unknown_kind", Some(id), format!("Piece {id} has the kind {kind}, which is not one. Use one of: {}.", KINDS.join(", ")), json!({"kind": kind, "kinds": KINDS})));
         }
         if let Some(mode) = piece.permission_mode.as_deref().filter(|mode| !MODES.contains(mode)) {
             return Err(PlanError::new(
@@ -241,6 +262,13 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
             _ => None,
         }) {
             return Err(PlanError::new("plan_invalid", Some(id), format!("Done-check {} of piece {id} is a vote that cannot pass: {} voters and a threshold of {}.", at + 1, voters.map_or("unset".into(), |n| n.to_string()), threshold.map_or("unset".into(), |n| n.to_string())), json!({"check": at})));
+        }
+        // TerminalX runs each command itself, on the worker's result: one that pushes, merges or deploys is no check.
+        if let Some((at, found)) = piece.done_checks.iter().enumerate().find_map(|(at, check)| match check {
+            Check::Command { run } => super::guard::refused(run).map(|(_, found)| (at, found)),
+            _ => None,
+        }) {
+            return Err(PlanError::new("check_not_allowed", Some(id), format!("Done-check {} of piece {id} runs `{found}`. A done-check is run by TerminalX on the worker's result and may not push, merge or deploy. Use a command that only checks: a test, a build, a search.", at + 1), json!({"check": at, "command": found})));
         }
         // A command is checked by running it: no model, no tokens. A piece with none says why.
         if !piece.done_checks.iter().any(|check| matches!(check, Check::Command { .. })) {
@@ -295,11 +323,17 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
         })?;
         owned.push(globs);
     }
+    let lead = LeadModel { agent: rules.default_agent, model: rules.lead_model };
     Ok(plan
         .pieces
         .iter()
         .zip(owned)
-        .map(|(piece, owns)| Piece {
+        .map(|(piece, owns)| {
+            let agent = piece.agent.as_deref().or(plan.agent.as_deref()).unwrap_or(rules.default_agent);
+            let kind = piece.kind.as_deref().map(str::trim).unwrap_or_default();
+            // What the plan names stands; what it leaves out comes from the table, by kind.
+            let chosen = routing::choose(kind, agent, piece.model.trim(), piece.effort.as_deref().map(str::trim).filter(|effort| !effort.is_empty()), rules.routing, rules.models, &lead);
+            Piece {
             id: piece.id.trim().to_string(),
             title: piece.title.trim().to_string(),
             brief: Brief {
@@ -318,13 +352,18 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
             review_only: piece.review_only,
             review_only_reason: piece.review_only_reason.trim().to_string(),
             kind: piece.kind.as_deref().map(str::trim).filter(|kind| !kind.is_empty()).map(str::to_owned),
-            agent: piece.agent.as_deref().or(plan.agent.as_deref()).unwrap_or(rules.default_agent).to_string(),
-            model: piece.model.trim().to_string(),
-            effort: piece.effort.as_deref().map(str::trim).filter(|effort| !effort.is_empty()).map(str::to_owned),
+            agent: agent.to_string(),
+            model: chosen.model,
+            effort: chosen.effort,
+            tier: chosen.tier,
+            model_note: chosen.note,
+            model_by_kind: chosen.model_by_kind,
+            effort_by_kind: chosen.effort_by_kind,
             permission_mode: piece.permission_mode.clone(),
             reads_untrusted: piece.reads_untrusted,
             estimate: piece.estimate,
             attempts: 0,
+            tries: Vec::new(),
             worker: None,
             branch: None,
             held: None,
@@ -333,6 +372,7 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
             queued_for: None,
             state: PieceState::Queued,
             note: None,
+            }
         })
         .collect())
 }
@@ -371,8 +411,7 @@ fn owned_glob(entry: &str, checkout: Option<&std::path::Path>) -> Result<String,
 
 /// Whether `path`, as `git diff --name-only` prints it, is one a piece owning `globs` may
 /// change. Exact about letter case, as git is. What the scope gate of verification
-/// (PRO-278) asks of each changed file; nothing asks it before then.
-#[cfg_attr(not(test), allow(dead_code))]
+/// asks of each changed file (`verify::gates`).
 pub fn owns(globs: &[String], path: &str) -> bool {
     let path: Vec<Token> = path.chars().map(Token::Lit).collect();
     globs.iter().any(|glob| readings(glob).iter().any(|glob| intersect(glob, &path)))
@@ -539,9 +578,11 @@ fn intersect(a: &[Token], b: &[Token]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestration::routing::tests::{MODELS, TABLE};
+    use crate::orchestration::routing::Tier;
 
     fn piece(id: &str) -> PlanPiece {
-        PlanPiece { id: id.into(), title: format!("Piece {id}"), done_checks: vec![Check::Command { run: "cargo t".into() }], ..Default::default() }
+        PlanPiece { id: id.into(), title: format!("Piece {id}"), done_checks: vec![Check::Command { run: "cargo t".into() }], kind: Some("code".into()), ..Default::default() }
     }
 
     fn plan(pieces: Vec<PlanPiece>) -> Plan {
@@ -550,11 +591,26 @@ mod tests {
 
     fn check(plan: &Plan, limit: u32) -> Result<Vec<Piece>, PlanError> {
         let agents = ["claude".to_string(), "codex".to_string()];
-        validate(plan, &Rules { piece_limit: limit, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: None })
+        validate(plan, &Rules { piece_limit: limit, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: None, routing: &TABLE, models: &MODELS, lead_model: "fable" })
     }
 
     fn refused(plan: &Plan) -> PlanError {
         check(plan, 8).expect_err("the plan is refused")
+    }
+
+    #[test]
+    fn a_done_check_that_pushes_merges_or_deploys_is_refused_naming_it() {
+        for (run, found) in [("cargo t && git push origin HEAD", "git push"), ("sh -c 'npm publish'", "npm publish"), ("gh pr merge 12 --squash", "gh pr merge")] {
+            let mut cli = piece("cli");
+            cli.done_checks = vec![Check::Command { run: "cargo t".into() }, Check::Command { run: run.into() }];
+            let error = refused(&plan(vec![cli]));
+            assert_eq!((error.code, error.piece.as_deref(), &error.details), ("check_not_allowed", Some("cli"), &json!({"check": 1, "command": found})), "{run}");
+            assert!(error.message.contains("may not push, merge or deploy"), "{}", error.message);
+        }
+        // Words in a review point are not a command.
+        let mut cli = piece("cli");
+        cli.done_checks.push(Check::Review { text: "Nothing in it runs git push.".into() });
+        assert!(check(&plan(vec![cli]), 8).is_ok());
     }
 
     #[test]
@@ -577,6 +633,77 @@ mod tests {
         let mut with_agent = plan(vec![piece("a")]);
         with_agent.agent = Some("codex".into());
         assert_eq!(check(&with_agent, 8).unwrap()[0].agent, "codex");
+    }
+
+    #[test]
+    fn a_plan_with_kinds_and_no_models_gets_models_and_efforts_from_the_table() {
+        let of = |id: &str, kind: &str, agent: &str| PlanPiece { kind: Some(kind.into()), agent: Some(agent.into()), ..piece(id) };
+        let pieces = check(&plan(vec![
+            of("map", "search", "claude"), of("fix", "scoped-code", "claude"), of("build", "code", "claude"), of("shape", "refactor", "claude"),
+            of("logs", "logs", "codex"), of("check", "verify", "codex"), of("port", "code", "codex"), of("study", "research", "codex"),
+        ]), 8).unwrap();
+        let chosen: Vec<(&str, &str, Option<&str>, Option<Tier>)> = pieces.iter().map(|piece| (piece.id.as_str(), piece.model.as_str(), piece.effort.as_deref(), piece.tier)).collect();
+        assert_eq!(chosen, vec![
+            ("map", "haiku", None, Some(Tier::Small)),
+            ("fix", "sonnet", Some("medium"), Some(Tier::Mid)),
+            ("build", "opus", Some("medium"), Some(Tier::Large)),
+            ("shape", "fable", Some("medium"), Some(Tier::Top)),
+            ("logs", "gpt-6-luna", None, Some(Tier::Small)),
+            ("check", "gpt-6.1-terra", Some("medium"), Some(Tier::Mid)),
+            ("port", "gpt-6.1-sol", Some("medium"), Some(Tier::Large)),
+            ("study", "gpt-6-astra", Some("medium"), Some(Tier::Top)),
+        ]);
+        assert!(pieces.iter().all(|piece| piece.model_note.is_none() && piece.tries.is_empty()));
+        // Each says its model and effort are its kind's, not the plan's.
+        assert!(pieces.iter().all(|piece| piece.model_by_kind && piece.effort_by_kind));
+        // A plan may override per piece: the model, the effort, or both.
+        let named = PlanPiece { model: "sonnet".into(), effort: Some("high".into()), ..of("a", "search", "claude") };
+        let effort_only = PlanPiece { effort: Some("low".into()), ..of("b", "code", "claude") };
+        let pieces = check(&plan(vec![named, effort_only]), 8).unwrap();
+        assert_eq!((pieces[0].model.as_str(), pieces[0].effort.as_deref(), pieces[0].tier), ("sonnet", Some("high"), Some(Tier::Mid)));
+        assert_eq!((pieces[1].model.as_str(), pieces[1].effort.as_deref()), ("opus", Some("low")));
+        assert_eq!((pieces[0].model_by_kind, pieces[0].effort_by_kind, pieces[1].model_by_kind, pieces[1].effort_by_kind), (false, false, true, false));
+        // A worker runs on the lead's agent unless the plan names another, and uses that agent's column.
+        let mut on_codex = plan(vec![piece("a")]);
+        on_codex.agent = Some("codex".into());
+        assert_eq!(check(&on_codex, 8).unwrap()[0].model, "gpt-6.1-sol");
+        // The project's table decides, where it differs from the built-in one.
+        let project: routing::Overrides = serde_json::from_value(json!({"code": {"claude": {"tier": "mid", "effort": "high"}}})).unwrap();
+        let table = Table::resolved(&routing::Overrides::default(), Some(&project));
+        let agents = ["claude".to_string(), "codex".to_string()];
+        let pieces = validate(&plan(vec![piece("a")]), &Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: None, routing: &table, models: &MODELS, lead_model: "fable" }).unwrap();
+        assert_eq!((pieces[0].model.as_str(), pieces[0].effort.as_deref()), ("sonnet", Some("high")));
+    }
+
+    #[test]
+    fn a_tier_nobody_installed_falls_back_to_the_leads_model_and_the_piece_says_so() {
+        // What Codex lists today has no Astra.
+        let mut models = crate::models::claude_fallback();
+        models.extend(crate::harness::codex::models::fallback());
+        let agents = ["claude".to_string(), "codex".to_string()];
+        let study = PlanPiece { kind: Some("research".into()), ..piece("study") };
+        let pieces = validate(&plan(vec![study, piece("build")]), &Rules { piece_limit: 8, default_agent: "codex", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: None, routing: &TABLE, models: &models, lead_model: "gpt-5.6-sol" }).unwrap();
+        assert_eq!((pieces[0].model.as_str(), pieces[0].effort.as_deref()), ("gpt-5.6-sol", Some("medium")));
+        assert_eq!(pieces[0].model_note.as_deref(), Some("No top model of Codex is installed (astra): this piece runs on the lead's model, gpt-5.6-sol."));
+        assert_eq!((pieces[1].model.as_str(), pieces[1].model_note.as_deref()), ("gpt-5.6-sol", None));
+    }
+
+    #[test]
+    fn a_piece_with_no_kind_or_one_that_does_not_exist_is_refused_naming_it() {
+        let mut none = piece("b");
+        none.kind = None;
+        let error = refused(&plan(vec![piece("a"), none]));
+        assert_eq!((error.code, error.piece.as_deref()), ("no_kind", Some("b")));
+        assert!(error.message.contains("search, logs, scoped-code, code, refactor, research, review, verify"), "{}", error.message);
+        let mut blank = piece("b");
+        blank.kind = Some("  ".into());
+        assert_eq!(refused(&plan(vec![blank])).code, "no_kind");
+        let mut other = piece("b");
+        other.kind = Some("essay".into());
+        let error = refused(&plan(vec![other]));
+        assert_eq!((error.code, error.piece.as_deref(), error.details["kind"].as_str()), ("unknown_kind", Some("b"), Some("essay")));
+        // Each of the eight is one.
+        check(&plan(KINDS.iter().map(|kind| PlanPiece { kind: Some(kind.to_string()), ..piece(kind) }).collect()), 8).unwrap();
     }
 
     #[test]
@@ -659,9 +786,9 @@ mod tests {
     #[test]
     fn a_piece_needs_a_command_check_unless_it_says_why_review_alone_can_check_it() {
         let with = |checks: Value, extra: Value| -> Result<Vec<Piece>, PlanError> {
-            let mut piece = json!({"id": "docs", "title": "Docs", "doneChecks": checks});
+            let mut piece = json!({"id": "docs", "title": "Docs", "kind": "scoped-code", "doneChecks": checks});
             piece.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-            check(&parse(&json!({"goal": "g", "pieces": [{"id": "a", "title": "A", "doneChecks": [{"type": "command", "run": "cargo t"}]}, piece]})).unwrap(), 8)
+            check(&parse(&json!({"goal": "g", "pieces": [{"id": "a", "title": "A", "kind": "code", "doneChecks": [{"type": "command", "run": "cargo t"}]}, piece]})).unwrap(), 8)
         };
         let review = json!([{"type": "review", "text": "Every documented key exists in the store."}]);
         // Review alone, unexplained: refused, naming the piece and both ways out.
@@ -714,7 +841,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src/store/settings")).unwrap();
         std::fs::write(dir.path().join("src/cli.rs"), "").unwrap();
         let agents = ["claude".to_string()];
-        let rules = Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: Some(dir.path()) };
+        let rules = Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: Some(dir.path()), routing: &TABLE, models: &MODELS, lead_model: "fable" };
         let owning = |owns: &[&str]| validate(&plan(vec![PlanPiece { owns: owns.iter().map(|path| path.to_string()).collect(), ..piece("a") }]), &rules).map(|pieces| pieces[0].owns.clone());
         // As git writes paths: forward slashes from the root, no `./`, a directory as everything in it.
         assert_eq!(
@@ -762,7 +889,7 @@ mod tests {
             piece.permission_mode = Some(mode.into());
             plan(vec![piece])
         };
-        let rules = |worker_mode: &'static str, approval: bool| Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode, approval, checkout: None };
+        let rules = |worker_mode: &'static str, approval: bool| Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode, approval, checkout: None, routing: &TABLE, models: &MODELS, lead_model: "fable" };
         // Nobody approves this project's runs: a piece may be stricter than the project, never looser.
         for (project, piece, allowed) in [
             ("manual", "bypassPermissions", false),

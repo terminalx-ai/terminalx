@@ -66,7 +66,7 @@ describe("new-chat entry points", () => {
   it("announces manual status alongside the branch row's accessible name", async () => {
     await boot([session("here", "/repos/web", new Date().toISOString(), { manualStatus: "in_review" })]);
     mount();
-    expect(screen.getByRole("button", { name: "main, Talk here", description: "Status: In review" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "main, Talk here", description: /Status: In review$/ })).toBeTruthy();
   });
 
   it("opens the same composer from the sidebar plus menu and its project option without creating a session", async () => {
@@ -410,8 +410,9 @@ describe("the conversation list", () => {
     const main = within(web).getByRole("button", { name: "main, 2 sessions" });
     expect(within(web).queryByText("Talk m1")).toBeNull();
     expect(within(web).queryByText("Talk m2")).toBeNull();
-    // The row's state is the most pressing among them.
-    expect(within(main).getByText("Needs attention")).toBeTruthy();
+    // The row's state is the most pressing among them: its mark, with no label on the row.
+    expect(main.querySelector("[data-session-status]")?.getAttribute("data-status-label")).toBe("Needs you");
+    expect(within(main).queryByText("Needs you")).toBeNull();
     fireEvent.click(main);
     expect(within(web).getByRole("button", { name: "main, 2 sessions" }).getAttribute("aria-current")).toBe("true");
     expect(within(web).queryByText("Talk m1")).toBeNull();
@@ -691,7 +692,8 @@ describe("the archive (#718)", () => {
     const web = screen.getByRole("group", { name: "web" });
     const webArchive = within(web).getByTestId("archived-sessions");
     expect(within(webArchive).getByRole("button", { name: "Archived (1)" }).getAttribute("aria-expanded")).toBe("true");
-    expect(within(webArchive).getByRole("button", { name: /^Talk old-web/ }).textContent).toContain("dev");
+    // Its branch is in the row's tooltip; the row itself ends in its time (02.04).
+    expect(within(webArchive).getByRole("button", { name: /^Talk old-web/ }).closest("[title]")?.getAttribute("title")).toContain("dev");
     // The live list is as it was.
     expect(within(web).getByRole("button", { name: "main, Talk here" })).toBeTruthy();
 
@@ -824,7 +826,14 @@ describe("row extras and unread reminders (PRO-179)", () => {
     await boot([row]);
     prefs.setPrefs({ sidebarLayout, colourLineCounts: false });
     mount();
-    expect(await screen.findByText("+12")).toBeTruthy();
+    if (sidebarLayout === "simple") {
+      // A working row ends in its time, as 02.04 draws it; its lines show once it stops.
+      await waitFor(() => expect(document.querySelector('[data-row-meta="time"]')).toBeTruthy());
+      expect(screen.queryByText("+12")).toBeNull();
+    } else {
+      // The chat list keeps its own time column, and its lines beside it.
+      expect(await screen.findByText("+12")).toBeTruthy();
+    }
     expect(store.getSessionStore().selectedSessionId).not.toBe("background");
     additions = 27;
     await act(async () => setTabStatus(row.id, row.tabs[0].id, "completed"));
