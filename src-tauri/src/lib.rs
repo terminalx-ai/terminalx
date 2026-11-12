@@ -162,6 +162,7 @@ mod session;
 mod sidebar_activity;
 mod session_archive;
 mod session_usage;
+mod session_names;
 mod session_ops;
 mod workspace_setup;
 mod stray_processes;

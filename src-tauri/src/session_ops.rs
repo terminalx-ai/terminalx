@@ -1101,34 +1101,64 @@ impl SessionPatch {
     }
 }
 
-/// Name a conversation after what it is about, as its agent titled it
-/// (Claude Code writes a title into its transcript), while the conversation
-/// still goes by the name it was given automatically: "New session", or the
-/// first line of its opening prompt. A title the reader chose is never
-/// replaced, nor one taken from the agent before. `None` when nothing changes.
+/// Name a conversation after what it is about, while it still goes by the
+/// name it was given automatically: "New session", the first line of its
+/// opening prompt, or a name generated from that prompt. Called after each
+/// turn; the result is the same every time until the agent writes a title.
+///
+/// Which name wins (PRO-333): a name led by a ticket/PR reference found in a
+/// long opening prompt (`PRO-123 …`, `#456 …`), else the agent's own title
+/// (Claude Code writes one into its transcript), else the long prompt's first
+/// imperative clause, trimmed ([`crate::session_names`]). A prompt of one
+/// sentence with no agent title keeps its first line. A title the reader
+/// chose is never replaced, nor one taken from the agent before. A session of
+/// one tab shows that tab's title, so the tab takes the name too unless the
+/// reader named it. `None` when nothing changes.
 pub(crate) fn adopt_agent_title(session_id: &str) -> Result<Option<SessionEntry>> {
     let Some(session) = index::load().map_err(err)?.into_iter().find(|s| s.id == session_id) else { return Ok(None) };
-    let Some(path) = session.tabs.iter()
-        .filter(|tab| tab.harness == "claude")
-        .filter_map(|tab| crate::harness::claude::transcript::locate(&session.cwd, tab.provider_session_id.as_deref()?))
-        .find(|path| path.is_file())
-    else { return Ok(None) };
-    let Some(title) = crate::harness::claude::transcript::ai_title(&path) else { return Ok(None) };
-    let first = crate::harness::claude::transcript::first_prompt(&path).unwrap_or_default();
-    if title == session.title || !automatic_title(&session.title, &first) {
+    if session.tabs.len() == 1 && session.tabs[0].follow.title_pinned {
         return Ok(None);
     }
-    update_session_meta(session_id, &SessionPatch { title: Some(title), ..Default::default() }).map(Some)
+    let transcript = session.tabs.iter()
+        .filter(|tab| tab.harness == "claude")
+        .filter_map(|tab| crate::harness::claude::transcript::locate(&session.cwd, tab.provider_session_id.as_deref()?))
+        .find(|path| path.is_file());
+    // The app's own log holds the prompt as it was typed, for every agent.
+    let first = store::conversation_titles::first_request(&session)
+        .or_else(|| transcript.as_deref().and_then(crate::harness::claude::transcript::first_prompt))
+        .unwrap_or_default();
+    if !automatic_title(&session.title, &first) {
+        return Ok(None);
+    }
+    let agent_title = transcript.as_deref().and_then(crate::harness::claude::transcript::ai_title);
+    let Some(title) = crate::session_names::chosen_name(&first, agent_title) else { return Ok(None) };
+    let named = |s: &SessionEntry| s.title == title && (s.tabs.len() != 1 || s.tabs[0].follow.title_pinned || s.tabs[0].title.as_deref() == Some(title.as_str()));
+    if named(&session) {
+        return Ok(None);
+    }
+    index::update_session(session_id, |s| {
+        // The reader may have renamed it since it was read.
+        if !automatic_title(&s.title, &first) || named(s) || (s.tabs.len() == 1 && s.tabs[0].follow.title_pinned) {
+            return Ok(None);
+        }
+        s.title = title.clone();
+        if let [tab] = s.tabs.as_mut_slice() {
+            tab.title = Some(title.clone());
+        }
+        Ok(Some(s.clone()))
+    })
+    .map_err(err)
 }
 
-/// Whether `title` is one the app made up: the untitled default, or the
-/// opening prompt's first line (cut short).
+/// Whether `title` is one the app made up: the untitled default, the opening
+/// prompt's first line (cut short), or the name generated from that prompt.
 fn automatic_title(title: &str, first_prompt: &str) -> bool {
     let title = title.trim();
     title.is_empty()
         || title == "New session"
         || title == QUICK_CHAT_TITLE
         || first_prompt.trim().lines().next().is_some_and(|line| line.trim().starts_with(title))
+        || crate::session_names::generated_name(first_prompt).is_some_and(|name| name == title)
 }
 
 /// Apply a [`SessionPatch`] and return the updated entry.
@@ -1457,6 +1487,69 @@ mod tests {
         assert!(super::automatic_title("New session", ""));
         assert!(super::automatic_title("We can work on PRD", "We can work on PRD here\nand more"));
         assert!(!super::automatic_title("Pricing notes", "We can work on PRD here"));
+        let long = "Implement PRO-123: short names. Read the code first.";
+        let generated = crate::session_names::generated_name(long).unwrap();
+        assert!(super::automatic_title(&generated, long));
+    }
+
+    fn one_tab_session(title: &str, harness: &str) {
+        let session: SessionEntry = serde_json::from_value(serde_json::json!({
+            "id": "n", "projectPath": "/p", "cwd": "/p", "title": title, "created": "x", "modified": "x", "activeTab": "only",
+            "tabs": [{"id": "only", "harness": harness, "created": "x"}]
+        }))
+        .unwrap();
+        index::update(|sessions| {
+            sessions.push(session);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    const LONG_PROMPT: &str = "You are the owner's chief of staff for the company.\nPlease triage the support inbox every morning, then report.";
+
+    #[test]
+    fn a_session_from_a_long_prompt_gets_a_short_name_for_any_agent() {
+        let _home = crate::store::temp_home();
+        one_tab_session("You are the owner's chief of staff for the company.", "codex");
+        said("n", "only", LONG_PROMPT);
+        store::conversation_titles::name_tab("n", "only").unwrap();
+        let named = adopt_agent_title("n").unwrap().expect("renamed");
+        assert_eq!(named.title, "Triage the support inbox every morning");
+        // The row of a one-tab session shows the tab's title: it says the same.
+        assert_eq!(named.tabs[0].title.as_deref(), Some("Triage the support inbox every morning"));
+        // Computed once: later turns change nothing.
+        assert!(adopt_agent_title("n").unwrap().is_none());
+        // A sidebar rename is the reader's and is never replaced.
+        rename_tab_entry("n", "only", Some("Inbox".into())).unwrap();
+        update_session_meta("n", &SessionPatch { title: Some("Inbox".into()), ..Default::default() }).unwrap();
+        assert!(adopt_agent_title("n").unwrap().is_none());
+        assert_eq!(index::get("n").unwrap().title, "Inbox");
+    }
+
+    #[test]
+    fn a_name_the_person_set_is_kept() {
+        let _home = crate::store::temp_home();
+        one_tab_session("Support triage", "codex");
+        said("n", "only", LONG_PROMPT);
+        assert!(adopt_agent_title("n").unwrap().is_none());
+        assert_eq!(index::get("n").unwrap().title, "Support triage");
+    }
+
+    #[test]
+    fn a_prompt_of_one_sentence_keeps_its_first_line() {
+        let _home = crate::store::temp_home();
+        one_tab_session("Fix the login bug", "codex");
+        said("n", "only", "Fix the login bug");
+        assert!(adopt_agent_title("n").unwrap().is_none());
+        assert_eq!(index::get("n").unwrap().title, "Fix the login bug");
+    }
+
+    #[test]
+    fn a_ticket_reference_leads_the_name() {
+        let _home = crate::store::temp_home();
+        one_tab_session("", "codex");
+        said("n", "only", "Work on Linear issue ENG-42: Fix login timeout\n\nUsers get logged out.\n\nWhen done, summarise what changed.");
+        assert_eq!(adopt_agent_title("n").unwrap().unwrap().title, "ENG-42 Fix login timeout");
     }
 
     #[test]
