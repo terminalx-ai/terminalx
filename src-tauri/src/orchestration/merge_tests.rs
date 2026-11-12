@@ -20,6 +20,10 @@ fn git(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// A piece whose result is accepted: its id, what it depends on, the commit it was accepted as,
+/// the files it changed, and its done-check.
+type Accepted<'a> = (&'a str, &'a [&'a str], &'a str, &'a [&'a str], &'a str);
+
 /// A project: `lead/` is the lead's checkout on the branch `lead`, cut from
 /// `main`; `workers/<piece>/` is each worker's worktree on `piece-<piece>`.
 struct Repo {
@@ -77,8 +81,8 @@ impl Repo {
         git(&path, &["rev-parse", "HEAD"])
     }
 
-    /// Store a run whose pieces are all accepted: `(id, depends on, commit, files changed, done-check)`.
-    fn run(&self, pieces: &[(&str, &[&str], &str, &[&str], &str)], integration: Option<&str>) -> String {
+    /// Store a run whose pieces are all accepted.
+    fn run(&self, pieces: &[Accepted], integration: Option<&str>) -> String {
         let pieces: Vec<Value> = pieces
             .iter()
             .map(|(id, on, commit, files, check)| {
