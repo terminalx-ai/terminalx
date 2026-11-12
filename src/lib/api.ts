@@ -2250,6 +2250,27 @@ export interface PrAssociation {
   number: number;
   head: string;
   scope: PrScope;
+  /** Chosen with "Link pull request…" (PRO-294), not opened from this session; only a link can be unlinked. */
+  linked?: boolean;
+}
+
+/** An open pull request as "Link pull request…" lists it. */
+export interface OpenPr extends PullRequest {
+  /** `owner:branch` for a head on a fork, else the branch. */
+  headLabel: string;
+}
+
+/** The repository's open pull requests, and which ones a session already shows. */
+export interface PrLinkCandidates {
+  /** `owner/name`. */
+  repository: string;
+  /** Every open pull request; `prs` holds at most the first 100. */
+  total: number;
+  prs: OpenPr[];
+  /** Canonical URLs this session shows already. */
+  here: string[];
+  /** Canonical URLs another session shows. */
+  elsewhere: string[];
 }
 
 /** Owner-issued privacy provenance for one Actions click, reused unchanged
@@ -2285,6 +2306,9 @@ export const gh = {
   available: () => invoke<boolean>("gh_available"),
   associationsBatch: (sessionIds: string[]) => invoke<Record<string, PrAssociation[]>>("pr_associations_batch", { sessionKeys: sessionIds }),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
+  linkCandidates: (cwd: string, sessionId: string) => invoke<PrLinkCandidates>("pr_link_candidates", { cwd, sessionKey: sessionId }),
+  link: (sessionId: string, association: PrAssociation) => invoke<PrAssociation[]>("pr_link", { sessionKey: sessionId, association }),
+  unlink: (sessionId: string, url: string) => invoke<PrAssociation[]>("pr_unlink", { sessionKey: sessionId, url }),
   list: (cwd: string, branch: string, authority?: CheckAuthority) => invoke<PullRequest[]>("pr_list", { cwd, branch, ...(authority ? { authority } : {}) }),
   details: (cwd: string, number: number, url?: string, authority?: CheckAuthority) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}), ...(authority ? { authority } : {}) }),
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
