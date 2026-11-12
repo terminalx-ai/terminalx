@@ -233,7 +233,7 @@ export class RelayClient {
       if (approval) {
         // The Mac answers at once when it does not gate (an older Mac, an approved device); otherwise it waits for the person.
         if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
-        this.handshakeTimer = setTimeout(() => this.fail(new Error("No approval from the Mac in time")), approval.timeoutMs ?? PAIRING_APPROVAL_WAIT_MS);
+        this.handshakeTimer = setTimeout(() => this.fail(new PairingNotApprovedError(new Error("No approval from the Mac in time"))), approval.timeoutMs ?? PAIRING_APPROVAL_WAIT_MS);
         approval.onWaiting?.();
       }
       return;
@@ -294,8 +294,9 @@ export class RelayClient {
 
   private fail(cause: Error): void {
     if (this.state === "disconnected" && !this.connectPromise) return;
-    // Ended between e2ee_auth and e2ee_authenticated while pairing: the Mac did not approve (docs/PAIRING-APPROVAL.md).
-    const error = this.options.awaitApproval && this.handshakeReady && !this.authenticated ? new PairingNotApprovedError(cause) : cause;
+    // The socket closed between e2ee_auth and e2ee_authenticated while pairing: per the contract, the Mac did not approve
+    // (docs/PAIRING-APPROVAL.md). Only a socket close counts; a local protocol or parse error stays what it is.
+    const error = this.options.awaitApproval && this.handshakeReady && !this.authenticated && cause instanceof RelayOuterError ? new PairingNotApprovedError(cause) : cause;
     this.setState("disconnected", error);
     const socket = this.socket;
     this.socket = null;

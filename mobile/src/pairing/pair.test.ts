@@ -174,6 +174,25 @@ describe("approval on the Mac", () => {
     expect(await recoverPendingPairing()).toBeNull();
   });
 
+  it("keeps the journal when a recovery attempt is closed while waiting, since the Mac may have committed it", async () => {
+    state.relay = false; state.direct = false;
+    await expect(pair(parsePairingCode(btoa(JSON.stringify(freshOffer())))!)).rejects.toMatchObject({ category: "connection-failed" });
+    const journal = await readPairingJournal();
+    expect(journal).not.toBeNull();
+    state.relay = true; state.approval = "decline";
+    await expect(recoverPendingPairing()).rejects.toMatchObject({ category: "not-approved" });
+    expect(await readPairingJournal()).toEqual(journal);
+  });
+
+  it("recovers a committed install over its resume credential, which never waits for approval", async () => {
+    state.relay = true; state.failSave = true;
+    await expect(pair(parsePairingCode(btoa(JSON.stringify(freshOffer())))!)).rejects.toThrow();
+    state.failSave = false; state.approval = "decline";
+    const host = await recoverPendingPairing();
+    expect(await readHosts()).toEqual([host]);
+    expect(await readPairingJournal()).toBeNull();
+  });
+
   it("prefers the Mac's refusal to another path's network failure", async () => {
     state.relay = true; state.direct = false; state.approval = "decline"; state.slowFailure = true;
     const { result } = await progressOf(parsePairingCode(btoa(JSON.stringify(freshOffer())))!);

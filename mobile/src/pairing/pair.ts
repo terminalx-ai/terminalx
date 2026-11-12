@@ -95,7 +95,11 @@ function approvalProgress(hostPublicKeyB64: string, clientSecretKey: Uint8Array,
 /**
  * The Mac discards a pairing it was not allowed to finish (its device entry,
  * token and Relay invite), so the journal for it can never be recovered:
- * dropped, so neither Retry nor the next launch tries it again.
+ * dropped, so neither Retry nor the next launch tries it again. Used only for
+ * a new pairing, where no connection authenticated and so no credential can
+ * have been installed. Never on recovery: there the Mac may already have
+ * committed the install, and the journal holds the only copy of its resume
+ * token, so a close (which a relay or the network can cause) must not lose it.
  */
 async function forgetIfNotApproved<T>(operation: () => Promise<T>): Promise<T> {
   try { return await operation(); }
@@ -119,14 +123,10 @@ async function finishNewPairing(journal: PairingJournal, clientSecretKey: Uint8A
   }
 }
 
-function recoverPairing(journal: PairingJournal, clientSecretKey: Uint8Array, progress: Progress, device: DeviceDescription | null): Promise<StoredHost> {
-  return forgetIfNotApproved(() => recoverWithCandidates(journal, clientSecretKey, progress, device));
-}
-
-async function recoverWithCandidates(journal: PairingJournal, clientSecretKey: Uint8Array, progress: Progress, device: DeviceDescription | null): Promise<StoredHost> {
+async function recoverPairing(journal: PairingJournal, clientSecretKey: Uint8Array, progress: Progress, device: DeviceDescription | null): Promise<StoredHost> {
   const offer = offerFromJournal(journal);
   const candidates: (() => Promise<PairingCandidate>)[] = [
-    async () => resumeCandidate(offer, journal.secrets.pendingResumeToken, clientSecretKey, progress),
+    async () => resumeCandidate(offer, journal.secrets.pendingResumeToken, clientSecretKey),
     ...directEndpoints(offer).map((endpoint) => async () => directCandidate({ ...offer, endpoint }, clientSecretKey, progress)),
   ];
   if (offer.relay.inviteExpiresAt > Date.now()) candidates.push(async () => inviteCandidate(offer, clientSecretKey, progress));
@@ -268,12 +268,11 @@ async function resumeCandidate(
   offer: PairingOffer & { relay: NonNullable<PairingOffer["relay"]> },
   resumeToken: string,
   clientSecretKey: Uint8Array,
-  progress: Progress,
 ): Promise<PairingCandidate> {
   const relay = await resolveResumeRelay(offer.relay, resumeToken).catch(() => offer.relay);
+  // A resume credential exists only once the Mac has approved and installed it: no approval wait, and a close is an ordinary failure.
   return {
     client: new RelayClient({
-      ...awaitApproval(progress),
       relay,
       credential: resumeToken,
       credentialKind: "resume",

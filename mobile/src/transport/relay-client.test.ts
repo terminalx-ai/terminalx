@@ -375,6 +375,18 @@ describe("waiting for the Mac's approval while pairing", () => {
     client.close();
   });
 
+  it("keeps a local protocol error while waiting an ordinary failure, not a refusal by the Mac", async () => {
+    const socket = new EncryptedPeer({ gate: true });
+    const { client } = pairing(socket);
+    const connecting = client.connect();
+    socket.onopen?.(); await flush();
+    expect(socket.waiting).toBe(true);
+    // Something that is not a frame the Mac sealed (a relay injecting bytes): rejected as such.
+    socket.onmessage?.({ data: "not-a-sealed-frame" });
+    const error = await connecting.catch((cause: unknown) => cause);
+    expect(error).not.toBeInstanceOf(PairingNotApprovedError);
+  });
+
   it("leaves an ordinary connection's close as it was", async () => {
     const socket = new EncryptedPeer({ gate: true });
     const client = new RelayClient({ transport: "direct", endpoint: "ws://example.test", deviceToken: "test-device-token",
