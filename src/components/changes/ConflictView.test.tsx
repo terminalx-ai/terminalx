@@ -30,7 +30,9 @@ const merge: UnfinishedMerge = {
 
 /**
  * seats.ts as on disk: three lines, a conflict at line 4 (two lines each side,
- * theirs from line 8), line 11, a conflict at line 12, then the end.
+ * theirs from line 8), line 11, a conflict at line 12, then the end. Shown with
+ * the markers gone and yours kept, that is lines 1–3, the conflict at 4, line 6
+ * and the second conflict at 7.
  */
 function file(version: string, left: ("first" | "second")[] = ["first", "second"]): ConflictFile {
   const segments: ConflictSegment[] = [{ kind: "text", text: "import { priceFor } from \"./prices\";\n\nexport function prorate() {\n" }];
@@ -102,13 +104,14 @@ it("shows the path, which branch goes into which, both sides of each conflict an
   const first = within(screen.getByRole("group", { name: "Conflict 1 of 2, line 4" }));
   expect(first.getByText("raccoon/teams-billing · 2h ago")).toBeTruthy();
   expect(first.getByText("origin/main · #209 Multi-currency prices · Aisha")).toBeTruthy();
-  // Lines are numbered as on disk: yours from 5, theirs from 8, the text after the conflict from 11.
-  expect(within(first.getByRole("region", { name: "Yours" })).getByText("5")).toBeTruthy();
-  expect(within(first.getByRole("region", { name: "Theirs" })).getByText("8")).toBeTruthy();
+  // Numbered as the file reads once resolved with yours kept: both sides from 4, the text after from 6.
+  expect(within(first.getByRole("region", { name: "Yours" })).getAllByText(/^[45]$/).map((n) => n.textContent)).toEqual(["4", "5"]);
+  expect(within(first.getByRole("region", { name: "Theirs" })).getAllByText(/^[45]$/).map((n) => n.textContent)).toEqual(["4", "5"]);
+  expect(screen.getByText("6")).toBeTruthy();
   expect(first.getByRole("button", { name: "Keep yours" }) && first.getByRole("button", { name: "Keep theirs" }) && first.getByRole("button", { name: "Keep both" })).toBeTruthy();
   expect(first.getByText(COMBINE_SENDS)).toBeTruthy();
   // The other conflict shows both sides but acts only once it is the current one.
-  const second = within(screen.getByRole("group", { name: "Conflict 2 of 2, line 12" }));
+  const second = within(screen.getByRole("group", { name: "Conflict 2 of 2, line 7" }));
   expect(second.queryByRole("button", { name: "Keep yours" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Next conflict" }));
   expect(screen.getByText("Conflict 2 of 2")).toBeTruthy();
@@ -127,13 +130,13 @@ for (const [label, choice] of [["Keep yours", "ours"], ["Keep theirs", "theirs"]
     await screen.findByText("Conflict 1 of 2");
     expect(tabName(id)).toBe("seats.ts · 2 conflicts");
     fireEvent.click(screen.getByRole("button", { name: "Next conflict" }));
-    fireEvent.click(within(screen.getByRole("group", { name: "Conflict 2 of 2, line 12" })).getByRole("button", { name: label }));
+    fireEvent.click(within(screen.getByRole("group", { name: "Conflict 2 of 2, line 7" })).getByRole("button", { name: label }));
     await screen.findByText("Conflict 1 of 1");
     expect(source.resolveConflict).toHaveBeenCalledTimes(1);
     const [m, f, index, chosen] = source.resolveConflict.mock.calls[0];
     expect([m, f.version, index, chosen]).toEqual([merge, "v1", 1, choice]);
     expect(screen.getByText("  return seatsFor(change);", { normalizer: (text) => text })).toBeTruthy();
-    expect(screen.queryByRole("group", { name: /line 12/ })).toBeNull();
+    expect(screen.queryByRole("group", { name: /line 7/ })).toBeNull();
     expect(tabName(id)).toBe("seats.ts · 1 conflict");
   });
 }

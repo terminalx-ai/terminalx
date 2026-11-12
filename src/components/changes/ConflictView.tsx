@@ -36,9 +36,13 @@ function theirsMeta(side: ConflictSide): string {
   return [side.branch, commit && (commit.pr != null ? `#${commit.pr} ${commit.subject}` : commit.subject), commit?.author].filter(Boolean).join(" · ");
 }
 
-type Row = { kind: "line"; line: number; text: string } | { kind: "conflict"; hunk: ConflictHunk; position: number; oursAt: number; theirsAt: number };
+type Row = { kind: "line"; line: number; text: string } | { kind: "conflict"; hunk: ConflictHunk; position: number; at: number };
 
-/** The file as rows: text lines numbered as on disk, and each conflict with where its sides start on disk. */
+/**
+ * The file as rows, numbered as it reads with every conflict marker gone
+ * and yours kept: both sides of a conflict start on the line it takes, and
+ * the text after it goes on from the end of yours (the 05.11 screen).
+ */
 function rowsOf(file: ConflictFile): Row[] {
   const rows: Row[] = [];
   let line = 1;
@@ -48,13 +52,8 @@ function rowsOf(file: ConflictFile): Row[] {
       for (const text of lines(segment.text)) rows.push({ kind: "line", line: line++, text });
       continue;
     }
-    const { hunk } = segment;
-    // <<<<<<< ours [||||||| base] ======= theirs >>>>>>>
-    const ours = lines(hunk.ours).length;
-    const base = hunk.base == null ? 0 : lines(hunk.base).length + 1;
-    const theirs = lines(hunk.theirs).length;
-    rows.push({ kind: "conflict", hunk, position: position++, oursAt: hunk.line + 1, theirsAt: hunk.line + 1 + ours + base + 1 });
-    line = hunk.line + 1 + ours + base + 1 + theirs + 1;
+    rows.push({ kind: "conflict", hunk: segment.hunk, position: position++, at: line });
+    line += lines(segment.hunk.ours).length;
   }
   return rows;
 }
@@ -277,11 +276,11 @@ export function ConflictView({ entry, visible, source: given, files: givenFiles 
         const { hunk, position } = row;
         const on = position === Math.min(current, total - 1);
         const file = ready.file;
-        return <div key={`c${hunk.index}:${hunk.line}`} data-conflict={position} aria-label={`Conflict ${position + 1} of ${total}, line ${hunk.line}`} role="group"
+        return <div key={`c${hunk.index}:${hunk.line}`} data-conflict={position} aria-label={`Conflict ${position + 1} of ${total}, line ${row.at}`} role="group"
           className={cn("mx-3 my-1 grid gap-2", !on && "cursor-pointer opacity-70")} onClick={on ? undefined : () => setCurrent(position)}>
-          <SideBlock label="Yours" tone="ours" at={row.oursAt} text={hunk.ours} meta={on ? yoursMeta(file.ours) : file.ours.branch}
+          <SideBlock label="Yours" tone="ours" at={row.at} text={hunk.ours} meta={on ? yoursMeta(file.ours) : file.ours.branch}
             action={on && <Button variant="outline" size="sm" className="ml-auto border" disabled={writing} onClick={() => void keep(hunk, "ours")}>Keep yours</Button>} />
-          <SideBlock label="Theirs" tone="theirs" at={row.theirsAt} text={hunk.theirs} meta={on ? theirsMeta(file.theirs) : file.theirs.branch}
+          <SideBlock label="Theirs" tone="theirs" at={row.at} text={hunk.theirs} meta={on ? theirsMeta(file.theirs) : file.theirs.branch}
             action={on && <Button variant="outline" size="sm" className="ml-auto border" disabled={writing} onClick={() => void keep(hunk, "theirs")}>Keep theirs</Button>} />
           {on && <div className="flex flex-wrap items-center gap-2 py-0.5">
             <Button variant="outline" size="sm" className="border" disabled={writing} onClick={() => void keep(hunk, "both")}>Keep both</Button>
