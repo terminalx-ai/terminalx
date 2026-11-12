@@ -5302,6 +5302,41 @@ pub async fn orchestration_resolve_in_lead(app: AppHandle, id: String, piece: St
     tauri::async_runtime::spawn_blocking(move || sessions.orchestration("resolveInLead", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
 }
 
+/// Have the lead take over a blocked piece and finish it in its own checkout (PRO-361).
+#[tauri::command]
+pub async fn orchestration_take_over(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("takeOver", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
+/// Check what the lead committed for a piece it took over, and make it done when its checks pass.
+#[tauri::command]
+pub async fn orchestration_finish(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finish", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
+/// Widen a blocked piece's files (the ones its last report names outside them, when `own` is empty) and try it again.
+#[tauri::command]
+pub async fn orchestration_widen(app: AppHandle, id: String, piece: String, own: Option<Vec<String>>) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("widen", serde_json::json!({"id": id, "piece": piece, "own": own.unwrap_or_default()})).map_err(err)).await.map_err(err)?
+}
+
+/// Send a blocked piece's worker a note: its try opens again.
+#[tauri::command]
+pub async fn orchestration_note(app: AppHandle, id: String, piece: String, text: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("note", serde_json::json!({"id": id, "piece": piece, "text": text})).map_err(err)).await.map_err(err)?
+}
+
+/// Leave a blocked piece out of its run, with the pieces that depend on it and have not started.
+#[tauri::command]
+pub async fn orchestration_skip(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("skip", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
 /// Replace the plan of a run that has not started: what Edit saves.
 #[tauri::command]
 pub async fn orchestration_update_plan(app: AppHandle, id: String, plan: serde_json::Value) -> CmdResult<serde_json::Value> {

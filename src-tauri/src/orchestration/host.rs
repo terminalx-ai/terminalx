@@ -108,7 +108,9 @@ impl Host for ManagerHost {
         match crate::session_usage::refresh_session(&worker.session_id) {
             Ok((session, _)) => {
                 let (usd, unpriced_models) = crate::session_usage::estimated_cost(&session);
-                Cost { usd, unpriced_models }
+                let rows: Vec<_> = session.tabs.iter().filter_map(|tab| tab.usage.as_ref()).flat_map(|usage| &usage.models).collect();
+                let output_tokens = (!rows.is_empty()).then(|| crate::session_usage::total(rows).output_tokens);
+                Cost { usd, unpriced_models, output_tokens }
             }
             Err(_) => Cost::default(),
         }
@@ -209,7 +211,7 @@ impl Host for ManagerHost {
             _ => None,
         };
         match status {
-            Some(status) => WorkerNow::Reported { status, result: text("result") },
+            Some(status) => WorkerNow::Reported { status, result: text("result"), report: super::TryReport::of_row(&row) },
             // No report: still on its way, or not coming.
             None if row["reason"] == "working" || row["reminderPending"] == true => WorkerNow::Working,
             // Its brief is on its way into a CLI that is still starting.
@@ -389,6 +391,39 @@ impl Host for ManagerHost {
 
     fn now_ms(&self) -> i64 {
         chrono::Utc::now().timestamp_millis()
+    }
+
+    fn lead_head(&self, run: &Run) -> Option<String> {
+        let cwd = self.lead_checkout(run).ok()?;
+        crate::git::run(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"]).ok().map(|head| head.trim().to_string()).filter(|head| !head.is_empty())
+    }
+
+    fn lead_work(&self, run: &Run, since: &str) -> anyhow::Result<engine::LeadWork> {
+        let cwd = self.lead_checkout(run)?;
+        let head = crate::git::run(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"])?.trim().to_string();
+        let numbers = crate::git::run(&cwd, &["diff", "--numstat", &format!("{since}..{head}"), "--"])?;
+        let uncommitted = crate::git::run(&cwd, &["status", "--porcelain", "--untracked-files=no", "--"])?.lines().filter(|line| !line.trim().is_empty()).map(|line| line.get(3..).unwrap_or(line).trim().to_string()).collect();
+        Ok(engine::LeadWork { head, changes: verify::numstat(&numbers), uncommitted })
+    }
+
+    fn lead_commands(&self, run: &Run, piece: &Piece, by_lead: bool) -> Result<Vec<verify::CommandRun>, String> {
+        let cwd = self.lead_checkout(run).map_err(|error| format!("{error:#}"))?;
+        // No other writer while they run: the checkout is held as a merge holds it.
+        let _reserved = self.reserve(run, &cwd, by_lead)?;
+        let mut ran = Vec::new();
+        for command in piece.done_checks.iter().filter_map(|check| match check { super::Check::Command { run } => Some(run.as_str()), _ => None }) {
+            let result = verify::run_command(&cwd, command, false, verify::COMMAND_TIMEOUT);
+            let passed = result.passed;
+            ran.push(result);
+            if !passed {
+                break;
+            }
+        }
+        Ok(ran)
+    }
+
+    fn lead_mode(&self, run: &Run) -> Option<String> {
+        Checkouts::lead_mode(self, run)
     }
 }
 

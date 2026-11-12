@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   appRouting, budgetText, checksFrom, checkText, costText, defaultRoute, durationText, estimateText, fellShort, gaveUp, PIECE_KINDS, pieceCheck, pieceCost, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf,
-  reviewTokens, sameRoute, TIERS, tokensText, verifyingText, withoutPiece,
+  mergeSubtitle, reviewTokens, sameRoute, TIERS, tokensText, verifyingText, withoutPiece,
 } from "./orchestration";
 import type { Run, RunPiece } from "@/types/orchestration";
 
@@ -183,5 +183,14 @@ describe("checking a result (PRO-278)", () => {
     // Nothing read yet is not zero.
     expect(reviewTokens(review([verifier()]))).toBeNull();
     expect(reviewTokens(undefined)).toBeNull();
+  });
+});
+
+describe("a merge not yet begun (PRO-361)", () => {
+  it("says every result waits to be merged, though a lead's take-over recorded its cost under merge", () => {
+    const done = (id: string) => piece(id, { state: "done", tries: [{ step: "first", model: "sonnet", outcome: "done", verification: { gates: [], outcome: "passed", facts: { files: ["a"], changedLines: 1, commit: `${id}000` } } }] });
+    const taken = run([done("a"), done("b")], { state: "merging", merge: { into: "", resolvedUsd: 0.4 } });
+    expect(mergeSubtitle(taken)).toBe("Every result is accepted. 2 branches wait to be merged into the lead's branch.");
+    expect(mergeSubtitle({ ...taken, merge: { into: "main" } })).toBe("Merging in dependency order. 0 of 2 branches are in.");
   });
 });

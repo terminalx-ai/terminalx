@@ -2761,6 +2761,16 @@ export const orchestration = {
   sendBack: (id: string, piece: string) => invoke<Run>("orchestration_send_back", { id, piece }),
   /** Have the lead resolve a piece's conflict: it is sent both sides and the pieces' goals. */
   resolveInLead: (id: string, piece: string) => invoke<Run>("orchestration_resolve_in_lead", { id, piece }),
+  /** A blocked piece (PRO-361, 18.03): the lead takes it over and finishes it in its own checkout. */
+  takeOver: (id: string, piece: string) => invoke<Run>("orchestration_take_over", { id, piece }),
+  /** Check what the lead committed for a piece it took over; done once its checks pass there. */
+  finish: (id: string, piece: string) => invoke<Run>("orchestration_finish", { id, piece }),
+  /** Give a blocked piece more files (its report's outside files when `own` is empty) and a fresh worker. */
+  widen: (id: string, piece: string, own: string[] = []) => invoke<Run>("orchestration_widen", { id, piece, own }),
+  /** Send a blocked piece's worker a note: its try opens again. */
+  note: (id: string, piece: string, text: string) => invoke<Run>("orchestration_note", { id, piece, text }),
+  /** Leave a blocked piece out, with the pieces that depend on it and have not started. */
+  skip: (id: string, piece: string) => invoke<Run>("orchestration_skip", { id, piece }),
   /** One run's worker limit and budget, set by the person (PRO-280). */
   setLimits: (id: string, limits: RunLimits) => invoke<Run>("orchestration_set_limits", { id, limits }),
   /** Let a run that reached its budget go on: now, or once the window that stopped it resets. */

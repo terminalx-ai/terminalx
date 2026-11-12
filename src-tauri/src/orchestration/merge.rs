@@ -571,6 +571,13 @@ pub fn merge(host: &dyn Checkouts, id: &str, options: &Options) -> Result<Merged
         RunState::Stopped => return Err(EngineError::new("run_ended", format!("Run {id} was stopped. Nothing more is merged in it."), Some("Merge the branches you want by hand, or create a new run for what is left."))),
         _ => {}
     }
+    // What the lead commits for a piece it took over is that piece's result (`engine::finish`): no other
+    // piece's merge lands in its branch meanwhile, to be counted as its work.
+    if let Some(taken) = run.pieces.iter().find(|piece| piece.state == PieceState::Lead) {
+        let mut error = EngineError::new("piece_with_lead", format!("Piece {} is with the lead: nothing is merged into its branch until it is finished or skipped, so its work is not mixed with other pieces'.", taken.id), Some("Finish it with `terminalx runs finish`, or have it skipped, then merge."));
+        error.details = json!({"piece": taken.id});
+        return Err(error);
+    }
     if let Some(unknown) = options.skip.iter().find(|skip| run.piece(skip).is_none()) {
         let mut error = EngineError::new("piece_not_found", format!("Run {id} has no piece {unknown}."), Some("Use a piece id from `terminalx runs show --json`."));
         error.details = json!({"pieces": run.pieces.iter().map(|piece| piece.id.clone()).collect::<Vec<_>>()});
@@ -661,7 +668,7 @@ pub fn merge(host: &dyn Checkouts, id: &str, options: &Options) -> Result<Merged
             continue;
         }
         // After everything it depends on: a piece built on another is not merged without it.
-        if piece.depends_on.iter().any(|on| !run.piece(on).is_some_and(Piece::merged)) {
+        if piece.depends_on.iter().any(|on| !run.piece(on).is_some_and(Piece::merge_settled)) {
             continue;
         }
         // The same commit failed the same check on the same branch: nothing has changed that could change the answer.
@@ -762,7 +769,7 @@ pub fn merge(host: &dyn Checkouts, id: &str, options: &Options) -> Result<Merged
     })
     .map_err(EngineError::internal)?;
     host.changed(&after);
-    let after = if stopped_at.is_none() && after.state.followed() && after.pieces.iter().all(Piece::merged) { finish(host, id, &cwd, check.as_ref(), options)? } else { after };
+    let after = if stopped_at.is_none() && after.state.followed() && after.pieces.iter().all(Piece::merge_settled) { finish(host, id, &cwd, check.as_ref(), options)? } else { after };
     Ok(summary(after, &cwd, check.map(|(command, _)| command), stopped_at))
 }
 
@@ -779,7 +786,8 @@ fn finish(host: &dyn Checkouts, id: &str, cwd: &Path, check: Option<&(String, bo
     if whole.as_ref().is_none_or(|whole| whole.passed) {
         // The integration check has just passed on this commit: a done-check that is the same command is not run twice.
         let mut seen: Vec<&str> = check.iter().map(|(command, _)| command.as_str()).collect();
-        'pieces: for piece in run.merge_order() {
+        // A piece a person skipped is not in the branch: its checks say nothing of it.
+        'pieces: for piece in run.merge_order().into_iter().filter(|piece| piece.state != PieceState::Skipped) {
             for command in piece.done_checks.iter().filter_map(|check| match check { Check::Command { run } => Some(run.as_str()), _ => None }) {
                 if seen.contains(&command.trim()) {
                     continue;
@@ -796,7 +804,7 @@ fn finish(host: &dyn Checkouts, id: &str, cwd: &Path, check: Option<&(String, bo
     }
     let moved = head(cwd).ok().as_deref() != Some(at.as_str());
     let (after, ()) = store::update(id, |run| {
-        let every = run.state.followed() && run.pieces.iter().all(Piece::merged);
+        let every = run.state.followed() && run.pieces.iter().all(Piece::merge_settled);
         let merge = run.merge.get_or_insert_with(RunMerge::default);
         merge.check = whole.clone().filter(|whole| !whole.passed);
         if whole.as_ref().is_some_and(|whole| whole.passed) && !moved {
@@ -862,9 +870,9 @@ fn summary(run: Run, cwd: &Path, check: Option<String>, stopped_at: Option<Strin
     let waiting: Vec<Held> = run
         .merge_order()
         .into_iter()
-        .filter(|piece| piece.current_merge().is_none())
+        .filter(|piece| piece.current_merge().is_none() && piece.state != PieceState::Skipped)
         .map(|piece| {
-            let on: Vec<String> = piece.depends_on.iter().filter(|on| !run.piece(on).is_some_and(Piece::merged)).cloned().collect();
+            let on: Vec<String> = piece.depends_on.iter().filter(|on| !run.piece(on).is_some_and(Piece::merge_settled)).cloned().collect();
             let why = if piece.state != PieceState::Done {
                 format!("Its result is not accepted yet: it is {}.", serde_json::to_value(piece.state).ok().and_then(|state| state.as_str().map(str::to_owned)).unwrap_or_default())
             } else if !on.is_empty() {
@@ -895,7 +903,7 @@ fn summary(run: Run, cwd: &Path, check: Option<String>, stopped_at: Option<Strin
         format!("The merge stopped at piece {piece}: {} Run `terminalx runs merge` again once that is dealt with.", run.piece(piece).and_then(|piece| piece.merge.as_ref()).and_then(|merge| merge.note.clone()).unwrap_or_default())
     } else if let Some(piece) = integration_failed.first() {
         format!("The integration check failed after piece {piece} was merged, so that merge was undone; `{into}` is at {}. `terminalx runs send-back {piece}` gives what the check printed to its worker. Pieces that depend on it wait for it.", short(&at))
-    } else if let Some(reason) = run.reason.as_deref().filter(|_| run.pieces.iter().all(Piece::merged)) {
+    } else if let Some(reason) = run.reason.as_deref().filter(|_| run.pieces.iter().all(Piece::merge_settled)) {
         format!("{reason} Fix it on `{into}`, commit, and run `terminalx runs merge` again: the checks are run on the new commit.")
     } else if !skipped.is_empty() {
         format!("Left out on request: {}. Run `terminalx runs merge` without --skip to try {} again.", skipped.join(", "), if skipped.len() == 1 { "it" } else { "them" })

@@ -13,7 +13,7 @@ use super::verify::{self, Checked, Facts, Gate, GateResult};
 use super::plan::Plan;
 use super::ladder::Step;
 use super::routing::Tier;
-use super::{store, Hold, Outcome, Piece, PieceState, Run, RunState, SessionRef};
+use super::{store, Hold, Outcome, Piece, PieceState, Run, RunState, SessionRef, TryReport};
 use crate::status::usage::UsageWindow;
 use crate::store::settings::{OrchestratorLimits, OrchestratorSettings};
 use crate::worker_report::Status;
@@ -52,8 +52,9 @@ struct World {
     activity: BTreeMap<String, Activity>,
     clock: i64,
     watches: usize,
-    /// What each worker's session has used so far, in dollars, and how often it was read.
+    /// What each worker's session has used so far, in dollars and in output tokens, and how often it was read.
     costs: BTreeMap<String, f64>,
+    output_tokens: BTreeMap<String, u64>,
     cost_reads: BTreeMap<String, usize>,
     /// The runs the engine asked to have their waiting retries started, one entry an ask.
     retries: Vec<String>,
@@ -74,6 +75,13 @@ struct World {
     commits: BTreeMap<String, String>,
     /// The workers whose checked worktree was forgotten: they went back to work.
     resets: Vec<String>,
+    /// PRO-361: the lead's checkout, as a piece it took over reads it.
+    lead_head: Option<String>,
+    lead_work: Option<engine::LeadWork>,
+    lead_since: Vec<String>,
+    /// Done-check commands that fail in the lead's checkout.
+    lead_fails: BTreeSet<String>,
+    lead_mode: Option<String>,
 }
 
 struct Fake {
@@ -98,7 +106,7 @@ impl Fake {
         let session = self.session_of(piece);
         let mut world = self.world();
         world.running.remove(&session);
-        world.now.insert(session, WorkerNow::Reported { status, result: result.into() });
+        world.now.insert(session, WorkerNow::Reported { status, result: result.into(), report: TryReport { result: result.to_string(), ..TryReport::default() } });
     }
 
     fn session_of(&self, piece: &str) -> String {
@@ -142,7 +150,7 @@ impl Host for Fake {
     fn worker_cost(&self, worker: &SessionRef) -> Cost {
         let mut world = self.world();
         *world.cost_reads.entry(worker.session_id.clone()).or_default() += 1;
-        Cost { usd: world.costs.get(&worker.session_id).copied(), unpriced_models: Vec::new() }
+        Cost { usd: world.costs.get(&worker.session_id).copied(), unpriced_models: Vec::new(), output_tokens: world.output_tokens.get(&worker.session_id).copied() }
     }
 
     fn retry_waits(&self, run_id: &str) {
@@ -280,13 +288,40 @@ impl Host for Fake {
     fn now_ms(&self) -> i64 {
         self.world().clock
     }
+
+    fn lead_head(&self, _run: &Run) -> Option<String> {
+        self.world().lead_head.clone()
+    }
+
+    fn lead_work(&self, _run: &Run, since: &str) -> anyhow::Result<engine::LeadWork> {
+        let mut world = self.world();
+        world.lead_since.push(since.to_string());
+        world.lead_work.clone().ok_or_else(|| anyhow::anyhow!("the lead's checkout is gone"))
+    }
+
+    fn lead_commands(&self, _run: &Run, piece: &Piece, _by_lead: bool) -> Result<Vec<verify::CommandRun>, String> {
+        let world = self.world();
+        let mut ran = Vec::new();
+        for command in piece.done_checks.iter().filter_map(|check| match check { super::Check::Command { run } => Some(run.clone()), _ => None }) {
+            let passed = !world.lead_fails.contains(&command);
+            ran.push(verify::CommandRun { run: command, project: false, exit_code: Some(if passed { 0 } else { 1 }), passed, millis: 10, output: (!passed).then(|| "1 test failed".to_string()) });
+            if !passed {
+                break;
+            }
+        }
+        Ok(ran)
+    }
+
+    fn lead_mode(&self, _run: &Run) -> Option<String> {
+        Some(self.world().lead_mode.clone().unwrap_or_else(|| "bypassPermissions".into()))
+    }
 }
 
 /// Gates 2 to 4 passed on a change of `files` and `lines` changed lines.
 fn passing(files: &[&str], lines: u32) -> Checked {
     Checked {
         gates: vec![GateResult::passed(Gate::Scope, "Within what the piece owns."), GateResult::passed(Gate::Branch, "Committed and clean."), GateResult::passed(Gate::Commands, "1 command exited 0.")],
-        facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, security_areas: Vec::new(), commands_not_run: false, commit: Some("c0ffee1".into()) },
+        facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, changes: Vec::new(), security_areas: Vec::new(), commands_not_run: false, commit: Some("c0ffee1".into()) },
         diff: files.iter().map(|file| format!("diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n-old\n+new\n")).collect(),
         base: "settings-typed-store".into(),
     }
@@ -596,15 +631,15 @@ fn a_run_survives_a_restart_with_its_piece_states_intact() {
     restarted.settings.lock().unwrap().require_approval = false;
     {
         let mut world = restarted.world();
-        world.now.insert("w1-map".into(), WorkerNow::Reported { status: Status::Done, result: "41 call sites in 9 files.".into() });
-        world.now.insert("w2-store".into(), WorkerNow::Reported { status: Status::Blocked, result: "The migration needs a decision on the old keys.".into() });
+        world.now.insert("w1-map".into(), WorkerNow::Reported { status: Status::Done, result: "41 call sites in 9 files.".into(), report: TryReport { result: "41 call sites in 9 files.".to_string(), ..TryReport::default() } });
+        world.now.insert("w2-store".into(), WorkerNow::Reported { status: Status::Blocked, result: "The migration needs a decision on the old keys.".into(), report: TryReport { result: "The migration needs a decision on the old keys.".to_string(), ..TryReport::default() } });
     }
     assert_eq!(store::list().unwrap(), vec![before.clone()]);
     assert_eq!(engine::refreshed(&restarted, &id).unwrap(), before);
     assert_eq!(store::for_lead("lead").unwrap().unwrap().id, id);
     assert_eq!(store::for_worker("w2-store").unwrap().map(|(run, piece)| (run.id, piece)), Some((id.clone(), "store".into())));
     // It goes on where it was: the blocked piece's worker finishes, and the next pieces start.
-    restarted.world().now.insert("w2-store".into(), WorkerNow::Reported { status: Status::Done, result: "Store added, 14 tests pass.".into() });
+    restarted.world().now.insert("w2-store".into(), WorkerNow::Reported { status: Status::Done, result: "Store added, 14 tests pass.".into(), report: TryReport { result: "Store added, 14 tests pass.".to_string(), ..TryReport::default() } });
     let next = engine::start(&restarted, &id).unwrap();
     assert_eq!(next.started, vec!["session", "pipeline", "cli"]);
     drop(home);
@@ -642,6 +677,11 @@ fn a_piece_follows_what_its_worker_reports() {
 
 /// A run of one `scoped-code` piece on the table's model, started, and a second piece that waits on it.
 fn one_piece() -> (Fake, String) {
+    two_pieces_for("lead")
+}
+
+/// `cli`, and `docs` on it, in a run of `lead` that asks for no approval, started.
+fn two_pieces_for(lead: &str) -> (Fake, String) {
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
     let plan: Plan = serde_json::from_value(json!({"goal": "Move CLI reads", "pieces": [
@@ -649,7 +689,7 @@ fn one_piece() -> (Fake, String) {
         {"id": "docs", "title": "Update the docs", "kind": "scoped-code", "doneChecks": [{"type": "command", "run": "every key is documented"}], "owns": ["docs/"], "dependsOn": ["cli"]},
     ]}))
     .unwrap();
-    let run = engine::create(&host, &plan, "lead", Some("lead-tab".into())).unwrap();
+    let run = engine::create(&host, &plan, lead, Some(format!("{lead}-tab"))).unwrap();
     engine::start(&host, &run.id).unwrap();
     (host, run.id)
 }
@@ -753,10 +793,10 @@ fn a_failing_piece_follows_the_ladder_and_is_blocked_after_three_tries() {
     let piece = run.piece("cli").unwrap();
     assert_eq!((piece.state, piece.attempts, piece.gave_up()), (PieceState::Blocked, 3, true));
     assert_eq!(piece.note.as_deref(), Some("Blocked after 3 tries: sonnet at medium, then sonnet at high, then opus at medium. It used all 3 tries. Last failure: The worker reported failed: The same test fails."));
-    // Nothing else can run: the run says which piece holds it up.
-    assert_eq!((run.state, run.reason.as_deref()), (RunState::Failed, Some("cli is blocked after 3 tries. docs cannot start without it.")));
+    // Nothing else can run, and the run does not fail: a blocked piece waits on the person (PRO-361).
+    assert_eq!((run.state, run.reason.as_deref()), (RunState::Running, None));
     assert!(engine::start_retries(&host, id).unwrap().started.is_empty());
-    assert_eq!(engine::start(&host, id).unwrap_err().code, "run_ended");
+    assert!(engine::start(&host, id).unwrap().started.is_empty(), "docs still waits for cli");
     // Read again and again, it stays as it is.
     assert_eq!(engine::refreshed(&host, id).unwrap(), run);
     assert_eq!(host.made(), vec!["cli", "cli", "cli"]);
@@ -885,7 +925,7 @@ fn a_piece_with_no_tier_above_it_is_blocked_after_two_tries() {
     let after = store::get(&run.id).unwrap();
     assert_eq!(tried(&after, "shape"), vec![(Step::First, "fable".to_string(), Some("medium".to_string()), Some(Outcome::Failed)), (Step::Effort, "fable".into(), Some("high".into()), Some(Outcome::Failed))]);
     assert_eq!(after.piece("shape").unwrap().note.as_deref(), Some("Blocked after 2 tries: fable at medium, then fable at high. It already ran on the top tier: there is no model above it. Last failure: The worker reported failed: It still does not compile."));
-    assert_eq!((after.state, after.reason.as_deref()), (RunState::Failed, Some("shape is blocked after 2 tries.")));
+    assert_eq!((after.state, after.reason.as_deref()), (RunState::Running, None), "a blocked piece waits on the person");
 }
 
 #[test]
@@ -1670,7 +1710,7 @@ fn a_gate_that_fails_skips_the_later_ones_feeds_the_ladder_and_a_piece_stops_at_
     assert_eq!((piece.state, piece.tries.len(), piece.gave_up()), (PieceState::Blocked, 3, true));
     assert!(piece.note.as_deref().unwrap().starts_with("Blocked after 3 tries: sonnet at medium, then sonnet at high, then opus at medium. It used all 3 tries. Last failure: The result did not pass the command checks check"), "{:?}", piece.note);
     assert_eq!(tried(&run, "cli").iter().map(|attempt| attempt.3).collect::<Vec<_>>(), vec![Some(Outcome::CheckFailed); 3]);
-    assert_eq!((run.state, run.reason.as_deref()), (RunState::Failed, Some("cli is blocked after 3 tries. docs cannot start without it.")));
+    assert_eq!((run.state, run.reason.as_deref()), (RunState::Running, None));
     assert!(engine::start_retries(&host, id).unwrap().started.is_empty());
     engine::refreshed(&host, id).unwrap();
     let world = host.world();
@@ -2011,7 +2051,7 @@ fn a_lead_waiting_on_its_run_is_woken_by_a_piece_settled_not_by_each_turn_that_e
     let held = engine::refreshed(&asking, &asking_id).unwrap();
     assert_eq!((held.state, held.piece("cli").unwrap().state), (RunState::Running, PieceState::Blocked));
     let woken = engine::wake(&held, &held, false).expect("nothing is under way");
-    assert_eq!(woken["why"], json!(["Nothing is under way and nothing can start: waiting changes nothing. Held up by: cli. `terminalx runs show` says why for each."]));
+    assert_eq!(woken["why"], json!(["Nothing is under way and nothing can start: waiting changes nothing. Held up by: cli. `terminalx runs show` says why for each; the person decides what happens to a blocked piece."]));
     assert_eq!(woken["pieces"][0]["changed"], false);
     // The same for a review nobody could answer.
     let (unread, unread_id) = run_of("lead-unread", json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]));
@@ -2029,7 +2069,8 @@ fn a_lead_waiting_on_its_run_is_woken_by_a_piece_settled_not_by_each_turn_that_e
         engine::start_retries(&stuck, &stuck_id).unwrap();
     }
     let blocked = store::get(&stuck_id).unwrap();
-    assert_eq!(engine::wake(&before, &blocked, false).unwrap()["why"], json!(["cli is blocked after 3 tries.", "The run is failed."]));
+    // The run waits on the person, not failed (PRO-361): the wait says nothing else can happen until they decide.
+    assert_eq!(engine::wake(&before, &blocked, false).unwrap()["why"], json!(["cli is blocked after 3 tries.", "Nothing is under way and nothing can start: waiting changes nothing. Held up by: cli. `terminalx runs show` says why for each; the person decides what happens to a blocked piece."]));
 }
 
 /// Two pieces that depend on nothing.
@@ -2453,4 +2494,305 @@ fn a_worker_deleted_mid_turn_frees_its_slot_for_the_next_queued_piece() {
     assert_eq!((after.piece("p2").unwrap().state, after.piece("p2").unwrap().queued_for), (PieceState::Running, None));
     assert_eq!(host.made(), vec!["p1", "p2"]);
     assert_eq!(after.in_turn(), 1);
+}
+
+// ---- A blocked piece (PRO-361, 18.03): take over in lead, widen and retry, a note, skip.
+
+/// What the third worker of `cli` reported when it gave up: the fix lies in a file it does not own.
+const OUTSIDE: &str = "The default mode now comes from the store, but `sessions_create` still reads the old file when the project has an override. That path is in `src/store/projects.rs`, which the store piece owns.";
+
+/// `one_piece()` with `cli` blocked after its three tries and `docs` waiting on it. The last
+/// worker's report names a file outside the piece and evidence in another.
+fn blocked_cli() -> (Fake, String) {
+    blocked_cli_for("lead")
+}
+
+fn blocked_cli_for(lead: &str) -> (Fake, String) {
+    let (host, id) = two_pieces_for(lead);
+    host.reports("cli", Status::Failed, "2 tests in control::tests fail.");
+    engine::worker_turn_ended(&host, "w1-cli");
+    engine::start_retries(&host, &id).unwrap();
+    host.reports("cli", Status::Partial, "1 test still fails.");
+    engine::worker_turn_ended(&host, "w2-cli");
+    engine::start_retries(&host, &id).unwrap();
+    {
+        let mut world = host.world();
+        world.running.remove("w3-cli");
+        world.output_tokens.insert("w3-cli".into(), 41_000);
+        world.now.insert(
+            "w3-cli".into(),
+            WorkerNow::Reported {
+                status: Status::Failed,
+                result: OUTSIDE.into(),
+                report: TryReport {
+                    result: OUTSIDE.into(),
+                    evidence: vec!["cargo t control: exit 101".into(), "src/control.rs:1184".into()],
+                    not_done: vec!["The override path in src/store/projects.rs".into()],
+                    could_not_read: vec!["https://example.com/spec: 403".into()],
+                    uncertain: vec!["Whether Windows reads the same path".into()],
+                    ..TryReport::default()
+                },
+            },
+        );
+    }
+    engine::worker_turn_ended(&host, "w3-cli");
+    (host, id)
+}
+
+#[test]
+fn a_blocked_piece_waits_on_the_person_with_its_workers_report_and_the_files_outside_it() {
+    let _home = crate::store::temp_home();
+    let (host, id) = blocked_cli();
+    let run = engine::refreshed(&host, &id).unwrap();
+    assert_eq!((run.state, run.reason.as_deref()), (RunState::Running, None));
+    assert_eq!(states(&run), vec![("cli", PieceState::Blocked), ("docs", PieceState::Queued)]);
+    let last = &run.piece("cli").unwrap().tries[2];
+    // The whole report is kept with its try, and what its session used.
+    let report = last.report.as_ref().expect("the report is kept");
+    assert_eq!((report.evidence.len(), report.not_done.len(), report.could_not_read.len(), report.uncertain.len()), (2, 1, 1, 1));
+    assert_eq!(last.output_tokens, Some(41_000));
+    // What it names outside its files, with the piece that owns one when one does.
+    let shown = engine::shown(&run);
+    // In the order the report names them: its result, then its evidence.
+    assert_eq!(shown["pieces"][0]["outside"], json!([{"path": "src/store/projects.rs"}, {"path": "src/control.rs"}]));
+    assert!(shown["pieces"][1].get("outside").is_none());
+    // The lead's wait says it is the person's to decide.
+    let woken = engine::wake(&run, &run, false).unwrap();
+    assert!(woken["why"][0].as_str().unwrap().contains("the person decides what happens to a blocked piece"), "{woken}");
+}
+
+#[test]
+fn skipping_a_blocked_piece_leaves_it_and_what_waits_on_it_out_and_the_run_merges_without_them() {
+    let _home = crate::store::temp_home();
+    let (host, id) = blocked_cli();
+    // Refused for a piece that is not blocked, one the run does not have, and in a run that has not started.
+    let error = engine::skip(&host, &id, "docs", engine::By::Person).unwrap_err();
+    assert_eq!((error.code, error.details["state"].as_str()), ("piece_not_blocked", Some("queued")));
+    assert!(error.message.contains("it has not started"), "{}", error.message);
+    assert_eq!(engine::skip(&host, &id, "nope", engine::By::Person).unwrap_err().code, "piece_not_found");
+    let waiting = engine::create(&Fake::new(), &plan(), "other-lead", None).unwrap();
+    assert_eq!(engine::skip(&host, &waiting.id, "map", engine::By::Person).unwrap_err().code, "run_not_started");
+
+    let skipped = engine::skip(&host, &id, "cli", engine::By::Person).unwrap();
+    assert_eq!(skipped.skipped, vec!["cli", "docs"]);
+    assert_eq!(states(&skipped.run), vec![("cli", PieceState::Skipped), ("docs", PieceState::Skipped)]);
+    assert_eq!(skipped.run.piece("docs").unwrap().note.as_deref(), Some("Skipped with piece cli, which it depends on."));
+    // Every piece is settled: the run is merged without them, and no worker is started for them.
+    assert_eq!(skipped.run.state, RunState::Merging);
+    assert!(skipped.run.pieces.iter().all(super::Piece::merge_settled));
+    assert_eq!(host.made(), vec!["cli", "cli", "cli"]);
+    // The try that fell short keeps its outcome; reading the run again does not bring the piece back.
+    assert_eq!(skipped.run.piece("cli").unwrap().tries[2].outcome, Some(Outcome::Failed));
+    assert_eq!(engine::refreshed(&host, &id).unwrap().piece("cli").unwrap().state, PieceState::Skipped);
+    let told = host.world().told.last().cloned().unwrap();
+    assert!(told.contains("The person skipped piece cli of run") && told.contains("and with it docs, which depends on it"), "{told}");
+    // Once skipped it is not blocked: a second skip is refused, and so is a stopped run's.
+    assert_eq!(engine::skip(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "piece_not_blocked");
+    engine::stop(&host, &id, engine::By::Cli).unwrap();
+    assert_eq!(engine::skip(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "run_ended");
+}
+
+#[test]
+fn widening_a_blocked_piece_adds_the_files_it_needs_and_starts_one_fresh_worker() {
+    let _home = crate::store::temp_home();
+    let (host, id) = blocked_cli();
+    // A path outside the repository, and a file another piece still works on, are refused.
+    let error = engine::widen(&host, &id, "cli", &["../secrets".into()], engine::By::Person).unwrap_err();
+    assert_eq!((error.code, error.details["path"].as_str()), ("invalid_path", Some("../secrets")));
+    let error = engine::widen(&host, &id, "cli", &["docs/guide.md".into()], engine::By::Person).unwrap_err();
+    assert_eq!((error.code, error.details["owner"].as_str(), error.details["state"].as_str()), ("owned_by_another", Some("docs"), Some("queued")));
+    // A directory or a glob is compared as one, not as a file named so.
+    for wider in ["docs", "**/*.md", "*/guide.md"] {
+        let error = engine::widen(&host, &id, "cli", &[wider.into()], engine::By::Person).unwrap_err();
+        assert_eq!((error.code, error.details["owner"].as_str()), ("owned_by_another", Some("docs")), "{wider}");
+    }
+    let error = engine::widen(&host, &id, "cli", &["src/cli.rs".into()], engine::By::Person).unwrap_err();
+    assert_eq!(error.code, "nothing_to_widen");
+    assert!(error.message.contains("already owns src/cli.rs"), "{}", error.message);
+    // A catch-all is every file, not a widening.
+    for everything in ["**", "*/*", "./**"] {
+        assert_eq!(engine::widen(&host, &id, "cli", &[everything.into()], engine::By::Person).unwrap_err().code, "invalid_path", "{everything}");
+    }
+    // The person approved what each piece owns: the lead does not change it from the CLI.
+    store::update(&id, |run| {
+        run.approval = Some(super::Approval { at: "2026-11-12T09:00:00Z".into() });
+        Ok(())
+    })
+    .unwrap();
+    let error = engine::widen(&host, &id, "cli", &[], engine::By::Cli).unwrap_err();
+    assert_eq!(error.code, "person_only");
+    assert!(error.recovery.as_deref().unwrap().contains("Tell the person"));
+    assert_eq!(engine::widen(&host, &id, "docs", &[], engine::By::Person).unwrap_err().code, "piece_not_blocked");
+    assert_eq!(host.made().len(), 3, "nothing refused starts a worker");
+
+    // With no files named, the ones its last report and check name outside it.
+    let widened = engine::widen(&host, &id, "cli", &[], engine::By::Person).unwrap();
+    assert_eq!((widened.added.clone(), widened.started), (vec!["src/store/projects.rs".to_string(), "src/control.rs".to_string()], true));
+    let piece = widened.run.piece("cli").unwrap();
+    assert_eq!(piece.owns, vec!["src/cli.rs", "src/store/projects.rs", "src/control.rs"]);
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[3].step), (PieceState::Running, 4, Step::Widened));
+    // A fresh worker on the last try's model and effort, told what went before and what it owns now.
+    let fourth = host.world().made.last().cloned().unwrap();
+    assert_eq!((fourth.session.as_str(), fourth.model.as_str(), fourth.effort.as_deref()), ("w4-cli", "opus", Some("medium")));
+    let brief = host.world().briefs["w4-cli"].clone();
+    assert!(brief.contains("You are try 4 of this piece") && brief.contains("A person gave this piece more files") && brief.contains("- src/store/projects.rs"), "{brief}");
+    assert!(host.world().told.last().unwrap().contains("widened piece cli of run"));
+    assert!(engine::shown(&widened.run)["pieces"][0].get("outside").is_none(), "what it owns now is not outside it");
+
+    // A try past the ladder that falls short blocks it again: there is no fifth by itself.
+    host.reports("cli", Status::Failed, "Still failing.");
+    assert_eq!(engine::worker_turn_ended(&host, "w4-cli"), None);
+    let piece = store::get(&id).unwrap().piece("cli").cloned().unwrap();
+    assert_eq!((piece.state, piece.tries.len()), (PieceState::Blocked, 4));
+    assert!(piece.note.as_deref().unwrap().contains("The try after a person widened its files fell short too."), "{:?}", piece.note);
+}
+
+#[test]
+fn a_note_to_a_blocked_pieces_worker_opens_its_try_again_in_the_same_session() {
+    let _home = crate::store::temp_home();
+    let (host, id) = blocked_cli();
+    assert_eq!(engine::note(&host, &id, "cli", "  ", engine::By::Person).unwrap_err().code, "empty_note");
+    assert_eq!(engine::note(&host, &id, "docs", "Hi.", engine::By::Person).unwrap_err().code, "piece_not_blocked");
+    // The run's worker limit holds a note's turn as it holds any worker's.
+    let mut full = store::get(&id).unwrap().limits;
+    full.workers = 0;
+    store::update(&id, |run| {
+        run.limits = full;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(engine::note(&host, &id, "cli", "Read the store first.", engine::By::Person).unwrap_err().code, "no_free_worker");
+    store::update(&id, |run| {
+        run.limits.workers = 4;
+        Ok(())
+    })
+    .unwrap();
+
+    let after = engine::note(&host, &id, "cli", "The override reader is in src/store/projects.rs: call it, do not copy it.", engine::By::Person).unwrap();
+    let piece = after.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[2].outcome, piece.tries[2].report.is_none()), (PieceState::Running, 3, None, true));
+    // Sent to the worker it had, in its own session: no new worker.
+    assert_eq!(host.made().len(), 3);
+    let sent = host.world().briefs["w3-cli"].clone();
+    assert!(sent.starts_with("A note from the person running this run") && sent.contains("call it, do not copy it.") && sent.contains("`terminalx-report`"), "{sent}");
+    assert!(host.world().told.last().unwrap().contains("> The override reader is in src/store/projects.rs"));
+    // Its next report is checked as any is: done, and its checks pass.
+    host.reports("cli", Status::Done, "Calls the store's reader now.");
+    engine::worker_turn_ended(&host, "w3-cli");
+    let run = store::get(&id).unwrap();
+    assert_eq!((run.piece("cli").unwrap().state, run.piece("cli").unwrap().tries[2].outcome), (PieceState::Done, Some(Outcome::Done)));
+    assert_eq!(run.ready().iter().map(|piece| piece.id.as_str()).collect::<Vec<_>>(), vec!["docs"]);
+
+    // A worker whose session is gone gets no note: a fresh one is what widening is for. (A lead leads one run at a time.)
+    engine::stop(&host, &id, engine::By::Cli).unwrap();
+    let (gone, gone_id) = blocked_cli();
+    gone.world().now.insert("w3-cli".into(), WorkerNow::Gone);
+    let error = engine::note(&gone, &gone_id, "cli", "Anyone there?", engine::By::Person).unwrap_err();
+    assert_eq!(error.code, "worker_gone");
+    assert!(error.recovery.as_deref().unwrap().contains("Widen its scope"));
+
+    // From the CLI it is the lead's note, and says so: never the person's.
+    engine::stop(&gone, &gone_id, engine::By::Cli).unwrap();
+    let (lead_note, lead_id) = blocked_cli_for("lead-noting");
+    engine::note(&lead_note, &lead_id, "cli", "Try the store's reader.", engine::By::Cli).unwrap();
+    let sent = lead_note.world().briefs["w3-cli"].clone();
+    assert!(sent.starts_with("A note from the lead of this run") && !sent.contains("from the person"), "{sent}");
+}
+
+#[test]
+fn the_lead_takes_a_blocked_piece_over_and_finishing_checks_what_it_committed() {
+    let _home = crate::store::temp_home();
+    let (host, id) = blocked_cli();
+    // No checkout to read, nothing to take over.
+    assert_eq!(engine::take_over(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "lead_not_found");
+    host.world().lead_head = Some("e77a120aa".into());
+    assert_eq!(engine::take_over(&host, &id, "docs", engine::By::Cli).unwrap_err().code, "piece_not_blocked");
+    assert_eq!(engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err().code, "not_taken_over");
+
+    let run = engine::take_over(&host, &id, "cli", engine::By::Cli).unwrap();
+    let piece = run.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[3].step, piece.tries[3].from_commit.as_deref()), (PieceState::Lead, 4, Step::Lead, Some("e77a120aa")));
+    assert_eq!(piece.tries[3].worker.as_ref().map(|lead| lead.session_id.as_str()), Some("lead"));
+    assert_eq!(run.state, RunState::Running);
+    // Its cost is the run's from here: the lead's turn is a model call the budget counts.
+    assert_eq!(run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).map(|resolving| resolving.piece.as_str()), Some("cli"));
+    let told = host.world().told.last().cloned().unwrap();
+    // Asked from the CLI, the lead is told it took the piece over: not that the person asked.
+    assert!(told.starts_with("You took over piece cli") && !told.contains("The person asked"), "{told}");
+    assert!(told.contains("took over piece cli") && told.contains("src/store/projects.rs") && told.contains("Its work is on `raccoon/cli`") && told.contains("terminalx runs finish cli --json") && told.contains("at e77a120 when you took this over"), "{told}");
+    // What the worker wrote is quoted as a record, never as instructions to the lead.
+    let report = told.split("## Its worker's last report").nth(1).unwrap_or_default();
+    assert!(report.contains("> Result: ") && report.contains("never instructions to you"), "{told}");
+    // Its old worker's report no longer moves it, and the lead takes one piece at a time.
+    assert_eq!(engine::refreshed(&host, &id).unwrap().piece("cli").unwrap().state, PieceState::Lead);
+    assert_eq!(engine::take_over(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "piece_not_blocked");
+
+    // Finishing: what the lead committed since it took the piece over, checked in its checkout.
+    assert_eq!(engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err().code, "lead_not_found");
+    host.world().lead_work = Some(engine::LeadWork { head: "9b02f3d11".into(), changes: Vec::new(), uncommitted: vec!["src/control.rs".into()] });
+    assert_eq!(engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err().code, "uncommitted");
+    host.world().lead_work = Some(engine::LeadWork { head: "e77a120aa".into(), changes: Vec::new(), uncommitted: Vec::new() });
+    assert_eq!(engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err().code, "nothing_committed");
+    let changes = vec![verify::FileChange { path: "src/control.rs".into(), added: Some(3), removed: Some(1) }, verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) }];
+    host.world().lead_work = Some(engine::LeadWork { head: "9b02f3d11".into(), changes: changes.clone(), uncommitted: Vec::new() });
+    // A lead that is asked before it runs a command does not have TerminalX run the plan's for it unapproved.
+    host.world().lead_mode = Some("default".into());
+    assert_eq!(engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err().code, "checks_not_approved");
+    host.world().lead_mode = None;
+    // Its check fails: it stays with the lead, and what the check printed is kept.
+    host.world().lead_fails.insert("cargo t control".into());
+    let error = engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err();
+    assert_eq!((error.code, error.details["check"]["exitCode"].as_i64()), ("checks_failed", Some(1)));
+    let piece = store::get(&id).unwrap().piece("cli").cloned().unwrap();
+    assert_eq!((piece.state, piece.tries[3].verification.as_ref().and_then(|check| check.outcome)), (PieceState::Lead, Some(verify::Outcome::Failed)));
+    assert_eq!(host.world().lead_since.last().map(String::as_str), Some("e77a120aa"), "its work is counted from where it took the piece over");
+
+    host.world().lead_fails.clear();
+    let finished = engine::finish(&host, &id, "cli", engine::By::Person, false).unwrap();
+    assert_eq!((finished.commit.as_str(), finished.checks.len()), ("9b02f3d11", 1));
+    let piece = finished.run.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.tries[3].outcome), (PieceState::Done, Some(Outcome::Done)));
+    // Accepted as the lead's own commit: the merge finds it in the lead's branch already.
+    assert_eq!(piece.accepted_commit(), Some("9b02f3d11"));
+    assert_eq!(piece.tries[3].verification.as_ref().unwrap().facts.as_ref().unwrap().changes, changes);
+    assert!(finished.run.merge.as_ref().unwrap().resolving.is_none(), "the lead's call is over");
+    assert_eq!(finished.run.ready().iter().map(|piece| piece.id.as_str()).collect::<Vec<_>>(), vec!["docs"]);
+    assert!(host.world().told.last().unwrap().contains("The person checked piece cli"));
+
+    // A piece the lead took over may be skipped too, when it cannot be done. (A lead leads one run at a time.)
+    engine::stop(&host, &id, engine::By::Cli).unwrap();
+    let (other, other_id) = blocked_cli();
+    other.world().lead_head = Some("e77a120aa".into());
+    engine::take_over(&other, &other_id, "cli", engine::By::Cli).unwrap();
+    let skipped = engine::skip(&other, &other_id, "cli", engine::By::Cli).unwrap();
+    assert_eq!((skipped.run.piece("cli").unwrap().state, skipped.run.piece("cli").unwrap().tries[3].outcome), (PieceState::Skipped, Some(Outcome::Stopped)));
+    assert!(skipped.run.merge.as_ref().unwrap().resolving.is_none());
+}
+
+
+#[test]
+fn a_plan_a_person_approved_is_theirs_to_change_the_lead_takes_over_widens_or_skips_only_from_the_run_view() {
+    let _home = crate::store::temp_home();
+    let (host, id) = blocked_cli();
+    host.world().lead_head = Some("e77a120aa".into());
+    store::update(&id, |run| {
+        run.approval = Some(super::Approval { at: "2026-11-12T09:00:00Z".into() });
+        Ok(())
+    })
+    .unwrap();
+    for (what, error) in [
+        ("take-over", engine::take_over(&host, &id, "cli", engine::By::Cli).unwrap_err()),
+        ("widen", engine::widen(&host, &id, "cli", &[], engine::By::Cli).map(|_| ()).unwrap_err()),
+        ("skip", engine::skip(&host, &id, "cli", engine::By::Cli).map(|_| ()).unwrap_err()),
+    ] {
+        assert_eq!((error.code, error.details["piece"].as_str()), ("person_only", Some("cli")), "{what}");
+    }
+    assert_eq!(store::get(&id).unwrap().piece("cli").unwrap().state, PieceState::Blocked, "nothing changed");
+    // The person may: the lead is told they asked, and that leaving it out is theirs too.
+    let run = engine::take_over(&host, &id, "cli", engine::By::Person).unwrap();
+    assert_eq!(run.piece("cli").unwrap().state, PieceState::Lead);
+    let told = host.world().told.last().cloned().unwrap();
+    assert!(told.starts_with("The person asked you to take over piece cli") && told.contains("they can skip it in the Run view") && !told.contains("terminalx runs skip"), "{told}");
+    assert_eq!(engine::skip(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "person_only");
+    assert_eq!(engine::skip(&host, &id, "cli", engine::By::Person).unwrap().skipped, vec!["cli", "docs"]);
 }
