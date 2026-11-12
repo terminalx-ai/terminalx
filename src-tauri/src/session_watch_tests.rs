@@ -856,6 +856,77 @@ fn a_provider_sandbox_that_could_narrow_reads_keeps_discovery_on_the_card() {
     }
 }
 
+/// The rig's tab as a run's verifier, until dropped: every rig shares its ids.
+struct AsVerifier;
+
+impl AsVerifier {
+    fn noted() -> Self {
+        // Read the runs first, so that noting it is not lost to a later first read.
+        assert!(crate::orchestration::store::is_verifier(SESSION, TAB).is_some(), "the runs are readable");
+        crate::orchestration::store::note_verifier(SESSION, TAB);
+        assert_eq!(crate::orchestration::store::is_verifier(SESSION, TAB), Some(true));
+        Self
+    }
+}
+
+impl Drop for AsVerifier {
+    fn drop(&mut self) {
+        crate::orchestration::store::forget_verifier(SESSION, TAB);
+    }
+}
+
+/// A run's verifier asks at `PreToolUse`, in either agent, and TerminalX runs
+/// its read-only command itself (PRO-330). The answer is in that hook's own
+/// form: Claude Code 2.1.322 ignores one in `PermissionRequest` form ("Hook
+/// returned incorrect event name"), and would then run the command itself.
+/// Where the person has not let read-only commands run unasked, or the
+/// agent's sandbox could narrow what it reads, the command is refused, with
+/// the verifier sent to its file tools, and never left to the agent's shell.
+#[test]
+#[cfg(unix)]
+fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, crate::orchestration::guard::VERIFIER_MODE);
+        let _verifier = AsVerifier::noted();
+        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        std::fs::create_dir(&app).unwrap();
+        std::fs::write(app.join("file"), "hello\n").unwrap();
+        let frame = || command_frame(&rig, "PreToolUse", "cat file", app.to_str().unwrap());
+        let answer = |reply: HookReply| reply.output.expect("the hook is answered")["hookSpecificOutput"].clone();
+
+        let output = answer(rig.manager.on_hook(frame()));
+        assert_eq!((&output["hookEventName"], &output["permissionDecision"]), (&json!("PreToolUse"), &json!("deny")), "{kind:?}: {output}");
+        assert!(output.get("decision").is_none(), "{kind:?}: no PermissionRequest decision in a PreToolUse answer: {output}");
+        let report = output["permissionDecisionReason"].as_str().unwrap();
+        assert_eq!(crate::harness::read_only::ran_result(report), Some((0, "hello\n".into())), "{kind:?}: TerminalX ran it");
+        // Codex's own form, the one its discovery commands are answered in; Claude's PreToolUse is the same.
+        assert_eq!(output, codex::pty::pre_tool_ran(report)["hookSpecificOutput"], "{kind:?}");
+        assert!(rig.manager.pending_permissions().is_empty(), "{kind:?}: nobody is asked for a verifier");
+
+        let refused = |reason: &str| {
+            let output = answer(rig.manager.on_hook(frame()));
+            assert_eq!(output, crate::orchestration::guard::refusal_output(reason)["hookSpecificOutput"], "{kind:?}");
+            assert!(["Read", "Grep", "Glob"].iter().all(|tool| reason.contains(tool)));
+            assert!(rig.manager.pending_permissions().is_empty(), "{kind:?}: refused, not asked");
+        };
+        // Read-only commands off: refused, whatever the sandbox.
+        let mut settings = store::settings::load();
+        settings.agents.read_only_commands = false;
+        store::settings::save(&settings).unwrap();
+        refused(crate::orchestration::guard::NOT_ALLOWED);
+        settings.agents.read_only_commands = true;
+        store::settings::save(&settings).unwrap();
+        // The agent's sandbox could narrow what it reads, in the command's own project: refused.
+        let (file, text) = match kind {
+            CliKind::Claude => (".claude/settings.local.json", r#"{"sandbox":{"enabled":true,"filesystem":{"denyRead":["~/.ssh"]}}}"#),
+            CliKind::Codex => (".codex/config.toml", "[permissions.filesystem]\ndeny_read = [\"~/.ssh\"]\n"),
+        };
+        std::fs::create_dir_all(app.join(file).parent().unwrap()).unwrap();
+        std::fs::write(app.join(file), text).unwrap();
+        refused(crate::orchestration::guard::SANDBOXED);
+    }
+}
+
 #[test]
 fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
