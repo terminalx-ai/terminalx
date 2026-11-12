@@ -1427,6 +1427,24 @@ fn asked_to_run(input: &Value) -> Value {
 
 /// The directory this provider proves the command will execute in. Codex's
 /// session cwd is not its exec_command workdir, so it is never a fallback.
+/// Whether the provider's own sandbox could not have narrowed what a command
+/// in `cwd` reads. TerminalX runs a vetted read-only command itself, outside
+/// that sandbox (PRO-330), only then. Not knowing is not "unconfined".
+fn provider_unconfined(kind: CliKind, session_id: &str, cwd: Option<&str>, transcript: Option<&str>) -> bool {
+    let Some(cwd) = cwd else { return false };
+    // The command's directory and the tab's launch directories: the CLI
+    // loaded project settings from where it started, whatever `cd` the model
+    // ran since.
+    let Ok(session) = index::get(session_id) else { return false };
+    let dirs = [Path::new(cwd), Path::new(&session.cwd), Path::new(&session.project_path)];
+    let dirs: Vec<&Path> = dirs.into_iter().filter(|dir| dir.is_absolute()).collect();
+    let sources = crate::harness::provider_sandbox::Sources::from_env(transcript);
+    !match kind {
+        CliKind::Claude => crate::harness::provider_sandbox::claude_may_restrict(&dirs, &sources),
+        CliKind::Codex => crate::harness::provider_sandbox::codex_may_restrict(&dirs, &sources),
+    }
+}
+
 fn permission_directory(kind: CliKind, payload: &Value) -> Option<&str> {
     let input = &payload["tool_input"];
     match kind {
@@ -6469,7 +6487,19 @@ impl SessionManager {
                     // (PRO-330), and the hook is answered with what it printed, in the form a
                     // `PreToolUse` hook answers in for either agent.
                     crate::orchestration::guard::VerifierCall::Run(approved) => {
-                        let approved = if permission_directory(kind, &frame.payload).is_some() { approved } else { approved.directory_was_reported() };
+                        // Under the gates every command TerminalX runs itself is under: the person
+                        // lets it run read-only commands, and the provider's sandbox could not have
+                        // narrowed what this one reads. Otherwise it is refused, never handed to the
+                        // agent's shell: nobody is there to be asked.
+                        let verified = permission_directory(kind, &frame.payload);
+                        let allowed = store::settings::load().agents.read_only_commands
+                            && provider_unconfined(kind, &frame.session, verified.or_else(|| frame.payload["cwd"].as_str()), frame.payload["transcript_path"].as_str());
+                        if !allowed {
+                            let reason = "TerminalX did not run this command: a verifier's shell commands are run by TerminalX itself, which it does only where read-only commands are allowed to run unasked and the agent's own sandbox does not limit what they read. Judge the result from the diff you were given, and read files with your file-reading tool.";
+                            log::info!("run verifier {}/{}: {reason}", frame.session, frame.tab);
+                            return HookReply { output: Some(crate::orchestration::guard::refusal_output(reason)), refused: None };
+                        }
+                        let approved = if verified.is_some() { approved } else { approved.directory_was_reported() };
                         return self.run_discovery(&rt_arc, &frame, kind, &frame.payload["tool_input"], approved, true);
                     }
                     crate::orchestration::guard::VerifierCall::Leave => unreachable!("left alone above"),
@@ -6846,20 +6876,7 @@ impl SessionManager {
                         return reply_for(kind, gate, Decision::Execute(updated));
                     }
                 }
-                let unconfined = || {
-                    let Some(cwd) = cwd else { return false };
-                    // The command's directory and the tab's launch
-                    // directories: the CLI loaded project settings from
-                    // where it started, whatever `cd` the model ran since.
-                    let Ok(session) = index::get(&rt.session_id) else { return false };
-                    let dirs = [Path::new(cwd), Path::new(&session.cwd), Path::new(&session.project_path)];
-                    let dirs: Vec<&Path> = dirs.into_iter().filter(|dir| dir.is_absolute()).collect();
-                    let sources = crate::harness::provider_sandbox::Sources::from_env(frame.payload["transcript_path"].as_str());
-                    !match kind {
-                        CliKind::Claude => crate::harness::provider_sandbox::claude_may_restrict(&dirs, &sources),
-                        CliKind::Codex => crate::harness::provider_sandbox::codex_may_restrict(&dirs, &sources),
-                    }
-                };
+                let unconfined = || provider_unconfined(kind, &rt.session_id, cwd, frame.payload["transcript_path"].as_str());
                 match (store::settings::load().agents.read_only_commands && unconfined())
                     .then(|| crate::harness::read_only::approved(&tool_name, &input, cwd)).flatten() {
                     Some(approved) => (None, Some(approved)),
@@ -6960,6 +6977,12 @@ impl SessionManager {
     /// agent: a run's verifier is held to reading there, before any
     /// permission is asked for.
     fn run_discovery(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, input: &Value, approved: crate::harness::read_only::Approved, pre_tool: bool) -> HookReply {
+        // No answer lets the agent run the command itself. That is right where a person is asked
+        // next; a verifier is never to run one, so there the command is refused instead.
+        let unanswered = || match pre_tool {
+            true => HookReply { output: Some(crate::orchestration::guard::refusal_output("TerminalX did not run this command: it was stopped before it finished. Nothing ran. Ask for it again if you still need it.")), refused: None },
+            false => HookReply::default(),
+        };
         // Codex records no item for a call its hook answered, so the chat
         // would not show this command at all. Claude's transcript does.
         let row = (kind == CliKind::Codex).then(|| {
@@ -6970,7 +6993,7 @@ impl SessionManager {
         let command = crate::harness::read_only::command(frame.payload["tool_name"].as_str().unwrap_or(""), input).unwrap_or("").to_string();
         if let Some(call_id) = &row {
             let mut rt = rt_arc.lock().unwrap();
-            if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)) { return HookReply::default(); }
+            if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)) { return unanswered(); }
             let title = format!("shell {}", command.lines().next().unwrap_or(""));
             self.apply(&mut rt, Payload::ToolCallStarted {
                 call_id: call_id.clone(), name: "shell".into(), tool_type: ToolType::Shell,
@@ -6991,7 +7014,7 @@ impl SessionManager {
                 self.apply(&mut rt, Payload::ToolCallCompleted { call_id, result }, None);
             }
         }
-        let Some(ran) = ran else { return HookReply::default() };
+        let Some(ran) = ran else { return unanswered() };
         let report = ran.report();
         let output = match kind {
             // The same `PreToolUse` denial carries the result for both agents.
