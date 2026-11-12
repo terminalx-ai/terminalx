@@ -2537,7 +2537,7 @@ mod tests {
         let json = ORCHESTRATOR_GUIDE.split("```json\n").nth(1).and_then(|rest| rest.split("\n```").next()).expect("the guide has a plan example");
         let plan = plan::parse(&serde_json::from_str(json).expect("the example is JSON")).unwrap_or_else(|error| panic!("the example is refused: {error:?}"));
         let agents = ["claude".to_string(), "codex".to_string()];
-        let rules = |piece_limit, approval| plan::Rules { piece_limit, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval, checkout: None };
+        let rules = |piece_limit, approval| plan::Rules { piece_limit, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval, checkout: None, routing: &crate::orchestration::routing::tests::TABLE, models: &crate::orchestration::routing::tests::MODELS, lead_model: "fable" };
         // Valid under the default limit with a person approving it, and still valid where nobody does.
         let pieces = plan::validate(&plan, &rules(8, true)).unwrap_or_else(|error| panic!("the example is refused: {error:?}"));
         plan::validate(&plan, &rules(8, false)).unwrap();

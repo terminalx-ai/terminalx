@@ -1425,6 +1425,34 @@ fn asked_to_run(input: &Value) -> Value {
     what
 }
 
+/// The hook a command TerminalX runs itself answers ([`SessionManager::run_discovery`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Answering {
+    /// An Ask-mode permission gate: Codex's `PreToolUse`, Claude's
+    /// `PermissionRequest`. Unanswered, a person is asked next.
+    Permission,
+    /// A run verifier's `PreToolUse`, for either agent. Unanswered, its agent
+    /// would run the command itself, so an unfinished run is refused.
+    Verifier,
+}
+
+/// Whether the provider's own sandbox could have narrowed what a command run
+/// in `cwd` reads (PRO-330). TerminalX runs a vetted read-only command itself,
+/// outside that sandbox, only when it could not. Not knowing is "it could".
+fn provider_may_restrict(kind: CliKind, session_id: &str, cwd: &Path, transcript: Option<&str>) -> bool {
+    // The command's directory and the tab's launch directories: the CLI
+    // loaded project settings from where it started, whatever `cd` the model
+    // ran since.
+    let Ok(session) = index::get(session_id) else { return true };
+    let dirs = [cwd, Path::new(&session.cwd), Path::new(&session.project_path)];
+    let dirs: Vec<&Path> = dirs.into_iter().filter(|dir| dir.is_absolute()).collect();
+    let sources = crate::harness::provider_sandbox::Sources::from_env(transcript);
+    match kind {
+        CliKind::Claude => crate::harness::provider_sandbox::claude_may_restrict(&dirs, &sources),
+        CliKind::Codex => crate::harness::provider_sandbox::codex_may_restrict(&dirs, &sources),
+    }
+}
+
 /// The directory this provider proves the command will execute in. Codex's
 /// session cwd is not its exec_command workdir, so it is never a fallback.
 fn permission_directory(kind: CliKind, payload: &Value) -> Option<&str> {
@@ -6425,21 +6453,30 @@ impl SessionManager {
             // command not known to only read, is refused in every permission mode, whatever its
             // tab is switched to later.
             let call = crate::orchestration::guard::verifier_call(&frame.payload);
-            if call != crate::orchestration::guard::VerifierCall::Leave && {
+            if !matches!(call, crate::orchestration::guard::VerifierCall::Leave) && {
                 let known = crate::orchestration::store::is_verifier(&frame.session, &frame.tab);
                 // The session's entry is read only when the runs could not be.
                 crate::orchestration::guard::reads_only(known, known.is_none().then(|| index::get(&frame.session).ok()).flatten().as_ref(), &frame.tab)
             } {
-                let output = match call {
+                // Under the gates every command TerminalX runs itself is under (PRO-330): the person
+                // lets it run read-only commands unasked, and the provider's sandbox could not have
+                // narrowed what this one reads. Otherwise it is refused, never handed to the agent's
+                // shell: nobody is there to be asked.
+                let transcript = frame.payload["transcript_path"].as_str();
+                let call = crate::orchestration::guard::held(call, store::settings::load().agents.read_only_commands, |cwd| provider_may_restrict(kind, &frame.session, cwd, transcript));
+                match call {
                     crate::orchestration::guard::VerifierCall::Refuse(reason) => {
                         log::info!("run verifier {}/{}: {reason}", frame.session, frame.tab);
-                        crate::orchestration::guard::refusal_output(&reason)
+                        return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
                     }
-                    // A command that only reads runs as the reader's replacement for it, in either agent's hook form.
-                    crate::orchestration::guard::VerifierCall::Replace(input) => codex::pty::pre_tool_rewrite(input),
+                    // As an approved discovery command is: TerminalX runs the vetted programs and
+                    // answers this `PreToolUse` hook with what they printed, in that hook's form.
+                    crate::orchestration::guard::VerifierCall::Run(approved) => {
+                        let approved = if permission_directory(kind, &frame.payload).is_some() { approved } else { approved.directory_was_reported() };
+                        return self.run_discovery(&rt_arc, &frame, kind, &frame.payload["tool_input"], approved, Answering::Verifier);
+                    }
                     crate::orchestration::guard::VerifierCall::Leave => unreachable!("left alone above"),
-                };
-                return HookReply { output: Some(output), refused: None };
+                }
             }
         }
         if frame.event == "StatusLine" {
@@ -6811,20 +6848,7 @@ impl SessionManager {
                         return reply_for(kind, gate, Decision::Execute(updated));
                     }
                 }
-                let unconfined = || {
-                    let Some(cwd) = cwd else { return false };
-                    // The command's directory and the tab's launch
-                    // directories: the CLI loaded project settings from
-                    // where it started, whatever `cd` the model ran since.
-                    let Ok(session) = index::get(&rt.session_id) else { return false };
-                    let dirs = [Path::new(cwd), Path::new(&session.cwd), Path::new(&session.project_path)];
-                    let dirs: Vec<&Path> = dirs.into_iter().filter(|dir| dir.is_absolute()).collect();
-                    let sources = crate::harness::provider_sandbox::Sources::from_env(frame.payload["transcript_path"].as_str());
-                    !match kind {
-                        CliKind::Claude => crate::harness::provider_sandbox::claude_may_restrict(&dirs, &sources),
-                        CliKind::Codex => crate::harness::provider_sandbox::codex_may_restrict(&dirs, &sources),
-                    }
-                };
+                let unconfined = || cwd.is_some_and(|cwd| !provider_may_restrict(kind, &rt.session_id, Path::new(cwd), frame.payload["transcript_path"].as_str()));
                 match (store::settings::load().agents.read_only_commands && unconfined())
                     .then(|| crate::harness::read_only::approved(&tool_name, &input, cwd)).flatten() {
                     Some(approved) => (None, Some(approved)),
@@ -6833,7 +6857,8 @@ impl SessionManager {
             } else { (None, None) }
         };
         if let Some(approved) = discovery {
-            return self.run_discovery(rt_arc, frame, kind, &input, approved, verified_cwd.is_some());
+            let approved = if verified_cwd.is_some() { approved } else { approved.directory_was_reported() };
+            return self.run_discovery(rt_arc, frame, kind, &input, approved, Answering::Permission);
         }
 
         let (tx, rx) = std::sync::mpsc::channel::<Decision>();
@@ -6918,9 +6943,15 @@ impl SessionManager {
     /// shell has loaded the user's startup files, so it runs nothing
     /// (PRO-330). The run stops when nobody is left to read the result: the
     /// hook's connection closed (Esc, the CLI giving up) or the tab no
-    /// longer has the CLI that asked.
-    fn run_discovery(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, input: &Value, approved: crate::harness::read_only::Approved, verified: bool) -> HookReply {
-        let approved = if verified { approved } else { approved.directory_was_reported() };
+    /// longer has the CLI that asked. `answering` says which hook is answered,
+    /// and so the form of the answer and what an unfinished run is told.
+    fn run_discovery(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, input: &Value, approved: crate::harness::read_only::Approved, answering: Answering) -> HookReply {
+        // No answer lets the agent run the command itself. That is right where a person is asked
+        // next; a verifier is never to run one, so there the command is refused instead.
+        let unanswered = || match answering {
+            Answering::Verifier => HookReply { output: Some(crate::orchestration::guard::refusal_output(crate::orchestration::guard::STOPPED)), refused: None },
+            Answering::Permission => HookReply::default(),
+        };
         // Codex records no item for a call its hook answered, so the chat
         // would not show this command at all. Claude's transcript does.
         let row = (kind == CliKind::Codex).then(|| {
@@ -6931,7 +6962,7 @@ impl SessionManager {
         let command = crate::harness::read_only::command(frame.payload["tool_name"].as_str().unwrap_or(""), input).unwrap_or("").to_string();
         if let Some(call_id) = &row {
             let mut rt = rt_arc.lock().unwrap();
-            if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)) { return HookReply::default(); }
+            if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)) { return unanswered(); }
             let title = format!("shell {}", command.lines().next().unwrap_or(""));
             self.apply(&mut rt, Payload::ToolCallStarted {
                 call_id: call_id.clone(), name: "shell".into(), tool_type: ToolType::Shell,
@@ -6952,11 +6983,13 @@ impl SessionManager {
                 self.apply(&mut rt, Payload::ToolCallCompleted { call_id, result }, None);
             }
         }
-        let Some(ran) = ran else { return HookReply::default() };
+        let Some(ran) = ran else { return unanswered() };
         let report = ran.report();
-        let output = match kind {
-            CliKind::Codex => codex::pty::pre_tool_ran(&report),
-            CliKind::Claude => claude::pty::permission_ran(&report),
+        let output = match (kind, answering) {
+            // The same `PreToolUse` denial carries the result for both agents. Claude Code
+            // ignores an answer in another hook's form ("Hook returned incorrect event name").
+            (CliKind::Codex, _) | (CliKind::Claude, Answering::Verifier) => codex::pty::pre_tool_ran(&report),
+            (CliKind::Claude, Answering::Permission) => claude::pty::permission_ran(&report),
         };
         HookReply { output: Some(output), refused: None }
     }
