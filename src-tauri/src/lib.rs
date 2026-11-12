@@ -259,6 +259,30 @@ fn let_go_of_unresponsive_runtime(state: &AppState) {
     }
 }
 
+/// Tells the webview a setting link (PRO-127) is waiting: it takes the link
+/// with `settings_link_take`, so the event itself carries nothing of it.
+#[cfg(feature = "desktop")]
+const SETTINGS_LINK_REQUESTED: &str = "settings_link_requested";
+
+/// Keep a validated setting link for the webview and tell it one is waiting.
+/// A webview that is not listening yet (the link launched the app) takes it
+/// when it starts.
+#[cfg(feature = "desktop")]
+fn offer_settings_link(app: &tauri::AppHandle, link: desktop_links::SettingsLink) {
+    app.state::<desktop_links::PendingSettingsLink>().set(link);
+    if let Err(error) = app.emit(SETTINGS_LINK_REQUESTED, ()) {
+        log::warn!("tell the webview about a settings link: {error}");
+    }
+}
+
+/// The setting link waiting for the webview, once: `{ id, enable }` and
+/// nothing else of the URL, or null when none is.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn settings_link_take(pending: tauri::State<'_, desktop_links::PendingSettingsLink>) -> Option<desktop_links::SettingsLink> {
+    pending.take()
+}
+
 /// The desktop's log file, `desktop.log` beside the runtime's (#716), kept
 /// from setup on: the app's stderr goes nowhere once it is opened normally.
 #[cfg(all(feature = "desktop", unix))]
@@ -349,6 +373,7 @@ pub fn run() {
         )
         .manage(floating::Floating::default())
         .manage(state)
+        .manage(desktop_links::PendingSettingsLink::default())
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
         .setup(move |app| {
@@ -388,6 +413,7 @@ pub fn run() {
                 if let Ok(Some(urls)) = app.deep_link().get_current() {
                     for url in urls {
                         if links.is_join_link(&url) { let _ = joining.set_pending_join(url.to_string()); }
+                        else if let Some(link) = links.settings_link(&url) { offer_settings_link(&app_handle, link); }
                     }
                 }
                 app.deep_link().on_open_url(move |event| {
@@ -396,6 +422,9 @@ pub fn run() {
                             account::focus_main_window(&app_handle);
                             if links.is_join_link(&url) {
                                 if joining.set_pending_join(url.to_string()).is_err() { log::warn!("ignored invalid session link"); }
+                            } else if let Some(link) = links.settings_link(&url) {
+                                log::info!("received TerminalX settings link");
+                                offer_settings_link(&app_handle, link);
                             } else if links.is_launch_link(&url) {
                                 log::info!("received TerminalX launch link");
                             } else if account.handle_deep_link(&app_handle, &url) {
@@ -617,6 +646,7 @@ pub fn run() {
             commands::session_share_status,
             commands::session_share_change,
             commands::session_join_pending,
+            settings_link_take,
             commands::session_guest_join,
             commands::session_guest_send,
             commands::session_guest_leave,
