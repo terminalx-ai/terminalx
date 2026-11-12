@@ -369,6 +369,8 @@ fn a_run_from_an_orchestrate_start_waits_for_approval_with_approval_off() {
     settings.orchestrator.projects.entry(project.path.clone()).or_default().require_approval = Some(false);
     crate::store::settings::save(&settings).unwrap();
     let (service, _sink) = super::tests::headless_service();
+    // A runtime that serves this computer's projects, as the desktop's does, also without the desktop feature (CI's local-ui build).
+    let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(Duration::from_secs(60)));
     let lead = |orchestrate: bool| {
         let request: crate::session_ops::NewSession = serde_json::from_value(json!({
             "projectPath": project.path, "useWorktree": true, "tab": {"harness": "claude"}, "orchestrate": orchestrate,
