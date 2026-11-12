@@ -265,7 +265,8 @@ try {
         const alerts = await summary.getByRole("alert").allTextContents();
         const checks = {
           "one warning says the run has no limit and what still stops it": alerts.length === 1 && alerts[0].includes("no limit on dollars or points") && alerts[0].includes("passes 85%"),
-          "the budget says No limit for each": (await summary.textContent()).includes("BudgetNo points limit · No dollar limit"),
+          // Dollars first (owner decision, PRO-361).
+          "the budget says No limit for each": (await summary.textContent()).includes("BudgetNo dollar limit · No points limit"),
           "neither budget has a field while it is No limit": (await summary.getByRole("spinbutton", { name: "Points of a window this run may use" }).count()) === 0 && (await summary.getByRole("spinbutton", { name: "Dollars this run may spend" }).count()) === 0,
           "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
         };

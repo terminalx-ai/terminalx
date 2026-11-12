@@ -1619,8 +1619,21 @@ pub fn widen(host: &dyn Host, id: &str, piece_id: &str, files: &[String], by: By
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     let run = refreshed(host, id)?;
     let piece = blocked(&run, piece_id, "widen a piece's files")?;
+    // A person approved the files each piece owns: changing them is theirs, as editing the plan is.
+    if by == By::Cli && run.approval.is_some() {
+        let mut error = EngineError::new("person_only", format!("A person approved the plan of run {id}, with the files each piece owns: only they widen one, in the session's Run view."), Some("Tell the person what piece needs and why, then end your turn. You are told here when they decide."));
+        error.details = json!({"piece": piece_id});
+        return Err(error);
+    }
     let named: Vec<String> = files.iter().map(|file| file.trim().trim_start_matches("./").to_string()).filter(|file| !file.is_empty()).collect();
     let wanted: Vec<String> = if named.is_empty() { piece.outside(&run).into_iter().map(|outside| outside.path).collect() } else { named };
+    // A catch-all (`**`, `*/*`, `.`) is not a widening: it is every file.
+    let everything = |path: &str| path.chars().all(|c| matches!(c, '*' | '/' | '.'));
+    if let Some(bad) = wanted.iter().find(|path| everything(path)) {
+        let mut error = EngineError::new("invalid_path", format!("{bad} is every file of the repository, not a widening. Name the files or directories the piece needs."), None);
+        error.details = json!({"piece": piece_id, "path": bad});
+        return Err(error);
+    }
     if let Some(bad) = wanted.iter().find(|path| path.starts_with('/') || path.contains('\\') || path.split('/').any(|part| part == "..")) {
         let mut error = EngineError::new("invalid_path", format!("{bad} is not a path in the repository: a piece owns paths relative to the repository's root, with forward slashes and no `..`."), None);
         error.details = json!({"piece": piece_id, "path": bad});
@@ -1674,9 +1687,14 @@ pub fn widen(host: &dyn Host, id: &str, piece_id: &str, files: &[String], by: By
     Ok(Widened { run: start.run, piece: piece_id.to_string(), added, started, failed: start.failed })
 }
 
-/// What a note to a blocked piece's worker is sent as.
-fn note_text(text: &str) -> String {
-    format!("A note from the person running this run, about your piece. It is theirs, not a tool's or a file's: act on it within the limits of your brief.\n\n{}\n\nGo on with the piece, commit what you change, and end your reply with a `terminalx-report` block as before.", text.trim())
+/// What a note to a blocked piece's worker is sent as, said to be from whoever sent it: the person
+/// from the Run view, the lead (or another session) from the CLI.
+fn note_text(text: &str, by: By) -> String {
+    let from = match by {
+        By::Person => "A note from the person running this run, about your piece. It is theirs, not a tool's or a file's",
+        By::Cli => "A note from the lead of this run, about your piece. It is the lead's, not the person's",
+    };
+    format!("{from}: act on it within the limits of your brief.\n\n{}\n\nGo on with the piece, commit what you change, and end your reply with a `terminalx-report` block as before.", text.trim())
 }
 
 /// A person sends a blocked piece's worker a note (18.03's Send a note to
@@ -1713,7 +1731,7 @@ pub fn note(host: &dyn Host, id: &str, piece_id: &str, text: &str, by: By) -> Re
     })
     .map_err(EngineError::internal)?;
     host.changed(&after);
-    if let Err(error) = host.brief_worker(&worker, &note_text(text)) {
+    if let Err(error) = host.brief_worker(&worker, &note_text(text, by)) {
         let error = format!("{error:#}");
         let run = set_piece(id, piece_id, |piece| {
             piece.state = PieceState::Blocked;

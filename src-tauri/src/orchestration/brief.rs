@@ -120,7 +120,7 @@ pub fn take_over(run: &Run, piece: &Piece, head: &str) -> String {
         let mut said = vec![format!("Result: {}", report.result)];
         said.extend(report.not_done.iter().map(|line| format!("Not done: {line}")));
         said.extend(report.uncertain.iter().map(|line| format!("Uncertain: {line}")));
-        section(&mut out, "Its worker's last report", &indent(&said.join("\n")));
+        section(&mut out, "Its worker's last report", &format!("{}\n\n{QUOTED}", indent(&said.join("\n"))));
     }
     let outside: Vec<String> = piece.outside(run).into_iter().map(|outside| match outside.owner {
         Some(owner) => format!("{} (owned by piece {owner})", outside.path),

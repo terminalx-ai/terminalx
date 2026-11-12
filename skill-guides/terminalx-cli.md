@@ -889,9 +889,11 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   piece's last report and check name outside its scope (`outside` in `runs show`, each with
   the `owner` piece when one owns it). It returns `run`, `piece`, `added`, `started` and
   `failed`. A try after a widening that falls short blocks the piece again: there is no
-  ladder after it.
+  ladder after it. A person approved the files each piece owns, so in a run they approved
+  only they widen one (`person_only`); a catch-all such as `**` is refused (`invalid_path`).
 - **Send a note to the worker.** `terminalx runs note <piece> --text <text> --json` sends the
-  piece's last worker the note in its own session and worktree. The piece is `running`
+  piece's last worker the note in its own session and worktree, as yours (a person's note
+  says it is theirs). The piece is `running`
   again and takes its next report, which is checked as any is.
 - **Skip piece.** `terminalx runs skip <piece> --json` leaves the piece out: no worker works
   on it again and it is not merged. Pieces that depend on it and have not started are left
@@ -1741,7 +1743,7 @@ JSON failures have this shape:
 - `piece_not_blocked`: `take-over`, `widen`, `note` and `skip` are for a piece that is
   `blocked` (or `failed`; `skip` also takes one you took over). `details.state` says where
   it is.
-- `nothing_to_widen`, `owned_by_another`, `invalid_path`: `runs widen` added nothing. Name
+- `nothing_to_widen`, `owned_by_another`, `invalid_path`, `person_only`: `runs widen` added nothing. Name
   the files with `--own`, wait until the piece that owns a file is done, or give a path
   relative to the repository's root.
 - `worker_gone`, `empty_note`, `note_not_taken`: `runs note` reached no worker; widen the

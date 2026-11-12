@@ -650,7 +650,7 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, costOf, o
   // room beside an open piece): a column goes before a title is squeezed, and a title wraps, never cut (PRO-361).
   const columns = editable
     ? "grid-cols-[minmax(0,1fr)_13.5rem] @[720px]/board:grid-cols-[minmax(10rem,1.4fr)_13.5rem_minmax(0,1fr)_3.5rem_5.5rem]"
-    : "grid-cols-[minmax(0,1fr)_6.5rem_1.75rem] @[540px]/board:grid-cols-[minmax(10rem,1.5fr)_minmax(7.5rem,1fr)_6.5rem_3.5rem_1.75rem] @[704px]/board:grid-cols-[minmax(10rem,1.3fr)_minmax(7.5rem,1fr)_6rem_2.75rem_3.5rem_minmax(3.5rem,1fr)_1.75rem]";
+    : "grid-cols-[minmax(0,1fr)_6.5rem_1.75rem] @[540px]/board:grid-cols-[minmax(10rem,1.5fr)_minmax(7.5rem,1fr)_6.5rem_3.5rem_1.75rem] @[704px]/board:grid-cols-[minmax(10rem,1.7fr)_minmax(7.5rem,1fr)_6rem_2.75rem_3.5rem_minmax(3.5rem,1fr)_1.75rem]";
   const wide = editable ? "hidden @[720px]/board:block" : "hidden @[704px]/board:block";
   const mid = "hidden @[540px]/board:block";
   const heads = editable ? [["Piece", ""], ["Model and effort", ""], ["Done when", wide], ["After", wide], ["Estimate", wide]] : [["Piece", ""], ["Model", mid], ["State", ""], ["Tries", wide], ["Cost", mid], ["Report", wide], ["", ""]];
@@ -1006,7 +1006,7 @@ function ReportSections({ attempt }: { attempt: PieceTry }) {
   const changes = facts?.changes?.length ? facts.changes : (facts?.files.length ? facts.files : report?.changed?.files ?? []).map((path) => ({ path, added: undefined, removed: undefined }));
   const where = [attempt.branch ?? report?.changed?.branch, shortCommit(facts?.commit ?? report?.changed?.commit)].filter(Boolean).join(" · ");
   return (
-    <div data-testid="piece-report-sections">
+    <div data-testid="piece-report-sections" className="mt-5">
       <Section title="Evidence"><ReportList lines={report?.evidence} empty="None given" render={(line) => <EvidenceLine line={line} />} /></Section>
       <Section title="Changed">
         {changes.length ? (

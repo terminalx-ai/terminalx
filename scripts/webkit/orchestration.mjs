@@ -79,7 +79,13 @@ function setup({ mode, scene, enabled }) {
       waiting: run.pieces.filter((piece) => piece.state === "queued").map((piece) => ({ piece: piece.id, on: piece.dependsOn.filter((id) => !done(id)) })),
     };
   };
-  const base = { id: "01a1cabc-2fa5-7380-8770-af2097ca9149", lead: { sessionId: session.id, tabId: session.tabs[0].id }, projectPath: session.projectPath, goal: "Move settings reads to the typed store", budget: { points: 25 }, workerMode: "bypassPermissions", created: at(20), modified: at(1) };
+  // Today at 16:10, the 5h window's reset.
+  const resets = (() => { const now = new Date(); return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 16, 10).getTime(); })();
+  // As a runtime with PRO-280 sends it: the run's own limits, and what it has used of a subscription's window.
+  const base = {
+    id: "01a1cabc-2fa5-7380-8770-af2097ca9149", lead: { sessionId: session.id, tabId: session.tabs[0].id }, projectPath: session.projectPath, goal: "Move settings reads to the typed store", budget: { points: 25 }, workerMode: "bypassPermissions", created: at(20), modified: at(1),
+    limits: { workers: 4, dollars: 15, points: 25, ceiling: 85 }, usage: { dollars: 0, subscription: true, windows: [{ agent: "claude", key: "five_hour", label: "5h", percent: 41, start: 32, resetsAt: resets, points: 9 }] },
+  };
   const worker = (id) => ({ sessionId: `worker-${id}`, tabId: `worker-${id}-tab` });
   const started = (id, state, note, attempts = 1) => ({ state, note, attempts, worker: worker(id), branch: `raccoon/${id}-piece`, startedMode: "bypassPermissions" });
   // How a result was checked (PRO-278): the gates TerminalX ran itself, and the verifier where one was asked.
@@ -455,7 +461,7 @@ try {
           "its footer offers the worker and the diff, and says what it cost and used": (await panel.getByRole("button", { name: "View diff", exact: true }).count()) === 1 && (await panel.getByTestId("piece-detail-cost").textContent()) === "$1.82 · 41k out",
           "only the done pieces' segments are coloured": (await view.getByTestId("run-pieces").locator("[data-segment]").evaluateAll((items) => items.map((item) => item.dataset.segment).join())) === "done,done,open,open,open,open",
           "Merge is shown and stays disabled until every piece is done": (await view.getByTestId("run-merge").isDisabled()) && (await view.getByTestId("run-merge").getAttribute("title")) === "Merge unlocks when every piece is done.",
-          "spend is in dollars first, the window's points under it, and the lead's model and effort beside it": (await view.getByTestId("run-spend").textContent()).startsWith("$") && (await view.getByTestId("run-points").count()) === 0 && (await view.getByTestId("run-lead").textContent()).includes("Fable 5.2 Medium"),
+          "spend is in dollars first, the window's points under it, and the lead's model and effort beside it": (await view.getByTestId("run-spend").textContent()) === "$4.13 of $15.00" && (await view.getByTestId("run-points").textContent()).startsWith("9 of 25 points · 5h window at 41% · resets") && (await view.getByTestId("run-lead").textContent()).includes("Fable 5.2 Medium"),
           "no piece title is cut short": (await view.getByTestId("piece-title").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth + 1 && !getComputedStyle(item).textOverflow.includes("ellipsis")))),
           "the plan can no longer be edited or approved": (await view.getByRole("button", { name: "Approve and start" }).count()) === 0 && (await view.getByRole("button", { name: "Edit plan" }).count()) === 0 && (await view.getByRole("combobox").count()) === 0,
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
