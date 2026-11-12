@@ -109,6 +109,15 @@ pub fn note_verifier(session_id: &str, tab_id: &str) {
     }
 }
 
+/// A tab noted as a verifier is one no longer: a test's tab ids are shared.
+#[cfg(test)]
+pub fn forget_verifier(session_id: &str, tab_id: &str) {
+    let mut known = VERIFIERS.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(known) = known.as_mut() {
+        known.remove(&(session_id.to_string(), tab_id.to_string()));
+    }
+}
+
 pub fn insert(run: &Run) -> Result<()> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let mut runs = list()?;
