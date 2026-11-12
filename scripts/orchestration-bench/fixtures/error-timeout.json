@@ -1,0 +1,9 @@
+{
+  "id": "local",
+  "ok": false,
+  "error": {
+    "code": "timeout",
+    "message": "The app did not answer before the client timeout.",
+    "recovery": "Check status before retrying a mutating command; it may already have completed."
+  }
+}
