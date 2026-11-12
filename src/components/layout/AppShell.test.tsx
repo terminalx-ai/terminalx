@@ -14,6 +14,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { announceProjectAdded } from "@/lib/projectAdded";
 
+// The native side of setting links (PRO-127): the link `settings_link_take` hands out once, and the ping
+// a link arriving while the app runs sends. Every other command fails as it does outside the app.
+const native = vi.hoisted(() => ({ pending: [] as unknown[], listeners: new Map<string, Set<() => void>>() }));
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
+  invoke: vi.fn(async (command: string) => {
+    if (command === "settings_link_take") return native.pending.shift() ?? null;
+    throw new Error(`${command} is not available in this test`);
+  }),
+}));
+vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/api/event")>()),
+  listen: vi.fn(async (event: string, handler: () => void) => {
+    const set = native.listeners.get(event) ?? new Set();
+    set.add(handler);
+    native.listeners.set(event, set);
+    return () => set.delete(handler);
+  }),
+}));
+const pingSettingsLink = () => { for (const handler of native.listeners.get("settings_link_requested") ?? []) handler(); };
+
 vi.mock("@/components/session/LocalSectionDialogs", () => ({ LocalSectionDialogs: () => null }));
 vi.mock("@/components/session/GuestSession", () => ({ GuestSessionHost: () => null }));
 vi.mock("@/components/session/ShareSessionDialog", () => ({ ShareSessionDialogHost: () => null }));
@@ -164,6 +185,9 @@ vi.mock("@/components/cleanup/CleanupIndicator", () => ({
 const { AppShell } = await import("./AppShell");
 const { closeAllEditors, openFile } = await import("@/lib/editors");
 const { claimCloudMirrorOwner, cloudMirrorState, resetCloudMirrors } = await import("@/lib/cloudMirror");
+const { forgetSettingToasts, getSettingToasts } = await import("@/lib/settingsToasts");
+const { openSettingRow } = await import("@/lib/settingsLinks");
+const { dismissUnknownSettingLink } = await import("@/lib/settingsDeepLink");
 
 beforeEach(() => {
   sessionStore.projects = [{ path: "/repo", name: "Raccoon" }];
@@ -179,6 +203,10 @@ beforeEach(() => {
 
 afterEach(async () => {
   cleanup();
+  native.pending = [];
+  native.listeners.clear();
+  forgetSettingToasts();
+  dismissUnknownSettingLink();
   await closeAllEditors("checkout:/outside/feature");
 });
 
@@ -415,6 +443,74 @@ describe("settings page navigation", () => {
     expect(await section()).toBe("agents");
     pressSettingsShortcut();
     await waitFor(() => expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("account"));
+  });
+});
+
+describe("setting links (PRO-127)", () => {
+  const settings = () => screen.findByTestId("settings-page");
+  const opened = async () => {
+    const page = await settings();
+    return { tab: page.dataset.initialTab, request: Number(page.dataset.openRequest) };
+  };
+
+  it("opens Settings on the row a link that launched the app names, once the shell starts", async () => {
+    native.pending = [{ id: "general.sounds", enable: false }];
+    render(<AppShell />);
+    expect((await opened()).tab).toBe("general.sounds");
+    expect(native.pending).toEqual([]);
+  });
+
+  it("focuses Settings on the row a link names while the app runs, each time one arrives", async () => {
+    sessionStore.view = "issues";
+    render(<AppShell />);
+    expect(screen.getByTestId("issues")).toBeTruthy();
+    await waitFor(() => expect(native.listeners.get("settings_link_requested")?.size).toBe(1));
+
+    native.pending = [{ id: "general.promptMap", enable: false }];
+    act(() => pingSettingsLink());
+    const first = await opened();
+    expect(first.tab).toBe("general.promptMap");
+
+    // The same row again, with Settings open: a new request, so Settings goes back to it.
+    native.pending = [{ id: "general.promptMap", enable: false }];
+    act(() => pingSettingsLink());
+    await waitFor(() => expect(Number(screen.getByTestId("settings-page").dataset.openRequest)).toBe(first.request + 1));
+    expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("general.promptMap");
+  });
+
+  it("turns a linkable row on from an enable link and says so", async () => {
+    setPrefs({ sounds: false });
+    native.pending = [{ id: "general.sounds", enable: true }];
+    render(<AppShell />);
+    expect((await opened()).tab).toBe("general.sounds");
+    await waitFor(() => expect(getPrefs().sounds).toBe(true));
+    expect(getSettingToasts().map((toast) => toast.message)).toEqual(["Turned on Sounds"]);
+  });
+
+  it("changes nothing for an enable link to a row that is not linkable, and says so", async () => {
+    setPrefs({ animations: false });
+    const before = getPrefs();
+    native.pending = [{ id: "general.animations", enable: true }];
+    render(<AppShell />);
+    expect((await opened()).tab).toBe("general.animations");
+    await waitFor(() => expect(getSettingToasts().map((toast) => toast.message)).toEqual(["That link can’t turn on Pixel raccoon from outside the app"]));
+    expect(getPrefs()).toBe(before);
+  });
+
+  it("opens Settings at its default page for a link to no row, changes nothing, and says no setting matches", async () => {
+    const before = getPrefs();
+    native.pending = [{ id: "no.such.row", enable: true }];
+    render(<AppShell />);
+    expect((await opened()).tab).toBe("account");
+    expect(await screen.findByRole("status", { name: "No setting matches that link" })).toBeTruthy();
+    expect(getPrefs()).toBe(before);
+    expect(getSettingToasts()).toEqual([]);
+  });
+
+  it("opens the row a toast's Open setting asks for", async () => {
+    render(<AppShell />);
+    act(() => openSettingRow("general.sounds"));
+    expect((await opened()).tab).toBe("general.sounds");
   });
 });
 
