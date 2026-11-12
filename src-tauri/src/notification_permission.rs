@@ -5,6 +5,8 @@
 //! build that is not an app bundle, or no answer in time. The frontend shows
 //! its "Notifications are off" card for "denied" only.
 
+// Only the macOS desktop build asks the system; elsewhere the answer is always "unknown".
+#[cfg_attr(not(all(target_os = "macos", feature = "desktop")), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     Granted,
