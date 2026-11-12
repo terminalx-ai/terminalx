@@ -442,6 +442,59 @@ export function parseSmartInput(raw: string): SmartInput | null {
   return null;
 }
 
+/**
+ * What the palette is narrowed to. Each tab of the strip (design 07.05) is a
+ * scope; "cloud" ("Go to cloud session…") is narrower than any tab and is
+ * shown under Sessions.
+ */
+export type PaletteScope = "all" | "sessions" | "projects" | "actions" | "settings" | "cloud";
+
+/** The tab strip, in its order on screen. */
+export const PALETTE_TABS = [
+  { id: "all", label: "All" },
+  { id: "sessions", label: "Sessions" },
+  { id: "projects", label: "Projects" },
+  { id: "actions", label: "Actions" },
+  { id: "settings", label: "Settings" },
+] as const satisfies readonly { id: PaletteScope; label: string }[];
+
+export type PaletteTab = (typeof PALETTE_TABS)[number]["id"];
+
+/** The tab a scope is shown under: the cloud sessions are among the Sessions. */
+export function paletteTabOf(scope: PaletteScope): PaletteTab {
+  return scope === "cloud" ? "sessions" : scope;
+}
+
+/**
+ * The result groups a narrowed scope keeps; "all" keeps every group. A
+ * workspace is a project's branch, so it is listed under Projects. Files and
+ * smart input (an issue, a pull request, a path) are only searched in All.
+ */
+export const PALETTE_SCOPE_GROUPS: Record<Exclude<PaletteScope, "all">, readonly string[]> = {
+  sessions: ["sessions"],
+  cloud: ["sessions"],
+  projects: ["projects", "workspaces"],
+  actions: ["commands"],
+  settings: ["settings", "settings-pages"],
+};
+
+/** Whether a scope shows a result group. */
+export function paletteScopeShows(scope: PaletteScope, group: string): boolean {
+  return scope === "all" || PALETTE_SCOPE_GROUPS[scope].includes(group);
+}
+
+/** The search field's placeholder for a scope. */
+export function palettePlaceholder(scope: PaletteScope): string {
+  switch (scope) {
+    case "settings": return "Search settings…";
+    case "cloud": return "Search cloud sessions…";
+    case "sessions": return "Search sessions…";
+    case "projects": return "Search projects and workspaces…";
+    case "actions": return "Search views and commands…";
+    case "all": return "Search sessions, workspaces, projects, files, settings and commands…";
+  }
+}
+
 export type PaletteNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
 
 /** Loop through selectable rows while headers and “more” controls stay outside the cursor. */

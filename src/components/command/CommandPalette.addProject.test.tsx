@@ -98,7 +98,8 @@ describe("Home in the command palette (PRO-183)", () => {
     store.openIssues();
     render(<Palette />);
     fireEvent.change(screen.getByLabelText("Command palette search"), { target: { value: "home" } });
-    await screen.findByRole("option", { name: /Home/ });
+    // Settings rows that mention home are listed too; the exact command comes first.
+    expect((await screen.findAllByRole("option", { name: /Home/ }))[0].id).toBe("command:shortcut:app.home");
 
     fireEvent.keyDown(screen.getByLabelText("Command palette search"), { key: "Enter" });
 
