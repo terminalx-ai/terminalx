@@ -329,9 +329,10 @@ const SHELL_TOOLS: &[&str] = &["Bash", "shell", "shell_command", "exec_command",
 /// (`sed -i`, `git commit`, a redirect, a script) is refused, not asked about:
 /// nobody is there to answer.
 ///
-/// A command that passes is not run as it was written: what runs is the
-/// reader's own replacement for it, bound to the directory it was read in
-/// and to the programs it resolved, so what was judged is what is executed.
+/// A command that passes is not run by the agent's shell at all: TerminalX
+/// runs the programs the reader vetted itself, in the directory it was read
+/// in ([`crate::harness::read_only::Approved`], PRO-330), and answers the
+/// hook with what they printed, so what was judged is what is executed.
 pub fn verifier_call(payload: &Value) -> VerifierCall {
     let tool = payload["tool_name"].as_str().unwrap_or_default();
     let edits = EDIT_TOOLS.contains(&tool) || (tool.starts_with("mcp__") && ["__write_file", "__edit_file", "__create_or_update_file", "__push_files"].iter().any(|suffix| tool.ends_with(suffix)));
@@ -346,21 +347,22 @@ pub fn verifier_call(payload: &Value) -> VerifierCall {
     if !SHELL_TOOLS.contains(&tool) {
         return VerifierCall::Leave;
     }
-    match crate::harness::read_only::approved_input(tool, &payload["tool_input"], payload["cwd"].as_str()) {
-        Some(replacement) => VerifierCall::Replace(replacement),
+    match crate::harness::read_only::approved(tool, &payload["tool_input"], payload["cwd"].as_str()) {
+        Some(approved) => VerifierCall::Run(approved),
         None => VerifierCall::Refuse("TerminalX refused this command: a verifier of a run runs only commands that read (`git diff`, `git status`, `cat`, `rg`, `grep`, `ls`), with no redirect and no script. The checks were already run for you; judge the result from the diff and the files as they are.".to_string()),
     }
 }
 
 /// What becomes of a verifier's tool call.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum VerifierCall {
     /// Not a call that could change anything: its agent's own rules decide.
     Leave,
     /// Refused, and why.
     Refuse(String),
-    /// A shell command that only reads: run as this input, not as it was sent.
-    Replace(Value),
+    /// A shell command that only reads: TerminalX runs it itself, as vetted,
+    /// and the agent is given the result.
+    Run(crate::harness::read_only::Approved),
 }
 
 /// Whether a tab is held to reading: it is a verifier of a run's result.
@@ -608,7 +610,7 @@ mod tests {
         }
         // Reading is its work.
         for tool in ["Read", "Grep", "Glob"] {
-            assert_eq!(super::verifier_call(&serde_json::json!({"tool_name": tool, "tool_input": {"file_path": "src/cli.rs"}})), VerifierCall::Leave, "{tool}");
+            assert!(matches!(super::verifier_call(&serde_json::json!({"tool_name": tool, "tool_input": {"file_path": "src/cli.rs"}})), VerifierCall::Leave), "{tool}");
         }
         // A shell command is held to reading too, in whatever mode the tab is in: one that reads goes ahead.
         let dir = tempfile::tempdir().unwrap();
@@ -621,11 +623,10 @@ mod tests {
         };
         // (Tools every machine has: whether `rg` is one depends on where this runs.)
         for reads in ["git diff lead...HEAD -- src/cli.rs", "git status --short", "cat src/cli.rs", "ls src"] {
-            // It goes ahead as the reader's own replacement for it, bound to this directory: what was
-            // judged is what runs, not the text as it was sent.
-            let VerifierCall::Replace(input) = call("Bash", reads) else { panic!("{reads} goes ahead") };
-            let ran = input["command"].as_str().unwrap();
-            assert!(ran != reads && ran.contains(cwd.to_str().unwrap()) && ran.contains("|| exit 125"), "{reads} runs as: {ran}");
+            // It goes ahead as the reader vetted it, bound to this directory and run by TerminalX
+            // itself: what was judged is what runs, not the text as the agent's shell would read it.
+            let VerifierCall::Run(approved) = call("Bash", reads) else { panic!("{reads} goes ahead") };
+            assert_eq!(approved.directory(), cwd.as_path(), "{reads}");
         }
         // One that writes, or that nobody can tell, is refused: by either agent's name for its shell.
         for writes in ["sed -i '' s/a/b/ src/cli.rs", "git commit -am fix", "git checkout -- src/cli.rs", "git stash", "echo fixed > src/cli.rs", "cat a | tee b", "rm src/cli.rs", "sh -c 'cat src/cli.rs'", "cargo t", "python3 fix.py", "git diff && touch x"] {

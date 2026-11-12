@@ -6455,7 +6455,7 @@ impl SessionManager {
             // command not known to only read, is refused in every permission mode, whatever its
             // tab is switched to later.
             let call = crate::orchestration::guard::verifier_call(&frame.payload);
-            if call != crate::orchestration::guard::VerifierCall::Leave && {
+            if !matches!(call, crate::orchestration::guard::VerifierCall::Leave) && {
                 let known = crate::orchestration::store::is_verifier(&frame.session, &frame.tab);
                 // The session's entry is read only when the runs could not be.
                 crate::orchestration::guard::reads_only(known, known.is_none().then(|| index::get(&frame.session).ok()).flatten().as_ref(), &frame.tab)
@@ -6465,8 +6465,13 @@ impl SessionManager {
                         log::info!("run verifier {}/{}: {reason}", frame.session, frame.tab);
                         crate::orchestration::guard::refusal_output(&reason)
                     }
-                    // A command that only reads runs as the reader's replacement for it, in either agent's hook form.
-                    crate::orchestration::guard::VerifierCall::Replace(input) => codex::pty::pre_tool_rewrite(input),
+                    // A command that only reads is run by TerminalX itself, not by the agent's shell
+                    // (PRO-330), and the hook is answered with what it printed, in the form a
+                    // `PreToolUse` hook answers in for either agent.
+                    crate::orchestration::guard::VerifierCall::Run(approved) => {
+                        let approved = if permission_directory(kind, &frame.payload).is_some() { approved } else { approved.directory_was_reported() };
+                        return self.run_discovery(&rt_arc, &frame, kind, &frame.payload["tool_input"], approved, true);
+                    }
                     crate::orchestration::guard::VerifierCall::Leave => unreachable!("left alone above"),
                 };
                 return HookReply { output: Some(output), refused: None };
@@ -6863,7 +6868,8 @@ impl SessionManager {
             } else { (None, None) }
         };
         if let Some(approved) = discovery {
-            return self.run_discovery(rt_arc, frame, kind, &input, approved, verified_cwd.is_some());
+            let approved = if verified_cwd.is_some() { approved } else { approved.directory_was_reported() };
+            return self.run_discovery(rt_arc, frame, kind, &input, approved, false);
         }
 
         let (tx, rx) = std::sync::mpsc::channel::<Decision>();
@@ -6949,8 +6955,11 @@ impl SessionManager {
     /// (PRO-330). The run stops when nobody is left to read the result: the
     /// hook's connection closed (Esc, the CLI giving up) or the tab no
     /// longer has the CLI that asked.
-    fn run_discovery(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, input: &Value, approved: crate::harness::read_only::Approved, verified: bool) -> HookReply {
-        let approved = if verified { approved } else { approved.directory_was_reported() };
+    ///
+    /// `pre_tool` says the hook being answered is a `PreToolUse` whatever the
+    /// agent: a run's verifier is held to reading there, before any
+    /// permission is asked for.
+    fn run_discovery(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, input: &Value, approved: crate::harness::read_only::Approved, pre_tool: bool) -> HookReply {
         // Codex records no item for a call its hook answered, so the chat
         // would not show this command at all. Claude's transcript does.
         let row = (kind == CliKind::Codex).then(|| {
@@ -6985,7 +6994,9 @@ impl SessionManager {
         let Some(ran) = ran else { return HookReply::default() };
         let report = ran.report();
         let output = match kind {
+            // The same `PreToolUse` denial carries the result for both agents.
             CliKind::Codex => codex::pty::pre_tool_ran(&report),
+            CliKind::Claude if pre_tool => codex::pty::pre_tool_ran(&report),
             CliKind::Claude => claude::pty::permission_ran(&report),
         };
         HookReply { output: Some(output), refused: None }
