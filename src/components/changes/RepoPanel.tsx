@@ -156,7 +156,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           <span>
             {status?.operation ? `A ${status.operation} is in progress. ` : ""}
             {status?.conflicted?.length
-              ? `Conflicts in ${status.conflicted.join(", ")}: resolve them in the workspace before committing.`
+              ? status.operation === "merge" && source.unfinishedMerge && source.conflictFile && source.canWrite
+                ? `Conflicts in ${status.conflicted.join(", ")}: open each from Merge in progress in Changes to resolve it there, or ask the agent to, before committing.`
+                : `Conflicts in ${status.conflicted.join(", ")}: resolve them in the workspace before committing.`
               : status?.operation === "merge" && source.unfinishedMerge
                 ? "Commit or abort it from Changes, which shows what the merge brought in."
                 : "Finish or abort it in the workspace's terminal."}

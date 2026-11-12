@@ -61,10 +61,21 @@ export interface DiffEditorEntry extends EditorBase {
   };
 }
 export interface PrEditorEntry extends EditorBase { kind: "pr"; pr: PrAssociation }
-export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry;
-export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry;
+/** A conflicted file of a merge in progress, resolved one conflict at a time (PRO-293). */
+export interface ConflictEditorEntry extends EditorBase {
+  kind: "conflict";
+  conflict: {
+    /** The merge it was opened for: HEAD and the commit being merged. Another merge is not this tab's. */
+    head: string;
+    mergeHead: string;
+    /** Conflicts left in the file at the latest read, for the tab's title. */
+    conflicts: number;
+  };
+}
+export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry | ConflictEditorEntry;
+export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry | ConflictEditorEntry;
 export function isReviewEditor(entry: EditorEntry): entry is ReviewEditorEntry {
-  return entry.kind === "diff" || entry.kind === "pr";
+  return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict";
 }
 
 const REVIEW_TABS_KEY = "terminalx:review-tabs:v1";
@@ -72,7 +83,7 @@ const REVIEW_TABS_KEY = "terminalx:review-tabs:v1";
 /** Persist only locators, never snapshot contents, PR bodies or unsaved buffers. */
 export function serializeReviewTabs(value: Pick<State, "editors" | "active" | "collapsed">): string {
   return JSON.stringify({
-    editors: value.editors.filter((e) => e.kind === "diff" || e.kind === "pr").map((e) => ({ ...e, dirty: false, jump: undefined })),
+    editors: value.editors.filter(isReviewEditor).map((e) => ({ ...e, dirty: false, jump: undefined })),
     active: value.active,
     collapsed: value.collapsed,
   });
@@ -99,6 +110,10 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
       } else if (e.kind === "pr" && e.pr?.scope?.kind === "local" && typeof e.pr.scope.cwd === "string"
         && typeof e.pr.url === "string" && typeof e.pr.head === "string" && Number.isSafeInteger(e.pr.number) && e.pr.number > 0) {
         editors.push({ ...e, created: typeof e.created === "string" ? e.created : undefined, dirty: false, jump: undefined });
+      } else if (e.kind === "conflict" && reviewPath(e.root, e.rel) && e.conflict && isCommit(e.conflict.head) && isCommit(e.conflict.mergeHead)
+        && Number.isSafeInteger(e.conflict.conflicts) && e.conflict.conflicts >= 0) {
+        const { head, mergeHead, conflicts } = e.conflict;
+        editors.push({ ...e, created: typeof e.created === "string" ? e.created : undefined, dirty: false, jump: undefined, viewMode: "source", name: conflictTabName(e.rel, conflicts), conflict: { head, mergeHead, conflicts } });
       }
     }
     const active: State["active"] = {};
@@ -110,6 +125,8 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
     return { editors, active, collapsed };
   } catch { return empty; }
 }
+
+const isCommit = (value: unknown) => typeof value === "string" && /^[0-9a-f]{7,64}$/i.test(value);
 
 /** Which region took the last click or focus, so ⌘W closes the right thing. */
 export type Region = "chat" | "editor";
@@ -161,7 +178,7 @@ let nonce = 0;
  * reader wants a line, which only source can show, so it forces source mode.
  */
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
-  const existing = state.editors.find((e) => e.kind !== "diff" && e.kind !== "pr" && e.sessionId === sessionId && e.root === root && e.rel === rel);
+  const existing = state.editors.find((e) => !isReviewEditor(e) && e.sessionId === sessionId && e.root === root && e.rel === rel);
   const selected = getTerminalState().selected[sessionId];
   if (selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
   const kind = fileKind(rel);
@@ -226,6 +243,34 @@ export function openDiff(sessionId: string, root: string, rel: string, diff: Omi
 export function openPr(sessionId: string, root: string, pr: PrAssociation) {
   const id = JSON.stringify([sessionId, root, "pr", pr.url.toLowerCase().replace(/\/$/, "")]);
   return openReview({ id, sessionId, root, workspaceRoot: root, rel: pr.url, name: `PR #${pr.number}`, kind: "pr", dirty: false, viewMode: "source", pr });
+}
+
+/** A conflict tab's title: the file's name and what is left to resolve in it. */
+export function conflictTabName(rel: string, conflicts: number): string {
+  return `${fileName(rel)} · ${conflicts} ${conflicts === 1 ? "conflict" : "conflicts"}`;
+}
+
+/**
+ * Open (or focus) a conflicted file of the merge in progress in a centre tab.
+ * One tab per file: reopening it for a newer merge points it at that merge.
+ */
+export function openConflict(sessionId: string, root: string, rel: string, merge: { head: string; mergeHead: string }, conflicts: number) {
+  const path = reviewPath(root, rel);
+  if (!path) throw new Error("This file is outside the repository.");
+  const id = JSON.stringify([sessionId, root, "conflict", path]);
+  const conflict = { head: merge.head, mergeHead: merge.mergeHead, conflicts };
+  const existing = state.editors.find((e) => e.id === id);
+  if (existing?.kind === "conflict" && (existing.conflict.head !== merge.head || existing.conflict.mergeHead !== merge.mergeHead)) {
+    set({ editors: state.editors.map((e) => e.id === id && e.kind === "conflict" ? { ...e, name: conflictTabName(path, conflicts), conflict } : e) });
+  }
+  return openReview({ id, sessionId, root, workspaceRoot: root, rel: path, name: conflictTabName(path, conflicts), kind: "conflict", dirty: false, viewMode: "source", conflict });
+}
+
+/** The conflict tab read its file again: its title follows what is left. */
+export function setConflictCount(id: string, conflicts: number) {
+  const entry = state.editors.find((e) => e.id === id);
+  if (entry?.kind !== "conflict" || entry.conflict.conflicts === conflicts) return;
+  set({ editors: state.editors.map((e) => e.id === id && e.kind === "conflict" ? { ...e, name: conflictTabName(e.rel, conflicts), conflict: { ...e.conflict, conflicts } } : e) });
 }
 
 export async function setDiffMode(id: string, mode: DiffMode) {

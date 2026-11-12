@@ -19,6 +19,7 @@ import {
 } from "@/lib/editors";
 import { DiffEditorPane } from "./DiffEditorPane";
 import { PrPanel } from "@/components/changes/PrPanel";
+import { ConflictView } from "@/components/changes/ConflictView";
 import { MediaPane } from "./MediaPane";
 import { EditorPane } from "./EditorPane";
 
@@ -52,7 +53,7 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab, revi
   const reviews = standalone ? [] : all.filter(isReviewEditor);
   const editors = standalone ? all : all.filter((e) => !isReviewEditor(e));
   const activeId = editors.find((e) => e.id === ed.active[sessionId])?.id ?? editors[editors.length - 1]?.id ?? null;
-  const reviewActive = editors.some((e) => e.id === activeId && (e.kind === "diff" || e.kind === "pr"));
+  const reviewActive = editors.some((e) => e.id === activeId && isReviewEditor(e));
   const fullWidth = fill || reviewActive;
   const reviewShown = reviews.some((e) => selected?.kind === "review" && selected.id === e.id);
   const collapsed = !!ed.collapsed[sessionId];
@@ -190,7 +191,7 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab, revi
       <div className="relative min-h-0 flex-1">
         {editors.map((e) => (
           <div key={e.id} className={cn("absolute inset-0 flex flex-col", e.id !== activeId && "hidden")}>
-            {e.kind === "diff" ? <DiffEditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={e.id === activeId && active && !collapsed && !reviewShown} busy={false} /> : e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : <MediaPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} />}
+            {e.kind === "diff" ? <DiffEditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "conflict" ? <ConflictView entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={e.id === activeId && active && !collapsed && !reviewShown} busy={false} /> : e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : <MediaPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} />}
           </div>
         ))}
       </div>
@@ -213,6 +214,7 @@ export function ReviewTab({ entry, visible, focused = visible, embedded = false 
     className={cn("absolute inset-0 z-10 flex min-h-0 flex-col bg-background outline-none", !visible && "hidden")}
     onPointerDownCapture={() => setLastFocused("editor")} onFocusCapture={() => setLastFocused("editor")}>
     {entry.kind === "diff" ? <DiffEditorPane entry={entry} visible={visible} />
+      : entry.kind === "conflict" ? <ConflictView entry={entry} visible={visible} />
       : <PrPanel cwd={entry.root} sessionId={entry.sessionId} branch={entry.pr.head} selectedPr={entry.pr} active={visible} busy={false} />}
   </div>;
 }
