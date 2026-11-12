@@ -71,7 +71,7 @@ async function composer(page, selector) {
 const SURFACES = {
   "a session's composer": async () => {
     const page = await app({ cloud: false, localProjects: 1, localSession: true });
-    await openConversation(page, "claude tab");
+    await openConversation(page, "Local long session");
     await tab(page, "gemini tab").click();
     return { page, field: await composer(page, "textarea[data-composer]") };
   },

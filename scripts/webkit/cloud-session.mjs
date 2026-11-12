@@ -392,7 +392,7 @@ for (const viewport of [{ width: 1000, height: 520 }, VIEWPORT]) {
 {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, VIEWPORT);
   await sidebar(page);
-  await openConversation(page, "claude tab");
+  await openConversation(page, "Local long session");
   for (const label of ["claude tab", "gemini tab"]) {
     const name = `local session (${label})`;
     await tab(page, label).click();

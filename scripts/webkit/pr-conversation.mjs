@@ -44,7 +44,7 @@ const extra = `(() => {
 let page;
 try {
   page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width: 1100, height: 860 }, { extra });
-  await openConversation(page, "claude tab");
+  await openConversation(page, "Local long session");
   const branch = page.getByRole("button", { name: "Branch", exact: true });
   await branch.click();
   await page.getByText("Activity · 200", { exact: true }).waitFor();

@@ -50,7 +50,7 @@ try {
         await route.continue();
       });
     }
-    await openConversation(page, "claude tab");
+    await openConversation(page, "Local long session");
     await tab(page, "gemini tab").click();
     const chat = page.locator('[data-find-scope="chat"]:visible');
     const scroller = chat.locator('[data-chat-scroller]');

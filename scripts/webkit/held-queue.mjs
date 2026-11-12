@@ -43,7 +43,7 @@ try {
   browser = await webkit.launch({ headless: true });
   for (const colorScheme of ["light", "dark"]) {
   const page = await open(browser, server.url, { cloud:false, localProjects:1, localSession:true }, { width:1100, height:800 }, { extra, colorScheme });
-  await openConversation(page, "claude tab");
+  await openConversation(page, "Local long session");
   await tab(page, "gemini tab").click();
   const tray = page.getByRole("region", { name:"Held follow-ups" }).filter({ visible: true });
   await tray.waitFor();

@@ -40,7 +40,7 @@ try {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width: 1400, height: 900 }, { extra: `(${setup.toString()})()` });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await openConversation(page, "claude tab");
+  await openConversation(page, "Local long session");
   const dock = page.getByTestId("panel-terminal");
   await dock.locator(".xterm-screen").waitFor();
   await page.mouse.move(0, 0);

@@ -26,7 +26,7 @@ try {
     })();`;
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, floating }, { width: 1100, height: 800 }, { extra });
     if (!floating) {
-      await openConversation(page, "claude tab");
+      await openConversation(page, "Local long session");
       await tab(page, "gemini tab").click();
     }
     const detail = page.getByTestId("permission-detail").filter({ visible: true });
@@ -76,7 +76,7 @@ try {
     })();`;
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, floating }, { width: 1100, height: 800 }, { extra });
     if (!floating) {
-      await openConversation(page, "claude tab");
+      await openConversation(page, "Local long session");
       await tab(page, "gemini tab").click();
     }
     const diff = page.getByTestId("permission-diff").filter({ visible: true });
