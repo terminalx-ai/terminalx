@@ -6,16 +6,19 @@ export type PieceState = "queued" | "running" | "stalled" | "verifying" | "done"
 /** What keeps a piece the lead asked for from starting (PRO-280). */
 export type RunHold = "runLimit" | "appLimit" | "budget";
 
+/** A budget or the window level: a bound, or `"none"` for No limit (`settings::Cap`, PRO-335). */
+export type Cap = number | "none";
+
 /** A run's worker limit and budget (`budget::RunLimits`). */
 export interface RunLimits {
   /** Workers of the run in a turn at once. */
   workers: number;
   /** Dollars its workers on an API key may spend. */
-  dollars: number;
+  dollars: Cap;
   /** Points of one usage window the run itself may use. */
-  points: number;
-  /** No new piece starts once a window it draws on is this full, in percent. */
-  ceiling: number;
+  points: Cap;
+  /** No new piece starts once a window it draws on is this full, in percent; off, it may use the whole window. */
+  ceiling: Cap;
 }
 
 /** One usage window a run draws on, as the run has seen it. */
@@ -169,10 +172,10 @@ export interface RunSessionRef {
 }
 
 export interface RunBudget {
-  /** Points of a subscription's usage window. */
-  points?: number;
+  /** Points of a subscription's usage window; `"none"` (or `null` in a plan file) is No limit. */
+  points?: Cap;
   /** Dollars, for an agent billed by an API key. */
-  dollars?: number;
+  dollars?: Cap;
 }
 
 /** What the lead expects a piece to cost, in API-equivalent dollars. */
@@ -421,9 +424,9 @@ export interface OrchestratorSettings {
   workerMode: string;
   workersPerRun: number;
   workersAtOnce: number;
-  budgetDollars: number;
-  budgetPoints: number;
-  windowCeiling: number;
+  budgetDollars: Cap;
+  budgetPoints: Cap;
+  windowCeiling: Cap;
   stallMinutes: number;
   /** Over how many changed lines a result is read by a verifier though its commands pass. */
   reviewDiffLines: number;
@@ -439,9 +442,9 @@ export interface OrchestratorLimits {
   workerMode: string;
   workersPerRun: number;
   workersAtOnce: number;
-  budgetDollars: number;
-  budgetPoints: number;
-  windowCeiling: number;
+  budgetDollars: Cap;
+  budgetPoints: Cap;
+  windowCeiling: Cap;
   stallMinutes: number;
   reviewDiffLines: number;
   routing: RoutingTable;
@@ -451,9 +454,9 @@ export interface ProjectOrchestratorSettings {
   requireApproval?: boolean;
   pieceLimit?: number;
   workerMode?: string;
-  budgetDollars?: number;
-  budgetPoints?: number;
-  windowCeiling?: number;
+  budgetDollars?: Cap;
+  budgetPoints?: Cap;
+  windowCeiling?: Cap;
   reviewDiffLines?: number;
   /** The project's own rows of the routing table. */
   routing?: RoutingRows;
@@ -469,9 +472,10 @@ export interface OrchestratorPatch {
   workersPerRun?: number;
   workersAtOnce?: number;
   stallMinutes?: number;
-  budgetDollars?: number | null;
-  budgetPoints?: number | null;
-  windowCeiling?: number | null;
+  /** `"none"` is No limit (the window level off). */
+  budgetDollars?: Cap | null;
+  budgetPoints?: Cap | null;
+  windowCeiling?: Cap | null;
   reviewDiffLines?: number | null;
   /** Cells to change. `null` takes a cell's override away: it follows the app (for a project) or the built-in table. */
   routing?: Partial<Record<PieceKind, Partial<Record<RoutedAgent, Route | null>>>>;

@@ -56,6 +56,8 @@ pub mod verify;
 
 use serde::{Deserialize, Serialize};
 
+use crate::store::settings::Cap;
+
 /// The webview is told a run changed with this event; the payload is the run.
 pub const RUN_EVENT: &str = "orchestration_run";
 
@@ -315,11 +317,17 @@ pub struct SessionRef {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Budget {
     /// Points of a subscription's usage window.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub points: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "written")]
+    pub points: Option<Cap>,
     /// Dollars, for an agent billed by an API key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dollars: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "written")]
+    pub dollars: Option<Cap>,
+}
+
+/// A budget written into a plan: a number, or No limit as `null` or `"none"`
+/// (PRO-335). Left out, the run follows the settings.
+fn written<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Cap>, D::Error> {
+    Cap::deserialize(deserializer).map(Some)
 }
 
 /// What the lead expects a piece to cost, in API-equivalent dollars.

@@ -5014,12 +5014,14 @@ pub struct OrchestratorPatch {
     workers_at_once: Option<u32>,
     #[serde(default)]
     stall_minutes: Option<u32>,
+    /// The budgets and the window level take a number or `"none"` for No
+    /// limit (PRO-335); `null` is "follow the app", for a project.
     #[serde(default, deserialize_with = "given")]
-    budget_dollars: Option<Option<f64>>,
+    budget_dollars: Option<Option<crate::store::settings::Cap>>,
     #[serde(default, deserialize_with = "given")]
-    budget_points: Option<Option<f64>>,
+    budget_points: Option<Option<crate::store::settings::Cap>>,
     #[serde(default, deserialize_with = "given")]
-    window_ceiling: Option<Option<f64>>,
+    window_ceiling: Option<Option<crate::store::settings::Cap>>,
     /// Over how many changed lines a result is read by a verifier.
     #[serde(default, deserialize_with = "given")]
     review_diff_lines: Option<Option<u32>>,
@@ -5054,13 +5056,13 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
     if let Some(minutes) = patch.stall_minutes.filter(|minutes| !valid_stall_minutes(*minutes)) {
         return Err(format!("A worker is marked stalled after 1 to {MAX_STALL_MINUTES} minutes, not {minutes}."));
     }
-    if patch.budget_dollars.flatten().is_some_and(|dollars| !valid_dollars(dollars)) {
+    if patch.budget_dollars.flatten().is_some_and(|dollars| !dollars.valid(valid_dollars)) {
         return Err(format!("A dollar budget is more than $0 and at most ${MAX_BUDGET_DOLLARS:.0}."));
     }
-    if patch.budget_points.flatten().is_some_and(|points| !valid_percent(points)) {
+    if patch.budget_points.flatten().is_some_and(|points| !points.valid(valid_percent)) {
         return Err("A points budget is more than 0 and at most 100 points of a window.".into());
     }
-    if patch.window_ceiling.flatten().is_some_and(|level| !valid_percent(level)) {
+    if patch.window_ceiling.flatten().is_some_and(|level| !level.valid(valid_percent)) {
         return Err("A window level is more than 0% and at most 100%.".into());
     }
     if let Some(Some(limit)) = patch.piece_limit {

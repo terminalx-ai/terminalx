@@ -4,7 +4,7 @@ import { errorMessage, orchestration } from "@/lib/api";
 import { modeLabel, PERMISSION_MODES } from "@/lib/models";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { useSessionStore } from "@/lib/sessions";
-import type { OrchestratorPatch, OrchestratorSettings as Settings } from "@/types/orchestration";
+import type { Cap, OrchestratorPatch, OrchestratorSettings as Settings } from "@/types/orchestration";
 import { RegisteredSetting } from "./settingsRegistry";
 import { RoutingTableSettings } from "./RoutingTableSettings";
 
@@ -96,10 +96,41 @@ function NumberField({ value, placeholder, disabled, label, min, max, step = 1, 
   );
 }
 
+/** A budget or the window level (PRO-335): a number, or No limit with the switch beside it.
+ * Turned back on, the app-wide field returns to `fallback`; a repository's field (with a `placeholder`) follows the default again. */
+function CapField({ value, placeholder, label, offLabel, offText, fallback, disabled, onSave, ...bounds }: {
+  value: Cap | undefined; placeholder?: string; label: string; offLabel: string; offText: string; fallback?: number; disabled: boolean;
+  min: number; max: number; step?: number; prefix?: string; suffix?: string; onSave: (value: Cap | null) => void;
+}) {
+  const off = value === "none";
+  return (
+    <span className="inline-flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+      {off ? <span className="text-xs text-muted-foreground">{offText}</span> : (
+        <NumberField label={label} value={value} placeholder={placeholder} disabled={disabled} {...bounds} onSave={onSave} />
+      )}
+      <label className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Switch size="sm" aria-label={`${label}: ${offLabel}`} checked={off} disabled={disabled} onCheckedChange={(on) => onSave(on ? "none" : (fallback ?? null))} />
+        {offLabel}
+      </label>
+    </span>
+  );
+}
+
+/** `$15`, `25 pts`, `85%` or `No limit`: a value a repository follows, as its field's placeholder. */
+function capPlaceholder(cap: Cap | undefined): string {
+  return cap === undefined ? "" : cap === "none" ? "No limit" : String(cap);
+}
+
 /** The most pieces or workers the settings take (`MAX_PIECE_LIMIT`, `MAX_WORKERS` in store/settings.rs). */
 const MAX_WORKERS = 50;
 const MAX_DOLLARS = 10000;
 const MAX_STALL_MINUTES = 240;
+/** What a budget turned back on starts from: the defaults (`DEFAULT_BUDGET_*`, `DEFAULT_WINDOW_CEILING` in store/settings.rs). */
+const DEFAULT_DOLLARS = 15;
+const DEFAULT_POINTS = 25;
+const DEFAULT_CEILING = 85;
+/** What the window level says when it is off, here and in a repository. */
+const CEILING_OFF = "Off: a run can use the whole window";
 
 /** Settings → Orchestrator: what a lead's run of workers may do without asking, for every project. */
 export function OrchestratorTab() {
@@ -130,13 +161,13 @@ export function OrchestratorTab() {
       />
       <div className="mb-1 mt-4 text-xs font-medium uppercase tracking-wide text-faint">Budget and stalls</div>
       <RegisteredSetting setting="orchestrator.budgetDollars"
-        control={<NumberField label="Budget per run, API key" value={settings?.budgetDollars} min={0.01} max={MAX_DOLLARS} step={0.01} prefix="$" disabled={!ready} onSave={(value) => value !== null && void save({ budgetDollars: value })} />}
+        control={<CapField label="Budget per run, API key" offLabel="No limit" offText="No limit" fallback={DEFAULT_DOLLARS} value={settings?.budgetDollars} min={0.01} max={MAX_DOLLARS} step={0.01} prefix="$" disabled={!ready} onSave={(value) => value !== null && void save({ budgetDollars: value })} />}
       />
       <RegisteredSetting setting="orchestrator.budgetPoints"
-        control={<NumberField label="Budget per run, subscription" value={settings?.budgetPoints} min={1} max={100} suffix="pts" disabled={!ready} onSave={(value) => value !== null && void save({ budgetPoints: value })} />}
+        control={<CapField label="Budget per run, subscription" offLabel="No limit" offText="No limit" fallback={DEFAULT_POINTS} value={settings?.budgetPoints} min={1} max={100} suffix="pts" disabled={!ready} onSave={(value) => value !== null && void save({ budgetPoints: value })} />}
       />
       <RegisteredSetting setting="orchestrator.windowCeiling"
-        control={<NumberField label="Pause when a window passes" value={settings?.windowCeiling} min={1} max={100} suffix="%" disabled={!ready} onSave={(value) => value !== null && void save({ windowCeiling: value })} />}
+        control={<CapField label="Pause when a window passes" offLabel="Off" offText={CEILING_OFF} fallback={DEFAULT_CEILING} value={settings?.windowCeiling} min={1} max={100} suffix="%" disabled={!ready} onSave={(value) => value !== null && void save({ windowCeiling: value })} />}
       />
       <RegisteredSetting setting="orchestrator.stallMinutes"
         control={<NumberField label="Mark a worker stalled after" value={settings?.stallMinutes} min={1} max={MAX_STALL_MINUTES} suffix="min" disabled={!ready} onSave={(value) => value !== null && void save({ stallMinutes: value })} />}
@@ -204,16 +235,16 @@ export function RepositoryOrchestratorSettings({ projectPath }: { projectPath: s
           </select>
         </div>
         {([
-          ["budgetDollars", "Budget per run, API key", "Dollars its workers on an API key may spend.", { min: 0.01, max: MAX_DOLLARS, step: 0.01, prefix: "$" }],
-          ["budgetPoints", "Budget per run, subscription", "Points of a usage window one run may use.", { min: 1, max: 100, suffix: "pts" }],
-          ["windowCeiling", "Pause when a window passes", "Whoever used it.", { min: 1, max: 100, suffix: "%" }],
-        ] as const).map(([key, title, hint, bounds]) => (
+          ["budgetDollars", "Budget per run, API key", "Dollars its workers on an API key may spend.", "No limit", "No limit", { min: 0.01, max: MAX_DOLLARS, step: 0.01, prefix: "$" }],
+          ["budgetPoints", "Budget per run, subscription", "Points of a usage window one run may use.", "No limit", "No limit", { min: 1, max: 100, suffix: "pts" }],
+          ["windowCeiling", "Pause when a window passes", "Whoever used it. Off, a run can use the whole window.", "Off", CEILING_OFF, { min: 1, max: 100, suffix: "%" }],
+        ] as const).map(([key, title, hint, offLabel, offText, bounds]) => (
           <div key={key} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2">
             <div className="min-w-0">
               <div className="text-[13px] font-medium">{title}</div>
               <div className="text-xs leading-relaxed text-muted-foreground">{hint} Leave empty to follow the default.</div>
             </div>
-            <NumberField label={`${title} in ${project.name}`} value={own[key]} placeholder={settings ? String(settings[key]) : ""} disabled={!ready} {...bounds} onSave={(value) => void save({ project: projectPath, [key]: value })} />
+            <CapField label={`${title} in ${project.name}`} offLabel={offLabel} offText={offText} value={own[key]} placeholder={capPlaceholder(settings?.[key])} disabled={!ready} {...bounds} onSave={(value) => void save({ project: projectPath, [key]: value })} />
           </div>
         ))}
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2">

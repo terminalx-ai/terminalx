@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use serde_json::json;
 
 use super::budget::{Login, PauseKind, RunLimits};
+use crate::store::settings::Cap;
 use super::engine::{self, Activity, By, Cost, EngineError, Host, Lead, Resume, Started, VerifierNow, WorkerNow};
 use super::verify::{self, Checked, Facts, Gate, GateResult};
 use super::plan::Plan;
@@ -326,7 +327,7 @@ fn a_valid_plan_is_stored_as_a_run_that_waits_for_approval() {
     let run = engine::create(&host, &plan(), "lead", Some("lead-tab".into())).unwrap();
     assert_eq!(run.state, RunState::AwaitingApproval);
     assert_eq!((run.lead.session_id.as_str(), run.lead.tab_id.as_deref(), run.project_path.as_str()), ("lead", Some("lead-tab"), "/repo"));
-    assert_eq!((run.goal.as_str(), run.budget.points, run.worker_mode.as_str()), ("Move settings reads to the typed store", Some(25.0), "bypassPermissions"));
+    assert_eq!((run.goal.as_str(), run.budget.points, run.worker_mode.as_str()), ("Move settings reads to the typed store", Some(Cap::At(25.0)), "bypassPermissions"));
     assert_eq!(run.pieces.len(), 6);
     assert!(run.pieces.iter().all(|piece| piece.state == PieceState::Queued && piece.worker.is_none()));
     assert!(run.approval.is_none());
@@ -1215,7 +1216,7 @@ fn a_run_on_an_api_key_that_reaches_its_dollar_budget_starts_nothing_new_and_say
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
         settings.workers_per_run = 1;
-        settings.budget_dollars = 2.0;
+        settings.budget_dollars = Cap::At(2.0);
     });
     host.world().api_key.insert("claude".into());
     let run = engine::create(&host, &flat_plan(3, "claude"), "lead", None).unwrap();
@@ -1244,10 +1245,32 @@ fn a_run_on_an_api_key_that_reaches_its_dollar_budget_starts_nothing_new_and_say
     assert_eq!(queued_for(&store::get(&run.id).unwrap()), vec![("p2", Some(Hold::Budget)), ("p3", Some(Hold::Budget))]);
     // Resuming while still past it is refused; raising the budget lets it go on.
     assert_eq!(engine::resume(&host, &run.id, Resume::Now).unwrap_err().code, "budget_reached");
-    engine::set_limits(&host, &run.id, RunLimits { dollars: 10.0, ..run.limits.clone() }).unwrap();
+    engine::set_limits(&host, &run.id, RunLimits { dollars: Cap::At(10.0), ..run.limits.clone() }).unwrap();
     let resumed = engine::resume(&host, &run.id, Resume::Now).unwrap();
     assert_eq!((resumed.run.state, resumed.started.clone()), (RunState::Running, vec!["p2".to_string()]));
     assert!(host.world().told.last().unwrap().contains("running again"));
+}
+
+#[test]
+fn a_run_with_no_dollar_limit_keeps_going_past_ten_thousand_dollars_and_still_records_its_cost() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 1;
+        settings.budget_dollars = Cap::NoLimit;
+    });
+    host.world().api_key.insert("claude".into());
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    assert_eq!(run.limits.dollars, Cap::NoLimit);
+    assert!(super::budget::fit(&run, 0).iter().any(|warning| warning.contains("no limit on dollars")), "{:?}", super::budget::fit(&run, 0));
+    engine::start(&host, &run.id).unwrap();
+
+    let p1 = host.session_of("p1");
+    host.world().costs.insert(p1.clone(), 12_345.0);
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &p1);
+    let run = store::get(&run.id).unwrap();
+    assert_eq!((run.state, run.pause.as_ref(), run.usage.dollars), (RunState::Running, None, 12_345.0));
+    assert_eq!(host.made(), vec!["p1", "p2"], "the next piece started");
 }
 
 #[test]
@@ -1298,12 +1321,12 @@ fn a_run_stops_on_its_own_points_and_the_settings_change_when_the_next_run_stops
     // With 40 points and a 90% level in Settings, the same use does not stop the next run.
     {
         let mut settings = host.settings.lock().unwrap();
-        settings.budget_points = 40.0;
-        settings.window_ceiling = 90.0;
+        settings.budget_points = Cap::At(40.0);
+        settings.window_ceiling = Cap::At(90.0);
     }
     host.world().windows[0].used_percent = 10.0;
     let next = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
-    assert_eq!((next.limits.points, next.limits.ceiling), (40.0, 90.0));
+    assert_eq!((next.limits.points, next.limits.ceiling), (Cap::At(40.0), Cap::At(90.0)));
     engine::start(&host, &next.id).unwrap();
     host.world().windows[0].used_percent = 36.0;
     host.reports("p1", Status::Done, "done");
@@ -1324,7 +1347,7 @@ fn a_run_with_workers_on_both_logins_keeps_both_budgets() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
         settings.workers_per_run = 1;
-        settings.budget_dollars = 1.0;
+        settings.budget_dollars = Cap::At(1.0);
     });
     host.world().api_key.insert("codex".into());
     host.world().windows = vec![window("five_hour", "5h", 10.0, chrono::Utc::now().timestamp_millis() + 3_600_000)];
@@ -1446,10 +1469,10 @@ fn a_person_can_change_one_runs_limits_and_a_bad_value_is_refused() {
     let host = Fake::new();
     let run = engine::create(&host, &flat_plan(3, "claude"), "lead", None).unwrap();
     assert_eq!(run.limits, RunLimits::default());
-    let changed = engine::set_limits(&host, &run.id, RunLimits { workers: 1, dollars: 3.0, points: 10.0, ceiling: 70.0 }).unwrap();
+    let changed = engine::set_limits(&host, &run.id, RunLimits { workers: 1, dollars: Cap::At(3.0), points: Cap::At(10.0), ceiling: Cap::At(70.0) }).unwrap();
     assert_eq!(changed.limits.workers, 1);
     assert_eq!(engine::set_limits(&host, &run.id, RunLimits { workers: 0, ..changed.limits.clone() }).unwrap_err().code, "invalid_limits");
-    assert_eq!(engine::set_limits(&host, &run.id, RunLimits { ceiling: 120.0, ..changed.limits.clone() }).unwrap_err().code, "invalid_limits");
+    assert_eq!(engine::set_limits(&host, &run.id, RunLimits { ceiling: Cap::At(120.0), ..changed.limits.clone() }).unwrap_err().code, "invalid_limits");
     // Approved, it holds to the person's limit of one.
     let approved = engine::approve(&host, &run.id).unwrap();
     assert_eq!(approved.started, vec!["p1"]);
@@ -1461,10 +1484,10 @@ fn a_lead_may_ask_for_less_budget_than_the_settings_allow_never_more() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
     let mut plan = flat_plan(1, "claude");
-    plan.budget.points = Some(10.0);
-    plan.budget.dollars = Some(500.0);
+    plan.budget.points = Some(Cap::At(10.0));
+    plan.budget.dollars = Some(Cap::At(500.0));
     let run = engine::create(&host, &plan, "lead", None).unwrap();
-    assert_eq!((run.limits.points, run.limits.dollars), (10.0, 15.0));
+    assert_eq!((run.limits.points, run.limits.dollars), (Cap::At(10.0), Cap::At(15.0)));
 }
 
 #[test]
@@ -2097,7 +2120,7 @@ fn a_piece_whose_merge_conflicts_goes_back_to_its_worker_with_the_conflict_as_it
 fn accepted_pair(lead: &str, workers: u32, spent: f64) -> (Fake, String) {
     let host = free_host(|settings| {
         settings.workers_per_run = workers;
-        settings.budget_dollars = 5.0;
+        settings.budget_dollars = Cap::At(5.0);
     });
     host.world().api_key.insert("claude".into());
     let run = engine::create(&host, &pair(), lead, Some("lead-tab".into())).unwrap();
@@ -2152,7 +2175,7 @@ fn merging_holds_no_worker_slot_and_a_conflict_is_resolved_by_a_model_only_withi
 
     // Past its budget, no such call is started: the run waits for the person and says which limit.
     conflicts(id, "b");
-    engine::set_limits(&host, id, RunLimits { dollars: 3.0, ..settled.limits.clone() }).unwrap();
+    engine::set_limits(&host, id, RunLimits { dollars: Cap::At(3.0), ..settled.limits.clone() }).unwrap();
     let told = host.world().told.len();
     let refused = engine::resolve_in_lead(&host, id, "b").unwrap_err();
     assert_eq!(refused.code, "budget_reached");
@@ -2166,7 +2189,7 @@ fn merging_holds_no_worker_slot_and_a_conflict_is_resolved_by_a_model_only_withi
     // Sending the piece back is a worker's turn, held to the same budget.
     assert_eq!(engine::send_back(&host, id, "b").unwrap_err().code, "run_not_running");
     // The person raises the budget and resumes: with every result accepted the run is merging again.
-    engine::set_limits(&host, id, RunLimits { dollars: 20.0, ..paused.limits.clone() }).unwrap();
+    engine::set_limits(&host, id, RunLimits { dollars: Cap::At(20.0), ..paused.limits.clone() }).unwrap();
     assert_eq!(engine::resume(&host, id, Resume::Now).unwrap().run.state, RunState::Merging);
     engine::resolve_in_lead(&host, id, "b").unwrap();
     assert!(host.world().told.last().unwrap().contains("from a\n=======\nfrom b"));
@@ -2183,7 +2206,7 @@ fn merging_holds_no_worker_slot_and_a_conflict_is_resolved_by_a_model_only_withi
 
     // A run paused on its budget while its last worker was in a turn goes on to merging by itself
     // when that result is accepted: bringing accepted results together starts no worker and asks no model.
-    let host = free_host(|settings| settings.budget_dollars = 5.0);
+    let host = free_host(|settings| settings.budget_dollars = Cap::At(5.0));
     host.world().api_key.insert("claude".into());
     let run = engine::create(&host, &pair(), "lead-3", None).unwrap();
     engine::start(&host, &run.id).unwrap();
@@ -2232,7 +2255,7 @@ fn a_retry_waits_for_a_slot_like_any_worker_and_every_try_counts_against_the_bud
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
         settings.workers_per_run = 2;
-        settings.budget_dollars = 5.0;
+        settings.budget_dollars = Cap::At(5.0);
     });
     host.world().api_key.insert("claude".into());
     let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
@@ -2284,7 +2307,7 @@ fn a_result_reported_as_the_budget_runs_out_is_still_checked() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
         settings.workers_per_run = 2;
-        settings.budget_dollars = 2.0;
+        settings.budget_dollars = Cap::At(2.0);
     });
     host.world().api_key.insert("claude".into());
     let run = engine::create(&host, &flat_plan(3, "claude"), "lead", None).unwrap();
@@ -2309,7 +2332,7 @@ fn a_retry_that_comes_up_as_the_budget_runs_out_starts_when_the_run_is_resumed()
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
         settings.workers_per_run = 1;
-        settings.budget_dollars = 2.0;
+        settings.budget_dollars = Cap::At(2.0);
     });
     host.world().api_key.insert("claude".into());
     let run = engine::create(&host, &flat_plan(1, "claude"), "lead", None).unwrap();
@@ -2329,7 +2352,7 @@ fn a_retry_that_comes_up_as_the_budget_runs_out_starts_when_the_run_is_resumed()
     assert_eq!(host.made(), vec!["p1"]);
 
     // The person raises the budget and resumes: the next try starts.
-    engine::set_limits(&host, &run.id, RunLimits { dollars: 10.0, ..held.limits.clone() }).unwrap();
+    engine::set_limits(&host, &run.id, RunLimits { dollars: Cap::At(10.0), ..held.limits.clone() }).unwrap();
     let resumed = engine::resume(&host, &run.id, Resume::Now).unwrap();
     assert_eq!((resumed.run.state, resumed.started.clone()), (RunState::Running, vec!["p1".to_string()]));
     let p1 = resumed.run.piece("p1").unwrap();

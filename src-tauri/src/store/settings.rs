@@ -100,13 +100,14 @@ pub struct OrchestratorSettings {
     /// What a run of workers on an API key may spend, in dollars, before it
     /// starts nothing new and asks the person.
     #[serde(deserialize_with = "budget_dollars")]
-    pub budget_dollars: f64,
+    pub budget_dollars: Cap,
     /// Percentage points of a subscription usage window one run may use.
     #[serde(deserialize_with = "budget_points")]
-    pub budget_points: f64,
-    /// A run starts nothing new once a window it draws on is this full, whoever filled it.
+    pub budget_points: Cap,
+    /// A run starts nothing new once a window it draws on is this full,
+    /// whoever filled it. Off, a run may use the whole window.
     #[serde(deserialize_with = "window_ceiling")]
-    pub window_ceiling: f64,
+    pub window_ceiling: Cap,
     /// A worker in a turn with no tool call or file change for this long,
     /// while its agent sits idle and no command of its is running, is stalled.
     #[serde(deserialize_with = "stall_minutes")]
@@ -135,11 +136,11 @@ pub struct ProjectOrchestratorSettings {
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_worker_mode")]
     pub worker_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_budget_dollars")]
-    pub budget_dollars: Option<f64>,
+    pub budget_dollars: Option<Cap>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_budget_points")]
-    pub budget_points: Option<f64>,
+    pub budget_points: Option<Cap>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_window_ceiling")]
-    pub window_ceiling: Option<f64>,
+    pub window_ceiling: Option<Cap>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_review_diff_lines")]
     pub review_diff_lines: Option<u32>,
     /// The project's own rows of the routing table; the rest follow the app's.
@@ -162,9 +163,9 @@ pub struct OrchestratorLimits {
     pub worker_mode: String,
     pub workers_per_run: u32,
     pub workers_at_once: u32,
-    pub budget_dollars: f64,
-    pub budget_points: f64,
-    pub window_ceiling: f64,
+    pub budget_dollars: Cap,
+    pub budget_points: Cap,
+    pub window_ceiling: Cap,
     pub stall_minutes: u32,
     pub review_diff_lines: u32,
     /// The routing table in force: every kind, every agent.
@@ -196,6 +197,58 @@ pub const MAX_BUDGET_DOLLARS: f64 = 10_000.0;
 pub const DEFAULT_BUDGET_POINTS: f64 = 25.0;
 pub const DEFAULT_WINDOW_CEILING: f64 = 85.0;
 pub const DEFAULT_STALL_MINUTES: u32 = 10;
+
+/// A run budget or the window level, which a person may turn off (PRO-335).
+/// Stored as its number, or as `"none"` for No limit, so a settings file
+/// written before it loads unchanged; a plan may also write No limit as `null`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Cap {
+    At(f64),
+    NoLimit,
+}
+
+impl Cap {
+    /// The bound, or `None` for No limit.
+    pub fn at(self) -> Option<f64> {
+        match self {
+            Cap::At(value) => Some(value),
+            Cap::NoLimit => None,
+        }
+    }
+
+    /// No limit, or a bound `valid` takes.
+    pub fn valid(self, valid: fn(f64) -> bool) -> bool {
+        self.at().is_none_or(valid)
+    }
+
+    /// `"none"` (any case) is No limit; a number is a bound, checked by the reader.
+    fn from_value(value: &serde_json::Value) -> Option<Self> {
+        match value {
+            serde_json::Value::String(text) if text.trim().eq_ignore_ascii_case("none") => Some(Cap::NoLimit),
+            _ => value.as_f64().map(Cap::At),
+        }
+    }
+}
+
+impl Serialize for Cap {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Cap::At(value) => serializer.serialize_f64(*value),
+            Cap::NoLimit => serializer.serialize_str("none"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Cap {
+    /// A number, `"none"`, or `null`: what a run's limits and a plan's budget are sent as.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.is_null() {
+            return Ok(Cap::NoLimit);
+        }
+        Cap::from_value(&value).ok_or_else(|| serde::de::Error::custom(format!("{value} is not a number or \"none\"")))
+    }
+}
 pub const MAX_STALL_MINUTES: u32 = 240;
 
 /// A limit typed in Settings or a hand-edited file, when it is one.
@@ -216,8 +269,9 @@ pub fn valid_stall_minutes(value: u32) -> bool {
 fn read_u32(value: &serde_json::Value, valid: fn(u32) -> bool) -> Option<u32> {
     value.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| valid(*n))
 }
-fn read_f64(value: &serde_json::Value, valid: fn(f64) -> bool) -> Option<f64> {
-    value.as_f64().filter(|n| valid(*n))
+/// A file's `null` is no value: only `"none"` turns a budget off there.
+fn read_cap(value: &serde_json::Value, valid: fn(f64) -> bool) -> Option<Cap> {
+    Cap::from_value(value).filter(|cap| cap.valid(valid))
 }
 
 /// A damaged app-wide value is the default; a project's damaged value is no value.
@@ -235,13 +289,13 @@ macro_rules! bounded {
 }
 bounded!(workers_per_run, u32, read_u32, valid_workers, DEFAULT_WORKERS_PER_RUN);
 bounded!(workers_at_once, u32, read_u32, valid_workers, DEFAULT_WORKERS_AT_ONCE);
-bounded!(budget_dollars, f64, read_f64, valid_dollars, DEFAULT_BUDGET_DOLLARS);
-bounded!(budget_points, f64, read_f64, valid_percent, DEFAULT_BUDGET_POINTS);
-bounded!(window_ceiling, f64, read_f64, valid_percent, DEFAULT_WINDOW_CEILING);
+bounded!(budget_dollars, Cap, read_cap, valid_dollars, Cap::At(DEFAULT_BUDGET_DOLLARS));
+bounded!(budget_points, Cap, read_cap, valid_percent, Cap::At(DEFAULT_BUDGET_POINTS));
+bounded!(window_ceiling, Cap, read_cap, valid_percent, Cap::At(DEFAULT_WINDOW_CEILING));
 bounded!(stall_minutes, u32, read_u32, valid_stall_minutes, DEFAULT_STALL_MINUTES);
-bounded!(project_budget_dollars, f64, read_f64, valid_dollars);
-bounded!(project_budget_points, f64, read_f64, valid_percent);
-bounded!(project_window_ceiling, f64, read_f64, valid_percent);
+bounded!(project_budget_dollars, Cap, read_cap, valid_dollars);
+bounded!(project_budget_points, Cap, read_cap, valid_percent);
+bounded!(project_window_ceiling, Cap, read_cap, valid_percent);
 
 fn valid_piece_limit(value: &serde_json::Value) -> Option<u32> {
     value.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| (1..=MAX_PIECE_LIMIT).contains(n))
@@ -292,9 +346,9 @@ impl Default for OrchestratorSettings {
             worker_mode: DEFAULT_WORKER_MODE.into(),
             workers_per_run: DEFAULT_WORKERS_PER_RUN,
             workers_at_once: DEFAULT_WORKERS_AT_ONCE,
-            budget_dollars: DEFAULT_BUDGET_DOLLARS,
-            budget_points: DEFAULT_BUDGET_POINTS,
-            window_ceiling: DEFAULT_WINDOW_CEILING,
+            budget_dollars: Cap::At(DEFAULT_BUDGET_DOLLARS),
+            budget_points: Cap::At(DEFAULT_BUDGET_POINTS),
+            window_ceiling: Cap::At(DEFAULT_WINDOW_CEILING),
             stall_minutes: DEFAULT_STALL_MINUTES,
             review_diff_lines: DEFAULT_REVIEW_DIFF_LINES,
             routing: Default::default(),
@@ -673,7 +727,7 @@ mod tests {
         let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
         let limits = legacy.orchestrator.for_project("/repo");
         assert_eq!((limits.workers_per_run, limits.workers_at_once, limits.stall_minutes), (4, 8, 10));
-        assert_eq!((limits.budget_dollars, limits.budget_points, limits.window_ceiling), (15.0, 25.0, 85.0));
+        assert_eq!((limits.budget_dollars, limits.budget_points, limits.window_ceiling), (Cap::At(15.0), Cap::At(25.0), Cap::At(85.0)));
 
         // A project answers for its budget; the worker limits and the stall time are the app's.
         let set: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {
@@ -682,9 +736,9 @@ mod tests {
         }})).unwrap();
         let repo = set.orchestrator.for_project("/repo");
         assert_eq!((repo.workers_per_run, repo.workers_at_once, repo.stall_minutes), (2, 5, 20));
-        assert_eq!((repo.budget_dollars, repo.budget_points, repo.window_ceiling), (4.5, 30.0, 70.0));
+        assert_eq!((repo.budget_dollars, repo.budget_points, repo.window_ceiling), (Cap::At(4.5), Cap::At(30.0), Cap::At(70.0)));
         let other = set.orchestrator.for_project("/other");
-        assert_eq!((other.budget_dollars, other.window_ceiling), (15.0, 90.5));
+        assert_eq!((other.budget_dollars, other.window_ceiling), (Cap::At(15.0), Cap::At(90.5)));
         let written = serde_json::to_value(&set).unwrap();
         assert_eq!(written["orchestrator"]["projects"]["/repo"], serde_json::json!({"budgetDollars": 4.5, "windowCeiling": 70.0}));
 
@@ -695,8 +749,38 @@ mod tests {
         }})).unwrap();
         let limits = damaged.orchestrator.for_project("/repo");
         assert_eq!((limits.workers_per_run, limits.workers_at_once, limits.stall_minutes), (4, 8, 10));
-        assert_eq!((limits.budget_dollars, limits.budget_points, limits.window_ceiling), (15.0, 25.0, 85.0));
+        assert_eq!((limits.budget_dollars, limits.budget_points, limits.window_ceiling), (Cap::At(15.0), Cap::At(25.0), Cap::At(85.0)));
         assert!(damaged.orchestrator.projects["/repo"].is_empty());
+    }
+
+    #[test]
+    fn a_budget_or_the_window_level_may_be_no_limit_app_wide_or_for_one_project() {
+        // A file written before PRO-335 loads, and is written back, as it was.
+        let old = serde_json::json!({"budgetDollars": 15.0, "budgetPoints": 25.0, "windowCeiling": 85.0});
+        let loaded: OrchestratorSettings = serde_json::from_value(old.clone()).unwrap();
+        let written = serde_json::to_value(&loaded).unwrap();
+        for key in ["budgetDollars", "budgetPoints", "windowCeiling"] {
+            assert_eq!(written[key], old[key], "{key}");
+        }
+
+        let set: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {
+            "budgetDollars": "none", "windowCeiling": "None",
+            "projects": {"/repo": {"budgetPoints": "none", "budgetDollars": 30}, "/nulls": {"budgetDollars": null}},
+        }})).unwrap();
+        let app = set.orchestrator.for_project("/other");
+        assert_eq!((app.budget_dollars, app.budget_points, app.window_ceiling), (Cap::NoLimit, Cap::At(25.0), Cap::NoLimit));
+        let repo = set.orchestrator.for_project("/repo");
+        assert_eq!((repo.budget_dollars, repo.budget_points, repo.window_ceiling), (Cap::At(30.0), Cap::NoLimit, Cap::NoLimit));
+        // A project's `null` is no value of its own: only "none" turns a budget off.
+        assert_eq!(set.orchestrator.for_project("/nulls").budget_dollars, Cap::NoLimit);
+        assert!(set.orchestrator.projects["/nulls"].is_empty());
+        let written = serde_json::to_value(&set).unwrap();
+        assert_eq!((written["orchestrator"]["budgetDollars"].clone(), written["orchestrator"]["windowCeiling"].clone()), (serde_json::json!("none"), serde_json::json!("none")));
+        assert_eq!(written["orchestrator"]["projects"]["/repo"], serde_json::json!({"budgetDollars": 30.0, "budgetPoints": "none"}));
+
+        // App-wide, `null` or any other word is damage: the default, never No limit.
+        let damaged: OrchestratorSettings = serde_json::from_value(serde_json::json!({"budgetDollars": null, "budgetPoints": "unlimited"})).unwrap();
+        assert_eq!((damaged.budget_dollars, damaged.budget_points), (Cap::At(15.0), Cap::At(25.0)));
     }
 
     #[test]
