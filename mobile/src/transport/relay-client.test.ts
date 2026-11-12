@@ -241,7 +241,8 @@ function relayClient(socket: EncryptedPeer): RelayClient {
 // A 3 MB attachment: about 4 MB of base64 in one request, four times what the relay cell accepts in one message (#669).
 const attachment = { mediaType: "image/png", data: "A".repeat(4_000_000), name: "photo.png" };
 
-describe("messages larger than one relay frame (#669)", () => {
+// Sealing and opening 4 MB takes 1–2 s on an idle machine and more than 5 s on a loaded one, which is not a failure.
+describe("messages larger than one relay frame (#669)", { timeout: 30_000 }, () => {
   it("cross as fragments both ways once the Mac agrees, and the connection stays usable", async () => {
     const transcript = { events: [], blob: "🦝 \"tool\" output\n".repeat(150_000) };
     const socket = new EncryptedPeer({ fragments: true, reply: (method) => method === "session.sync" ? transcript : undefined });

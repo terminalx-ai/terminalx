@@ -6,15 +6,19 @@ export type DeviceDescription = { label: string; platform: "ios" | "android" };
 const MAX_LABEL = 64;
 
 /**
- * This phone's name and platform from what React Native's `Platform` says
- * (`OS` and `constants`). iOS gives apps only the model family ("iPhone",
- * "iPad") since iOS 16 without a special entitlement; Android gives the
- * maker and model ("Google Pixel 8"). Null on any other platform.
+ * This phone's name and platform. `deviceName` is the platform's device name
+ * (expo-constants `Constants.deviceName`): on Android the name the person gave
+ * the phone ("Sam's Pixel"); on iOS 16 and later only the model family
+ * ("iPhone") without a special entitlement. Without it, the name comes from
+ * React Native's `Platform` (`OS` and `constants`): the model family on iOS,
+ * the maker and model on Android ("Google Pixel 8"). Null on any other platform.
  */
-export function deviceDescriptionFrom(os: string, constants: unknown): DeviceDescription | null {
+export function deviceDescriptionFrom(os: string, constants: unknown, deviceName?: unknown): DeviceDescription | null {
   const values = (constants && typeof constants === "object" ? constants : {}) as Record<string, unknown>;
+  if (os !== "ios" && os !== "android") return null;
+  const named = cleanDeviceLabel(text(deviceName));
+  if (named) return { label: named, platform: os };
   if (os === "ios") return { label: values.interfaceIdiom === "pad" ? "iPad" : "iPhone", platform: "ios" };
-  if (os !== "android") return null;
   const maker = text(values.Manufacturer) || text(values.Brand);
   const model = text(values.Model);
   const name = model && maker && !model.toLowerCase().startsWith(maker.toLowerCase()) ? `${capitalize(maker)} ${model}` : model || capitalize(maker);
