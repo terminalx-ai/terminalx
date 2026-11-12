@@ -1113,22 +1113,34 @@ pub(crate) fn adopt_agent_title(session_id: &str) -> Result<Option<SessionEntry>
         .filter_map(|tab| crate::harness::claude::transcript::locate(&session.cwd, tab.provider_session_id.as_deref()?))
         .find(|path| path.is_file())
     else { return Ok(None) };
-    let Some(title) = crate::harness::claude::transcript::ai_title(&path) else { return Ok(None) };
     let first = crate::harness::claude::transcript::first_prompt(&path).unwrap_or_default();
-    if title == session.title || !automatic_title(&session.title, &first) {
+    if !automatic_title(&session.title, &first) {
+        return Ok(None);
+    }
+    // Which name wins (PRO-333): a ticket/PR-based name from a long prompt, else
+    // the agent's own title, else the prompt's first clause, trimmed.
+    let generated = crate::session_names::generated_name(&first);
+    let title = if crate::session_names::is_reference_name(&first) {
+        generated
+    } else {
+        crate::harness::claude::transcript::ai_title(&path).or(generated)
+    };
+    let Some(title) = title else { return Ok(None) };
+    if title == session.title {
         return Ok(None);
     }
     update_session_meta(session_id, &SessionPatch { title: Some(title), ..Default::default() }).map(Some)
 }
 
-/// Whether `title` is one the app made up: the untitled default, or the
-/// opening prompt's first line (cut short).
+/// Whether `title` is one the app made up: the untitled default, the opening
+/// prompt's first line (cut short), or the name generated from that prompt.
 fn automatic_title(title: &str, first_prompt: &str) -> bool {
     let title = title.trim();
     title.is_empty()
         || title == "New session"
         || title == QUICK_CHAT_TITLE
         || first_prompt.trim().lines().next().is_some_and(|line| line.trim().starts_with(title))
+        || crate::session_names::generated_name(first_prompt).is_some_and(|name| name == title)
 }
 
 /// Apply a [`SessionPatch`] and return the updated entry.
@@ -1457,6 +1469,9 @@ mod tests {
         assert!(super::automatic_title("New session", ""));
         assert!(super::automatic_title("We can work on PRD", "We can work on PRD here\nand more"));
         assert!(!super::automatic_title("Pricing notes", "We can work on PRD here"));
+        let long = "Implement PRO-123: short names. Read the code first.";
+        let generated = crate::session_names::generated_name(long).unwrap();
+        assert!(super::automatic_title(&generated, long));
     }
 
     #[test]
