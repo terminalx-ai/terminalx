@@ -6785,12 +6785,15 @@ impl SessionManager {
         // An automatic discovery allowance only skips TerminalX's Ask gate.
         // Codex's own PermissionRequest (sandbox/network escalation), and
         // Claude's safety checks in bypass mode, always remain a decision.
+        // TerminalX runs such a command itself, outside the provider's
+        // sandbox (PRO-330), so it is automatic only while that sandbox could
+        // not have narrowed what the command reads; otherwise it is asked.
         let verified_cwd = permission_directory(kind, &frame.payload);
         let cwd = verified_cwd.or_else(|| {
             (kind == CliKind::Codex && crate::harness::read_only::command(&tool_name, &input).is_some())
                 .then(|| crate::harness::read_only::reported_scope(&input, frame.payload["cwd"].as_str())).flatten()
         });
-        let session_command = {
+        let (session_command, discovery) = {
             let rt = rt_arc.lock().unwrap();
             let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
             if !p.origin.accepts(frame) { return HookReply::default(); }
@@ -6808,19 +6811,30 @@ impl SessionManager {
                         return reply_for(kind, gate, Decision::Execute(updated));
                     }
                 }
-                if let Some(updated) = store::settings::load().agents.read_only_commands
-                    .then(|| crate::harness::read_only::approved_input(&tool_name, &input, cwd)).flatten() {
-                    // Approve only the sanitized replacement. The unchanged
-                    // input may inherit executors/config from shell startup.
-                    let output = match kind {
-                        CliKind::Codex => codex::pty::pre_tool_rewrite(updated),
-                        CliKind::Claude => claude::pty::permission_decision(true, Some(updated), vec![]),
-                    };
-                    return HookReply { output: Some(output), refused: None };
+                let unconfined = || {
+                    let Some(cwd) = cwd else { return false };
+                    // The command's directory and the tab's launch
+                    // directories: the CLI loaded project settings from
+                    // where it started, whatever `cd` the model ran since.
+                    let Ok(session) = index::get(&rt.session_id) else { return false };
+                    let dirs = [Path::new(cwd), Path::new(&session.cwd), Path::new(&session.project_path)];
+                    let dirs: Vec<&Path> = dirs.into_iter().filter(|dir| dir.is_absolute()).collect();
+                    let sources = crate::harness::provider_sandbox::Sources::from_env(frame.payload["transcript_path"].as_str());
+                    !match kind {
+                        CliKind::Claude => crate::harness::provider_sandbox::claude_may_restrict(&dirs, &sources),
+                        CliKind::Codex => crate::harness::provider_sandbox::codex_may_restrict(&dirs, &sources),
+                    }
+                };
+                match (store::settings::load().agents.read_only_commands && unconfined())
+                    .then(|| crate::harness::read_only::approved(&tool_name, &input, cwd)).flatten() {
+                    Some(approved) => (None, Some(approved)),
+                    None => (key, None),
                 }
-                key
-            } else { None }
+            } else { (None, None) }
         };
+        if let Some(approved) = discovery {
+            return self.run_discovery(rt_arc, frame, kind, &input, approved, verified_cwd.is_some());
+        }
 
         let (tx, rx) = std::sync::mpsc::channel::<Decision>();
         {
@@ -6897,6 +6911,54 @@ impl SessionManager {
         // Teardown or a settings restart may replace this CLI while the hook
         // waits. An answer for that old launch cannot start the new one's work.
         self.await_decision(rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)))
+    }
+
+    /// TerminalX runs an approved discovery command's programs itself,
+    /// outside the tab's lock, and answers with their result. The provider's
+    /// shell has loaded the user's startup files, so it runs nothing
+    /// (PRO-330). The run stops when nobody is left to read the result: the
+    /// hook's connection closed (Esc, the CLI giving up) or the tab no
+    /// longer has the CLI that asked.
+    fn run_discovery(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, input: &Value, approved: crate::harness::read_only::Approved, verified: bool) -> HookReply {
+        let approved = if verified { approved } else { approved.directory_was_reported() };
+        // Codex records no item for a call its hook answered, so the chat
+        // would not show this command at all. Claude's transcript does.
+        let row = (kind == CliKind::Codex).then(|| {
+            let id = frame.payload["tool_use_id"].as_str().filter(|id| !id.is_empty()).map(String::from)
+                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            format!("terminalx-ran-{id}")
+        });
+        let command = crate::harness::read_only::command(frame.payload["tool_name"].as_str().unwrap_or(""), input).unwrap_or("").to_string();
+        if let Some(call_id) = &row {
+            let mut rt = rt_arc.lock().unwrap();
+            if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)) { return HookReply::default(); }
+            let title = format!("shell {}", command.lines().next().unwrap_or(""));
+            self.apply(&mut rt, Payload::ToolCallStarted {
+                call_id: call_id.clone(), name: "shell".into(), tool_type: ToolType::Shell,
+                input: serde_json::json!({"command": command, "cwd": approved.directory().display().to_string()}),
+                title: Some(title),
+            }, None);
+        }
+        let caller = crate::hooks::Caller::current();
+        let wanted = || caller.connected() && matches!(&rt_arc.lock().unwrap().engine, Engine::Cli(p) if p.origin.accepts(frame));
+        let ran = approved.run_while(&wanted);
+        if let Some(call_id) = row {
+            let mut rt = rt_arc.lock().unwrap();
+            if matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)) {
+                let result = match &ran {
+                    Some(ran) => ToolResult { text: ran.output.clone(), is_error: ran.status != 0, exit_code: Some(ran.status), ..Default::default() },
+                    None => ToolResult { text: "Stopped: the agent stopped waiting for this command.".into(), is_error: true, ..Default::default() },
+                };
+                self.apply(&mut rt, Payload::ToolCallCompleted { call_id, result }, None);
+            }
+        }
+        let Some(ran) = ran else { return HookReply::default() };
+        let report = ran.report();
+        let output = match kind {
+            CliKind::Codex => codex::pty::pre_tool_ran(&report),
+            CliKind::Claude => claude::pty::permission_ran(&report),
+        };
+        HookReply { output: Some(output), refused: None }
     }
 
     /// Wait for the decision on the card a permission hook asked for, and

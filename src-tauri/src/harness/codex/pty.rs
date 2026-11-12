@@ -294,6 +294,18 @@ pub fn pre_tool_decision(allow: bool) -> Value {
     }})
 }
 
+/// The reply for a read-only command TerminalX ran itself (PRO-330). Only a
+/// denial lets a hook answer for the command without Codex running it in
+/// the user's shell, so the model is shown the result as
+/// `Command blocked by PreToolUse hook: <report>`, which says that it ran.
+pub fn pre_tool_ran(report: &str) -> Value {
+    json!({ "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": report,
+    }})
+}
+
 /// Codex 0.164+ runs the replacement shell input from PreToolUse. Keep the
 /// provider's own sandbox/PermissionRequest boundary after this rewrite.
 pub fn pre_tool_rewrite(mut input: Value) -> Value {
