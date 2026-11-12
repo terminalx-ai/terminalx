@@ -47,8 +47,9 @@ export function LocalSidebarSections({ groups, filtered, groupByStatus = false, 
     {/* No standing "New section…" row: a section is made from a chat's menu, Move to section → New section…, where there is a chat to put in it. */}
     {error && <p role="alert" className="px-2 py-1 text-xs text-destructive">{error}</p>}
   </>;
-  // Inside the sidebar's own drag scope the main list is a drop target too; alone, sessions still move between sections.
-  return scoped ? content : <SidebarDragScope main={false}>{content}</SidebarDragScope>;
+  // Inside the sidebar's own drag scope the main list is a drop target too. Alone (the simple layout), sessions move
+  // between sections, leave them by a target after the last one, and come in from the project tree by SidebarSort's bridge.
+  return scoped ? content : <SidebarDragScope main={false} mainTarget>{content}</SidebarDragScope>;
 }
 
 function Section({ section, sessions, index, count, filtered, groupByStatus, renderSession }: {

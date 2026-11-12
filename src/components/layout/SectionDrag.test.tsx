@@ -35,7 +35,8 @@ function rect(this: HTMLElement): DOMRect {
   const sectionId = this.getAttribute("data-local-section");
   if (sectionId) return box(saved.sections.findIndex((entry) => entry.id === sectionId) * 200, 150);
   if (this.hasAttribute("data-main-drop-zone")) return box(0, 1000);
-  const row = this.tagName === "LI" ? this.querySelector("[data-row-sessions]")?.getAttribute("data-row-sessions") : null;
+  if (this.hasAttribute("data-main-drop-target")) return box(360, 32);
+  const row = this.tagName === "LI" ? this.querySelector("[data-row-sessions]")?.getAttribute("data-row-sessions")?.split(" ")[0] : null;
   if (row && row in rowTop) return box(rowTop[row]!, 32);
   // dnd-kit's DragOverlay (it measures its only child): fixed at the picked-up node's rect, moved by its transform.
   const overlay = [this, this.parentElement].find((node) => node?.style.position === "fixed" && node.style.zIndex === "999");
@@ -76,7 +77,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 const region = (name: string) => screen.getByRole("region", { name: `${name} section` });
-const rowItem = (id: string) => document.querySelector(`[data-row-sessions="${id}"]`)!.closest("li")!;
+const rowItem = (id: string) => document.querySelector(`[data-row-sessions~="${id}"]`)!.closest("li")!;
 const moves = () => mocks.invoke.mock.calls.filter(([command, args]) => command === "edit_local_section" && args.edit.kind === "move").map(([, args]) => args.edit);
 const pointer = { isPrimary: true, button: 0, pointerId: 1 };
 async function drag(from: Element, y: number) {
@@ -136,5 +137,38 @@ describe("dragging sessions between local sections", () => {
     await key(document, "Space");
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("edit_local_section", { edit: { kind: "reorder", id: "Bugs", by: -1 } }));
     await waitFor(() => expect(document.querySelector("[data-local-section]")?.getAttribute("data-local-section")).toBe("Bugs"));
+  });
+});
+
+// The simple layout draws its project tree beside the sections rather than inside one drag scope (SessionSidebar).
+describe("dragging sessions in the simple layout", () => {
+  beforeEach(() => { prefs.setPrefs({ sidebarLayout: "simple" }); });
+
+  it("moves a project-tree session into a section, and a sectioned one out by the main-list target", async () => {
+    mount();
+    expect(within(region("Bugs")).getByText("Drag sessions here")).toBeTruthy();
+    const two = rowItem("two");
+    const members = two.querySelector("[data-row-sessions]")!.getAttribute("data-row-sessions")!.split(" ");
+    await drag(two, 275);
+    await waitFor(() => expect(moves()).toEqual([{ kind: "move", sessionIds: members, sectionId: "Bugs" }]));
+    await waitFor(() => expect(within(region("Bugs")).queryByText("Drag sessions here")).toBeNull());
+    expect(document.querySelector("[data-drop-over]")).toBeNull();
+    await drag(rowItem("one"), 370);
+    await waitFor(() => expect(moves()).toContainEqual({ kind: "move", sessionIds: ["one"], sectionId: null }));
+    await waitFor(() => expect(within(region("Release")).getByText("Drag sessions here")).toBeTruthy());
+    expect(document.querySelector("[data-main-drop-target]")).toBeNull();
+  });
+
+  it("leaves a project-tree session where it is when dropped outside the sections", async () => {
+    mount();
+    await drag(rowItem("two"), 700);
+    expect(moves()).toEqual([]);
+  });
+
+  it("raises the error toast when a move from the project tree fails", async () => {
+    failMove = true;
+    mount();
+    await drag(rowItem("two"), 275);
+    await waitFor(() => expect(toasts.getErrorToasts().map((toast) => toast.action)).toEqual([expect.stringMatching(/^Couldn't move “.+” to Bugs$/)]));
   });
 });

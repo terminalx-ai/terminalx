@@ -1,8 +1,8 @@
-import { createContext, useCallback, useContext, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { closestCenter, pointerWithin, DndContext, DragOverlay, KeyboardSensor, PointerSensor, useDndContext, useDroppable, useSensor, useSensors, type Active, type Announcements, type CollisionDetection, type KeyboardCoordinateGetter, type Over } from "@dnd-kit/core";
 import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy, type SortingStrategy } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
+import { CSS, getEventCoordinates } from "@dnd-kit/utilities";
 import { StatusGroups } from "./StatusGroups";
 import { conversationTitle } from "@/lib/sessions";
 import type { SessionEntry } from "@/types/session";
@@ -34,6 +34,30 @@ const dataOf = (node: Active | Over | null | undefined) => node?.data.current as
 const sectionSortId = (id: string) => `section:${id}`;
 const noSorting: SortingStrategy = () => null;
 
+/**
+ * The simple layout draws its project tree beside the sections, not inside a
+ * shared SidebarDragScope, so a session dragged there is in another DndContext
+ * than the sections. Sections on screen register here; such a drag finds the
+ * one under the pointer by its rect and moves the session into it on drop.
+ */
+const sectionNodes = new Map<string, { node: HTMLElement; scope: Scope["lists"] }>();
+let bridged: string | null = null;
+const bridgeListeners = new Set<() => void>();
+function setBridged(id: string | null) {
+  if (bridged === id) return;
+  bridged = id;
+  for (const listener of bridgeListeners) listener();
+}
+const subscribeBridged = (listener: () => void) => { bridgeListeners.add(listener); return () => { bridgeListeners.delete(listener); }; };
+function sectionAt(scope: Scope["lists"], x: number, y: number): string | null {
+  for (const [id, entry] of sectionNodes) {
+    if (entry.scope === scope || !entry.node.isConnected) continue;
+    const rect = entry.node.getBoundingClientRect();
+    if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return id;
+  }
+  return null;
+}
+
 /** Rows rendered inside a local section: their lists drop into, and drag out of, that section. */
 export function SidebarSection({ id, name, children }: { id: string; name: string; children: ReactNode }) {
   const value = useMemo(() => ({ id, name }), [id, name]);
@@ -61,7 +85,14 @@ export function SortableStatusGroups({ sessions, children, scope }: { sessions: 
  * section (another project, branch or status group) cancels.
  * Without sections the scope behaves exactly like separate sortable lists.
  */
-export function SidebarDragScope({ children, main = true, moves: allowMoves = true }: { children: ReactNode; main?: boolean; moves?: boolean }) {
+export function SidebarDragScope({ children, main = true, mainTarget = false, moves: allowMoves = true }: {
+  children: ReactNode;
+  /** The whole scope is the main list's drop zone (ChatListSidebar). */
+  main?: boolean;
+  /** Only the sections are inside: a "Drop here to move to the main list" target follows them while a sectioned session is held. */
+  mainTarget?: boolean;
+  moves?: boolean;
+}) {
   const { sections } = useLocalSections();
   const moves = allowMoves && sections.length > 0;
   const lists = useRef(new Map<string, { current: ListEntry }>()).current;
@@ -148,10 +179,18 @@ export function SidebarDragScope({ children, main = true, moves: allowMoves = tr
     onDragEnd: ({ active, over }) => {
       const data = dataOf(active);
       if (data?.type === "section") return outcome.current === "section" && over ? `Dropped ${sectionPosition(data, over.id)}` : `Cancelled. ${sectionPosition(data)}`;
-      if (outcome.current === "move" && data?.type === "row") return `Moved ${data.name} to ${sectionName(moveTarget(data, over) ?? null)}.`;
+      if (outcome.current === "move" && data?.type === "row") return `Moved ${data.name} to ${sectionName(movedTo.current)}.`;
       return over && outcome.current === "reorder" ? `Dropped ${description(active.id, over.id)}` : `Cancelled. ${description(active.id)}`;
     },
     onDragCancel: ({ active }) => { const data = dataOf(active); return data?.type === "section" ? `Cancelled. ${sectionPosition(data)}` : `Cancelled. ${description(active.id)}`; },
+  };
+  const movedTo = useRef<string | null>(null);
+  const moveTo = (data: RowData, target: string | null, order: string[] | null) => {
+    movedTo.current = target;
+    void (async () => {
+      await editLocalSection({ kind: "move", sessionIds: data.members, sectionId: target });
+      if (order) await saveSidebarOrder({ sessions: order });
+    })().catch(reportError(`Couldn't move “${data.name}” to ${sectionName(target)}`));
   };
   const dropSession = (data: RowData, activeId: string | number, over: Over) => {
     const target = moveTarget(data, over);
@@ -166,10 +205,7 @@ export function SidebarDragScope({ children, main = true, moves: allowMoves = tr
         ids.splice(at < 0 ? ids.length : at, 0, ...data.members);
         return ids;
       })() : null;
-      void (async () => {
-        await editLocalSection({ kind: "move", sessionIds: data.members, sectionId: target });
-        if (order) await saveSidebarOrder({ sessions: order });
-      })().catch(reportError(`Couldn't move “${data.name}” to ${sectionName(target)}`));
+      moveTo(data, target, order);
       return;
     }
     const source = lists.get(data.list)?.current;
@@ -204,16 +240,30 @@ export function SidebarDragScope({ children, main = true, moves: allowMoves = tr
           dragRows.current = data?.type === "row" ? rowsOf(data) : [];
           setActive(data ?? null);
         }}
-        onDragCancel={() => setActive(null)}
+        onDragMove={({ active, activatorEvent, delta }) => {
+          const data = dataOf(active);
+          // Pointer only: the keyboard stays in its own list.
+          const start = moves && data?.type === "row" && data.kind === "sessions" ? getEventCoordinates(activatorEvent) : null;
+          const target = start ? sectionAt(lists, start.x + delta.x, start.y + delta.y) : null;
+          setBridged(data?.type === "row" && target !== data.section ? target : null);
+        }}
+        onDragCancel={() => { setActive(null); setBridged(null); }}
         onDragEnd={({ active, over }) => {
           setActive(null);
           outcome.current = null;
           const data = dataOf(active);
+          const target = bridged;
+          setBridged(null);
+          if (data?.type === "row" && target !== null) {
+            outcome.current = "move";
+            return moveTo(data, target, null);
+          }
           if (!over || !data) return;
           if (data.type === "row") dropSession(data, active.id, over);
           else if (data.type === "section") dropSection(data, over);
         }}>
         {main ? <MainListZone active={moves ? active : null}>{children}</MainListZone> : children}
+        {!main && mainTarget && moves && <MainListTarget active={active} />}
         {moves && createPortal(<DragOverlay dropAnimation={animations ? undefined : null}>{overlay}</DragOverlay>, document.body)}
       </DndContext>
     </ScopeContext.Provider>
@@ -231,13 +281,22 @@ function MainListZone({ active, children }: { active: DragData | null; children:
   </div>;
 }
 
+/** Beside the sections in the simple layout: where a sectioned session is dropped to leave its section. */
+function MainListTarget({ active }: { active: DragData | null }) {
+  const leaving = active?.type === "row" && active.kind === "sessions" && active.section !== null;
+  const zone = useDroppable({ id: "zone:main", data: useMemo<ZoneData>(() => ({ type: "zone", section: null, name: MAIN_LIST }), []), disabled: !leaving });
+  return leaving ? <p ref={zone.setNodeRef} data-main-drop-target="" className={cn("mx-2 mb-2 grid h-8 place-items-center rounded-md border border-dashed border-border text-[12px] text-faint", zone.isOver && "border-info/60 bg-info/10 text-foreground")}>Drop here to move to the main list</p> : null;
+}
+
 /** A sortable scope never moves a session into another project, branch or status group. */
 export function SidebarSortList(props: ListProps) {
   const { custom } = useSidebarOrder();
   const scope = useContext(ScopeContext);
-  const moves = !!scope?.moves && (props.kind ?? "sessions") === "sessions";
+  const { sections } = useLocalSections();
+  // Outside a shared scope (the simple layout's project tree), sessions still drag into the sections there are.
+  const moves = (props.kind ?? "sessions") === "sessions" && (scope ? scope.moves : sections.length > 0);
   if (!custom && !moves) return <Items.Provider value={EMPTY_LIST}>{props.children}</Items.Provider>;
-  if (!scope) return <SidebarDragScope main={false} moves={false}><SortableList {...props} custom={custom} /></SidebarDragScope>;
+  if (!scope) return <SidebarDragScope main={false}><SortableList {...props} custom={custom} /></SidebarDragScope>;
   return <SortableList {...props} custom={custom} />;
 }
 
@@ -314,8 +373,17 @@ export function useSidebarSectionDrag(section: { id: string; name: string }, sor
   const from = dataOf(active);
   const to = dataOf(over);
   const held = from?.type === "row" && from.kind === "sessions" && from.section !== section.id;
-  const isOver = held && !!to && to.type !== "section" && to.section === section.id && !(to.type === "row" && to.list === from.list);
-  const ref = useCallback((node: HTMLElement | null) => { sort.setNodeRef(node); zone.setNodeRef(node); }, [sort.setNodeRef, zone.setNodeRef]);
+  const bridgedOver = useSyncExternalStore(subscribeBridged, () => bridged === section.id);
+  const isOver = bridgedOver || (held && !!to && to.type !== "section" && to.section === section.id && !(to.type === "row" && to.list === from.list));
+  const node = useRef<HTMLElement | null>(null);
+  const ref = useCallback((element: HTMLElement | null) => { node.current = element; sort.setNodeRef(element); zone.setNodeRef(element); }, [sort.setNodeRef, zone.setNodeRef]);
+  useLayoutEffect(() => {
+    const element = node.current;
+    if (!scope || !element) return;
+    const entry = { node: element, scope: scope.lists };
+    sectionNodes.set(section.id, entry);
+    return () => { if (sectionNodes.get(section.id) === entry) sectionNodes.delete(section.id); };
+  }, [scope, section.id]);
   const headerRef = usePointerDrag(!!scope && sortable, sort.listeners, () => {});
   const style: CSSProperties = { transform: CSS.Translate.toString(sort.transform), transition: sort.transition, position: "relative", zIndex: sort.isDragging ? 10 : undefined, opacity: sort.isDragging ? 0.4 : undefined };
   const handle = scope && sortable ? (

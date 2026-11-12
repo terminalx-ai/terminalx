@@ -38,8 +38,8 @@ const extra = (layout) => `(() => {
   };
 })();`;
 
-// A real pointer drag through dnd-kit's PointerSensor, as sidebar-order.mjs does it.
-const drag = async (page, from, to) => {
+// A real pointer drag through dnd-kit's PointerSensor, as sidebar-order.mjs does it. hold() stops short of the drop.
+const hold = async (page, from, to) => {
   const start = await from.boundingBox();
   const end = await to.boundingBox();
   assert.ok(start && end);
@@ -50,6 +50,9 @@ const drag = async (page, from, to) => {
   const target = await to.boundingBox();
   await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 20 });
   await page.evaluate(() => new Promise(requestAnimationFrame));
+};
+const drag = async (page, from, to) => {
+  await hold(page, from, to);
   await page.mouse.up();
   await page.waitForTimeout(100);
 };
@@ -126,9 +129,14 @@ try {
     await drag(page, section("Retries").getByText("Fix retry handling", { exact: true }), section("Release").getByText("Drag sessions here", { exact: true }));
     await section("Release").getByText("Fix retry handling", { exact: true }).waitFor();
     assert.equal(await section("Retries").getByText("Drag sessions here", { exact: true }).count(), 1, "the emptied section shows its drop target");
-    if (layout === "list") { // Simple layout: the project tree joins once SessionSidebar wraps its nav in SidebarDragScope.
-      // From the main list into a section's header, then back out to the main list.
-      await drag(page, page.locator('[data-row-sessions~="three"]'), section("Retries").getByRole("button", { name: "Retries", exact: true }));
+    {
+      // From the main list into a section's header, then back out to the main list. In the simple layout the
+      // project tree is outside the sections' drag scope and reaches them through SidebarSort's bridge.
+      await hold(page, page.locator('[data-row-sessions~="three"]'), section("Retries").getByRole("button", { name: "Retries", exact: true }));
+      await page.locator('[data-local-section="' + (await section("Retries").getAttribute('data-local-section')) + '"][data-drop-over]').waitFor();
+      assert.equal(await page.locator('[data-drop-over]').count(), 1, "only the section under the pointer is lit");
+      if (process.env.SCREENSHOTS) await page.screenshot({ path: `${process.env.SCREENSHOTS}/${layout}-${colorScheme}-drag-in.png` });
+      await page.mouse.up();
       const held = section("Retries").locator('[data-row-sessions~="three"]');
       await held.waitFor();
       const start = await held.boundingBox();
@@ -138,6 +146,7 @@ try {
       const back = page.locator('[data-main-drop-target]');
       await back.waitFor();
       assert.equal(await back.textContent(), "Drop here to move to the main list");
+      if (process.env.SCREENSHOTS) await page.screenshot({ path: `${process.env.SCREENSHOTS}/${layout}-${colorScheme}-drag-out.png` });
       const end = await back.boundingBox();
       await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 20 });
       await page.evaluate(() => new Promise(requestAnimationFrame));
