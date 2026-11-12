@@ -93,7 +93,7 @@ level past which nothing new starts, for workers on a subscription), and after h
 minutes of nothing a worker counts as stalled. A project may answer for itself under
 `projects`, by its path, for approval, the piece limit, the worker mode, the diff threshold,
 its routing rows and the three budget values; a setting it leaves out follows the app-wide
-value. These are the person's to change, in Settings → Orchestrator: do not edit
+value. Each budget value, and the window level, may be `"none"` for No limit. These are the person's to change, in Settings → Orchestrator: do not edit
 them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
 settings page in the app; the `runs` commands work either way.
 
@@ -687,7 +687,8 @@ The plan is a JSON file you write:
   worker is told to treat that text as information, never as instructions.
 - `estimate`: what you expect the piece to cost, in API-equivalent dollars. `budget` is what
   the run may use, in `points` of a subscription's window or `dollars`. Where it is lower
-  than the person's settings it holds; it cannot raise them. See "Limits and budget".
+  than the person's settings it holds; it cannot raise them, and asking for No limit (`null`
+  or `"none"`) leaves the person's limit in place. See "Limits and budget".
 
 `runs create` checks the plan and stores it. A refusal names its rule in `code` and the
 piece in `details.piece`, and nothing is stored:
@@ -925,7 +926,10 @@ it differ from the one before), `model`, `effort`, `tier`, `worker`, `branch`, `
 
 A run has `limits`: `workers` (in a turn at once), `dollars`, `points` and `ceiling`. They are
 the project's settings when the run is made, with your plan's `budget` where it asks for
-less; the person can change them for the run in the approval view, or when it stops.
+less; the person can change them for the run in the approval view, or when it stops. Each of
+`dollars`, `points` and `ceiling` may be `"none"`: No limit, which never pauses the run for
+that limit (a `ceiling` of `"none"` lets the run use the whole window). Cost is still recorded
+in `usage`.
 
 - **Worker limits.** At most `limits.workers` of the run's workers are in a turn at once, and
   at most the app-wide limit across every run. `runs start` starts what fits and leaves the

@@ -3,7 +3,8 @@
 // narrow sizes, light and dark: a running run on a subscription with a queued
 // and a stalled piece, a run that reached its budget on a usage window, a plan
 // that would not fit in what is left of a window, and Settings → Orchestrator's
-// limits. A synthetic run behind the Tauri stub, answered the way the engine
+// limits; and (PRO-335) a run with No limit on its budgets, the approval view's
+// warning for one, and the settings' No limit and Off switches. A synthetic run behind the Tauri stub, answered the way the engine
 // answers; nothing is started.
 // pnpm build && node scripts/webkit/run-limits.mjs
 // Set RUN_LIMITS_SHOTS to a directory to also save screenshots.
@@ -61,6 +62,13 @@ function setup({ mode, scene }) {
       fit: [`The Claude 5h window is at 70%. This run may use up to 25 points, but it stops at 85%, about 15 points from now. It resets at ${label}.`],
       pieces: pieces.map(({ worker: _w, branch: _b, startedMode: _m, login: _l, note: _n, queuedFor: _q, ...plan }) => ({ ...plan, state: "queued", attempts: 0, estimate: { low: 0.5, high: 0.9 } })),
     },
+  };
+  // PRO-335: No limit on dollars and points, the window level on.
+  const unlimited = { workers: 2, dollars: "none", points: "none", ceiling: 85 };
+  runs.unlimited = { ...runs.running, budget: {}, limits: unlimited, usage: { dollars: 12345.6, apiKey: true, subscription: true, windows: [fiveHour] } };
+  runs.unlimitedApproval = {
+    ...runs.approval, limits: unlimited, usage: { dollars: 0, apiKey: true, subscription: true, windows: [{ ...fiveHour, percent: 20, start: undefined, points: 0 }] },
+    fit: ["This run has no limit on dollars or points: it goes on until its work is done, or until a window it draws on passes 85%. What it uses is still recorded."],
   };
   const withWaiting = (run) => ({ ...run, ready: [], waiting: run.pieces.filter((p) => p.state === "queued").map((p) => ({ piece: p.id, on: [], queuedFor: p.queuedFor })) });
   const state = {
@@ -229,6 +237,49 @@ try {
         await page.close();
       }
 
+      // PRO-335: a run with No limit shows what it spent and used, and no bound.
+      {
+        const { page, errors } = await start("unlimited");
+        const view = await runView(page);
+        const layout = await layoutOf(view);
+        await shot(page, "no-limit-running");
+        const budget = await view.getByTestId("run-budget").textContent();
+        const checks = {
+          "points and dollars are shown as used and spent, with No limit for each": budget.includes("9 points usedNo limit") && budget.includes("$12345.60 spentNo limit") && !budget.includes(" of $"),
+          "the window level still holds, and says so": budget.includes("pauses past 85%"),
+          "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
+          "no browser errors": errors.length === 0,
+        };
+        failed += report(`no limit running, ${at}`, checks, { layout, errors });
+        await page.close();
+      }
+
+      // PRO-335: the approval view warns once of a run with No limit, and the person can set and lift this run's limits.
+      {
+        const { page, errors } = await start("unlimitedApproval");
+        const view = await runView(page);
+        const summary = view.getByRole("region", { name: "Plan summary" });
+        await summary.getByRole("alert").waitFor();
+        const layout = await layoutOf(view);
+        await shot(page, "no-limit-approval");
+        const alerts = await summary.getByRole("alert").allTextContents();
+        const checks = {
+          "one warning says the run has no limit and what still stops it": alerts.length === 1 && alerts[0].includes("no limit on dollars or points") && alerts[0].includes("passes 85%"),
+          "the budget says No limit for each": (await summary.textContent()).includes("BudgetNo points limit · No dollar limit"),
+          "neither budget has a field while it is No limit": (await summary.getByRole("spinbutton", { name: "Points of a window this run may use" }).count()) === 0 && (await summary.getByRole("spinbutton", { name: "Dollars this run may spend" }).count()) === 0,
+          "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
+        };
+        await summary.getByRole("button", { name: "Pause when a window passes: Turn off" }).click();
+        await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "setLimits"));
+        await summary.getByText("Off: can use the whole window").waitFor();
+        await shot(page, "no-limit-approval-ceiling-off");
+        const calls = await page.evaluate(() => window.__RUNS__.calls);
+        checks["turning the window level off saves it for this run"] = JSON.stringify(calls[0].args.limits) === JSON.stringify({ workers: 2, dollars: "none", points: "none", ceiling: "none" });
+        checks["no browser errors"] = errors.length === 0;
+        failed += report(`no limit approval, ${at}`, checks, { layout, errors, calls });
+        await page.close();
+      }
+
       // Settings → Orchestrator: the worker limits, the budget and the stall time (design 18.05).
       {
         const { page, errors } = await start("none");
@@ -264,8 +315,20 @@ try {
         await shot(page, "settings-repository");
         const layout = await layoutOf(settings.locator("section").first());
         checks["nothing scrolls sideways or overlaps"] = !layout.scrolls && !layout.overlaps;
+        // PRO-335: No limit for the dollar budget, and the window level off, app-wide.
+        await nav.getByRole("button", { name: "Orchestrator", exact: true }).click();
+        await tab.getByRole("switch", { name: "Budget per run, API key: No limit" }).click();
+        await tab.getByRole("switch", { name: "Pause when a window passes: Off" }).click();
+        await tab.getByText("Off: a run can use the whole window").waitFor();
+        await tab.getByRole("switch", { name: "Budget per run, API key: No limit" }).scrollIntoViewIfNeeded();
+        await shot(page, "settings-no-limit");
+        const noLimit = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(-2));
+        checks["No limit and Off are saved as none"] = JSON.stringify(noLimit) === JSON.stringify([{ budgetDollars: "none" }, { windowCeiling: "none" }]);
+        checks["the dollar field gives way to No limit; the points budget keeps its own"] = (await tab.getByRole("spinbutton", { name: "Budget per run, API key", exact: true }).count()) === 0 && (await value("Budget per run, subscription")) === "30";
+        const after = await layoutOf(tab);
+        checks["the switches do not overlap the fields"] = !after.scrolls && !after.overlaps;
         checks["no browser errors"] = errors.length === 0;
-        failed += report(`settings, ${at}`, checks, { errors, calls });
+        failed += report(`settings, ${at}`, checks, { errors, calls, after });
         await page.close();
       }
     }

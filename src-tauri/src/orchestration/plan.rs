@@ -952,7 +952,13 @@ mod tests {
             "id": "a", "title": "A", "goal": "g", "why": "w", "scope": "s", "outOfScope": "o", "known": ["k"], "readFirst": ["r"], "limits": ["l"], "owns": ["src/"],
             "dependsOn": [], "doneChecks": [{"type": "command", "run": "x"}], "kind": "code", "agent": "codex", "model": "m", "effort": "high", "permissionMode": "manual", "readsUntrusted": true, "estimate": {"low": 1.0, "high": 2.0},
         }]})).unwrap();
-        assert_eq!((whole.pieces[0].permission_mode.as_deref(), whole.pieces[0].reads_untrusted, whole.budget.points), (Some("manual"), true, Some(5.0)));
+        assert_eq!((whole.pieces[0].permission_mode.as_deref(), whole.pieces[0].reads_untrusted, whole.budget.points), (Some("manual"), true, Some(crate::store::settings::Cap::At(5.0))));
+        // No limit is `null` or "none"; left out, the run follows the settings (PRO-335).
+        use crate::store::settings::Cap;
+        let off = parse(&json!({"goal": "g", "budget": {"dollars": null, "points": "none"}, "pieces": []})).unwrap();
+        assert_eq!((off.budget.dollars, off.budget.points), (Some(Cap::NoLimit), Some(Cap::NoLimit)));
+        assert_eq!(parse(&json!({"goal": "g", "budget": {}, "pieces": []})).unwrap().budget.dollars, None);
+        assert_eq!(parse(&json!({"goal": "g", "budget": {"dollars": "lots"}, "pieces": []})).unwrap_err().code, "plan_invalid");
         assert_eq!(parse(&json!({"goal": "g", "pieces": "none"})).unwrap_err().code, "plan_invalid");
         assert_eq!(parse(&json!({"pieces": []})).unwrap_err().code, "plan_invalid");
     }

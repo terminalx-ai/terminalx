@@ -2,7 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { orchestration } from "@/lib/api";
 import type {
-  MergeState, PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunGate, RunHold, RunLimits, RunPiece, RunPlan, RunRefusal, RunReview, RunState, RunVerification,
+  Cap, MergeState, PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunGate, RunHold, RunLimits, RunPiece, RunPlan, RunRefusal, RunReview, RunState, RunVerification,
   RunWindowUse, Tier, TryOutcome, TryStep,
 } from "@/types/orchestration";
 
@@ -204,11 +204,26 @@ export function estimateText(estimate: RunEstimate | null | undefined): string |
   return estimate.low === estimate.high ? `$${money(estimate.low)}` : `$${money(estimate.low)}–${money(estimate.high)}`;
 }
 
+/** The bound of a budget or the window level, or `null` for No limit (PRO-335). */
+export function capAt(cap: Cap | null | undefined): number | null {
+  return typeof cap === "number" ? cap : null;
+}
+
+/** `25 points`, `1 point`, or `No points limit`. */
+export function pointsText(points: Cap): string {
+  return points === "none" ? "No points limit" : `${points} ${points === 1 ? "point" : "points"}`;
+}
+
+/** `$15.00`, or `No dollar limit`. */
+export function dollarsText(dollars: Cap): string {
+  return dollars === "none" ? "No dollar limit" : `$${dollars.toFixed(2)}`;
+}
+
 /** `25 points`, `$15.00`, or both; `null` when the plan set none. */
 export function budgetText(run: Pick<Run, "budget">): string | null {
   const parts = [
-    run.budget.points != null ? `${run.budget.points} ${run.budget.points === 1 ? "point" : "points"}` : null,
-    run.budget.dollars != null ? `$${run.budget.dollars.toFixed(2)}` : null,
+    run.budget.points != null ? pointsText(run.budget.points) : null,
+    run.budget.dollars != null ? dollarsText(run.budget.dollars) : null,
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : null;
 }

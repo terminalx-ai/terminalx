@@ -326,20 +326,20 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "orchestrator.budgetDollars", section: "orchestrator", title: "Budget per run, API key",
-    description: "Dollars its workers on an API key may spend; then the run starts nothing new and asks you.",
-    searchTerms: ["orchestrator", "budget", "dollars", "cost", "spend", "api key", "money"], scope: "user",
+    description: "Dollars its workers on an API key may spend; then the run starts nothing new and asks you. No limit lets a run spend until its work is done; its cost is still shown.",
+    searchTerms: ["orchestrator", "budget", "dollars", "cost", "spend", "api key", "money", "no limit", "unlimited"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.budgetDollars" },
   }),
   defineSetting({
     id: "orchestrator.budgetPoints", section: "orchestrator", title: "Budget per run, subscription",
-    description: "Points of a usage window one run may use: the change in the window while it runs, which counts everything else you run too.",
-    searchTerms: ["orchestrator", "budget", "points", "subscription", "usage", "window", "plan", "limit"], scope: "user",
+    description: "Points of a usage window one run may use: the change in the window while it runs, which counts everything else you run too. No limit leaves only the window level to pause it.",
+    searchTerms: ["orchestrator", "budget", "points", "subscription", "usage", "window", "plan", "limit", "no limit", "unlimited", "tokens"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.budgetPoints" },
   }),
   defineSetting({
     id: "orchestrator.windowCeiling", section: "orchestrator", title: "Pause when a window passes",
-    description: "Whoever used it; the run can go on after the reset.",
-    searchTerms: ["orchestrator", "window", "usage", "ceiling", "pause", "percent", "subscription", "reset"], scope: "user",
+    description: "Whoever used it; the run can go on after the reset. Keeps your own window from running out. Off, a run can use the whole window.",
+    searchTerms: ["orchestrator", "window", "usage", "ceiling", "pause", "percent", "subscription", "reset", "off", "no limit"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.windowCeiling" },
   }),
   defineSetting({
