@@ -37,6 +37,7 @@ import { SidebarTitlebar } from "./SidebarTitlebar";
 import { IssuePipelineSettingsDialog } from "@/components/issues/IssuePipelineSettingsDialog";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
+import { reportError, showError } from "@/lib/errorToasts";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { branchMerged, conversationBranch } from "@/lib/checkout";
@@ -202,7 +203,7 @@ export async function confirmRemoveProject(group: ConversationGroup) {
     await archiveSessions(open.map((session) => session.id), true);
     if (group.project) await removeProject(group.path);
   } catch (error) {
-    console.error("remove project", errorMessage(error));
+    showError(`Couldn't remove “${group.name}” from TerminalX`, error);
   }
 }
 
@@ -662,12 +663,12 @@ function ProjectGroup({
           <DropdownMenuItem onSelect={() => startSessionIn(group.path, null)}>
             <SquarePen /> New chat in {group.name}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void revealItemInDir(group.path)}>
+          <DropdownMenuItem onSelect={() => void revealItemInDir(group.path).catch(reportError(`Couldn't reveal “${group.name}” in Finder`))}>
             <FolderOpen /> Reveal in Finder
           </DropdownMenuItem>
           {group.project && (
             <>
-              <DropdownMenuItem onSelect={() => void updateProject(group.path, { pinned: !group.project?.pinned })}>
+              <DropdownMenuItem onSelect={() => void updateProject(group.path, { pinned: !group.project?.pinned }).catch(reportError(`Couldn't ${group.project?.pinned ? "unpin" : "pin"} “${group.name}”`))}>
                 <Pin /> {group.project.pinned ? "Unpin project" : "Pin project"}
               </DropdownMenuItem>
               <DropdownMenuSub>
@@ -810,7 +811,7 @@ export function ArchivedSessions({ id, count, opened, children }: { id: string; 
 export function UnarchiveButton({ session, title }: { session: SessionEntry; title: string }) {
   return (
     <WithTooltip label="Unarchive">
-      <Button variant="ghost" size="icon-xs" aria-label={`Unarchive ${title}`} onClick={() => void archiveSession(session.id, false)}>
+      <Button variant="ghost" size="icon-xs" aria-label={`Unarchive ${title}`} onClick={() => void archiveSession(session.id, false).catch(reportError(`Couldn't unarchive “${title}”`))}>
         <ArchiveRestore />
       </Button>
     </WithTooltip>
@@ -886,7 +887,7 @@ function BranchRow({
           </ContextMenuItem>
         )}
         {branch && (
-          <ContextMenuItem onSelect={() => void copyText(branch).catch(() => {})}>
+          <ContextMenuItem onSelect={() => void copyText(branch).catch(reportError(`Couldn't copy the branch name “${branch}”`))}>
             <GitBranch /> Copy branch name
           </ContextMenuItem>
         )}
@@ -1008,7 +1009,8 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
   const SubTrigger = contextMenu ? ContextMenuSubTrigger : DropdownMenuSubTrigger;
   const SubContent = contextMenu ? ContextMenuSubContent : DropdownMenuSubContent;
   const IssueItems = contextMenu ? IssueLinkContextItems : IssueLinkMenuItems;
-  const copy = (text: string) => void copyText(text).catch(() => {});
+  const title = conversationTitle(session) || "this conversation";
+  const copy = (text: string, what: string) => void copyText(text).catch(reportError(`Couldn't copy ${what}`));
   const picked = isPicked(ids, usePickedSessions());
   const store = useSessionStore();
   const unread = store.sessions.filter((entry) => ids.includes(entry.id)).some(isUnread);
@@ -1071,29 +1073,29 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
         <CheckSquare /> {unread ? "Mark as read" : "Mark as unread"}<span className="ml-auto text-xs text-faint" aria-hidden>R</span>
       </Item>}
       {error && <span role="alert" className="block px-2 text-xs text-destructive">{error}</span>}
-      <Item data-row-key="p" aria-keyshortcuts="P" onSelect={() => void pinSession(session.id, !session.pinned)}>
+      <Item data-row-key="p" aria-keyshortcuts="P" onSelect={() => void pinSession(session.id, !session.pinned).catch(reportError(`Couldn't ${session.pinned ? "unpin" : "pin"} “${title}”`))}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
       </Item>
       <Separator />
-      <Item onSelect={() => void revealItemInDir(session.cwd)}>
+      <Item onSelect={() => void revealItemInDir(session.cwd).catch(reportError(`Couldn't reveal “${title}” in Finder`))}>
         <FolderOpen /> Reveal in Finder
       </Item>
-      <Item onSelect={() => copy(session.cwd)}>
+      <Item onSelect={() => copy(session.cwd, `the path of “${title}”`)}>
         <Copy /> Copy path
       </Item>
       {branch && (
-        <Item onSelect={() => copy(branch)}>
+        <Item onSelect={() => copy(branch, `the branch name “${branch}”`)}>
           <GitBranch /> Copy branch name
         </Item>
       )}
-      <Item onSelect={() => void copyShareLink(session.id).catch(() => {})}>
+      <Item onSelect={() => void copyShareLink(session.id).catch(reportError(`Couldn't copy a link to “${title}”`))}>
         <Link /> Copy link
       </Item>
       <Separator />
       <Item data-row-key="s" aria-keyshortcuts="S" onSelect={() => togglePicked(ids)}>
         <CheckSquare /> {picked ? "Deselect" : "Select"}
       </Item>
-      <Item data-row-key="a" aria-keyshortcuts="A" onSelect={() => void archiveSession(session.id, !session.archived)}>
+      <Item data-row-key="a" aria-keyshortcuts="A" onSelect={() => void archiveSession(session.id, !session.archived).catch(reportError(`Couldn't ${session.archived ? "unarchive" : "archive"} “${title}”`))}>
         <Archive /> {session.archived ? "Unarchive" : "Archive"}
       </Item>
       <IssueItems session={session} />
