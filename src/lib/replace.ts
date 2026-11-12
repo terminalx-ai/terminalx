@@ -15,6 +15,8 @@ export interface ReplaceSpec {
   replacement: string;
   regex: boolean;
   caseSensitive: boolean;
+  /** Only matches that stand as whole words. */
+  wholeWord?: boolean;
 }
 
 /** The key a hit is excluded under. */
@@ -44,7 +46,7 @@ export function expandReplacement(template: string, m: RegExpExecArray): string 
 export function replaceInState(state: EditorState, spec: ReplaceSpec, lines?: Set<number>): { changes: ChangeSpec[]; count: number } {
   const changes: ChangeSpec[] = [];
   if (!spec.query) return { changes, count: 0 };
-  const query = new SearchQuery({ search: spec.query, regexp: spec.regex, caseSensitive: spec.caseSensitive, literal: true });
+  const query = new SearchQuery({ search: spec.query, regexp: spec.regex, caseSensitive: spec.caseSensitive, wholeWord: !!spec.wholeWord, literal: true });
   if (!query.valid) return { changes, count: 0 };
   const cursor = query.getCursor(state) as Iterator<{ from: number; to: number; match?: RegExpExecArray }>;
   for (let r = cursor.next(); !r.done; r = cursor.next()) {

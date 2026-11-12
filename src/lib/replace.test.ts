@@ -29,6 +29,10 @@ describe("replaceInState", () => {
     expect(apply("foo Foo\nfoo", literal)).toEqual({ text: "bar bar\nbar", count: 3 });
     expect(apply("foo Foo", { ...literal, caseSensitive: true })).toEqual({ text: "bar Foo", count: 1 });
   });
+  it("skips matches inside longer words when whole word is on", () => {
+    expect(apply("id ids id_x Id", { ...literal, query: "id", wholeWord: true })).toEqual({ text: "bar ids id_x bar", count: 2 });
+    expect(apply("id ids", { query: "i.", replacement: "-", regex: true, caseSensitive: true, wholeWord: true })).toEqual({ text: "- ids", count: 1 });
+  });
   it("limits itself to the lines asked for", () => {
     expect(apply("foo\nfoo\nfoo", literal, new Set([2]))).toEqual({ text: "foo\nbar\nfoo", count: 1 });
   });

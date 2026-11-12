@@ -76,6 +76,7 @@ mod cloud_control;
 mod pipe_transport;
 #[cfg(feature = "desktop")]
 mod dictation;
+mod notification_permission;
 #[cfg(feature = "desktop")]
 mod transparency;
 #[cfg(feature = "desktop")]
@@ -162,6 +163,7 @@ mod session;
 mod sidebar_activity;
 mod session_archive;
 mod session_usage;
+mod session_names;
 mod session_ops;
 mod workspace_setup;
 mod stray_processes;
@@ -845,6 +847,7 @@ pub fn run() {
             commands::replace_text,
             commands::fork_session,
             commands::dictation_available,
+            commands::notification_permission,
             commands::dictation_start,
             commands::dictation_stop,
             commands::update_project,

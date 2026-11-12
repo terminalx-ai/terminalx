@@ -200,4 +200,11 @@ mod tests {
         assert_eq!(offered.first().map(|m| m.harness.as_str()), Some("claude"));
         assert_eq!(offered.last().map(|m| m.harness.as_str()), Some("codex"));
     }
+
+    #[test]
+    fn an_empty_codex_answer_stays_empty_while_claude_keeps_its_fallback() {
+        let offered = offered(Vec::new(), Vec::new());
+        assert!(offered.iter().all(|m| m.harness != "codex"), "no Codex model is invented");
+        assert!(offered.iter().any(|m| m.harness == "claude"));
+    }
 }

@@ -38,6 +38,7 @@ desktop = [
     "dep:block2",
     "dep:objc2-foundation",
     "dep:objc2-speech",
+    "dep:objc2-user-notifications",
     "dep:transcribe-cpp",
     "dep:terminalx-dictation-detector",
 ]
@@ -134,6 +135,7 @@ objc2-avf-audio = { version = "0.3", features = ["AVAudioEngine", "AVAudioNode",
 block2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSBundle", "NSDictionary", "NSNotification", "NSOperation", "block2"], optional = true }
 objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognitionTaskHint", "SFTranscription", "SFTranscriptionSegment", "SFErrors", "block2", "objc2-avf-audio"], optional = true }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationSettings"], optional = true }
 transcribe-cpp = { version = "0.2", default-features = false, features = ["metal"], optional = true }
 terminalx-dictation-detector = { path = "src/transcription/native-detector", optional = true }
 
