@@ -30,12 +30,14 @@ use std::sync::Mutex;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use super::budget::{self, Login, Pause, RunLimits};
 use super::ladder::{self, Step, Verdict};
 use super::plan::{self, Plan, PlanError};
 use super::routing::{self, LeadModel};
 use super::verify::{self as checks, Gate, GateResult, Tally, Verification, Verifier};
-use super::{brief, guard, store, Approval, Outcome, Piece, PieceState, Run, RunState, SessionRef, Try};
+use super::{brief, guard, store, Approval, Hold, MergeState, Outcome, Piece, PieceState, Run, RunState, SessionRef, Try};
 use crate::models::Model;
+use crate::status::usage::UsageWindow;
 use crate::store::settings::OrchestratorLimits;
 use crate::worker_report::Status;
 
@@ -61,6 +63,19 @@ pub struct Started {
     pub session_id: String,
     pub tab_id: String,
     pub branch: Option<String>,
+}
+
+/// What a worker in a turn has been doing: what tells a stall from a long build.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// Its last tool call, tool result or file change in this turn, else the
+    /// turn's start, in milliseconds since the epoch.
+    pub last_ms: Option<i64>,
+    /// A tool call of its has not returned, or a background task of its runs:
+    /// a build or a test run, however long, is work.
+    pub command_running: bool,
+    /// Its agent's processes are using the CPU.
+    pub busy: bool,
 }
 
 /// What a piece's worker is doing now.
@@ -152,6 +167,19 @@ pub trait Host: Send + Sync {
     fn tell_lead(&self, run: &Run, text: &str);
     /// The stored run changed.
     fn changed(&self, run: &Run);
+    /// How a new tab of `agent` would be signed in now.
+    fn login(&self, agent: &str) -> Login;
+    /// The usage windows as the status bar has them now.
+    fn windows(&self) -> Vec<UsageWindow>;
+    /// What a worker in a turn has been doing.
+    fn activity(&self, worker: &SessionRef) -> Activity;
+    /// Start what waits for a free worker slot ([`fill_slots`]), soon and
+    /// outside the caller's locks: a turn ending must not wait on a start.
+    fn fill_later(&self);
+    /// Make sure something calls [`watch`] while a run has workers in a turn
+    /// or waits to resume after a reset.
+    fn watch(&self);
+    fn now_ms(&self) -> i64;
 }
 
 /// A refusal with a code a caller can branch on.
@@ -244,15 +272,21 @@ pub fn create(host: &dyn Host, plan: &Plan, lead_session: &str, lead_tab: Option
         state: if limits.require_approval { RunState::AwaitingApproval } else { RunState::Planned },
         budget: plan.budget.clone(),
         pieces,
+        limits: RunLimits::new(&limits, &plan.budget),
         worker_mode: limits.worker_mode,
         plan_edited: false,
         approval: None,
         reason: None,
         integration_check: plan.integration(),
         merge: None,
+        usage: Default::default(),
+        pause: None,
         created: now.clone(),
         modified: now,
     };
+    let mut run = run;
+    // The windows it would draw on, for the person approving it: nothing counts yet.
+    update_usage(host, &mut run);
     store::insert(&run).map_err(EngineError::internal)?;
     host.changed(&run);
     Ok(run)
@@ -273,12 +307,26 @@ pub fn update_plan(host: &dyn Host, id: &str, plan: &Plan) -> Result<Run, Engine
     limits.require_approval = run.state == RunState::AwaitingApproval;
     let models = models_for(host, plan);
     let pieces = plan::validate(plan, &rules_for(&limits, &lead, &agents, &models))?;
+    let reading = read_usage(host, &Run { pieces: pieces.clone(), ..run.clone() });
     let (run, ()) = store::update(id, |run| {
+        // A budget the person wrote into the plan is theirs to set: it holds as written.
+        if plan.budget.dollars != run.budget.dollars {
+            if let Some(dollars) = plan.budget.dollars {
+                run.limits.dollars = dollars;
+            }
+        }
+        if plan.budget.points != run.budget.points {
+            if let Some(points) = plan.budget.points {
+                run.limits.points = points;
+            }
+        }
+        run.limits.valid().map_err(|message| anyhow::anyhow!(message))?;
         run.goal = plan.goal.trim().to_string();
         run.budget = plan.budget.clone();
         run.integration_check = plan.integration();
         run.pieces = pieces;
         run.plan_edited = true;
+        apply_usage(run, &reading, false);
         Ok(())
     })
     .map_err(EngineError::internal)?;
@@ -292,6 +340,9 @@ pub fn update_plan(host: &dyn Host, id: &str, plan: &Plan) -> Result<Run, Engine
 pub struct Waiting {
     pub piece: String,
     pub on: Vec<String>,
+    /// It was asked for but a limit holds it: it starts by itself when the limit allows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued_for: Option<Hold>,
 }
 
 /// A piece whose worker could not be started or briefed.
@@ -330,11 +381,33 @@ pub fn start(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
             Err(error)
         }
         state if state.ended() => Err(EngineError::new("run_ended", format!("Run {id} has ended ({}). Nothing more starts in it.", state_name(state)), Some("Create a new run for what is left."))),
+        RunState::NeedsYou => {
+            // What the lead asked for starts when the person lets the run go on.
+            let (run, ()) = store::update(id, |run| {
+                let ready: Vec<String> = run.ready().iter().map(|piece| piece.id.clone()).collect();
+                for piece in run.pieces.iter_mut().filter(|piece| ready.contains(&piece.id)) {
+                    piece.queued_for = Some(Hold::Budget);
+                }
+                Ok(())
+            })
+            .map_err(EngineError::internal)?;
+            host.changed(&run);
+            let why = run.pause.as_ref().map(|pause| pause.message.clone()).unwrap_or_else(|| run.reason.clone().unwrap_or_default());
+            let mut error = EngineError::new(
+                "needs_you",
+                format!("Run {id} reached its budget and starts nothing new until the person lets it go on. {why}"),
+                Some("Tell the person, then end your turn. The pieces you asked for start when they resume the run (raising the budget alone does not), or after the window resets if they asked for that; you are told here."),
+            );
+            error.details = json!({"run": id, "pause": run.pause});
+            Err(error)
+        }
         _ => launch_ready(host, id, Launch::Ready),
     }
 }
 
-/// Which pieces a launch starts.
+/// Which pieces a launch considers. Whichever it is, every piece passes the
+/// budget and the worker limits before its brief goes (PRO-280): a retry or
+/// an escalated try takes a slot like any other worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Launch {
     /// Every piece whose dependencies are done: what the lead asks for.
@@ -343,14 +416,31 @@ enum Launch {
     /// a worker's turn ending starts by itself: a piece a `done` report
     /// unblocked is the lead's to start, once it has read that report.
     Retries,
+    /// Only the pieces a limit or the budget held, next tries among them:
+    /// what a freed slot or a resume starts. A piece that became ready since
+    /// waits for the lead, who may have to collect a finished piece's branch
+    /// before it starts.
+    Held,
 }
 
 /// Start the next try of every piece whose last one fell short. Called by
 /// the host when a read of the run took the ladder's step
-/// ([`Host::retry_waits`]), off that read's thread.
+/// ([`Host::retry_waits`]), off that read's thread. A run that reached its
+/// budget starts none: its next tries start when it is resumed.
 pub fn start_retries(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
-    let run = stored(id)?;
+    let mut run = stored(id)?;
+    if run.state == RunState::NeedsYou && run.pieces.iter().any(|piece| piece.retry_waits() && piece.queued_for.is_none()) {
+        // Held for the person, as what the lead asks for is: it starts when they resume the run.
+        (run, ()) = store::update(id, |run| {
+            for piece in run.pieces.iter_mut().filter(|piece| piece.retry_waits()) {
+                piece.queued_for = Some(Hold::Budget);
+            }
+            Ok(())
+        })
+        .map_err(EngineError::internal)?;
+        host.changed(&run);
+    }
     if !run.state.live() {
         let waiting = waiting(&run);
         return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new() });
@@ -375,10 +465,13 @@ pub fn approve(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     let run = &start.run;
     let lead = &run.lead.session_id;
     let edited = if run.plan_edited { format!(" They changed the plan first: read it again with `terminalx runs show {id} --json`.") } else { String::new() };
-    let started = match start.started.is_empty() {
-        true => "No worker could be started; `terminalx runs show` says why for each piece.".to_string(),
-        false => format!("Workers were started for: {}.", start.started.join(", ")),
+    let started = match (start.started.is_empty(), start.run.state) {
+        (_, RunState::NeedsYou) => format!("No worker was started: {}", start.run.reason.clone().unwrap_or_default()),
+        (true, _) => "No worker could be started; `terminalx runs show` says why for each piece.".to_string(),
+        (false, _) => format!("Workers were started for: {}.", start.started.join(", ")),
     };
+    let queued: Vec<&str> = start.waiting.iter().filter(|waiting| matches!(waiting.queued_for, Some(Hold::RunLimit | Hold::AppLimit))).map(|waiting| waiting.piece.as_str()).collect();
+    let started = if queued.is_empty() { started } else { format!("{started} Queued for a free worker slot, and started by TerminalX as workers finish: {}.", queued.join(", ")) };
     host.tell_lead(
         run,
         &format!(
@@ -388,18 +481,125 @@ pub fn approve(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     Ok(start)
 }
 
+/// Run workers in a turn across every run: what the app-wide limit counts.
+/// Sessions a person started by hand are not workers and are never counted.
+fn in_turn_everywhere() -> Result<usize, EngineError> {
+    Ok(store::list().map_err(EngineError::internal)?.iter().filter(|run| !run.state.ended()).map(Run::in_turn).sum())
+}
+
+/// What the budget is computed from, read from the host outside the store's
+/// lock: the usage windows and each agent's login. What workers cost is
+/// what their tries recorded (`Piece::cost`, PRO-273's per-session cost),
+/// which every read of the run brings up to date.
+struct Reading {
+    windows: Vec<UsageWindow>,
+    logins: std::collections::HashMap<String, Login>,
+}
+
+fn read_usage(host: &dyn Host, run: &Run) -> Reading {
+    let logins = run.pieces.iter().map(|piece| piece.agent.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().map(|agent| (agent.clone(), host.login(&agent))).collect();
+    Reading { windows: host.windows(), logins }
+}
+
+/// Bring a run's usage up to date. Its share of a window starts to count once
+/// it has a worker, or (`starting`) as its first one is about to start.
+fn apply_usage(run: &mut Run, reading: &Reading, starting: bool) {
+    let active = starting || run.pieces.iter().any(|piece| piece.worker.is_some() || piece.tries.iter().any(|attempt| attempt.worker.is_some()));
+    // Every try counts, an escalated one's as much as the first: each was a worker on the budget.
+    let cost = |piece: &Piece| piece.cost().0;
+    let login = |agent: &str| reading.logins.get(agent).copied().unwrap_or(Login::Subscription);
+    budget::update(run, &reading.windows, &cost, &login, active);
+}
+
+fn update_usage(host: &dyn Host, run: &mut Run) {
+    let reading = read_usage(host, run);
+    apply_usage(run, &reading, false);
+}
+
+/// The run reached its budget: nothing new starts, and the lead is told why,
+/// once. `held` are the pieces it was about to start, which start when the
+/// person lets it go on.
+fn pause(host: &dyn Host, id: &str, pause: Pause, held: &[String]) -> Result<Run, EngineError> {
+    let mut paused_now = false;
+    let (run, ()) = store::update(id, |run| {
+        for piece in run.pieces.iter_mut().filter(|piece| held.contains(&piece.id)) {
+            piece.queued_for = Some(Hold::Budget);
+        }
+        if run.state != RunState::NeedsYou {
+            paused_now = true;
+            run.state = RunState::NeedsYou;
+            run.reason = Some(pause.message.clone());
+            run.pause = Some(pause.clone());
+        }
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    if paused_now {
+        host.changed(&run);
+        let reset = match pause.window.as_ref().and_then(|window| window.resets_at) {
+            Some(_) => " They can also let it go on once the window resets.",
+            None => "",
+        };
+        host.tell_lead(
+            &run,
+            &format!(
+                "Run {id} reached its budget and starts no new piece: {}\n\nWorkers already in a turn finish it. The person decides what happens next: raise the budget, or resume the run.{reset} Do not start the remaining work another way. Tell the person, then end your turn; you are told here when the run goes on.",
+                pause.message
+            ),
+        );
+    }
+    Ok(run)
+}
+
 fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, EngineError> {
     let run = stored(id)?;
     // Until its piece is stored, a worker is known as one by who started it.
     let _limited = guard::starting(&run.lead.session_id);
-    // Pieces with no worker yet, and pieces whose worker has a session it was never briefed in.
+    let app_limit = host.limits(&run.project_path).workers_at_once as usize;
+    // Pieces whose worker has a session it was never briefed in, and pieces with no worker yet.
+    let briefless = || run.pieces.iter().filter(|piece| piece.held.is_some() && piece.worker.is_some());
     let ready: Vec<String> = match launch {
-        Launch::Ready => run.pieces.iter().filter(|piece| piece.held.is_some() && piece.worker.is_some()).chain(run.ready()).map(|piece| piece.id.clone()).collect(),
+        Launch::Ready => briefless().chain(run.ready()).map(|piece| piece.id.clone()).collect(),
         Launch::Retries => run.ready().into_iter().filter(|piece| piece.retry_waits()).map(|piece| piece.id.clone()).collect(),
+        Launch::Held => briefless()
+            .filter(|piece| piece.queued_for.is_some())
+            .chain(run.ready().into_iter().filter(|piece| piece.queued_for.is_some()))
+            .map(|piece| piece.id.clone())
+            .collect(),
     };
     let (mut started, mut failed) = (Vec::new(), Vec::new());
-    for piece_id in ready {
+    for (index, piece_id) in ready.iter().enumerate() {
+        let piece_id = piece_id.clone();
         // Read again each time: the brief of a later piece names what earlier ones reported.
+        let run = stored(id)?;
+        if run.piece(&piece_id).is_none() {
+            continue;
+        }
+        // Every brief starts a turn, a held piece's in the session it already has as much as a
+        // new one: each passes the budget and the worker limits.
+        // The budget first: a run past it starts nothing, whatever the slots. A window's
+        // baseline is taken here, before the run's first worker starts in it.
+        let reading = read_usage(host, &run);
+        let (current, ()) = store::update(id, |run| {
+            apply_usage(run, &reading, true);
+            Ok(())
+        })
+        .map_err(EngineError::internal)?;
+        if let Some(reached) = budget::reached(&current, host.now_ms()) {
+            pause(host, id, reached, &ready[index..])?;
+            break;
+        }
+        let hold = if current.in_turn() >= current.limits.workers as usize {
+            Some(Hold::RunLimit)
+        } else if in_turn_everywhere()? >= app_limit {
+            Some(Hold::AppLimit)
+        } else {
+            None
+        };
+        if let Some(hold) = hold {
+            set_piece(id, &piece_id, |piece| piece.queued_for = Some(hold))?;
+            continue;
+        }
         let run = stored(id)?;
         let Some(piece) = run.piece(&piece_id) else { continue };
         let mode = piece.mode(&run.worker_mode).to_string();
@@ -407,12 +607,14 @@ fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, Engi
             // The session it already has: never a second one for the same piece.
             Some(worker) => (worker, piece.branch.clone()),
             None => {
+                let login = host.login(&piece.agent);
                 let worker = match host.create_worker(&run, piece, &mode) {
                     Ok(worker) => worker,
                     Err(error) => {
                         let error = format!("{error:#}");
                         set_piece(id, &piece_id, |piece| {
                             piece.state = PieceState::Failed;
+                            piece.queued_for = None;
                             piece.note = Some(format!("Its worker could not be started: {error}"));
                         })?;
                         failed.push(NotStarted { piece: piece_id, error });
@@ -426,6 +628,8 @@ fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, Engi
                     piece.worker = Some(reference.clone());
                     piece.branch = worker.branch.clone();
                     piece.started_mode = Some(mode.clone());
+                    piece.login = Some(login);
+                    piece.queued_for = None;
                     piece.attempts += 1;
                     // The try the ladder planned, or the first one.
                     if piece.tries.last().is_none_or(|last| last.worker.is_some()) {
@@ -452,6 +656,7 @@ fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, Engi
         // Running before the brief goes: the turn it starts may end first.
         let run = set_piece(id, &piece_id, |piece| {
             piece.held = None;
+            piece.queued_for = None;
             piece.state = PieceState::Running;
             piece.note = None;
         })?;
@@ -477,6 +682,9 @@ fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, Engi
     })
     .map_err(EngineError::internal)?;
     host.changed(&run);
+    if !started.is_empty() {
+        host.watch();
+    }
     let waiting = waiting(&run);
     Ok(Start { run, started, waiting, failed })
 }
@@ -486,7 +694,11 @@ pub fn waiting(run: &Run) -> Vec<Waiting> {
     run.pieces
         .iter()
         .filter(|piece| piece.state == PieceState::Queued)
-        .map(|piece| Waiting { piece: piece.id.clone(), on: piece.depends_on.iter().filter(|id| run.piece(id).is_none_or(|dependency| dependency.state != PieceState::Done)).cloned().collect() })
+        .map(|piece| Waiting {
+            piece: piece.id.clone(),
+            on: piece.depends_on.iter().filter(|id| run.piece(id).is_none_or(|dependency| dependency.state != PieceState::Done)).cloned().collect(),
+            queued_for: piece.queued_for,
+        })
         .collect()
 }
 
@@ -504,7 +716,20 @@ fn set_piece(id: &str, piece_id: &str, change: impl FnOnce(&mut Piece)) -> Resul
 /// The run with each piece brought up to date with its worker.
 pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     let run = stored(id)?;
-    if !run.state.live() {
+    if matches!(run.state, RunState::AwaitingApproval | RunState::Planned) {
+        // Nothing runs yet; the windows it would draw on are kept current for the person deciding.
+        let reading = read_usage(host, &run);
+        let (after, ()) = store::update(id, |run| {
+            apply_usage(run, &reading, false);
+            Ok(())
+        })
+        .map_err(EngineError::internal)?;
+        if after != run {
+            host.changed(&after);
+        }
+        return Ok(after);
+    }
+    if !run.state.followed() {
         return Ok(run);
     }
     // Workers are read outside the store's lock: a transcript is a file read.
@@ -545,9 +770,13 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     // The ladder needs the installed models only when a try fell short.
     let models = if seen.iter().any(|(_, _, now, _)| fell_short(now)) || reading.iter().any(|(_, _, _, now, _)| *now != VerifierNow::Working) { host.models() } else { Vec::new() };
     let mut back_at_work: Vec<SessionRef> = Vec::new();
-    let (after, ()) = store::update(id, |run| {
-        if !run.state.live() {
-            return Ok(());
+    let usage = read_usage(host, &run);
+    // What the lead's session has cost, while it resolves a conflict a person gave it.
+    let lead_usd = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).and_then(|_| host.worker_cost(&run.lead).usd);
+    let now_ms = host.now_ms();
+    let (after, reached) = store::update(id, |run| {
+        if !run.state.followed() {
+            return Ok(None);
         }
         for (piece_id, worker, now, cost) in seen {
             // A piece whose worker was replaced meanwhile is not this worker's to decide.
@@ -584,6 +813,10 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                     Some(Some(_)) => continue,
                     Some(None) => state = PieceState::Verifying,
                 }
+            }
+            // Still in its turn: whether it is stalled is the watcher's to say ([`watch`]).
+            if state == PieceState::Running && piece.state == PieceState::Stalled {
+                continue;
             }
             piece.state = state;
             // A worker back at work keeps the line it last reported until it reports again.
@@ -654,13 +887,28 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             }
             counted(piece, &models);
         }
+        follow_resolution(run, lead_usd);
+        apply_usage(run, &usage, false);
         settle(run);
-        Ok(())
+        Ok((run.state == RunState::Running).then(|| budget::reached(run, now_ms)).flatten())
     })
     .map_err(EngineError::internal)?;
-    if after != run {
-        host.changed(&after);
+    // A runtime that restarted has no watcher yet for the workers it found running.
+    if after.in_turn() > 0 || after.pause.as_ref().is_some_and(|pause| pause.resume_at.is_some()) {
+        host.watch();
     }
+    // Past its budget: nothing new starts from here on, but what this read found is still
+    // followed up. A result that waits for its checks is checked, and a next try that waits
+    // is held for the person (`start_retries`), to start when the run is resumed.
+    let after = match reached {
+        Some(reached) => pause(host, id, reached, &[])?,
+        None => {
+            if after != run {
+                host.changed(&after);
+            }
+            after
+        }
+    };
     for worker in &back_at_work {
         host.check_reset(worker);
     }
@@ -736,7 +984,8 @@ fn counted(piece: &mut Piece, models: &[Model]) {
 /// The current try of `piece_id` is the one whose check began at `started`,
 /// still waiting on it: nobody replaced its worker or sent it back to work.
 fn checked_try<'a>(run: &'a mut Run, piece_id: &str, worker: &SessionRef, started: &str) -> Option<&'a mut Piece> {
-    if !run.state.live() {
+    // A run paused on its budget still has the results reported before it paused checked.
+    if !run.state.followed() {
         return None;
     }
     run.pieces.iter_mut().find(|piece| {
@@ -760,7 +1009,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         // One thread a piece: a second read that got here first has it.
         let Some(_checking) = checks::checking(id, &piece_id) else { continue };
         let run = stored(id)?;
-        if !run.state.live() {
+        if !run.state.followed() {
             break;
         }
         let Some(piece) = run.piece(&piece_id).filter(|piece| piece.check_waits()) else { continue };
@@ -1062,6 +1311,24 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
     };
     let worker = piece.worker.clone().filter(|worker| host.worker(worker) != WorkerNow::Gone);
     if let Some(worker) = worker {
+        // A turn in the session it has, started as any worker's is: within the budget and the
+        // worker limits (PRO-280). A fresh worker passes them where it is started, below.
+        if let Some(reached) = budget::reached(&run, host.now_ms()) {
+            return Err(over_budget(host, id, reached, "send the piece back to its worker"));
+        }
+        let app_limit = host.limits(&run.project_path).workers_at_once as usize;
+        let full = if run.in_turn() >= run.limits.workers as usize {
+            Some(format!("this run has {} of its {} workers in a turn", run.in_turn(), run.limits.workers))
+        } else if in_turn_everywhere()? >= app_limit {
+            Some(format!("the app has as many run workers in a turn as it allows ({app_limit})"))
+        } else {
+            None
+        };
+        if let Some(full) = full {
+            let mut error = EngineError::new("no_free_worker", format!("Piece {piece_id} was not sent back: {full}. Its worker would be one more."), Some("Send it back when a worker's turn has ended, or raise the worker limit for this run."));
+            error.details = json!({"piece": piece_id, "inTurn": run.in_turn(), "workers": run.limits.workers});
+            return Err(error);
+        }
         // Back at work: the try is open again, and what was checked is not what it will report.
         host.check_reset(&worker);
         let (after, ()) = store::update(id, |run| {
@@ -1087,6 +1354,8 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
             host.changed(&run);
             return Ok(SentBack { run, piece: piece_id.to_string(), fresh_worker: false, blocked: false, failed: vec![NotStarted { piece: piece_id.to_string(), error }] });
         }
+        // A worker in a turn again is watched for a stall, as any is.
+        host.watch();
         return Ok(SentBack { run: after, piece: piece_id.to_string(), fresh_worker: false, blocked: false, failed: Vec::new() });
     }
     // Its session is gone: a fresh worker on a branch cut from the lead's, which has the merged pieces in it.
@@ -1115,11 +1384,59 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
 /// A person chose to have the lead resolve a piece's conflict: the lead is
 /// sent both sides of each conflicting place and the goals of the pieces
 /// involved (`merge::resolve_prompt`), and nothing else.
+///
+/// It is the merge stage's one model call, and the run's budget counts it: a
+/// run past its budget does not start it, and waits for the person instead.
+/// What the lead's session costs from here until the piece's merge is
+/// settled is added to what the run has used ([`follow_resolution`]).
 pub fn resolve_in_lead(host: &dyn Host, id: &str, piece_id: &str) -> Result<Run, EngineError> {
-    let run = stored(id)?;
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let run = refreshed(host, id)?;
     let prompt = run.piece(piece_id).and_then(|piece| super::merge::resolve_prompt(&run, piece)).ok_or_else(|| EngineError::new("nothing_to_resolve", format!("Piece {piece_id} of run {id} has no merge conflict to resolve."), None))?;
+    if let Some(reached) = budget::reached(&run, host.now_ms()) {
+        return Err(over_budget(host, id, reached, "ask the lead to resolve the conflict"));
+    }
+    // Not knowing how the lead is signed in is not "free": a subscription's windows are watched either way.
+    let login = host.lead(&run.lead.session_id).map(|lead| host.login(&lead.agent)).unwrap_or(Login::Subscription);
+    let lead_usd = host.worker_cost(&run.lead).usd.unwrap_or(0.0);
+    let (run, ()) = store::update(id, |run| {
+        let merge = run.merge.get_or_insert_with(Default::default);
+        merge.end_resolving();
+        merge.resolving = Some(super::Resolution { piece: piece_id.to_string(), login, lead_usd, usd: 0.0 });
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    host.changed(&run);
     host.tell_lead(&run, &prompt);
     Ok(run)
+}
+
+/// The run is past its budget, so a model call of its merge stage was not
+/// started: the run waits for the person (`needsYou`), as it does when a
+/// piece would start, and the caller is told which limit.
+fn over_budget(host: &dyn Host, id: &str, reached: Pause, what: &str) -> EngineError {
+    let message = format!("Run {id} is past its budget, so TerminalX did not {what}. {}", reached.message);
+    if let Err(error) = pause(host, id, reached.clone(), &[]) {
+        log::warn!("mark run {id} as past its budget: {error}");
+    }
+    let mut error = EngineError::new("budget_reached", message, Some("Raise the budget for this run and resume it, or let it go on after the window resets. Resolving the conflict by hand in the lead's checkout, then merging again, uses none of it."));
+    error.details = json!({"run": id, "pause": reached});
+    error
+}
+
+/// Keep what the lead's conflict-resolving call has cost up to date, and
+/// end it once its piece's merge is settled: merged, or sent back to work.
+/// `lead_usd` is what the lead's session has cost now, when it was read.
+fn follow_resolution(run: &mut Run, lead_usd: Option<f64>) {
+    let Some(piece) = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).map(|resolving| resolving.piece.clone()) else { return };
+    let open = run.piece(&piece).and_then(Piece::current_merge).is_some_and(|merge| merge.state == MergeState::Conflict);
+    let Some(merge) = run.merge.as_mut() else { return };
+    if let (Some(now), Some(resolving)) = (lead_usd, merge.resolving.as_mut()) {
+        resolving.usd = (now - resolving.lead_usd).max(0.0);
+    }
+    if !open {
+        merge.end_resolving();
+    }
 }
 
 /// What the pieces make of a started run. Merging when every piece's result
@@ -1127,6 +1444,18 @@ pub fn resolve_in_lead(host: &dyn Host, id: &str, piece_id: &str) -> Result<Run,
 /// piece failed or ran out of tries and nothing is running or could start;
 /// running otherwise.
 fn settle(run: &mut Run) {
+    if run.state == RunState::NeedsYou {
+        // It waits for the person until every piece's result is accepted anyway. Merging those
+        // starts no worker and asks no model, so it does not wait on the budget; a merge that
+        // stopped and needs resolving does, and the run stays with the person.
+        let unresolved = run.pieces.iter().any(|piece| piece.current_merge().is_some_and(|merge| matches!(merge.state, MergeState::Conflict | MergeState::IntegrationFailed | MergeState::Failed)));
+        if run.pieces.iter().all(|piece| piece.state == PieceState::Done) && !unresolved {
+            run.state = RunState::Merging;
+            run.reason = None;
+            run.pause = None;
+        }
+        return;
+    }
     if !run.state.live() {
         return;
     }
@@ -1136,7 +1465,7 @@ fn settle(run: &mut Run) {
         // and the checks pass there (`merge::merge`), which says so itself: what keeps a merged
         // run from done is its reason until then.
         (RunState::Merging, if run.state == RunState::Merging { run.reason.clone() } else { None })
-    } else if run.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Verifying)) || !run.ready().is_empty() || failed.is_empty() {
+    } else if run.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Stalled | PieceState::Verifying)) || !run.ready().is_empty() || failed.is_empty() {
         (RunState::Running, None)
     } else {
         let names: Vec<String> = failed.iter().map(|piece| piece.id.clone()).collect();
@@ -1176,7 +1505,7 @@ pub struct Stop {
 /// approved is discarded the same way. Workers' sessions, worktrees and
 /// branches stay as they are.
 pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
-    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     // Read the workers first: a piece whose worker has just reported done is done, not stopped.
     let run = refreshed(host, id)?;
     if run.state == RunState::Done {
@@ -1196,6 +1525,7 @@ pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
     let (after, ()) = store::update(id, |run| {
         for piece in run.pieces.iter_mut().filter(|piece| piece.state != PieceState::Done) {
             piece.state = PieceState::Stopped;
+            piece.queued_for = None;
             // A try that was under way, or planned and never started, ends here.
             if let Some(attempt) = piece.tries.last_mut().filter(|attempt| attempt.outcome.is_none()) {
                 attempt.outcome = Some(Outcome::Stopped);
@@ -1203,6 +1533,7 @@ pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
             }
         }
         run.state = RunState::Stopped;
+        run.pause = None;
         run.reason = Some(match (by, waited) {
             (By::Person, true) => "A person discarded the plan.",
             (By::Person, false) => "A person stopped the run.",
@@ -1218,7 +1549,226 @@ pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
             host.tell_lead(&after, &said);
         }
     }
+    // Its workers' slots are free for other runs, which start under the same lock.
+    drop(starting);
+    host.fill_later();
     Ok(Stop { run: after, stopped, failed })
+}
+
+/// A person changes the worker limit or the budget of one run: while
+/// approving it, or when it stopped to ask. A paused run stays paused until
+/// it is resumed.
+pub fn set_limits(host: &dyn Host, id: &str, limits: RunLimits) -> Result<Run, EngineError> {
+    limits.valid().map_err(|message| EngineError::new("invalid_limits", message, None))?;
+    let run = stored(id)?;
+    if run.state.ended() {
+        return Err(EngineError::new("run_ended", format!("Run {id} has ended ({}).", state_name(run.state)), None));
+    }
+    let (run, ()) = store::update(id, |run| {
+        run.limits = limits;
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    host.changed(&run);
+    // A higher worker limit is room for what queued.
+    if run.state == RunState::Running {
+        host.fill_later();
+    }
+    Ok(run)
+}
+
+/// What a person asks of a paused run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resume {
+    /// Go on now: refused while the run is still past its budget.
+    Now,
+    /// Go on by itself once the window that stopped it resets.
+    AfterReset,
+}
+
+/// A person lets a run that reached its budget go on.
+pub fn resume(host: &dyn Host, id: &str, how: Resume) -> Result<Start, EngineError> {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    resume_locked(host, id, how, false)
+}
+
+fn resume_locked(host: &dyn Host, id: &str, how: Resume, by_reset: bool) -> Result<Start, EngineError> {
+    let run = stored(id)?;
+    if run.state != RunState::NeedsYou {
+        return Err(EngineError::new("not_paused", format!("Run {id} is not waiting for you ({}).", state_name(run.state)), None));
+    }
+    if how == Resume::AfterReset {
+        let Some(at) = run.pause.as_ref().and_then(|pause| pause.window.as_ref()).and_then(|window| window.resets_at) else {
+            return Err(EngineError::new("no_reset", "This run did not stop on a usage window with a known reset time.", Some("Raise its budget, then resume it.")));
+        };
+        let (run, ()) = store::update(id, |run| {
+            if let Some(pause) = run.pause.as_mut() {
+                pause.resume_at = Some(at);
+            }
+            Ok(())
+        })
+        .map_err(EngineError::internal)?;
+        host.changed(&run);
+        host.watch();
+        let waiting = waiting(&run);
+        return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new() });
+    }
+    let mut current = run.clone();
+    update_usage(host, &mut current);
+    if let Some(reached) = budget::reached(&current, host.now_ms()) {
+        let mut error = EngineError::new("budget_reached", format!("The run is still past its budget. {}", reached.message), Some("Raise the budget for this run, or let it go on after the window resets."));
+        error.details = json!({"run": id, "pause": reached});
+        return Err(error);
+    }
+    store::update(id, |run| {
+        run.usage = current.usage.clone();
+        run.state = RunState::Running;
+        run.reason = None;
+        run.pause = None;
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    let start = launch_ready(host, id, Launch::Held)?;
+    let how = if by_reset { "Its usage window reset, as the person asked, so the run goes on." } else { "The person let it go on." };
+    let started = if start.started.is_empty() { "No piece waited to start; call `terminalx runs start` when the next one is ready.".to_string() } else { format!("Workers were started for: {}.", start.started.join(", ")) };
+    host.tell_lead(&start.run, &format!("Run {id} is running again. {how} {started}"));
+    Ok(start)
+}
+
+/// Start the pieces that wait for a free worker slot, in every running run,
+/// oldest run first. Called when a worker's turn ends, a run stops or a limit
+/// rises: the lead does not call again for them.
+pub fn fill_slots(host: &dyn Host) {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let runs = match store::list() {
+        Ok(runs) => runs,
+        Err(error) => return log::warn!("read the runs to start queued pieces: {error:#}"),
+    };
+    for run in runs.iter().filter(|run| matches!(run.state, RunState::Running | RunState::Failed)) {
+        // Ready pieces a limit held (a next try among them), and pieces whose session waits for its brief behind one.
+        // A next try no limit has held yet is `start_retries`'s to start, not a freed slot's.
+        let held = |piece: &&Piece| matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit));
+        if !run.ready().iter().any(held) && !run.pieces.iter().filter(|piece| piece.held.is_some() && piece.worker.is_some()).any(|piece| held(&piece)) {
+            continue;
+        }
+        // Read first: a worker whose session was deleted mid-turn holds its slot until a read
+        // finds it gone, and no turn of it ends to say so.
+        if let Err(error) = refreshed(host, &run.id) {
+            log::warn!("read run {} before starting its queued pieces: {error}", run.id);
+        }
+        match launch_ready(host, &run.id, Launch::Held) {
+            Ok(start) if !start.started.is_empty() => log::info!("run {}: started queued pieces {}", run.id, start.started.join(", ")),
+            Ok(_) => {}
+            Err(error) => log::warn!("start the queued pieces of run {}: {error}", run.id),
+        }
+    }
+}
+
+/// What a watch found: whether there is still anything to watch.
+pub fn watch(host: &dyn Host) -> bool {
+    let now = host.now_ms();
+    let Ok(runs) = store::list() else { return true };
+    let (mut more, mut fill) = (false, false);
+    for run in runs.iter().filter(|run| !run.state.ended()) {
+        if run.state == RunState::NeedsYou {
+            match run.pause.as_ref().and_then(|pause| pause.resume_at) {
+                // Past the reset, but the window has not been read since: its last reading is the
+                // full one before the reset. Wait for one that is not; the person's ask stands.
+                Some(at) if at <= now && !read_since_reset(host, run, at) => more = true,
+                Some(at) if at <= now => {
+                    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+                    match resume_locked(host, &run.id, Resume::Now, true) {
+                        Ok(_) => {}
+                        // The new window filled already, or the run is past another limit: it waits for the person.
+                        Err(error) => {
+                            let _ = store::update(&run.id, |run| {
+                                if let Some(pause) = run.pause.as_mut() {
+                                    pause.resume_at = None;
+                                }
+                                Ok(())
+                            });
+                            host.tell_lead(run, &format!("Run {} was to go on after its usage window reset, but it cannot: {}", run.id, error.message));
+                        }
+                    }
+                }
+                Some(_) => more = true,
+                None => {}
+            }
+        }
+        if let Err(error) = mark_stalls(host, &run.id, now) {
+            log::warn!("check run {} for stalled workers: {error}", run.id);
+        }
+        more |= stored(&run.id).is_ok_and(|run| run.in_turn() > 0);
+        fill |= matches!(run.state, RunState::Running | RunState::Failed) && run.pieces.iter().any(|piece| matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit)));
+    }
+    // What waits for a slot is looked at on every tick, not only when a turn ends: a slot can
+    // free up without one (a worker's session deleted mid-turn).
+    if fill {
+        host.fill_later();
+    }
+    more
+}
+
+/// Whether the window that paused a run has been read afresh since it reset at
+/// `at`: a reading that is not stale, taken after the reset or naming a later one.
+fn read_since_reset(host: &dyn Host, run: &Run, at: i64) -> bool {
+    let Some(paused) = run.pause.as_ref().and_then(|pause| pause.window.as_ref()) else { return true };
+    host.windows().iter().any(|window| {
+        window.agent == paused.agent && window.key == paused.key && !window.stale && (window.updated_at >= at || window.resets_at.is_some_and(|next| next > at + 60_000))
+    })
+}
+
+/// Whether a worker in a turn is stalled: nothing for the stall time, no
+/// command of its running, and its agent idle. Never on no evidence.
+fn stalled(activity: &Activity, now: i64, stall_ms: i64) -> Option<i64> {
+    if activity.command_running || activity.busy {
+        return None;
+    }
+    let quiet = now - activity.last_ms?;
+    (quiet >= stall_ms).then_some(quiet)
+}
+
+fn mark_stalls(host: &dyn Host, id: &str, now: i64) -> Result<(), EngineError> {
+    let run = stored(id)?;
+    let stall_ms = i64::from(host.limits(&run.project_path).stall_minutes) * 60_000;
+    let seen: Vec<(String, SessionRef, Option<i64>)> = run
+        .pieces
+        .iter()
+        .filter(|piece| matches!(piece.state, PieceState::Running | PieceState::Stalled))
+        .filter_map(|piece| piece.worker.clone().map(|worker| (piece.id.clone(), worker.clone(), stalled(&host.activity(&worker), now, stall_ms))))
+        .collect();
+    let mut newly = Vec::new();
+    let (after, ()) = store::update(id, |run| {
+        for (piece_id, worker, quiet) in &seen {
+            let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == *piece_id && piece.worker.as_ref() == Some(worker) && matches!(piece.state, PieceState::Running | PieceState::Stalled)) else { continue };
+            match (piece.state, quiet) {
+                (PieceState::Running, Some(quiet)) => {
+                    piece.state = PieceState::Stalled;
+                    piece.note = Some(format!("Stalled: no tool call or file change for {} minutes, no command running, and its agent is idle.", quiet / 60_000));
+                    newly.push((piece.id.clone(), piece.title.clone(), worker.session_id.clone(), quiet / 60_000));
+                }
+                (PieceState::Stalled, None) => {
+                    piece.state = PieceState::Running;
+                    piece.note = None;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    if after != run {
+        host.changed(&after);
+    }
+    for (piece, title, session, minutes) in newly {
+        host.tell_lead(
+            &after,
+            &format!(
+                "The worker of piece {piece} ({title}) in run {id} looks stalled: it has made no tool call or file change for {minutes} minutes, runs no command, and its agent is idle. Look at it with `terminalx sessions show {session} --json`, send it what it needs, or stop it. It still counts as a running worker."
+            ),
+        );
+    }
+    Ok(())
 }
 
 /// A turn ended in `session_id`: if it is a run's worker, its piece follows.
@@ -1228,10 +1778,15 @@ pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
 /// another one (`runs show`, the Run view) that got there first.
 pub fn worker_turn_ended(host: &dyn Host, session_id: &str) -> Option<String> {
     match store::for_worker(session_id) {
-        Ok(Some((run, _))) => match refreshed(host, &run.id) {
-            Ok(after) => return after.pieces.iter().any(Piece::retry_waits).then_some(after.id),
-            Err(error) => log::warn!("refresh run {} after its worker {session_id} ended a turn: {error}", run.id),
-        },
+        Ok(Some((run, _))) => {
+            let after = refreshed(host, &run.id);
+            // Its slot may be free: what waits for one starts, in this run or another.
+            host.fill_later();
+            match after {
+                Ok(after) => return after.pieces.iter().any(Piece::retry_waits).then_some(after.id),
+                Err(error) => log::warn!("refresh run {} after its worker {session_id} ended a turn: {error}", run.id),
+            }
+        }
         Ok(None) => {}
         Err(error) => log::warn!("read the runs after {session_id} ended a turn: {error:#}"),
     }
@@ -1302,6 +1857,9 @@ pub fn shown(run: &Run) -> Value {
     value["waiting"] = json!(waiting(run));
     value["estimate"] = json!(estimate);
     value["unestimated"] = json!(unestimated);
+    value["inTurn"] = json!(run.in_turn());
+    // What does not fit in what is left, for the person approving it.
+    value["fit"] = json!(if matches!(run.state, RunState::AwaitingApproval | RunState::Planned) { budget::fit(run, chrono::Utc::now().timestamp_millis()) } else { Vec::new() });
     value["maxTries"] = json!(ladder::MAX_TRIES);
     // The order `runs merge` takes the pieces in, and whether a pass is at work on them now.
     value["mergeOrder"] = json!(run.merge_order().iter().map(|piece| piece.id.clone()).collect::<Vec<_>>());

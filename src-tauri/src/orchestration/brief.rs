@@ -158,6 +158,9 @@ mod tests {
             reason: None,
             integration_check: None,
             merge: None,
+            limits: Default::default(),
+            usage: Default::default(),
+            pause: None,
             created: "2026-11-11T00:00:00Z".into(),
             modified: "2026-11-11T00:00:00Z".into(),
         }

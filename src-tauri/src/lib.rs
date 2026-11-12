@@ -906,6 +906,8 @@ pub fn run() {
             commands::orchestration_merge,
             commands::orchestration_send_back,
             commands::orchestration_resolve_in_lead,
+            commands::orchestration_set_limits,
+            commands::orchestration_resume,
             commands::session_usage,
             commands::organization_work_status,
             commands::set_organization_work_status,

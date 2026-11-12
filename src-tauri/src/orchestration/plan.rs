@@ -384,6 +384,8 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
             branch: None,
             held: None,
             started_mode: None,
+            login: None,
+            queued_for: None,
             state: PieceState::Queued,
             note: None,
             merge: None,

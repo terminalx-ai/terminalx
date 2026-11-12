@@ -39,6 +39,7 @@
 //! the same code in the app and under test.
 
 pub mod brief;
+pub mod budget;
 pub mod engine;
 #[cfg(test)]
 mod engine_tests;
@@ -67,6 +68,9 @@ pub enum RunState {
     AwaitingApproval,
     /// Approved or started: workers are running, or pieces wait on others.
     Running,
+    /// It reached its budget (`pause` says which): no new piece starts until
+    /// a person raises it or resumes the run. Workers already in a turn finish it.
+    NeedsYou,
     /// Every piece is done and results are being checked.
     Verifying,
     /// Every piece's result is accepted; they are being merged into the
@@ -92,6 +96,12 @@ impl RunState {
     /// brings it back.
     pub fn live(self) -> bool {
         matches!(self, Self::Running | Self::Failed | Self::Merging)
+    }
+
+    /// Its pieces follow their workers: a live run, and one paused on its
+    /// budget, whose workers already in a turn finish it and are checked.
+    pub fn followed(self) -> bool {
+        self.live() || self == Self::NeedsYou
     }
 }
 
@@ -195,8 +205,25 @@ pub struct FinalCheck {
     pub command: verify::CommandRun,
 }
 
+/// The lead resolving a piece's conflict because a person asked it to
+/// (`engine::resolve_in_lead`): the one model call of the merge stage, which
+/// the run's budget counts as it counts a worker's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Resolution {
+    pub piece: String,
+    /// How the lead's agent is signed in: which budget the call draws on.
+    pub login: budget::Login,
+    /// What the lead's session had cost when it was asked.
+    #[serde(default)]
+    pub lead_usd: f64,
+    /// What its session has cost since, as of the run's last read.
+    #[serde(default)]
+    pub usd: f64,
+}
+
 /// Where the merge of a run stands ([`merge`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunMerge {
     /// The lead's branch: what the pieces are merged into.
@@ -222,6 +249,31 @@ pub struct RunMerge {
     /// When the last pass ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
+    /// The lead is resolving a conflict a person gave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving: Option<Resolution>,
+    /// What earlier such calls cost a lead on an API key.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub resolved_usd: f64,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+impl RunMerge {
+    /// What resolving conflicts in the lead has cost on an API key: counted
+    /// in the run's dollar budget with its workers' cost.
+    pub fn key_dollars(&self) -> f64 {
+        self.resolved_usd + self.resolving.as_ref().filter(|resolving| resolving.login == budget::Login::ApiKey).map_or(0.0, |resolving| resolving.usd)
+    }
+
+    /// The call under way is over: what it cost stays counted.
+    pub fn end_resolving(&mut self) {
+        if let Some(resolving) = self.resolving.take().filter(|resolving| resolving.login == budget::Login::ApiKey) {
+            self.resolved_usd += resolving.usd;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +283,10 @@ pub enum PieceState {
     Queued,
     /// Its worker is in a turn, or is about to be reminded of its report.
     Running,
+    /// Its worker is in a turn but has made no tool call or file change for
+    /// the stall time while its agent sits idle and runs no command. The lead
+    /// was told. It counts against the worker limits as a running one does.
+    Stalled,
     /// Its worker reported `done` and the result is being checked ([`verify`]).
     Verifying,
     /// Its worker reported `done` and the result passed every check.
@@ -485,6 +541,13 @@ pub struct Piece {
     /// The mode its worker was started in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_mode: Option<String>,
+    /// How its worker's agent was signed in when it started: which budget it draws on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<budget::Login>,
+    /// The lead (or an approval) asked for it to start, but a limit held it:
+    /// it starts by itself when a worker stops and the limit allows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_for: Option<Hold>,
     pub state: PieceState,
     /// One line on the state: the worker's result, or why it is not done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -553,6 +616,18 @@ impl Piece {
     }
 }
 
+/// What keeps a piece the lead asked for from starting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Hold {
+    /// The run has as many workers in a turn as it may.
+    RunLimit,
+    /// The app has as many run workers in a turn as it may, across runs.
+    AppLimit,
+    /// The run reached its budget and waits for a person.
+    Budget,
+}
+
 /// Who approved a run, and when.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -582,9 +657,6 @@ pub struct Run {
     /// project that asks for no approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
-    /// Why it failed or was stopped, or what keeps a merged run from done.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
     /// The command run in the lead's checkout after each piece is merged
     /// ([`merge`]); exit code 0 passes. The plan's; the project's own check
     /// command is run when the plan names none.
@@ -594,6 +666,18 @@ pub struct Run {
     /// the first `runs merge`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<RunMerge>,
+    /// Why it failed, was stopped, or needs the person, or what keeps a merged run from done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Its worker limit and budget (PRO-280).
+    #[serde(default)]
+    pub limits: budget::RunLimits,
+    /// What it has used, as of its last refresh.
+    #[serde(default)]
+    pub usage: budget::RunUsage,
+    /// Why it is `needsYou`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<budget::Pause>,
     pub created: String,
     pub modified: String,
 }
@@ -601,6 +685,11 @@ pub struct Run {
 impl Run {
     pub fn piece(&self, id: &str) -> Option<&Piece> {
         self.pieces.iter().find(|piece| piece.id == id)
+    }
+
+    /// Its workers in a turn now: what the worker limits count.
+    pub fn in_turn(&self) -> usize {
+        self.pieces.iter().filter(|piece| piece.worker.is_some() && matches!(piece.state, PieceState::Running | PieceState::Stalled)).count()
     }
 
     /// Pieces with no worker yet whose dependencies are all done, in plan

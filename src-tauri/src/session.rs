@@ -1895,6 +1895,13 @@ impl SessionManager {
                 engine::shown(&engine::resolve_in_lead(&host, string("id")?, string("piece")?).map_err(refused)?)
             }
             "updatePlan" => engine::shown(&engine::update_plan(&host, string("id")?, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?).map_err(refused)?),
+            // A person's own limits for one run (PRO-280): from the approval view, or a paused run's.
+            "setLimits" => engine::shown(&engine::set_limits(&host, string("id")?, serde_json::from_value(params["limits"].clone()).context("limits are not a run's limits")?).map_err(refused)?),
+            "resume" => {
+                self.accepting_work()?;
+                let how = if params["afterReset"] == true { engine::Resume::AfterReset } else { engine::Resume::Now };
+                serde_json::to_value(engine::resume(&host, string("id")?, how).map_err(refused)?)?
+            }
             _ => anyhow::bail!("unsupported orchestration operation"),
         })
     }
@@ -2551,6 +2558,11 @@ impl SessionManager {
     pub(crate) fn resource_kill(&self, pane: &str, confirmed: bool) -> Result<crate::status::resources::KillResult> {
         let stop = |session: &str, tab: &str| self.stop_if_idle(session, tab, crate::idle_agents::STOPPED_FROM_RESOURCES, Duration::ZERO);
         self.status.resources.kill(&self.terminals, pane, confirmed, &stop)
+    }
+
+    /// The usage windows, for an orchestration run's budget.
+    pub(crate) fn usage_windows(&self) -> Vec<crate::status::usage::UsageWindow> {
+        self.status.usage.windows()
     }
 
     pub fn usage_snapshot(&self) -> crate::status::usage::UsageSnapshot {

@@ -647,7 +647,7 @@ fn finish(host: &dyn Checkouts, id: &str, cwd: &Path, check: Option<&(String, bo
     }
     let moved = head(cwd).ok().as_deref() != Some(at.as_str());
     let (after, ()) = store::update(id, |run| {
-        let every = run.state.live() && run.pieces.iter().all(Piece::merged);
+        let every = run.state.followed() && run.pieces.iter().all(Piece::merged);
         let merge = run.merge.get_or_insert_with(RunMerge::default);
         merge.check = whole.clone().filter(|whole| !whole.passed);
         if whole.as_ref().is_some_and(|whole| whole.passed) && !moved {
@@ -669,7 +669,7 @@ fn finish(host: &dyn Checkouts, id: &str, cwd: &Path, check: Option<&(String, bo
             return Ok(());
         }
         match reason {
-            None => (run.state, run.reason) = (RunState::Done, None),
+            None => (run.state, run.reason, run.pause) = (RunState::Done, None, None),
             Some(reason) => run.reason = Some(reason),
         }
         Ok(())

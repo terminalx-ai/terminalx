@@ -6,12 +6,14 @@ use std::sync::Mutex;
 
 use serde_json::json;
 
-use super::engine::{self, By, Cost, EngineError, Host, Lead, Started, VerifierNow, WorkerNow};
+use super::budget::{Login, PauseKind, RunLimits};
+use super::engine::{self, Activity, By, Cost, EngineError, Host, Lead, Resume, Started, VerifierNow, WorkerNow};
 use super::verify::{self, Checked, Facts, Gate, GateResult};
 use super::plan::Plan;
 use super::ladder::Step;
 use super::routing::Tier;
-use super::{store, Outcome, Piece, PieceState, Run, RunState, SessionRef};
+use super::{store, Hold, Outcome, Piece, PieceState, Run, RunState, SessionRef};
+use crate::status::usage::UsageWindow;
 use crate::store::settings::{OrchestratorLimits, OrchestratorSettings};
 use crate::worker_report::Status;
 
@@ -42,6 +44,13 @@ struct World {
     /// Pieces whose new session cannot be made safe to brief, and how often that was tried.
     no_secure: BTreeSet<String>,
     secured: Vec<String>,
+    /// PRO-280: the usage windows, the agents on an API key, each worker's
+    /// activity, the clock, and how often a watch was asked for.
+    windows: Vec<UsageWindow>,
+    api_key: BTreeSet<String>,
+    activity: BTreeMap<String, Activity>,
+    clock: i64,
+    watches: usize,
     /// What each worker's session has used so far, in dollars, and how often it was read.
     costs: BTreeMap<String, f64>,
     cost_reads: BTreeMap<String, usize>,
@@ -243,6 +252,31 @@ impl Host for Fake {
     fn changed(&self, run: &Run) {
         self.world().changed.push(run.state);
     }
+
+    fn login(&self, agent: &str) -> Login {
+        if self.world().api_key.contains(agent) { Login::ApiKey } else { Login::Subscription }
+    }
+
+    fn windows(&self) -> Vec<UsageWindow> {
+        self.world().windows.clone()
+    }
+
+    fn activity(&self, worker: &SessionRef) -> Activity {
+        self.world().activity.get(&worker.session_id).cloned().unwrap_or_default()
+    }
+
+    /// At once: nothing here holds a lock a start would wait on.
+    fn fill_later(&self) {
+        engine::fill_slots(self);
+    }
+
+    fn watch(&self) {
+        self.world().watches += 1;
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.world().clock
+    }
 }
 
 /// Gates 2 to 4 passed on a change of `files` and `lines` changed lines.
@@ -412,14 +446,14 @@ fn start_starts_only_the_pieces_whose_dependencies_are_done() {
     host.reports("store", Status::Done, "Store added, 14 tests pass.");
     let third = engine::start(&host, id).unwrap();
     assert_eq!(third.started, vec!["session", "pipeline", "cli"]);
-    assert_eq!(third.waiting, vec![engine::Waiting { piece: "docs".into(), on: vec!["session".into(), "pipeline".into(), "cli".into()] }]);
+    assert_eq!(third.waiting, vec![engine::Waiting { piece: "docs".into(), on: vec!["session".into(), "pipeline".into(), "cli".into()], queued_for: None }]);
 
     // Two of three done is not enough for `docs`.
     host.reports("session", Status::Done, "17 call sites moved.");
     host.reports("cli", Status::Done, "CLI reads moved.");
     let fourth = engine::start(&host, id).unwrap();
     assert!(fourth.started.is_empty());
-    assert_eq!(fourth.waiting, vec![engine::Waiting { piece: "docs".into(), on: vec!["pipeline".into()] }]);
+    assert_eq!(fourth.waiting, vec![engine::Waiting { piece: "docs".into(), on: vec!["pipeline".into()], queued_for: None }]);
     assert_eq!(fourth.run.state, RunState::Running);
 
     host.reports("pipeline", Status::Done, "No direct reads remain.");
@@ -1071,12 +1105,409 @@ fn runs_are_found_by_id_prefix_lead_and_worker() {
     assert_eq!(engine::start(&host, "no-such-run").unwrap_err().code, "not_found");
 }
 
+// ---------------------------------------------------------------- limits, budget, stalls (PRO-280)
+
+/// `count` pieces that depend on nothing, on `agent`.
+fn flat_plan(count: usize, agent: &str) -> Plan {
+    let pieces: Vec<serde_json::Value> = (1..=count).map(|n| json!({"id": format!("p{n}"), "title": format!("Piece {n}"), "kind": "code", "doneChecks": [{"type": "command", "run": "exit 0"}], "agent": agent, "model": "sonnet"})).collect();
+    serde_json::from_value(json!({"goal": "Many small pieces", "pieces": pieces})).unwrap()
+}
+
+/// A host that starts runs without approval, with its settings changed by `set`.
+fn free_host(set: impl FnOnce(&mut OrchestratorSettings)) -> Fake {
+    let host = Fake::new();
+    {
+        let mut settings = host.settings.lock().unwrap();
+        settings.require_approval = false;
+        set(&mut settings);
+    }
+    host
+}
+
+fn window(key: &str, label: &str, percent: f32, resets_at: i64) -> UsageWindow {
+    UsageWindow { agent: "claude".into(), key: key.into(), label: label.into(), used_percent: percent, resets_at: Some(resets_at), window_minutes: Some(300), updated_at: 0, stale: false, source: "statusline".into(), endpoint_running: false }
+}
+
+fn queued_for(run: &Run) -> Vec<(&str, Option<Hold>)> {
+    run.pieces.iter().filter(|piece| piece.state == PieceState::Queued).map(|piece| (piece.id.as_str(), piece.queued_for)).collect()
+}
+
+#[test]
+fn with_a_limit_of_two_two_of_five_run_and_each_finish_starts_one_more() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| settings.workers_per_run = 2);
+    let run = engine::create(&host, &flat_plan(5, "claude"), "lead", None).unwrap();
+    assert_eq!(run.limits.workers, 2, "the run takes its limit from the settings");
+
+    let start = engine::start(&host, &run.id).unwrap();
+    assert_eq!(start.started, vec!["p1", "p2"]);
+    assert_eq!(queued_for(&start.run), vec![("p3", Some(Hold::RunLimit)), ("p4", Some(Hold::RunLimit)), ("p5", Some(Hold::RunLimit))]);
+    assert!(start.waiting.iter().all(|waiting| waiting.on.is_empty() && waiting.queued_for == Some(Hold::RunLimit)), "{:?}", start.waiting);
+    assert_eq!(engine::shown(&start.run)["inTurn"], 2);
+
+    // Another start while both work starts nothing more.
+    assert!(engine::start(&host, &run.id).unwrap().started.is_empty());
+    assert_eq!(host.made(), vec!["p1", "p2"]);
+
+    // Each finish starts the next queued piece, with no call from the lead.
+    for (finished, next) in [("p1", "p3"), ("p2", "p4"), ("p3", "p5")] {
+        host.reports(finished, Status::Done, "done");
+        engine::worker_turn_ended(&host, &host.session_of(finished));
+        let run = store::get(&run.id).unwrap();
+        assert_eq!(run.piece(next).unwrap().state, PieceState::Running, "{next} starts when {finished} ends");
+        assert!(run.in_turn() <= 2, "never more than two at once: {:?}", states(&run));
+    }
+    for finished in ["p4", "p5"] {
+        host.reports(finished, Status::Done, "done");
+        engine::worker_turn_ended(&host, &host.session_of(finished));
+    }
+    // Every result accepted: the run waits to be merged (PRO-279), with no worker in a turn.
+    let accepted = store::get(&run.id).unwrap();
+    assert_eq!((accepted.state, accepted.in_turn()), (RunState::Merging, 0));
+    assert_eq!(host.made().len(), 5);
+}
+
+#[test]
+fn a_piece_that_becomes_ready_by_a_dependency_still_waits_for_the_lead() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| settings.workers_per_run = 1);
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["map"]);
+    host.reports("map", Status::Done, "41 call sites");
+    engine::worker_turn_ended(&host, &host.session_of("map"));
+    // `store` is ready now, but the lead may have to collect `map`'s branch first.
+    let run = store::get(&run.id).unwrap();
+    assert_eq!((run.piece("store").unwrap().state, run.piece("store").unwrap().queued_for), (PieceState::Queued, None));
+    assert_eq!(host.made(), vec!["map"]);
+    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["store"]);
+}
+
+#[test]
+fn the_app_wide_limit_holds_across_two_runs() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 4;
+        settings.workers_at_once = 3;
+    });
+    let first = engine::create(&host, &flat_plan(3, "claude"), "lead", None).unwrap();
+    assert_eq!(engine::start(&host, &first.id).unwrap().started.len(), 3);
+    let second = engine::create(&host, &flat_plan(2, "claude"), "lead-2", None).unwrap();
+    let start = engine::start(&host, &second.id).unwrap();
+    assert!(start.started.is_empty(), "three workers already run in the app");
+    assert_eq!(queued_for(&start.run), vec![("p1", Some(Hold::AppLimit)), ("p2", Some(Hold::AppLimit))]);
+
+    // A worker of the first run finishing frees a slot for the second.
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("p1"));
+    let second = store::get(&second.id).unwrap();
+    assert_eq!(second.in_turn(), 1);
+    assert_eq!(queued_for(&second), vec![("p2", Some(Hold::AppLimit))]);
+    let total: usize = store::list().unwrap().iter().map(Run::in_turn).sum();
+    assert_eq!(total, 3);
+
+    // Stopping the first run frees its slots too.
+    engine::stop(&host, &first.id, By::Cli).unwrap();
+    assert_eq!(store::get(&second.id).unwrap().in_turn(), 2);
+}
+
+#[test]
+fn a_run_on_an_api_key_that_reaches_its_dollar_budget_starts_nothing_new_and_says_why() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 1;
+        settings.budget_dollars = 2.0;
+    });
+    host.world().api_key.insert("claude".into());
+    let run = engine::create(&host, &flat_plan(3, "claude"), "lead", None).unwrap();
+    assert!(run.usage.api_key && !run.usage.subscription);
+    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["p1"]);
+    assert_eq!(store::get(&run.id).unwrap().piece("p1").unwrap().login, Some(Login::ApiKey));
+
+    // Its first worker spent past the budget in its turn.
+    let p1 = host.session_of("p1");
+    host.world().costs.insert(p1.clone(), 2.35);
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &p1);
+    let run = store::get(&run.id).unwrap();
+    assert_eq!(run.state, RunState::NeedsYou);
+    let pause = run.pause.clone().unwrap();
+    assert_eq!(pause.kind, PauseKind::Dollars);
+    assert!(pause.message.contains("$2.35") && pause.message.contains("$2.00"), "{}", pause.message);
+    assert_eq!(run.reason.as_deref(), Some(pause.message.as_str()));
+    assert_eq!(host.made(), vec!["p1"], "the queued piece did not start");
+    assert!(host.world().told.last().unwrap().contains("reached its budget"), "the lead is told");
+
+    // The lead asking again is refused with the reason; what it asked for waits for the person.
+    let error = engine::start(&host, &run.id).unwrap_err();
+    assert_eq!(error.code, "needs_you");
+    assert!(error.message.contains("$2.35"), "{}", error.message);
+    assert_eq!(queued_for(&store::get(&run.id).unwrap()), vec![("p2", Some(Hold::Budget)), ("p3", Some(Hold::Budget))]);
+    // Resuming while still past it is refused; raising the budget lets it go on.
+    assert_eq!(engine::resume(&host, &run.id, Resume::Now).unwrap_err().code, "budget_reached");
+    engine::set_limits(&host, &run.id, RunLimits { dollars: 10.0, ..run.limits.clone() }).unwrap();
+    let resumed = engine::resume(&host, &run.id, Resume::Now).unwrap();
+    assert_eq!((resumed.run.state, resumed.started.clone()), (RunState::Running, vec!["p2".to_string()]));
+    assert!(host.world().told.last().unwrap().contains("running again"));
+}
+
+#[test]
+fn a_subscription_run_stops_when_a_window_passes_its_level_and_names_the_window_and_its_reset() {
+    let _home = crate::store::temp_home();
+    let resets = chrono::Utc::now().timestamp_millis() + 3 * 3_600_000;
+    let host = free_host(|settings| settings.workers_per_run = 1);
+    host.world().windows = vec![window("five_hour", "5h", 40.0, resets), window("seven_day_opus", "7d Opus", 99.0, resets)];
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    // Dollars do not count on a subscription; a window scoped to a model the run does not use does not either.
+    assert!(run.usage.subscription && !run.usage.api_key);
+    assert_eq!(run.usage.windows.iter().map(|window| window.key.as_str()).collect::<Vec<_>>(), vec!["five_hour"]);
+    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["p1"]);
+    assert_eq!(store::get(&run.id).unwrap().usage.windows[0].start, Some(40.0), "the baseline is the window when the run began");
+
+    let p1 = host.session_of("p1");
+    host.world().costs.insert(p1.clone(), 500.0);
+    host.world().windows[0].used_percent = 86.0;
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &p1);
+    let run = store::get(&run.id).unwrap();
+    assert_eq!(run.state, RunState::NeedsYou);
+    let pause = run.pause.clone().unwrap();
+    assert_eq!(pause.kind, PauseKind::Window);
+    let at = super::budget::reset_time(resets, host.now_ms());
+    assert!(pause.message.contains("Claude 5h") && pause.message.contains("86%") && pause.message.contains(&format!("resets at {at}")), "{}", pause.message);
+    assert_eq!(pause.window.as_ref().and_then(|window| window.resets_at), Some(resets));
+    assert_eq!(host.made(), vec!["p1"]);
+}
+
+#[test]
+fn a_run_stops_on_its_own_points_and_the_settings_change_when_the_next_run_stops() {
+    let _home = crate::store::temp_home();
+    let resets = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let host = free_host(|settings| settings.workers_per_run = 1);
+    host.world().windows = vec![window("five_hour", "5h", 10.0, resets)];
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    engine::start(&host, &run.id).unwrap();
+    host.world().windows[0].used_percent = 36.0;
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("p1"));
+    let run = store::get(&run.id).unwrap();
+    let pause = run.pause.clone().unwrap();
+    assert_eq!((run.state, pause.kind), (RunState::NeedsYou, PauseKind::Points));
+    assert!(pause.message.contains("about 26 points") && pause.message.contains("budget of 25"), "{}", pause.message);
+    engine::stop(&host, &run.id, By::Person).unwrap();
+
+    // With 40 points and a 90% level in Settings, the same use does not stop the next run.
+    {
+        let mut settings = host.settings.lock().unwrap();
+        settings.budget_points = 40.0;
+        settings.window_ceiling = 90.0;
+    }
+    host.world().windows[0].used_percent = 10.0;
+    let next = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    assert_eq!((next.limits.points, next.limits.ceiling), (40.0, 90.0));
+    engine::start(&host, &next.id).unwrap();
+    host.world().windows[0].used_percent = 36.0;
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("p1"));
+    let next = store::get(&next.id).unwrap();
+    assert_eq!(next.state, RunState::Running);
+    assert_eq!(next.piece("p2").unwrap().state, PieceState::Running);
+    // It stops at the new budget instead: 42 points of its own are past 40.
+    host.world().windows[0].used_percent = 52.0;
+    host.reports("p2", Status::Partial, "half");
+    engine::worker_turn_ended(&host, &host.session_of("p2"));
+    let next = store::get(&next.id).unwrap();
+    assert_eq!((next.state, next.pause.unwrap().kind), (RunState::NeedsYou, PauseKind::Points));
+}
+
+#[test]
+fn a_run_with_workers_on_both_logins_keeps_both_budgets() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 1;
+        settings.budget_dollars = 1.0;
+    });
+    host.world().api_key.insert("codex".into());
+    host.world().windows = vec![window("five_hour", "5h", 10.0, chrono::Utc::now().timestamp_millis() + 3_600_000)];
+    let mut plan = flat_plan(3, "claude");
+    plan.pieces[1].agent = Some("codex".into());
+    let run = engine::create(&host, &plan, "lead", None).unwrap();
+    assert!(run.usage.api_key && run.usage.subscription);
+    engine::start(&host, &run.id).unwrap();
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("p1"));
+    // The codex worker on a key spends past a dollar: that stops it, though the window is fine.
+    let p2 = host.session_of("p2");
+    host.world().costs.insert(p2.clone(), 1.5);
+    host.reports("p2", Status::Done, "done");
+    engine::worker_turn_ended(&host, &p2);
+    assert_eq!(store::get(&run.id).unwrap().pause.unwrap().kind, PauseKind::Dollars);
+}
+
+#[test]
+fn a_run_paused_on_a_window_resumes_by_itself_after_the_reset_when_asked() {
+    let _home = crate::store::temp_home();
+    let now = chrono::Utc::now().timestamp_millis();
+    let resets = now + 3_600_000;
+    let host = free_host(|settings| settings.workers_per_run = 1);
+    host.world().clock = now;
+    host.world().windows = vec![window("five_hour", "5h", 90.0, resets)];
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    // Over the level before anything starts: nothing starts, and the approval view would have warned.
+    assert!(!super::budget::fit(&run, now).is_empty());
+    let start = engine::start(&host, &run.id).unwrap();
+    assert!(start.started.is_empty());
+    assert_eq!(start.run.state, RunState::NeedsYou);
+    assert_eq!(queued_for(&start.run), vec![("p1", Some(Hold::Budget)), ("p2", Some(Hold::Budget))]);
+
+    let asked = engine::resume(&host, &run.id, Resume::AfterReset).unwrap();
+    assert_eq!(asked.run.pause.as_ref().unwrap().resume_at, Some(resets));
+    assert!(engine::watch(&host), "a resume to come is something to watch");
+    assert_eq!(store::get(&run.id).unwrap().state, RunState::NeedsYou, "not before the reset");
+
+    // Past the reset, but nothing has read the window since: the status bar marks the old
+    // reading stale and it still says 90%. The run waits for a fresh reading; the ask stands.
+    {
+        let mut world = host.world();
+        world.clock = resets + 60_000;
+        world.windows[0].stale = true;
+        world.windows[0].updated_at = resets - 600_000;
+    }
+    let told = host.world().told.len();
+    assert!(engine::watch(&host), "still something to watch");
+    let waiting = store::get(&run.id).unwrap();
+    assert_eq!((waiting.state, waiting.pause.as_ref().unwrap().resume_at), (RunState::NeedsYou, Some(resets)));
+    assert_eq!(host.world().told.len(), told, "the lead is not told it cannot go on");
+    assert_eq!(host.made(), Vec::<String>::new());
+
+    // A fresh reading of the new window: the next watch lets it go on.
+    {
+        let mut world = host.world();
+        world.clock = resets + 120_000;
+        world.windows = vec![UsageWindow { updated_at: resets + 90_000, ..window("five_hour", "5h", 2.0, resets + 5 * 3_600_000) }];
+    }
+    engine::watch(&host);
+    let run = store::get(&run.id).unwrap();
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(host.made(), vec!["p1"], "one worker, as the limit allows; the other queues for a slot");
+    assert_eq!(queued_for(&run), vec![("p2", Some(Hold::RunLimit))]);
+    assert!(host.world().told.last().unwrap().contains("reset"));
+}
+
+#[test]
+fn a_worker_inside_a_long_build_is_not_stalled_and_an_idle_one_is() {
+    let _home = crate::store::temp_home();
+    let now = 10 * 3_600_000;
+    let host = free_host(|_| {});
+    host.world().clock = now;
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    engine::start(&host, &run.id).unwrap();
+    let (building, idle) = (host.session_of("p1"), host.session_of("p2"));
+    {
+        let mut world = host.world();
+        // A ten-minute build: its last tool call started 12 minutes ago and has not returned.
+        world.activity.insert(building.clone(), Activity { last_ms: Some(now - 12 * 60_000), command_running: true, busy: false });
+        // Nothing for 11 minutes, no command, agent idle.
+        world.activity.insert(idle.clone(), Activity { last_ms: Some(now - 11 * 60_000), command_running: false, busy: false });
+    }
+    assert!(engine::watch(&host));
+    let run = store::get(&run.id).unwrap();
+    assert_eq!((run.piece("p1").unwrap().state, run.piece("p2").unwrap().state), (PieceState::Running, PieceState::Stalled));
+    assert!(run.piece("p2").unwrap().note.as_deref().unwrap().contains("11 minutes"));
+    let told = host.world().told.clone();
+    assert_eq!(told.iter().filter(|said| said.contains("looks stalled")).count(), 1);
+    assert!(told.last().unwrap().contains("p2") && told.last().unwrap().contains(&idle));
+    // A stalled worker still holds its slot.
+    assert_eq!(run.in_turn(), 2);
+    // Told once, not at every watch.
+    engine::watch(&host);
+    assert_eq!(host.world().told.iter().filter(|said| said.contains("looks stalled")).count(), 1);
+    // A refresh while it is still in its turn leaves it stalled.
+    engine::refreshed(&host, &run.id).unwrap();
+    assert_eq!(store::get(&run.id).unwrap().piece("p2").unwrap().state, PieceState::Stalled);
+
+    // It moves again: running. An agent busy on the CPU is never stalled either.
+    host.world().activity.insert(idle.clone(), Activity { last_ms: Some(now - 60_000), command_running: false, busy: false });
+    engine::watch(&host);
+    assert_eq!(store::get(&run.id).unwrap().piece("p2").unwrap().state, PieceState::Running);
+    host.world().activity.insert(idle.clone(), Activity { last_ms: Some(now - 30 * 60_000), command_running: false, busy: true });
+    engine::watch(&host);
+    assert_eq!(store::get(&run.id).unwrap().piece("p2").unwrap().state, PieceState::Running);
+
+    // The stall time is a setting.
+    host.settings.lock().unwrap().stall_minutes = 40;
+    host.world().activity.insert(idle.clone(), Activity { last_ms: Some(now - 30 * 60_000), command_running: false, busy: false });
+    engine::watch(&host);
+    assert_eq!(store::get(&run.id).unwrap().piece("p2").unwrap().state, PieceState::Running);
+}
+
+#[test]
+fn a_person_can_change_one_runs_limits_and_a_bad_value_is_refused() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    let run = engine::create(&host, &flat_plan(3, "claude"), "lead", None).unwrap();
+    assert_eq!(run.limits, RunLimits::default());
+    let changed = engine::set_limits(&host, &run.id, RunLimits { workers: 1, dollars: 3.0, points: 10.0, ceiling: 70.0 }).unwrap();
+    assert_eq!(changed.limits.workers, 1);
+    assert_eq!(engine::set_limits(&host, &run.id, RunLimits { workers: 0, ..changed.limits.clone() }).unwrap_err().code, "invalid_limits");
+    assert_eq!(engine::set_limits(&host, &run.id, RunLimits { ceiling: 120.0, ..changed.limits.clone() }).unwrap_err().code, "invalid_limits");
+    // Approved, it holds to the person's limit of one.
+    let approved = engine::approve(&host, &run.id).unwrap();
+    assert_eq!(approved.started, vec!["p1"]);
+    assert!(host.world().told.last().unwrap().contains("Queued for a free worker slot"));
+}
+
+#[test]
+fn a_lead_may_ask_for_less_budget_than_the_settings_allow_never_more() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    let mut plan = flat_plan(1, "claude");
+    plan.budget.points = Some(10.0);
+    plan.budget.dollars = Some(500.0);
+    let run = engine::create(&host, &plan, "lead", None).unwrap();
+    assert_eq!((run.limits.points, run.limits.dollars), (10.0, 15.0));
+}
+
+#[test]
+fn a_held_piece_briefed_in_the_session_it_has_waits_for_a_slot_too() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| settings.workers_per_run = 1);
+    // p1's new session cannot be made safe to brief: it keeps the session, held.
+    host.world().no_secure.insert("p1".into());
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    let first = engine::start(&host, &run.id).unwrap();
+    assert_eq!(first.started, vec!["p2"], "p1 is held, p2 takes the one slot");
+    assert!(first.run.piece("p1").unwrap().held.is_some());
+
+    // p1 can now be secured, but the run's one slot is p2's: its brief waits for it.
+    host.world().no_secure.clear();
+    let again = engine::start(&host, &run.id).unwrap();
+    assert!(again.started.is_empty());
+    let p1 = again.run.piece("p1").unwrap();
+    assert_eq!((p1.queued_for, p1.held.is_some()), (Some(Hold::RunLimit), true));
+    assert_eq!(again.run.in_turn(), 1);
+    let p1_session = host.session_of("p1");
+    assert!(!host.world().briefs.contains_key(&p1_session));
+
+    // p2 finishes: p1 is briefed in the session it already has, and no second one is made.
+    host.reports("p2", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("p2"));
+    let run = store::get(&run.id).unwrap();
+    let p1 = run.piece("p1").unwrap();
+    assert_eq!((p1.state, p1.queued_for, p1.held.is_none()), (PieceState::Running, None, true));
+    assert!(host.world().briefs.contains_key(&p1_session));
+    assert_eq!(host.made(), vec!["p1", "p2"]);
+}
+
+
+
 // ---- checking a result before it is accepted (PRO-278) ----------------------
 
 /// A started run of `pieces` that asks for no approval, led by `lead`.
 fn run_of(lead: &str, pieces: serde_json::Value) -> (Fake, String) {
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
+    // These runs test the ladder and the gates, not the worker limit (PRO-280): every piece starts at once.
+    host.settings.lock().unwrap().workers_per_run = 8;
     let plan: Plan = serde_json::from_value(json!({"goal": "Move CLI reads", "pieces": pieces})).unwrap();
     let run = engine::create(&host, &plan, lead, Some("lead-tab".into())).unwrap();
     engine::start(&host, &run.id).unwrap();
@@ -1113,7 +1544,7 @@ fn a_done_report_is_a_claim_until_its_result_passes_the_gates_and_then_it_is_acc
     assert_eq!(read.state, RunState::Running);
     let start = engine::start(&host, id).unwrap();
     assert!(start.started.is_empty());
-    assert_eq!(start.waiting, vec![engine::Waiting { piece: "docs".into(), on: vec!["cli".into()] }]);
+    assert_eq!(start.waiting, vec![engine::Waiting { piece: "docs".into(), on: vec!["cli".into()], queued_for: None }]);
     assert_eq!(engine::check_failed(&host, id, "cli", "exit 1").unwrap_err().code, "piece_not_done");
     assert!(host.world().checked.is_empty());
 
@@ -1558,7 +1989,8 @@ fn pair() -> Plan {
 /// What `merge::merge` records for a piece whose merge conflicts: about the commit it is accepted as.
 fn conflicts(id: &str, piece_id: &str) -> String {
     let (_, commit) = store::update(id, |run| {
-        run.merge = Some(super::RunMerge { into: "lead".into(), stopped_at: Some(piece_id.into()), ..Default::default() });
+        let merge = run.merge.get_or_insert_with(Default::default);
+        (merge.into, merge.stopped_at) = ("lead".into(), Some(piece_id.into()));
         let piece = run.pieces.iter_mut().find(|piece| piece.id == piece_id).unwrap();
         let commit = piece.accepted_commit().unwrap_or("c0ffee").to_string();
         piece.merge = Some(super::PieceMerge {
@@ -1659,4 +2091,271 @@ fn a_piece_whose_merge_conflicts_goes_back_to_its_worker_with_the_conflict_as_it
     assert!(piece.tries[0].detail.as_deref().unwrap().contains("src/shared.rs"));
     let next = host.session_of("b");
     assert!(next != worker && host.world().briefs[&next].contains("src/shared.rs"), "the next worker is told what conflicted");
+}
+
+/// Both pieces of [`pair`] accepted on an API key, with a budget of $5 and `spent` on each worker.
+fn accepted_pair(lead: &str, workers: u32, spent: f64) -> (Fake, String) {
+    let host = free_host(|settings| {
+        settings.workers_per_run = workers;
+        settings.budget_dollars = 5.0;
+    });
+    host.world().api_key.insert("claude".into());
+    let run = engine::create(&host, &pair(), lead, Some("lead-tab".into())).unwrap();
+    engine::start(&host, &run.id).unwrap();
+    for piece in ["a", "b"] {
+        if host.made().iter().all(|made| made != piece) {
+            // Held by the worker limit: it starts when the first one's turn ends.
+            host.reports("a", Status::Done, "A done.");
+            engine::worker_turn_ended(&host, &host.session_of("a"));
+        }
+        let session = host.session_of(piece);
+        host.world().costs.insert(session, spent);
+        host.reports(piece, Status::Done, "Done.");
+    }
+    assert_eq!(engine::refreshed(&host, &run.id).unwrap().state, RunState::Merging);
+    (host, run.id)
+}
+
+#[test]
+fn merging_holds_no_worker_slot_and_a_conflict_is_resolved_by_a_model_only_within_the_budget() {
+    let _home = crate::store::temp_home();
+    let (host, id) = accepted_pair("lead", 2, 1.0);
+    let id = &id;
+    // A run that waits to be merged has no worker in a turn: its slots are other runs', and its
+    // own budget, already spent, does not keep its accepted results from being merged.
+    let merging = store::get(id).unwrap();
+    assert_eq!((merging.in_turn(), merging.usage.dollars), (0, 2.0));
+
+    // The lead resolving a conflict is a model call of the run: what its session costs from the
+    // moment it is asked counts toward the run's dollars, with its workers' cost.
+    conflicts(id, "b");
+    host.world().costs.insert("lead".into(), 7.0);
+    let asked = engine::resolve_in_lead(&host, id, "b").unwrap();
+    let resolving = asked.merge.as_ref().unwrap().resolving.clone().unwrap();
+    assert_eq!((resolving.piece.as_str(), resolving.login, resolving.lead_usd, resolving.usd), ("b", Login::ApiKey, 7.0, 0.0));
+    host.world().costs.insert("lead".into(), 8.5);
+    let during = engine::refreshed(&host, id).unwrap();
+    assert_eq!((during.usage.dollars, during.state), (3.5, RunState::Merging), "what the lead spent before it was asked is not the run's");
+    // The piece merged: the call is over, and what it cost stays counted whatever the lead does next.
+    store::update(id, |run| {
+        let merge = run.pieces.iter_mut().find(|piece| piece.id == "b").unwrap().merge.as_mut().unwrap();
+        (merge.state, merge.after, merge.files) = (super::MergeState::Merged, Some("d00d".into()), Vec::new());
+        Ok(())
+    })
+    .unwrap();
+    host.world().costs.insert("lead".into(), 9.0);
+    let settled = engine::refreshed(&host, id).unwrap();
+    let merge = settled.merge.as_ref().unwrap();
+    assert_eq!((merge.resolving.as_ref(), merge.resolved_usd, settled.usage.dollars), (None, 2.0, 4.0));
+    host.world().costs.insert("lead".into(), 30.0);
+    assert_eq!(engine::refreshed(&host, id).unwrap().usage.dollars, 4.0);
+
+    // Past its budget, no such call is started: the run waits for the person and says which limit.
+    conflicts(id, "b");
+    engine::set_limits(&host, id, RunLimits { dollars: 3.0, ..settled.limits.clone() }).unwrap();
+    let told = host.world().told.len();
+    let refused = engine::resolve_in_lead(&host, id, "b").unwrap_err();
+    assert_eq!(refused.code, "budget_reached");
+    assert!(refused.message.contains("did not ask the lead to resolve the conflict") && refused.message.contains("$4.00") && refused.message.contains("$3.00"), "{}", refused.message);
+    let paused = store::get(id).unwrap();
+    assert_eq!((paused.state, paused.pause.as_ref().map(|pause| pause.kind), paused.merge.as_ref().unwrap().resolving.as_ref()), (RunState::NeedsYou, Some(PauseKind::Dollars), None));
+    let said: Vec<String> = host.world().told[told..].to_vec();
+    assert!(said.len() == 1 && said[0].contains("reached its budget") && !said[0].contains("from a\n=======\nfrom b"), "the lead is told of the budget, not sent the conflict: {said:?}");
+    // It stays with the person while a merge needs resolving: a read does not take it back to merging.
+    assert_eq!(engine::refreshed(&host, id).unwrap().state, RunState::NeedsYou);
+    // Sending the piece back is a worker's turn, held to the same budget.
+    assert_eq!(engine::send_back(&host, id, "b").unwrap_err().code, "run_not_running");
+    // The person raises the budget and resumes: with every result accepted the run is merging again.
+    engine::set_limits(&host, id, RunLimits { dollars: 20.0, ..paused.limits.clone() }).unwrap();
+    assert_eq!(engine::resume(&host, id, Resume::Now).unwrap().run.state, RunState::Merging);
+    engine::resolve_in_lead(&host, id, "b").unwrap();
+    assert!(host.world().told.last().unwrap().contains("from a\n=======\nfrom b"));
+
+    // Past the budget, a piece is not sent back to its worker either.
+    let (host, id) = accepted_pair("lead-2", 1, 3.0);
+    let run = store::get(&id).unwrap();
+    assert_eq!((run.state, run.pause.as_ref(), run.usage.dollars), (RunState::Merging, None, 6.0));
+    conflicts(&id, "b");
+    let refused = engine::send_back(&host, &id, "b").unwrap_err();
+    assert_eq!(refused.code, "budget_reached");
+    assert!(refused.message.contains("did not send the piece back to its worker"), "{}", refused.message);
+    assert_eq!(store::get(&id).unwrap().state, RunState::NeedsYou);
+
+    // A run paused on its budget while its last worker was in a turn goes on to merging by itself
+    // when that result is accepted: bringing accepted results together starts no worker and asks no model.
+    let host = free_host(|settings| settings.budget_dollars = 5.0);
+    host.world().api_key.insert("claude".into());
+    let run = engine::create(&host, &pair(), "lead-3", None).unwrap();
+    engine::start(&host, &run.id).unwrap();
+    let first = host.session_of("a");
+    host.world().costs.insert(first.clone(), 6.0);
+    host.reports("a", Status::Done, "A done.");
+    engine::worker_turn_ended(&host, &first);
+    assert_eq!(store::get(&run.id).unwrap().state, RunState::NeedsYou);
+    host.reports("b", Status::Done, "B done.");
+    let accepted = engine::refreshed(&host, &run.id).unwrap();
+    assert_eq!((accepted.state, accepted.pause.as_ref(), accepted.reason.as_deref()), (RunState::Merging, None, None));
+}
+
+#[test]
+fn a_piece_is_sent_back_to_its_worker_only_into_a_free_worker_slot() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 2;
+        settings.workers_at_once = 2;
+    });
+    let run = engine::create(&host, &pair(), "lead", Some("lead-tab".into())).unwrap();
+    let id = &run.id;
+    engine::start(&host, id).unwrap();
+    host.reports("a", Status::Done, "A done.");
+    host.reports("b", Status::Done, "B done.");
+    assert_eq!(engine::refreshed(&host, id).unwrap().state, RunState::Merging);
+    // Another run takes both of the app's slots while this one waits to be merged: merging holds none.
+    let other = engine::create(&host, &flat_plan(2, "claude"), "lead-2", None).unwrap();
+    assert_eq!(engine::start(&host, &other.id).unwrap().started.len(), 2);
+    conflicts(id, "b");
+    let worker = host.session_of("b");
+    let refused = engine::send_back(&host, id, "b").unwrap_err();
+    assert_eq!(refused.code, "no_free_worker");
+    let kept = store::get(id).unwrap();
+    assert_eq!((kept.piece("b").unwrap().state, kept.state, host.world().briefs[&worker].contains("src/shared.rs")), (PieceState::Done, RunState::Merging, false), "nothing was sent, and the conflict stands");
+    // A slot free, it goes back and takes it.
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("p1"));
+    let sent = engine::send_back(&host, id, "b").unwrap();
+    assert_eq!((sent.run.in_turn(), sent.run.piece("b").unwrap().state), (1, PieceState::Running));
+    assert!(host.world().briefs[&worker].contains("src/shared.rs"));
+}
+
+#[test]
+fn a_retry_waits_for_a_slot_like_any_worker_and_every_try_counts_against_the_budget() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 2;
+        settings.budget_dollars = 5.0;
+    });
+    host.world().api_key.insert("claude".into());
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["p1", "p2"]);
+    // The person lowers this run to one worker at a time while both work.
+    engine::set_limits(&host, &run.id, RunLimits { workers: 1, ..run.limits.clone() }).unwrap();
+
+    // p1's first try falls short. Its next try is a new worker, and the run already has one in a turn.
+    let first = host.session_of("p1");
+    host.world().costs.insert(first.clone(), 2.0);
+    host.reports("p1", Status::Failed, "The build broke.");
+    engine::worker_turn_ended(&host, &first);
+    let after = store::get(&run.id).unwrap();
+    let p1 = after.piece("p1").unwrap();
+    assert!(p1.retry_waits(), "{:?}", p1.state);
+    assert_eq!(after.in_turn(), 1);
+    assert_eq!(host.world().retries, vec![run.id.clone()], "the host is asked to start it");
+    // Started as the host starts it: no slot, no retry. It queues for one.
+    assert!(engine::start_retries(&host, &run.id).unwrap().started.is_empty(), "no slot, no retry");
+    let after = store::get(&run.id).unwrap();
+    assert_eq!(after.piece("p1").unwrap().queued_for, Some(Hold::RunLimit), "the retry queues for a slot");
+    assert_eq!(host.made(), vec!["p1", "p2"]);
+    // What the try that fell short cost stays on the budget, though it has no worker now.
+    assert_eq!(after.usage.dollars, 2.0);
+
+    // p2 finishes: its slot goes to p1's next try, without the lead.
+    host.reports("p2", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("p2"));
+    let after = store::get(&run.id).unwrap();
+    assert_eq!(host.made(), vec!["p1", "p2", "p1"]);
+    assert_eq!((after.piece("p1").unwrap().state, after.piece("p1").unwrap().tries.len(), after.piece("p1").unwrap().queued_for), (PieceState::Running, 2, None));
+
+    // The second try costs more: the two together pass the budget, which neither does alone.
+    let second = host.session_of("p1");
+    assert_ne!(second, first);
+    host.world().costs.insert(second.clone(), 3.5);
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &second);
+    let after = store::get(&run.id).unwrap();
+    assert_eq!(after.usage.dollars, 5.5);
+    assert!(host.world().told.iter().any(|told| told.contains("reached its budget") && told.contains("$5.50")), "the run paused on both tries' cost");
+    // Its result was still checked after the pause, and it was the last piece: the run waits to be
+    // merged (PRO-279), which the budget does not hold back.
+    assert_eq!((after.state, after.piece("p1").unwrap().state, after.pause.as_ref()), (RunState::Merging, PieceState::Done, None));
+}
+
+#[test]
+fn a_result_reported_as_the_budget_runs_out_is_still_checked() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 2;
+        settings.budget_dollars = 2.0;
+    });
+    host.world().api_key.insert("claude".into());
+    let run = engine::create(&host, &flat_plan(3, "claude"), "lead", None).unwrap();
+    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["p1", "p2"]);
+
+    // p1's report is the read that takes the run past its budget.
+    let p1 = host.session_of("p1");
+    host.world().costs.insert(p1.clone(), 2.5);
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &p1);
+    let after = store::get(&run.id).unwrap();
+    assert_eq!(after.state, RunState::NeedsYou);
+    // Its result was checked all the same, and accepted: it does not sit in `verifying` unchecked.
+    assert_eq!(after.piece("p1").unwrap().state, PieceState::Done);
+    assert_eq!(host.world().checked, vec!["p1".to_string()]);
+    // Nothing new started.
+    assert_eq!(host.made(), vec!["p1", "p2"]);
+}
+
+#[test]
+fn a_retry_that_comes_up_as_the_budget_runs_out_starts_when_the_run_is_resumed() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 1;
+        settings.budget_dollars = 2.0;
+    });
+    host.world().api_key.insert("claude".into());
+    let run = engine::create(&host, &flat_plan(1, "claude"), "lead", None).unwrap();
+    engine::start(&host, &run.id).unwrap();
+
+    // The try falls short, and what it cost takes the run past its budget, in the same read.
+    let first = host.session_of("p1");
+    host.world().costs.insert(first.clone(), 2.5);
+    host.reports("p1", Status::Failed, "The build broke.");
+    engine::worker_turn_ended(&host, &first);
+    assert_eq!(store::get(&run.id).unwrap().state, RunState::NeedsYou);
+    // The host is still asked to start the next try, and it is held for the person.
+    assert_eq!(host.world().retries, vec![run.id.clone()]);
+    assert!(engine::start_retries(&host, &run.id).unwrap().started.is_empty());
+    let held = store::get(&run.id).unwrap();
+    assert_eq!(queued_for(&held), vec![("p1", Some(Hold::Budget))]);
+    assert_eq!(host.made(), vec!["p1"]);
+
+    // The person raises the budget and resumes: the next try starts.
+    engine::set_limits(&host, &run.id, RunLimits { dollars: 10.0, ..held.limits.clone() }).unwrap();
+    let resumed = engine::resume(&host, &run.id, Resume::Now).unwrap();
+    assert_eq!((resumed.run.state, resumed.started.clone()), (RunState::Running, vec!["p1".to_string()]));
+    let p1 = resumed.run.piece("p1").unwrap();
+    assert_eq!((p1.state, p1.tries.len(), p1.queued_for), (PieceState::Running, 2, None));
+}
+
+#[test]
+fn a_worker_deleted_mid_turn_frees_its_slot_for_the_next_queued_piece() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| settings.workers_per_run = 1);
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["p1"]);
+    assert_eq!(queued_for(&store::get(&run.id).unwrap()), vec![("p2", Some(Hold::RunLimit))]);
+
+    // p1's session is deleted while it works: no turn of it ends to say so.
+    let p1 = host.session_of("p1");
+    {
+        let mut world = host.world();
+        world.running.remove(&p1);
+        world.now.remove(&p1);
+    }
+    // The next tick of the watcher finds the slot free and starts what waited for it.
+    engine::watch(&host);
+    let after = store::get(&run.id).unwrap();
+    assert_eq!(after.piece("p1").unwrap().state, PieceState::Blocked);
+    assert_eq!((after.piece("p2").unwrap().state, after.piece("p2").unwrap().queued_for), (PieceState::Running, None));
+    assert_eq!(host.made(), vec!["p1", "p2"]);
+    assert_eq!(after.in_turn(), 1);
 }

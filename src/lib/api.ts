@@ -1,5 +1,5 @@
 import { privacyBlocksCommand, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
-import type { OrchestratorLimits, OrchestratorPatch, OrchestratorSettings, Run, RunPlan, RunStart, RunStop, TierModels } from "@/types/orchestration";
+import type { OrchestratorLimits, OrchestratorPatch, OrchestratorSettings, Run, RunLimits, RunPlan, RunStart, RunStop, TierModels } from "@/types/orchestration";
 import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -2726,6 +2726,10 @@ export const orchestration = {
   sendBack: (id: string, piece: string) => invoke<Run>("orchestration_send_back", { id, piece }),
   /** Have the lead resolve a piece's conflict: it is sent both sides and the pieces' goals. */
   resolveInLead: (id: string, piece: string) => invoke<Run>("orchestration_resolve_in_lead", { id, piece }),
+  /** One run's worker limit and budget, set by the person (PRO-280). */
+  setLimits: (id: string, limits: RunLimits) => invoke<Run>("orchestration_set_limits", { id, limits }),
+  /** Let a run that reached its budget go on: now, or once the window that stopped it resets. */
+  resume: (id: string, afterReset: boolean) => invoke<RunStart>("orchestration_resume", { id, afterReset }),
   settings: () => invoke<OrchestratorSettings>("orchestrator_settings"),
   setSettings: (patch: OrchestratorPatch) => invoke<OrchestratorSettings>("set_orchestrator_settings", { patch }),
 };

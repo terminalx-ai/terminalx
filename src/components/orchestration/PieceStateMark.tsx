@@ -1,4 +1,4 @@
-import { CircleAlert, CircleCheck, CircleDashed, CircleX, LoaderCircle, ScanSearch, Square } from "@/icons";
+import { CircleAlert, CircleCheck, CircleDashed, CircleX, Hourglass, LoaderCircle, ScanSearch, Square } from "@/icons";
 import { cn } from "@/lib/cn";
 import { PIECE_STATE_LABEL } from "@/lib/orchestration";
 import { usePrefs } from "@/lib/prefs";
@@ -8,6 +8,7 @@ import type { PieceState } from "@/types/orchestration";
 export const PIECE_STATE_STYLE: Record<PieceState, { icon: typeof CircleCheck; className: string }> = {
   queued: { icon: CircleDashed, className: "text-faint" },
   running: { icon: LoaderCircle, className: "text-accent" },
+  stalled: { icon: Hourglass, className: "text-warning" },
   verifying: { icon: ScanSearch, className: "text-info" },
   done: { icon: CircleCheck, className: "text-add" },
   blocked: { icon: CircleAlert, className: "text-warning" },

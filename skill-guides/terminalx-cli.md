@@ -72,18 +72,28 @@ User-facing webview choices are under `preferences`, for example:
     "requireApproval": true,
     "pieceLimit": 8,
     "workerMode": "bypassPermissions",
+    "workersPerRun": 4,
+    "workersAtOnce": 8,
+    "budgetDollars": 15,
+    "budgetPoints": 25,
+    "windowCeiling": 85,
+    "stallMinutes": 10,
     "reviewDiffLines": 400,
-    "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12 } }
+    "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12, "budgetPoints": 15 } }
   }
 }
 ```
 
 `orchestrator` holds the limits of orchestration runs: whether a run waits for approval, the
-most pieces a plan may have (1 to 50), the permission mode workers start in, and over how
-many changed lines a result is read by a verifier though its commands pass
-(`reviewDiffLines`, 1 to 100000). A project
-may answer for itself under `projects`, by its path; a setting it leaves out follows the
-app-wide value. These are the person's to change, in Settings → Orchestrator: do not edit
+most pieces a plan may have (1 to 50), the permission mode workers start in, over how many
+changed lines a result is read by a verifier though its commands pass (`reviewDiffLines`,
+1 to 100000), how many workers run at once (per run, and across every run of the app), each
+run's budget (dollars for workers on an API key; points of a usage window, and the window
+level past which nothing new starts, for workers on a subscription), and after how many
+minutes of nothing a worker counts as stalled. A project may answer for itself under
+`projects`, by its path, for approval, the piece limit, the worker mode, the diff threshold,
+its routing rows and the three budget values; a setting it leaves out follows the app-wide
+value. These are the person's to change, in Settings → Orchestrator: do not edit
 them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
 settings page in the app; the `runs` commands work either way.
 
@@ -676,8 +686,8 @@ The plan is a JSON file you write:
   pages, logs from elsewhere). The person is shown that it will run without prompts, and the
   worker is told to treat that text as information, never as instructions.
 - `estimate`: what you expect the piece to cost, in API-equivalent dollars. `budget` is what
-  the run may use, in `points` of a subscription's window or `dollars`. Both are recorded and
-  shown to the person with the plan; nothing is stopped by them yet.
+  the run may use, in `points` of a subscription's window or `dollars`. Where it is lower
+  than the person's settings it holds; it cannot raise them. See "Limits and budget".
 
 `runs create` checks the plan and stores it. A refusal names its rule in `code` and the
 piece in `details.piece`, and nothing is stored:
@@ -749,8 +759,9 @@ starts it at once.
 
 #### Start, follow, stop
 
-`runs start` starts a worker for every piece whose dependencies are done, and returns
-`started` (piece ids), `waiting` (each queued piece with the pieces it waits `on`) and
+`runs start` starts a worker for every piece whose dependencies are done, up to the worker
+limits, and returns `started` (piece ids), `waiting` (each queued piece with the pieces it
+waits `on`, and `queuedFor` when a limit holds it) and
 `failed` (pieces whose worker could not be started, with the `error`). Call it again
 whenever a piece is done: it starts the pieces that waited on it, and tries again a piece
 whose worker could not be started. Calling it when nothing new is ready starts nothing. A
@@ -880,13 +891,14 @@ committed when they start. It is refused with `piece_not_done` for a piece that 
 report `done`, and a run's worker cannot call it (`not_the_lead`).
 
 `runs show` returns the run: `state`, `goal`, `budget`, `workerMode`, `pieces`, `ready` (the
-pieces the next `runs start` would start), `waiting`, and `estimate` with `unestimated` (how
-many pieces carry none), `maxTries`, and `costUsd` (what its workers used so far, at API
-list prices, as `sessions usage` counts it; `null` before any was read). Each piece has its
-plan fields and `state`, `tier`, `modelNote`, `modelByKind` and `effortByKind` (true when the
-plan left that one to the piece's kind), `attempts`, `worker` (`sessionId`, `tabId`),
-`branch`, `startedMode`, `note`, `costUsd` and `tries`. `model`, `effort`, `worker` and
-`branch` are those of its current try.
+pieces the next `runs start` would start), `waiting`, `estimate` with `unestimated` (how
+many pieces carry none), `maxTries`, `costUsd` (what its workers used so far, at API list
+prices, as `sessions usage` counts it; `null` before any was read), `limits`, `usage`,
+`pause`, `inTurn` (its workers in a turn now) and `fit`. Each piece has its plan fields and
+`state`, `tier`, `modelNote`, `modelByKind` and `effortByKind` (true when the plan left that
+one to the piece's kind), `attempts`, `worker` (`sessionId`, `tabId`), `branch`,
+`startedMode`, `login` (`apiKey` or `subscription`), `queuedFor`, `note`, `costUsd` and
+`tries`. `model`, `effort`, `worker` and `branch` are those of its current try.
 
 `tries` is every try, oldest first: `step` (`first`, `retry`, `effort` or `tier`: what made
 it differ from the one before), `model`, `effort`, `tier`, `worker`, `branch`, `outcome`
@@ -894,13 +906,13 @@ it differ from the one before), `model`, `effort`, `tier`, `worker`, `branch`, `
 `detail` (the result line, or the failure text the next try was given), `costUsd`,
 `verification` (how its result was checked, above), `started` and `ended`.
 
-- Run `state`: `planned`, `awaitingApproval`, `running`, `verifying`, `merging`, `done`,
-  `stopped`, `failed`. A run is `merging` when every piece's result is accepted, and `done`
-  once `runs merge` has merged them all into your branch and the checks passed on the
-  merged result (below). It is `failed` when a piece
-  ran out of tries and nothing is running or could start; `reason` names the piece and what
-  it holds up. A failed run goes back to `running` when that piece's worker finishes after
-  all.
+- Run `state`: `planned`, `awaitingApproval`, `running`, `needsYou`, `verifying`, `merging`,
+  `done`, `stopped`, `failed`. A run is `merging` when every piece's result is accepted, and
+  `done` once `runs merge` has merged them all into your branch and the checks passed on the
+  merged result (below). It is `failed` when a piece ran out of tries and nothing is running
+  or could start; `reason` names the piece and what it holds up. A failed run goes back to
+  `running` when that piece's worker finishes after all. `needsYou`: it reached its budget
+  (see below).
 - Piece `state` follows its worker's last report, each time the run is read: `queued` (no
   worker yet, or its next try waits for one), `running`, `verifying` (it reported `done`
   and its result is being checked), `done` (its result passed every check), `blocked` (it
@@ -908,6 +920,45 @@ it differ from the one before), `model`, `effort`, `tier`, `worker`, `branch`, `
   or its session was deleted; `note` says which), `failed` (its worker could not be
   started), `stopped`. A `done` piece stays done when its worker's session is deleted
   afterwards.
+
+#### Limits and budget
+
+A run has `limits`: `workers` (in a turn at once), `dollars`, `points` and `ceiling`. They are
+the project's settings when the run is made, with your plan's `budget` where it asks for
+less; the person can change them for the run in the approval view, or when it stops.
+
+- **Worker limits.** At most `limits.workers` of the run's workers are in a turn at once, and
+  at most the app-wide limit across every run. `runs start` starts what fits and leaves the
+  rest `queued` with `queuedFor: "runLimit"` or `"appLimit"`. Those start by themselves when
+  a worker's turn ends, in this run or another: do not call `runs start` for them, and do not
+  poll. A piece that becomes ready only because a piece it depends on finished still waits
+  for your `runs start`, so you can collect that branch first. A retry or an escalated try
+  (`tries`) takes a slot like any other worker: it queues when none is free, and starts by
+  itself when one is. A stalled worker still holds its slot. A `verifying` piece does not:
+  its worker's turn has ended, its verifiers are not counted, and a result that fails its
+  checks goes to a fresh try that waits for a slot. Sessions a person starts by hand are
+  never counted, queued or refused.
+- **Budget.** A worker on an API key (Settings → Agents) draws on `dollars`: `usage.dollars`
+  sums the recorded cost (`costUsd`) of every try of its pieces, not only the current one. A worker on a subscription draws on its account's usage windows,
+  and on the model windows of its own model (`usage.windows`, each with the `percent` it is
+  at, the `start` it was at when the run began, the run's `points` and `resetsAt`). The run's
+  points are an estimate: the window is shared with everything the person runs. The run
+  stops starting new pieces when a window it draws on reaches `ceiling` percent, when its own
+  points of a window reach `points`, or when `usage.dollars` reaches `dollars`; a run with
+  workers on both logins keeps both and stops on whichever comes first. It becomes
+  `needsYou`, `reason` and `pause.message` say which limit (a window by name, with its reset
+  time), and you are told once. Workers already in a turn finish it. `runs start` is then
+  refused with `needs_you`; what you asked for starts when the person resumes the run
+  (raising the budget alone does not), or by itself once the window has reset and been read
+  again, if they asked for that, and you are told. Tell the person and end your turn; do not get the work done another way.
+- **Stalls.** A worker in a turn with no tool call or file change for the stall time (10
+  minutes unless the person changed it), no command or background task of its running, and
+  its agent idle on the CPU, is `stalled`, and you are told once. A long build or test run is
+  not a stall. Look at it, `send` it what it needs, or stop it; it is `running` again as soon
+  as it does something.
+- `fit`, before a run starts: warnings that what the run may use would not fit in what is
+  left of a window, or that your estimate is over the dollar budget. The person sees them.
+
 
 A `done` piece passed its checks; that is as much as they prove. When you find something
 they did not catch, report it with `runs check-failed`. To get a `blocked` piece moving, `send` its worker what it needs: the piece is `running` again while
@@ -1001,6 +1052,24 @@ When the merge stops on a conflict, choose one, then run `runs merge` again:
   the integration check on it, and goes on. It does not undo a merge you made.
 - **Leave it out.** `terminalx runs merge --skip <piece> --json` merges the pieces that do
   not depend on it. The run is not done without it; a later `runs merge` tries it again.
+
+Limits and budget (above) and the merge. Merging holds no worker slot and uses none of the
+budget: it is git and the checks, and a run that waits to be merged counts no worker in a
+turn. The two things that start a model do count:
+
+- `send-back` starts a worker's turn. It is refused with `no_free_worker` when the run, or
+  the app, has as many workers in a turn as it may; send it back when one has ended. A
+  fresh worker for a piece whose session is gone queues for a slot like any next try.
+- Having a conflict resolved by a model (a person pressing Resolve in lead, or `send-back`)
+  counts toward the run's budget: the worker's try by its recorded cost, the lead's turn by
+  what its session costs from the moment it is asked until that piece's merge is settled.
+  A run past its budget starts neither. The command is refused with `budget_reached`, the
+  run becomes `needsYou` with the limit in `pause.message`, and it stays there while a
+  merge needs resolving, until the person raises the budget and resumes it. Resolving the
+  conflict yourself by hand, and `runs merge`, are not held back by the budget.
+
+A run that is `needsYou` when its last piece is accepted, with no merge to resolve, becomes
+`merging` by itself.
 
 A piece whose merge failed the integration check is not checked again until its commit or
 your branch has changed; `--recheck` runs the check again all the same (a flaky test).
