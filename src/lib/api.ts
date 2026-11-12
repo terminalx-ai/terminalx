@@ -559,6 +559,14 @@ export const api = {
   pairingRetryRelay: () => invoke<PairingStatus>("pairing_retry_relay"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
+  /** Let the phone waiting on this Mac finish pairing (docs/PAIRING-APPROVAL.md). */
+  pairingApprove: (requestId: string) => invoke<PairingStatus>("pairing_approve", { requestId }),
+  /** Refuse it: the unclaimed device, its token and the active code are discarded. */
+  pairingDecline: (requestId: string) => invoke<PairingStatus>("pairing_decline", { requestId }),
+  /** End a device's live connections and keep its pairing; the phone stops reconnecting. */
+  pairingDisconnect: (deviceId: string) => invoke<PairingStatus>("pairing_disconnect", { deviceId }),
+  /** Keep this Mac awake while a phone is connected. */
+  pairingSetKeepAwake: (enabled: boolean) => invoke<PairingStatus>("pairing_set_keep_awake", { enabled }),
   /** This Mac's name as the user's other devices show it (#686). */
   machineName: () => invoke<MachineName>("machine_name"),
   /** Name this Mac; null lets it follow the computer's own name again. */

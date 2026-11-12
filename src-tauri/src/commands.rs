@@ -1660,6 +1660,46 @@ pub async fn pairing_revoke(
     state.pairing.revoke_device(&device_id).await.map_err(err)
 }
 
+/// The person approved the phone waiting with `request_id` (PRO-314).
+#[tauri::command]
+pub async fn pairing_approve(
+    request_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.approve_pairing(&request_id)).await.map_err(err)?.map_err(err)
+}
+
+/// Off the main thread: declining removes the device token from the Keychain.
+#[tauri::command]
+pub async fn pairing_decline(
+    request_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.decline_pairing(&request_id)).await.map_err(err)?.map_err(err)
+}
+
+/// End a phone's connections and keep its pairing.
+#[tauri::command]
+pub async fn pairing_disconnect(
+    device_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.disconnect_device(&device_id)).await.map_err(err)?.map_err(err)
+}
+
+/// Keep this Mac awake while a phone is connected.
+#[tauri::command]
+pub async fn pairing_set_keep_awake(
+    enabled: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.set_keep_awake(enabled)).await.map_err(err)?.map_err(err)
+}
+
 /// This Mac's name as the user's other devices show it (#686).
 #[tauri::command]
 pub async fn machine_name(state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::pairing::MachineName> {

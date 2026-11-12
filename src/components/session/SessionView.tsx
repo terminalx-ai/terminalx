@@ -7,7 +7,8 @@ import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { PanelPresence } from "@/components/layout/PanelPresence";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, FolderSync, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
+import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, FolderSync, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, Smartphone, SquareTerminal } from "@/icons";
+import { openPairPhone } from "@/lib/pairing";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import type { GithubIdentity } from "@/lib/api";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
@@ -1058,6 +1059,10 @@ function WorkspaceMenu({ session, branch, folder, base, onContinue }: { session:
               </DropdownMenuItem>
             </>
           )}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={() => openPairPhone()}>
+            <Smartphone /> Pair a phone…
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </>
