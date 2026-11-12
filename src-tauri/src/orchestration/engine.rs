@@ -1292,9 +1292,9 @@ pub struct SentBack {
 /// next step instead, with the same text. No model writes that text.
 pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
-    if super::merge::under_way(id) {
-        return Err(EngineError::new("merge_in_progress", format!("Run {id} is being merged. A piece is sent back once that has ended."), None));
-    }
+    // The hold a merge pass takes, kept to the end: no pass begins and merges the commit
+    // that is being sent back between the look at its merge below and the piece going back to work.
+    let _no_merge = super::merge::hold_for_send_back(id).map_err(|error| EngineError { message: format!("{} A piece is sent back once that has ended.", error.message), ..error })?;
     let run = refreshed(host, id)?;
     if !run.state.live() {
         return Err(EngineError::new("run_not_running", format!("Run {id} is not running ({}). A piece is sent back in a run that is.", state_name(run.state)), None));
@@ -1392,6 +1392,12 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
 pub fn resolve_in_lead(host: &dyn Host, id: &str, piece_id: &str) -> Result<Run, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     let run = refreshed(host, id)?;
+    // Before the budget: a run that has ended is not paused again by being past it.
+    if matches!(run.state, RunState::Stopped | RunState::Done) {
+        let mut error = EngineError::new("run_ended", format!("Run {id} has ended ({}): nothing more is merged in it, so the lead is not asked to resolve a conflict.", state_name(run.state)), Some("Merge the branch you want by hand, or create a new run for what is left."));
+        error.details = json!({"run": id, "state": run.state});
+        return Err(error);
+    }
     let prompt = run.piece(piece_id).and_then(|piece| super::merge::resolve_prompt(&run, piece)).ok_or_else(|| EngineError::new("nothing_to_resolve", format!("Piece {piece_id} of run {id} has no merge conflict to resolve."), None))?;
     if let Some(reached) = budget::reached(&run, host.now_ms()) {
         return Err(over_budget(host, id, reached, "ask the lead to resolve the conflict"));
@@ -1419,7 +1425,7 @@ fn over_budget(host: &dyn Host, id: &str, reached: Pause, what: &str) -> EngineE
     if let Err(error) = pause(host, id, reached.clone(), &[]) {
         log::warn!("mark run {id} as past its budget: {error}");
     }
-    let mut error = EngineError::new("budget_reached", message, Some("Raise the budget for this run and resume it, or let it go on after the window resets. Resolving the conflict by hand in the lead's checkout, then merging again, uses none of it."));
+    let mut error = EngineError::new("budget_reached", message, Some("Raise the budget for this run and resume it, or let it go on after the window resets. Resolving the conflict by hand in the lead's checkout, then merging again (`terminalx runs merge`, or `--skip <piece>` to leave it out), uses none of it and works while the run is paused."));
     error.details = json!({"run": id, "pause": reached});
     error
 }
