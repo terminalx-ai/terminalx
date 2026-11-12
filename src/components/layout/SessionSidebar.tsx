@@ -663,7 +663,7 @@ function ProjectGroup({
           <DropdownMenuItem onSelect={() => startSessionIn(group.path, null)}>
             <SquarePen /> New chat in {group.name}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void revealItemInDir(group.path).catch(reportError(`Couldn't reveal “${group.name}” in Finder`))}>
+          <DropdownMenuItem onSelect={() => void Promise.resolve().then(() => revealItemInDir(group.path)).catch(reportError(`Couldn't reveal “${group.name}” in Finder`))}>
             <FolderOpen /> Reveal in Finder
           </DropdownMenuItem>
           {group.project && (
@@ -1077,7 +1077,7 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
       </Item>
       <Separator />
-      <Item onSelect={() => void revealItemInDir(session.cwd).catch(reportError(`Couldn't reveal “${title}” in Finder`))}>
+      <Item onSelect={() => void Promise.resolve().then(() => revealItemInDir(session.cwd)).catch(reportError(`Couldn't reveal “${title}” in Finder`))}>
         <FolderOpen /> Reveal in Finder
       </Item>
       <Item onSelect={() => copy(session.cwd, `the path of “${title}”`)}>
