@@ -19,6 +19,22 @@ describe("setting row actions", () => {
     expect(item.getAttribute("aria-describedby") && document.getElementById(item.getAttribute("aria-describedby")!)?.textContent).toBe("general.sounds");
   });
 
+  it("sits beside the row's title, outside the name a control takes from it", () => {
+    render(<RegisteredSetting setting="general.sounds" id="sounds-label" control={<button aria-labelledby="sounds-label">x</button>} />);
+    const actions = screen.getByRole("button", { name: "Actions for Sounds" });
+    expect(actions.parentElement).toBe(document.getElementById("sounds-label")!.parentElement);
+    expect(document.getElementById("sounds-label")!.textContent).toBe("Sounds");
+    expect(screen.getByRole("button", { name: "Sounds" })).toBeTruthy();
+  });
+
+  it("names each instance of a repeated row, and links to the row", async () => {
+    render(<RegisteredSetting setting="organizations.organization" instance="org-1" label="Procyon" description="owner" control={<span>Open</span>} />);
+    mouseClick(screen.getByRole("button", { name: "Actions for Procyon" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Copy setting link" }));
+    await waitFor(() => expect(getSettingToasts().map((toast) => toast.message)).toEqual(["Copied a link to Organization"]));
+    expect(invoke).toHaveBeenCalledWith("copy_text", { text: "terminalx://settings/organizations.organization" });
+  });
+
   it("copies the link, then says so", async () => {
     render(<SettingRowActions id="general.promptMap" title="Prompt map" />);
     accessibilityPress(screen.getByRole("button", { name: "Actions for Prompt map" }));

@@ -1,5 +1,6 @@
 import { cloneElement, type ComponentProps, type ReactElement, type ReactNode } from "react";
-import { SettingRow } from "@/components/ui/controls";
+import type { SettingRow } from "@/components/ui/controls";
+import { cn } from "@/lib/cn";
 import { SHORTCUT_ACTIONS } from "@/lib/shortcuts";
 import { setPrefs } from "@/lib/prefs";
 import { SettingRowActions } from "./SettingRowActions";
@@ -71,9 +72,21 @@ function defineSetting<const T extends SettingDefinition>(definition: T): T & Se
     if (definition.layout === "content") {
       return children ? cloneElement(children as ReactElement<Record<string, unknown>>, anchor) : null;
     }
-    return <div {...anchor} className="group/setting flex min-w-0 items-start gap-1 outline-none">
-      <div className="min-w-0 flex-1"><SettingRow label={definition.title} description={definition.hideDescription ? undefined : definition.description} control={null} {...props} /></div>
-      <SettingRowActions id={definition.id as SettingId} title={definition.title} />
+    // SettingRow's own structure and classes (controls.tsx), with the row's “…” actions beside the title (design 09.04, 09.23).
+    const { label = definition.title, description = definition.hideDescription ? undefined : definition.description, control = null, stacked, disabled, id } = props;
+    return <div {...anchor} className="group/setting min-w-0 outline-none">
+      <div className={cn("flex flex-col gap-1.5 py-2", disabled && "opacity-60")}>
+        <div className={cn("flex gap-4", stacked ? "flex-col" : "items-center justify-between")}>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-[13px] font-medium">
+              <span id={id} className="min-w-0">{label}</span>
+              <SettingRowActions id={definition.id as SettingId} title={definition.title} label={label} />
+            </div>
+            {description && <div className="text-xs leading-relaxed text-muted-foreground">{description}</div>}
+          </div>
+          <div className={cn(stacked ? "" : "shrink-0")}>{control}</div>
+        </div>
+      </div>
     </div>;
   } };
 }
