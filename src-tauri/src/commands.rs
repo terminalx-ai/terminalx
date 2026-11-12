@@ -5007,6 +5007,9 @@ pub struct OrchestratorPatch {
     piece_limit: Option<Option<u32>>,
     #[serde(default, deserialize_with = "given")]
     worker_mode: Option<Option<String>>,
+    /// Over how many changed lines a result is read by a verifier.
+    #[serde(default, deserialize_with = "given")]
+    review_diff_lines: Option<Option<u32>>,
     /// Cells of the routing table, by kind and then by agent. A cell given
     /// as `null` loses its override: it follows the app again (for a
     /// project) or the built-in table (for the app).
@@ -5024,7 +5027,12 @@ fn given<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserializer: D)
 
 #[tauri::command]
 pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
-    use crate::store::settings::{MAX_PIECE_LIMIT, WORKER_MODES};
+    use crate::store::settings::{MAX_PIECE_LIMIT, MAX_REVIEW_DIFF_LINES, WORKER_MODES};
+    if let Some(Some(lines)) = patch.review_diff_lines {
+        if !(1..=MAX_REVIEW_DIFF_LINES).contains(&lines) {
+            return Err(format!("A diff is read by a verifier over 1 to {MAX_REVIEW_DIFF_LINES} changed lines, not {lines}."));
+        }
+    }
     if let Some(Some(limit)) = patch.piece_limit {
         if !(1..=MAX_PIECE_LIMIT).contains(&limit) {
             return Err(format!("A plan may have from 1 to {MAX_PIECE_LIMIT} pieces, not {limit}."));
@@ -5063,6 +5071,7 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             if let Some(value) = patch.require_approval { project.require_approval = value; }
             if let Some(value) = patch.piece_limit { project.piece_limit = value; }
             if let Some(value) = patch.worker_mode { project.worker_mode = value; }
+            if let Some(value) = patch.review_diff_lines { project.review_diff_lines = value; }
             // A project that follows the app in everything has no entry of its own.
             if project.is_empty() { orchestrator.projects.remove(&path); }
         }
@@ -5074,6 +5083,7 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             if let Some(value) = patch.require_approval { orchestrator.require_approval = value.ok_or("Say whether a run asks first.")?; }
             if let Some(value) = patch.piece_limit { orchestrator.piece_limit = value.ok_or("Say how many pieces a plan may have.")?; }
             if let Some(value) = patch.worker_mode { orchestrator.worker_mode = value.ok_or("Say which mode workers run in.")?; }
+            if let Some(value) = patch.review_diff_lines { orchestrator.review_diff_lines = value.ok_or("Say over how many changed lines a result is read by a verifier.")?; }
         }
     }
     store::settings::save(&settings).map_err(err)?;

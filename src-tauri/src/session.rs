@@ -6421,6 +6421,26 @@ impl SessionManager {
                 log::info!("run worker {}/{}: {reason}", frame.session, frame.tab);
                 return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
             }
+            // A verifier of a run's result reads it and changes nothing: an edit, and a shell
+            // command not known to only read, is refused in every permission mode, whatever its
+            // tab is switched to later.
+            let call = crate::orchestration::guard::verifier_call(&frame.payload);
+            if call != crate::orchestration::guard::VerifierCall::Leave && {
+                let known = crate::orchestration::store::is_verifier(&frame.session, &frame.tab);
+                // The session's entry is read only when the runs could not be.
+                crate::orchestration::guard::reads_only(known, known.is_none().then(|| index::get(&frame.session).ok()).flatten().as_ref(), &frame.tab)
+            } {
+                let output = match call {
+                    crate::orchestration::guard::VerifierCall::Refuse(reason) => {
+                        log::info!("run verifier {}/{}: {reason}", frame.session, frame.tab);
+                        crate::orchestration::guard::refusal_output(&reason)
+                    }
+                    // A command that only reads runs as the reader's replacement for it, in either agent's hook form.
+                    crate::orchestration::guard::VerifierCall::Replace(input) => codex::pty::pre_tool_rewrite(input),
+                    crate::orchestration::guard::VerifierCall::Leave => unreachable!("left alone above"),
+                };
+                return HookReply { output: Some(output), refused: None };
+            }
         }
         if frame.event == "StatusLine" {
             if kind == CliKind::Claude && self.status.usage.ingest_claude(usage_account.as_deref(), &frame.payload) {

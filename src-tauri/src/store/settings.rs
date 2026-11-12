@@ -88,6 +88,10 @@ pub struct OrchestratorSettings {
     /// The permission mode of a worker whose piece names none.
     #[serde(deserialize_with = "worker_mode")]
     pub worker_mode: String,
+    /// A result whose diff is over this many changed lines is read by a
+    /// verifier even when its commands pass (PRO-278, `orchestration::verify`).
+    #[serde(deserialize_with = "review_diff_lines")]
+    pub review_diff_lines: u32,
     /// The rows of the routing table a person changed (PRO-275): which tier
     /// and effort a kind of piece starts on, per agent. A row that is not
     /// here is the built-in one (`orchestration::routing::default_route`).
@@ -107,6 +111,8 @@ pub struct ProjectOrchestratorSettings {
     pub piece_limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_worker_mode")]
     pub worker_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_review_diff_lines")]
+    pub review_diff_lines: Option<u32>,
     /// The project's own rows of the routing table; the rest follow the app's.
     #[serde(skip_serializing_if = "RoutingOverrides::is_empty")]
     pub routing: RoutingOverrides,
@@ -125,6 +131,7 @@ pub struct OrchestratorLimits {
     pub require_approval: bool,
     pub piece_limit: u32,
     pub worker_mode: String,
+    pub review_diff_lines: u32,
     /// The routing table in force: every kind, every agent.
     pub routing: RoutingTable,
 }
@@ -143,6 +150,20 @@ pub const DEFAULT_WORKER_MODE: &str = "bypassPermissions";
 
 fn valid_piece_limit(value: &serde_json::Value) -> Option<u32> {
     value.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| (1..=MAX_PIECE_LIMIT).contains(n))
+}
+
+pub use crate::orchestration::verify::{DEFAULT_REVIEW_DIFF_LINES, MAX_REVIEW_DIFF_LINES};
+
+fn valid_review_diff_lines(value: &serde_json::Value) -> Option<u32> {
+    value.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| (1..=MAX_REVIEW_DIFF_LINES).contains(n))
+}
+
+fn review_diff_lines<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<u32, D::Error> {
+    Ok(valid_review_diff_lines(&serde_json::Value::deserialize(deserializer)?).unwrap_or(DEFAULT_REVIEW_DIFF_LINES))
+}
+
+fn project_review_diff_lines<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<u32>, D::Error> {
+    Ok(valid_review_diff_lines(&serde_json::Value::deserialize(deserializer)?))
 }
 
 fn valid_worker_mode(value: &serde_json::Value) -> Option<String> {
@@ -170,7 +191,7 @@ fn project_worker_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std
 
 impl Default for OrchestratorSettings {
     fn default() -> Self {
-        Self { require_approval: true, piece_limit: DEFAULT_PIECE_LIMIT, worker_mode: DEFAULT_WORKER_MODE.into(), routing: Default::default(), projects: Default::default() }
+        Self { require_approval: true, piece_limit: DEFAULT_PIECE_LIMIT, worker_mode: DEFAULT_WORKER_MODE.into(), review_diff_lines: DEFAULT_REVIEW_DIFF_LINES, routing: Default::default(), projects: Default::default() }
     }
 }
 
@@ -182,6 +203,7 @@ impl OrchestratorSettings {
             require_approval: project.and_then(|p| p.require_approval).unwrap_or(self.require_approval),
             piece_limit: project.and_then(|p| p.piece_limit).unwrap_or(self.piece_limit),
             worker_mode: project.and_then(|p| p.worker_mode.clone()).unwrap_or_else(|| self.worker_mode.clone()),
+            review_diff_lines: project.and_then(|p| p.review_diff_lines).unwrap_or(self.review_diff_lines),
             routing: RoutingTable::resolved(&self.routing, project.map(|p| &p.routing)),
         }
     }

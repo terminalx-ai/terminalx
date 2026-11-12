@@ -2,7 +2,7 @@
  * Mirrors `src-tauri/src/orchestration/mod.rs`, as `engine::shown` sends it. */
 
 export type RunState = "planned" | "awaitingApproval" | "running" | "verifying" | "merging" | "done" | "stopped" | "failed";
-export type PieceState = "queued" | "running" | "done" | "blocked" | "failed" | "stopped";
+export type PieceState = "queued" | "running" | "verifying" | "done" | "blocked" | "failed" | "stopped";
 
 /** A model's place in its vendor's line-up; the routing table names tiers, not versions (PRO-275). */
 export type Tier = "small" | "mid" | "large" | "top";
@@ -29,6 +29,72 @@ export type TierModels = Record<RoutedAgent, Record<Tier, { id: string; label: s
 export type TryStep = "first" | "retry" | "effort" | "tier";
 export type TryOutcome = "done" | "failed" | "partial" | "checkFailed" | "blocked" | "stopped";
 
+/** One of the checks a result goes through, in the order they run (`verify::Gate`). Only `review` uses a model. */
+export type RunGate = "report" | "scope" | "branch" | "commands" | "review";
+
+/** One command of the command gate, as TerminalX ran it in the worker's worktree. */
+export interface CommandRun {
+  run: string;
+  /** The project's own check command, not one the plan wrote. */
+  project?: boolean;
+  /** Absent when it was stopped at its deadline or could not be started. */
+  exitCode?: number;
+  passed: boolean;
+  millis: number;
+  /** The last 100 lines it printed, kept for one that failed. */
+  output?: string;
+}
+
+export interface GateResult {
+  gate: RunGate;
+  passed: boolean;
+  /** One line on a pass; what failed, as the next try reads it, on a failure. */
+  detail?: string;
+  commands?: CommandRun[];
+}
+
+export interface VerifierTokens {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  costUsd?: number;
+}
+
+/** One verifier session: a conversation in the worker's worktree that reads the diff and cannot edit. */
+export interface RunVerifier {
+  session?: RunSessionRef;
+  model: string;
+  effort?: string;
+  verdict?: "pass" | "fail";
+  /** `file:line: what is wrong`, for a fail. */
+  evidence?: string[];
+  /** Why it gave no verdict. */
+  problem?: string;
+  tokens?: VerifierTokens;
+}
+
+/** The model step of a check: who was asked, why, and what they said. */
+export interface RunReview {
+  reasons: string[];
+  voters: number;
+  threshold: number;
+  verifiers: RunVerifier[];
+  promptChars: number;
+}
+
+/** How one try's result was checked (`verify::Verification`): the gates that ran, in order, a failure last. */
+export interface RunVerification {
+  gates: GateResult[];
+  facts?: { files: string[]; changedLines: number; securityAreas?: string[]; /** The piece has commands and TerminalX did not run them unasked. */ commandsNotRun?: boolean; commit?: string };
+  review?: RunReview;
+  /** Absent while it is under way. */
+  outcome?: "passed" | "failed" | "inconclusive";
+  failure?: string;
+  started?: string;
+  ended?: string;
+}
+
 /** One try at a piece: the worker it ran in, on what, at what cost, to what end. */
 export interface PieceTry {
   step: TryStep;
@@ -47,6 +113,8 @@ export interface PieceTry {
   costUsd?: number;
   /** Models whose tokens the cost leaves out. */
   costUnpricedModels?: string[];
+  /** How its result was checked; absent before its worker reported. */
+  verification?: RunVerification;
   started?: string;
   ended?: string;
 }
@@ -160,6 +228,8 @@ export interface Run {
   /** What the run's workers cost so far; `null` before any cost was read. */
   costUsd?: number | null;
   costUnpricedModels?: string[];
+  /** What every verifier session used, apart from the workers; `null` when none was asked. */
+  verifierTokens?: number | null;
 }
 
 /** A plan as `runs create` reads it, and as Edit saves it. */
@@ -222,6 +292,8 @@ export interface OrchestratorSettings {
   requireApproval: boolean;
   pieceLimit: number;
   workerMode: string;
+  /** Over how many changed lines a result is read by a verifier though its commands pass. */
+  reviewDiffLines: number;
   /** The rows of the routing table changed for the app; absent when none is. */
   routing?: RoutingRows;
   projects: Record<string, ProjectOrchestratorSettings>;
@@ -232,6 +304,7 @@ export interface OrchestratorLimits {
   requireApproval: boolean;
   pieceLimit: number;
   workerMode: string;
+  reviewDiffLines: number;
   routing: RoutingTable;
 }
 
@@ -239,6 +312,7 @@ export interface ProjectOrchestratorSettings {
   requireApproval?: boolean;
   pieceLimit?: number;
   workerMode?: string;
+  reviewDiffLines?: number;
   /** The project's own rows of the routing table. */
   routing?: RoutingRows;
 }
@@ -249,6 +323,7 @@ export interface OrchestratorPatch {
   requireApproval?: boolean | null;
   pieceLimit?: number | null;
   workerMode?: string | null;
+  reviewDiffLines?: number | null;
   /** Cells to change. `null` takes a cell's override away: it follows the app (for a project) or the built-in table. */
   routing?: Partial<Record<PieceKind, Partial<Record<RoutedAgent, Route | null>>>>;
   /** Take every override away first. */

@@ -176,4 +176,8 @@ export interface IssuePipelineSettings {
   allowNoCi?: boolean;
   localCheckCommand?: string | null;
   localChecksOnly?: boolean;
+  /** The model the reviewer runs on; absent, the author's own. Used when the author's agent offers it. */
+  reviewerModel?: string | null;
+  /** The reviewer's effort; absent, the author's with the author's model, the model's default with a reviewer model. */
+  reviewerEffort?: string | null;
 }

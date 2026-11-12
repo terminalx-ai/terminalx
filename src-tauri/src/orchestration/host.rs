@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 
-use super::engine::{Cost, EngineError, Host, Lead, Started, WorkerNow};
+use super::engine::{Cost, EngineError, Host, Lead, Started, VerifierNow, WorkerNow};
+use super::verify::{self, Checked, Checkout, Gate};
 use super::{guard, Piece, Run, SessionRef, RUN_EVENT};
 use crate::session::SessionManager;
 use crate::session_ops::{NewSession, NewTab};
@@ -167,8 +168,102 @@ impl Host for ManagerHost {
             None if row["reason"] == "working" || row["reminderPending"] == true => WorkerNow::Working,
             // Its brief is on its way into a CLI that is still starting.
             None if row["reason"] == "noTurn" && (view.running || view.queued) => WorkerNow::Working,
+            // Its turn ended, the reminder went out and came to nothing: there is no report to read.
+            None if matches!(row["reason"].as_str(), Some("noBlock" | "malformed" | "noReply")) => WorkerNow::NoReport(text("detail")),
             None => WorkerNow::Stuck(text("detail")),
         }
+    }
+
+    fn check_waits(&self, run_id: &str) {
+        // The gates run the plan's commands: minutes, not a read's worth of time.
+        let (host, run) = (self.clone(), run_id.to_string());
+        let spawned = std::thread::Builder::new().name("run-verify".into()).spawn(move || {
+            if let Err(error) = super::engine::verify(&host, &run) {
+                log::warn!("check the results of run {run}: {error}");
+            }
+        });
+        if let Err(error) = spawned {
+            log::warn!("start the check of run {run_id}: {error}");
+        }
+    }
+
+    fn check(&self, run: &Run, piece: &Piece, worker: &SessionRef) -> Checked {
+        let Ok(session) = index::get(&worker.session_id) else {
+            return Checked::unreadable(Gate::Branch, "The worker's session was deleted, so its worktree cannot be checked.");
+        };
+        let base = match index::get(&run.lead.session_id).context("the lead's session is gone").and_then(|lead| lead_base(Path::new(&lead.cwd))) {
+            Ok(base) => base,
+            Err(error) => return Checked::unreadable(Gate::Scope, format!("The lead's branch could not be read, so there is nothing to compare the result with: {error:#}")),
+        };
+        // The project's own check, the one its pipelines run before a merge.
+        let project_check = crate::store::projects::issue_pipeline_settings(&run.project_path).ok().and_then(|settings| settings.local_check_command);
+        // The mode the worker was started in decides, with the person's approval, whether its commands are run unasked.
+        let commands = verify::may_run_commands(run.approval.is_some(), piece.started_mode.as_deref().unwrap_or_else(|| piece.mode(&run.worker_mode)));
+        let marks = crate::store::root().ok().map(|root| root.join("run-checks"));
+        verify::gates(&Checkout { cwd: session.cwd.into(), base, branch: piece.branch.clone(), commands, marks }, piece, project_check.as_deref(), verify::COMMAND_TIMEOUT)
+    }
+
+    fn create_verifier(&self, _run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef> {
+        // A conversation of its own in the worker's session: the same worktree, the worker's
+        // limits, and nothing of the worker's transcript. It starts in a mode that edits nothing.
+        let tab = self.manager.add_tab(&worker.session_id, &NewTab { harness: piece.agent.clone(), transport: AgentTransport::Pty, model: model.to_string(), effort: effort.map(str::to_owned), permission_mode: Some(guard::VERIFIER_MODE.to_string()) })?;
+        let (voters, _) = verify::panel(piece);
+        let title = if voters > 1 { format!("Verifier {number}") } else { "Verifier".to_string() };
+        crate::session_ops::rename_tab_entry(&worker.session_id, &tab.id, Some(title)).map_err(|error| anyhow!("{error}"))?;
+        if let Ok(session) = index::get(&worker.session_id) {
+            self.sink.emit("session_updated", &session);
+        }
+        Ok(SessionRef { session_id: worker.session_id.clone(), tab_id: Some(tab.id) })
+    }
+
+    fn brief_verifier(&self, verifier: &SessionRef, prompt: &str) -> anyhow::Result<()> {
+        let tab = verifier.tab_id.as_deref().ok_or_else(|| anyhow!("the verifier has no tab"))?;
+        self.manager.send(&verifier.session_id, tab, prompt.to_string(), Vec::new())?;
+        Ok(())
+    }
+
+    fn verifier(&self, verifier: &SessionRef) -> VerifierNow {
+        let Ok(session) = index::get(&verifier.session_id) else { return VerifierNow::Gone };
+        let Some(tab) = verifier.tab_id.as_deref().filter(|tab| session.tab(tab).is_some()) else { return VerifierNow::Gone };
+        let view = self.manager.wait_view(&session.id, tab);
+        match crate::control::open_turn(&view) {
+            Some(worker_report::OpenTurn::Working) => return VerifierNow::Working,
+            Some(worker_report::OpenTurn::Waiting) => return VerifierNow::Stuck("It stopped on a permission request, a question or an error, and gave no verdict.".into()),
+            None => {}
+        }
+        let events = match self.manager.load_events(&session.id, tab) {
+            Ok(events) => events,
+            Err(error) => return VerifierNow::Stuck(format!("Its transcript could not be read: {error:#}")),
+        };
+        match crate::issue_pipeline::host::last_reply(&events) {
+            Some((_, reply)) => VerifierNow::Replied(reply),
+            // Its prompt is on its way into a CLI that is still starting.
+            None if view.running || view.queued => VerifierNow::Working,
+            None => VerifierNow::Stuck("It ended without a reply.".into()),
+        }
+    }
+
+    fn check_reset(&self, worker: &SessionRef) {
+        if let (Ok(session), Ok(root)) = (index::get(&worker.session_id), crate::store::root()) {
+            verify::forget_clean(&root.join("run-checks"), Path::new(&session.cwd));
+        }
+    }
+
+    fn result_commit(&self, worker: &SessionRef) -> Option<String> {
+        let session = index::get(&worker.session_id).ok()?;
+        crate::git::head_commit(Path::new(&session.cwd))
+    }
+
+    fn verifier_tokens(&self, verifier: &SessionRef) -> Option<verify::Tokens> {
+        let tab_id = verifier.tab_id.as_deref()?;
+        // Read from its transcript again, as far as it has got.
+        if let Err(error) = crate::session_usage::refresh_tab(&verifier.session_id, tab_id) {
+            log::warn!("read what verifier {}/{tab_id} used: {error:#}", verifier.session_id);
+        }
+        let session = index::get(&verifier.session_id).ok()?;
+        let usage = session.tab(tab_id)?.usage.as_ref()?;
+        let total = crate::session_usage::total(&usage.models);
+        Some(verify::Tokens { input: total.input_tokens, output: total.output_tokens, cache_read: total.cache_read_tokens, cache_write: total.cache_write_tokens, cost_usd: total.cost_usd })
     }
 
     fn stop_worker(&self, worker: &SessionRef) -> anyhow::Result<bool> {
