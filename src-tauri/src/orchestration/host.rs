@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 
-use super::engine::{Cost, EngineError, Host, Lead, Started, VerifierNow, WorkerNow};
+use super::budget::Login;
+use super::engine::{self, Activity, Cost, EngineError, Host, Lead, Started, VerifierNow, WorkerNow};
 use super::verify::{self, Checked, Checkout, Gate};
 use super::{guard, Piece, Run, SessionRef, RUN_EVENT};
 use crate::session::SessionManager;
@@ -29,6 +30,48 @@ impl ManagerHost {
     pub fn new(sink: Arc<dyn EventSink>, manager: SessionManager) -> Self {
         Self { sink, manager }
     }
+}
+
+/// How often the watcher looks for stalled workers and runs due to resume.
+/// A stall is measured in minutes, so a minute is fine enough.
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// Above this, a worker's agent is working, whatever its transcript says.
+const BUSY_CPU_PERCENT: f32 = 5.0;
+
+/// Whether the watcher thread runs, and how often it was asked for: a run
+/// that starts while the thread decides to end is not left unwatched.
+static WATCHER: std::sync::Mutex<(bool, u64)> = std::sync::Mutex::new((false, 0));
+
+fn millis(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts).ok().map(|at| at.timestamp_millis())
+}
+
+/// What a worker did in its open turn, from its transcript's events.
+pub(crate) fn activity_of(events: &[crate::events::AgentEvent]) -> Activity {
+    use crate::events::Payload;
+    let from = events.iter().rposition(|event| matches!(event.payload, Payload::TurnStarted { .. })).unwrap_or(0);
+    let mut activity = Activity::default();
+    let mut open = std::collections::HashSet::new();
+    let mut background = false;
+    for event in &events[from..] {
+        let at = || millis(&event.ts);
+        match &event.payload {
+            Payload::TurnStarted { .. } => activity.last_ms = at(),
+            Payload::ToolCallStarted { call_id, .. } => {
+                open.insert(call_id.clone());
+                activity.last_ms = at().or(activity.last_ms);
+            }
+            Payload::ToolCallCompleted { call_id, .. } => {
+                open.remove(call_id);
+                activity.last_ms = at().or(activity.last_ms);
+            }
+            Payload::FileEdits { .. } => activity.last_ms = at().or(activity.last_ms),
+            Payload::BackgroundTasksChanged { tasks } => background = !tasks.is_empty(),
+            _ => {}
+        }
+    }
+    activity.command_running = !open.is_empty() || background;
+    activity
 }
 
 /// The commit a worker's branch is cut from: the lead's branch, or the commit
@@ -292,5 +335,105 @@ impl Host for ManagerHost {
 
     fn changed(&self, run: &Run) {
         self.sink.emit(RUN_EVENT, &super::engine::shown(run));
+    }
+
+    fn login(&self, agent: &str) -> Login {
+        if crate::agent_keys::uses_saved_key(agent) { Login::ApiKey } else { Login::Subscription }
+    }
+
+    fn windows(&self) -> Vec<crate::status::usage::UsageWindow> {
+        self.manager.usage_windows()
+    }
+
+    fn activity(&self, worker: &SessionRef) -> Activity {
+        let Some(tab) = worker.tab_id.as_deref() else { return Activity::default() };
+        let mut activity = match self.manager.load_events(&worker.session_id, tab) {
+            Ok(events) => activity_of(&events),
+            // Unread is not idle: no stall is called on no evidence.
+            Err(_) => return Activity { command_running: true, ..Activity::default() },
+        };
+        activity.busy = match self.manager.resource_sample() {
+            Ok(sample) => sample.processes.iter().any(|process| process.session_id.as_deref() == Some(worker.session_id.as_str()) && process.tab_id.as_deref() == Some(tab) && process.cpu_percent.is_some_and(|cpu| cpu >= BUSY_CPU_PERCENT)),
+            Err(_) => true,
+        };
+        activity
+    }
+
+    fn fill_later(&self) {
+        let host = self.clone();
+        std::thread::spawn(move || engine::fill_slots(&host));
+    }
+
+    fn watch(&self) {
+        let mut watcher = WATCHER.lock().unwrap_or_else(|error| error.into_inner());
+        watcher.1 += 1;
+        if watcher.0 {
+            return;
+        }
+        watcher.0 = true;
+        let host = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(WATCH_EVERY);
+            let asked = WATCHER.lock().unwrap_or_else(|error| error.into_inner()).1;
+            let more = engine::watch(&host);
+            let mut watcher = WATCHER.lock().unwrap_or_else(|error| error.into_inner());
+            if !more && watcher.1 == asked {
+                watcher.0 = false;
+                return;
+            }
+        });
+    }
+
+    fn now_ms(&self) -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::activity_of;
+    use crate::events::AgentEvent;
+    use serde_json::json;
+
+    fn event(seq: u64, ts: &str, payload: serde_json::Value) -> AgentEvent {
+        serde_json::from_value(json!({"id": format!("e{seq}"), "sessionId": "w", "tabId": "t", "harness": "claude", "seq": seq, "ts": ts, "payload": payload})).unwrap()
+    }
+
+    fn ms(ts: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(ts).unwrap().timestamp_millis()
+    }
+
+    #[test]
+    fn a_command_still_running_is_work_and_the_last_tool_call_or_edit_is_the_last_activity() {
+        let started = |seq, ts, id: &str| event(seq, ts, json!({"type": "tool_call_started", "callId": id, "name": "Bash", "toolType": "shell", "input": {"command": "cargo build"}}));
+        let done = |seq, ts, id: &str| event(seq, ts, json!({"type": "tool_call_completed", "callId": id, "result": {"text": "ok"}}));
+        // An earlier turn's open call does not count: only the open turn's.
+        let earlier = vec![
+            event(1, "2026-11-11T09:00:00Z", json!({"type": "turn_started"})),
+            started(2, "2026-11-11T09:00:01Z", "old"),
+            event(3, "2026-11-11T10:00:00Z", json!({"type": "turn_started"})),
+        ];
+        let idle = activity_of(&earlier);
+        assert_eq!((idle.last_ms, idle.command_running), (Some(ms("2026-11-11T10:00:00Z")), false));
+
+        // A ten-minute build: its call has not returned.
+        let mut building = earlier.clone();
+        building.push(started(4, "2026-11-11T10:01:00Z", "build"));
+        let activity = activity_of(&building);
+        assert!(activity.command_running);
+        assert_eq!(activity.last_ms, Some(ms("2026-11-11T10:01:00Z")));
+
+        // It returned, and a file was edited after: that edit is the last activity.
+        building.push(done(5, "2026-11-11T10:11:00Z", "build"));
+        building.push(event(6, "2026-11-11T10:12:30Z", json!({"type": "file_edits", "edits": []})));
+        let activity = activity_of(&building);
+        assert!(!activity.command_running);
+        assert_eq!(activity.last_ms, Some(ms("2026-11-11T10:12:30Z")));
+
+        // A background task of its counts as a command running.
+        building.push(event(7, "2026-11-11T10:13:00Z", json!({"type": "background_tasks_changed", "tasks": [{"id": "b1", "label": "npm test"}]})));
+        assert!(activity_of(&building).command_running);
+        building.push(event(8, "2026-11-11T10:20:00Z", json!({"type": "background_tasks_changed", "tasks": []})));
+        assert!(!activity_of(&building).command_running);
     }
 }
