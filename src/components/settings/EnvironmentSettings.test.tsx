@@ -6,21 +6,26 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ projects: [{ name: "App", path: "/repo", kind: "git" }, { name: "Remote", path: "cloud:org:repo", kind: "git" }] }) }));
 import { EnvironmentSettings } from "./EnvironmentSettings";
 let values: Record<string, Record<string, string>>;
+let plain: Set<string>;
 beforeEach(() => {
   values = { user: { API_KEY: "private-value" }, "/repo": { REPO_KEY: "repo-secret" } };
+  plain = new Set();
   vi.clearAllMocks();
   invoke.mockImplementation(async (command: string, args: Record<string, any>) => {
     const scope = args.projectPath || "user";
     switch (command) {
-      case "environment_list": return [
-        ...(scope !== "user" ? Object.keys(values.user).map((name) => ({ name, scope: "user", overridden: name in values[scope] })) : []),
-        ...Object.keys(values[scope]).map((name) => ({ name, scope: scope === "user" ? "user" : "repository", overridden: false })),
-      ];
+      case "environment_list": {
+        const row = (s: string, name: string, overridden: boolean) => plain.has(`${s}:${name}`) ? { name, scope: s === "user" ? "user" : "repository", overridden, secret: false, value: values[s][name] } : { name, scope: s === "user" ? "user" : "repository", overridden };
+        return [
+          ...(scope !== "user" ? Object.keys(values.user).map((name) => row("user", name, name in values[scope])) : []),
+          ...Object.keys(values[scope]).map((name) => row(scope, name, false)),
+        ];
+      }
       case "environment_reveal": return values[scope][args.name];
       case "environment_copy": return;
       case "environment_save":
         if (args.previous) delete values[scope][args.previous];
-        for (const { name, value } of args.inputs) values[scope][name] = value;
+        for (const { name, value, secret } of args.inputs) { values[scope][name] = value; if (secret === false) plain.add(`${scope}:${name}`); else plain.delete(`${scope}:${name}`); }
         return true;
       case "environment_delete": delete values[scope][args.name]; return true;
       case "environment_read_file": return "FROM_FILE=loaded";
@@ -84,21 +89,61 @@ describe("environment settings", () => {
     await screen.findByRole("button", { name: "Reveal KEY_9" });
     expect(screen.getAllByRole("row")).toHaveLength(12);
   });
-  it("selects repository scope, lists inheritance and loads a file for review", async () => {
+  it("opens a repository's variables below the Personal ones and loads a file for review", async () => {
     await ready();
     expect(screen.queryByRole("option", { name: /Remote/ })).toBeNull();
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "/repo" } });
-    await screen.findByRole("button", { name: "Reveal REPO_KEY" });
-    expect(screen.queryByRole("button", { name: "Edit API_KEY" })).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: "Scope" }), { target: { value: "/repo" } });
+    const repository = within(await screen.findByRole("region", { name: "Environment of App" }));
+    await repository.findByRole("button", { name: "Reveal REPO_KEY" });
+    expect(repository.queryByRole("button", { name: "Edit API_KEY" })).toBeNull();
     open.mockResolvedValue("/repo/.env");
-    fireEvent.click(screen.getByRole("button", { name: "Load from .env file" }));
+    fireEvent.click(repository.getByRole("button", { name: "Load from .env file" }));
     const dialog = within(await screen.findByRole("dialog"));
     expect(invoke).toHaveBeenCalledWith("environment_read_file", { projectPath: "/repo", path: "/repo/.env" });
     expect(values["/repo"].FROM_FILE).toBeUndefined();
     fireEvent.click(dialog.getByRole("button", { name: "Import 1 valid variables" }));
-    await screen.findByRole("button", { name: "Reveal FROM_FILE" });
+    await repository.findByText("loaded");
     expect(values["/repo"].FROM_FILE).toBe("loaded");
     expect(values.user.FROM_FILE).toBeUndefined();
+  });
+  it("keeps secret-looking values in the Keychain by default and stores others plainly", async () => {
+    await ready();
+    expect(screen.getByRole("columnheader", { name: "Applies to" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "All projects" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Paste variables" }));
+    let dialog = within(screen.getByRole("dialog"));
+    const keychain = dialog.getByRole("switch", { name: "Keep values that look like secrets in the Keychain" });
+    expect(keychain.getAttribute("aria-checked")).toBe("true");
+    fireEvent.change(dialog.getByLabelText("Variables"), { target: { value: "SENTRY_AUTH_TOKEN=sntrys_eyJpYXQiOjE3\nVITE_RELAY_URL=wss://relay.dev.example\n2FA_SEED=JBSWY3DPEHPK3PXP" } });
+    const detected = within(dialog.getByRole("list", { name: "Detected variables" }));
+    expect(detected.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["SENTRY_AUTH_TOKENsecret", "VITE_RELAY_URL"]);
+    expect(dialog.getByRole("alert").textContent).toContain("Line 3:");
+    fireEvent.click(dialog.getByRole("button", { name: "Import 2 valid variables" }));
+    await screen.findByText("wss://relay.dev.example");
+    const sent = invoke.mock.calls.find(([command]) => command === "environment_save")![1];
+    expect(sent.inputs).toEqual([{ name: "SENTRY_AUTH_TOKEN", value: "sntrys_eyJpYXQiOjE3", secret: true }, { name: "VITE_RELAY_URL", value: "wss://relay.dev.example", secret: false }]);
+    expect(screen.queryByRole("button", { name: "Reveal VITE_RELAY_URL" })).toBeNull();
+    expect(screen.queryByText("sntrys_eyJpYXQiOjE3")).toBeNull();
+    // Off: this save stores even a secret-looking value plainly.
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    dialog = within(screen.getByRole("dialog"));
+    fireEvent.click(dialog.getByRole("switch", { name: "Keep values that look like secrets in the Keychain" }));
+    fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "OTHER_TOKEN" } });
+    fireEvent.change(dialog.getByLabelText("Value"), { target: { value: "visible" } });
+    expect(dialog.getByText(/stored in TerminalX's settings/)).toBeTruthy();
+    fireEvent.click(dialog.getByRole("button", { name: "Save variable" }));
+    await screen.findByText("visible");
+    expect(invoke.mock.calls.filter(([command]) => command === "environment_save").at(-1)![1].inputs).toEqual([{ name: "OTHER_TOKEN", value: "visible", secret: false }]);
+    // The next sheet starts with the switch on again.
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    expect(within(screen.getByRole("dialog")).getByRole("switch").getAttribute("aria-checked")).toBe("true");
+  });
+  it("lists what TerminalX sets itself, including the workspace port block", async () => {
+    await ready();
+    const own = screen.getByText(/Variables TerminalX sets itself/).closest("details")!;
+    expect(own.textContent).toContain("TERMINALX_PORT");
+    expect(own.textContent).toContain("TERMINALX_PORTS");
+    expect(own.textContent).not.toContain("do not allocate an environment variable");
   });
   it("keeps the sheet open and reports failed writes", async () => {
     await ready();
