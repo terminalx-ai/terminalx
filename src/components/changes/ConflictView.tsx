@@ -194,6 +194,8 @@ export function ConflictView({ entry, visible, source: given, files: givenFiles 
       const next = await source.resolveConflict!(ready.merge, ready.file, hunk.index, choice);
       await baseline();
       if (mine === generation.current) show(ready.merge, next);
+      // Changes reads the merge again: the card's count for this file follows.
+      window.dispatchEvent(new Event("workspace-files-changed"));
     } catch (e) {
       // Refused (the file moved on since it was read) or failed: say so, and never keep the old version in use.
       setError(source.errorMessage(e));

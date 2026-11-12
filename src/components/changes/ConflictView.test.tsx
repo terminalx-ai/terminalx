@@ -129,9 +129,14 @@ for (const [label, choice] of [["Keep yours", "ours"], ["Keep theirs", "theirs"]
     const { id } = show(source);
     await screen.findByText("Conflict 1 of 2");
     expect(tabName(id)).toBe("seats.ts · 2 conflicts");
+    const changes = vi.fn();
+    window.addEventListener("workspace-files-changed", changes);
     fireEvent.click(screen.getByRole("button", { name: "Next conflict" }));
     fireEvent.click(within(screen.getByRole("group", { name: "Conflict 2 of 2, line 7" })).getByRole("button", { name: label }));
     await screen.findByText("Conflict 1 of 1");
+    // Changes reads the merge again, so the card's per-file count follows.
+    expect(changes).toHaveBeenCalledTimes(1);
+    window.removeEventListener("workspace-files-changed", changes);
     expect(source.resolveConflict).toHaveBeenCalledTimes(1);
     const [m, f, index, chosen] = source.resolveConflict.mock.calls[0];
     expect([m, f.version, index, chosen]).toEqual([merge, "v1", 1, choice]);
