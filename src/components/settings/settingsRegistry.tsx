@@ -1,6 +1,8 @@
 import { cloneElement, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import { SettingRow } from "@/components/ui/controls";
 import { SHORTCUT_ACTIONS } from "@/lib/shortcuts";
+import { setPrefs } from "@/lib/prefs";
+import { SettingRowActions } from "./SettingRowActions";
 
 export const NATIVE_CODEX_DESCRIPTION =
   "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.";
@@ -47,6 +49,14 @@ interface SettingDefinition {
   layout?: "row" | "content";
   /** Some existing rows have no visible help text; metadata remains searchable. */
   hideDescription?: boolean;
+  /**
+   * A setting link with `?enable=1` may turn this row on from outside the app
+   * (PRO-127). `enable` calls the row's existing setter. Only reversible,
+   * local, non-secret on/off switches belong here: never one that widens
+   * permissions or approvals, a bypass or auto mode, computer use, cloud or
+   * network sharing, the account, or an Experimental switch.
+   */
+  linkable?: { enable: () => Promise<void> };
 }
 export interface SettingRegistration extends SettingDefinition {
   render: (props: RowProps) => ReactNode;
@@ -61,7 +71,10 @@ function defineSetting<const T extends SettingDefinition>(definition: T): T & Se
     if (definition.layout === "content") {
       return children ? cloneElement(children as ReactElement<Record<string, unknown>>, anchor) : null;
     }
-    return <div {...anchor} className="min-w-0 outline-none"><SettingRow label={definition.title} description={definition.hideDescription ? undefined : definition.description} control={null} {...props} /></div>;
+    return <div {...anchor} className="group/setting flex min-w-0 items-start gap-1 outline-none">
+      <div className="min-w-0 flex-1"><SettingRow label={definition.title} description={definition.hideDescription ? undefined : definition.description} control={null} {...props} /></div>
+      <SettingRowActions id={definition.id as SettingId} title={definition.title} />
+    </div>;
   } };
 }
 
@@ -395,6 +408,8 @@ export const SETTINGS_ROWS = [
     description: "A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there.",
     searchTerms: ["general", "sounds"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.sounds" },
+    // Linkable: an in-app tone on this Mac; off again with the same switch.
+    linkable: { enable: async () => setPrefs({ sounds: true }) },
   }),
   defineSetting({
     id: "general.animations", section: "general", title: "Pixel raccoon",
@@ -413,6 +428,8 @@ export const SETTINGS_ROWS = [
     description: "Under each finished turn, the files the agent changed with the lines it added and removed. Click a file to open it.",
     searchTerms: ["general", "show", "files", "changed"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.turnChanges" },
+    // Linkable: shows local diff stats under a turn; display only, off again with the same switch.
+    linkable: { enable: async () => setPrefs({ turnChanges: true }) },
   }),
   defineSetting({
     id: "general.fixErrorsInstructions", section: "general", title: "Fix errors instructions",
@@ -425,6 +442,8 @@ export const SETTINGS_ROWS = [
     description: "A mark for each of your prompts down the right edge of a conversation. Hover one to read it, click to go back to it.",
     searchTerms: ["general", "prompt", "map"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.promptMap" },
+    // Linkable: marks for your own prompts in the conversation; display only, off again with the same switch.
+    linkable: { enable: async () => setPrefs({ promptMap: true }) },
   }),
   defineSetting({
     id: "general.autocorrect", section: "general", title: "Autocorrect",

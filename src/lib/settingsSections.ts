@@ -32,11 +32,11 @@ const sectionIndex = SETTINGS_SECTIONS.map((section) => indexPaletteItem({
   recentAt: 0,
 }, [...section.terms]));
 
-/** A section behind a switch in Settings → Experimental is found only while the switch is on. */
-function offered(tab: SettingsTab): boolean {
+/** A section behind a switch in Settings → Experimental is found only while the switch is on. Shared with the row search. */
+export function settingsSectionOffered(tab: SettingsTab): boolean {
   return tab !== "orchestrator" || getExperimentalSettings()?.orchestratorRuns === true;
 }
 
 export function searchSettingsSections(query: string) {
-  return rankPaletteItems(sectionIndex, query).filter((match) => offered(match.item.tab)).slice(0, 30);
+  return rankPaletteItems(sectionIndex, query).filter((match) => settingsSectionOffered(match.item.tab)).slice(0, 30);
 }

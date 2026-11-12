@@ -62,6 +62,24 @@ describe("settings registry", () => {
     for (const value of [undefined, null, "missing", "toString", { type: "click" }]) expect(resolveSetting(value).id).toBe("account.identity");
   });
 
+  it("keeps the linkable allowlist to reversible, local display and sound switches", () => {
+    // A link from another app can turn these on, and nothing else. Review any change here as a security boundary.
+    expect(SETTINGS_ROWS.filter((row) => "linkable" in row && row.linkable).map((row) => row.id)).toEqual(["general.sounds", "general.turnChanges", "general.promptMap"]);
+    for (const id of ["agents.readOnlyCommands", "orchestrator.workerMode", "orchestrator.requireApproval", "general.cloudControl", "general.computerUse", "general.dataPrivacy", "account.workStatus", "integrations.linear", "experimental.orchestratorRuns", "experimental.nativeCodex"]) {
+      expect("linkable" in resolveSetting(id) && resolveSetting(id).linkable, id).toBeFalsy();
+    }
+  });
+
+  it("gives every row-layout setting an actions menu, and content rows none", () => {
+    for (const row of SETTINGS_ROWS) {
+      const view = render(<>{row.render(row.layout === "content" ? { children: <section>Editor</section> } : { control: <span>Control</span> })}</>);
+      const actions = screen.queryByRole("button", { name: `Actions for ${row.title}` });
+      if (row.layout === "content") expect(actions, row.id).toBeNull();
+      else expect(actions, row.id).toBeTruthy();
+      view.unmount();
+    }
+  });
+
   it("keeps metadata-only descriptions out of controls that had no help text", () => {
     render(<RegisteredSetting setting="appearance.theme" control={<button>Theme picker</button>} />);
     expect(screen.queryByText(resolveSetting("appearance.theme").description)).toBeNull();
