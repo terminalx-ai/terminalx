@@ -59,7 +59,7 @@ export function RuntimeStatus({ tier }: { tier: "full" | "compact" | "icon" }) {
           sideOffset={5}
           data-status-context-exempt
           onContextMenu={(event) => { suppressNativeContextMenu(event); event.stopPropagation(); }}
-          className="z-(--z-menu) w-[24rem] max-w-[calc(100vw-2rem)] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
+          className="z-(--z-menu) w-[24rem] max-w-[calc(100vw-2rem)] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
         >
           <RuntimeDetails epoch={runtime.epoch} outdated={outdated} />
         </PopoverPrimitive.Content>

@@ -77,6 +77,8 @@ mod pipe_transport;
 #[cfg(feature = "desktop")]
 mod dictation;
 #[cfg(feature = "desktop")]
+mod transparency;
+#[cfg(feature = "desktop")]
 mod drag_text;
 #[cfg(feature = "desktop")]
 mod transcription;
@@ -333,6 +335,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(transparency::plugin())
         .plugin(tauri_plugin_window_state::Builder::default().with_filter(|label| !chat_windows::is_chat_window(label)).build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -445,6 +448,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            transparency::reduce_transparency,
             configuration_commands::configuration_resolve,
             configuration_watch::configuration_watch,
             configuration_commands::configuration_write,

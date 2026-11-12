@@ -36,7 +36,7 @@ function UndoCard({ offer }: { offer: CloseUndo }) {
       .finally(() => setBusy(false));
   };
   return (
-    <aside role="status" aria-busy={busy} data-testid="close-undo" className="pointer-events-auto rounded-xl bg-popover glass p-3 text-sm text-popover-foreground shadow-surface hairline animate-fade-in">
+    <aside role="status" aria-busy={busy} data-testid="close-undo" className="pointer-events-auto rounded-xl bg-popover p-3 text-sm text-popover-foreground shadow-surface hairline animate-fade-in">
       <div className="flex items-start gap-2.5">
         <AgentMark id={named[0].harness} className="mt-0.5 size-4 shrink-0" />
         <div className="min-w-0 flex-1">

@@ -89,7 +89,7 @@ export const DialogContent = React.forwardRef<
       className={cn(
         // Centred by layout (inset-0, auto margins, as tall as its content), not by translate(-50%): WebKit holds a
         // translated layer where it was while the entrance plays, so a dialog that grew as it opened jumped at the end.
-        "fixed inset-0 z-(--z-dialog) m-auto h-fit w-[calc(100%-2rem)] rounded-xl bg-popover glass p-5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-dialog-in data-[state=closed]:animate-dialog-out",
+        "fixed inset-0 z-(--z-dialog) m-auto h-fit w-[calc(100%-2rem)] rounded-xl bg-popover p-5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-dialog-in data-[state=closed]:animate-dialog-out",
         // Should the header and footer alone be taller than the window, the dialog still scrolls as a whole.
         "max-h-[calc(100dvh-2rem)] overflow-y-auto scrollbar-thin",
         layout === "pinned" && "flex flex-col",

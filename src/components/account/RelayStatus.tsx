@@ -52,7 +52,7 @@ export function RelayStatus() {
           side="top"
           align="start"
           sideOffset={8}
-          className="z-(--z-tooltip) w-72 max-w-[calc(100vw-16px)] rounded-md bg-popover glass p-3 text-xs text-popover-foreground shadow-surface hairline"
+          className="z-(--z-tooltip) w-72 max-w-[calc(100vw-16px)] rounded-md bg-popover p-3 text-xs text-popover-foreground shadow-surface hairline"
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
           onPointerEnter={cancelClose}

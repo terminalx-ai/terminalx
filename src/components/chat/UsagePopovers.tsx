@@ -8,7 +8,7 @@ import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
 import type { Turn } from "@/lib/transcript";
 import type { TabEntry } from "@/types/session";
 
-const panel = "z-(--z-menu) w-80 max-w-[calc(100vw-24px)] max-h-[var(--radix-popover-content-available-height)] overflow-auto rounded-xl bg-(--surface-card) p-4 text-popover-foreground shadow-surface hairline outline-none";
+const panel = "z-(--z-menu) w-80 max-w-[calc(100vw-24px)] max-h-[var(--radix-popover-content-available-height)] overflow-auto rounded-xl bg-popover p-4 text-popover-foreground shadow-surface hairline outline-none";
 const count = (value?: number) => value == null ? "Unavailable" : value.toLocaleString();
 const money = (value: number) => value > 0 && value < 0.01 ? "< $0.01" : `$${value.toFixed(2)}`;
 

@@ -98,3 +98,68 @@ export async function openCloudSession(page, title) {
   await palette.getByRole("option", { name: new RegExp(`^${escapeRegExp(title)}`) }).first().click();
   await page.locator('main header [data-testid="session-title"]').filter({ hasText: title }).waitFor();
 }
+
+/**
+ * What shows through a floating panel (PRO-336). The panel's own content is
+ * hidden, its box inside the rounded corners captured, and every pixel
+ * compared with the panel's colour: text or rows from behind it show up as
+ * pixels that differ. `ink` is the colour of the panel's quietest text
+ * (`text-muted-foreground`), and `contrast` that colour's WCAG ratio against
+ * what the capture found. Turn glass mode on first to test the Mac look.
+ */
+export async function throughPanel(page, panel) {
+  const box = await panel.evaluate(async (node) => {
+    await Promise.all(node.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => {})));
+    node.setAttribute("data-panel-probe", "");
+    const rect = node.getBoundingClientRect();
+    const inset = Math.max(8, parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0);
+    return { x: rect.x + inset, y: rect.y + inset, width: Math.max(1, rect.width - inset * 2), height: Math.max(1, rect.height - inset * 2) };
+  });
+  const style = await page.addStyleTag({ content: "[data-panel-probe] * { visibility: hidden !important; }" });
+  const png = await page.screenshot({ clip: box, animations: "disabled", scale: "css" });
+  await style.evaluate((node) => node.remove());
+  return panel.evaluate(async (node, data) => {
+    node.removeAttribute("data-panel-probe");
+    const image = new Image();
+    image.src = `data:image/png;base64,${data}`;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    const counts = new Map();
+    for (let i = 0; i < pixels.length; i += 4) {
+      const key = (pixels[i] << 16) | (pixels[i + 1] << 8) | pixels[i + 2];
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const key = [...counts].sort((a, b) => b[1] - a[1])[0][0];
+    const ground = [key >> 16, (key >> 8) & 255, key & 255];
+    let differing = 0;
+    let spread = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const off = Math.max(...[0, 1, 2].map((c) => Math.abs(pixels[i + c] - ground[c])));
+      spread = Math.max(spread, off);
+      if (off > 2) differing++;
+    }
+    const swatch = document.createElement("span");
+    swatch.className = "text-muted-foreground";
+    node.append(swatch);
+    context.fillStyle = getComputedStyle(swatch).color;
+    swatch.remove();
+    context.fillRect(0, 0, 1, 1);
+    const ink = [...context.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+    const luminance = (rgb) => rgb.map((v) => v / 255).map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)).reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+    const [hi, lo] = [luminance(ink), luminance(ground)].sort((a, b) => b - a);
+    return {
+      ground: `rgb(${ground.join(" ")})`,
+      ink: `rgb(${ink.join(" ")})`,
+      /** Share of the panel's pixels that are not its own colour. */
+      showsThrough: differing / (pixels.length / 4),
+      spread,
+      contrast: Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100,
+      backdrop: getComputedStyle(node).backdropFilter || getComputedStyle(node).webkitBackdropFilter || "none",
+    };
+  }, png.toString("base64"));
+}

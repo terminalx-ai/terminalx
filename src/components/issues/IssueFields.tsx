@@ -439,7 +439,7 @@ export function IssueLabels({
               align="start"
               sideOffset={4}
               collisionPadding={8}
-              className="z-(--z-menu) w-64 max-w-[calc(100vw-1rem)] rounded-lg bg-popover glass pt-1.5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
+              className="z-(--z-menu) w-64 max-w-[calc(100vw-1rem)] rounded-lg bg-popover pt-1.5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
             >
               <LabelPicker edits={edits} onClose={onClose} />
             </PopoverPrimitive.Content>
