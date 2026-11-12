@@ -9,6 +9,8 @@ export * from "@terminalx/portable/agentSettings";
 let models: ModelInfo[] = [];
 const listeners = new Set<() => void>();
 let loading: Promise<void> | null = null;
+/** True once an agent list has been read: an empty one is then an answer, not a wait. */
+let loaded = false;
 
 export function loadModels() {
   if (!loading) {
@@ -16,6 +18,7 @@ export function loadModels() {
       .listModels()
       .then((m) => {
         models = m;
+        loaded = true;
         for (const l of listeners) l();
       })
       .catch(() => {});
@@ -27,6 +30,7 @@ export function loadModels() {
 export async function refreshModels() {
   try {
     models = await agent.listModels(true);
+    loaded = true;
     for (const l of listeners) l();
   } catch {
     /* keep whatever was known */
@@ -44,6 +48,18 @@ export function useModels(harness?: string): ModelInfo[] {
     () => models,
   );
   return harness ? all.filter((m) => m.harness === harness) : all;
+}
+
+/** False until the first read of the agents' models has come back. */
+export function useModelsLoaded(): boolean {
+  return useSyncExternalStore(
+    (cb) => {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+    () => loaded,
+    () => loaded,
+  );
 }
 
 export function modelLabel(harness: string, id: string): string {

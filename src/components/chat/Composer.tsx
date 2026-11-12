@@ -27,6 +27,7 @@ import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
 import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, effortChoices, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
+import { ModelPickerEmpty } from "@/components/chat/ModelPickerEmpty";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { chooseMode } from "@/lib/dialogs";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
@@ -101,6 +102,9 @@ export type Handoff = { label: string; prompt: string } | { label: string; run: 
  * Images attach as blocks; any other dropped file becomes an `@path` mention.
  * Up and Down recall the tab's earlier and later messages, as a shell does.
  */
+const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", opencode: "OpenCode" };
+const agentName = (id: string) => AGENT_NAMES[id] ?? id;
+
 export function Composer({
   tab,
   sendScope = tab.id,
@@ -203,11 +207,17 @@ export function Composer({
   stopMode?: "interrupt" | "force" | "stop";
   autoFocus?: boolean;
 }) {
-  const { models: listed, refresh: refreshPickerModels } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
+  const { models: listed, refresh: refreshPickerModels, loaded: modelsLoaded } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
   const model = modelForTab(listed, tab.model);
   // What may be chosen here, plus what the tab is already on if that is not among them.
   const models = useMemo(() => model && !listed.some((m) => m.id === model.id) ? [...listed, model] : listed, [listed, model?.id]);
   const [caret, setCaret] = useState(0);
+  const [retryingModels, setRetryingModels] = useState(false);
+  const retryModels = () => {
+    setRetryingModels(true);
+    void Promise.resolve(refreshPickerModels()).finally(() => setRetryingModels(false));
+  };
+  const noModels = models.length === 0;
   const commandSource = useMemo(() => givenCommands ?? (cwd ? localCommands(cwd, tab.harness) : null), [givenCommands?.key, cwd, tab.harness]);
   const [commandList, setCommandList] = useState<ComposerCommandList>(() => commandSource?.known() ?? NO_COMMANDS);
   const firstLoad = useRef<ComposerCommands | null>(null);
@@ -618,6 +628,16 @@ export function Composer({
                 </p>
               )}
               <DropdownMenuLabel>Model</DropdownMenuLabel>
+              {noModels ? (
+                <ModelPickerEmpty
+                  agent={agentName(tab.harness)}
+                  other={agentHandoff?.name}
+                  loading={!modelsLoaded}
+                  retrying={retryingModels}
+                  onRetry={retryModels}
+                  onOpenSettings={() => window.dispatchEvent(new CustomEvent("terminalx:open-settings", { detail: "agents" }))}
+                />
+              ) : null}
               <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={onSetModel}>
                 {modelGroups(models).map((group) => (
                   <Fragment key={group.title ?? "models"}>
