@@ -737,16 +737,25 @@ export async function setSessionUnread(ids: string[], unread: boolean) {
   await refreshSessions();
 }
 
-/** A conversation's name: its agent's title for it once there is one. */
+/**
+ * A conversation's name. A chat of one tab goes by its agent's (or the
+ * reader's) title for that tab once there is one. A session of several tabs
+ * goes by its own title, whichever tab is in front: a Reviewer or Conflict
+ * resolver tab a pipeline opens must never rename the row (PRO-331).
+ */
 export function conversationTitle(session: SessionEntry): string {
+  const own = session.title?.trim();
+  if (session.tabs.length > 1 && own) return own;
   const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
   return tab?.title?.trim() || session.title;
 }
 
-/** Rename a conversation by the title the sidebar shows: the session's, and its tab's when the tab has its own. */
+/** Rename a conversation by the title the sidebar shows: the session's, and its tab's when it is the one tab and has its own. */
 export async function renameConversation(session: SessionEntry, title: string) {
   await renameSession(session.id, title);
-  const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
+  // With several tabs the name shown is the session's, and the front tab may be a helper's.
+  if (session.tabs.length > 1) return;
+  const tab = session.tabs[0];
   if (tab) await api.renameTab(session.id, tab.id, title);
 }
 

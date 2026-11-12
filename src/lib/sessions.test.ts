@@ -540,3 +540,38 @@ it("requests Start from only for that new-session navigation", () => {
   sessions.openNewSession();
   expect(sessions.getSessionStore().startFromRequest).toBe(0);
 });
+
+describe("conversationTitle (PRO-331)", () => {
+  const tab = (id: string, title: string | null, extra: object = {}) => ({ id, harness: "claude", title, model: "m", permissionMode: "default", status: "idle", created: "", modified: "", ...extra }) as SessionEntry["tabs"][number];
+  const base = { id: "s", title: "PRO-274 Create an orchestration run", projectPath, cwd: worktreePath, created: "", modified: "" } as SessionEntry;
+
+  it("keeps the session's own title when a Reviewer or Conflict resolver tab is in front", async () => {
+    const { conversationTitle } = await import("./sessions");
+    const tabs = [tab("author", "Do the work"), tab("reviewer", "Reviewer", { titlePinned: true }), tab("resolver", "Conflict resolver", { titlePinned: true })];
+    expect(conversationTitle({ ...base, tabs, activeTab: "reviewer" })).toBe("PRO-274 Create an orchestration run");
+    expect(conversationTitle({ ...base, tabs, activeTab: "resolver" })).toBe("PRO-274 Create an orchestration run");
+  });
+
+  it("goes by the tab's title in a chat of one tab, so a rename shows", async () => {
+    const { conversationTitle } = await import("./sessions");
+    expect(conversationTitle({ ...base, title: "New session", tabs: [tab("t", "My rename", { titlePinned: true })], activeTab: "t" })).toBe("My rename");
+    expect(conversationTitle({ ...base, title: "New session", tabs: [tab("t", null)], activeTab: "t" })).toBe("New session");
+  });
+
+  it("falls back to the front tab's title only when a session of several tabs has none of its own", async () => {
+    const { conversationTitle } = await import("./sessions");
+    expect(conversationTitle({ ...base, title: " ", tabs: [tab("a", "First"), tab("b", "Second")], activeTab: "b" })).toBe("Second");
+  });
+
+  it("renames the session alone when it has several tabs, and its tab too when it has one", async () => {
+    const { renameConversation } = await import("./sessions");
+    mocks.invoke.mockClear();
+    mocks.invoke.mockResolvedValue(undefined);
+    await renameConversation({ ...base, tabs: [tab("a", "x"), tab("reviewer", "Reviewer")], activeTab: "reviewer" }, "Renamed");
+    const commands = mocks.invoke.mock.calls.map((call) => call[0]);
+    expect(commands.some((name) => /rename_tab/.test(String(name)))).toBe(false);
+    mocks.invoke.mockClear();
+    await renameConversation({ ...base, tabs: [tab("a", "x")], activeTab: "a" }, "Renamed");
+    expect(mocks.invoke.mock.calls.map((call) => call[0]).some((name) => /rename_tab/.test(String(name)))).toBe(true);
+  });
+});
