@@ -11,7 +11,7 @@ try {
   for (const colorScheme of ["light", "dark"]) {
     const extra = `window.__PW_STUB__.answers.star_nag_ready = { revision: 1, visible: false, mode: "browser", busy: false, error: null };`;
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width: 1100, height: 800 }, { extra, colorScheme });
-    await openConversation(page, "claude tab");
+    await openConversation(page, "Local long session");
     await tab(page, "gemini tab").click();
     const reminder = page.locator("[data-star-reminder]");
     const composer = page.locator("[data-composer-box]:visible");

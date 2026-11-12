@@ -9,7 +9,7 @@ const browser = await launch();
 let failed = 0;
 try {
   const host = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSharing: "host" }, { width: 1280, height: 760 });
-  await openConversation(host, "claude tab");
+  await openConversation(host, "Local long session");
   await host.getByRole("button", { name: "Share session…" }).click();
   // A first-time host sees the introduction before the link settings (#852).
   await host.getByTestId("share-intro").waitFor();

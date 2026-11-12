@@ -62,7 +62,7 @@ try {
    window.__copies = []; const nativeClipboard = navigator.clipboard;
    Object.defineProperty(navigator, 'clipboard', {value:{write:async items => { if (${clipboard}) await nativeClipboard.write(items); window.__copies.push(await (await items[0].getType('text/plain')).text()); },writeText:async text=>{if (${clipboard}) await nativeClipboard.writeText(text); window.__copies.push(text);}}});`;
   const page = await open(browser, server.url, {cloud:false,localProjects:1,localSession:true,floating}, {width:1100,height:800}, {extra});
-  if (!floating) { await openConversation(page,'claude tab'); await tab(page,'gemini tab').click(); }
+  if (!floating) { await openConversation(page, 'Local long session'); await tab(page,'gemini tab').click(); }
   const chat = page.locator('[data-chat-scroller]:visible');
   const wrapper = chat.locator('[data-streamdown="table-wrapper"]').first();
   await wrapper.waitFor();

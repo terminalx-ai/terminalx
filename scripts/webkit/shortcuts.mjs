@@ -153,7 +153,7 @@ const fits = (layout) => ({
   );
 
   // Hold Right Option to talk, in a chat tab's composer.
-  await openConversation(page, "claude tab");
+  await openConversation(page, "Local long session");
   await tab(page, "gemini tab").click();
   const composer = page.locator('[role="tabpanel"]:not([aria-hidden="true"]) textarea[data-composer]');
   await composer.waitFor();
