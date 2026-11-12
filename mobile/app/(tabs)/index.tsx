@@ -5,6 +5,7 @@ import { useRouter } from "expo-router";
 import { ChevronRight, Keyboard, QrCode, X } from "lucide-react-native";
 import { ACCOUNT_PAIRING_CAPABILITY } from "@mobile/pairing/contracts";
 import type { AccountHost } from "@mobile/pairing/account-client";
+import type { PairingProgress } from "@mobile/pairing/pair";
 import { accountHostIdentityMatches } from "@mobile/pairing/account";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState, Screen, SectionTitle, StatusDot } from "@mobile/ui/primitives";
@@ -40,11 +41,11 @@ export default function MachinesScreen() {
         <Text style={[styles.heroDetail, { color: palette.muted }]}>Sign in with the same TerminalX account as your Mac, or use an explicit QR pairing. Sessions stay on the Mac and travel over an end-to-end encrypted connection.</Text>
         <Button label="Sign in" onPress={() => void app.signIn()} />
         {app.error ? <Card style={[styles.errorPanel, { borderColor: `${palette.danger}66` }]}><Text style={[styles.errorTitle, { color: palette.ink }]}>Couldn’t finish that</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.error}</Text><View style={styles.actions}><Button label="Retry" kind="secondary" style={styles.flex} onPress={() => void app.retryPairing().catch(() => undefined)} /><Button label="Use QR code" kind="secondary" style={styles.flex} onPress={openPairing} /></View></Card> : null}
-        {app.hosts.length ? <><SectionTitle>QR-paired machines</SectionTitle><Card>{app.hosts.map((host, index) => <View key={host.id} style={[styles.hostRow, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><Pressable testID={`machine-row-${host.id}`} accessibilityRole="button" accessibilityActions={[{ name: "options", label: "Device options" }]} onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === "options") menu.open(host); }} onPress={() => void connect(host)} onLongPress={() => menu.open(host)} style={({ pressed }) => [styles.row, styles.hostRowMain, pressed && { backgroundColor: palette.raised }]}><StatusDot color={app.activeHost?.id === host.id && app.connectionStage === "connected" ? palette.success : palette.muted} /><View style={styles.rowCopy}><Text numberOfLines={1} style={[styles.rowTitle, { color: palette.ink }]}>{menu.nameOf(host)}</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.activeHost?.id === host.id ? connectionLabel(app.connectionStage, app.connectionAttempt) : relativeTime(host.lastConnectedAt)}</Text></View><ChevronRight size={18} color={palette.faint} /></Pressable><DeviceOptionsButton name={menu.nameOf(host)} onPress={() => menu.open(host)} /></View>)}</Card></> : null}
+        {app.hosts.length ? <><SectionTitle>QR-paired machines</SectionTitle><Card>{app.hosts.map((host, index) => <View key={host.id} style={[styles.hostRow, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><Pressable testID={`machine-row-${host.id}`} accessibilityRole="button" accessibilityActions={[{ name: "options", label: "Device options" }]} onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === "options") menu.open(host); }} onPress={() => void connect(host)} onLongPress={() => menu.open(host)} style={({ pressed }) => [styles.row, styles.hostRowMain, pressed && { backgroundColor: palette.raised }]}><StatusDot color={app.activeHost?.id === host.id && app.connectionStage === "connected" ? palette.success : palette.muted} /><View style={styles.rowCopy}><Text numberOfLines={1} style={[styles.rowTitle, { color: palette.ink }]}>{menu.nameOf(host)}</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.activeHost?.id === host.id ? connectionLabel(app.connectionStage, app.connectionAttempt) : host.disconnectedOnMacAt ? connectionLabel("disconnected-on-mac", 0) : relativeTime(host.lastConnectedAt)}</Text></View><ChevronRight size={18} color={palette.faint} /></Pressable><DeviceOptionsButton name={menu.nameOf(host)} onPress={() => menu.open(host)} /></View>)}</Card></> : null}
         <Button label="Use QR code or pairing code" kind="secondary" onPress={openPairing} />
       </Screen>
       {menu.element}
-      <PairingSheet key={pairingOpen ? "open" : "closed"} visible={pairingOpen} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />
+      <PairingSheet key={pairingOpen ? "open" : "closed"} visible={pairingOpen} progress={app.pairingProgress ?? null} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />
     </>;
   }
 
@@ -54,7 +55,7 @@ export default function MachinesScreen() {
       <View style={styles.heading}><View><Text style={[styles.account, { color: palette.ink }]}>{app.session.user.displayName ?? app.session.user.email}</Text><Text style={[styles.detail, { color: palette.muted }]}>One active Mac at a time</Text></View><Button label="Pair" kind="secondary" onPress={openPairing} /></View>
 
       <SectionTitle>Paired machines</SectionTitle>
-      {app.hosts.length ? <Card>{app.hosts.map((host, index) => <View key={host.id} style={[styles.hostRow, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><Pressable testID={`machine-row-${host.id}`} accessibilityRole="button" accessibilityActions={[{ name: "options", label: "Device options" }]} onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === "options") menu.open(host); }} onPress={() => void connect(host)} onLongPress={() => menu.open(host)} style={({ pressed }) => [styles.row, styles.hostRowMain, pressed && { backgroundColor: palette.raised }]}><StatusDot color={app.activeHost?.id === host.id && app.connectionStage === "connected" ? palette.success : palette.muted} /><View style={styles.rowCopy}><Text numberOfLines={1} style={[styles.rowTitle, { color: palette.ink }]}>{menu.nameOf(host)}</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.activeHost?.id === host.id ? connectionLabel(app.connectionStage, app.connectionAttempt) : relativeTime(host.lastConnectedAt)}</Text></View><ChevronRight size={18} color={palette.faint} /></Pressable><DeviceOptionsButton name={menu.nameOf(host)} onPress={() => menu.open(host)} /></View>)}</Card> : <EmptyState title="No paired Macs" detail="Choose a live Mac below, or pair from the QR code in TerminalX on your Mac." />}
+      {app.hosts.length ? <Card>{app.hosts.map((host, index) => <View key={host.id} style={[styles.hostRow, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><Pressable testID={`machine-row-${host.id}`} accessibilityRole="button" accessibilityActions={[{ name: "options", label: "Device options" }]} onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === "options") menu.open(host); }} onPress={() => void connect(host)} onLongPress={() => menu.open(host)} style={({ pressed }) => [styles.row, styles.hostRowMain, pressed && { backgroundColor: palette.raised }]}><StatusDot color={app.activeHost?.id === host.id && app.connectionStage === "connected" ? palette.success : palette.muted} /><View style={styles.rowCopy}><Text numberOfLines={1} style={[styles.rowTitle, { color: palette.ink }]}>{menu.nameOf(host)}</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.activeHost?.id === host.id ? connectionLabel(app.connectionStage, app.connectionAttempt) : host.disconnectedOnMacAt ? connectionLabel("disconnected-on-mac", 0) : relativeTime(host.lastConnectedAt)}</Text></View><ChevronRight size={18} color={palette.faint} /></Pressable><DeviceOptionsButton name={menu.nameOf(host)} onPress={() => menu.open(host)} /></View>)}</Card> : <EmptyState title="No paired Macs" detail="Choose a live Mac below, or pair from the QR code in TerminalX on your Mac." />}
 
       <SectionTitle>Your machines</SectionTitle>
       {app.installationState === "reauthentication-required" ? <StateCard title="Sign in again to verify this installation" detail="For your security, pairing needs a recent sign-in." action="Sign in again" onPress={() => void app.signIn()} /> : null}
@@ -64,7 +65,7 @@ export default function MachinesScreen() {
       <Button label="Use QR code or pairing code" kind="secondary" onPress={openPairing} />
     </Screen>
     {menu.element}
-    <PairingSheet key={pairingOpen ? "open" : "closed"} visible={pairingOpen} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />
+    <PairingSheet key={pairingOpen ? "open" : "closed"} visible={pairingOpen} progress={app.pairingProgress ?? null} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />
   </>;
 }
 
@@ -82,7 +83,7 @@ function StateCard({ title, detail, action, onPress }: { title: string; detail: 
   return <Card style={styles.stateCard}><Text style={[styles.rowTitle, { color: palette.ink }]}>{title}</Text><Text style={[styles.detail, { color: palette.muted }]}>{detail}</Text><Button label={action} kind="secondary" onPress={onPress} /></Card>;
 }
 
-function PairingSheet({ visible, error, onClearError, onClose, onPair }: { visible: boolean; error: string | null; onClearError(): void; onClose(): void; onPair(code: string): Promise<void> }) {
+function PairingSheet({ visible, progress, error, onClearError, onClose, onPair }: { visible: boolean; progress: PairingProgress | null; error: string | null; onClearError(): void; onClose(): void; onPair(code: string): Promise<void> }) {
   const { palette } = useTheme();
   const [mode, setMode] = useState<"scan" | "type">("scan");
   const [permission, requestPermission] = useCameraPermissions();
@@ -140,7 +141,7 @@ function PairingSheet({ visible, error, onClearError, onClose, onPair }: { visib
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("scan")} style={[styles.segmentItem, mode === "scan" && { backgroundColor: palette.card }]}><QrCode size={16} color={mode === "scan" ? palette.ink : palette.muted} /><Text style={{ color: mode === "scan" ? palette.ink : palette.muted }}>Scan</Text></Pressable>
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("type")} style={[styles.segmentItem, mode === "type" && { backgroundColor: palette.card }]}><Keyboard size={16} color={mode === "type" ? palette.ink : palette.muted} /><Text style={{ color: mode === "type" ? palette.ink : palette.muted }}>Type code</Text></Pressable>
       </View>
-      {visible && mode === "scan" ? permission?.granted ? <>
+      {busy && progress ? <PairingApproval progress={progress} /> : visible && mode === "scan" ? permission?.granted ? <>
         <PairingScanner key={cameraGeneration} enabled={!scanned && !busy} onScan={scan} />
         {busy ? <Text style={[styles.detail, { color: palette.muted }]}>QR decoded. Pairing securely…</Text> : null}
         <Button label={scanned ? "Scan again" : "Restart camera"} kind="secondary" disabled={busy} onPress={() => selectMode("scan")} />
@@ -157,10 +158,27 @@ function PairingSheet({ visible, error, onClearError, onClose, onPair }: { visib
   </Modal>;
 }
 
+/**
+ * After a code is scanned (PRO-314): the Mac holds the pairing until the
+ * person checks that it shows this same fingerprint and approves it there.
+ */
+function PairingApproval({ progress }: { progress: PairingProgress }) {
+  const { palette } = useTheme();
+  const [first, second] = progress.fingerprint.split("\u00B7");
+  return <Card style={styles.approval}>
+    <Text accessibilityRole="header" style={[styles.errorTitle, { color: palette.ink }]}>Approve on your Mac</Text>
+    <Text testID="pairing-fingerprint" accessibilityLabel={`Fingerprint ${[...progress.fingerprint.replace("\u00B7", "")].join(" ")}`} style={[styles.fingerprint, { color: palette.ink }]}>{progress.fingerprint}</Text>
+    <Text accessibilityLiveRegion="polite" style={[styles.detail, { color: palette.muted }]}>{progress.waitingForApproval
+      ? `Check that your Mac shows ${first} ${second}, then choose Approve there. This phone waits up to 2 minutes.`
+      : "Connecting securely to your Mac. It will show this same fingerprint."}</Text>
+  </Card>;
+}
+
 function connectionLabel(stage: string, attempt: number) {
   if (stage === "connected") return "Connected";
   if (stage === "connecting") return "Connecting · Requesting secure credential";
   if (stage === "cant-connect") return `Can’t connect · attempt ${attempt}`;
+  if (stage === "disconnected-on-mac") return "Disconnected on your Mac · tap to reconnect";
   if (stage === "unreachable") return "Host unreachable · retrying";
   return "Reconnecting…";
 }
@@ -201,5 +219,8 @@ const styles = StyleSheet.create({
   segmentItem: { flex: 1, minHeight: 38, borderRadius: 8, flexDirection: "row", gap: 7, alignItems: "center", justifyContent: "center" },
   cameraPermission: { flex: 1, justifyContent: "center", gap: 16, paddingHorizontal: 28 },
   codeForm: { gap: 14 },
+  approval: { padding: 20, gap: 12, alignItems: "center" },
+  // The same characters, the same size as on the Mac, so they are compared at a glance.
+  fingerprint: { fontSize: 34, fontWeight: "700", letterSpacing: 2, fontVariant: ["tabular-nums"] },
   codeInput: { minHeight: 120, borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, padding: 14, textAlignVertical: "top", fontSize: 15 },
 });
