@@ -26,7 +26,7 @@ export function EnvironmentSettings() {
     <section className="flex flex-col gap-2" aria-label="Personal variables">
       <h3 className="text-sm font-medium">Personal</h3>
       <p className="text-xs text-muted-foreground">Applied to every agent and terminal you start on this Mac. Project variables override these.</p>
-      <EnvironmentTable project={null} />
+      <EnvironmentTable project={null} projects={local} />
     </section>
     <TerminalXVariables />
     {local.length > 0 && <section className="flex flex-col gap-2" aria-label="Repository variables">
