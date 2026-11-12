@@ -273,15 +273,6 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
               autoComplete="off"
               className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-faint"
             />
-            <SearchToggle label="Match case" pressed={caseSensitive} onClick={() => setCaseSensitive((v) => !v)}>
-              <CaseSensitive className="size-4" />
-            </SearchToggle>
-            <SearchToggle label="Whole word" pressed={wholeWord} onClick={() => setWholeWord((v) => !v)}>
-              <WholeWord className="size-4" />
-            </SearchToggle>
-            <SearchToggle label="Regular expression" pressed={regex} onClick={() => setRegex((v) => !v)}>
-              <Regex className="size-4" />
-            </SearchToggle>
           </div>
           {replaceOpen && (
             <div className="flex items-center gap-2 px-3 pb-2">
@@ -306,19 +297,30 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
               </Button>
             </div>
           )}
+          <div className="flex h-9 items-center gap-1 border-t border-hairline px-3">
+            <SearchToggle label="Match case" text="Match case" pressed={caseSensitive} onClick={() => setCaseSensitive((v) => !v)}>
+              <CaseSensitive className="size-3.5" />
+            </SearchToggle>
+            <SearchToggle label="Whole word" text="Whole word" pressed={wholeWord} onClick={() => setWholeWord((v) => !v)}>
+              <WholeWord className="size-3.5" />
+            </SearchToggle>
+            <SearchToggle label="Regular expression" text="Regex" pressed={regex} onClick={() => setRegex((v) => !v)}>
+              <Regex className="size-3.5" />
+            </SearchToggle>
+            {result && (
+              <div className="ml-auto min-w-0 truncate pl-2 text-xs text-muted-foreground">
+                {occurrences}
+                {result.capped ? "+" : ""} {occurrences === 1 && !result.capped ? "match" : "matches"}
+                {occurrences || result.capped ? ` in ${result.files} file${result.files === 1 ? "" : "s"}` : ""}
+                {replaceOpen && !nothingExcluded ? ` · ${plan.occurrences} selected` : ""}
+                {busy ? " · searching…" : ""}
+              </div>
+            )}
+          </div>
         </div>
         <div className="max-h-[26rem] overflow-auto p-1 scrollbar-thin">
           {error && <div className="px-3 py-2 text-xs text-destructive">{error}</div>}
           {report && <div className="px-3 py-2 text-xs text-add">{report}</div>}
-          {result && (
-            <div className="px-2 py-1 text-[11px] text-faint">
-              {occurrences}
-              {result.capped ? "+" : ""} {occurrences === 1 && !result.capped ? "match" : "matches"}
-              {occurrences || result.capped ? ` in ${result.files} file${result.files === 1 ? "" : "s"}` : ""}
-              {replaceOpen && !nothingExcluded ? ` · ${plan.occurrences} selected` : ""}
-              {busy ? " · searching…" : ""}
-            </div>
-          )}
           {groups.map(([path, hits]) => (
             <div key={path} className="mb-1">
               <div className="group/file sticky top-0 z-10 flex items-center gap-2 bg-popover px-2 py-1 text-xs font-medium text-foreground">
