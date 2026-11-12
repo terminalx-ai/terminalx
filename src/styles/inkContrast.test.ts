@@ -4,13 +4,15 @@ import { contrast, oklch, palettes, rgb, type RGB } from "./tokenContrast";
 
 /**
  * Secondary and tertiary text (`text-muted-foreground`, `text-faint`) meet
- * WCAG AA, 4.5:1 for normal text, on the surfaces they sit on, in every
- * palette, light and dark (PRO-336). Muted text also labels selected rows and
- * muted chips, so it is held to every surface; faint text to the grounds of
- * the page, the chat, cards and raised panels. The rungs keep their order:
- * strong over muted over faint.
+ * WCAG AA, 4.5:1 for normal text, on every surface they sit on, in every
+ * palette, light and dark (PRO-336): the page, the chat, cards, raised and
+ * muted surfaces, selected rows, the glass-mode selected veil and a menu's
+ * highlighted row. The rungs keep their order: strong over muted over faint.
  */
 const AA = 4.5;
+
+/** `top` (white 1 or black 0) laid at `alpha` over `ground`, as the browser composites it. */
+const veil = (ground: RGB, top: number, alpha: number) => ground.map((channel) => channel * (1 - alpha) + top * alpha) as RGB;
 
 describe("text ink contrast", () => {
   const all = palettes();
@@ -20,23 +22,20 @@ describe("text ink contrast", () => {
   for (const { selector, dark, tokens } of all) {
     // In dark mode the chat is the page mixed 88% with black (tokens.css, --surface-chat).
     const page = oklch(tokens["surface-page"]);
-    const grounds: Record<string, RGB> = {
-      page: rgb(page),
-      card: rgb(tokens["surface-card"]),
-      raised: rgb(tokens["surface-raised"]),
-      ...(dark ? { chat: rgb([page[0] * 0.88, page[1] * 0.88, page[2]]) } : {}),
-    };
-    const every: Record<string, RGB> = { ...grounds, muted: rgb(tokens["surface-muted"]), selected: rgb(tokens["surface-selected"]) };
+    const grounds: Record<string, RGB> = Object.fromEntries(["page", "card", "raised", "muted", "selected"].map((name) => [name, rgb(tokens[`surface-${name}`])]));
+    if (dark) grounds.chat = rgb([page[0] * 0.88, page[1] * 0.88, page[2]]);
+    for (const base of ["page", "card"]) {
+      // Glass mode's --veil-selected (9% white / 7% black) and a menu row's highlight, --veil-strong (11.5% white / 10% black).
+      grounds[`${base} under the glass selected veil`] = dark ? veil(grounds[base], 1, 0.09) : veil(grounds[base], 0, 0.07);
+      grounds[`${base} under a menu highlight`] = dark ? veil(grounds[base], 1, 0.115) : veil(grounds[base], 0, 0.1);
+    }
 
-    it(`muted text meets ${AA}:1 on every surface in ${selector}`, () => {
-      const ink = rgb(tokens["ink-muted"]);
-      for (const [name, ground] of Object.entries(every)) expect(contrast(ink, ground), `ink-muted on surface-${name}`).toBeGreaterThanOrEqual(AA);
-    });
-
-    it(`faint text meets ${AA}:1 on the page, chat, card and raised surfaces in ${selector}`, () => {
-      const ink = rgb(tokens["ink-faint"]);
-      for (const [name, ground] of Object.entries(grounds)) expect(contrast(ink, ground), `ink-faint on surface-${name}`).toBeGreaterThanOrEqual(AA);
-    });
+    for (const ink of ["ink-muted", "ink-faint"]) {
+      it(`${ink} meets ${AA}:1 on every surface in ${selector}`, () => {
+        const color = rgb(tokens[ink]);
+        for (const [name, ground] of Object.entries(grounds)) expect(contrast(color, ground), `${ink} on ${name}`).toBeGreaterThanOrEqual(AA);
+      });
+    }
 
     it(`keeps strong over muted over faint in ${selector}`, () => {
       const on = rgb(tokens["surface-page"]);

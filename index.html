@@ -17,14 +17,13 @@
           root.setAttribute("data-theme", t);
           root.setAttribute("data-mode", resolved);
           // Glass (the desktop tinted through the window) is the Mac look, off
-          // while the reader asks macOS to Reduce transparency, and back on
-          // when they stop: the setting can change while the app runs.
-          if (navigator.platform.indexOf("Mac") === 0) {
-            var reduce = window.matchMedia("(prefers-reduced-transparency: reduce)");
-            var glass = function () { root.toggleAttribute("data-glass", !reduce.matches); };
-            glass();
-            reduce.addEventListener("change", glass);
-          }
+          // while the reader asks macOS to Reduce transparency. WebKit has no
+          // prefers-reduced-transparency, so the native side states the
+          // setting before this runs (src-tauri/src/transparency.rs), and
+          // src/lib/glass.ts follows it while the app runs.
+          var reduce = window.__TERMINALX_REDUCE_TRANSPARENCY__ === true;
+          root.toggleAttribute("data-reduce-transparency", reduce);
+          if (navigator.platform.indexOf("Mac") === 0 && !reduce) root.setAttribute("data-glass", "");
         } catch (e) {}
       })();
     </script>

@@ -9,7 +9,8 @@ const html = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
 /**
  * Glass mode (PRO-336): the desktop shows through the window's own large
  * surfaces only. Whatever floats over other content keeps an opaque ground,
- * and Reduce transparency turns glass off.
+ * and Reduce transparency turns glass and blur off (behaviour: src/lib/glass.test.ts,
+ * scripts/webkit/readable-panels.mjs).
  */
 describe("glass mode", () => {
   const glass = tokens.match(/html\[data-glass\] body \{([^}]+)\}/)![1];
@@ -28,11 +29,10 @@ describe("glass mode", () => {
     expect(app).not.toMatch(/--veil-float|\.glass\s*\{/);
   });
 
-  it("is off while macOS asks to Reduce transparency, and nothing blurs then", () => {
-    expect(html).toMatch(/matchMedia\("\(prefers-reduced-transparency: reduce\)"\)/);
-    expect(html).toMatch(/toggleAttribute\("data-glass", !reduce\.matches\)/);
-    expect(html).toMatch(/reduce\.addEventListener\("change"/);
-    const reduce = app.match(/@media \(prefers-reduced-transparency: reduce\) \{([\s\S]*?)\n\}/)![1];
-    expect(reduce).toMatch(/backdrop-filter: none !important/);
+  it("drops every blur while Reduce transparency is on, from the attribute the app sets", () => {
+    // WebKit has no prefers-reduced-transparency; the setting comes from AppKit (src/lib/glass.ts).
+    expect(app).not.toMatch(/@media[^{]*prefers-reduced-transparency/);
+    expect(app).toMatch(/:root\[data-reduce-transparency\] \*,[\s\S]*?backdrop-filter: none !important/);
+    expect(html).toMatch(/window\.__TERMINALX_REDUCE_TRANSPARENCY__ === true/);
   });
 });

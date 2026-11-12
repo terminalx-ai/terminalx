@@ -171,15 +171,14 @@
   display: none;
 }
 
-/* With Reduce transparency on (macOS Accessibility, Display) index.html keeps
-   glass mode off, and nothing blurs what lies behind it either (PRO-336). */
-@media (prefers-reduced-transparency: reduce) {
-  *,
-  ::before,
-  ::after {
-    -webkit-backdrop-filter: none !important;
-    backdrop-filter: none !important;
-  }
+/* With Reduce transparency on (macOS Accessibility, Display) glass mode is off
+   and nothing blurs what lies behind it either (PRO-336). WebKit has no
+   prefers-reduced-transparency: the attribute comes from AppKit (lib/glass.ts). */
+:root[data-reduce-transparency] *,
+:root[data-reduce-transparency] ::before,
+:root[data-reduce-transparency] ::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
 }
 
 @keyframes shimmer {

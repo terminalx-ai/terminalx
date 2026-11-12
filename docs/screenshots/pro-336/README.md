@@ -12,14 +12,18 @@ synthetic Tauri bridge fixtures (`scripts/webkit/run-sidebar.mjs`,
 - Tooltips, hover cards, menus, popovers, dialogs, toasts and the composer are
   opaque in glass mode: the card colour, as without glass. The sidebar and title
   bar keep the window's vibrancy. Nothing blurs behind a panel any more.
-- Secondary text (`text-muted-foreground`) is lighter in dark mode (oklch L 0.66 → 0.70)
-  and darker in light mode (0.48 → 0.46); tertiary text (`text-faint`) moved more
-  (dark 0.50 → 0.63, light 0.62 → 0.53). Both now meet 4.5:1; the order strong over
-  muted over faint holds in every palette.
+- Secondary text (`text-muted-foreground`) is lighter in dark mode (oklch L 0.66 → 0.78)
+  and darker in light mode (0.48 → 0.41); tertiary text (`text-faint`) moved more
+  (dark 0.50 → 0.72, light 0.62 → 0.48). Both now meet 4.5:1 on every surface they
+  sit on, selected rows, muted chips, glass veils and menu highlights included;
+  strong over muted over faint holds in every palette.
 - The folded lead's hover card opens outside the sidebar, level with the row,
   and hovering the row no longer brings its actions in, so its title keeps its width.
   The row's menu is still on right-click, on keyboard focus and when it is open.
 - With Reduce transparency on, glass is off: the window paints solid and nothing blurs.
+  WebKit has no `prefers-reduced-transparency`, so the app reads the setting from
+  AppKit (`NSWorkspace.accessibilityDisplayShouldReduceTransparency`) and follows
+  its change notification.
 
 ## Before and after
 
