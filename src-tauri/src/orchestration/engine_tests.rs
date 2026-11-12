@@ -2070,3 +2070,27 @@ fn a_retry_that_comes_up_as_the_budget_runs_out_starts_when_the_run_is_resumed()
     let p1 = resumed.run.piece("p1").unwrap();
     assert_eq!((p1.state, p1.tries.len(), p1.queued_for), (PieceState::Running, 2, None));
 }
+
+#[test]
+fn a_worker_deleted_mid_turn_frees_its_slot_for_the_next_queued_piece() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| settings.workers_per_run = 1);
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["p1"]);
+    assert_eq!(queued_for(&store::get(&run.id).unwrap()), vec![("p2", Some(Hold::RunLimit))]);
+
+    // p1's session is deleted while it works: no turn of it ends to say so.
+    let p1 = host.session_of("p1");
+    {
+        let mut world = host.world();
+        world.running.remove(&p1);
+        world.now.remove(&p1);
+    }
+    // The next tick of the watcher finds the slot free and starts what waited for it.
+    engine::watch(&host);
+    let after = store::get(&run.id).unwrap();
+    assert_eq!(after.piece("p1").unwrap().state, PieceState::Blocked);
+    assert_eq!((after.piece("p2").unwrap().state, after.piece("p2").unwrap().queued_for), (PieceState::Running, None));
+    assert_eq!(host.made(), vec!["p1", "p2"]);
+    assert_eq!(after.in_turn(), 1);
+}

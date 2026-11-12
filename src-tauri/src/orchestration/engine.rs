@@ -1467,6 +1467,11 @@ pub fn fill_slots(host: &dyn Host) {
         if !run.ready().iter().any(held) && !run.pieces.iter().filter(|piece| piece.held.is_some() && piece.worker.is_some()).any(|piece| held(&piece)) {
             continue;
         }
+        // Read first: a worker whose session was deleted mid-turn holds its slot until a read
+        // finds it gone, and no turn of it ends to say so.
+        if let Err(error) = refreshed(host, &run.id) {
+            log::warn!("read run {} before starting its queued pieces: {error}", run.id);
+        }
         match launch_ready(host, &run.id, Launch::Held) {
             Ok(start) if !start.started.is_empty() => log::info!("run {}: started queued pieces {}", run.id, start.started.join(", ")),
             Ok(_) => {}
@@ -1479,7 +1484,7 @@ pub fn fill_slots(host: &dyn Host) {
 pub fn watch(host: &dyn Host) -> bool {
     let now = host.now_ms();
     let Ok(runs) = store::list() else { return true };
-    let mut more = false;
+    let (mut more, mut fill) = (false, false);
     for run in runs.iter().filter(|run| !run.state.ended()) {
         if run.state == RunState::NeedsYou {
             match run.pause.as_ref().and_then(|pause| pause.resume_at) {
@@ -1510,6 +1515,12 @@ pub fn watch(host: &dyn Host) -> bool {
             log::warn!("check run {} for stalled workers: {error}", run.id);
         }
         more |= stored(&run.id).is_ok_and(|run| run.in_turn() > 0);
+        fill |= matches!(run.state, RunState::Running | RunState::Failed) && run.pieces.iter().any(|piece| matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit)));
+    }
+    // What waits for a slot is looked at on every tick, not only when a turn ends: a slot can
+    // free up without one (a worker's session deleted mid-turn).
+    if fill {
+        host.fill_later();
     }
     more
 }
