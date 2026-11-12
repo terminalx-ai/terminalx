@@ -2009,5 +2009,64 @@ fn a_retry_waits_for_a_slot_like_any_worker_and_every_try_counts_against_the_bud
     engine::worker_turn_ended(&host, &second);
     let after = store::get(&run.id).unwrap();
     assert_eq!(after.usage.dollars, 5.5);
-    assert_eq!((after.state, after.pause.as_ref().map(|pause| pause.kind)), (RunState::NeedsYou, Some(PauseKind::Dollars)));
+    assert!(host.world().told.iter().any(|told| told.contains("reached its budget") && told.contains("$5.50")), "the run paused on both tries' cost");
+    // Its result was still checked after the pause, and it was the last piece: the run is done.
+    assert_eq!((after.state, after.piece("p1").unwrap().state), (RunState::Done, PieceState::Done));
+}
+
+#[test]
+fn a_result_reported_as_the_budget_runs_out_is_still_checked() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 2;
+        settings.budget_dollars = 2.0;
+    });
+    host.world().api_key.insert("claude".into());
+    let run = engine::create(&host, &flat_plan(3, "claude"), "lead", None).unwrap();
+    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["p1", "p2"]);
+
+    // p1's report is the read that takes the run past its budget.
+    let p1 = host.session_of("p1");
+    host.world().costs.insert(p1.clone(), 2.5);
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(&host, &p1);
+    let after = store::get(&run.id).unwrap();
+    assert_eq!(after.state, RunState::NeedsYou);
+    // Its result was checked all the same, and accepted: it does not sit in `verifying` unchecked.
+    assert_eq!(after.piece("p1").unwrap().state, PieceState::Done);
+    assert_eq!(host.world().checked, vec!["p1".to_string()]);
+    // Nothing new started.
+    assert_eq!(host.made(), vec!["p1", "p2"]);
+}
+
+#[test]
+fn a_retry_that_comes_up_as_the_budget_runs_out_starts_when_the_run_is_resumed() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 1;
+        settings.budget_dollars = 2.0;
+    });
+    host.world().api_key.insert("claude".into());
+    let run = engine::create(&host, &flat_plan(1, "claude"), "lead", None).unwrap();
+    engine::start(&host, &run.id).unwrap();
+
+    // The try falls short, and what it cost takes the run past its budget, in the same read.
+    let first = host.session_of("p1");
+    host.world().costs.insert(first.clone(), 2.5);
+    host.reports("p1", Status::Failed, "The build broke.");
+    engine::worker_turn_ended(&host, &first);
+    assert_eq!(store::get(&run.id).unwrap().state, RunState::NeedsYou);
+    // The host is still asked to start the next try, and it is held for the person.
+    assert_eq!(host.world().retries, vec![run.id.clone()]);
+    assert!(engine::start_retries(&host, &run.id).unwrap().started.is_empty());
+    let held = store::get(&run.id).unwrap();
+    assert_eq!(queued_for(&held), vec![("p1", Some(Hold::Budget))]);
+    assert_eq!(host.made(), vec!["p1"]);
+
+    // The person raises the budget and resumes: the next try starts.
+    engine::set_limits(&host, &run.id, RunLimits { dollars: 10.0, ..held.limits.clone() }).unwrap();
+    let resumed = engine::resume(&host, &run.id, Resume::Now).unwrap();
+    assert_eq!((resumed.run.state, resumed.started.clone()), (RunState::Running, vec!["p1".to_string()]));
+    let p1 = resumed.run.piece("p1").unwrap();
+    assert_eq!((p1.state, p1.tries.len(), p1.queued_for), (PieceState::Running, 2, None));
 }

@@ -891,12 +891,18 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     if after.in_turn() > 0 || after.pause.as_ref().is_some_and(|pause| pause.resume_at.is_some()) {
         host.watch();
     }
-    if let Some(reached) = reached {
-        return pause(host, id, reached, &[]);
-    }
-    if after != run {
-        host.changed(&after);
-    }
+    // Past its budget: nothing new starts from here on, but what this read found is still
+    // followed up. A result that waits for its checks is checked, and a next try that waits
+    // is held for the person (`start_retries`), to start when the run is resumed.
+    let after = match reached {
+        Some(reached) => pause(host, id, reached, &[])?,
+        None => {
+            if after != run {
+                host.changed(&after);
+            }
+            after
+        }
+    };
     for worker in &back_at_work {
         host.check_reset(worker);
     }
@@ -972,7 +978,8 @@ fn counted(piece: &mut Piece, models: &[Model]) {
 /// The current try of `piece_id` is the one whose check began at `started`,
 /// still waiting on it: nobody replaced its worker or sent it back to work.
 fn checked_try<'a>(run: &'a mut Run, piece_id: &str, worker: &SessionRef, started: &str) -> Option<&'a mut Piece> {
-    if !matches!(run.state, RunState::Running | RunState::Failed) {
+    // A run paused on its budget still has the results reported before it paused checked.
+    if !matches!(run.state, RunState::Running | RunState::Failed | RunState::NeedsYou) {
         return None;
     }
     run.pieces.iter_mut().find(|piece| {
@@ -996,7 +1003,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         // One thread a piece: a second read that got here first has it.
         let Some(_checking) = checks::checking(id, &piece_id) else { continue };
         let run = stored(id)?;
-        if !matches!(run.state, RunState::Running | RunState::Failed) {
+        if !matches!(run.state, RunState::Running | RunState::Failed | RunState::NeedsYou) {
             break;
         }
         let Some(piece) = run.piece(&piece_id).filter(|piece| piece.check_waits()) else { continue };
