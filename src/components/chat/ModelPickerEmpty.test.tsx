@@ -13,7 +13,7 @@ function open(props: Partial<React.ComponentProps<typeof ModelPickerEmpty>> = {}
     <DropdownMenu open>
       <DropdownMenuTrigger>x</DropdownMenuTrigger>
       <DropdownMenuContent>
-        <ModelPickerEmpty agent="Codex" other="Claude Code" loading={false} retrying={false} onRetry={onRetry} onOpenSettings={onOpenSettings} {...props} />
+        <ModelPickerEmpty agent="Codex" signIn="ChatGPT" other="Claude Code" loading={false} retrying={false} onRetry={onRetry} onOpenSettings={onOpenSettings} {...props} />
       </DropdownMenuContent>
     </DropdownMenu>,
   );
@@ -25,6 +25,7 @@ describe("an empty model list", () => {
     const { onRetry, onOpenSettings } = open();
     expect(screen.getByText("No models from Codex")).toBeTruthy();
     expect(screen.getByText(/Codex answered with an empty model list/)).toBeTruthy();
+    expect(screen.getByText(/Its ChatGPT sign-in may have expired/)).toBeTruthy();
     expect(screen.getByText(/Claude Code models still work/)).toBeTruthy();
     screen.getByRole("menuitem", { name: "Open Settings › Agents" }).click();
     expect(onOpenSettings).toHaveBeenCalled();

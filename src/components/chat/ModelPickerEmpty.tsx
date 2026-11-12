@@ -2,8 +2,10 @@ import { Loader2 } from "@/icons";
 import { DropdownMenuItem, DropdownMenuLabel } from "@/components/ui/menu";
 
 /** What the model picker says while the agent's models load, and when it answered with none. */
-export function ModelPickerEmpty({ agent, other, loading, retrying, onRetry, onOpenSettings }: {
+export function ModelPickerEmpty({ agent, signIn, other, loading, retrying, onRetry, onOpenSettings }: {
   agent: string;
+  /** Whose account the agent signs in with ("ChatGPT" for Codex), when it is not the agent's own. */
+  signIn?: string;
   /** The other agent, whose models may still work. */
   other?: string;
   loading: boolean;
@@ -23,7 +25,7 @@ export function ModelPickerEmpty({ agent, other, loading, retrying, onRetry, onO
     <div data-testid="model-picker-empty">
       <DropdownMenuLabel className="text-foreground">No models from {agent}</DropdownMenuLabel>
       <p className="max-w-72 px-2 pb-1.5 text-xs text-muted-foreground">
-        {agent} answered with an empty model list. Its sign-in may have expired: check it in Settings › Agents.
+        {agent} answered with an empty model list. Its {signIn ? `${signIn} ` : ""}sign-in may have expired: check it in Settings › Agents.
       </p>
       <DropdownMenuItem onSelect={onOpenSettings}>Open Settings › Agents</DropdownMenuItem>
       <DropdownMenuItem onSelect={(e) => { e.preventDefault(); onRetry(); }}>Retry</DropdownMenuItem>

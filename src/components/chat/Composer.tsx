@@ -95,6 +95,12 @@ const CORNER = "rounded-[calc(var(--radius-2xl)-10px)]";
 /** A one-click next step above the input. */
 export type Handoff = { label: string; prompt: string } | { label: string; run: () => void };
 
+/** Agents by the name their models go under in the picker's empty state. */
+const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", opencode: "OpenCode" };
+const agentName = (id: string) => AGENT_NAMES[id] ?? id;
+/** The account an agent signs in with, where it is not the agent's own. */
+const SIGN_INS: Record<string, string> = { codex: "ChatGPT" };
+
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
  * While a turn runs the send button becomes Stop and a new prompt queues.
@@ -102,8 +108,6 @@ export type Handoff = { label: string; prompt: string } | { label: string; run: 
  * Images attach as blocks; any other dropped file becomes an `@path` mention.
  * Up and Down recall the tab's earlier and later messages, as a shell does.
  */
-const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", opencode: "OpenCode" };
-const agentName = (id: string) => AGENT_NAMES[id] ?? id;
 
 export function Composer({
   tab,
@@ -633,6 +637,7 @@ export function Composer({
               {noModels ? (
                 <ModelPickerEmpty
                   agent={agentName(tab.harness)}
+                  signIn={SIGN_INS[tab.harness]}
                   other={agentHandoff?.name}
                   loading={!modelsLoaded}
                   retrying={retryingModels}
