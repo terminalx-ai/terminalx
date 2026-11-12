@@ -93,6 +93,8 @@ afterEach(cleanup);
 const called = (command: string) => mocks.invoke.mock.calls.filter(([name]) => name === command).map(([, args]) => args);
 const option = (number: number) => screen.getAllByRole("option").find((row) => row.getAttribute("data-pr") === String(number))!;
 const search = () => screen.getByRole("textbox", { name: "Search open PRs" });
+/** The dialog's description, whole: the repository name is a span of its own so it never breaks. */
+const description = async () => (await screen.findByText(/^Show an open PR’s checks and review in this session\./)).textContent;
 
 async function mount() {
   vi.resetModules();
@@ -111,7 +113,7 @@ async function mount() {
 describe("Link a pull request", () => {
   it("lists the repository's open pull requests with their branches, checks and authors", async () => {
     await mount();
-    expect(await screen.findByText(/5 open PRs in terminalx-ai\/terminalx\./)).toBeTruthy();
+    await waitFor(async () => expect(await description()).toBe("Show an open PR’s checks and review in this session. 5 open PRs in terminalx-ai/terminalx."));
     expect(search().getAttribute("placeholder")).toBe("Search open PRs by number, title or branch");
     expect(screen.getAllByRole("option")).toHaveLength(5);
     expect(within(option(788)).getByText("raccoon/approval-cards-diff → main")).toBeTruthy();
@@ -224,7 +226,7 @@ describe("Link a pull request", () => {
   it("says when more pull requests are open than it lists", async () => {
     answer = () => ({ ...candidates(), total: 412 });
     await mount();
-    expect(await screen.findByText(/412 open PRs in terminalx-ai\/terminalx\. The 5 most recent are listed\./)).toBeTruthy();
+    await waitFor(async () => expect(await description()).toBe("Show an open PR’s checks and review in this session. 412 open PRs in terminalx-ai/terminalx. The 5 most recent are listed."));
   });
 
   it("marks one this session already shows", async () => {

@@ -128,6 +128,25 @@ describe("merged workspace action", () => {
     expect(screen.queryByRole("button", { name: "Settle worktree" })).toBeNull();
   });
 
+  it("still says the branch merged while a pull request linked from another branch is open (PRO-294)", async () => {
+    mockBackend(cleanMerged);
+    const backend = mocks.invoke.getMockImplementation()!;
+    const linked: PullRequest = { ...mergedPr, number: 70, title: "Someone else's work", url: "https://example.test/pull/70", head: "elsewhere", state: "OPEN", mergeable: "MERGEABLE",
+      checks: [{ name: "CI", state: "failure", url: "https://github.com/acme/api/actions/runs/1/job/2", actions: { runId: 1, jobId: 2 } }] };
+    mocks.invoke.mockImplementation(async (command: string, args: { url?: string }) => {
+      if (command === "pr_associations") return [{ url: mergedPr.url, number: mergedPr.number, head: mergedPr.head, scope: { kind: "local", cwd } }, { url: linked.url, number: linked.number, head: linked.head, scope: { kind: "local", cwd }, linked: true }];
+      if (command === "pr_details") return args.url === linked.url ? linked : mergedPr;
+      return backend(command, args);
+    });
+    const onFixErrors = vi.fn(async () => {});
+    render(<PrPanel cwd={cwd} sessionId="author" branch={mergedPr.head} active busy={false} onSettle={() => {}} onFixErrors={onFixErrors} workspace={{ projectPath, onDelete: vi.fn() }} />);
+    await screen.findByText("Someone else's work");
+    expect(await screen.findByText("This branch has been merged.")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Delete workspace" })).toBeTruthy();
+    // Its failing checks are shown, but not sent to this session's agent to fix.
+    expect(screen.queryByRole("button", { name: /Fix errors/ })).toBeNull();
+  });
+
   it.each([
     ["has uncommitted changes", { ...cleanMerged, uncommitted: 1 }],
     ["has unpushed commits", { ...cleanMerged, unpushed: 1 }],

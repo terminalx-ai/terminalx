@@ -340,7 +340,9 @@ export function PrPanel({
     const pr = row.pr!;
     openPr(sessionId ?? `checkout:${cwd}`, cwd, row.association ?? { url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd } });
   } : undefined;
-  const open = prs.filter((p) => p.state === "OPEN");
+  // The session's own pull requests: one linked from another branch (PRO-294) is only shown here, and says nothing of whether this branch is done.
+  const ownWork = (row: SessionPr) => row.current || !row.association?.linked;
+  const open = visibleRows.filter((row) => ownWork(row) && row.pr?.state === "OPEN");
   const currentBranch = status?.branch ?? branch;
   const fresh = loadedSelection === selection && !loading && (!error || errorFrom === "action") && !visibleRows.some((row) => row.error);
   const currentOpen = visibleRows.some((row) => row.current && row.pr?.state === "OPEN");
@@ -401,7 +403,7 @@ export function PrPanel({
         const reviews = <ReviewThreads source={source} url={pr.url} sessionId={sessionId} active={active} prState={pr.state} />;
         const checks = <PrChecks pr={pr} source={source} showSummary={!inline} disabled={!!working || loading || !fresh} fixBusy={fixBusy}
           onRerun={(failedOnly) => rerun(pr, failedOnly)}
-          onFix={onFixErrors && pr.state === "OPEN" ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
+          onFix={onFixErrors && pr.state === "OPEN" && ownWork(row) ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
         const onUnlink = unlink(row);
         if (inline) return <div key={row.identity}><InlinePr onUnlink={onUnlink} unlinkDisabled={!!working} reviews={reviews} onOpen={openInTab ? () => openInTab(row) : undefined} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
           <>
