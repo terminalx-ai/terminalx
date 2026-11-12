@@ -196,3 +196,13 @@ it("replaces a start when its issue pipeline needs the reader", () => {
   expect(screen.getByRole("status").textContent).toContain("#785 needs you");
   expect(screen.queryByText("Session started")).toBeNull();
 });
+
+it("shows setting-link toasts beside the other notices", async () => {
+  const { forgetSettingToasts, showSettingEnabled } = await import("@/lib/settingsToasts");
+  render(<Toasts />);
+  act(() => { showSettingEnabled("general.sounds", "Sounds"); });
+  const toast = screen.getByRole("status", { name: "Turned on Sounds" });
+  expect(within(toast).getByRole("button", { name: "Open setting" })).toBeTruthy();
+  act(forgetSettingToasts);
+  expect(screen.queryByRole("status", { name: "Turned on Sounds" })).toBeNull();
+});
