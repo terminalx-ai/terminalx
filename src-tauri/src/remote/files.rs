@@ -475,8 +475,8 @@ impl WorkspaceFiles {
     // ---- search ----------------------------------------------------------
 
     /// Grep the tree under `path` (the whole workspace by default): literal
-    /// or `regex`, `caseSensitive` or not, ignored and binary files skipped,
-    /// symlinks never followed. At most `maxResults` hits and a bounded
+    /// or `regex`, `caseSensitive` or not, `wholeWord` or not, ignored and
+    /// binary files skipped, symlinks never followed. At most `maxResults` hits and a bounded
     /// answer (`capped`); `fs.cancel` with the same `searchId` stops it
     /// early (`cancelled`), as does a new search under the same id.
     pub fn search(&self, peer: u64, params: &Value) -> Result<Value, RpcError> {
@@ -489,6 +489,8 @@ impl WorkspaceFiles {
             regex: bool,
             #[serde(default)]
             case_sensitive: bool,
+            #[serde(default)]
+            whole_word: bool,
             #[serde(default)]
             path: String,
             max_results: Option<usize>,
@@ -510,7 +512,7 @@ impl WorkspaceFiles {
         if let Some(previous) = self.searches.lock().unwrap().insert(key.clone(), flag.clone()) {
             previous.store(true, Ordering::Relaxed);
         }
-        let result = crate::files::search_text_under(&self.root, &base, &p.query, p.regex, p.case_sensitive, limit, None, &flag);
+        let result = crate::files::search_text_under(&self.root, &base, &p.query, p.regex, p.case_sensitive, p.whole_word, limit, None, &flag);
         {
             let mut searches = self.searches.lock().unwrap();
             if searches.get(&key).is_some_and(|current| Arc::ptr_eq(current, &flag)) {

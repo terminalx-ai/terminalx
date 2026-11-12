@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CaseSensitive, ChevronDown, ChevronRight, Regex, Replace, ReplaceAll, Search } from "@/icons";
+import { CaseSensitive, ChevronDown, ChevronRight, Regex, Replace, ReplaceAll, Search, TextSearch as NoHitsIcon, ToggleLeft, WholeWord } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { openFile } from "@/lib/editors";
 import { useShortcut } from "@/lib/hotkeys";
 import { hitKey, planReplace, replaceInOpenBuffers, splitTargets, type ReplacePlan, type ReplaceSpec } from "@/lib/replace";
 import { cn } from "@/lib/cn";
+import { joinNames, loadSearchToggles, registerProjectSearch, saveSearchToggles, togglesOn } from "@/lib/projectSearch";
 import { fileErrorText, localFileSource, StaleRequestError, type FileSource } from "@/lib/workspaceFiles";
 
 const LIMIT = 500;
@@ -24,6 +25,11 @@ const LIMIT = 500;
  * It searches through a FileSource: the local checkout at `root` unless
  * `source` names another. Replace is offered only where the source can
  * rewrite files.
+ *
+ * Match case, Whole word and Regex stay as they were left, across reopening
+ * and restarts. A search that finds nothing names the toggles that are on
+ * and offers to turn them off. `openProjectSearch` (lib/projectSearch) opens
+ * it from elsewhere with a query filled in.
  */
 export function ProjectSearch({ sessionId, root, source }: { sessionId: string; root: string; source?: FileSource }) {
   const reader = useMemo(() => source ?? localFileSource(root), [source, root]);
@@ -34,8 +40,10 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
   const [replacement, setReplacement] = useState("");
   const [replaceShown, setReplaceOpen] = useState(false);
   const replaceOpen = replaceShown && canRewrite;
-  const [regex, setRegex] = useState(false);
-  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [initialToggles] = useState(loadSearchToggles);
+  const [regex, setRegex] = useState(initialToggles.regex);
+  const [caseSensitive, setCaseSensitive] = useState(initialToggles.caseSensitive);
+  const [wholeWord, setWholeWord] = useState(initialToggles.wholeWord);
   const [result, setResult] = useState<TextSearch | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -52,6 +60,16 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
     focusNext.current = "find";
     setOpen(true);
   });
+  useEffect(
+    () =>
+      registerProjectSearch((query) => {
+        if (query) setQ(query);
+        focusNext.current = "find";
+        setOpen(true);
+      }),
+    [],
+  );
+  useEffect(() => saveSearchToggles({ caseSensitive, wholeWord, regex }), [caseSensitive, wholeWord, regex]);
   useShortcut("files.replace", () => {
     if (!canRewrite) return;
     focusNext.current = "replace";
@@ -75,7 +93,7 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
       setBusy(true);
       try {
         if (!reader.search) throw new Error("Searching is not available in this workspace.");
-        const r = await reader.search({ query: q, regex, caseSensitive, limit: LIMIT, replacement: preview }, controller.signal);
+        const r = await reader.search({ query: q, regex, caseSensitive, wholeWord, limit: LIMIT, replacement: preview }, controller.signal);
         if (live) {
           setResult(r);
           setError(null);
@@ -91,13 +109,13 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
       controller.abort();
       window.clearTimeout(t);
     };
-  }, [open, q, regex, caseSensitive, reader, preview, generation]);
+  }, [open, q, regex, caseSensitive, wholeWord, reader, preview, generation]);
 
   // A new question starts with everything selected again.
   useEffect(() => {
     setExcluded(new Set());
     setReport(null);
-  }, [q, regex, caseSensitive, root, open]);
+  }, [q, regex, caseSensitive, wholeWord, root, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -152,7 +170,7 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
    */
   const runReplace = useCallback(
     async (target: ReplacePlan, opts: { everything: boolean; confirm: boolean }) => {
-      const spec: ReplaceSpec = { query: q, replacement, regex, caseSensitive };
+      const spec: ReplaceSpec = { query: q, replacement, regex, caseSensitive, wholeWord };
       const abs = (rel: string) => `${root}/${rel}`;
       const openRel = liveEditorPathsUnder(root).map((p) => p.slice(root.length + 1));
       const { live, disk } = opts.everything
@@ -184,7 +202,7 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
         }
         if (opts.everything || disk.length) {
           if (!reader.replaceText) throw new Error("Replacing is not available in this workspace.");
-          const r = await reader.replaceText({ query: q, replacement, regex, caseSensitive, targets: opts.everything ? null : disk, skip: opts.everything ? openRel : [] });
+          const r = await reader.replaceText({ query: q, replacement, regex, caseSensitive, wholeWord, targets: opts.everything ? null : disk, skip: opts.everything ? openRel : [] });
           files += r.files;
           count += r.replacements;
         }
@@ -198,7 +216,7 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
         setReplacing(false);
       }
     },
-    [q, replacement, regex, caseSensitive, root, reader],
+    [q, replacement, regex, caseSensitive, wholeWord, root, reader],
   );
 
   const replaceSelected = () => {
@@ -209,6 +227,16 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
   const replaceHit = (h: TextHit) => void runReplace(planReplace([h], new Set()), { everything: false, confirm: false });
 
   const canReplace = replaceOpen && !!result && !busy;
+  const noHits = !!q.trim() && !!result && !result.hits.length && !busy;
+  const onNames = togglesOn({ caseSensitive, wholeWord, regex });
+  // Exactly the toggles that are on go off, and the query runs again.
+  const turnOff = () => {
+    setCaseSensitive(false);
+    setWholeWord(false);
+    setRegex(false);
+    focusNext.current = "find";
+    input.current?.focus();
+  };
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -245,12 +273,6 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
               autoComplete="off"
               className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-faint"
             />
-            <SearchToggle label="Match case" pressed={caseSensitive} onClick={() => setCaseSensitive((v) => !v)}>
-              <CaseSensitive className="size-4" />
-            </SearchToggle>
-            <SearchToggle label="Regular expression" pressed={regex} onClick={() => setRegex((v) => !v)}>
-              <Regex className="size-4" />
-            </SearchToggle>
           </div>
           {replaceOpen && (
             <div className="flex items-center gap-2 px-3 pb-2">
@@ -275,18 +297,30 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
               </Button>
             </div>
           )}
+          <div className="flex h-9 items-center gap-1 border-t border-hairline px-3">
+            <SearchToggle label="Match case" text="Match case" pressed={caseSensitive} onClick={() => setCaseSensitive((v) => !v)}>
+              <CaseSensitive className="size-3.5" />
+            </SearchToggle>
+            <SearchToggle label="Whole word" text="Whole word" pressed={wholeWord} onClick={() => setWholeWord((v) => !v)}>
+              <WholeWord className="size-3.5" />
+            </SearchToggle>
+            <SearchToggle label="Regular expression" text="Regex" pressed={regex} onClick={() => setRegex((v) => !v)}>
+              <Regex className="size-3.5" />
+            </SearchToggle>
+            {result && (
+              <div className="ml-auto min-w-0 truncate pl-2 text-xs text-muted-foreground">
+                {occurrences}
+                {result.capped ? "+" : ""} {occurrences === 1 && !result.capped ? "match" : "matches"}
+                {occurrences || result.capped ? ` in ${result.files} file${result.files === 1 ? "" : "s"}` : ""}
+                {replaceOpen && !nothingExcluded ? ` · ${plan.occurrences} selected` : ""}
+                {busy ? " · searching…" : ""}
+              </div>
+            )}
+          </div>
         </div>
         <div className="max-h-[26rem] overflow-auto p-1 scrollbar-thin">
           {error && <div className="px-3 py-2 text-xs text-destructive">{error}</div>}
           {report && <div className="px-3 py-2 text-xs text-add">{report}</div>}
-          {result && (
-            <div className="px-2 py-1 text-[11px] text-faint">
-              {occurrences}
-              {result.capped ? "+" : ""} {occurrences === 1 && !result.capped ? "match" : "matches"} in {result.files} file{result.files === 1 ? "" : "s"}
-              {replaceOpen && !nothingExcluded ? ` · ${plan.occurrences} selected` : ""}
-              {busy ? " · searching…" : ""}
-            </div>
-          )}
           {groups.map(([path, hits]) => (
             <div key={path} className="mb-1">
               <div className="group/file sticky top-0 z-10 flex items-center gap-2 bg-popover px-2 py-1 text-xs font-medium text-foreground">
@@ -343,12 +377,36 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
               })}
             </div>
           ))}
-          {q.trim() && result && !result.hits.length && !busy && <div className="px-3 py-6 text-center text-xs text-faint">No matches.</div>}
+          {noHits && (
+            <div className="px-3 py-8 text-center">
+              <div className="mx-auto grid size-10 place-items-center rounded-lg bg-veil-strong">
+                <NoHitsIcon className="size-[18px] text-muted-foreground" />
+              </div>
+              <div className="mt-3 text-sm font-medium text-foreground">No matches for “{q}”</div>
+              {onNames.length > 0 && (
+                <>
+                  <div className="mx-auto mt-1 max-w-[26rem] text-xs text-muted-foreground">
+                    {joinNames(onNames)} {onNames.length === 1 ? "is" : "are"} on.
+                  </div>
+                  <div className="mt-4 flex justify-center">
+                    <Button variant="outline" size="sm" className="text-muted-foreground" onClick={turnOff}>
+                      <ToggleLeft />
+                      Turn off {joinNames(onNames)}
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           {!q.trim() && (
             <div className="px-3 py-6 text-center text-xs text-faint">
               {replaceOpen ? "Type to search, then a replacement to preview it in every file." : "Type to search every file in the checkout."}
             </div>
           )}
+        </div>
+        <div className="flex items-center gap-4 border-t border-hairline px-3 py-2 text-[11px] text-faint">
+          <span>Searches files in this worktree that git does not ignore</span>
+          <span className="ml-auto">Toggles stay on for the next search</span>
         </div>
       </DialogContent>
     </Dialog>
