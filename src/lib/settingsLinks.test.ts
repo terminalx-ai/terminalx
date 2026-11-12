@@ -34,6 +34,8 @@ describe("setting links", () => {
     expect(parseSettingLink(buildSettingLink("general.sounds"))).toEqual({ id: "general.sounds", enable: false });
     expect(parseSettingLink("terminalx://settings/repositories.scripts?enable=1")).toEqual({ id: "repositories.scripts", enable: true });
     for (const row of SETTINGS_ROWS) expect(parseSettingLink(buildSettingLink(row.id))?.id).toBe(row.id);
+    // A scheme and host are not case-sensitive; the row id is.
+    expect(parseSettingLink("TerminalX://Settings/general.sounds?enable=1")).toEqual({ id: "general.sounds", enable: true });
   });
 
   it.each([
@@ -55,6 +57,14 @@ describe("setting links", () => {
     "https://settings/general.sounds",
     "terminalx:settings/general.sounds",
     "terminalx://settings/toString",
+    " terminalx://settings/general.sounds",
+    "terminalx://settings/general.sounds ",
+    "terminalx://settings/general.\nsounds",
+    "terminalx://settings/general%2Esounds",
+    "terminalx://settings/General.Sounds",
+    "terminalx://settings/general.sounds?enable=1\n",
+    "terminalx://settings/general.sounds?ENABLE=1",
+    "terminalx://settings/general.sounds\\..\\x",
     "not a url",
   ])("rejects %s", (url) => {
     expect(parseSettingLink(url)).toBeNull();

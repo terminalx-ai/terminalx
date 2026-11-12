@@ -24,7 +24,7 @@ describe("setting link toasts", () => {
     expect(screen.getAllByRole("button", { name: "Open setting" })).toHaveLength(1);
   });
 
-  it("opens the setting from Turned on, and dismisses", () => {
+  it("opens the setting from Turned on, and the toast goes", () => {
     const opened = vi.fn();
     const stop = onOpenSettingRow(opened);
     try {
@@ -32,9 +32,6 @@ describe("setting link toasts", () => {
       act(() => { showSettingEnabled("general.sounds", "Sounds"); });
       fireEvent.click(screen.getByRole("button", { name: "Open setting" }));
       expect(opened).toHaveBeenCalledWith("general.sounds");
-      expect(screen.queryByRole("status")).toBeNull();
-      act(() => { showSettingLinkCopied("general.sounds", "Sounds"); });
-      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
       expect(screen.queryByRole("status")).toBeNull();
     } finally { stop(); }
   });

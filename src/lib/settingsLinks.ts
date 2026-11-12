@@ -96,25 +96,21 @@ export interface ParsedSettingLink {
 }
 
 /**
- * A setting link, or null for anything else: scheme `terminalx:`, host
- * `settings`, exactly one path segment that is a registry row id, no
- * credentials, port or fragment, and no query other than `enable=1`.
- * Strict on purpose: the link may come from any other app.
+ * A setting link, or null for anything else. The whole string must be
+ * `terminalx://settings/<row-id>` with nothing after it but an optional
+ * `?enable=1`: no credentials, port, further path segment, other query,
+ * fragment, escape or whitespace, and the id must be a registry row.
+ * Strict on purpose, and matched as text rather than through a URL parser
+ * (which trims and unescapes): the link may come from any other app.
  */
+const SETTING_LINK_TAIL = /^([A-Za-z0-9._-]+)(\?enable=1)?$/;
 export function parseSettingLink(url: string): ParsedSettingLink | null {
   if (typeof url !== "string") return null;
-  let parsed: URL;
-  try { parsed = new URL(url); } catch { return null; }
-  if (parsed.protocol !== "terminalx:" || parsed.host !== "settings" || parsed.username || parsed.password || parsed.port) return null;
-  if (parsed.hash || url.includes("#")) return null;
-  const segments = parsed.pathname.split("/");
-  if (segments.length !== 2 || segments[0] !== "") return null;
-  const id = segments[1];
-  if (!settingById(id)) return null;
-  // An empty "?" leaves `search` empty, so the raw link is checked too.
-  const enable = url.includes("?");
-  if (enable && parsed.search !== "?enable=1") return null;
-  return { id: id as SettingId, enable };
+  // The scheme and host may be in any case; the row id and the query never are.
+  if (url.slice(0, SETTING_LINK_PREFIX.length).toLowerCase() !== SETTING_LINK_PREFIX) return null;
+  const match = SETTING_LINK_TAIL.exec(url.slice(SETTING_LINK_PREFIX.length));
+  if (!match || !settingById(match[1])) return null;
+  return { id: match[1] as SettingId, enable: match[2] !== undefined };
 }
 
 export type EnableSettingResult = "enabled" | "not-linkable" | "unknown";
