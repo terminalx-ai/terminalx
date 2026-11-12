@@ -13,6 +13,8 @@ import {
 import {
   AtSign,
   BarChart3,
+  Bot,
+  FlaskConical,
   CalendarClock,
   CircleDot,
   Command as CommandIcon,
@@ -23,33 +25,49 @@ import {
   Gauge,
   GitBranch,
   GitPullRequest,
+  HardDrive,
   Home,
+  Info,
+  KeyRound,
   Keyboard,
   LayoutGrid,
   Loader2,
   MessageSquare,
+  Mic,
   Moon,
   PanelLeft,
   PanelRight,
   Palette,
+  Plug,
   Search,
   Settings,
+  Smartphone,
   Sparkles,
   Sun,
   Terminal,
+  User,
+  Users,
+  Workflow,
   Cloud,
   type LucideIcon,
   Trash2,
 } from "@/icons";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { HighlightedText } from "@/components/ui/HighlightedText";
-import { searchSettingsSections } from "@/lib/settingsSections";
+import { SETTINGS_SECTIONS as SETTINGS_PAGES, settingsSectionOffered } from "@/lib/settingsSections";
+import { searchSettings } from "@/lib/settingsSearch";
+import { requestProjectSettings } from "@/lib/projectAdded";
+import type { SettingsSection } from "@/components/settings/settingsRegistry";
 import { AgentMark } from "@/components/AgentMark";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { cn } from "@/lib/cn";
 import {
   indexPaletteItem,
   movePaletteSelection,
+  PALETTE_TABS,
+  paletteScopeShows,
+  palettePlaceholder,
+  paletteTabOf,
   parseSmartInput,
   rankPaletteItems,
   searchPaletteIndex,
@@ -61,6 +79,7 @@ import {
   type PaletteEntityBase,
   type PaletteMatch,
   type PaletteNavigationKey,
+  type PaletteScope,
   type SmartInput,
 } from "@/lib/commandPalette";
 import { api, errorMessage, files, gh, issues, type FileHit, type Issue, type PullRequest } from "@/lib/api";
@@ -106,6 +125,28 @@ const GROUP_CAPS: Record<string, number> = {
   files: 8,
   commands: 8,
   settings: 30,
+  "settings-pages": 30,
+  "settings-projects": 30,
+};
+
+/** Each Settings page's icon in the palette (design 07.05 gives every page its own). */
+const SETTINGS_PAGE_ICONS: Record<SettingsSection, LucideIcon> = {
+  account: User,
+  devices: Smartphone,
+  general: Settings,
+  appearance: Palette,
+  agents: Bot,
+  orchestrator: Workflow,
+  environment: KeyRound,
+  transcription: Mic,
+  integrations: Plug,
+  projects: FolderPlus,
+  repositories: FolderGit2,
+  organizations: Users,
+  storage: HardDrive,
+  shortcuts: Keyboard,
+  experimental: FlaskConical,
+  about: Info,
 };
 
 interface CommandEntry extends PaletteEntityBase {
@@ -140,6 +181,8 @@ interface PaletteRow {
   run: () => void | Promise<void>;
   restoreFocus?: boolean;
   closeBefore?: boolean;
+  /** One line: the title, and the secondary text after it (the Settings pages list, design 07.05). */
+  inline?: boolean;
 }
 
 interface PaletteGroup {
@@ -263,7 +306,7 @@ export function CommandPalette({
   const status = useStatus();
   const theme = useTheme();
   const [query, setQuery] = useState("");
-  const [scope, setScope] = useState<"all" | "cloud" | "settings">("all");
+  const [scope, setScope] = useState<PaletteScope>("all");
   const deferredQuery = useDeferredValue(query);
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
@@ -505,7 +548,7 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:mode:system", group: "commands" as const, primary: "Appearance: System", secondary: theme.mode === "system" ? "Current appearance" : "Follow the system appearance", recentAt: 5, icon: Palette, run: () => setMode("system") }),
       indexPaletteItem({ id: "command:mode:light", group: "commands" as const, primary: "Appearance: Light", secondary: theme.mode === "light" ? "Current appearance" : "Use the light appearance", recentAt: 4, icon: Sun, run: () => setMode("light") }),
       indexPaletteItem({ id: "command:mode:dark", group: "commands" as const, primary: "Appearance: Dark", secondary: theme.mode === "dark" ? "Current appearance" : "Use the dark appearance", recentAt: 3, icon: Moon, run: () => setMode("dark") }),
-      indexPaletteItem({ id: "command:settings:search", group: "commands" as const, primary: "Search settings…", secondary: "Find a settings section", recentAt: 2, icon: Settings, keepOpen: true, run: () => { setScope("settings"); setQuery(""); setSelected(0); } }, ["preferences options configure"]),
+      indexPaletteItem({ id: "command:settings:search", group: "commands" as const, primary: "Search settings…", secondary: "Find a setting by name and open it", recentAt: 2, icon: Settings, keepOpen: true, run: () => { setScope("settings"); setQuery(""); setSelected(0); } }, ["preferences options configure"]),
       indexPaletteItem({ id: "command:new-issue", group: "commands" as const, primary: "New issue…", secondary: "Create a GitHub or Linear issue for the project", recentAt: 2, icon: CircleDot, run: () => openNewIssue() }, ["issue create new bug feature github linear ticket"]),
       indexPaletteItem({ id: "command:worktree-cleanup", group: "commands" as const, primary: "Clean up worktrees…", secondary: "Review and remove safe worktrees across open projects, here and on cloud workspaces", recentAt: 2, icon: Trash2, run: () => openWorktreeCleanup() }, ["worktree workspace cleanup disk space remove delete prune"]),
       indexPaletteItem({ id: "command:local-section:create", group: "commands" as const, primary: "New local section…", secondary: "Group sessions across local projects", recentAt: 2, icon: FolderPlus, run: () => openSectionDialog({ kind: "create" }) }, ["create sidebar section"]),
@@ -648,18 +691,62 @@ export function CommandPalette({
           },
         })) }];
     }
-    const settingsMatches = searchSettingsSections(deferredQuery);
-    const settingsGroup: PaletteGroup = {
-      id: "settings",
-      label: "Settings",
-      rows: settingsMatches.map((match) => entityRow(
-        { ...match, item: { ...match.item, id: `palette:${match.item.id}` } },
-        "command",
-        () => onOpenSettings(match.item.tab),
-        { icon: Settings },
-      )),
+    // Settings are found by row (PRO-127): a row opens Settings on that row and
+    // highlights it. With nothing typed, the pages are listed instead.
+    const settingsMatches = searchSettings(deferredQuery);
+    const settingsGroup: PaletteGroup = deferredQuery.trim()
+      ? {
+          id: "settings",
+          label: "Settings",
+          rows: settingsMatches.map((match) => {
+            const page = `${match.sectionTitle} · `;
+            return {
+              id: `palette:setting:${match.id}`,
+              kind: "command",
+              primary: match.row.title,
+              secondary: match.row.description ? `${page}${match.row.description}` : match.sectionTitle,
+              primaryRanges: match.titleRanges,
+              secondaryRanges: match.row.description
+                ? match.descriptionRanges.map((range) => ({ start: range.start + page.length, end: range.end + page.length }))
+                : [],
+              icon: SETTINGS_PAGE_ICONS[match.section],
+              run: () => onOpenSettings(match.id),
+            };
+          }),
+        }
+      : {
+          id: "settings-pages",
+          label: "Settings pages",
+          rows: SETTINGS_PAGES.filter((page) => settingsSectionOffered(page.id)).map((page) => ({
+            id: `palette:settings-page:${page.id}`,
+            kind: "command",
+            primary: page.title,
+            secondary: page.description,
+            primaryRanges: [],
+            secondaryRanges: [],
+            icon: SETTINGS_PAGE_ICONS[page.id],
+            inline: true,
+            run: () => onOpenSettings(page.id),
+          })),
+        };
+    // Under the pages, each project's own settings (design 07.05): the repositories Settings lists.
+    const settingsProjectsGroup: PaletteGroup = {
+      id: "settings-projects",
+      label: "Projects",
+      rows: store.projects.filter((project) => !project.archived).map((project) => ({
+        id: `palette:settings-project:${project.path}`,
+        kind: "command",
+        primary: project.name,
+        secondary: "Scripts, files to copy and workspace cleanup",
+        primaryRanges: [],
+        secondaryRanges: [],
+        icon: FolderGit2,
+        project,
+        inline: true,
+        run: () => requestProjectSettings(project.path),
+      })),
     };
-    if (scope === "settings") return [settingsGroup];
+    if (scope === "settings") return deferredQuery.trim() ? [settingsGroup] : [settingsGroup, settingsProjectsGroup];
     const entityMatches = searchPaletteIndex(paletteIndex, deferredQuery);
     const commandMatches = rankPaletteItems(commandEntries, deferredQuery);
     const rankedFiles = deferredQuery.trim() ? rankPaletteItems(fileEntries, deferredQuery) : [];
@@ -741,18 +828,19 @@ export function CommandPalette({
       const cloudRows = entityMatches.sessions.flatMap((match, index) => (match.item.cloudKey ? [sessionRows[index]] : []));
       return [{ id: "sessions", label: "Cloud sessions", rows: cloudRows }];
     }
+    const searched = !!deferredQuery.trim();
     // A strong settings match ("font") should beat a fuzzy command; an exact
     // command ("Home") should still win over incidental settings keywords.
     const commandGroup: PaletteGroup = { id: "commands", label: "Views and commands", rows: commandRows };
-    const settingsFirst = deferredQuery.trim() && (settingsMatches[0]?.score ?? Infinity) < (commandMatches[0]?.score ?? Infinity);
+    const settingsFirst = searched && (settingsMatches[0]?.score ?? Infinity) < (commandMatches[0]?.score ?? Infinity);
     return [
       { id: "smart", label: "Smart input", rows: smartRows },
-      { id: "sessions", label: deferredQuery.trim() ? "Sessions" : "Recent sessions", rows: sessionRows },
-      { id: "workspaces", label: deferredQuery.trim() ? "Workspaces" : "Recent workspaces", rows: workspaceRows },
-      { id: "projects", label: deferredQuery.trim() ? "Projects" : "Recent projects", rows: projectRows },
+      { id: "sessions", label: searched ? "Sessions" : "Recent sessions", rows: sessionRows },
+      { id: "workspaces", label: searched ? "Workspaces" : "Recent workspaces", rows: workspaceRows },
+      { id: "projects", label: searched ? "Projects" : "Recent projects", rows: projectRows },
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
       ...(settingsFirst ? [settingsGroup, commandGroup] : [commandGroup, settingsGroup]),
-    ];
+    ].filter((group) => paletteScopeShows(scope, group.id));
   }, [statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
 
   const renderedGroups = useMemo(() => {
@@ -812,7 +900,8 @@ export function CommandPalette({
     }
   };
 
-  const searching = scope !== "settings" && (fileLoading || workItemLoading || reposLoading);
+  const searching = (scope === "all" || scope === "cloud") && (fileLoading || workItemLoading || reposLoading);
+  const tab = paletteTabOf(scope);
   const empty = !selectableRows.length && !searching;
 
   return (
@@ -840,7 +929,7 @@ export function CommandPalette({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={onInputKeyDown}
-            placeholder={scope === "settings" ? "Search settings…" : scope === "cloud" ? "Search cloud sessions…" : "Search sessions, workspaces, projects, files, settings and commands…"}
+            placeholder={palettePlaceholder(scope)}
             aria-label="Command palette search"
             aria-controls="command-palette-results"
             aria-activedescendant={selectableRows[selected]?.id}
@@ -848,10 +937,33 @@ export function CommandPalette({
             spellCheck={false}
             className="h-11 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
           />
-          {scope === "settings" && <button type="button" aria-label="Search everything" className="shrink-0 rounded bg-selected px-2 py-1 text-xs text-muted-foreground" onClick={() => { setScope("all"); inputRef.current?.focus(); }}>Settings ×</button>}
           {searching && <Loader2 className="size-3.5 shrink-0 animate-spin text-faint" aria-label="Searching" />}
           <kbd className="rounded-md bg-veil-raised px-1.5 py-0.5 text-[10px] text-faint">Esc</kbd>
         </div>
+
+        {!statusSessionId && (
+          <div role="tablist" aria-label="Search in" className="mt-2 flex h-10 items-center gap-1 border-b border-hairline px-2.5">
+            {PALETTE_TABS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === item.id}
+                className={cn(
+                  "flex h-7 items-center rounded-md px-2.5 text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                  tab === item.id ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
+                )}
+                onClick={() => {
+                  // Under Sessions, the cloud-only list widens to every session.
+                  setScope(item.id);
+                  inputRef.current?.focus();
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {error && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
 
@@ -892,15 +1004,16 @@ export function CommandPalette({
           {empty && (
             <div className="px-5 py-10 text-center">
               <p role="status" className="text-sm text-muted-foreground">{scope === "settings" ? `No settings match ${query.trim()}` : "No results match this search."}</p>
-              {scope !== "settings" && <p className="mt-1 text-xs text-faint">Try a session, branch, project, file path, setting, issue, pull request or command.</p>}
+              {scope === "all" && <p className="mt-1 text-xs text-faint">Try a session, branch, project, file path, setting, issue, pull request or command.</p>}
             </div>
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-3 border-t border-hairline px-3 py-2 text-[10px] text-faint">
-          <span><kbd className="rounded bg-veil-raised px-1">↑↓</kbd> move</span>
-          <span><kbd className="rounded bg-veil-raised px-1">↵</kbd> open</span>
-          <span><kbd className="rounded bg-veil-raised px-1">Esc</kbd> close</span>
+        <div className="flex h-9 items-center gap-4 border-t border-hairline px-4 text-xs text-faint">
+          <span>↑↓ to move</span>
+          <span>↵ to open</span>
+          {/* Design 07.05: with nothing typed, Settings lists only its pages. */}
+          {scope === "settings" && !query.trim() && <span className="ml-auto truncate">Type to search every setting, not only pages</span>}
         </div>
       </DialogContent>
     </Dialog>
@@ -941,10 +1054,20 @@ function PaletteResultRow({
       onFocus={() => onHover(index)}
       onClick={() => onSelect(row)}
       className={cn(
-        "flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left outline-none",
+        "flex w-full items-center rounded-lg px-2.5 text-left outline-none",
+        row.inline ? "h-9 gap-2.5" : "gap-3 py-2",
         selected ? "bg-selected text-foreground shadow-button" : "text-muted-foreground hover:bg-veil-raised",
       )}
     >
+      {row.inline ? <>
+        {row.project ? <ProjectGlyph project={row.project} size={14} /> : <Icon className="size-3.5 shrink-0 text-muted-foreground" />}
+        <span className="min-w-0 truncate text-[13px] text-foreground">
+          <HighlightedText text={row.primary} ranges={row.primaryRanges} />
+        </span>
+        <span className="ml-auto min-w-0 max-w-[60%] shrink truncate pl-3 text-right text-xs text-faint">
+          <HighlightedText text={row.secondary} ranges={row.secondaryRanges} />
+        </span>
+      </> : <>
       <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-veil-raised text-muted-foreground">
         {busy ? <Loader2 className="size-3.5 animate-spin" /> : row.manualStatus ? <ManualStatusIcon status={row.manualStatus} /> : row.agentId ? <AgentMark id={row.agentId} className="size-4" decorative /> : row.project ? <ProjectGlyph project={row.project} /> : <Icon className="size-4" />}
       </span>
@@ -965,6 +1088,7 @@ function PaletteResultRow({
           ))}
         </span>
       )}
+      </>}
     </button>
   );
 }
