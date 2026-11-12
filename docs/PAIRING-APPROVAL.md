@@ -114,3 +114,28 @@ Mac awake while agents work") can hold its own reason on the same mechanism.
 
 Existing: `pairing_status`, `pairing_generate { connectionMode }`,
 `pairing_revoke { deviceId }`, `pairing_retry_relay`.
+
+## Where the dialog opens, and differences from the design
+
+The dialog opens from Settings → Devices, the command palette ("Pair a phone…") and
+the session view's own menu (the … beside the title). It is not on the sidebar
+row menu: that menu holds a few per-conversation actions, and pairing is not one.
+
+Deliberate differences from the Superdesign screen "14.19 Pair a phone · remote
+control":
+
+- While a phone waits, the approval prompt (fingerprint, "Decline", "Approve",
+  the path and the time left) takes the QR code's place in the left column. The
+  screen has no approval state.
+- Closing the dialog while a phone waits declines that request.
+- A connected device's row has "Disconnect" beside "Revoke"; the screen's row shows
+  only "Revoke", the ticket asks for both.
+- A "Copy code" link sits under "Generate a new code", for typing the code on a
+  phone that cannot scan.
+- With Relay down, the Relay line shows the Relay's own message, plus a hint
+  to choose "Only this network"; an expired code shows an expired state in place
+  of the QR code.
+- Dates follow the system locale ("Nov 3, 10:20 PM" where the screen has
+  "3 Nov, 18:20").
+- Colours, type and spacing come from the app's tokens, not the screen's Tailwind
+  values.
