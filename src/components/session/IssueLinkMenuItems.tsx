@@ -1,8 +1,8 @@
-import { CircleDot, EyeOff, Unplug } from "@/icons";
+import { CircleDot, EyeOff, GitPullRequest, Unplug } from "@/icons";
 import { message } from "@tauri-apps/plugin-dialog";
 import { ContextMenuCheckboxItem, ContextMenuItem, DropdownMenuCheckboxItem, DropdownMenuItem } from "@/components/ui/menu";
 import { errorMessage } from "@/lib/api";
-import { openLinkIssue } from "@/lib/dialogs";
+import { openLinkIssue, openLinkPr } from "@/lib/dialogs";
 import { linkText } from "@/lib/issueWork";
 import { isQuickChat } from "@/lib/quickChats";
 import { setSessionWorkPrivate, unlinkSessionIssue } from "@/lib/sessions";
@@ -26,11 +26,16 @@ function unlinkLabel(session: SessionEntry): string {
   return `Unlink ${session.issue?.identifier ?? "issue"}${link && link !== "manual" ? ` (${linkText(link).toLowerCase()})` : ""}`;
 }
 
+/** A session in a Git checkout on this Mac can show another branch's pull request (PRO-294). */
+function canLinkPr(session: SessionEntry): boolean {
+  return !session.id.startsWith("cloud:") && !!session.cwd && !!session.branch && !session.worktreeRemoved;
+}
+
 const SHARE_HINT = "Its work status never leaves this Mac: your other machines and your team do not see it.";
 
 /**
  * A session's issue link and what it shares (#441): "Link to issue…" or
- * "Unlink", and "Don't share this session". Nothing for a quick chat, which
+ * "Unlink", "Link pull request…" (PRO-294), and "Don't share this session". Nothing for a quick chat, which
  * has no project, so a menu can include it unconditionally.
  */
 export function IssueLinkMenuItems({ session }: { session: SessionEntry }) {
@@ -44,6 +49,11 @@ export function IssueLinkMenuItems({ session }: { session: SessionEntry }) {
       ) : (
         <DropdownMenuItem onSelect={() => openLinkIssue(session.id)}>
           <CircleDot /> Link to issue…
+        </DropdownMenuItem>
+      )}
+      {canLinkPr(session) && (
+        <DropdownMenuItem onSelect={() => openLinkPr(session.id)}>
+          <GitPullRequest /> Link pull request…
         </DropdownMenuItem>
       )}
       <DropdownMenuCheckboxItem checked={!!session.issueWork?.private} onCheckedChange={(on) => setPrivate(session, on === true)} title={SHARE_HINT}>
@@ -65,6 +75,11 @@ export function IssueLinkContextItems({ session, disabled = false }: { session: 
       ) : (
         <ContextMenuItem disabled={disabled} onSelect={() => openLinkIssue(session.id)}>
           <CircleDot /> Link to issue…
+        </ContextMenuItem>
+      )}
+      {canLinkPr(session) && (
+        <ContextMenuItem disabled={disabled} onSelect={() => openLinkPr(session.id)}>
+          <GitPullRequest /> Link pull request…
         </ContextMenuItem>
       )}
       <ContextMenuCheckboxItem disabled={disabled} checked={!!session.issueWork?.private} onCheckedChange={(on) => setPrivate(session, on === true)} title={SHARE_HINT}>

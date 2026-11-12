@@ -22,6 +22,11 @@ pub struct Association {
     pub number: u64,
     pub head: String,
     pub scope: Scope,
+    /// Chosen by hand with "Link pull request…" (PRO-294), rather than
+    /// recorded from this session's own creation. Only such a link can be
+    /// unlinked; it does not make the PR this session's branch PR.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linked: bool,
 }
 
 /// A canonical URL is both repository identity and PR identity (numbers alone aren't).
@@ -85,7 +90,7 @@ pub fn record_local(session: &str, cwd: &Path, url: &str, head: &str) -> Result<
     let url = identity(url)?;
     let number = url.rsplit('/').next().unwrap().parse()?;
     update(&crate::store::root()?.join("session-pr-associations.json"), session, vec![Association {
-        url, number, head: head.into(), scope: Scope::Local { cwd: cwd.to_string_lossy().into_owned() },
+        url, number, head: head.into(), scope: Scope::Local { cwd: cwd.to_string_lossy().into_owned() }, linked: false,
     }])?;
     Ok(())
 }
@@ -111,7 +116,7 @@ fn observe(calls: &mut CreationCalls, event: crate::events::AgentEvent, session:
             let urls: BTreeSet<_> = result.text.lines().filter_map(|line| identity(line.trim()).ok()).collect();
             if urls.len() == 1 {
                 let url = urls.into_iter().next().unwrap();
-                return Some(Association { number: url.rsplit('/').next().unwrap().parse().unwrap(), url, head: String::new(), scope: Scope::Local { cwd: cwd.into() } });
+                return Some(Association { number: url.rsplit('/').next().unwrap().parse().unwrap(), url, head: String::new(), scope: Scope::Local { cwd: cwd.into() }, linked: false });
             }
         }
         _ => {}
@@ -258,7 +263,7 @@ fn refresh_locked(
                 let number = canonical.rsplit('/').next().unwrap().parse()?;
                 pipeline_rows.entry(pipeline.author.session_id.clone()).or_default().push(Association {
                     url: canonical, number, head: pipeline.branch.clone(),
-                    scope: Scope::Local { cwd: pipeline.project_path.clone() },
+                    scope: Scope::Local { cwd: pipeline.project_path.clone() }, linked: false,
                 });
             }
         }
@@ -308,12 +313,99 @@ pub fn for_session(session: &str, additions: Vec<Association>) -> Result<Vec<Ass
     Ok(rows.remove(session).unwrap_or_default())
 }
 
+/// The sessions, other than `session`, that already show each of `urls`: by
+/// a link or by having opened it. Sessions that no longer exist are left out
+/// (`live`), so a deleted session does not hold a pull request forever.
+fn others_with(all: &Associations, session: &str, urls: &BTreeSet<String>, live: &dyn Fn(&str) -> bool) -> BTreeMap<String, Vec<String>> {
+    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (other, entries) in all {
+        if other == session || !live(other) { continue; }
+        for url in entries.keys().filter(|url| urls.contains(*url)) {
+            found.entry(url.clone()).or_default().push(other.clone());
+        }
+    }
+    found
+}
+
+fn link_in(path: &Path, session: &str, mut entry: Association, live: &dyn Fn(&str) -> bool) -> Result<Vec<Association>> {
+    if session.is_empty() { bail!("A session is required to link a pull request"); }
+    entry.url = identity(&entry.url)?;
+    if entry.url.rsplit('/').next().and_then(|n| n.parse::<u64>().ok()) != Some(entry.number) {
+        bail!("Pull request number does not match its URL");
+    }
+    if !matches!(entry.scope, Scope::Local { .. }) { bail!("Only a session on this Mac can link a pull request"); }
+    entry.linked = true;
+    transaction(path, || {
+        let mut all: Associations = crate::store::read_json(path)?.unwrap_or_default();
+        // One session shows a pull request at a time; the dialog says which
+        // rows are taken, and this refuses a race between two windows.
+        if others_with(&all, session, &BTreeSet::from([entry.url.clone()]), live).contains_key(&entry.url) {
+            bail!("#{} is linked to another session", entry.number);
+        }
+        let saved = all.entry(session.to_string()).or_default();
+        // Already this session's own (it opened it): nothing to add.
+        if !saved.contains_key(&entry.url) {
+            saved.insert(entry.url.clone(), entry);
+            crate::store::write_json(path, &all)?;
+        }
+        Ok(all.get(session).into_iter().flat_map(|entries| entries.values().cloned()).collect())
+    })
+}
+
+fn unlink_in(path: &Path, session: &str, url: &str) -> Result<Vec<Association>> {
+    let url = identity(url)?;
+    transaction(path, || {
+        let mut all: Associations = crate::store::read_json(path)?.unwrap_or_default();
+        let Some(entries) = all.get_mut(session) else { return Ok(vec![]) };
+        match entries.get(&url) {
+            None => {}
+            Some(entry) if !entry.linked => bail!("This session opened #{}; only a linked pull request can be unlinked", entry.number),
+            Some(_) => {
+                entries.remove(&url);
+                if entries.is_empty() { all.remove(session); }
+                crate::store::write_json(path, &all)?;
+            }
+        }
+        Ok(all.get(session).into_iter().flat_map(|entries| entries.values().cloned()).collect())
+    })
+}
+
+fn live_sessions() -> Result<BTreeSet<String>> {
+    Ok(crate::store::index::load()?.into_iter().map(|session| session.id).collect())
+}
+
+fn registry() -> Result<std::path::PathBuf> {
+    Ok(crate::store::root()?.join("session-pr-associations.json"))
+}
+
+/// Show `entry` in `session`'s pull request section, whichever branch it is on.
+pub fn link(session: &str, entry: Association) -> Result<Vec<Association>> {
+    let live = live_sessions()?;
+    link_in(&registry()?, session, entry, &|id| live.contains(id))
+}
+
+/// Remove a link made with [`link`]; a PR the session opened stays.
+pub fn unlink(session: &str, url: &str) -> Result<Vec<Association>> {
+    unlink_in(&registry()?, session, url)
+}
+
+/// For each of `urls`, the other existing sessions that show it.
+pub fn linked_elsewhere(session: &str, urls: &[String]) -> Result<BTreeMap<String, Vec<String>>> {
+    let path = registry()?;
+    let urls: BTreeSet<String> = urls.iter().filter_map(|url| identity(url).ok()).collect();
+    let live = live_sessions()?;
+    transaction(&path, || {
+        let all: Associations = crate::store::read_json(&path)?.unwrap_or_default();
+        Ok(others_with(&all, session, &urls, &|id| live.contains(id)))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn entry(repo: &str, number: u64, head: &str) -> Association {
-        Association { url: format!("https://github.com/acme/{repo}/pull/{number}"), number, head: head.into(), scope: Scope::Local { cwd: "/fixture".into() } }
+        Association { url: format!("https://github.com/acme/{repo}/pull/{number}"), number, head: head.into(), scope: Scope::Local { cwd: "/fixture".into() }, linked: false }
     }
 
     fn journal_event(session: &str, payload: serde_json::Value) -> String {
@@ -543,5 +635,87 @@ mod tests {
         for url in ["file:///a/b/pull/1", "https://github.com/a/b/issues/1", "https://user:secret@github.com/a/b/pull/1"] {
             assert!(identity(url).is_err());
         }
+    }
+
+    fn linked(number: u64, head: &str) -> Association {
+        Association { url: format!("https://github.com/Acme/API/pull/{number}"), number, head: head.into(), scope: Scope::Local { cwd: "/fixture".into() }, linked: false }
+    }
+
+    #[test]
+    fn a_linked_pull_request_on_another_branch_is_stored_and_survives_reloading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-pr-associations.json");
+        let rows = link_in(&path, "one", linked(788, "raccoon/approval-cards-diff"), &|_| true).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].url, "https://github.com/acme/api/pull/788", "stored under its canonical identity");
+        assert!(rows[0].linked);
+        assert_eq!(rows[0].head, "raccoon/approval-cards-diff");
+        // A restart reads the same file: the link is on disk, flagged as a link.
+        let saved: Associations = crate::store::read_json(&path).unwrap().unwrap();
+        assert!(saved["one"]["https://github.com/acme/api/pull/788"].linked);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"linked\": true") || text.contains("\"linked\":true"), "{text}");
+        // And the ordinary session read (journals, pipelines) keeps it.
+        let (rows, _) = refresh(dir.path(), &["one".into()], || Ok(BTreeMap::new()), || Ok(vec![]), BTreeMap::new()).unwrap();
+        assert_eq!(rows["one"].len(), 1);
+        assert!(rows["one"][0].linked);
+    }
+
+    #[test]
+    fn a_pull_request_shown_by_another_existing_session_cannot_be_linked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-pr-associations.json");
+        update(&path, "creator", vec![entry("api", 783, "raccoon/session-overview")]).unwrap();
+        let error = link_in(&path, "one", linked(783, "raccoon/session-overview"), &|_| true).unwrap_err();
+        assert_eq!(error.to_string(), "#783 is linked to another session");
+        let all: Associations = crate::store::read_json(&path).unwrap().unwrap();
+        assert!(!all.contains_key("one"));
+        assert_eq!(others_with(&all, "one", &BTreeSet::from(["https://github.com/acme/api/pull/783".to_string()]), &|_| true)
+            ["https://github.com/acme/api/pull/783"], vec!["creator".to_string()]);
+        // The creating session itself is not "another session".
+        assert!(others_with(&all, "creator", &BTreeSet::from(["https://github.com/acme/api/pull/783".to_string()]), &|_| true).is_empty());
+        // A session that was deleted no longer holds it.
+        assert!(link_in(&path, "one", linked(783, "raccoon/session-overview"), &|id| id != "creator").is_ok());
+    }
+
+    #[test]
+    fn only_a_link_can_be_unlinked_and_linking_an_own_pull_request_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-pr-associations.json");
+        update(&path, "one", vec![entry("api", 5, "mine")]).unwrap();
+        let rows = link_in(&path, "one", linked(5, "mine"), &|_| true).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].linked, "the session opened it; it stays its own");
+        assert!(unlink_in(&path, "one", "https://github.com/acme/api/pull/5").unwrap_err().to_string().contains("only a linked pull request can be unlinked"));
+        link_in(&path, "one", linked(9, "theirs"), &|_| true).unwrap();
+        let rows = unlink_in(&path, "one", "https://github.com/ACME/api/pull/9").unwrap();
+        assert_eq!(rows.iter().map(|row| row.number).collect::<Vec<_>>(), vec![5]);
+        // Unlinking again, or an unknown session, is not an error.
+        assert_eq!(unlink_in(&path, "one", "https://github.com/acme/api/pull/9").unwrap().len(), 1);
+        assert!(unlink_in(&path, "nobody", "https://github.com/acme/api/pull/9").unwrap().is_empty());
+        // Once unlinked, another session may link it.
+        assert!(link_in(&path, "two", linked(9, "theirs"), &|_| true).is_ok());
+    }
+
+    #[test]
+    fn a_link_needs_a_local_session_and_a_matching_pull_request_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-pr-associations.json");
+        let mut cloud = linked(1, "x");
+        cloud.scope = Scope::Cloud { workspace: "w".into(), repo: "acme/api".into() };
+        assert!(link_in(&path, "one", cloud, &|_| true).is_err());
+        let mut wrong = linked(1, "x");
+        wrong.number = 2;
+        assert!(link_in(&path, "one", wrong, &|_| true).is_err());
+        assert!(link_in(&path, "", linked(1, "x"), &|_| true).is_err());
+        assert!(!path.exists(), "nothing written for a refused link");
+    }
+
+    #[test]
+    fn associations_saved_before_links_existed_still_read_as_not_linked() {
+        let old = r#"{"url":"https://github.com/acme/api/pull/3","number":3,"head":"h","scope":{"kind":"local","cwd":"/x"}}"#;
+        let entry: Association = serde_json::from_str(old).unwrap();
+        assert!(!entry.linked);
+        assert!(!serde_json::to_string(&entry).unwrap().contains("linked"), "unchanged on disk for older readers");
     }
 }

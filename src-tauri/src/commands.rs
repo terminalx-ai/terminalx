@@ -3183,6 +3183,40 @@ pub async fn pr_attach(cwd: String, number: u64) -> CmdResult<String> {
     github_work(move || crate::github::attach_pr(Path::new(&cwd), number).map_err(err)).await.map_err(err)?
 }
 
+/// "Link pull request…" (PRO-294): the repository's open pull requests, and
+/// which of them this session or another one already shows.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrLinkCandidates {
+    #[serde(flatten)]
+    open: crate::github::OpenPrs,
+    /// Canonical URLs this session already shows (opened here or linked).
+    here: Vec<String>,
+    /// Canonical URLs another existing session shows.
+    elsewhere: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn pr_link_candidates(cwd: String, session_key: String) -> CmdResult<PrLinkCandidates> {
+    let open = github_work(move || crate::github::open_prs(Path::new(&cwd)).map_err(err)).await.map_err(err)??;
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<PrLinkCandidates> {
+        let urls: Vec<String> = open.prs.iter().map(|row| row.pr.url.clone()).collect();
+        let here = crate::pr_associations::for_session(&session_key, vec![])?.into_iter().map(|row| row.url).collect();
+        let elsewhere = crate::pr_associations::linked_elsewhere(&session_key, &urls)?.into_keys().collect();
+        Ok(PrLinkCandidates { open, here, elsewhere })
+    }).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn pr_link(session_key: String, association: crate::pr_associations::Association) -> CmdResult<Vec<crate::pr_associations::Association>> {
+    tauri::async_runtime::spawn_blocking(move || crate::pr_associations::link(&session_key, association).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_unlink(session_key: String, url: String) -> CmdResult<Vec<crate::pr_associations::Association>> {
+    tauri::async_runtime::spawn_blocking(move || crate::pr_associations::unlink(&session_key, &url).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn pr_associations_batch(session_keys: Vec<String>) -> CmdResult<std::collections::BTreeMap<String, Vec<crate::pr_associations::Association>>> {
     tauri::async_runtime::spawn_blocking(move || crate::pr_associations::for_sessions(&session_keys).map_err(err)).await.map_err(err)?
