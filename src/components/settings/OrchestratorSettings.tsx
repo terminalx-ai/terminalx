@@ -96,16 +96,16 @@ function NumberField({ value, placeholder, disabled, label, min, max, step = 1, 
   );
 }
 
-/** A budget or the window level (PRO-335): a number, or No limit with the switch beside it.
+/** A budget or the window level (PRO-335): a number, or No limit with the switch beside it; off, `offText` (when given) stands in for the field.
  * Turned back on, the app-wide field returns to `fallback`; a repository's field (with a `placeholder`) follows the default again. */
 function CapField({ value, placeholder, label, offLabel, offText, fallback, disabled, onSave, ...bounds }: {
-  value: Cap | undefined; placeholder?: string; label: string; offLabel: string; offText: string; fallback?: number; disabled: boolean;
+  value: Cap | undefined; placeholder?: string; label: string; offLabel: string; offText?: string; fallback?: number; disabled: boolean;
   min: number; max: number; step?: number; prefix?: string; suffix?: string; onSave: (value: Cap | null) => void;
 }) {
   const off = value === "none";
   return (
     <span className="inline-flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
-      {off ? <span className="text-xs text-muted-foreground">{offText}</span> : (
+      {off ? offText && <span className="text-xs text-muted-foreground">{offText}</span> : (
         <NumberField label={label} value={value} placeholder={placeholder} disabled={disabled} {...bounds} onSave={onSave} />
       )}
       <label className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -161,10 +161,10 @@ export function OrchestratorTab() {
       />
       <div className="mb-1 mt-4 text-xs font-medium uppercase tracking-wide text-faint">Budget and stalls</div>
       <RegisteredSetting setting="orchestrator.budgetDollars"
-        control={<CapField label="Budget per run, API key" offLabel="No limit" offText="No limit" fallback={DEFAULT_DOLLARS} value={settings?.budgetDollars} min={0.01} max={MAX_DOLLARS} step={0.01} prefix="$" disabled={!ready} onSave={(value) => value !== null && void save({ budgetDollars: value })} />}
+        control={<CapField label="Budget per run, API key" offLabel="No limit" fallback={DEFAULT_DOLLARS} value={settings?.budgetDollars} min={0.01} max={MAX_DOLLARS} step={0.01} prefix="$" disabled={!ready} onSave={(value) => value !== null && void save({ budgetDollars: value })} />}
       />
       <RegisteredSetting setting="orchestrator.budgetPoints"
-        control={<CapField label="Budget per run, subscription" offLabel="No limit" offText="No limit" fallback={DEFAULT_POINTS} value={settings?.budgetPoints} min={1} max={100} suffix="pts" disabled={!ready} onSave={(value) => value !== null && void save({ budgetPoints: value })} />}
+        control={<CapField label="Budget per run, subscription" offLabel="No limit" fallback={DEFAULT_POINTS} value={settings?.budgetPoints} min={1} max={100} suffix="pts" disabled={!ready} onSave={(value) => value !== null && void save({ budgetPoints: value })} />}
       />
       <RegisteredSetting setting="orchestrator.windowCeiling"
         control={<CapField label="Pause when a window passes" offLabel="Off" offText={CEILING_OFF} fallback={DEFAULT_CEILING} value={settings?.windowCeiling} min={1} max={100} suffix="%" disabled={!ready} onSave={(value) => value !== null && void save({ windowCeiling: value })} />}
@@ -235,8 +235,8 @@ export function RepositoryOrchestratorSettings({ projectPath }: { projectPath: s
           </select>
         </div>
         {([
-          ["budgetDollars", "Budget per run, API key", "Dollars its workers on an API key may spend.", "No limit", "No limit", { min: 0.01, max: MAX_DOLLARS, step: 0.01, prefix: "$" }],
-          ["budgetPoints", "Budget per run, subscription", "Points of a usage window one run may use.", "No limit", "No limit", { min: 1, max: 100, suffix: "pts" }],
+          ["budgetDollars", "Budget per run, API key", "Dollars its workers on an API key may spend.", "No limit", undefined, { min: 0.01, max: MAX_DOLLARS, step: 0.01, prefix: "$" }],
+          ["budgetPoints", "Budget per run, subscription", "Points of a usage window one run may use.", "No limit", undefined, { min: 1, max: 100, suffix: "pts" }],
           ["windowCeiling", "Pause when a window passes", "Whoever used it. Off, a run can use the whole window.", "Off", CEILING_OFF, { min: 1, max: 100, suffix: "%" }],
         ] as const).map(([key, title, hint, offLabel, offText, bounds]) => (
           <div key={key} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2">
