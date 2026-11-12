@@ -6447,8 +6447,24 @@ impl SessionManager {
                         log::info!("run verifier {}/{}: {reason}", frame.session, frame.tab);
                         return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
                     }
-                    // A command that only reads is run by TerminalX, as an approved discovery command is (PRO-330).
+                    // A command that only reads is run by TerminalX, as an approved discovery command is (PRO-330),
+                    // and on the same terms: outside the provider's sandbox, so only while that sandbox could not
+                    // have narrowed what it reads. Otherwise it is refused, not asked: nobody answers for a verifier.
                     crate::orchestration::guard::VerifierCall::Run(approved) => {
+                        let unconfined = index::get(&frame.session).is_ok_and(|session| {
+                            let dirs = [approved.directory(), Path::new(&session.cwd), Path::new(&session.project_path)];
+                            let dirs: Vec<&Path> = dirs.into_iter().filter(|dir| dir.is_absolute()).collect();
+                            let sources = crate::harness::provider_sandbox::Sources::from_env(frame.payload["transcript_path"].as_str());
+                            !match kind {
+                                CliKind::Claude => crate::harness::provider_sandbox::claude_may_restrict(&dirs, &sources),
+                                CliKind::Codex => crate::harness::provider_sandbox::codex_may_restrict(&dirs, &sources),
+                            }
+                        });
+                        if !unconfined {
+                            let reason = "TerminalX refused this command: this agent's sandbox settings may limit what it reads, and TerminalX runs a verifier's commands outside that sandbox. Read the files with your file tools (Read, Grep, Glob) instead, and judge the result from the diff you were given.";
+                            log::info!("run verifier {}/{}: {reason}", frame.session, frame.tab);
+                            return HookReply { output: Some(crate::orchestration::guard::refusal_output(reason)), refused: None };
+                        }
                         let input = frame.payload["tool_input"].clone();
                         let verified = permission_directory(kind, &frame.payload).is_some();
                         return self.run_discovery(&rt_arc, &frame, kind, &input, approved, verified);
