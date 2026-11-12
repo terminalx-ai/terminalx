@@ -36,7 +36,7 @@ export const DropdownMenuRadioGroup = Prim.RadioGroup;
 const COLLISION_PADDING = 8;
 
 const contentClass =
-  "z-(--z-menu) min-w-[10rem] overflow-hidden rounded-lg bg-popover glass p-1 text-popover-foreground shadow-surface hairline animate-fade-in";
+  "z-(--z-menu) min-w-[10rem] overflow-hidden rounded-lg bg-popover p-1 text-popover-foreground shadow-surface hairline animate-fade-in";
 
 export const DropdownMenuContent = React.forwardRef<
   React.ComponentRef<typeof Prim.Content>,

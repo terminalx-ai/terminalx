@@ -294,7 +294,7 @@ export function notAttached(names: string[]): string {
 export function DropHint({ dragging, mentionFiles = true }: { dragging: boolean; mentionFiles?: boolean }) {
   if (!dragging) return null;
   return (
-    <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-composer/80 text-sm text-muted-foreground">
+    <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-composer text-sm text-muted-foreground">
       {mentionFiles ? "Drop images to attach, other files to mention" : "Drop images to attach"}
     </div>
   );

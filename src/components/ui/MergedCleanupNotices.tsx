@@ -7,11 +7,8 @@ import { branchOutcome, dismissMergedNotice, holdMergedWorkspace, mergedDue, res
 
 /** How many notices are shown at once; the rest are in Settings → Storage. */
 const SHOWN = 3;
-/**
- * A notice's card. It floats over the conversation, so its ground is the card colour itself, never the see-through
- * glass one (which in a macOS window lets the text behind it show through).
- */
-const NOTICE = "pointer-events-auto rounded-xl bg-(--surface-card) p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in";
+/** A notice's card. It floats over the conversation on the opaque popover ground. */
+const NOTICE = "pointer-events-auto rounded-xl bg-popover p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in";
 
 function NoticeCard({ notice }: { notice: MergedNotice }) {
   const [busy, setBusy] = useState(false);
@@ -89,7 +86,7 @@ export function MergedCleanupNotices() {
   return (
     <div className="pointer-events-none flex max-h-[50dvh] shrink-0 flex-col gap-2 overflow-y-auto">
       {more > 0 ? (
-        <div role="status" className="pointer-events-auto rounded-lg bg-(--surface-card) px-3 py-1.5 text-xs text-muted-foreground shadow-surface hairline">
+        <div role="status" className="pointer-events-auto rounded-lg bg-popover px-3 py-1.5 text-xs text-muted-foreground shadow-surface hairline">
           {more} more {more === 1 ? "workspace" : "workspaces"}; see Settings → Storage.
         </div>
       ) : null}

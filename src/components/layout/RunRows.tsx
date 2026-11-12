@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, type ReactElement } from "react";
+import { createContext, useContext, useMemo, useRef, useState, type ReactElement } from "react";
 import { CircleAlert, GitFork, LoaderCircle, Network, ShieldAlert } from "@/icons";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PieceStateIcon, PIECE_STATE_STYLE } from "@/components/orchestration/PieceStateMark";
@@ -146,21 +146,41 @@ export function LeadTrailing({ family, folded, summary, fallback }: { family: Le
   </>;
 }
 
+/** How far the card keeps from the sidebar's edge. */
+const CARD_GAP = 6;
+
+/**
+ * Where the card goes beside its row: past the sidebar's edge rather than the
+ * row's button, which ends inside the sidebar, and level with the row's top
+ * rather than the button's (18.07, PRO-336).
+ */
+function besideSidebar(trigger: HTMLElement | null) {
+  const button = trigger?.getBoundingClientRect();
+  const row = trigger?.parentElement?.getBoundingClientRect();
+  const rail = trigger?.closest("[data-testid=sidebar-rail]")?.getBoundingClientRect();
+  if (!button || !row || !rail) return { side: CARD_GAP, align: 0 };
+  return { side: Math.max(CARD_GAP, rail.right - button.right + CARD_GAP), align: row.top - button.top };
+}
+
 /**
  * Hovering a folded lead (18.07): the run in a line, then each piece that is
  * not done with its state and whether it waits on the person, and how many
- * are. A lead with no run lists the workers that are not idle.
+ * are. A lead with no run lists the workers that are not idle. The card sits
+ * outside the sidebar, beside the row, and is opaque like every tooltip, so
+ * the rows it passes over never show through it.
  */
 export function LeadHoverCard({ family, summary, title, children }: { family: LeadFamily; summary: LeadSummary; title: string; children: ReactElement }) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [offset, setOffset] = useState({ side: CARD_GAP, align: 0 });
   const waiting = new Set(summary.needs.map((need) => need.sessionId));
   const run = family.run;
   const open = run ? run.pieces.filter((piece) => piece.state !== "done") : [];
   const done = run ? run.pieces.length - open.length : 0;
   const head = [run && summary.progress ? `${summary.progress.done} of ${summary.progress.total}` : `${family.workers.length} ${family.workers.length === 1 ? "worker" : "workers"}`, summary.spend != null ? formatCost(summary.spend) : null].filter(Boolean).join(" · ");
   return (
-    <Tooltip delayDuration={500}>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent side="right" align="start" className="block w-72 p-0" data-testid="lead-hover">
+    <Tooltip delayDuration={500} onOpenChange={(open) => { if (open) setOffset(besideSidebar(trigger.current)); }}>
+      <TooltipTrigger asChild ref={trigger}>{children}</TooltipTrigger>
+      <TooltipContent side="right" align="start" sideOffset={offset.side} alignOffset={offset.align} className="block w-72 p-0" data-testid="lead-hover">
         <div className="flex items-center gap-2 border-b border-hairline px-3 py-2">
           <span className="min-w-0 flex-1 truncate font-medium">{title}</span>
           <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{head}</span>

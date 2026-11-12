@@ -482,7 +482,7 @@ export function NewSessionView({
             </div>
           )}
 
-          <div className={cn("relative overflow-hidden rounded-2xl bg-composer glass shadow-surface hairline", modal && "shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
+          <div className={cn("relative overflow-hidden rounded-2xl bg-composer shadow-surface hairline", modal && "shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
             <DropHint dragging={attach.dragging} />
 
             <div className="flex h-12 items-center gap-1 border-b border-hairline px-2">

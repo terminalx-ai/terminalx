@@ -72,9 +72,9 @@ export function IssueWorkChip({ workers, now = Date.now(), className }: { worker
       {/* The card is a flex row, so the list has to be allowed to shrink
           below its longest line: otherwise that line sets the list's width,
           runs past the card's edge and is never cut with "…" (#713). Its
-          lines lie over the rows below, so keep it opaque even in macOS
-          glass mode, and dim none of its rows. */}
-      <TooltipContent side="bottom" align="start" className="max-w-72 items-start bg-(--surface-card)" data-testid="issue-work-card">
+          lines lie over the rows below: like every tooltip it is opaque,
+          and it dims none of its rows. */}
+      <TooltipContent side="bottom" align="start" className="max-w-72 items-start" data-testid="issue-work-card">
         <IssueWorkList workers={workers} now={now} fade={false} className="min-w-0 flex-1" />
       </TooltipContent>
     </Tooltip>

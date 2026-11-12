@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { launch, open, report, serve } from "./harness.mjs";
+import { launch, open, report, serve, throughPanel } from "./harness.mjs";
 
 const shots = process.env.RUN_SIDEBAR_SHOTS;
 if (shots) await mkdir(shots, { recursive: true });
@@ -164,13 +164,37 @@ try {
     const needs = leadA.getByTestId("lead-needs");
     checks["folded, a lead with a blocked piece and a worker that asks shows one mark with how many, and why"] = (await needs.textContent()) === "1" && (await needs.getAttribute("data-needs")) === "approval" && (await needs.getAttribute("title")).includes("Move CLI code to the store: Needs permission");
     checks["folded, it shows 4 of 6 done"] = (await leadA.getByTestId("lead-progress").textContent()) === "4/6";
-    // Hovering the folded lead lists the pieces that are not done.
-    await leadA.locator("button[aria-describedby]").first().hover();
+    // Hovering the folded lead lists the pieces that are not done. In glass
+    // mode, the Mac look, whatever the platform (PRO-336): the card sits
+    // outside the sidebar, beside the row, nothing behind it shows through,
+    // and the hovered row keeps its title's width.
+    const glass = await page.evaluate(() => document.documentElement.hasAttribute("data-glass"));
+    await page.evaluate(() => document.documentElement.setAttribute("data-glass", ""));
+    const leadRow = leadA.locator("button[aria-describedby]").first();
+    const titleWidth = () => leadRow.evaluate((node) => node.querySelector("span.truncate").getBoundingClientRect().width);
+    await page.mouse.move(size.width - 4, size.height - 4);
+    await page.getByTestId("lead-hover").waitFor({ state: "detached" }).catch(() => {});
+    const restingTitle = await titleWidth();
+    const restingRow = await leadA.locator(":scope > div").first().evaluate((node) => node.getBoundingClientRect().toJSON());
+    await leadRow.hover();
     const card = page.getByTestId("lead-hover");
     await card.waitFor();
     const hover = await card.innerText();
+    const placed = await card.evaluate((node, rowBox) => {
+      const box = node.getBoundingClientRect();
+      const rail = document.querySelector('[data-testid="sidebar-rail"]').getBoundingClientRect();
+      return { left: box.left, railRight: rail.right, top: box.top, rowTop: rowBox.top, inWindow: box.right <= innerWidth && box.bottom <= innerHeight };
+    }, restingRow);
+    const hoveredTitle = await titleWidth();
+    const through = await throughPanel(page, card);
     await shot(page, "folded-hover");
     checks["hovering it lists the pieces not done, which needs the person, and how many are done"] = hover.includes("Move CLI code to the store") && hover.includes("needs you") && hover.includes("Update the docs and the CLI guide") && hover.includes("4 pieces") && !hover.includes("Map every settings read");
+    checks["the card sits outside the sidebar, level with the row, inside the window"] = placed.left >= placed.railRight && Math.abs(placed.top - placed.rowTop) <= 8 && placed.inWindow;
+    checks["the hovered row keeps its title's width"] = Math.abs(hoveredTitle - restingTitle) < 0.5;
+    checks["in glass mode nothing behind the card shows through, and its quiet text reads at 4.5:1"] = through.showsThrough === 0 && through.backdrop === "none" && through.contrast >= 4.5;
+    await page.evaluate((glass) => document.documentElement.toggleAttribute("data-glass", glass), glass);
+    if (!checks["the hovered row keeps its title's width"] || !checks["the card sits outside the sidebar, level with the row, inside the window"]) console.log(JSON.stringify({ restingTitle, hoveredTitle, placed }));
+    if (!checks["in glass mode nothing behind the card shows through, and its quiet text reads at 4.5:1"]) console.log(JSON.stringify(through));
     // A worker's row opens the worker; the lead's opens its run.
     await page.mouse.move(size.width - 4, size.height - 4);
     await leadA.getByTestId("lead-fold").click();
@@ -187,6 +211,12 @@ try {
     checks["the run view shows spend against the budget"] = (await view.getByTestId("run-spend").textContent()) === "$7.42 of $15.00";
     checks["the run view says what needs the person, with the reason"] = (await view.getByTestId("run-needs").innerText()).includes("Move CLI code to the store: Needs permission");
     checks["the run's line says which piece is blocked and what waits for it"] = (await view.getByText("Piece 5 is blocked. Piece 6 waits for it; nothing else is running.").count()) === 1;
+    // The Run view's side panel, as on a Mac (glass on, PRO-336).
+    await page.evaluate(() => document.documentElement.setAttribute("data-glass", ""));
+    await view.locator('[role="row"][data-piece="cli"]').first().click();
+    await view.getByTestId("piece-detail").waitFor();
+    await page.mouse.move(size.width - 4, size.height - 4);
+    await shot(page, "run-view-panel");
     checks["no browser errors"] = errors.length === 0;
     failed += report(`lead and workers, ${at}`, checks, { workerRows, hover, errors });
     await page.close();

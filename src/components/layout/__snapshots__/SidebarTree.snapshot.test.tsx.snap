@@ -105,6 +105,7 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
         </span>
         <span
           class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+          data-row-actions="true"
         >
           <button
             aria-label="New session in main"
@@ -246,6 +247,7 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -451,6 +453,7 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -763,6 +766,7 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
         </span>
         <span
           class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+          data-row-actions="true"
         >
           <button
             aria-label="New session in quiet-amber-fox"
@@ -916,6 +920,7 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -1684,6 +1689,7 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
         </span>
         <span
           class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+          data-row-actions="true"
         >
           <button
             aria-label="New session in hotfix"
@@ -1815,6 +1821,7 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
             </button>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -2049,6 +2056,7 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -2342,6 +2350,7 @@ exports[`sidebar tree DOM > draws an empty and a collapsed project 2`] = `
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -2585,6 +2594,7 @@ exports[`sidebar tree DOM > draws archived sessions when archived sessions are s
         </span>
         <span
           class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+          data-row-actions="true"
         >
           <button
             aria-label="New session in main"
@@ -2747,6 +2757,7 @@ exports[`sidebar tree DOM > draws archived sessions when archived sessions are s
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -3059,6 +3070,7 @@ exports[`sidebar tree DOM > draws archived sessions when archived sessions are s
         </span>
         <span
           class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+          data-row-actions="true"
         >
           <button
             aria-label="New session in quiet-amber-fox"
@@ -3212,6 +3224,7 @@ exports[`sidebar tree DOM > draws archived sessions when archived sessions are s
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -3980,6 +3993,7 @@ exports[`sidebar tree DOM > draws archived sessions when archived sessions are s
         </span>
         <span
           class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+          data-row-actions="true"
         >
           <button
             aria-label="New session in hotfix"
@@ -4159,6 +4173,7 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
         </span>
         <span
           class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+          data-row-actions="true"
         >
           <button
             aria-label="New session in main"
@@ -4300,6 +4315,7 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -4505,6 +4521,7 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -4817,6 +4834,7 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
         </span>
         <span
           class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+          data-row-actions="true"
         >
           <button
             aria-label="New session in quiet-amber-fox"
@@ -4970,6 +4988,7 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -5738,6 +5757,7 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
         </span>
         <span
           class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+          data-row-actions="true"
         >
           <button
             aria-label="New session in hotfix"
@@ -5869,6 +5889,7 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
             </button>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -6103,6 +6124,7 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -6396,6 +6418,7 @@ exports[`sidebar tree DOM > draws every workspace, session and tab row kind 1`] 
             </span>
             <span
               class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+              data-row-actions="true"
             >
               <button
                 aria-expanded="false"
@@ -6622,6 +6645,7 @@ exports[`sidebar tree DOM > draws folder projects 1`] = `
         </span>
         <span
           class="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex"
+          data-row-actions="true"
         >
           <button
             aria-label="New session in "

@@ -228,7 +228,7 @@ export function SessionCost({ session, className }: { session: SessionEntry; cla
     </Popover.Trigger>
     <Popover.Portal>
       <Popover.Content side="bottom" align="start" sideOffset={6} collisionPadding={12} aria-label="Session usage"
-        className="z-(--z-menu) w-[400px] max-w-[calc(100vw-24px)] max-h-[var(--radix-popover-content-available-height)] overflow-auto rounded-xl border border-hairline bg-(--surface-card) text-sm text-popover-foreground shadow-surface outline-none">
+        className="z-(--z-menu) w-[400px] max-w-[calc(100vw-24px)] max-h-[var(--radix-popover-content-available-height)] overflow-auto rounded-xl border border-hairline bg-popover text-sm text-popover-foreground shadow-surface outline-none">
         <UsagePopover session={session} models={models} total={total} onClose={() => setOpen(false)} />
       </Popover.Content>
     </Popover.Portal>

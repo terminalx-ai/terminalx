@@ -359,7 +359,7 @@ export function TerminalView({
         // Floats over the terminal's corner rather than taking a row: nothing is drawn until it is wanted.
         <div
           className={cn(
-            "absolute top-1.5 right-3 z-10 flex items-center gap-1 rounded-md border border-hairline bg-terminal/90 p-0.5 shadow-sm backdrop-blur transition-opacity duration-150",
+            "absolute top-1.5 right-3 z-10 flex items-center gap-1 rounded-md border border-hairline bg-terminal p-0.5 shadow-sm transition-opacity duration-150",
             pinned ? "opacity-100" : "pointer-events-none opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100",
           )}
           data-testid="terminal-toolbar"

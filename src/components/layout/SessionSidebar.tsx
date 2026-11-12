@@ -1221,6 +1221,7 @@ function ConversationRow({
           )}
           // A folded lead's hover card says more than a title would.
           title={folded ? undefined : location ?? (branchName ? `${branchName} · ${title}` : title)}
+          data-folded-lead={folded ? "" : undefined}
           {...{ [ROW_ATTRIBUTE]: ids.join(" ") }}
         >
           {sort.handle}

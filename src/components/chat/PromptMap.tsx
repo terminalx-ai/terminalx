@@ -190,7 +190,7 @@ export function PromptMap({
       {hovered && preview && (
         <div
           role="tooltip"
-          className="pointer-events-none absolute right-7 z-(--z-tooltip) w-max max-w-[18rem] -translate-y-1/2 rounded-md bg-popover glass px-2.5 py-1.5 text-xs leading-snug text-popover-foreground shadow-surface hairline"
+          className="pointer-events-none absolute right-7 z-(--z-tooltip) w-max max-w-[18rem] -translate-y-1/2 rounded-md bg-popover px-2.5 py-1.5 text-xs leading-snug text-popover-foreground shadow-surface hairline"
           style={{ top: hovered.top }}
         >
           {sent && (

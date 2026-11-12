@@ -85,9 +85,8 @@ export function RuntimeStartFailedDialog({ failed }: { failed: LocalRuntimeStart
       <DialogContent
         width="max-w-[600px]"
         showClose={false}
-        // Opaque even under glass (where --card is a veil), over a darker
-        // backdrop: nothing behind it can be used until this is answered.
-        className="bg-(--surface-card) p-6"
+        // Over a darker backdrop: nothing behind it can be used until this is answered.
+        className="p-6"
         overlayClassName="bg-black/65"
         onOpenAutoFocus={(event) => { event.preventDefault(); restart.current?.focus(); }}
         onEscapeKeyDown={(event) => event.preventDefault()}
