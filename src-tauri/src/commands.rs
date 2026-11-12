@@ -3676,6 +3676,16 @@ pub async fn replace_text(
     .map_err(err)
 }
 
+// ------------------------------------------------------------------ notifications
+
+/// What macOS says about TerminalX's banners: "granted", "denied", "ask" or
+/// "unknown" (see `notification_permission`). Asking waits on the system, so
+/// it runs on the blocking pool, off the webview's IPC thread.
+#[tauri::command]
+pub async fn notification_permission() -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(|| crate::notification_permission::permission().to_string()).await.map_err(err)
+}
+
 // ------------------------------------------------------------------ dictation
 
 #[tauri::command]

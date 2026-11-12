@@ -76,6 +76,7 @@ mod cloud_control;
 mod pipe_transport;
 #[cfg(feature = "desktop")]
 mod dictation;
+mod notification_permission;
 #[cfg(feature = "desktop")]
 mod transparency;
 #[cfg(feature = "desktop")]
@@ -846,6 +847,7 @@ pub fn run() {
             commands::replace_text,
             commands::fork_session,
             commands::dictation_available,
+            commands::notification_permission,
             commands::dictation_start,
             commands::dictation_stop,
             commands::update_project,
