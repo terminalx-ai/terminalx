@@ -20,7 +20,10 @@ from .source import pinned_source
 
 
 def agent_browser_version(root: Path) -> str:
-    return json.loads((root / 'package.json').read_text())['dependencies']['agent-browser']
+    package = json.loads((root / 'package.json').read_text())
+    version = package.get('dependencies', {}).get('agent-browser') or package.get('devDependencies', {}).get('agent-browser')
+    require(isinstance(version, str) and bool(version.strip()), 'package.json has no agent-browser version to verify')
+    return version
 
 
 def updater_signature(release: Release, runner: Runner, archive: Path) -> dict:

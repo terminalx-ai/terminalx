@@ -932,4 +932,46 @@ describe("limits and budget (PRO-280)", () => {
     // The dollar budget is not offered to a run with no worker on an API key.
     expect(within(summary).queryByRole("spinbutton", { name: "Dollars this run may spend" })).toBeNull();
   });
+
+  // PRO-335. No window here has a reset time, so nothing shown depends on the clock.
+  const window = { agent: "claude", key: "five_hour", label: "5h", percent: 41, start: 32, points: 9 };
+
+  it("shows what a run with no limit spent and used, says No limit instead of a bound, and names the window level", async () => {
+    await open(running({ limits: { workers: 4, dollars: "none", points: "none", ceiling: 85 }, usage: { dollars: 12345.6, apiKey: true, subscription: true, windows: [window] } }));
+    const budget = screen.getByTestId("run-budget").textContent ?? "";
+    expect(budget).toContain("9 points usedNo limit");
+    expect(budget).toContain("$12345.60 spentNo limit");
+    expect(budget).not.toContain(" of $");
+    expect(budget).toContain("5h window at 41% · pauses past 85%");
+    expect(screen.getAllByTestId("run-no-limit")).toHaveLength(2);
+  });
+
+  it("says the window level is off for a run that has it off", async () => {
+    await open(running({ limits: { workers: 4, dollars: 15, points: 25, ceiling: "none" }, usage: { dollars: 0, subscription: true, windows: [window] } }));
+    const budget = screen.getByTestId("run-budget").textContent ?? "";
+    expect(budget).toContain("9 of 25 points");
+    expect(budget).toContain("5h window at 41% · window level off");
+  });
+
+  it("shows the approval view's one No limit warning, and sets and lifts this run's limits", async () => {
+    const warning = "This run has no limit on points of a window: it goes on until its work is done, or until a window it draws on passes 85%. What it uses is still recorded.";
+    const plan: Run = { ...waiting(), limits: { workers: 4, dollars: 15, points: "none", ceiling: 85 }, usage: { dollars: 0, subscription: true, windows: [{ ...window, start: undefined, points: 0 }] }, inTurn: 0, fit: [warning] };
+    answers.orchestration_set_limits = ({ limits }: { limits: Run["limits"] }) => ({ ...plan, limits });
+    await open(plan);
+    const summary = screen.getByRole("region", { name: "Plan summary" });
+    expect(within(summary).getAllByRole("alert").map((alert) => alert.textContent)).toEqual([warning]);
+    expect(summary.textContent).toContain("BudgetNo points limit");
+    expect(within(summary).queryByRole("spinbutton", { name: "Points of a window this run may use" })).toBeNull();
+
+    // Back to a bound, starting from the default; then the window level off.
+    fireEvent.click(within(summary).getByRole("button", { name: "Points of a window this run may use: Set a limit" }));
+    await waitFor(() => expect(calls("orchestration_set_limits")).toEqual([{ id: "run-1", limits: { workers: 4, dollars: 15, points: 25, ceiling: 85 } }]));
+    await waitFor(() => expect(within(summary).getByRole("spinbutton", { name: "Points of a window this run may use" })).toBeTruthy());
+    fireEvent.click(within(summary).getByRole("button", { name: "Pause when a window passes: Turn off" }));
+    await waitFor(() => expect(calls("orchestration_set_limits").at(-1)).toEqual({ id: "run-1", limits: { workers: 4, dollars: 15, points: 25, ceiling: "none" } }));
+    await waitFor(() => expect(summary.textContent).toContain("Off: can use the whole window"));
+    // Off, its button is named for what it now does.
+    expect(within(summary).getByRole("button", { name: "Pause when a window passes: Set a limit" })).toBeTruthy();
+    expect(within(summary).queryByRole("button", { name: "Pause when a window passes: Turn off" })).toBeNull();
+  });
 });

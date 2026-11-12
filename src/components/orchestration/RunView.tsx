@@ -10,7 +10,7 @@ import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { EFFORT_LABEL, effortChoices, modeLabel, modelForTab, modelLabel, modelOptionText, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
-  budgetText, checksFrom, checkText, conflictReasons, conflictsWith, costText, currentMerge, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, holdText, mainWindow, MERGE_STATE_LABEL, mergeNote, mergeRows, mergeSubtitle, noteRun, numberList, pieceCheck, pieceMerged, pieceMode, pieceNumbers,
+  budgetText, capAt, checksFrom, dollarsText, pointsText, checkText, conflictReasons, conflictsWith, costText, currentMerge, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, holdText, mainWindow, MERGE_STATE_LABEL, mergeNote, mergeRows, mergeSubtitle, noteRun, numberList, pieceCheck, pieceMerged, pieceMode, pieceNumbers,
   planOf, raisesMode, readOnlyPieces, refusalOf, requestOrchestratorSettings, resetClock, reviewTokens, RUN_STATE_LABEL, TIER_DOT, tokensText, TRY_OUTCOME_LABEL, TRY_STEP_LABEL, useRun, verifyingText,
   shortCommit, windowLine, windowName, withoutPiece, type MergeRow, type MergeRowState,
 } from "@/lib/orchestration";
@@ -20,7 +20,7 @@ import { familyNeeds, overBudget, pieceSpend, runSpend, type Need } from "@/lib/
 import { formatCost } from "@/components/session/SessionCost";
 import { SESSION_STATUSES } from "@terminalx/portable/sessionStatus";
 import { relativeTime } from "@/lib/time";
-import type { CommandRun, GateResult, PieceTry, Run, RunLimits, RunPiece, RunPlan, RunPlanPiece, RunReview, RunVerification, RunVerifier, Tier } from "@/types/orchestration";
+import type { Cap, CommandRun, GateResult, PieceTry, Run, RunLimits, RunPiece, RunPlan, RunPlanPiece, RunReview, RunVerification, RunVerifier, Tier } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
 /** What the lead is asked when a person presses Plan a run. The lead decides whether splitting helps at all. */
@@ -229,7 +229,8 @@ function footnote(run: Run): string {
 }
 
 /** The defaults of a run stored by a runtime older than PRO-280, which sends no limits. */
-const DEFAULT_LIMITS: RunLimits = { workers: 4, dollars: 15, points: 25, ceiling: 85 };
+const DEFAULTS = { workers: 4, dollars: 15, points: 25, ceiling: 85 } as const;
+const DEFAULT_LIMITS: RunLimits = DEFAULTS;
 const limitsOf = (run: Run): RunLimits => run.limits ?? DEFAULT_LIMITS;
 
 type Act = (name: string, work: () => Promise<Run | null>) => Promise<boolean>;
@@ -238,8 +239,8 @@ type Act = (name: string, work: () => Promise<Run | null>) => Promise<boolean>;
 function heldBudget(run: Run): string | null {
   if (!run.limits || !run.usage) return null;
   const parts = [
-    run.usage.subscription ? `${run.limits.points} points` : null,
-    run.usage.apiKey ? `$${run.limits.dollars.toFixed(2)}` : null,
+    run.usage.subscription ? pointsText(run.limits.points) : null,
+    run.usage.apiKey ? dollarsText(run.limits.dollars) : null,
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : null;
 }
@@ -271,6 +272,22 @@ function LimitField({ label, value, min, max, step = 1, prefix, suffix, disabled
   );
 }
 
+/** A budget or the window level of this run (PRO-335): its field, or No limit, and the button that switches between them.
+ * Turned back on, it starts from `fallback`. */
+function CapLimitField({ value, offLabel, offText, fallback, ...field }: Omit<Parameters<typeof LimitField>[0], "value" | "onSave"> & {
+  value: Cap; offLabel: string; offText: string; fallback: number; onSave: (value: Cap) => void;
+}) {
+  const off = value === "none";
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {off ? <span className="inline-flex h-7 items-center rounded-md border border-dashed border-hairline px-2 text-xs text-muted-foreground">{offText}</span> : <LimitField {...field} value={value} />}
+      <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" aria-label={`${field.label}: ${off ? "Set a limit" : offLabel}`} disabled={field.disabled} onClick={() => field.onSave(off ? fallback : "none")}>
+        {off ? "Set a limit" : offLabel}
+      </Button>
+    </span>
+  );
+}
+
 /** This run's own worker limit and budget: the project's settings until the person changes them here. */
 function LimitsEditor({ run, busy, act }: { run: Run; busy: boolean; act: Act }) {
   const limits = limitsOf(run);
@@ -288,17 +305,17 @@ function LimitsEditor({ run, busy, act }: { run: Run; busy: boolean; act: Act })
       {subscription && <>
         <span className="flex items-center gap-2 text-[13px]">
           <span className="text-muted-foreground">Subscription</span>
-          <LimitField label="Points of a window this run may use" value={limits.points} min={1} max={100} suffix="pts" disabled={busy} onSave={(points) => save({ points })} />
+          <CapLimitField label="Points of a window this run may use" value={limits.points} offLabel="No limit" offText="No limit" fallback={DEFAULTS.points} min={1} max={100} suffix="pts" disabled={busy} onSave={(points) => save({ points })} />
         </span>
         <span className="flex items-center gap-2 text-[13px]">
           <span className="text-muted-foreground">Pause past</span>
-          <LimitField label="Pause when a window passes" value={limits.ceiling} min={1} max={100} suffix="%" disabled={busy} onSave={(ceiling) => save({ ceiling })} />
+          <CapLimitField label="Pause when a window passes" value={limits.ceiling} offLabel="Turn off" offText="Off: can use the whole window" fallback={DEFAULTS.ceiling} min={1} max={100} suffix="%" disabled={busy} onSave={(ceiling) => save({ ceiling })} />
         </span>
       </>}
       {apiKey && (
         <span className="flex items-center gap-2 text-[13px]">
           <span className="text-muted-foreground">API key</span>
-          <LimitField label="Dollars this run may spend" value={limits.dollars} min={0.01} max={10000} step={0.01} prefix="$" disabled={busy} onSave={(dollars) => save({ dollars })} />
+          <CapLimitField label="Dollars this run may spend" value={limits.dollars} offLabel="No limit" offText="No limit" fallback={DEFAULTS.dollars} min={0.01} max={10000} step={0.01} prefix="$" disabled={busy} onSave={(dollars) => save({ dollars })} />
         </span>
       )}
     </div>
@@ -500,7 +517,7 @@ function RunSummary({ run, spend, unpriced }: { run: Run; spend: number | null; 
   const budget = budgetText(run);
   const estimate = estimateText(run.estimate);
   const limits = limitsOf(run);
-  const dollars = run.budget.dollars;
+  const dollars = capAt(run.budget.dollars);
   const over = overBudget(run, spend);
   return (
     <section aria-label="Run summary" className="mx-6 grid grid-cols-1 gap-3 @[640px]/run:grid-cols-3">
@@ -519,7 +536,7 @@ function RunSummary({ run, spend, unpriced }: { run: Run; spend: number | null; 
           {/* Workers' cost as their sessions record it (PRO-273), against the dollars the plan allows. A points budget is shown as set: a run's share of a usage window is not measured. */}
           <div className="mt-1 text-[13px] text-muted-foreground" data-testid="run-spend">
             <span className={cn("text-xl font-semibold", over ? "text-destructive" : "text-foreground")}>{formatCost(spend ?? 0)}{unpriced ? "+" : ""}</span>
-            {dollars != null ? ` of $${dollars.toFixed(2)}` : budget ? ` · budget ${budget}` : " spent"}
+            {dollars != null ? ` of $${dollars.toFixed(2)}` : run.budget.dollars === "none" ? " spent · No limit" : budget ? ` · budget ${budget}` : " spent"}
           </div>
           {dollars != null && dollars > 0 && (
             <div className="mt-2 h-1 overflow-hidden rounded-full bg-veil-strong" aria-hidden>
@@ -548,24 +565,29 @@ function RunSummary({ run, spend, unpriced }: { run: Run; spend: number | null; 
 function BudgetCard({ run, estimate, spend, unpriced }: { run: Run; estimate: string | null; spend: number | null; unpriced: boolean }) {
   const limits = limitsOf(run);
   const dollars = spend ?? run.usage?.dollars ?? 0;
-  const over = dollars >= limits.dollars;
+  // No limit (PRO-335): what it used is still shown, against nothing.
+  const allowed = capAt(limits.dollars);
+  const points = capAt(limits.points);
+  const ceiling = capAt(limits.ceiling);
+  const over = allowed !== null && dollars >= allowed;
   const window = run.usage ? mainWindow(run) : null;
   const subscription = !!run.usage?.subscription;
   const apiKey = !!run.usage?.apiKey;
   const kind = subscription && apiKey ? "subscription and API key" : subscription ? "subscription" : apiKey ? "API key" : null;
   const plan = budgetText(run);
+  const noLimit = <span className="ml-1 rounded bg-veil-strong px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground" data-testid="run-no-limit">No limit</span>;
   return (
     <div className="rounded-lg bg-well px-3.5 py-3 hairline" data-testid="run-budget">
       <div className="text-[11px] text-faint">Budget{kind ? ` · ${kind}` : ""}</div>
       {subscription && (
         <div className="mt-1 text-[13px] text-muted-foreground">
-          <span className="text-xl font-semibold text-foreground">{Math.round(window?.points ?? 0)}</span> of {limits.points} points
+          <span className="text-xl font-semibold text-foreground">{Math.round(window?.points ?? 0)}</span>{points !== null ? ` of ${points} points` : <> points used{noLimit}</>}
         </div>
       )}
-      {apiKey && <div className={cn("text-[13px] text-muted-foreground", !subscription && "mt-1")}><span className={cn("font-semibold", over ? "text-destructive" : "text-foreground", !subscription && "text-xl")}>${dollars.toFixed(2)}{unpriced ? "+" : ""}</span> of ${limits.dollars.toFixed(2)}</div>}
+      {apiKey && <div className={cn("text-[13px] text-muted-foreground", !subscription && "mt-1")}><span className={cn("font-semibold", over ? "text-destructive" : "text-foreground", !subscription && "text-xl")}>${dollars.toFixed(2)}{unpriced ? "+" : ""}</span>{allowed !== null ? ` of $${allowed.toFixed(2)}` : <> spent{noLimit}</>}</div>}
       {!kind && <div className="mt-1 text-[13px]">{plan ? <span className="font-mono">{plan}</span> : <span className="text-muted-foreground">None set by the plan</span>}</div>}
       <div className="mt-2 text-[11px] text-faint">
-        {window ? `${windowLine(window)} · pauses past ${limits.ceiling}%` : apiKey && over ? "Over budget" : estimate ? `Estimated ${estimate} API-equivalent` : "The plan carries no estimate"}
+        {window ? `${windowLine(window)} · ${ceiling !== null ? `pauses past ${ceiling}%` : "window level off"}` : apiKey && over ? "Over budget" : estimate ? `Estimated ${estimate} API-equivalent` : "The plan carries no estimate"}
         {unpriced ? " · a model's tokens have no price" : ""}
       </div>
     </div>
@@ -891,7 +913,8 @@ function PlanForm({ run, busy, onCancel, onSave }: { run: Run; busy: boolean; on
   const [points, setPoints] = useState(run.budget.points == null ? "" : String(run.budget.points));
   const [dollars, setDollars] = useState(run.budget.dollars == null ? "" : String(run.budget.dollars));
   const [integrationCheck, setIntegrationCheck] = useState(run.integrationCheck ?? "");
-  const amount = (text: string) => (text.trim() === "" || !Number.isFinite(Number(text)) || Number(text) < 0 ? undefined : Number(text));
+  // "none" is No limit (PRO-335); empty follows the settings.
+  const amount = (text: string): Cap | undefined => (text.trim().toLowerCase() === "none" ? "none" : text.trim() === "" || !Number.isFinite(Number(text)) || Number(text) < 0 ? undefined : Number(text));
   return (
     <form aria-label="Edit plan" className="mx-6 mb-3 flex flex-col gap-3 rounded-lg bg-well p-3.5 hairline" onSubmit={(event) => { event.preventDefault(); onSave({ ...planOf(run), goal, budget: { points: amount(points), dollars: amount(dollars) }, integrationCheck: integrationCheck.trim() || undefined }); }}>
       <label className="flex flex-col gap-1 text-xs text-muted-foreground">Goal
@@ -903,10 +926,10 @@ function PlanForm({ run, busy, onCancel, onSave }: { run: Run; busy: boolean; on
       </label>
       <div className="flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">Budget, points
-          <input type="number" min={0} step="any" className={cn(field, "w-28 text-foreground")} value={points} onChange={(event) => setPoints(event.target.value)} />
+          <input inputMode="decimal" placeholder="From settings" title="A number, or none for No limit" className={cn(field, "w-28 text-foreground")} value={points} onChange={(event) => setPoints(event.target.value)} />
         </label>
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">Budget, dollars
-          <input type="number" min={0} step="any" className={cn(field, "w-28 text-foreground")} value={dollars} onChange={(event) => setDollars(event.target.value)} />
+          <input inputMode="decimal" placeholder="From settings" title="A number, or none for No limit" className={cn(field, "w-28 text-foreground")} value={dollars} onChange={(event) => setDollars(event.target.value)} />
         </label>
         <span className="ml-auto flex gap-2">
           <Button type="button" size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>

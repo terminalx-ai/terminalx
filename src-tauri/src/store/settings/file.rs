@@ -124,12 +124,13 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_line
     if key.starts_with("orchestrator.") && !value.is_object() {
         let field = key.rsplit('.').next().unwrap_or_default();
         let whole = |valid: fn(u32) -> bool| value.as_u64().and_then(|n| u32::try_from(n).ok()).is_some_and(valid);
-        let fraction = |valid: fn(f64) -> bool| value.as_f64().is_some_and(valid);
+        // PRO-335: a budget or the window level may also be "none", No limit.
+        let cap = |valid: fn(f64) -> bool| super::read_cap(&value, valid).is_some();
         let checked = match field {
             "workersPerRun" | "workersAtOnce" => Some((whole(super::valid_workers), "expected a number of workers from 1 to 50")),
             "stallMinutes" => Some((whole(super::valid_stall_minutes), "expected minutes from 1 to 240")),
-            "budgetDollars" => Some((fraction(super::valid_dollars), "expected dollars above 0, at most 10000")),
-            "budgetPoints" | "windowCeiling" => Some((fraction(super::valid_percent), "expected a percentage above 0, at most 100")),
+            "budgetDollars" => Some((cap(super::valid_dollars), "expected dollars above 0, at most 10000, or \"none\" for no limit")),
+            "budgetPoints" | "windowCeiling" => Some((cap(super::valid_percent), "expected a percentage above 0, at most 100, or \"none\" for no limit")),
             _ => None,
         };
         if let Some((ok, why)) = checked {
@@ -488,6 +489,39 @@ mod tests {
         assert!(settings.floating.shortcut.is_none());
         assert!(settings.merged_cleanup.enabled_for("/repo"));
         assert_eq!(settings.preferences["mode"], "dark");
+    }
+
+    #[test]
+    fn a_budget_or_the_window_level_at_no_limit_is_saved_and_read_back_through_the_file() {
+        use crate::store::settings::Cap;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // A hand-edited "none", app-wide and for a project, is a valid file (PRO-335).
+        std::fs::write(&path, json!({"orchestrator": {"budgetDollars": "none", "projects": {"/repo": {"budgetPoints": "none", "windowCeiling": 70}}}}).to_string()).unwrap();
+        let mut state = FileState::default();
+        refresh(&path, &mut state);
+        assert!(state.error.is_none(), "{:?}", state.error);
+        assert_eq!(state.good.orchestrator.budget_dollars, Cap::NoLimit);
+        assert_eq!(state.good.orchestrator.for_project("/repo").budget_points, Cap::NoLimit);
+
+        // Saving No limit for the window level, and reading the file again, keeps every "none".
+        let mut next = state.good.clone();
+        next.orchestrator.window_ceiling = Cap::NoLimit;
+        write(&path, &mut state, &next).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((&saved["orchestrator"]["budgetDollars"], &saved["orchestrator"]["windowCeiling"]), (&json!("none"), &json!("none")));
+        assert_eq!(saved["orchestrator"]["projects"]["/repo"], json!({"budgetPoints": "none", "windowCeiling": 70.0}));
+        let mut reread = FileState::default();
+        refresh(&path, &mut reread);
+        assert!(reread.error.is_none(), "{:?}", reread.error);
+        assert_eq!(reread.good.orchestrator, next.orchestrator);
+
+        // Any other word, or null, is still refused with the key.
+        for bad in [json!("unlimited"), Value::Null, json!(0)] {
+            let error = parse(&json!({"orchestrator": {"windowCeiling": bad}}).to_string()).unwrap_err().to_string();
+            assert!(error.contains("orchestrator.windowCeiling") && error.contains("\"none\""), "{error}");
+        }
+        assert!(parse(&json!({"orchestrator": {"projects": {"/repo": {"budgetDollars": "lots"}}}}).to_string()).unwrap_err().to_string().contains("budgetDollars"));
     }
 
     #[test]

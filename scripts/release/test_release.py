@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import release as cli  # noqa: E402
-from txrelease import assets, config, content, credentials, notarize, publish, secrets_scan, source  # noqa: E402
+from txrelease import assets, config, content, credentials, notarize, publish, secrets_scan, source, verify  # noqa: E402
 from txrelease.config import LATEST_DMG, ReleaseError  # noqa: E402
 from txrelease.proc import Result, Runner, sha256, write_json  # noqa: E402
 
@@ -137,6 +137,20 @@ class TempCase(unittest.TestCase):
     def setUp(self):
         self.directory = Path(tempfile.mkdtemp(prefix='tx-release-test-'))
         self.addCleanup(shutil.rmtree, self.directory, True)
+
+
+class BrowserVersionTests(TempCase):
+    def test_reads_browser_version_from_either_dependency_group(self):
+        for group in ('devDependencies', 'dependencies'):
+            with self.subTest(group=group):
+                package = {'dependencies': {'react': '19.3.0'}, group: {'agent-browser': '0.27.0'}}
+                (self.directory / 'package.json').write_text(json.dumps(package))
+                self.assertEqual(verify.agent_browser_version(self.directory), '0.27.0')
+
+    def test_refuses_a_missing_browser_version(self):
+        (self.directory / 'package.json').write_text(json.dumps({'dependencies': {}}))
+        with self.assertRaisesRegex(ReleaseError, 'agent-browser'):
+            verify.agent_browser_version(self.directory)
 
 
 class ConfigTests(TempCase):

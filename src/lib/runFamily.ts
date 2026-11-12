@@ -88,7 +88,7 @@ export function runSpend(run: Run, sessions: ReadonlyMap<string, SessionEntry>):
 
 /** Past the dollars the plan allows. A points budget is not measured per run, so it is never "over". */
 export function overBudget(run: Pick<Run, "budget">, spend: number | null): boolean {
-  return run.budget.dollars != null && spend != null && spend > run.budget.dollars;
+  return typeof run.budget.dollars === "number" && spend != null && spend > run.budget.dollars;
 }
 
 /** A row's model as one word, `Sonnet`, and the colour 18.07 draws it in. */
@@ -139,7 +139,7 @@ export function familyNeeds({ lead, leadStatus, run, workers, statusOf, spend }:
   if (waitsOnPerson(leadStatus)) needs.push({ kind: kind(leadStatus), sessionId: lead.id, text: `Lead: ${leadStatus.detail}` });
   if (run?.state === "awaitingApproval") needs.push({ kind: "approval", sessionId: lead.id, text: "The plan waits for your approval" });
   if (run && !["done", "stopped"].includes(run.state) && overBudget(run, spend)) {
-    needs.push({ kind: "attention", sessionId: lead.id, text: `Over budget: $${spend!.toFixed(2)} of $${run.budget.dollars!.toFixed(2)}` });
+    needs.push({ kind: "attention", sessionId: lead.id, text: `Over budget: $${spend!.toFixed(2)} of $${Number(run.budget.dollars).toFixed(2)}` });
   }
   const asked = new Set<string>();
   for (const worker of workers) {

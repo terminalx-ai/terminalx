@@ -255,6 +255,66 @@ describe("Settings → Orchestrator, limits and budget (PRO-280)", () => {
   });
 });
 
+describe("No limit for a run's budget and window level (PRO-335)", () => {
+  const off = (name: string) => screen.getByRole("switch", { name }) as HTMLElement;
+
+  it("turns the dollar and points budgets off and on again, and shows No limit in place of the field", async () => {
+    render(<OrchestratorTab />);
+    await waitFor(() => expect(off("Budget per run, API key: No limit").hasAttribute("disabled")).toBe(false));
+    expect(off("Budget per run, API key: No limit").getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.click(off("Budget per run, API key: No limit"));
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledWith({ budgetDollars: "none" }));
+    await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "Budget per run, API key" })).toBeNull());
+    expect(off("Budget per run, API key: No limit").getAttribute("aria-checked")).toBe("true");
+
+    fireEvent.click(off("Budget per run, subscription: No limit"));
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledWith({ budgetPoints: "none" }));
+    await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "Budget per run, subscription" })).toBeNull());
+    // The window level stays on by itself.
+    expect(limit("Pause when a window passes").value).toBe("85");
+
+    // Back on, a budget starts from the default.
+    fireEvent.click(off("Budget per run, API key: No limit"));
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenLastCalledWith({ budgetDollars: 15 }));
+    await waitFor(() => expect(limit("Budget per run, API key").value).toBe("15"));
+  });
+
+  it("turns the window level off, saying a run can then use the whole window", async () => {
+    render(<OrchestratorTab />);
+    await waitFor(() => expect(off("Pause when a window passes: Off").hasAttribute("disabled")).toBe(false));
+    fireEvent.click(off("Pause when a window passes: Off"));
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledWith({ windowCeiling: "none" }));
+    await waitFor(() => expect(screen.getByTestId("orchestrator-settings").textContent).toContain("Off: a run can use the whole window"));
+    expect(screen.queryByRole("spinbutton", { name: "Pause when a window passes" })).toBeNull();
+  });
+
+  it("shows settings stored with No limit as such", async () => {
+    stored = { ...stored, budgetDollars: "none", windowCeiling: "none" };
+    render(<OrchestratorTab />);
+    await waitFor(() => expect(off("Budget per run, API key: No limit").getAttribute("aria-checked")).toBe("true"));
+    expect(off("Pause when a window passes: Off").getAttribute("aria-checked")).toBe("true");
+    expect(off("Budget per run, subscription: No limit").getAttribute("aria-checked")).toBe("false");
+    expect(limit("Budget per run, subscription").value).toBe("25");
+  });
+
+  it("lets a repository choose No limit, shows the default's No limit as its placeholder, and follows the default again", async () => {
+    stored = { ...stored, budgetPoints: "none" };
+    render(<RepositoryOrchestratorSettings projectPath="/repo" />);
+    const points = await screen.findByRole("spinbutton", { name: "Budget per run, subscription in terminalx" });
+    await waitFor(() => expect(points.hasAttribute("disabled")).toBe(false));
+    expect((points as HTMLInputElement).placeholder).toBe("No limit");
+
+    fireEvent.click(off("Budget per run, API key in terminalx: No limit"));
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledWith({ project: "/repo", budgetDollars: "none" }));
+    await waitFor(() => expect(stored.projects["/repo"]).toEqual({ budgetDollars: "none" }));
+    // Off again, the repository has no value of its own: it follows the default.
+    fireEvent.click(off("Budget per run, API key in terminalx: No limit"));
+    await waitFor(() => expect(mocks.setSettings).toHaveBeenLastCalledWith({ project: "/repo", budgetDollars: null }));
+    await waitFor(() => expect(stored.projects["/repo"]).toBeUndefined());
+  });
+});
+
 const cell = (name: string) => screen.getByRole("combobox", { name }) as HTMLSelectElement;
 const chosen = (select: HTMLSelectElement) => select.selectedOptions[0]?.textContent;
 /** The table shows a tier by the model it runs on: wait until that is read. */

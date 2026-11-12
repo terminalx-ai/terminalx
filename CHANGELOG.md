@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.2.31
+
+- Keep the session's own title in the sidebar while reviewer and helper tabs
+  are active. (#904)
+- Show token usage and cost per session, and align session status labels
+  across desktop and mobile. (#896, #898)
+- Show detailed session and pull request status on every sidebar row, and the
+  next Git action in the session header. (#821, #825)
+- Configure agent API keys from Settings and enforce managed data privacy
+  controls across app-owned network and agent activity. (#894, #817)
+- Create projects from Quick Start, confirm where a project was added, and
+  offer logs and recovery actions when the local runtime fails to start.
+  (#892, #888, #889)
+- Improve workspace setup scripts, local branch merges, workspace mirroring,
+  named run actions, and review comments. (#836, #827, #855, #853, #835)
+- Run auto-approved read-only commands outside the user's startup shell.
+  (#899)
+- Inspect individual CI checks from an issue pipeline and preserve the held
+  follow-up queue when leaving the composer. (#890, #886)
+- Experimental orchestration runs: a lead plans pieces you can approve,
+  workers get a model and effort per piece with escalation on failure, run
+  in a limited pool, are verified in a fresh session, and are merged into the
+  lead's branch in dependency order; the sidebar shows a lead with its
+  workers. (#895, #901, #900, #903, #905, #908, #902, #897)
+
 - Experimental: `terminalx runs merge` brings an orchestration run's accepted
   pieces into the lead's branch. TerminalX does the git work itself, with no
   model: one piece at a time, each after the pieces it depends on, one merge
