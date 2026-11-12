@@ -43,7 +43,11 @@ let failed = 0;
 try {
   for (const colorScheme of ["dark", "light"]) {
     const at = colorScheme;
-    const shot = async (page, name) => { if (shots) await page.screenshot({ path: join(shots, `readable-panels-${name}-${colorScheme}.png`) }); };
+    const shot = async (page, name) => {
+      if (!shots) return;
+      await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))));
+      await page.screenshot({ path: join(shots, `readable-panels-${name}-${colorScheme}.png`) });
+    };
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width: 1100, height: 760 }, { extra: transcript, colorScheme });
     page.setDefaultTimeout(30_000);
     const errors = [];
