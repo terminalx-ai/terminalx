@@ -34,6 +34,7 @@ import {
   Palette,
   Search,
   Settings,
+  Smartphone,
   Sparkles,
   Sun,
   Terminal,
@@ -96,6 +97,7 @@ import { THEMES, setMode, setTheme, useTheme } from "@/lib/theme";
 import { relativeTime } from "@/lib/time";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
 import { openWorktreeCleanup } from "@/lib/dialogs";
+import { openPairPhone } from "@/lib/pairing";
 import type { Project, SessionEntry } from "@/types/session";
 
 const GROUP_CAPS: Record<string, number> = {
@@ -507,6 +509,7 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:mode:dark", group: "commands" as const, primary: "Appearance: Dark", secondary: theme.mode === "dark" ? "Current appearance" : "Use the dark appearance", recentAt: 3, icon: Moon, run: () => setMode("dark") }),
       indexPaletteItem({ id: "command:settings:search", group: "commands" as const, primary: "Search settings…", secondary: "Find a settings section", recentAt: 2, icon: Settings, keepOpen: true, run: () => { setScope("settings"); setQuery(""); setSelected(0); } }, ["preferences options configure"]),
       indexPaletteItem({ id: "command:new-issue", group: "commands" as const, primary: "New issue…", secondary: "Create a GitHub or Linear issue for the project", recentAt: 2, icon: CircleDot, run: () => openNewIssue() }, ["issue create new bug feature github linear ticket"]),
+      indexPaletteItem({ id: "command:pair-phone", group: "commands" as const, primary: "Pair a phone…", secondary: "Drive this Mac's sessions from TerminalX for iPhone", recentAt: 2, icon: Smartphone, run: () => openPairPhone() }, ["phone iphone mobile pair pairing device qr remote"]),
       indexPaletteItem({ id: "command:worktree-cleanup", group: "commands" as const, primary: "Clean up worktrees…", secondary: "Review and remove safe worktrees across open projects, here and on cloud workspaces", recentAt: 2, icon: Trash2, run: () => openWorktreeCleanup() }, ["worktree workspace cleanup disk space remove delete prune"]),
       indexPaletteItem({ id: "command:local-section:create", group: "commands" as const, primary: "New local section…", secondary: "Group sessions across local projects", recentAt: 2, icon: FolderPlus, run: () => openSectionDialog({ kind: "create" }) }, ["create sidebar section"]),
       ...(selectedSession && !store.selectedCloudWorkspace ? [indexPaletteItem({ id: "command:local-section:move", group: "commands" as const, primary: "Move to section…", secondary: conversationTitle(selectedSession), recentAt: 3, icon: FolderPlus, run: () => openSectionDialog({ kind: "move", sessionIds: [selectedSession.id] }) }, ["move session sidebar section"])] : []),
