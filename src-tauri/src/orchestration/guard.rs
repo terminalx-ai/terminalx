@@ -324,10 +324,11 @@ const SHELL_TOOLS: &[&str] = &["Bash", "shell", "shell_command", "exec_command",
 /// (`sed -i`, `git commit`, a redirect, a script) is refused, not asked about:
 /// nobody is there to answer.
 ///
-/// A command that passes is not run by its agent, in a shell that has read
-/// the person's startup files: TerminalX runs the programs the reader
-/// resolved itself, in the directory it was read in (PRO-330), so what was
-/// judged is what is executed.
+/// A command that passes is not run by the agent's shell at all: TerminalX
+/// runs the programs the reader vetted itself, in the directory it was read
+/// in ([`crate::harness::read_only::Approved`], PRO-330), and answers the
+/// hook with what they printed, so what was judged is what is executed.
+/// That is outside the agent's sandbox, so it is held to [`held`] too.
 pub fn verifier_call(payload: &Value) -> VerifierCall {
     let tool = payload["tool_name"].as_str().unwrap_or_default();
     let edits = EDIT_TOOLS.contains(&tool) || (tool.starts_with("mcp__") && ["__write_file", "__edit_file", "__create_or_update_file", "__push_files"].iter().any(|suffix| tool.ends_with(suffix)));
@@ -342,7 +343,11 @@ pub fn verifier_call(payload: &Value) -> VerifierCall {
     if !SHELL_TOOLS.contains(&tool) {
         return VerifierCall::Leave;
     }
-    match crate::harness::read_only::approved(tool, &payload["tool_input"], payload["cwd"].as_str()) {
+    // The directory the command names for itself, as the discovery path takes it: Codex's
+    // `workdir`, and only without one the directory its hook reported.
+    let input = &payload["tool_input"];
+    let cwd = crate::harness::read_only::explicit_cwd(input).or_else(|| crate::harness::read_only::reported_scope(input, payload["cwd"].as_str()));
+    match crate::harness::read_only::approved(tool, input, cwd) {
         Some(approved) => VerifierCall::Run(approved),
         None => VerifierCall::Refuse("TerminalX refused this command: a verifier of a run runs only commands that read (`git diff`, `git status`, `cat`, `rg`, `grep`, `ls`), with no redirect and no script. The checks were already run for you; judge the result from the diff and the files as they are.".to_string()),
     }
@@ -355,9 +360,35 @@ pub enum VerifierCall {
     Leave,
     /// Refused, and why.
     Refuse(String),
-    /// A shell command that only reads: TerminalX runs the programs the reader
-    /// vetted itself and answers the hook with what they printed (PRO-330).
+    /// A shell command that only reads: TerminalX runs it itself, as vetted,
+    /// and the agent is given the result.
     Run(crate::harness::read_only::Approved),
+}
+
+/// Why a verifier's read-only command is refused where the person has not let
+/// TerminalX run read-only commands unasked (Settings, PRO-330).
+pub const NOT_ALLOWED: &str = "TerminalX refused this command: a verifier's shell commands are run by TerminalX itself, and read-only commands are not set to run unasked on this computer. Read the files with your file tools (Read, Grep, Glob) instead, and judge the result from the diff you were given.";
+
+/// Why a verifier's read-only command is refused where its agent's sandbox may
+/// narrow what it reads.
+pub const SANDBOXED: &str = "TerminalX refused this command: this agent's sandbox settings may limit what it reads, and TerminalX would run it outside that sandbox. Read the files with your file tools (Read, Grep, Glob) instead, and judge the result from the diff you were given.";
+
+/// Why a verifier's read-only command that was stopped before it finished is
+/// refused: no answer would let the agent's own shell run it.
+pub const STOPPED: &str = "TerminalX refused this command: it was stopped before it finished, and nothing reported a result. Read the files with your file tools (Read, Grep, Glob) instead.";
+
+/// A verifier's command TerminalX would run itself, held to PRO-330's gates
+/// for every command it runs outside the agent's sandbox: `read_only_commands`
+/// (the person lets read-only commands run unasked), and that sandbox could
+/// not have narrowed what the command reads. `may_restrict` says whether it
+/// could, for the directory the command runs in. Otherwise it is refused,
+/// never handed to the agent's shell: nobody is there to be asked.
+pub fn held(call: VerifierCall, read_only_commands: bool, may_restrict: impl FnOnce(&Path) -> bool) -> VerifierCall {
+    match call {
+        VerifierCall::Run(_) if !read_only_commands => VerifierCall::Refuse(NOT_ALLOWED.to_string()),
+        VerifierCall::Run(approved) if may_restrict(approved.directory()) => VerifierCall::Refuse(SANDBOXED.to_string()),
+        call => call,
+    }
 }
 
 /// Whether a tab is held to reading: it is a verifier of a run's result.
@@ -618,8 +649,8 @@ mod tests {
         };
         // (Tools every machine has: whether `rg` is one depends on where this runs.)
         for reads in ["git diff lead...HEAD -- src/cli.rs", "git status --short", "cat src/cli.rs", "ls src"] {
-            // It goes ahead as programs TerminalX runs itself, bound to this directory: what was
-            // judged is what runs, not the text as it was sent to a shell.
+            // It goes ahead as the reader vetted it, bound to this directory and run by TerminalX
+            // itself: what was judged is what runs, not the text as the agent's shell would read it.
             let VerifierCall::Run(approved) = call("Bash", reads) else { panic!("{reads} goes ahead") };
             assert_eq!(approved.directory(), cwd.as_path(), "{reads}");
         }
@@ -640,6 +671,58 @@ mod tests {
         // And it starts where its agent itself changes nothing: Claude Code's plan mode, Codex's read-only sandbox.
         assert_eq!(super::VERIFIER_MODE, "plan");
         assert_eq!(crate::harness::codex::stance(super::VERIFIER_MODE).1, "read-only");
+    }
+
+    #[test]
+    fn a_verifier_s_read_only_command_is_refused_where_read_only_commands_are_off_or_its_agent_s_sandbox_may_narrow_reads() {
+        use super::VerifierCall;
+        use crate::harness::provider_sandbox::{claude_may_restrict, codex_may_restrict, Sources};
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("worktree");
+        std::fs::create_dir(&cwd).unwrap();
+        let cwd = cwd.canonicalize().unwrap();
+        crate::git::run(&cwd, &["init", "-q", "-b", "lead"]).unwrap();
+        // This machine's settings stay out of it: every source is under the scratch directory.
+        let config = dir.path().join("claude");
+        let codex_home = dir.path().join("codex");
+        let system = dir.path().join("system");
+        for made in [&config, &codex_home, &system] {
+            std::fs::create_dir(made).unwrap();
+        }
+        let sources = Sources { claude_config: vec![config.clone()], codex_home: Some(codex_home.clone()), system, user: None };
+        let call = || super::verifier_call(&serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git status --short"}, "cwd": cwd}));
+        let claude = |call| super::held(call, true, |directory| claude_may_restrict(&[directory], &sources));
+        let codex = |call| super::held(call, true, |directory| codex_may_restrict(&[directory], &sources));
+        // Neither agent's sandbox narrows what it reads: TerminalX runs it, in the directory it was read in.
+        for held in [claude(call()), codex(call())] {
+            let VerifierCall::Run(approved) = held else { panic!("an unsandboxed verifier's read runs: {held:?}") };
+            assert_eq!(approved.directory(), cwd.as_path());
+        }
+        // Where the person has not let read-only commands run unasked, TerminalX runs none for a
+        // verifier either, whatever the sandbox: refused, with the file tools named.
+        let VerifierCall::Refuse(reason) = super::held(call(), false, |_| false) else { panic!("refused with read-only commands off") };
+        assert_eq!(reason, super::NOT_ALLOWED);
+        assert!(["Read", "Grep", "Glob"].iter().all(|tool| reason.contains(tool)), "{reason}");
+        // Claude Code's sandbox is on, in the worktree's own project settings: refused, with the
+        // verifier pointed at its file tools, and as a denial, so the agent's shell never runs it.
+        std::fs::create_dir(cwd.join(".claude")).unwrap();
+        std::fs::write(cwd.join(".claude/settings.json"), r#"{"sandbox": {"enabled": true}}"#).unwrap();
+        let VerifierCall::Refuse(reason) = claude(call()) else { panic!("refused under Claude's sandbox") };
+        assert_eq!(reason, super::SANDBOXED);
+        assert!(["Read", "Grep", "Glob"].iter().all(|tool| reason.contains(tool)), "{reason}");
+        assert_eq!(super::refusal_output(&reason)["hookSpecificOutput"]["permissionDecision"], "deny");
+        // Codex's sandbox narrows what it reads: refused the same way.
+        std::fs::write(codex_home.join("config.toml"), "[sandbox_workspace_write]\nreadable_roots = [\"/tmp\"]\n").unwrap();
+        assert!(matches!(codex(call()), VerifierCall::Refuse(reason) if reason == super::SANDBOXED));
+        // Settings that cannot be read could hold a restriction: refused too.
+        std::fs::write(config.join("settings.json"), "{ not json").unwrap();
+        std::fs::remove_file(cwd.join(".claude/settings.json")).unwrap();
+        assert!(matches!(claude(call()), VerifierCall::Refuse(reason) if reason == super::SANDBOXED));
+        // A refusal or a call left to its agent is not a run, and is passed through as it was.
+        assert!(matches!(claude(VerifierCall::Leave), VerifierCall::Leave));
+        assert!(matches!(claude(VerifierCall::Refuse("no".into())), VerifierCall::Refuse(reason) if reason == "no"));
+        // A run stopped before it finished is refused, never left unanswered, also with the file tools named.
+        assert!(["Read", "Grep", "Glob"].iter().all(|tool| super::STOPPED.contains(tool)), "{}", super::STOPPED);
     }
 
     #[test]

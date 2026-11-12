@@ -41,6 +41,18 @@
   blocked and goes back to the lead with what was tried. The Run view shows
   every try with its model, effort, cost and outcome. (PRO-275)
 
+- Experimental: with Orchestration runs on, a lead's workers sit under it in the
+  sidebar, whatever worktree they run in, each named by its piece with its
+  model's tier and its piece's state mark. Fold a lead and its row keeps what
+  matters: pieces done out of total, how many workers are running, a Needs
+  approval or Needs you mark with how many wait on you, and a worker's unread
+  mark. Hover it for the pieces that are not done. Clicking a lead opens its
+  run. The Run view's costs follow each worker's usage as it changes, still
+  counting every try a piece took, and set the run's spend against its dollar
+  budget; a Needs you list there names a blocked piece, a worker waiting
+  on an answer or spend past the budget, each opening the worker it is about.
+  Sessions that no other session started look as before. (PRO-281)
+
 - Experimental: an orchestration run no longer starts more workers than the
   Mac can carry. At most 4 workers of one run, and 8 across every run, are in a
   turn at once; the rest queue and start by themselves as workers finish.

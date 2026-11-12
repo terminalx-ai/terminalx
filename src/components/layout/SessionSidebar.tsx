@@ -3,7 +3,7 @@ import { isUnread } from "@/lib/dashboard";
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
-import { createContext, useId, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useContext, useId, useMemo, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
 import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -55,6 +55,10 @@ import { setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import type { Project, TabEntry, Workspace } from "@/types/session";
 import type { SessionEntry } from "@/types/session";
 import { useFold } from "./useFold";
+import { LeadGlyph, LeadHoverCard, LeadTrailing, RunFamiliesContext, WorkerMark, WorkerTier, useLeadFamily, useLeadSummary, useWorkerPiece, type RunFamilies } from "./RunRows";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { showRunView, useRunsByLead } from "@/lib/orchestration";
+import { nestWorkers } from "@/lib/runFamily";
 import { StatusMarkIcon } from "@/components/ui/SessionStatus";
 import { statusText } from "@terminalx/portable/sessionStatus";
 import { useSessionRowStatus } from "@/lib/sessionRowStatus";
@@ -512,10 +516,17 @@ function ProjectGroup({
   const { animations } = prefs;
   // A branch's sessions are tabs or sidebar rows, never both: as tabs, the branch is one row here whatever their number.
   const asTabs = branchSessionsAsTabs(prefs);
+  // Orchestration (PRO-281), behind Settings → Experimental: a lead's workers nest under its row, whatever worktree
+  // they run in, instead of each taking a branch row of its own. Off, every session is listed as before.
+  const orchestrating = useExperimentalSettings()?.orchestratorRuns === true;
+  const runs = useRunsByLead(orchestrating);
+  const nested = useMemo(() => (orchestrating ? nestWorkers(group.sessions) : { top: group.sessions, workersOf: {} }), [orchestrating, group.sessions]);
+  const families = useMemo<RunFamilies>(() => ({ workersOf: nested.workersOf, runs }), [nested.workersOf, runs]);
+  const holds = (session: SessionEntry, id: string | null) => session.id === id || !!nested.workersOf[session.id]?.some((worker) => worker.id === id);
   // One row per branch, newest work first; the conversations come in that order already.
   const branches = useMemo(() => {
     const byBranch = new Map<string, { key: string; branch: string; sessions: SessionEntry[] }>();
-    for (const session of group.sessions) {
+    for (const session of nested.top) {
       const branch = group.branches[session.id] ?? "";
       // A retained history must not join a live checkout merely because its
       // original branch name has been reused (or it now resumes on main).
@@ -525,12 +536,12 @@ function ProjectGroup({
       byBranch.set(key, entry);
     }
     return [...byBranch.values()];
-  }, [group]);
+  }, [group, nested.top]);
   // A removed workspace's conversations are kept, read and resumed from here, but set apart from the live ones
   // under a fold of their own (#696): left in the list, they sat beside live work for good.
   const live = branches.filter((entry) => !entry.key.startsWith("removed:"));
   const removed = branches.filter((entry) => entry.key.startsWith("removed:"));
-  const shown = all || filtered ? live : live.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
+  const shown = all || filtered ? live : live.filter((entry, index) => index < PEEK || entry.sessions.some((session) => holds(session, selectedId)));
   const more = !filtered && (live.length > shown.length || (all && live.length > PEEK));
   const sortBranch = ({ key, branch, sessions }: { key: string; branch: string; sessions: SessionEntry[] }) => {
     const tabbed = asTabs ? sessions.filter((session) => session.tabs.length > 0) : sessions;
@@ -691,6 +702,7 @@ function ProjectGroup({
       >
         <div className="-mx-2 min-h-0 overflow-hidden px-2">
       {/* Rows run the full width, so a selection spans it; their content is indented by `--indent` instead. */}
+      <RunFamiliesContext.Provider value={families}>
       <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:10px] [--indent-2:24px]">
         <SidebarSortList items={shown.map(sortBranch)}>
           {shown.map(row)}
@@ -726,6 +738,7 @@ function ProjectGroup({
           </ArchivedSessions>
         )}
       </ul>
+      </RunFamiliesContext.Provider>
         </div>
       </div>
       {renaming !== null && (
@@ -832,7 +845,8 @@ function BranchRow({
   onNewSession: NewSessionAction | null;
 }) {
   const sort = useSidebarSortable(sortId);
-  const holdsSelected = sessions.some((session) => session.id === selectedId);
+  const { workersOf } = useContext(RunFamiliesContext);
+  const holdsSelected = sessions.some((session) => session.id === selectedId || workersOf[session.id]?.some((worker) => worker.id === selectedId));
   const removed = sessions.every((session) => session.worktreeRemoved);
   const cleanup = useMergedStatus(LOCAL_HOST, removed ? null : sessions[0]?.cwd);
   const foldKey = removed ? `removed:${sessions[0].removedWorkspace?.path ?? sessions[0].id}` : branch;
@@ -1131,6 +1145,7 @@ function ConversationRow({
   onRenameBranch = null,
   linkTo,
   inArchive = false,
+  worker = false,
 }: {
   session: SessionEntry;
   sortId?: string;
@@ -1155,13 +1170,24 @@ function ConversationRow({
   linkTo: ConversationLinkActions | null;
   /** Drawn under an Archived fold, which says it already. */
   inArchive?: boolean;
+  /** Drawn under its lead (PRO-281): named by its piece, marked by its piece's state, with its model's tier. */
+  worker?: boolean;
 }) {
   const sort = useSidebarSortable(sortId);
-  const { sessions } = useSessionStore();
+  const { sessions, selectedSessionId } = useSessionStore();
+  // A lead (PRO-281): its workers nest under it and fold with it; folded, their marks come up to its row.
+  const family = useLeadFamily(session, worker || inArchive ? NO_PEERS : peers);
+  const summary = useLeadSummary(family);
+  const [leadOpen, toggleLead] = useFold(`lead:${session.id}`, true);
+  const leadExpanded = !!family && (leadOpen || family.workers.some((entry) => entry.id === selectedSessionId));
+  const folded = !!family && family.workers.length > 0 && !leadExpanded;
+  const { piece } = useWorkerPiece(session);
+  // A lead goes by its title, as a run's rows are read (18.07): its branch is in its tooltip, its run's glyph leads it.
+  if (family) named = "title";
   const statusDescriptionId = useId();
-  const title = named === "branch" ? (peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session)) : sidebarConversationTitle(session, branch, sessions);
+  const title = worker && piece ? piece.title : family ? conversationTitle(session) : named === "branch" ? (peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session)) : sidebarConversationTitle(session, branch, sessions);
   const draft = useSessionDraft(peers);
-  const unread = peers.some(isUnread);
+  const unread = peers.some(isUnread) || (folded && !!summary?.unread);
   // The sessions the row stands for, picked as one for the bulk bar (#718).
   const ids = peers.map((peer) => peer.id);
   const pickedNow = usePickedSessions();
@@ -1178,7 +1204,7 @@ function ConversationRow({
   // Rename is of what the row shows: its branch's label, or its conversation's title.
   const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
   return (
-    <li ref={sort.ref} style={sort.style}>
+    <li ref={sort.ref} style={sort.style} className={family ? "[--lead-indent:var(--indent,0px)]" : undefined} data-lead={family ? session.id : undefined} data-worker={worker ? session.id : undefined}>
       <AsyncDropdownMenu>
         <AsyncContextMenu>
         <ContextMenuTrigger asChild>
@@ -1186,19 +1212,39 @@ function ConversationRow({
           className={cn(
             actionRow,
             // Edge to edge: the row reaches past the list's 8px gutter, and its content keeps to it.
-            "relative -mx-2 flex min-h-9 items-center gap-2 py-1 pl-[calc(1rem+var(--indent,0px))] pr-3",
+            "relative -mx-2 flex items-center gap-2 py-1 pl-[calc(1rem+var(--indent,0px))] pr-3",
+            worker ? "min-h-7" : "min-h-9",
             selected ? "bg-selected text-foreground" : "text-foreground/90 hover:bg-selected/50",
             picked && "bg-info/12 ring-1 ring-inset ring-info/45",
           )}
-          title={location ?? (branchName ? `${branchName} · ${title}` : title)}
+          // A folded lead's hover card says more than a title would.
+          title={folded ? undefined : location ?? (branchName ? `${branchName} · ${title}` : title)}
           {...{ [ROW_ATTRIBUTE]: ids.join(" ") }}
         >
           {sort.handle}
+          {/* A worker hangs from its lead's glyph by a line. */}
+          {worker && <span aria-hidden className="pointer-events-none absolute inset-y-0 left-[calc(var(--lead-indent,0px)+1rem+7px)] border-l border-hairline" />}
+          {/* A lead folds its workers by the chevron in front of its glyph; the row itself opens the lead. */}
+          {family && family.workers.length > 0 && (
+            <button
+              type="button"
+              onClick={toggleLead}
+              aria-expanded={leadExpanded}
+              aria-label={leadExpanded ? `Fold the workers of ${title}` : `Unfold the workers of ${title}`}
+              data-testid="lead-fold"
+              className="absolute inset-y-0 left-[calc(var(--indent,0px)+1px)] flex w-3.5 items-center justify-center rounded-sm text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+            >
+              <ChevronDown aria-hidden className={cn("size-3 transition-transform", !leadExpanded && "-rotate-90")} />
+            </button>
+          )}
+          {withLeadHover(
           <button
             type="button"
             onClick={(event) => {
               if (pickOnClick(event, ids)) return;
               selectSession(session.id);
+              // A lead with a run opens on its run (18.07).
+              if (family?.run) showRunView(session.id, true);
             }}
             onDoubleClick={picking ? undefined : (rename ?? undefined)}
             aria-current={selected ? "true" : undefined}
@@ -1209,7 +1255,8 @@ function ConversationRow({
           >
             <span className="flex w-full min-w-0 items-center gap-2">
               {/* The row leads with its session status mark; the reader's own status groups rows and is read out here. */}
-              <StatusMarkIcon status={rowStatus} decorative /><span id={statusDescriptionId} hidden>{statusText(rowStatus)}. Status: {manualStatusLabel(session.manualStatus)}</span>
+              {family ? <LeadGlyph /> : worker ? <WorkerMark piece={piece} status={rowStatus} /> : <StatusMarkIcon status={rowStatus} decorative />}
+              <span id={statusDescriptionId} hidden>{statusText(rowStatus)}. Status: {manualStatusLabel(session.manualStatus)}{summary?.needs.length ? `. Waiting on you: ${summary.needs.map((need) => need.text).join("; ")}` : ""}</span>
               {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
               {named === "branch" ? (
                 <>
@@ -1221,7 +1268,7 @@ function ConversationRow({
                 </>
               ) : (
                 <>
-                  <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
+                  <span className={cn("min-w-0 flex-1 truncate", worker ? "text-[12.5px]" : "text-[13px]")}>{title}</span>
                   {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
                   {unread && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
                 </>
@@ -1233,10 +1280,12 @@ function ConversationRow({
                   <span className="truncate">{locationLabel}</span>
                 </span>
               )}
-              <SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />
+              {family && summary ? <LeadTrailing family={family} folded={folded} summary={summary} fallback={<SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />} />
+                : worker ? <WorkerTier piece={piece} session={session} />
+                : <SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />}
             </span>
             <DraftPreview text={draft} />
-          </button>
+          </button>)}
           <RowActions>
             <ArchiveRowButton session={session} title={title} />
             {session.archived && <UnarchiveButton session={session} title={title} />}
@@ -1255,6 +1304,18 @@ function ConversationRow({
           <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </DropdownMenuContent>
       </AsyncDropdownMenu>
+      {family && leadExpanded && family.workers.length > 0 && (
+        <ul aria-label={`Workers of ${title}`} data-testid="lead-workers" className="mt-0.5 flex flex-col gap-0.5 [--indent:calc(var(--lead-indent,0px)+16px)]">
+          {family.workers.map((entry) => (
+            <ConversationRow key={entry.id} session={entry} selected={entry.id === selectedSessionId} branch={null} linkTo={null} worker />
+          ))}
+        </ul>
+      )}
     </li>
   );
+
+  function withLeadHover(button: ReactElement) {
+    return folded && family && summary ? <LeadHoverCard family={family} summary={summary} title={title}>{button}</LeadHoverCard> : button;
+  }
 }
+const NO_PEERS: SessionEntry[] = [];

@@ -37,7 +37,10 @@ function boot() {
   booted = true;
   void listen<Run>("orchestration_run", (event) => upsert(event.payload)).catch(() => null);
   // What changed while the runtime was away was not announced: read again what is on screen.
-  void listen("local_runtime_reattached", () => { for (const sessionId of Object.keys(runs)) void read(sessionId); }).catch(() => null);
+  void listen("local_runtime_reattached", () => {
+    if (everyRunRead) void readAll();
+    for (const sessionId of Object.keys(runs)) void read(sessionId);
+  }).catch(() => null);
 }
 
 /** The run `sessionId` leads: `undefined` until read, `null` when it leads none. */
@@ -58,6 +61,47 @@ export function useRun(sessionId: string | undefined, enabled = true): Run | nul
   return enabled && sessionId ? all[sessionId] : undefined;
 }
 
+const NO_RUNS: Record<string, Run | null> = {};
+let everyRunRead = false;
+async function readAll() {
+  try {
+    const all = await orchestration.runs();
+    // Newest per lead, as `upsert` keeps it; one read, one change for the listeners.
+    const next = { ...runs };
+    for (const run of all) {
+      const shown = next[run.lead.sessionId];
+      if (!shown || shown.id === run.id || shown.created <= run.created) next[run.lead.sessionId] = run;
+    }
+    publish(next);
+  } catch {
+    everyRunRead = false;
+  }
+}
+
+/**
+ * Every run this window has heard of, by the session that leads it: what the
+ * sidebar nests and marks leads by (PRO-281). Read once, then kept by the
+ * runs' own events.
+ */
+export function useRunsByLead(enabled = true): Record<string, Run | null> {
+  const all = useSyncExternalStore(
+    (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    () => runs,
+    () => runs,
+  );
+  useEffect(() => {
+    if (!enabled) return;
+    boot();
+    if (everyRunRead) return;
+    everyRunRead = true;
+    void readAll();
+  }, [enabled]);
+  return enabled ? all : NO_RUNS;
+}
+
 /** What an action returned: shown at once, ahead of the event that follows it. */
 export function noteRun(run: Run) {
   upsert(run);
@@ -67,6 +111,7 @@ export function resetRunsForTests() {
   runViews = {};
   runs = {};
   booted = false;
+  everyRunRead = false;
   listeners.clear();
 }
 
