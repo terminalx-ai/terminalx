@@ -244,6 +244,53 @@ describe("session PR history", () => {
     expect(screen.queryByRole("button", { name: "Settle worktree" })).toBeNull();
   });
 
+  it("shows a pull request linked from another branch with its checks, and can unlink it (PRO-294)", async () => {
+    let linked = true;
+    mocks.invoke.mockImplementation(async (command: string, args: { url?: string; sessionKey?: string }) => {
+      if (command === "gh_available") return true;
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
+      if (command === "pr_associations") return linked ? [{ ...association(followup), linked: true }] : [];
+      if (command === "work_status") return workStatus("raccoon/approval-diff", 1);
+      if (command === "pr_list") return [];
+      if (command === "pr_details") return { ...followup, checks: [{ name: "Follow-up CI", state: "success" }] };
+      if (command === "pr_unlink") {
+        expect(args).toEqual({ sessionKey: "author", url: followup.url });
+        linked = false;
+        return [];
+      }
+      throw Error(command);
+    });
+    render(<PrPanel cwd={cwd} sessionId="author" branch="raccoon/approval-diff" active busy={false} />);
+    await screen.findByText("Follow-up work");
+    expect(screen.getByTestId("pr-linked").textContent).toBe("Linked");
+    // Its checks are read from the linked PR, not the session's branch.
+    expect(await screen.findByText("Follow-up CI")).toBeTruthy();
+    expect(mocks.invoke).toHaveBeenCalledWith("pr_details", { cwd, number: followup.number, url: followup.url });
+    // Creating a PR for the session's own branch is still offered: the link does not replace it.
+    expect(screen.getByRole("button", { name: "Create pull request" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: `Unlink #${followup.number}` }));
+    await waitFor(() => expect(screen.queryByText("Follow-up work")).toBeNull());
+    expect(screen.getByRole("status").textContent).toContain(`Unlinked #${followup.number}.`);
+  });
+
+  it("offers no Unlink for a pull request the session opened itself", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "gh_available") return true;
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
+      if (command === "pr_associations") return [association(followup)];
+      if (command === "work_status") return workStatus("followup", 1);
+      if (command === "pr_list") return [followup];
+      if (command === "pr_details") return followup;
+      throw Error(command);
+    });
+    render(<PrPanel cwd={cwd} sessionId="author" branch="followup" active busy={false} />);
+    await screen.findByText("Follow-up work");
+    expect(screen.queryByTestId("pr-linked")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Unlink/ })).toBeNull();
+  });
+
   it("keeps an unavailable association visible and blocks cleanup when its state is unknown", async () => {
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "gh_available") return true;
