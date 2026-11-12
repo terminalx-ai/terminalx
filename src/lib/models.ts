@@ -21,7 +21,11 @@ export function loadModels() {
         loaded = true;
         for (const l of listeners) l();
       })
-      .catch(() => {});
+      .catch(() => {
+        // Not an answer, but nothing more is coming: the picker offers a retry rather than waiting.
+        loaded = true;
+        for (const l of listeners) l();
+      });
   }
   return loading;
 }
@@ -69,3 +73,17 @@ export function modelLabel(harness: string, id: string): string {
 
 // Module state lives here; a hot update would lose it, so edits reload the page.
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());
+
+const agentSettingsListeners = new Set<() => void>();
+
+/** Ask the app shell to open Settings › Agents, where an agent's sign-in is checked (the empty model picker's way out). */
+export function requestAgentSettings() {
+  for (const listener of [...agentSettingsListeners]) listener();
+}
+
+export function onAgentSettingsRequest(listener: () => void): () => void {
+  agentSettingsListeners.add(listener);
+  return () => {
+    agentSettingsListeners.delete(listener);
+  };
+}

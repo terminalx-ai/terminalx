@@ -25,7 +25,7 @@ import { useDictationContext } from "@/lib/dictationContext";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
-import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, effortChoices, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, effortChoices, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, requestAgentSettings, runningModelName, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
 import { ModelPickerEmpty } from "@/components/chat/ModelPickerEmpty";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
@@ -524,7 +524,9 @@ export function Composer({
   const placeholder = busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up to the agent") : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
   // An alias reads as the version it is running, once someone has said which.
-  const modelName = model ? runningModelName(model, reportedModel) : tab.model ? prettyModelId(tab.model) : "Model";
+  // The agent answered and named no model: the button says so, as the menu does.
+  const noModelsFound = noModels && modelsLoaded && !retryingModels;
+  const modelName = model ? runningModelName(model, reportedModel) : noModelsFound ? "None found" : tab.model ? prettyModelId(tab.model) : "Model";
   const runs = model ? aliasRuns(model, reportedModel) : null;
   const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
   // A level the agent reported that this model's list does not carry is still the one in use.
@@ -615,7 +617,7 @@ export function Composer({
               {/* In a narrow composer the label truncates inside the button; its icon and chevron stay (`min-w-12`). */}
               <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modelLock} title={modelLock ?? modelTitle} aria-label={modelLock ? `Model: ${modelLock}` : undefined} data-testid="model-picker">
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
-                <span className="min-w-0 truncate text-foreground">{modelName}</span>
+                <span className={cn("min-w-0 truncate", noModelsFound ? "text-destructive" : "text-foreground")}>{modelName}</span>
                 {/* The effort is a setting of its own: set apart from the model, a step brighter than the tag. */}
                 {effortName ? <><span aria-hidden className="h-3 w-px shrink-0 bg-hairline-strong" /><span className="min-w-0 truncate text-muted-foreground">{effortName}</span></> : null}
                 <ChevronDown className="size-3 text-faint" />
@@ -635,7 +637,7 @@ export function Composer({
                   loading={!modelsLoaded}
                   retrying={retryingModels}
                   onRetry={retryModels}
-                  onOpenSettings={() => window.dispatchEvent(new CustomEvent("terminalx:open-settings", { detail: "agents" }))}
+                  onOpenSettings={requestAgentSettings}
                 />
               ) : null}
               <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={onSetModel}>
