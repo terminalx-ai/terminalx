@@ -25,8 +25,9 @@ import { useDictationContext } from "@/lib/dictationContext";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
-import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, effortChoices, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, effortChoices, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, requestAgentSettings, runningModelName, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
+import { ModelPickerEmpty } from "@/components/chat/ModelPickerEmpty";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { chooseMode } from "@/lib/dialogs";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
@@ -94,6 +95,12 @@ const CORNER = "rounded-[calc(var(--radius-2xl)-10px)]";
 /** A one-click next step above the input. */
 export type Handoff = { label: string; prompt: string } | { label: string; run: () => void };
 
+/** Agents by the name their models go under in the picker's empty state. */
+const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", opencode: "OpenCode" };
+const agentName = (id: string) => AGENT_NAMES[id] ?? id;
+/** The account an agent signs in with, where it is not the agent's own. */
+const SIGN_INS: Record<string, string> = { codex: "ChatGPT" };
+
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
  * While a turn runs the send button becomes Stop and a new prompt queues.
@@ -101,6 +108,7 @@ export type Handoff = { label: string; prompt: string } | { label: string; run: 
  * Images attach as blocks; any other dropped file becomes an `@path` mention.
  * Up and Down recall the tab's earlier and later messages, as a shell does.
  */
+
 export function Composer({
   tab,
   sendScope = tab.id,
@@ -203,11 +211,17 @@ export function Composer({
   stopMode?: "interrupt" | "force" | "stop";
   autoFocus?: boolean;
 }) {
-  const { models: listed, refresh: refreshPickerModels } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
+  const { models: listed, refresh: refreshPickerModels, loaded: modelsLoaded } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
   const model = modelForTab(listed, tab.model);
   // What may be chosen here, plus what the tab is already on if that is not among them.
   const models = useMemo(() => model && !listed.some((m) => m.id === model.id) ? [...listed, model] : listed, [listed, model?.id]);
   const [caret, setCaret] = useState(0);
+  const [retryingModels, setRetryingModels] = useState(false);
+  const retryModels = () => {
+    setRetryingModels(true);
+    void Promise.resolve(refreshPickerModels()).finally(() => setRetryingModels(false));
+  };
+  const noModels = models.length === 0;
   const commandSource = useMemo(() => givenCommands ?? (cwd ? localCommands(cwd, tab.harness) : null), [givenCommands?.key, cwd, tab.harness]);
   const [commandList, setCommandList] = useState<ComposerCommandList>(() => commandSource?.known() ?? NO_COMMANDS);
   const firstLoad = useRef<ComposerCommands | null>(null);
@@ -514,7 +528,9 @@ export function Composer({
   const placeholder = busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up to the agent") : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
   // An alias reads as the version it is running, once someone has said which.
-  const modelName = model ? runningModelName(model, reportedModel) : tab.model ? prettyModelId(tab.model) : "Model";
+  // The agent answered and named no model: the button says so, as the menu does.
+  const noModelsFound = noModels && modelsLoaded && !retryingModels;
+  const modelName = model ? runningModelName(model, reportedModel) : noModelsFound ? "None found" : tab.model ? prettyModelId(tab.model) : "Model";
   const runs = model ? aliasRuns(model, reportedModel) : null;
   const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
   // A level the agent reported that this model's list does not carry is still the one in use.
@@ -605,7 +621,7 @@ export function Composer({
               {/* In a narrow composer the label truncates inside the button; its icon and chevron stay (`min-w-12`). */}
               <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modelLock} title={modelLock ?? modelTitle} aria-label={modelLock ? `Model: ${modelLock}` : undefined} data-testid="model-picker">
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
-                <span className="min-w-0 truncate text-foreground">{modelName}</span>
+                <span className={cn("min-w-0 truncate", noModelsFound ? "text-destructive" : "text-foreground")}>{modelName}</span>
                 {/* The effort is a setting of its own: set apart from the model, a step brighter than the tag. */}
                 {effortName ? <><span aria-hidden className="h-3 w-px shrink-0 bg-hairline-strong" /><span className="min-w-0 truncate text-muted-foreground">{effortName}</span></> : null}
                 <ChevronDown className="size-3 text-faint" />
@@ -618,6 +634,17 @@ export function Composer({
                 </p>
               )}
               <DropdownMenuLabel>Model</DropdownMenuLabel>
+              {noModels ? (
+                <ModelPickerEmpty
+                  agent={agentName(tab.harness)}
+                  signIn={SIGN_INS[tab.harness]}
+                  other={agentHandoff?.name}
+                  loading={!modelsLoaded}
+                  retrying={retryingModels}
+                  onRetry={retryModels}
+                  onOpenSettings={requestAgentSettings}
+                />
+              ) : null}
               <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={onSetModel}>
                 {modelGroups(models).map((group) => (
                   <Fragment key={group.title ?? "models"}>

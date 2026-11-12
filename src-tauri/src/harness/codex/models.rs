@@ -9,8 +9,9 @@
 //!
 //! The answer is cached for the life of the process (the account does not
 //! change under us) and refreshed on demand when the model picker opens. Every
-//! failure — no `codex` on PATH, a hung child, a shape we do not understand —
-//! falls back to a built-in list rather than leaving the picker empty.
+//! failure to ask — no `codex` on PATH, a hung child, a shape we do not
+//! understand — falls back to a built-in list. An answer that names no models
+//! is passed on as empty, so the picker can explain it, and is not cached.
 
 use std::sync::Mutex;
 
@@ -28,9 +29,14 @@ pub struct Cache {
 
 impl Cache {
     /// The account's models, fetching once and then reusing the answer.
-    /// `refresh` forces a fresh read. Never empty: a failure yields the
-    /// built-in list, with the reason logged.
+    /// `refresh` forces a fresh read. A failure to ask yields the built-in
+    /// list, with the reason logged. An answer that names no models is passed
+    /// on as empty (the picker says so) and is not kept: the next read asks again.
     pub fn get(&self, refresh: bool) -> Vec<Model> {
+        self.get_with(refresh, fetch)
+    }
+
+    fn get_with(&self, refresh: bool, ask: impl FnOnce() -> Result<Vec<Model>>) -> Vec<Model> {
         if !refresh {
             let cached = self.models.lock().unwrap().clone();
             if let Some(models) = cached {
@@ -38,11 +44,12 @@ impl Cache {
             }
         }
         // The lock is not held across the fetch: it spawns a child and waits.
-        let models = match fetch() {
+        let models = match ask() {
             Ok(models) if !models.is_empty() => models,
-            Ok(_) => {
-                log::warn!("codex model/list named no usable models; using the built-in list");
-                fallback()
+            Ok(models) => {
+                log::warn!("codex model/list named no usable models; not caching the empty answer");
+                *self.models.lock().unwrap() = None;
+                return models;
             }
             Err(e) => {
                 log::warn!("could not read the Codex model list ({e:#}); using the built-in list");
@@ -248,5 +255,25 @@ mod tests {
         assert!(cache.substitute_for("").is_none());
         let sub = cache.substitute_for("gpt-5.6").expect("a stale id is substituted");
         assert_eq!(sub.id, "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn an_empty_answer_is_passed_on_and_not_kept() {
+        let cache = Cache::default();
+        assert!(cache.get_with(false, || Ok(Vec::new())).is_empty());
+        assert!(cache.models.lock().unwrap().is_none(), "an empty answer is not final");
+        // The next read asks again, and a real answer then sticks.
+        let got = cache.get_with(false, || Ok(fallback()));
+        assert_eq!(got.len(), fallback().len());
+        assert!(cache.get_with(false, || panic!("cached")).len() == got.len());
+        // A refresh that comes back empty clears what was kept.
+        assert!(cache.get_with(true, || Ok(Vec::new())).is_empty());
+        assert!(cache.models.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_failed_ask_still_falls_back() {
+        let cache = Cache::default();
+        assert!(!cache.get_with(false, || Err(anyhow::anyhow!("no codex"))).is_empty());
     }
 }

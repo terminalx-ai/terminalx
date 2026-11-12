@@ -9,6 +9,8 @@ export * from "@terminalx/portable/agentSettings";
 let models: ModelInfo[] = [];
 const listeners = new Set<() => void>();
 let loading: Promise<void> | null = null;
+/** True once an agent list has been read: an empty one is then an answer, not a wait. */
+let loaded = false;
 
 export function loadModels() {
   if (!loading) {
@@ -16,9 +18,14 @@ export function loadModels() {
       .listModels()
       .then((m) => {
         models = m;
+        loaded = true;
         for (const l of listeners) l();
       })
-      .catch(() => {});
+      .catch(() => {
+        // Not an answer, but nothing more is coming: the picker offers a retry rather than waiting.
+        loaded = true;
+        for (const l of listeners) l();
+      });
   }
   return loading;
 }
@@ -27,6 +34,7 @@ export function loadModels() {
 export async function refreshModels() {
   try {
     models = await agent.listModels(true);
+    loaded = true;
     for (const l of listeners) l();
   } catch {
     /* keep whatever was known */
@@ -46,6 +54,18 @@ export function useModels(harness?: string): ModelInfo[] {
   return harness ? all.filter((m) => m.harness === harness) : all;
 }
 
+/** False until the first read of the agents' models has come back. */
+export function useModelsLoaded(): boolean {
+  return useSyncExternalStore(
+    (cb) => {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+    () => loaded,
+    () => loaded,
+  );
+}
+
 export function modelLabel(harness: string, id: string): string {
   const m = models.find((x) => x.harness === harness && x.id === id);
   return m?.label ?? prettyModelId(id);
@@ -53,3 +73,17 @@ export function modelLabel(harness: string, id: string): string {
 
 // Module state lives here; a hot update would lose it, so edits reload the page.
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());
+
+const agentSettingsListeners = new Set<() => void>();
+
+/** Ask the app shell to open Settings › Agents, where an agent's sign-in is checked (the empty model picker's way out). */
+export function requestAgentSettings() {
+  for (const listener of [...agentSettingsListeners]) listener();
+}
+
+export function onAgentSettingsRequest(listener: () => void): () => void {
+  agentSettingsListeners.add(listener);
+  return () => {
+    agentSettingsListeners.delete(listener);
+  };
+}
