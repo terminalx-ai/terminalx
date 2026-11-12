@@ -33,12 +33,22 @@ pub const VM_SKILL_STUB: &str = include_str!(concat!(
     "/../skills/local-vm/SKILL.md"
 ));
 
+pub const ORCHESTRATOR_GUIDE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../skill-guides/terminalx-orchestrator.md"
+));
+pub const ORCHESTRATOR_SKILL_STUB: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../skills/terminalx-orchestrator/SKILL.md"
+));
+
 /// Every guide this binary can serve through `terminalx skills get <name>`,
 /// with the discovery stub "Install skills" writes for it.
-pub const SKILLS: [(&str, &str, &str); 3] = [
+pub const SKILLS: [(&str, &str, &str); 4] = [
     ("terminalx-cli", GUIDE, SKILL_STUB),
     ("computer-use", COMPUTER_GUIDE, COMPUTER_SKILL_STUB),
     ("local-vm", VM_GUIDE, VM_SKILL_STUB),
+    ("terminalx-orchestrator", ORCHESTRATOR_GUIDE, ORCHESTRATOR_SKILL_STUB),
 ];
 
 const HELP: &str = r#"terminalx — control a running TerminalX app
@@ -135,7 +145,7 @@ Usage:
   terminalx vm tools [TOOL] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--json]
   terminalx vm screenshot [--out PATH] [--json]
-  terminalx skills get terminalx-cli|computer-use|local-vm [--full] [--json]
+  terminalx skills get terminalx-cli|computer-use|local-vm|terminalx-orchestrator [--full] [--json]
 
 Computer use (desktop apps on macOS, Linux and Windows):
 COMPUTER_HELP
@@ -143,7 +153,8 @@ BROWSER_HELP
 
 Use `terminalx skills get terminalx-cli` for the complete guide and
 `terminalx skills get computer-use` for desktop automation, and
-`terminalx skills get local-vm` for the Linux desktop VM."#;
+`terminalx skills get local-vm` for the Linux desktop VM, and
+`terminalx skills get terminalx-orchestrator` before splitting a task across workers."#;
 
 /// The help text with the computer and browser verbs spliced in from their
 /// own modules.
@@ -559,7 +570,7 @@ fn parse_with_stdin(
                 return Err(ControlError::new(
                     "not_found",
                     format!("This binary does not embed a guide named {name}."),
-                    Some("Use terminalx-cli, computer-use or local-vm exactly.".into()),
+                    Some("Use terminalx-cli, computer-use, local-vm or terminalx-orchestrator exactly.".into()),
                 ));
             };
             let _full = tokens.flag("--full")?;
@@ -2487,6 +2498,131 @@ mod tests {
             assert!(!copy.contains("terminalx-legacy"));
             assert!(!copy.contains("terminalx-dev"));
             assert!(!copy.contains("TERMINALX_CLI_COMMAND"));
+        }
+    }
+
+    /// The commands the orchestrator guide names: every `terminalx …` line in a code block
+    /// and every `terminalx …` span of inline code.
+    fn orchestrator_guide_commands() -> Vec<String> {
+        let mut commands = Vec::new();
+        let mut fenced = false;
+        for line in ORCHESTRATOR_GUIDE.lines() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+            } else if fenced {
+                if line.trim_start().starts_with("terminalx ") {
+                    commands.push(line.trim().to_string());
+                }
+            } else {
+                commands.extend(line.split('`').skip(1).step_by(2).filter(|span| span.starts_with("terminalx ")).map(str::to_string));
+            }
+        }
+        commands
+    }
+
+    #[test]
+    fn the_orchestrator_guide_is_served_and_its_stub_names_it() {
+        let parsed = parse(&args(&["skills", "get", "terminalx-orchestrator"])).unwrap();
+        let Action::Guide { name, guide } = parsed.action else { panic!("expected guide") };
+        assert_eq!((name, guide), ("terminalx-orchestrator", ORCHESTRATOR_GUIDE));
+        assert!(ORCHESTRATOR_GUIDE.ends_with('\n') && !ORCHESTRATOR_GUIDE.ends_with("\n\n"));
+        assert!(ORCHESTRATOR_SKILL_STUB.starts_with("---\nname: terminalx-orchestrator\n"));
+        assert!(ORCHESTRATOR_SKILL_STUB.contains("terminalx skills get terminalx-orchestrator"));
+        assert!(ORCHESTRATOR_SKILL_STUB.contains("discovery stub"));
+        // The stub triggers on the requests the issue names.
+        for trigger in ["split", "parallelise", "delegate"] {
+            assert!(ORCHESTRATOR_SKILL_STUB.contains(trigger), "the stub does not trigger on {trigger}");
+        }
+        for text in [help_text(), ORCHESTRATOR_GUIDE.to_string(), ORCHESTRATOR_SKILL_STUB.to_string()] {
+            assert!(!text.contains("Raccoon") && !text.contains("terminalx-legacy"));
+        }
+        assert!(help_text().contains("terminalx skills get terminalx-cli|computer-use|local-vm|terminalx-orchestrator"));
+        // Every skill the help offers is one the binary embeds, and the other way round.
+        for (known, _, _) in SKILLS {
+            assert!(help_text().contains(known), "the help does not name {known}");
+        }
+    }
+
+    #[test]
+    fn the_orchestrator_guide_names_only_commands_and_flags_the_cli_has() {
+        let help = help_text();
+        let commands = orchestrator_guide_commands();
+        // The commands the lead needs are all in it, not just some.
+        for needed in ["terminalx runs create --from", "terminalx runs start", "terminalx wait --children-of", "terminalx sessions report --children-of", "terminalx skills get terminalx-orchestrator"] {
+            assert!(commands.iter().any(|command| command.starts_with(needed)), "the guide never runs {needed}");
+        }
+        for command in &commands {
+            // `terminalx <group> [<action>]`: the words before the first argument.
+            let words: Vec<&str> = command.split_whitespace().skip(1).take_while(|word| word.chars().all(|c| c.is_ascii_lowercase() || c == '-') && !word.starts_with('-')).take(2).collect();
+            assert!(!words.is_empty(), "no command in {command:?}");
+            assert!(help.contains(&format!("terminalx {}", words.join(" "))), "`{command}` is not a command of the CLI");
+            if words[..] == ["skills", "get"] {
+                let name = command.split_whitespace().nth(3).unwrap();
+                assert!(SKILLS.iter().any(|(known, _, _)| *known == name), "`{command}` asks for a guide that is not embedded");
+            }
+            for flag in command.split_whitespace().filter(|word| word.starts_with("--")) {
+                let flag = flag.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+                assert!(help.contains(flag), "`{command}` uses {flag}, which the CLI does not have");
+                assert!(GUIDE.contains(flag), "`{command}` uses {flag}, which the CLI guide does not document");
+            }
+        }
+        // The CLI guide has the sections this guide sends the lead to.
+        for heading in ["### Worker reports", "### Orchestration runs"] {
+            assert!(GUIDE.contains(heading), "the CLI guide has no {heading}");
+        }
+    }
+
+    #[test]
+    fn the_orchestrator_guides_plan_example_passes_runs_create_validation() {
+        use crate::orchestration::plan;
+        let json = ORCHESTRATOR_GUIDE.split("```json\n").nth(1).and_then(|rest| rest.split("\n```").next()).expect("the guide has a plan example");
+        let plan = plan::parse(&serde_json::from_str(json).expect("the example is JSON")).unwrap_or_else(|error| panic!("the example is refused: {error:?}"));
+        let agents = ["claude".to_string(), "codex".to_string()];
+        let rules = |piece_limit, approval| plan::Rules { piece_limit, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval, checkout: None };
+        // Valid under the default limit with a person approving it, and still valid where nobody does.
+        let pieces = plan::validate(&plan, &rules(8, true)).unwrap_or_else(|error| panic!("the example is refused: {error:?}"));
+        plan::validate(&plan, &rules(8, false)).unwrap();
+        assert_eq!(pieces.len(), 4);
+        // The example shows what the guide teaches: a dependency, owned paths that do not overlap,
+        // a read-only piece that owns nothing, and every piece checkable.
+        assert!(plan.pieces.iter().any(|piece| piece.depends_on == ["store"]));
+        assert!(plan.pieces.iter().any(|piece| piece.owns.is_empty()));
+        // Every piece is checkable by a command, or says why none can be: the rule `runs create` holds it to.
+        assert!(plan.pieces.iter().all(|piece| {
+            let command = piece.done_checks.iter().any(|check| matches!(check, crate::orchestration::Check::Command { .. }));
+            (command || (piece.review_only && !piece.review_only_reason.trim().is_empty())) && piece.model.is_empty() && piece.effort.is_none()
+        }));
+        // The code pieces carry a command; the read-only survey is the one that is review-only.
+        let review_only: Vec<&str> = plan.pieces.iter().filter(|piece| piece.review_only).map(|piece| piece.id.as_str()).collect();
+        assert_eq!(review_only, ["survey"]);
+        // The words that make the example a lesson rather than a template: the guide says why.
+        assert!(ORCHESTRATOR_GUIDE.contains("A piece that reads text from outside the repository"));
+    }
+
+    #[test]
+    fn the_orchestrator_guide_teaches_each_part_the_issue_asks_for() {
+        for said in [
+            // The gate, and saying so when the answer is to stay.
+            "do not need each other's output", "its own done-check", "would not fit in your context", "say which one failed",
+            // How many, how to cut.
+            "Three to five workers", "One owner per file", "`owns_outside_repository`", "competing hypothesis",
+            // The brief, field by field, and the verifier rule.
+            "`goal`", "`why`", "`scope`", "`known`", "`readFirst`", "`doneChecks`", "`reviewOnly`", "`limits`", "`terminalx-report`", "the material, not your conclusion",
+            // Reading reports and disagreement.
+            "Route on the `status` line", "Check the evidence", "`couldNotRead`", "as a gap", "the one\nobservable fact", "Do not pick the more confident",
+            // What stays, and context.
+            "Edits that span pieces", "Judgment calls", "Merging", "pushed or shared", "references, not content",
+            // Deterministic first, never poll.
+            "Never poll", "wait --children-of", "Write a `command` done-check",
+            // Models come from the routing table and the ladder.
+            "routing table", "escalation ladder",
+        ] {
+            assert!(ORCHESTRATOR_GUIDE.contains(said), "the orchestrator guide does not say {said:?}");
+        }
+        // No model name to go stale: the guide points at the table instead.
+        let lower = ORCHESTRATOR_GUIDE.to_lowercase();
+        for model in ["opus", "sonnet", "haiku", "fable", "gpt", "gemini"] {
+            assert!(!lower.contains(model), "the guide names a model: {model}");
         }
     }
 }
