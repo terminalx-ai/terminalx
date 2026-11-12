@@ -852,6 +852,89 @@ pub struct CliTab {
 
 /// How soon after it was started a CLI that goes again never got going.
 const STARTUP_EXIT: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long after a new tab was added its first start is told apart
+/// (PRO-291): the window that opened it watches it that long.
+const FIRST_START_WATCH: Duration = Duration::from_secs(10);
+
+/// What a new tab's first start came to (PRO-291).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FirstStart {
+    /// Added at this moment, and its agent not known to have gone.
+    Starting(Instant),
+    /// Its agent exited while starting at this moment: why, for whoever
+    /// shows the tab while it is watched.
+    Failed(String, Instant),
+    /// Its agent went after it got going, or was stopped, at this moment:
+    /// nothing failed, and nothing is started again for the window that
+    /// asks after the exit.
+    Settled(Instant),
+}
+
+/// What showing a new tab does about its first start.
+#[derive(Debug, PartialEq, Eq)]
+enum OnOpen {
+    Start,
+    Fail(String),
+    Leave,
+}
+
+/// The new tabs whose first start is still told apart, by `key_of`. Nothing
+/// here waits: the agent's exit is recorded as it is let go of, and read
+/// back when the window that opened the tab asks again (PRO-291).
+#[derive(Default)]
+struct FirstStarts(Mutex<HashMap<String, FirstStart>>);
+
+impl FirstStarts {
+    fn added(&self, key: String, now: Instant) {
+        self.0.lock().unwrap().insert(key, FirstStart::Starting(now));
+    }
+
+    fn starting(&self, key: &str) -> bool {
+        matches!(self.0.lock().unwrap().get(key), Some(FirstStart::Starting(_)))
+    }
+
+    /// Its agent went: `failure` says why when it went while starting and
+    /// nobody stopped it. Only the first start, and only while watched.
+    fn exited(&self, key: &str, failure: Option<String>, now: Instant) {
+        let mut starts = self.0.lock().unwrap();
+        let Some(FirstStart::Starting(added)) = starts.get(key) else { return };
+        if now.duration_since(*added) >= FIRST_START_WATCH {
+            starts.remove(key);
+            return;
+        }
+        let came_to = match failure {
+            Some(failure) => FirstStart::Failed(failure, now),
+            None => FirstStart::Settled(now),
+        };
+        starts.insert(key.to_string(), came_to);
+    }
+
+    fn on_open(&self, key: &str, now: Instant) -> OnOpen {
+        let mut starts = self.0.lock().unwrap();
+        match starts.get(key).cloned() {
+            // Told to any window that shows it while watched; after that, a
+            // tab nobody closed is started again as any other is.
+            Some(FirstStart::Failed(failure, at)) if now.duration_since(at) < FIRST_START_WATCH => OnOpen::Fail(failure),
+            Some(FirstStart::Failed(..)) => {
+                starts.remove(key);
+                OnOpen::Start
+            }
+            Some(FirstStart::Settled(at)) => {
+                starts.remove(key);
+                if now.duration_since(at) < FIRST_START_WATCH { OnOpen::Leave } else { OnOpen::Start }
+            }
+            Some(FirstStart::Starting(added)) if now.duration_since(added) >= FIRST_START_WATCH => {
+                starts.remove(key);
+                OnOpen::Start
+            }
+            _ => OnOpen::Start,
+        }
+    }
+
+    fn forget(&self, key: &str) {
+        self.0.lock().unwrap().remove(key);
+    }
+}
 
 impl CliTab {
     /// Whether this CLI went before it ever got going: within moments of the
@@ -1147,6 +1230,8 @@ pub struct SessionManager {
     session_stop_pids: Arc<Mutex<HashMap<String, Vec<u32>>>>,
     /// Tabs following their terminal (#437); off until the desktop app asks.
     follow: Arc<follow::Following>,
+    /// New tabs whose agent's first start is still told apart (PRO-291).
+    first_starts: Arc<FirstStarts>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1379,6 +1464,9 @@ impl Drop for Ticket {
 
 /// How long a restart waits for the outgoing CLI to let go of its conversation.
 const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+/// How long a stop waits, from its signal, for the agent's exit to be
+/// confirmed: what a tab's close tells the reader it waited (PRO-291).
+const STOP_CONFIRM_WAIT: Duration = Duration::from_secs(recovery::CLOSE_WAIT_SECS);
 /// Columns and rows every agent CLI starts at. A view that controls the
 /// pane's size (the desktop's terminal view, a cloud tab's controller)
 /// resizes it from here.
@@ -1579,6 +1667,7 @@ impl SessionManager {
             stop_pids: Arc::new(Mutex::new(Vec::new())),
             session_stop_pids: Arc::default(),
             follow: Arc::default(),
+            first_starts: Arc::default(),
         };
         let mut watcher = manager.clone();
         // The polling copy must not keep its own lifetime alive. In particular,
@@ -3863,7 +3952,46 @@ impl SessionManager {
                 return Ok(());
             }
         }
+        // A new tab whose agent exited while starting says so to the window
+        // that shows it, and is not started again behind its back (PRO-291).
+        let key = key_of(session_id, tab_id);
+        match self.first_starts.on_open(&key, Instant::now()) {
+            OnOpen::Fail(failure) => bail!(failure),
+            OnOpen::Leave => return Ok(()),
+            OnOpen::Start => {}
+        }
+        if self.first_starts.starting(&key) {
+            // Its pane's exit not yet settled by the watcher: settled here.
+            if let Some(failure) = self.first_cli_gone(session_id, tab_id) {
+                self.first_starts.exited(&key, failure.clone(), Instant::now());
+                return match failure {
+                    Some(failure) => Err(anyhow!(failure)),
+                    None => Ok(()),
+                };
+            }
+        }
         self.ensure_started(session_id, tab_id)
+    }
+
+    /// A new tab's CLI whose pane has exited: `Some(Some(why))` when it went
+    /// while starting ([`recovery::startup_failure`]), `Some(None)` when it
+    /// went otherwise, `None` while it runs or none was launched.
+    fn first_cli_gone(&self, session_id: &str, tab_id: &str) -> Option<Option<String>> {
+        let rt_arc = self.runtime(session_id, tab_id).ok()?;
+        let rt = rt_arc.lock().unwrap();
+        let Engine::Cli(p) = &rt.engine else { return None };
+        if p.by_hand.is_some() || self.terminals.is_running(&p.pane_id) {
+            return None;
+        }
+        Some((!rt.stopping && p.never_got_going()).then(|| self.startup_failure(&rt.harness, &p.pane_id)))
+    }
+
+    /// Why a CLI that exited while starting went, by its program's name and
+    /// the last line it left in its pane.
+    fn startup_failure(&self, harness: &str, pane: &str) -> String {
+        let output = self.terminals.program_output(pane).or_else(|| self.terminals.read_output(pane)).unwrap_or_default();
+        log::warn!("[{pane}] exited while starting a new tab");
+        recovery::startup_failure(harness, &recovery::EarlyExit::read(&output))
     }
 
     fn stop_with(&self, session_id: &str, tab_id: &str, keep_unread: bool) -> Result<()> {
@@ -3912,6 +4040,7 @@ impl SessionManager {
             }
             (pane, pid)
         };
+        let signalled = Instant::now();
         if let Some(pane) = pane {
             self.terminals.kill_and_wait(&pane, RESTART_WAIT);
         } else if self.host.is_live(&key) {
@@ -3919,7 +4048,7 @@ impl SessionManager {
         } else if let Some(pid) = pid {
             crate::harness::host::terminate(pid);
         }
-        let deadline = Instant::now() + RESTART_WAIT;
+        let deadline = signalled + STOP_CONFIRM_WAIT;
         while pid.is_some_and(crate::harness::host::is_alive) {
             if Instant::now() >= deadline {
                 let mut rt = rt_arc.lock().unwrap();
@@ -3946,8 +4075,17 @@ impl SessionManager {
         use crate::issue_pipeline::admission::{fence, Kind, Scope, TAB_CLOSED};
         let _closing = fence(Kind::Refuse(TAB_CLOSED), [Scope::Tab(session_id.into(), tab_id.into())]);
         let entry = index::get(session_id)?;
-        let pane = entry.tab(tab_id).context("tab not found")?.pane_id();
-        self.stop(session_id, tab_id)?;
+        let tab = entry.tab(tab_id).context("tab not found")?;
+        let pane = tab.pane_id();
+        // An agent that would not exit leaves its tab open, and the reader is
+        // told whose it was and how long it was given (PRO-291).
+        if let Err(error) = self.stop(session_id, tab_id) {
+            if recovery::exit_unconfirmed(&format!("{error:#}")) {
+                bail!(recovery::close_timed_out(agent_name(&tab.harness)));
+            }
+            return Err(error);
+        }
+        self.first_starts.forget(&key_of(session_id, tab_id));
         // A followed shell is closed by the explicit tab-close action too.
         if crate::pty::is_shell_id(&pane) {
             self.terminals.kill_and_wait(&pane, RESTART_WAIT);
@@ -4430,7 +4568,9 @@ impl SessionManager {
         if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(&index::permission_mode_or_default(tab.permission_mode.as_deref())) {
             bail!("New tabs in a shared session must use a permission mode other than Bypass.");
         }
-        crate::session_ops::add_tab_entry(session_id, tab).map_err(|error| anyhow!(error))
+        let added = crate::session_ops::add_tab_entry(session_id, tab).map_err(|error| anyhow!(error))?;
+        self.first_starts.added(key_of(session_id, &added.id), Instant::now());
+        Ok(added)
     }
 
     /// The app asks for another permission mode. Neither TUI has a command
@@ -5260,6 +5400,14 @@ impl SessionManager {
         let Engine::Cli(p) = &rt.engine else { return None };
         let pane = p.pane_id.clone();
         rt.left_at = Some((p.tail.path(), p.tail.offset()));
+        // A new tab's first agent going: whether it went while starting is
+        // what the window that opened the tab is told (PRO-291).
+        let key = key_of(&rt.session_id, &rt.tab_id);
+        if self.first_starts.starting(&key) {
+            let went_starting = p.by_hand.is_none() && !rt.stopping && p.never_got_going() && !self.terminals.is_running(&pane);
+            let failure = went_starting.then(|| self.startup_failure(&rt.harness, &pane));
+            self.first_starts.exited(&key, failure, Instant::now());
+        }
         crate::cloud_grants::forget_launch(&pane);
         for request_id in rt.pending.drain().map(|(id, _)| id).collect::<Vec<_>>() {
             self.publish(rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
@@ -7436,6 +7584,56 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+
+    #[test]
+    fn a_new_tabs_first_start_is_told_without_waiting_and_only_while_watched() {
+        let starts = FirstStarts::default();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        // A healthy new tab: its first showing starts it at once, and again.
+        starts.added("s/a".into(), t0);
+        assert_eq!(starts.on_open("s/a", at(0)), OnOpen::Start);
+        assert!(starts.starting("s/a"));
+        assert_eq!(starts.on_open("s/a", at(300)), OnOpen::Start);
+        // Its agent exited while starting: every window that shows it while watched is told why.
+        starts.exited("s/a", Some("claude exited while starting\nbad json".into()), at(900));
+        assert!(!starts.starting("s/a"));
+        assert_eq!(starts.on_open("s/a", at(1_000)), OnOpen::Fail("claude exited while starting\nbad json".into()));
+        assert_eq!(starts.on_open("s/a", at(5_000)), OnOpen::Fail("claude exited while starting\nbad json".into()));
+        // Closed, or no longer watched: started as any other tab is.
+        starts.forget("s/a");
+        assert_eq!(starts.on_open("s/a", at(5_000)), OnOpen::Start);
+        starts.added("s/e".into(), t0);
+        starts.exited("s/e", Some("bad json".into()), at(500));
+        assert_eq!(starts.on_open("s/e", at(500 + FIRST_START_WATCH.as_millis() as u64)), OnOpen::Start);
+        assert_eq!(starts.on_open("s/e", at(500)), OnOpen::Start);
+
+        // Gone after it got going, or stopped: the window asking after the exit starts nothing, once.
+        starts.added("s/b".into(), t0);
+        starts.exited("s/b", None, at(2_000));
+        assert_eq!(starts.on_open("s/b", at(2_100)), OnOpen::Leave);
+        assert_eq!(starts.on_open("s/b", at(2_200)), OnOpen::Start);
+        // A second exit is not the first start's.
+        starts.exited("s/b", Some("later".into()), at(3_000));
+        assert_eq!(starts.on_open("s/b", at(3_100)), OnOpen::Start);
+
+        // Past the watch, nothing is told apart any more.
+        starts.added("s/c".into(), t0);
+        starts.exited("s/c", Some("late".into()), at(FIRST_START_WATCH.as_millis() as u64));
+        assert_eq!(starts.on_open("s/c", at(11_000)), OnOpen::Start);
+        starts.added("s/d".into(), t0);
+        assert_eq!(starts.on_open("s/d", at(FIRST_START_WATCH.as_millis() as u64)), OnOpen::Start);
+        assert!(!starts.starting("s/d"));
+        // A tab never added here is started as always.
+        assert_eq!(starts.on_open("s/x", at(0)), OnOpen::Start);
+    }
+
+    #[test]
+    fn closing_waits_as_long_as_its_message_says() {
+        assert_eq!(STOP_CONFIRM_WAIT, Duration::from_secs(recovery::CLOSE_WAIT_SECS));
+        assert!(STOP_CONFIRM_WAIT >= RESTART_WAIT, "the stop's own kill wait fits inside it");
+        assert_eq!(recovery::close_timed_out(agent_name("codex")), "Codex didn't stop within 10 seconds");
+    }
 
     #[test]
     fn permission_timeout_disconnects_before_runtime_lock_cleanup() {
