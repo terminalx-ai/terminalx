@@ -42,6 +42,7 @@ import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { Toasts } from "@/components/ui/Toasts";
+import { NotificationsOffCard } from "@/components/ui/NotificationsOffCard";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
 import { GuestSessionHost } from "@/components/session/GuestSession";
 import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialog";
@@ -271,6 +272,8 @@ export function AppShell() {
       {/* Merged-workspace notices, top right under the tabs: a stack of them in the bottom corner covered the composer
           and its send button. Toasts and close-undo notices, which answer what was just done there, stay below. */}
       <div className="pointer-events-none fixed top-22 right-4 z-(--z-toast) flex max-h-[calc(100dvh-8rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
+        {/* It stays until notifications are allowed, so it is up here with the other notices that wait (PRO-327). */}
+        <NotificationsOffCard />
         <MergedCleanupNotices />
       </div>
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">

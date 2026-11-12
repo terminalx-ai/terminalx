@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { getPrefs } from "@/lib/prefs";
@@ -14,6 +15,8 @@ import { sessionStatus, type SessionEntry, type TabEntry, type TabStatus } from 
 import type { AutomationRun } from "@/types/automations";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import { noticesDeferred, subscribeNoticeDeferral } from "./noticeDeferral";
+import { isMac } from "./shortcuts";
+import { clearNotificationsOff, notificationsOffHidden, showNotificationsOff } from "@/components/ui/NotificationsOffCard";
 
 /**
  * Attention, graded by where the reader is. A turn finishing or an agent
@@ -173,6 +176,7 @@ function presenceElsewhere(): Presence | null {
 let raised: { sessionId: string; tabId: string } | null = null;
 
 function onReturn() {
+  recheckNotifications();
   const wasAway = !looking() && !presenceElsewhere()?.focused;
   focused = true;
   publishPresence();
@@ -256,6 +260,40 @@ async function canNotify(): Promise<boolean> {
   return permission;
 }
 
+// ---- notifications turned off in macOS (PRO-327)
+
+/**
+ * macOS can have banners and the dock badge off for the app, and then a
+ * session that needs the reader waits unseen. The notification plugin cannot
+ * tell: on desktop it always answers "granted". The app's own command reads
+ * the system setting; until it answers "denied" nothing is said.
+ */
+let blocked = false;
+async function notificationsBlocked(): Promise<boolean> {
+  try {
+    blocked = (await invoke<string>("notification_permission")) === "denied";
+  } catch {
+    blocked = false;
+  }
+  return blocked;
+}
+
+/** A session needs the reader: if macOS blocks the banner, the card says so and names it. Main window, macOS only. */
+function noteNeedsReader(sessionId: string, sessionTitle: string) {
+  if (!isMac || appWindow() !== "main" || notificationsOffHidden()) return;
+  void notificationsBlocked().then((off) => {
+    if (off && !notificationsOffHidden()) showNotificationsOff({ sessionId, sessionTitle });
+  });
+}
+
+/** Back in the app, perhaps from System Settings: allowed now, the card goes. */
+function recheckNotifications() {
+  if (!blocked || appWindow() !== "main") return;
+  void notificationsBlocked().then((off) => {
+    if (!off) clearNotificationsOff();
+  });
+}
+
 function summarise(_session: SessionEntry, tab: TabEntry, kind: AttentionKind): { title: string; body: string } {
   const agent = getSessions().harnesses.find((h) => h.id === tab.harness)?.name ?? "Agent";
   const status = kind === "waiting" ? `${agent} needs attention` : kind === "failed" ? `${agent} hit a problem` : `${agent} finished`;
@@ -272,6 +310,7 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   // A tab the reader muted raises nothing: no banner, no notice, no tone. Its row and the dock badge still show its state.
   if (isTabMuted(session, tab.id, getSessions().chatsPath)) return;
   const { title, body } = summarise(session, tab, kind);
+  if (kind === "waiting") noteNeedsReader(session.id, session.title);
   const onScreen = looking() && getSessions().selectedSessionId === session.id;
   if (!looking()) {
     // The other window has the reader, or this is not the window that sends banners.
@@ -376,6 +415,7 @@ export function raiseCloudAttention({ kind, session, tab }: CloudAttention) {
   const title = `TerminalX — ${kind === "waiting" ? `${agent} needs attention` : kind === "failed" ? `${agent} hit a problem` : `${agent} finished`}`;
   const where = `${session.title} · ${session.orgName} cloud`;
   const body = kind === "waiting" ? `${where}. Open the session to review its pending request.` : kind === "failed" ? `${where}. Open the session to review its recovery actions.` : `${where}. Open the session to review the conversation.`;
+  if (kind === "waiting") noteNeedsReader(session.key, session.title);
   if (!focused) {
     if (sendsBanner()) void canNotify().then((ok) => ok && sendNotification({ title, body }));
     return;
