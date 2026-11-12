@@ -361,7 +361,22 @@ fn worker_limit_child() {
 /// person's Approve, though the project asks for no approval; another lead's does not.
 #[test]
 fn a_run_from_an_orchestrate_start_waits_for_approval_with_approval_off() {
+    run_child("orchestrate_start_child");
+}
+
+/// The child of [`a_run_from_an_orchestrate_start_waits_for_approval_with_approval_off`]: a
+/// stand-in `claude` on the priority path, so the plan's pieces have a worker agent where
+/// none is installed (CI), and the path change stays in this process.
+#[test]
+fn orchestrate_start_child() {
+    if std::env::var(CHILD).as_deref() != Ok("1") { return; }
     let _home = crate::store::temp_home();
+    let bin = crate::store::root().unwrap().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // Never started: no session here sends a prompt. It only has to be there to be offered.
+    std::fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
     let repo = super::tests::git_repo();
     let project = projects::add(repo.path().to_str().unwrap()).unwrap();
     let mut settings = crate::store::settings::load();
