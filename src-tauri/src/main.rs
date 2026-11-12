@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    if let Some(code) = raccoon_lib::run_pty_supervisor() { std::process::exit(code); }
     if let Some(code) = raccoon_lib::run_git_transport_cli() { std::process::exit(code); }
     if raccoon_lib::startup::probe_cli() { return; }
     #[cfg(windows)]

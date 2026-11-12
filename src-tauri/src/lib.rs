@@ -153,6 +153,9 @@ pub mod power;
 mod project_start;
 mod project_templates;
 mod pty;
+/// Private inherited-descriptor helper, dispatched before application threads.
+#[cfg(target_os = "linux")]
+pub fn run_pty_supervisor() -> Option<i32> { pty::supervisor::dispatch() }
 #[cfg(feature = "desktop")]
 mod quit;
 #[cfg(feature = "desktop")]
