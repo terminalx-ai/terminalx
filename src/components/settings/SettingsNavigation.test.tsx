@@ -197,3 +197,27 @@ it("opens registered repository paths and files, retains drafts within a reposit
   expect((screen.getByRole("textbox", { name: "Glob patterns (one per line)" }) as HTMLTextAreaElement).value).toBe("");
   expect(group.getAllByRole("button", { name: "Files to copy" }).map((button) => button.getAttribute("aria-current"))).toEqual(["page"]);
 });
+
+describe("row search over repository rows (PRO-127)", () => {
+  it("opens a repository row on the repository already open, else the first listed, and highlights it", () => {
+    const view = render(<SettingsPage onBack={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "Search settings" });
+    fireEvent.change(input, { target: { value: "worktreeinclude" } });
+    const result = screen.getByRole("option", { name: /Files to copy/ });
+    expect(result.closest('[role="group"]')?.textContent).toContain("Repositories");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("button", { name: "One" }).getAttribute("aria-current")).toBe("page");
+    let row = view.container.querySelector<HTMLElement>('[data-setting-id="repositories.filesToCopy"]');
+    expect(row?.getAttribute("data-setting-instance")).toBe("/repos/one");
+    expect(document.activeElement).toBe(row);
+    expect(row?.dataset.settingHighlight).toBe("on");
+
+    fireEvent.click(within(screen.getByRole("group", { name: "Repositories" })).getByRole("button", { name: "Two" }));
+    fireEvent.change(input, { target: { value: "worktreeinclude" } });
+    fireEvent.click(screen.getByRole("option", { name: /Files to copy/ }));
+    expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
+    row = view.container.querySelector<HTMLElement>('[data-setting-id="repositories.filesToCopy"]');
+    expect(row?.getAttribute("data-setting-instance")).toBe("/repos/two");
+    expect(document.activeElement).toBe(row);
+  });
+});
