@@ -405,7 +405,7 @@ try {
           "a piece being checked shows its gates passed and its verifier reading": verifying.gates === "report:passed,scope:passed,branch:passed,commands:passed,review:running" && ["Verifierreading", "The change touches a security area: authorization.", "Reading"].every((said) => verifying.review.includes(said)) && verifying.text.includes("Waiting on the verifier. Nothing that depends on it starts until it has passed."),
           "a piece on its second try shows the check that sent the first back": retried.title.includes("Checks of try 1") && retried.gates === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && retried.check.includes("Done-checkfailed · exit 101cargo t control") && retried.check.includes("test result: FAILED. 10 passed; 2 failed"),
           "the checks fit their panel at every size": [verifying.layout, retried.layout].every((seen) => !seen.scrolls && seen.outside === 0 && !seen.overlaps && seen.smallest >= 10.5),
-          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultStore added, 14 tests pass.") && detail.includes("raccoon/store-piece") && (await view.getByRole("button", { name: "Open worker", exact: true }).count()) === 2,
+          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultStore added, 14 tests pass.") && detail.includes("raccoon/store-piece") && (await view.getByTestId("piece-detail").getByRole("button", { name: "Open worker", exact: true }).count()) === 2,
           "the plan can no longer be edited or approved": (await view.getByRole("button", { name: "Approve and start" }).count()) === 0 && (await view.getByRole("button", { name: "Edit plan" }).count()) === 0 && (await view.getByRole("combobox").count()) === 0,
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
         };
@@ -443,7 +443,7 @@ try {
           "four pieces are done, one is blocked and one waits": layout.rows.map((row) => row.state).join() === "done,done,done,done,blocked,queued" && (await view.getByTestId("run-done").textContent()) === "4",
           "the blocked piece's row shows the model it ended on, its three tries and what they cost": cli[1] === "Opus 5.5 Medium" && cli[2] === "Blocked" && cli[3] === "3" && cli[4] === "$3.71",
           "a piece that needed a second try shows two, and what both cost": (await cells("pipeline")).slice(3, 5).join() === "2,$0.97",
-          "the run sums what its workers cost": (await view.getByTestId("run-cost").textContent()) === "$7.42",
+          "the run sums what its workers cost": (await view.getByTestId("run-spend").textContent()).startsWith("$7.42"),
           "the piece says it used all its tries": (await detail.getByTestId("piece-tries-used").textContent()) === "· 3 of 3 tries used",
           "each try shows its model, effort, cost and why it was made, in order": said.length === 3
             && ["Sonnet 5.5 Medium", "$0.61", "First try", "Check failed: cargo t control"].every((text) => said[0].includes(text))
@@ -453,7 +453,7 @@ try {
           "the gates before the command passed, and no model was asked after it failed": (await detail.locator("[data-gate]").evaluateAll((items) => items.map((item) => `${item.dataset.gate}:${item.dataset.gateState}`).join())) === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && (await detail.getByTestId("piece-review").count()) === 0,
           "a piece a verifier passed says so in its row": !wide || (await view.locator('[data-piece="pipeline"]').getByTestId("piece-report").textContent()) === "12 reads moved, verifier passed",
           "every try can be opened": (await detail.getByRole("button", { name: "Open worker", exact: true }).count()) === 4,
-          "the table's columns are the design's, where there is room": !wide || (await view.getByRole("table", { name: "Pieces" }).getByRole("columnheader").allTextContents()).join() === "Piece,Model,State,Tries,Cost,Report",
+          "the table's columns are the design's, where there is room": !wide || (await view.getByRole("table", { name: "Pieces" }).getByRole("columnheader").allTextContents()).join() === "Piece,Model,State,Tries,Cost,Report,Worker",
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
           "no text is smaller than 10.5px": layout.smallest >= 10.5,
           "no browser errors": errors.length === 0,

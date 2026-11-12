@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
   selectSession: vi.fn(),
   openFile: vi.fn(),
+  /** The sessions the store holds: a run's workers, with what they have cost. */
+  sessions: [] as SessionEntry[],
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, Channel: class {} }));
@@ -19,7 +21,11 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.openFile }));
-vi.mock("@/lib/sessions", () => ({ selectSession: mocks.selectSession }));
+vi.mock("@/lib/sessions", () => ({
+  selectSession: mocks.selectSession,
+  useSessionStore: () => ({ sessions: mocks.sessions }),
+  conversationTitle: (entry: SessionEntry) => entry.title,
+}));
 
 const { RunView, PLAN_A_RUN_PROMPT } = await import("./RunView");
 const { onOrchestratorSettingsRequest, resetRunsForTests } = await import("@/lib/orchestration");
@@ -59,6 +65,7 @@ beforeEach(() => {
   mocks.listeners.clear();
   mocks.selectSession.mockReset();
   mocks.openFile.mockReset();
+  mocks.sessions = [];
   answers = { list_models: models, orchestrator_limits: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions" } };
   mocks.invoke.mockReset().mockImplementation(async (command: string, args: unknown) => {
     if (!(command in answers)) throw new Error(`unexpected command ${command}`);
@@ -240,7 +247,7 @@ describe("a run with workers (PRO-274)", () => {
   const running = (): Run => {
     const run = waiting();
     return {
-      ...run, state: "running", approval: { at: new Date(Date.now() - 14 * 60_000).toISOString() },
+      ...run, state: "running", approval: { at: new Date(Date.now() - 14 * 60_000).toISOString() }, waiting: [{ piece: "docs", on: ["store"] }],
       pieces: [
         { ...run.pieces[0], state: "done", attempts: 1, note: "41 call sites in 9 files.", worker: { sessionId: "w-map", tabId: "t" }, branch: "raccoon/map", startedMode: "bypassPermissions" },
         { ...run.pieces[1], state: "blocked", attempts: 1, note: "Reported partial: two tests fail.", worker: { sessionId: "w-store", tabId: "t" }, branch: "raccoon/store", startedMode: "bypassPermissions" },
@@ -252,11 +259,12 @@ describe("a run with workers (PRO-274)", () => {
   it("shows where each piece stands and opens a piece's worker", async () => {
     await open(running());
     expect(screen.getByTestId("run-state").textContent).toBe("Run");
-    expect(screen.getByText("3 pieces · started 14m ago · approved by you")).toBeTruthy();
+    // A blocked piece with nothing running is what the run's line says (18.03, PRO-281).
+    expect(screen.getByText("Piece 2 is blocked. Piece 3 waits for it; nothing else is running.")).toBeTruthy();
     expect(screen.getByTestId("run-done").textContent).toBe("1");
     expect([row("map"), row("store"), row("docs")].map((r) => r.dataset.pieceState)).toEqual(["done", "blocked", "queued"]);
     // State, tries, cost, and the line its worker last reported. No cost was read for it yet.
-    expect(within(row("store")).getAllByRole("cell").slice(2).map((cell) => cell.textContent)).toEqual(["Blocked", "1", "–", "Reported partial: two tests fail."]);
+    expect(within(row("store")).getAllByRole("cell").slice(2, 6).map((cell) => cell.textContent)).toEqual(["Blocked", "1", "–", "Reported partial: two tests fail."]);
     // A queued piece says what it waits for, by number.
     expect(row("docs").textContent).toContain("Waits for 2");
     // The first piece is open: its result, its branch, and the way to its worker.
@@ -288,6 +296,79 @@ describe("a run with workers (PRO-274)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop run" }));
     await waitFor(() => expect(screen.getByTestId("run-state").textContent).toBe("Run stopped"));
     expect([row("map"), row("store"), row("docs")].map((r) => r.dataset.pieceState)).toEqual(["done", "stopped", "stopped"]);
+  });
+});
+
+describe("a run's cost and what it waits on (PRO-281)", () => {
+  const usage = (costUsd: number | null) => ({ models: [{ model: "claude-sonnet-5-5", inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd }] });
+  const worker = (id: string, cost: number | null, extra: Partial<SessionEntry> = {}) =>
+    ({ id, title: id, projectPath: "/repo", cwd: `/repo/.worktrees/${id}`, parent: { sessionId: "lead" }, tabs: [{ id: `${id}-tab`, harness: "claude", model: "sonnet", status: "completed", usage: usage(cost) }], ...extra }) as unknown as SessionEntry;
+  const started = (budget: Run["budget"]): Run => {
+    const run = waiting();
+    return {
+      ...run, state: "running", budget, approval: { at: new Date().toISOString() }, waiting: [{ piece: "docs", on: ["store"] }],
+      pieces: [
+        { ...run.pieces[0], state: "done", attempts: 1, note: "41 call sites.", worker: { sessionId: "w-map" } },
+        { ...run.pieces[1], state: "running", attempts: 1, worker: { sessionId: "w-store" } },
+        run.pieces[2],
+      ],
+    };
+  };
+
+  it("shows each worker's cost and the run's spend against its budget, and follows a worker's cost as it changes", async () => {
+    mocks.sessions = [worker("w-map", 0.04), worker("w-store", 1.82)];
+    await open(started({ dollars: 5 }));
+    expect(within(row("map")).getByTestId("piece-cost").textContent).toBe("$0.04");
+    expect(within(row("store")).getByTestId("piece-cost").textContent).toBe("$1.82");
+    // No worker yet, no cost.
+    expect(within(row("docs")).getByTestId("piece-cost").textContent).toBe("–");
+    expect(screen.getByTestId("run-spend").textContent).toBe("$1.86 of $5.00");
+    expect(screen.queryByTestId("run-needs")).toBeNull();
+    // The open piece's footer carries its cost too.
+    expect(screen.getByTestId("piece-detail-cost").textContent).toBe("$0.04");
+  });
+
+  it("raises Needs you with the reason for a blocked piece and for spend past the budget, each opening where it is answered", async () => {
+    mocks.sessions = [worker("w-map", 2.5), worker("w-store", 3)];
+    const run = started({ dollars: 5 });
+    run.pieces[1] = { ...run.pieces[1], state: "blocked", note: "Check still fails after 3 tries" };
+    await open(run);
+    const needs = screen.getByTestId("run-needs");
+    expect(within(needs).getByText("Needs you")).toBeTruthy();
+    expect(within(needs).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "Over budget: $5.50 of $5.00",
+      "Typed store module: Check still fails after 3 tries" + "Open worker",
+    ]);
+    expect(screen.getByTestId("run-spend").textContent).toBe("$5.50 of $5.00");
+    fireEvent.click(within(needs).getByRole("button", { name: "Open worker" }));
+    expect(mocks.selectSession).toHaveBeenCalledWith("w-store");
+  });
+
+  it("a points budget is shown as set: a run's share of a usage window is not measured, so it is never over", async () => {
+    mocks.sessions = [worker("w-map", 40)];
+    await open(started({ points: 25 }));
+    expect(screen.getByTestId("run-spend").textContent).toBe("$40.00 · budget 25 points");
+    expect(screen.queryByTestId("run-needs")).toBeNull();
+  });
+
+  it("opens a piece's worker from its row", async () => {
+    mocks.sessions = [worker("w-map", 0.04)];
+    await open(started({}));
+    fireEvent.click(within(row("store")).getByRole("button", { name: "Open the worker of Typed store module" }));
+    expect(mocks.selectSession).toHaveBeenCalledWith("w-store");
+    expect(within(row("docs")).queryByRole("button", { name: /Open the worker/ })).toBeNull();
+  });
+
+  it("while the plan waits, Approve is the only way to start it: changing a piece's model saves the plan and starts nothing", async () => {
+    answers.orchestration_update_plan = ({ plan }: { plan: RunPlan }) => ({ ...waiting(), planEdited: true, pieces: waiting().pieces.map((p) => ({ ...p, model: plan.pieces.find((q) => q.id === p.id)!.model })) });
+    await open(waiting());
+    fireEvent.change(screen.getByRole("combobox", { name: "Model of Typed store module" }), { target: { value: "opus" } });
+    await waitFor(() => expect(calls("orchestration_update_plan")).toHaveLength(1));
+    expect(screen.getByTestId("run-view").getAttribute("data-run-state")).toBe("awaitingApproval");
+    expect(calls("orchestration_approve")).toHaveLength(0);
+    // Nothing on the page starts the run but Approve.
+    const starts = screen.getAllByRole("button").filter((button) => /start|approve|run$/i.test(button.textContent ?? ""));
+    expect(starts.map((button) => button.textContent)).toEqual(["Approve and start"]);
   });
 });
 
@@ -324,14 +405,17 @@ describe("a piece's tries and what they cost (PRO-275)", () => {
 
   it("shows each piece's tries and cost in its row, and what the run's workers cost so far", async () => {
     await open(blocked());
-    expect(screen.getByRole("table", { name: "Pieces" }).querySelectorAll('[role="columnheader"]').length).toBe(6);
-    expect([...screen.getByRole("table", { name: "Pieces" }).querySelectorAll('[role="columnheader"]')].map((head) => head.textContent)).toEqual(["Piece", "Model", "State", "Tries", "Cost", "Report"]);
+    expect(screen.getByRole("table", { name: "Pieces" }).querySelectorAll('[role="columnheader"]').length).toBe(7);
+    // The last column holds each row's way to its worker (PRO-281).
+    expect([...screen.getByRole("table", { name: "Pieces" }).querySelectorAll('[role="columnheader"]')].map((head) => head.textContent)).toEqual(["Piece", "Model", "State", "Tries", "Cost", "Report", "Worker"]);
     expect(within(row("map")).getAllByRole("cell").slice(1, 5).map((cell) => cell.textContent)).toEqual(["Haiku 5.5 Default", "Done", "1", "$0.04"]);
     // The model a piece is on now is its last try's.
     expect(within(row("cli")).getAllByRole("cell").slice(1, 5).map((cell) => cell.textContent)).toEqual(["Opus 5.5 Medium", "Blocked", "3", "$3.71"]);
     expect(within(row("docs")).getAllByRole("cell").slice(3, 5).map((cell) => cell.textContent)).toEqual(["–", "–"]);
-    expect(screen.getByTestId("run-cost").textContent).toBe("$3.75");
-    expect(screen.getByRole("status").textContent).toBe("cli is blocked after 3 tries. docs cannot start without it.");
+    expect(screen.getByTestId("run-spend").textContent).toBe("$3.75 · budget 25 points");
+    expect(screen.getAllByRole("status").map((status) => status.textContent)).toContain("cli is blocked after 3 tries. docs cannot start without it.");
+    // The blocked piece also waits on the person (PRO-281), and its entry opens its last worker.
+    expect(within(screen.getByTestId("run-needs")).getAllByRole("listitem").map((item) => item.textContent)).toEqual([`Move CLI code to the store: ${blocked().pieces[1].note}Open worker`]);
   });
 
   it("lists a blocked piece's tries: what each ran on, what it cost, why it was made, and how it ended", async () => {
