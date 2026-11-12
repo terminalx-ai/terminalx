@@ -98,7 +98,14 @@ vi.mock("@/lib/cloudConnections", async (importOriginal) => ({
     return () => connectedListeners.delete(listener);
   },
 }));
-vi.mock("@/lib/models", () => ({ loadModels: vi.fn() }));
+const agentSettingsRequests = vi.hoisted(() => new Set<() => void>());
+vi.mock("@/lib/models", () => ({
+  loadModels: vi.fn(),
+  onAgentSettingsRequest: (listener: () => void) => {
+    agentSettingsRequests.add(listener);
+    return () => agentSettingsRequests.delete(listener);
+  },
+}));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn(), useAccount: () => ({ status: { state: "signed-out" }, ready: true, busy: false }), closePasteLink: vi.fn(), pasteSignInLink: vi.fn() }));
 vi.mock("@/lib/cloudCatalog", () => ({ bootCloudCatalog: vi.fn() }));
@@ -300,6 +307,12 @@ describe("start screen", () => {
     render(<AppShell />);
 
     fireEvent.click(screen.getByRole("button", { name: "Agent settings from start" }));
+    expect((await screen.findByTestId("settings-page")).getAttribute("data-initial-tab")).toBe("agents");
+  });
+
+  it("opens Agent settings when the empty model picker asks for them (PRO-292)", async () => {
+    render(<AppShell />);
+    act(() => agentSettingsRequests.forEach((listener) => listener()));
     expect((await screen.findByTestId("settings-page")).getAttribute("data-initial-tab")).toBe("agents");
   });
 

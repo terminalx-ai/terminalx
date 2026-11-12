@@ -35,7 +35,7 @@ import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
 import { archiveSession, getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent, type ImageInput } from "@/lib/api";
-import { loadModels } from "@/lib/models";
+import { loadModels, onAgentSettingsRequest } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
@@ -193,6 +193,8 @@ export function AppShell() {
   }), []);
   // "Add your own templates in Settings › Projects", from Create a project.
   useEffect(() => onTemplateSettingsRequest(() => openSettings("projects.templates")), [openSettings]);
+  // The empty model picker's way out: Settings › Agents, where the agent's sign-in is checked.
+  useEffect(() => onAgentSettingsRequest(() => openSettings("agents")), [openSettings]);
   const openAccountSettings = useCallback(() => {
     setSettingsTab("account");
     setSettingsOpen(true);
