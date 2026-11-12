@@ -56,9 +56,9 @@ try {
       await close();
     }
 
-    const conversation = page.locator('[data-testid="conversation-list"]').getByRole("button", { name: layout === "simple" ? "main, First conversation" : "First conversation", exact: true });
+    const conversation = page.locator('[data-testid="conversation-list"]').getByRole("button", { name: layout === "simple" ? "main, Context session" : "Context session", exact: true });
     await conversation.hover();
-    await page.getByRole("button", { name: "Menu for First conversation", exact: true }).click();
+    await page.getByRole("button", { name: "Menu for Context session", exact: true }).click();
     await menu.waitFor();
     const expected = await actions();
     assert(expected.some((item) => item.label === "Link to issue…"));
