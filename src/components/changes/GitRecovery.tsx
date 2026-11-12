@@ -1,3 +1,4 @@
+import { prErrorDetails, prErrorKind, type PrErrorKind } from "@/lib/prErrors";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -147,7 +148,24 @@ export function AddRemote({ source, details, onDone }: { source: GitSource; deta
   </section>;
 }
 
-export function GitError({ details, operation }: { details: string; operation?: string }) {
+/** PR info that could not load, named by cause: no access, offline or timed out. */
+export function PrLoadError({ kind, details, onRetry, onConnect }: { kind: PrErrorKind; details: string; onRetry?: () => void; onConnect?: () => void }) {
+  const copy = {
+    access: { title: "GitHub access required", text: "The connected account can't read this repository's pull requests.", action: "Connect GitHub", run: onConnect },
+    timeout: { title: "Couldn't refresh PR info", text: "The last refresh timed out. What you see may be out of date.", action: "Retry", run: onRetry },
+    offline: { title: "You're offline", text: "PR info refreshes when the connection is back.", action: undefined, run: undefined },
+  }[kind];
+  return <div role="alert" data-testid={`pr-error-${kind}`} className="mx-3 my-2 rounded-md bg-destructive/10 p-2 text-xs">
+    <p className="font-medium">{copy.title}</p>
+    <p className="mt-1 text-muted-foreground">{copy.text}</p>
+    {copy.action && copy.run && <Button size="xs" variant="outline" className="mt-2" onClick={copy.run}>{copy.action}</Button>}
+    <CommandDetails key={details} details={prErrorDetails(details)} />
+  </div>;
+}
+
+export function GitError({ details, operation, onRetry, onConnect }: { details: string; operation?: string; onRetry?: () => void; onConnect?: () => void }) {
+  const kind = operation ? null : prErrorKind(details);
+  if (kind) return <PrLoadError kind={kind} details={details} onRetry={onRetry} onConnect={onConnect} />;
   const denied = /permission denied|authentication failed|access denied|write access.*not granted|denied to|error: 403|returned error: 403|could not read username/i.test(details);
   return <div role="alert" className="mx-3 my-2 rounded-md bg-destructive/10 p-2 text-xs">
     <p className="font-medium">{denied ? "Repository access denied" : operation === "push" ? "Could not push" : "Could not complete Git operation"}</p>

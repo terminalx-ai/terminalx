@@ -654,3 +654,18 @@ it.each([false, true])("respects cloud write permission for queue actions (canWr
   } else expect(mutate).not.toHaveBeenCalled();
   expect(mocks.invoke).not.toHaveBeenCalledWith("pr_merge", expect.anything());
 });
+
+describe("PrPanel load failure states", () => {
+  afterEach(cleanup);
+  it("names an offline failure instead of the raw error", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
+      if (command === "work_status") throw "[pr-error:offline] error connecting to api.github.com";
+      return null;
+    });
+    render(<PrPanel cwd={cwd} branch="feature" busy={false} active />);
+    expect(await screen.findByText("You're offline")).toBeTruthy();
+    expect(screen.queryByText("Could not complete Git operation")).toBeNull();
+  });
+});
