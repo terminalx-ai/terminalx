@@ -42,6 +42,36 @@ const rowIndex = SETTINGS_ROWS.map((row) => indexPaletteItem({
   recentAt: 0,
 }, [...row.searchTerms]));
 
+/** The row's lower-cased text outside its title: where a word must appear whole to count. */
+const bodyText = new Map<string, string>(SETTINGS_ROWS.map((row) => [row.id, `${row.description} ${row.searchTerms.join(" ")}`.toLowerCase()]));
+
+/**
+ * The palette's matcher also accepts a query's letters scattered through a
+ * long text ("font" is in almost every description that way), which suits a
+ * short title but lists unrelated rows for a description. So a word counts
+ * when it is in the row's description or search terms as typed, or, being a
+ * little off, when its letters follow one another in the title, close together.
+ */
+function wordsFound(row: SettingRegistration, query: string, titleRanges: readonly MatchRange[]): boolean {
+  const body = bodyText.get(row.id) ?? "";
+  const title = row.title.toLowerCase();
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return words.every((word) => body.includes(word) || title.includes(word) || (word.length >= 3 && titleRanges.length > 0 && nearlyIn(title, word)));
+}
+
+/** The word's letters in order in `text`, within the room of the word plus one stray letter: "thme" in "theme". */
+function nearlyIn(text: string, word: string): boolean {
+  for (let start = text.indexOf(word[0]); start >= 0; start = text.indexOf(word[0], start + 1)) {
+    let at = start;
+    for (const char of word.slice(1)) {
+      at = text.indexOf(char, at + 1);
+      if (at < 0) break;
+    }
+    if (at >= 0 && at - start + 1 <= word.length + 1) return true;
+  }
+  return false;
+}
+
 /**
  * Rows matching `query`, best first, at most SETTINGS_SEARCH_LIMIT. A blank
  * query matches nothing: the page lists its sections instead. Rows of a
@@ -53,7 +83,7 @@ export function searchSettings(query: string): SettingSearchMatch[] {
   const matches: SettingSearchMatch[] = [];
   for (const match of rankPaletteItems(rowIndex, query)) {
     const row = match.item.row;
-    if (!settingsSectionOffered(row.section)) continue;
+    if (!settingsSectionOffered(row.section) || !wordsFound(row, query, match.primaryRanges)) continue;
     matches.push({
       id: row.id as SettingId,
       row,

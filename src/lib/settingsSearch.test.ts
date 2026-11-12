@@ -20,6 +20,23 @@ describe("settings row search", () => {
     expect(term).toBeGreaterThan(description);
   });
 
+  it("finds the font rows for 'font', and only those", () => {
+    const ids = searchSettings("font").map((match) => match.id);
+    expect(ids).toContain("appearance.textSize");
+    // Not every row whose description happens to hold an f, an o, an n and a t in order.
+    expect(ids).toEqual(["appearance.textSize"]);
+  });
+
+  it("finds nothing for a mistyped second word, as the empty state expects", () => {
+    expect(searchSettings("dark mdoe")).toEqual([]);
+    expect(searchSettings("dark mode").map((match) => match.id)).toContain("appearance.mode");
+  });
+
+  it("forgives a typo in a title but not in a description", () => {
+    expect(searchSettings("sonuds")).toEqual([]);
+    expect(searchSettings("thme").map((match) => match.id)).toContain("appearance.theme");
+  });
+
   it("returns the row, its page and highlight ranges for title and description", () => {
     const [sounds] = searchSettings("sounds");
     expect(sounds.id).toBe("general.sounds");

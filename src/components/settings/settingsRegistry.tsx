@@ -209,13 +209,13 @@ export const SETTINGS_ROWS = [
   defineSetting({
     id: "appearance.mode", section: "appearance", title: "Mode",
     description: "System follows macOS and switches with it.",
-    searchTerms: ["appearance", "mode"], scope: "user",
+    searchTerms: ["appearance", "mode", "dark", "light", "dark mode", "light mode", "system"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.mode" },
   }),
   defineSetting({
     id: "appearance.textSize", section: "appearance", title: "Text size",
     description: "Scales the transcript and composer. Chrome stays the same size.",
-    searchTerms: ["appearance", "text", "size"], scope: "user",
+    searchTerms: ["appearance", "text", "size", "font", "font size", "zoom", "bigger", "smaller"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.fontScale" },
   }),
   defineSetting({
