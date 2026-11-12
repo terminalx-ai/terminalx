@@ -202,13 +202,13 @@ describe("palette tabs and scopes (design 07.05)", () => {
   });
 
   it("keeps each scope's groups, and every group in All", () => {
-    const groups = ["smart", "sessions", "workspaces", "projects", "files", "commands", "settings", "settings-pages"];
+    const groups = ["smart", "sessions", "workspaces", "projects", "files", "commands", "settings", "settings-pages", "settings-projects"];
     expect(groups.filter((group) => paletteScopeShows("all", group))).toEqual(groups);
     expect(groups.filter((group) => paletteScopeShows("sessions", group))).toEqual(["sessions"]);
     expect(groups.filter((group) => paletteScopeShows("cloud", group))).toEqual(["sessions"]);
     expect(groups.filter((group) => paletteScopeShows("projects", group))).toEqual(["workspaces", "projects"]);
     expect(groups.filter((group) => paletteScopeShows("actions", group))).toEqual(["commands"]);
-    expect(groups.filter((group) => paletteScopeShows("settings", group))).toEqual(["settings", "settings-pages"]);
+    expect(groups.filter((group) => paletteScopeShows("settings", group))).toEqual(["settings", "settings-pages", "settings-projects"]);
   });
 
   it("says what each scope searches", () => {

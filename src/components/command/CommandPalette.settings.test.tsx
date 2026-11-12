@@ -10,6 +10,7 @@ vi.mock("@/components/layout/AppShell", () => ({ TITLEBAR_INSET: 78 }));
 const { CommandPalette } = await import("./CommandPalette");
 const store = await import("@/lib/sessions");
 const { searchSettings } = await import("@/lib/settingsSearch");
+const { onProjectSettingsRequest } = await import("@/lib/projectAdded");
 
 beforeEach(async () => {
   mocks.invoke.mockReset().mockImplementation(async (command: string) => {
@@ -78,6 +79,14 @@ describe("settings in the command palette", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it.each(["font", "theme", "worktree"])("lists for %s the rows the row search finds, in its order", async (query) => {
+    const { input } = palette();
+    fireEvent.change(input, { target: { value: query } });
+    const rows = within(await screen.findByRole("group", { name: "Settings" })).getAllByRole("option");
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.map((row) => row.id)).toEqual(searchSettings(query).slice(0, rows.length).map((match) => `palette:setting:${match.id}`));
+  });
+
   it("puts a strong settings match ahead of the commands, and an exact command ahead of settings", async () => {
     const { input } = palette();
     fireEvent.change(input, { target: { value: "status bar" } });
@@ -107,8 +116,8 @@ describe("settings in the command palette", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(screen.getByRole("tab", { name: "Settings" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe("false");
-    // With nothing typed: the Settings pages, and nothing else.
-    expect(groupIds()).toEqual(["palette-group-settings-pages"]);
+    // With nothing typed: the Settings pages and each project's settings, and nothing else.
+    expect(groupIds()).toEqual(["palette-group-settings-pages", "palette-group-settings-projects"]);
     expect(screen.getByRole("group", { name: "Settings pages" })).toBeTruthy();
     fireEvent.change(input, { target: { value: "sounds" } });
     await screen.findByRole("option", { name: /^Sounds/ });
@@ -122,8 +131,10 @@ describe("settings in the command palette", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
     expect(input.getAttribute("placeholder")).toBe("Search settings…");
     const results = screen.getAllByRole("option");
+    const pages = within(screen.getByRole("group", { name: "Settings pages" })).getAllByRole("option");
     // Orchestrator is behind its Experimental switch, which is off.
-    expect(results).toHaveLength(15);
+    expect(pages).toHaveLength(15);
+    expect(results).toHaveLength(pages.length + 1);
     expect(results.map((row) => row.id)).not.toContain("palette:settings-page:orchestrator");
     expect(screen.getByRole("option", { name: /^Environment/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /^Projects/ })).toBeTruthy();
@@ -138,6 +149,25 @@ describe("settings in the command palette", () => {
     expect(input.getAttribute("aria-activedescendant")).toBe(results[0].id);
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(onOpenSettings).toHaveBeenCalledWith("account"));
+  });
+
+  it("lists each project under the pages, and opens that project's settings", async () => {
+    const { input, onOpenChange, onOpenSettings } = palette();
+    const requested = vi.fn();
+    const stop = onProjectSettingsRequest(requested);
+    try {
+      fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
+      const projects = within(screen.getByRole("group", { name: "Projects" })).getAllByRole("option");
+      expect(projects.map((row) => row.textContent)).toEqual(["AlphaScripts, files to copy and workspace cleanup"]);
+      fireEvent.click(projects[0]);
+      await waitFor(() => expect(requested).toHaveBeenCalledWith("/alpha"));
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+      expect(onOpenSettings).not.toHaveBeenCalled();
+    } finally { stop(); }
+    // Typed for, a project's settings are found as rows; the project list is gone.
+    fireEvent.change(input, { target: { value: "scripts" } });
+    await screen.findByRole("option", { name: /^Scripts/ });
+    expect(groupIds()).toEqual(["palette-group-settings"]);
   });
 
   it("drops the pages hint once a setting is typed for, and outside the Settings tab", async () => {

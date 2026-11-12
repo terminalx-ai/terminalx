@@ -56,6 +56,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { HighlightedText } from "@/components/ui/HighlightedText";
 import { SETTINGS_SECTIONS as SETTINGS_PAGES, settingsSectionOffered } from "@/lib/settingsSections";
 import { searchSettings } from "@/lib/settingsSearch";
+import { requestProjectSettings } from "@/lib/projectAdded";
 import type { SettingsSection } from "@/components/settings/settingsRegistry";
 import { AgentMark } from "@/components/AgentMark";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
@@ -125,6 +126,7 @@ const GROUP_CAPS: Record<string, number> = {
   commands: 8,
   settings: 30,
   "settings-pages": 30,
+  "settings-projects": 30,
 };
 
 /** Each Settings page's icon in the palette (design 07.05 gives every page its own). */
@@ -727,7 +729,24 @@ export function CommandPalette({
             run: () => onOpenSettings(page.id),
           })),
         };
-    if (scope === "settings") return [settingsGroup];
+    // Under the pages, each project's own settings (design 07.05): the repositories Settings lists.
+    const settingsProjectsGroup: PaletteGroup = {
+      id: "settings-projects",
+      label: "Projects",
+      rows: store.projects.filter((project) => !project.archived).map((project) => ({
+        id: `palette:settings-project:${project.path}`,
+        kind: "command",
+        primary: project.name,
+        secondary: "Scripts, files to copy and workspace cleanup",
+        primaryRanges: [],
+        secondaryRanges: [],
+        icon: FolderGit2,
+        project,
+        inline: true,
+        run: () => requestProjectSettings(project.path),
+      })),
+    };
+    if (scope === "settings") return deferredQuery.trim() ? [settingsGroup] : [settingsGroup, settingsProjectsGroup];
     const entityMatches = searchPaletteIndex(paletteIndex, deferredQuery);
     const commandMatches = rankPaletteItems(commandEntries, deferredQuery);
     const rankedFiles = deferredQuery.trim() ? rankPaletteItems(fileEntries, deferredQuery) : [];
@@ -1041,7 +1060,7 @@ function PaletteResultRow({
       )}
     >
       {row.inline ? <>
-        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+        {row.project ? <ProjectGlyph project={row.project} size={14} /> : <Icon className="size-3.5 shrink-0 text-muted-foreground" />}
         <span className="min-w-0 truncate text-[13px] text-foreground">
           <HighlightedText text={row.primary} ranges={row.primaryRanges} />
         </span>

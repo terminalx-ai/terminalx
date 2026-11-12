@@ -469,13 +469,15 @@ export function paletteTabOf(scope: PaletteScope): PaletteTab {
  * The result groups a narrowed scope keeps; "all" keeps every group. A
  * workspace is a project's branch, so it is listed under Projects. Files and
  * smart input (an issue, a pull request, a path) are only searched in All.
+ * Settings is its rows when typed for; with nothing typed, its pages and each
+ * project's own settings.
  */
 export const PALETTE_SCOPE_GROUPS: Record<Exclude<PaletteScope, "all">, readonly string[]> = {
   sessions: ["sessions"],
   cloud: ["sessions"],
   projects: ["projects", "workspaces"],
   actions: ["commands"],
-  settings: ["settings", "settings-pages"],
+  settings: ["settings", "settings-pages", "settings-projects"],
 };
 
 /** Whether a scope shows a result group. */
