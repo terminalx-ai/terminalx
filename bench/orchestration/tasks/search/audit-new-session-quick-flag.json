@@ -1,0 +1,21 @@
+{
+  "id": "audit-new-session-quick-flag",
+  "shape": "search",
+  "title": "Find every use of the session store's quick new-session flag",
+  "prompt": "The session store's `newSessionQuick` flag (the new-session composer opened with no project or worktree) is being renamed `newSessionChat`, because it now means an ordinary chat composed before its first send. Find every file that reads, sets, asserts or declares `newSessionQuick`, tests included.\n\nWrite the answer to `bench-answer.txt` at the repository root: one repository-relative path per line (for example `path/to/file.rs`), each file once, nothing else on the line. List files, not line numbers. Do not change any other file.",
+  "startCommit": "e6b1036a43da651dbbc1d4c113f91a47fdd1657a",
+  "solution": "audit-new-session-quick-flag.patch",
+  "check": {
+    "run": "node .bench-check/audit-new-session-quick-flag.mjs",
+    "timeoutSeconds": 30,
+    "files": [
+      ".bench-check/audit-new-session-quick-flag.mjs"
+    ],
+    "install": false
+  },
+  "source": {
+    "commit": "221eda1ad281",
+    "pr": 874
+  },
+  "notes": "Small-medium (8 files), frontend session store, layout and composer, about half of them tests."
+}

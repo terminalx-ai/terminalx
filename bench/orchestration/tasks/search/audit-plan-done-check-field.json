@@ -1,0 +1,21 @@
+{
+  "id": "audit-plan-done-check-field",
+  "shape": "search",
+  "title": "Find every use of a run plan piece's single done-check field",
+  "prompt": "In an orchestration run plan, each piece has a `doneCheck` field: one free-text string saying what proves the piece done. It is being replaced by a typed list of checks. Find every tracked file that reads, writes, validates, documents or tests a piece's `doneCheck` field (Rust, TypeScript, the WebKit layout scripts and the CLI guide all count), so that each can be moved to the new form.\n\nWrite the answer to `bench-answer.txt` at the repository root: one repository-relative path per line (for example `path/to/file.rs`), each file once, nothing else on the line. List files, not line numbers. Do not change any other file.",
+  "startCommit": "b7427243565d9e5b5f80a8bae888f4f2afc51990",
+  "solution": "audit-plan-done-check-field.patch",
+  "check": {
+    "run": "node .bench-check/audit-plan-done-check-field.mjs",
+    "timeoutSeconds": 30,
+    "files": [
+      ".bench-check/audit-plan-done-check-field.mjs"
+    ],
+    "install": false
+  },
+  "source": {
+    "commit": "42ebe20baf02",
+    "pr": 895
+  },
+  "notes": "Medium (12 files), cross-stack: orchestration Rust, TypeScript types and views, scripts/webkit, skill-guides."
+}

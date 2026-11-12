@@ -1,0 +1,49 @@
+diff --git a/bench-answer.txt b/bench-answer.txt
+new file mode 100644
+--- /dev/null
++++ b/bench-answer.txt
+@@ -0,0 +1,5 @@
++src-tauri/src/startup.rs
++src-tauri/src/startup/probe.rs
++src-tauri/src/startup/recorder.rs
++src-tauri/src/startup/validation.rs
++src-tauri/tests/startup_recorder.rs
+diff --git a/.bench-check/audit-startup-retain-recorder.mjs b/.bench-check/audit-startup-retain-recorder.mjs
+new file mode 100644
+--- /dev/null
++++ b/.bench-check/audit-startup-retain-recorder.mjs
+@@ -0,0 +1,34 @@
++// Outcome check for the orchestration benchmark task audit-startup-retain-recorder
++// (docs/ORCHESTRATION-BENCH.md). Reads the agent's answer from bench-answer.txt,
++// one repository-relative path per line, and compares it to the files the
++// real change had to touch. Exit 0 means solved.
++
++import { existsSync, readFileSync } from "node:fs";
++
++const ANSWER = "bench-answer.txt";
++const MIN_RECALL = 1.0;
++const MIN_PRECISION = 0.8;
++const TRUTH = new Set([
++  "src-tauri/src/startup.rs",
++  "src-tauri/src/startup/probe.rs",
++  "src-tauri/src/startup/recorder.rs",
++  "src-tauri/src/startup/validation.rs",
++  "src-tauri/tests/startup_recorder.rs",
++]);
++
++if (!existsSync(ANSWER)) {
++  console.log(`no ${ANSWER} at the repository root`);
++  process.exit(1);
++}
++// Forgiving about form: bullets, backticks, a leading ./ and a :line suffix are dropped.
++const listed = new Set(
++  readFileSync(ANSWER, "utf8")
++    .split(/\r?\n/)
++    .map((line) => line.trim().replace(/^[-*]\s+/, "").replace(/^`|`$/g, "").replace(/^\.\//, "").replace(/:\d+(:\d+)?$/, "").trim())
++    .filter((line) => line && !line.startsWith("#")),
++);
++const found = [...listed].filter((path) => TRUTH.has(path)).length;
++const recall = found / TRUTH.size;
++const precision = listed.size ? found / listed.size : 0;
++console.log(`listed ${listed.size}, ${found} of ${TRUTH.size} right: recall ${recall.toFixed(2)} (need ${MIN_RECALL}), precision ${precision.toFixed(2)} (need ${MIN_PRECISION})`);
++process.exit(recall >= MIN_RECALL && precision >= MIN_PRECISION ? 0 : 1);

@@ -1,0 +1,77 @@
+diff --git a/bench-answer.txt b/bench-answer.txt
+new file mode 100644
+--- /dev/null
++++ b/bench-answer.txt
+@@ -0,0 +1,19 @@
++src-tauri/src/account.rs
++src-tauri/src/account/organization_delete.rs
++src-tauri/src/agent_route_check.rs
++src-tauri/src/cloud_agent_client.rs
++src-tauri/src/cloud_agents/api.rs
++src-tauri/src/cloud_bootstrap.rs
++src-tauri/src/cloud_github.rs
++src-tauri/src/cloud_grants.rs
++src-tauri/src/cloud_workspaces.rs
++src-tauri/src/issue_ops/linear.rs
++src-tauri/src/issues.rs
++src-tauri/src/organization_compute.rs
++src-tauri/src/organization_environment.rs
++src-tauri/src/organization_github_app.rs
++src-tauri/src/organization_members.rs
++src-tauri/src/organization_workspace_config.rs
++src-tauri/src/status/usage/claude_oauth.rs
++src-tauri/src/transcription/download.rs
++src-tauri/src/work_claims/client.rs
+diff --git a/.bench-check/audit-remote-http-clients.mjs b/.bench-check/audit-remote-http-clients.mjs
+new file mode 100644
+--- /dev/null
++++ b/.bench-check/audit-remote-http-clients.mjs
+@@ -0,0 +1,48 @@
++// Outcome check for the orchestration benchmark task audit-remote-http-clients
++// (docs/ORCHESTRATION-BENCH.md). Reads the agent's answer from bench-answer.txt,
++// one repository-relative path per line, and compares it to the files the
++// real change had to touch. Exit 0 means solved.
++
++import { existsSync, readFileSync } from "node:fs";
++
++const ANSWER = "bench-answer.txt";
++const MIN_RECALL = 0.9;
++const MIN_PRECISION = 0.95;
++const TRUTH = new Set([
++  "src-tauri/src/account.rs",
++  "src-tauri/src/account/organization_delete.rs",
++  "src-tauri/src/agent_route_check.rs",
++  "src-tauri/src/cloud_agent_client.rs",
++  "src-tauri/src/cloud_agents/api.rs",
++  "src-tauri/src/cloud_bootstrap.rs",
++  "src-tauri/src/cloud_github.rs",
++  "src-tauri/src/cloud_grants.rs",
++  "src-tauri/src/cloud_workspaces.rs",
++  "src-tauri/src/issue_ops/linear.rs",
++  "src-tauri/src/issues.rs",
++  "src-tauri/src/organization_compute.rs",
++  "src-tauri/src/organization_environment.rs",
++  "src-tauri/src/organization_github_app.rs",
++  "src-tauri/src/organization_members.rs",
++  "src-tauri/src/organization_workspace_config.rs",
++  "src-tauri/src/status/usage/claude_oauth.rs",
++  "src-tauri/src/transcription/download.rs",
++  "src-tauri/src/work_claims/client.rs",
++]);
++
++if (!existsSync(ANSWER)) {
++  console.log(`no ${ANSWER} at the repository root`);
++  process.exit(1);
++}
++// Forgiving about form: bullets, backticks, a leading ./ and a :line suffix are dropped.
++const listed = new Set(
++  readFileSync(ANSWER, "utf8")
++    .split(/\r?\n/)
++    .map((line) => line.trim().replace(/^[-*]\s+/, "").replace(/^`|`$/g, "").replace(/^\.\//, "").replace(/:\d+(:\d+)?$/, "").trim())
++    .filter((line) => line && !line.startsWith("#")),
++);
++const found = [...listed].filter((path) => TRUTH.has(path)).length;
++const recall = found / TRUTH.size;
++const precision = listed.size ? found / listed.size : 0;
++console.log(`listed ${listed.size}, ${found} of ${TRUTH.size} right: recall ${recall.toFixed(2)} (need ${MIN_RECALL}), precision ${precision.toFixed(2)} (need ${MIN_PRECISION})`);
++process.exit(recall >= MIN_RECALL && precision >= MIN_PRECISION ? 0 : 1);
