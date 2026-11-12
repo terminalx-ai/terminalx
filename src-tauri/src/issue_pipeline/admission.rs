@@ -202,6 +202,13 @@ pub fn stopping(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| cause.to_string() == STOPPING)
 }
 
+/// Whether `cwd` is in the working tree at `tree`: the folder itself or one
+/// inside it, and in no other working tree that lies inside it.
+pub fn in_working_tree(tree: &Path, cwd: &Path) -> bool {
+    let (tree, cwd) = (canonical(tree), canonical(cwd));
+    cwd.starts_with(&tree) && !nested_tree(&tree, &cwd)
+}
+
 /// Whether a fence closes this checkout now: whoever would reserve it for
 /// work of its own (a pipeline's local checks, a conflict resolver) waits.
 pub fn closed(path: &Path) -> bool {

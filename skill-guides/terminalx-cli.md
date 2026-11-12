@@ -957,8 +957,12 @@ the merge began on (`lead_branch_changed`). It runs the plan's commands, so with
 approval of the plan and a lead that is asked before it runs commands it is refused with
 `checks_not_approved`: the person presses Merge in the Run view instead.
 
-The checks can take long. Give the command a long timeout, or run it in the background:
-the merge goes on in the app when the command stops waiting, `runs show` says how far it
+The checks can take long. Give the command a long timeout and wait for it. Do not work in
+your checkout meanwhile: until the merge has ended your other tool calls there are refused,
+and so is a `runs merge` from any other session while you are in a turn. A merge that fails
+its check is undone without discarding uncommitted work: changes in files the merge did not
+touch are kept, and when a file it did touch has changes the merge is left in and the piece
+is marked `failed` with why. The merge goes on in the app when the command stops waiting, `runs show` says how far it
 is (`mergeUnderWay`, and `merge` on the run and on each piece), and a second
 `runs merge` meanwhile is refused with `merge_in_progress`.
 

@@ -322,7 +322,9 @@ impl Checkouts for ManagerHost {
             }
         }
         let sessions = index::load().map_err(|error| format!("the sessions could not be read ({error:#})."))?;
-        for session in sessions.iter().filter(|session| canonical(Path::new(&session.cwd)) == checkout) {
+        // Every conversation that works on this checkout's files, from its top or a folder of it:
+        // the ones the fence closes.
+        for session in sessions.iter().filter(|session| admission::in_working_tree(&checkout, Path::new(&session.cwd))) {
             for tab in &session.tabs {
                 // The lead's own turn is the one that asked. Named with `--lead`, its tab is not known: none of its agents is waited for.
                 let asking = by_lead && session.id == run.lead.session_id && run.lead.tab_id.as_deref().is_none_or(|lead| lead == tab.id);

@@ -33,6 +33,8 @@ struct Repo {
     reserved: Mutex<Vec<bool>>,
     busy: Mutex<BTreeSet<String>>,
     project_check: Mutex<Option<String>>,
+    /// A pass that has reserved the checkout says so, and waits here to go on.
+    hold: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 
 impl Repo {
@@ -51,7 +53,7 @@ impl Repo {
         git(&lead, &["remote", "add", "origin", root.path().join("origin.git").to_str().unwrap()]);
         git(&lead, &["push", "-q", "origin", "main"]);
         git(&lead, &["checkout", "-q", "-b", "lead"]);
-        Self { root, mode: Mutex::new("bypassPermissions".into()), held: Mutex::new(None), reserved: Mutex::new(Vec::new()), busy: Mutex::new(BTreeSet::new()), project_check: Mutex::new(None) }
+        Self { root, mode: Mutex::new("bypassPermissions".into()), held: Mutex::new(None), reserved: Mutex::new(Vec::new()), busy: Mutex::new(BTreeSet::new()), project_check: Mutex::new(None), hold: Mutex::new(None) }
     }
 
     fn lead(&self) -> PathBuf {
@@ -110,7 +112,7 @@ impl Repo {
     }
 
     fn options(&self, by: By, skip: &[&str], recheck: bool) -> Options {
-        Options { skip: skip.iter().map(|piece| piece.to_string()).collect(), recheck, by, timeout: Duration::from_secs(60), begun: None }
+        Options { skip: skip.iter().map(|piece| piece.to_string()).collect(), recheck, by, from_lead: by == By::Cli, timeout: Duration::from_secs(60), begun: None }
     }
 
     fn state(&self, piece: &str) -> Option<MergeState> {
@@ -138,6 +140,10 @@ impl Checkouts for Repo {
             return Err(why);
         }
         self.reserved.lock().unwrap().push(by_lead);
+        if let Some((begun, wait)) = self.hold.lock().unwrap().take() {
+            begun.send(()).unwrap();
+            wait.recv().unwrap();
+        }
         Ok(Box::new(()))
     }
 
@@ -311,6 +317,35 @@ fn a_failed_integration_check_undoes_that_merge_only_and_names_the_piece() {
 }
 
 #[test]
+fn undoing_a_merge_never_discards_uncommitted_work() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let a = repo.work("a", &[("a.txt", "a\n")]);
+    // While the check runs, a file the merge did not touch is edited (by the check, or by anyone).
+    let id = repo.run(&[("a", &[], &a, &["a.txt"], "true")], Some("echo edited >> shared.txt; exit 1"));
+    let start = repo.head();
+    let merged = repo.merge(&[], false);
+    // The merge is undone, and the edit is still there.
+    assert_eq!((merged.integration_failed.as_slice(), repo.head()), (&["a".to_string()][..], start.clone()));
+    assert!(!repo.lead().join("a.txt").exists());
+    assert_eq!(std::fs::read_to_string(repo.lead().join("shared.txt")).unwrap(), "one\ntwo\nthree\nedited\n");
+    git(&repo.lead(), &["checkout", "--", "shared.txt"]);
+
+    // An edit to a file the merge itself changed: undoing would discard it, so the merge is left in and said so.
+    store::update(&id, |run| {
+        run.integration_check = Some("echo edited >> a.txt; exit 1".into());
+        Ok(())
+    })
+    .unwrap();
+    let kept = repo.merge(&[], true);
+    assert_eq!((kept.failed.as_slice(), kept.stopped_at.as_deref()), (&["a".to_string()][..], Some("a")));
+    assert!(repo.head() != start && git(&repo.lead(), &["rev-parse", "HEAD^1"]) == start);
+    assert_eq!(std::fs::read_to_string(repo.lead().join("a.txt")).unwrap(), "a\nedited\n");
+    let note = store::get(&id).unwrap().piece("a").unwrap().merge.clone().unwrap().note.unwrap();
+    assert!(note.contains("the merge was not undone") && note.contains("with the merge in it"), "{note}");
+}
+
+#[test]
 fn a_done_check_that_fails_on_the_merged_result_keeps_the_run_from_done() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -389,6 +424,14 @@ fn a_merge_is_refused_before_anything_moves_when_the_checkout_is_not_free() {
     let merged = merge::merge(&repo, &id, &repo.options(By::Person, &[], false)).unwrap();
     assert!(merged.done);
     assert_eq!(*repo.reserved.lock().unwrap(), [true, true, false], "a person's merge waits for the lead's turn too");
+    // So does a command that did not run in the lead's own conversation.
+    store::update(&id, |run| {
+        (run.state, run.approval) = (RunState::Merging, Some(crate::orchestration::Approval { at: "2026-11-12T09:00:00Z".into() }));
+        Ok(())
+    })
+    .unwrap();
+    merge::merge(&repo, &id, &Options { from_lead: false, ..repo.options(By::Cli, &[], false) }).unwrap();
+    assert_eq!(repo.reserved.lock().unwrap().last(), Some(&false));
     assert_eq!(merge::merge(&repo, &id, &Options { skip: vec!["nope".into()], ..repo.options(By::Cli, &[], false) }).unwrap_err().code, "piece_not_found");
 }
 
@@ -450,7 +493,45 @@ fn cleanup_removes_only_worktrees_whose_work_is_committed_and_merged() {
     assert!(!repo.worker("a").exists() && repo.worker("b").is_dir() && repo.worker("c").join("notes.txt").exists() && repo.worker("d").is_dir());
     // A worktree is removed; its branch never is.
     assert_eq!(git(&repo.lead(), &["rev-parse", "piece-a"]), a);
+    // While a pass merges the run, nothing is cleaned up: a merge it makes may yet be undone.
+    {
+        let (begun, started) = std::sync::mpsc::channel();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        *repo.hold.lock().unwrap() = Some((begun, wait));
+        std::thread::scope(|scope| {
+            store::update(&id, |run| {
+                run.state = RunState::Merging;
+                Ok(())
+            })
+            .unwrap();
+            let pass = scope.spawn(|| merge::merge(&repo, &id, &repo.options(By::Cli, &[], false)));
+            started.recv().unwrap();
+            assert_eq!(merge::cleanup(&repo, &id, true).unwrap_err().code, "merge_in_progress");
+            go.send(()).unwrap();
+            pass.join().unwrap().unwrap();
+        });
+    }
     // Asked again, what is gone is not listed and what stays still does.
     let again = merge::cleanup(&repo, &id, true).unwrap();
     assert_eq!((again.removed.len(), again.refused.len()), (0, 3));
+}
+
+#[test]
+fn a_piece_the_lead_merged_itself_is_not_undone_and_its_worker_is_told_so() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let a = repo.work("a", &[("a.txt", "a\n")]);
+    let id = repo.run(&[("a", &[], &a, &["a.txt"], "true")], Some("echo 'a.txt breaks the build'; exit 1"));
+    git(&repo.lead(), &["merge", "-q", "--no-ff", "-m", "Merge a by hand", &a]);
+    let by_hand = repo.head();
+
+    let merged = repo.merge(&[], false);
+
+    // Checked like any merge, but not TerminalX's to take back.
+    assert_eq!((merged.integration_failed.as_slice(), repo.head()), (&["a".to_string()][..], by_hand));
+    let run = store::get(&id).unwrap();
+    let record = run.piece("a").unwrap().merge.clone().unwrap();
+    assert!(record.by_hand && record.note.as_deref().unwrap().contains("nothing was undone"));
+    let brief = merge::brief(&run, run.piece("a").unwrap()).unwrap();
+    assert!(brief.contains("the lead merged it into `lead` itself") && brief.contains("That merge was not undone") && !brief.contains("so the merge was undone") && brief.contains("a.txt breaks the build"), "{brief}");
 }

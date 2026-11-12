@@ -122,8 +122,12 @@ pub struct Options {
     /// Run the integration check again for a piece it failed for, though
     /// neither its commit nor the lead's branch has changed since.
     pub recheck: bool,
-    /// Who asked: the lead with the CLI, or a person in the Run view.
+    /// Who asked: the CLI, or a person in the Run view.
     pub by: By,
+    /// The command ran in the lead's own conversation: that turn is the one
+    /// that asked, and is not waited for. Any other caller waits for the
+    /// lead's turn to end, as for every conversation in the checkout.
+    pub from_lead: bool,
     /// How long one command may run.
     pub timeout: Duration,
     /// Told once the pass holds the checkout and is about to merge: a caller
@@ -134,7 +138,7 @@ pub struct Options {
 
 impl Options {
     pub fn new(by: By) -> Self {
-        Self { skip: Vec::new(), recheck: false, by, timeout: verify::COMMAND_TIMEOUT, begun: None }
+        Self { skip: Vec::new(), recheck: false, by, from_lead: false, timeout: verify::COMMAND_TIMEOUT, begun: None }
     }
 }
 
@@ -277,7 +281,7 @@ fn recover(host: &dyn Checkouts, id: &str, cwd: &Path, run: &Run) -> Result<(), 
     let Some(pending) = run.merge.as_ref().and_then(|merge| merge.pending.clone()) else { return Ok(()) };
     let now = head(cwd).map_err(EngineError::internal)?;
     if pending.after.as_deref() == Some(now.as_str()) && git(cwd, &["rev-parse", "--verify", "--quiet", "HEAD^1"]).ok().as_deref() == Some(pending.before.as_str()) {
-        git(cwd, &["reset", "--hard", &pending.before]).map_err(|error| EngineError::internal(error.context("undo the merge whose check never finished")))?;
+        undo(cwd, &pending.before).map_err(|error| EngineError::new("lead_checkout_dirty", format!("An earlier merge was cut short before its check ended, and it cannot be taken back while files it changed have uncommitted changes: {error:#}. Nothing was merged."), Some("Commit them or put them aside, then run `terminalx runs merge` again.")))?;
     }
     let (after, ()) = store::update(id, |run| {
         if let Some(merge) = run.merge.as_mut() {
@@ -288,6 +292,15 @@ fn recover(host: &dyn Checkouts, id: &str, cwd: &Path, run: &Run) -> Result<(), 
     .map_err(EngineError::internal)?;
     host.changed(&after);
     Ok(())
+}
+
+/// Take back the merge at the tip of the lead's branch. Never at the cost of
+/// work that is not committed: `git reset --keep` moves the branch and the
+/// files the merge changed, keeps uncommitted changes in every other file,
+/// and refuses, changing nothing, when one of the merge's files has changes
+/// of its own (an edit made while the check ran, or the check's own).
+fn undo(cwd: &Path, before: &str) -> anyhow::Result<()> {
+    git(cwd, &["reset", "--keep", before]).map(|_| ())
 }
 
 /// What the probe found.
@@ -431,8 +444,7 @@ pub fn merge(host: &dyn Checkouts, id: &str, options: &Options) -> Result<Merged
             Some("Ask the person to press Merge in the session's Run view. Nothing was merged."),
         ));
     }
-    let by_lead = options.by == By::Cli;
-    let _reserved = host.reserve(&run, &cwd, by_lead).map_err(|why| EngineError::new("checkout_busy", format!("The lead's checkout is in use: {why} Nothing was merged."), Some("Run `terminalx runs merge` again once it is free.")))?;
+    let _reserved = host.reserve(&run, &cwd, options.from_lead).map_err(|why| EngineError::new("checkout_busy", format!("The lead's checkout is in use: {why} Nothing was merged."), Some("Run `terminalx runs merge` again once it is free.")))?;
     let into = preflight(&cwd, &run)?;
     recover(host, id, &cwd, &run)?;
     let (begun, ()) = store::update(id, |run| {
@@ -571,10 +583,10 @@ pub fn merge(host: &dyn Checkouts, id: &str, options: &Options) -> Result<Merged
         }
         if ran.as_ref().is_some_and(|ran| !ran.passed) {
             // That merge alone is taken back: the branch is where it was before this piece.
-            if let Err(error) = git(&cwd, &["reset", "--hard", &before]) {
+            if let Err(error) = undo(&cwd, &before) {
                 let mut failed = outcome(MergeState::Failed, &commit, &before);
                 failed.check = ran;
-                failed.note = Some(format!("The integration check failed and the merge could not be undone: {error:#}. The lead's branch is at {}.", short(&after)));
+                failed.note = Some(format!("The integration check failed, and the merge was not undone: files it changed have uncommitted changes now, which undoing it would discard ({error:#}). The lead's branch is at {}, with the merge in it. Commit or discard those changes, then merge again.", short(&after)));
                 record(host, id, piece_id, failed, |merge| merge.pending = None)?;
                 stopped_at = Some(piece_id.clone());
                 break;
@@ -778,8 +790,10 @@ pub fn brief(run: &Run, piece: &Piece) -> Option<String> {
         }
         MergeState::IntegrationFailed => {
             let check = merge.check.as_ref()?;
+            // Merged by the lead itself: nothing was undone, and the failing result is in its branch.
+            let what = if merge.by_hand { format!("was accepted and the lead merged it into `{into}` itself, but the run's integration check then failed on the merged result. That merge was not undone: your commits are in `{into}`, and the fix goes on top of them.") } else { format!("was accepted and merged into `{into}` without conflicts, but the run's integration check then failed on the merged result, so the merge was undone.") };
             format!(
-                "Your result for piece {} was accepted and merged into `{into}` without conflicts, but the run's integration check then failed on the merged result, so the merge was undone.\n\n`{}` {}. The last lines it printed:\n{}\n\n{rebase}, make that command pass there together with your own done-checks, commit, and report again.",
+                "Your result for piece {} {what}\n\n`{}` {}. The last lines it printed:\n{}\n\n{rebase}, make that command pass there together with your own done-checks, commit, and report again.",
                 piece.id,
                 check.run,
                 how(check),
@@ -883,10 +897,10 @@ fn keeps(worktree: &Worktree, lead_head: &str, into: &str) -> Option<String> {
 /// worked on. Branches are kept. Without `yes` nothing is removed: the
 /// refusal lists what would go and what would stay.
 pub fn cleanup(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, EngineError> {
+    // Held to the end: no pass may begin, make a merge this counts as in the lead's branch, and
+    // then undo it once the worktree is gone.
+    let _no_merge = Pass::begin(id).map_err(|error| EngineError::new("merge_in_progress", format!("{} Worktrees are cleaned up once that has ended.", error.message), None))?;
     let run = stored(id)?;
-    if under_way(id) {
-        return Err(EngineError::new("merge_in_progress", format!("Run {id} is being merged. Its worktrees are cleaned up once that has ended."), None));
-    }
     let cwd = host.lead_checkout(&run).map_err(|error| EngineError::new("lead_not_found", format!("The lead's checkout cannot be found, so nothing says what is merged: {error:#}"), None))?;
     let lead_head = head(&cwd).map_err(EngineError::internal)?;
     let into = crate::git::current_branch(&cwd).unwrap_or_else(|| short(&lead_head).to_string());

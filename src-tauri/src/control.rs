@@ -851,6 +851,10 @@ impl ControlService {
             "runs.merge" => {
                 self.manager.accepting_work().map_err(ControlError::internal)?;
                 let mut options = crate::orchestration::merge::Options::new(engine::By::Cli);
+                // Only the lead's own conversation is not waited for: its turn is the one asking.
+                // A command from any other session waits for the lead's turn like everyone's.
+                options.from_lead = params["caller"]["session"].as_str() == Some(run.lead.session_id.as_str())
+                    && run.lead.tab_id.as_deref().is_none_or(|tab| params["caller"]["tab"].as_str() == Some(tab));
                 options.skip = params["skip"].as_array().into_iter().flatten().filter_map(|piece| piece.as_str().map(str::to_owned)).collect();
                 options.recheck = params["recheck"].as_bool().unwrap_or(false);
                 let merged = crate::orchestration::merge::merge(&host, &run.id, &options).map_err(ControlError::of_run)?;
