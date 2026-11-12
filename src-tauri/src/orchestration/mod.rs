@@ -327,7 +327,7 @@ pub struct Budget {
 /// A budget written into a plan: a number, or No limit as `null` or `"none"`
 /// (PRO-335). Left out, the run follows the settings.
 fn written<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Cap>, D::Error> {
-    Cap::deserialize(deserializer).map(Some)
+    Option::<Cap>::deserialize(deserializer).map(|cap| Some(cap.unwrap_or(Cap::NoLimit)))
 }
 
 /// What the lead expects a piece to cost, in API-equivalent dollars.

@@ -281,7 +281,7 @@ function CapLimitField({ value, offLabel, offText, fallback, ...field }: Omit<Pa
   return (
     <span className="inline-flex items-center gap-1.5">
       {off ? <span className="inline-flex h-7 items-center rounded-md border border-dashed border-hairline px-2 text-xs text-muted-foreground">{offText}</span> : <LimitField {...field} value={value} />}
-      <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" aria-pressed={off} aria-label={`${field.label}: ${offLabel}`} disabled={field.disabled} onClick={() => field.onSave(off ? fallback : "none")}>
+      <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" aria-label={`${field.label}: ${off ? "Set a limit" : offLabel}`} disabled={field.disabled} onClick={() => field.onSave(off ? fallback : "none")}>
         {off ? "Set a limit" : offLabel}
       </Button>
     </span>

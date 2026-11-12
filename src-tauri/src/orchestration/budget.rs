@@ -477,6 +477,9 @@ mod tests {
         assert_eq!(serde_json::from_value::<RunLimits>(written).unwrap(), off);
         assert!(off.valid().is_ok());
         assert!(limits(Cap::At(10_001.0), Cap::NoLimit, Cap::NoLimit).valid().is_err(), "a bound is still checked");
+        // A value lost on the way arrives as null: it is refused, never read as No limit.
+        assert!(serde_json::from_value::<RunLimits>(serde_json::json!({"workers": 2, "dollars": null, "points": 25.0, "ceiling": 85.0})).is_err());
+        assert!(serde_json::from_value::<RunLimits>(serde_json::json!({"workers": 2, "dollars": "lots", "points": 25.0, "ceiling": 85.0})).is_err());
     }
 
     #[test]

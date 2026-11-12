@@ -1488,6 +1488,21 @@ fn a_lead_may_ask_for_less_budget_than_the_settings_allow_never_more() {
     plan.budget.dollars = Some(Cap::At(500.0));
     let run = engine::create(&host, &plan, "lead", None).unwrap();
     assert_eq!((run.limits.points, run.limits.dollars), (Cap::At(10.0), Cap::At(15.0)));
+
+    // PRO-335: a lead asking for No limit keeps the person's limit…
+    engine::stop(&host, &run.id, By::Person).unwrap();
+    let mut unlimited = flat_plan(1, "claude");
+    unlimited.budget.dollars = Some(Cap::NoLimit);
+    let asked = engine::create(&host, &unlimited, "lead", None).unwrap();
+    assert_eq!(asked.limits.dollars, Cap::At(15.0));
+    // …and the person writing it into the plan with Edit, before approving, lifts it for this run.
+    engine::stop(&host, &asked.id, By::Person).unwrap();
+    let asked = engine::create(&host, &flat_plan(1, "claude"), "lead", None).unwrap();
+    let mut edited = flat_plan(1, "claude");
+    edited.budget = serde_json::from_value(json!({"dollars": null, "points": "none"})).unwrap();
+    let after = engine::update_plan(&host, &asked.id, &edited).unwrap();
+    assert_eq!((after.limits.dollars, after.limits.points), (Cap::NoLimit, Cap::NoLimit));
+    assert_eq!(engine::shown(&after)["limits"], json!({"workers": 4, "dollars": "none", "points": "none", "ceiling": 85.0}));
 }
 
 #[test]

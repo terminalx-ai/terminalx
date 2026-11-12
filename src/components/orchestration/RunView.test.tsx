@@ -964,11 +964,14 @@ describe("limits and budget (PRO-280)", () => {
     expect(within(summary).queryByRole("spinbutton", { name: "Points of a window this run may use" })).toBeNull();
 
     // Back to a bound, starting from the default; then the window level off.
-    fireEvent.click(within(summary).getByRole("button", { name: "Points of a window this run may use: No limit" }));
+    fireEvent.click(within(summary).getByRole("button", { name: "Points of a window this run may use: Set a limit" }));
     await waitFor(() => expect(calls("orchestration_set_limits")).toEqual([{ id: "run-1", limits: { workers: 4, dollars: 15, points: 25, ceiling: 85 } }]));
     await waitFor(() => expect(within(summary).getByRole("spinbutton", { name: "Points of a window this run may use" })).toBeTruthy());
     fireEvent.click(within(summary).getByRole("button", { name: "Pause when a window passes: Turn off" }));
     await waitFor(() => expect(calls("orchestration_set_limits").at(-1)).toEqual({ id: "run-1", limits: { workers: 4, dollars: 15, points: 25, ceiling: "none" } }));
     await waitFor(() => expect(summary.textContent).toContain("Off: can use the whole window"));
+    // Off, its button is named for what it now does.
+    expect(within(summary).getByRole("button", { name: "Pause when a window passes: Set a limit" })).toBeTruthy();
+    expect(within(summary).queryByRole("button", { name: "Pause when a window passes: Turn off" })).toBeNull();
   });
 });

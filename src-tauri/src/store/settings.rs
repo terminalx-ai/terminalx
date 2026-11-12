@@ -240,12 +240,10 @@ impl Serialize for Cap {
 }
 
 impl<'de> Deserialize<'de> for Cap {
-    /// A number, `"none"`, or `null`: what a run's limits and a plan's budget are sent as.
+    /// A number or `"none"`. `null` is refused: a value lost on the way (`JSON.stringify(NaN)`
+    /// is `null`) must not lift a limit. Only a plan's budget reads `null` as No limit.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        if value.is_null() {
-            return Ok(Cap::NoLimit);
-        }
         Cap::from_value(&value).ok_or_else(|| serde::de::Error::custom(format!("{value} is not a number or \"none\"")))
     }
 }
