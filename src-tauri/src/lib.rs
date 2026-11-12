@@ -113,6 +113,7 @@ pub fn run_git_transport_cli() -> Option<i32> {
     { None }
 }
 mod unfinished_merge;
+mod merge_conflicts;
 mod pr_associations;
 mod github_identity;
 mod ssh_containment;
@@ -777,6 +778,9 @@ pub fn run() {
             commands::unfinished_merge,
             commands::commit_merge,
             commands::abort_merge,
+            commands::merge_conflict_file,
+            commands::resolve_merge_conflict,
+            commands::mark_conflict_resolved,
             commands::git_checkout,
             commands::working_changes,
             commands::pr_list,
