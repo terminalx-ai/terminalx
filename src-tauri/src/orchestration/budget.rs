@@ -213,6 +213,19 @@ pub fn update(run: &mut Run, windows: &[UsageWindow], cost: &dyn Fn(&Piece) -> O
             Login::Subscription => usage.subscription = true,
         }
     }
+    // The lead resolving a conflict a person gave it is a model call of the run's too (`merge`).
+    if let Some(merge) = &run.merge {
+        let dollars = merge.key_dollars();
+        match merge.resolving.as_ref().map(|resolving| resolving.login) {
+            Some(Login::Subscription) => usage.subscription = true,
+            Some(Login::ApiKey) => usage.api_key = true,
+            None => {}
+        }
+        if dollars > 0.0 {
+            usage.api_key = true;
+            usage.dollars += dollars;
+        }
+    }
     let subscription_pieces: Vec<&Piece> = counted(run).filter(|piece| login_of(piece, login_now) == Login::Subscription).collect();
     for window in windows.iter().filter(|window| !window.stale) {
         if !subscription_pieces.iter().any(|piece| draws_on(&window.agent, &window.key, &window.label, &piece.agent, &piece.model)) {

@@ -242,6 +242,65 @@ export interface RunPiece {
   queuedFor?: RunHold;
   state: PieceState;
   note?: string;
+  /** What came of merging its accepted result; absent before that was tried. */
+  merge?: PieceMerge;
+}
+
+/** What came of bringing a piece's accepted result into the lead's branch (`orchestration::MergeState`). */
+export type MergeState = "merged" | "nothingToMerge" | "conflict" | "integrationFailed" | "skipped" | "failed";
+
+/** One file a merge conflicts in. */
+export interface ConflictFile {
+  path: string;
+  /** How many places in it conflict; 0 when the conflict is not in its lines. */
+  hunks: number;
+  /** The first conflicting place, both sides, as git marks it. */
+  excerpt?: string;
+  /** The line of the merged file the excerpt starts at. */
+  line?: number;
+  /** The pieces already merged that changed this file. */
+  with?: string[];
+  /** The piece the plan gives this file to, when it is not this one. */
+  owner?: string;
+}
+
+/** The last try at merging a piece's accepted result. */
+export interface PieceMerge {
+  state: MergeState;
+  /** The accepted commit that was merged, or that the merge was tried with. */
+  commit: string;
+  /** Where the lead's branch was before; after a conflict or a failed check it is there still. */
+  before: string;
+  /** The merge commit, for a piece TerminalX merged. */
+  after?: string;
+  /** The lead merged it itself. */
+  byHand?: boolean;
+  files?: ConflictFile[];
+  /** The integration check as it ran on the merged result. */
+  check?: CommandRun;
+  note?: string;
+  at: string;
+}
+
+/** Where the merge of a run stands. */
+export interface RunMerge {
+  /** The lead's branch. */
+  into: string;
+  /** A merge whose integration check has not ended. */
+  pending?: { piece: string; before: string; after?: string };
+  /** The piece the last pass stopped at. */
+  stoppedAt?: string;
+  checkedHead?: string;
+  /** The integration check on the whole merged result, when it failed there. */
+  check?: CommandRun;
+  /** Every piece's command done-checks, run again once all were merged. */
+  finalChecks?: (CommandRun & { piece: string })[];
+  finalHead?: string;
+  at?: string;
+  /** The lead is resolving a conflict a person gave it: a model call the run's budget counts. */
+  resolving?: { piece: string; login: "apiKey" | "subscription"; leadUsd?: number; usd?: number };
+  /** What earlier such calls cost a lead on an API key. */
+  resolvedUsd?: number;
 }
 
 export interface RunWaiting {
@@ -263,6 +322,14 @@ export interface Run {
   planEdited?: boolean;
   approval?: { at: string };
   reason?: string;
+  /** The command run in the lead's checkout after each piece is merged; the project's own check when absent. */
+  integrationCheck?: string;
+  /** Where merging the pieces into the lead's branch stands; absent before the first merge. */
+  merge?: RunMerge;
+  /** The pieces in the order they are merged. */
+  mergeOrder?: string[];
+  /** A pass is merging the pieces now. */
+  mergeUnderWay?: boolean;
   /** Absent from a runtime older than PRO-280, as are `usage`, `inTurn` and `fit`. */
   limits?: RunLimits;
   usage?: RunUsage;
@@ -294,6 +361,8 @@ export interface Run {
 export interface RunPlan {
   goal: string;
   budget: RunBudget;
+  /** The command TerminalX runs after it merges each accepted piece. */
+  integrationCheck?: string;
   pieces: RunPlanPiece[];
 }
 

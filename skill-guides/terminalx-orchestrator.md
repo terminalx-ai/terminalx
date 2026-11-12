@@ -207,8 +207,15 @@ conclusion attached. Say which fact decided it when you report to the person.
 
 - Edits that span pieces: anything that touches files two pieces own.
 - Judgment calls: which approach, what to drop, what the person should decide.
-- Merging. A worker's branch is collected by you (`git merge <its branch>` in your worktree),
-  after you have read its report. Workers never push, merge, deploy or open a pull request.
+- Merging. Do not merge workers' branches by hand: once results are
+  accepted, `terminalx runs merge --json` merges each into your branch in dependency order
+  and runs the plan's `integrationCheck` after each merge. A merge that fails the check is
+  undone and names the piece; a conflict stops the merge at that piece with your branch
+  untouched. Then choose: `terminalx runs send-back <piece>` gives the conflict to its worker,
+  or resolve it yourself (`git merge <its commit>`, commit) and run `runs merge` again, or
+  leave it out with `--skip <piece>`. The run is done when every piece is merged and the
+  checks pass on the result. Nothing is pushed. Workers never push, merge, deploy or open a
+  pull request.
 - Anything pushed or shared with other people. A worker's output is a draft until you have
   checked it.
 
@@ -227,5 +234,5 @@ has a `command` done-check, or `reviewOnly` with a reason; briefs are short and 
 read; the piece count is within the usual ceiling.
 
 After the workers report: every `done` was checked; every `couldNotRead` was followed up;
-disagreements were settled by a fact; you hold every edit that spans pieces; you merged and
-nothing was pushed except by you.
+disagreements were settled by a fact; you hold every edit that spans pieces; `runs merge`
+brought the pieces into your branch and the run is `done`; nothing was pushed except by you.

@@ -4,13 +4,14 @@
 //! the event sink), so the `terminalx runs` commands and the window's Approve
 //! drive the same one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 
 use super::budget::Login;
 use super::engine::{self, Activity, Cost, EngineError, Host, Lead, Started, VerifierNow, WorkerNow};
+use super::merge::{Checkouts, Worktree};
 use super::verify::{self, Checked, Checkout, Gate};
 use super::{guard, Piece, Run, SessionRef, RUN_EVENT};
 use crate::session::SessionManager;
@@ -386,6 +387,94 @@ impl Host for ManagerHost {
 
     fn now_ms(&self) -> i64 {
         chrono::Utc::now().timestamp_millis()
+    }
+}
+
+impl Checkouts for ManagerHost {
+    fn lead_checkout(&self, run: &Run) -> anyhow::Result<PathBuf> {
+        Ok(PathBuf::from(index::get(&run.lead.session_id).context("the lead's session is gone")?.cwd))
+    }
+
+    fn lead_mode(&self, run: &Run) -> Option<String> {
+        let lead = index::get(&run.lead.session_id).ok()?;
+        let tab = run.lead.tab_id.as_deref().and_then(|tab| lead.tab(tab)).or_else(|| lead.tabs.iter().find(|tab| !tab.is_terminal()))?;
+        Some(tab.permission_mode.clone())
+    }
+
+    fn reserve(&self, run: &Run, cwd: &Path, by_lead: bool) -> Result<Box<dyn std::any::Any + Send>, String> {
+        use crate::issue_pipeline::admission::{self, Kind, Scope};
+        let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let checkout = canonical(cwd);
+        // The lock a prompt is admitted under, and a pipeline reserves a checkout under: what is
+        // found free here cannot be taken before the fence stands.
+        let _admission = admission::lock();
+        let pipelines = crate::issue_pipeline::store::list().map_err(|error| format!("the pipelines could not be read ({error:#})."))?;
+        for pipeline in pipelines.iter().filter(|pipeline| pipeline.checking_locally || pipeline.resolution.is_some()) {
+            let Ok(author) = index::get(&pipeline.author.session_id) else { continue };
+            if canonical(Path::new(&author.cwd)) == checkout {
+                return Err(if pipeline.checking_locally { "TerminalX is running a pipeline's checks in it.".into() } else { "it is reserved for a pipeline's conflict resolver.".into() });
+            }
+        }
+        let sessions = index::load().map_err(|error| format!("the sessions could not be read ({error:#})."))?;
+        // Every conversation that works on this checkout's files, from its top or a folder of it:
+        // the ones the fence closes.
+        for session in sessions.iter().filter(|session| admission::in_working_tree(&checkout, Path::new(&session.cwd))) {
+            for tab in &session.tabs {
+                // The lead's own turn is the one that asked. Named with `--lead`, its tab is not known: none of its agents is waited for.
+                let asking = by_lead && session.id == run.lead.session_id && run.lead.tab_id.as_deref().is_none_or(|lead| lead == tab.id);
+                if asking || tab.is_terminal() {
+                    continue;
+                }
+                if !self.manager.pipeline_idle(&session.id, &tab.id) {
+                    return Err(format!("the conversation \"{}\" is in a turn there.", session.title));
+                }
+            }
+        }
+        Ok(Box::new(admission::fence(Kind::Refuse(admission::RUN_MERGING), [Scope::working_tree(&checkout)])))
+    }
+
+    fn project_check(&self, project_path: &str) -> Option<String> {
+        crate::store::projects::issue_pipeline_settings(project_path).ok().and_then(|settings| settings.local_check_command)
+    }
+
+    fn worktree(&self, worker: &SessionRef) -> Option<Worktree> {
+        let session = index::get(&worker.session_id).ok()?;
+        let path = PathBuf::from(&session.cwd);
+        // A worktree of its own, of this project: never the project's own checkout.
+        if !path.is_dir() || !crate::git::is_own_worktree(&path) || !crate::git::is_worktree_of(Path::new(&session.project_path), &path) || crate::worktree_control::same_folder(&session.cwd, &session.project_path) {
+            return None;
+        }
+        let busy = session.tabs.iter().any(|tab| !tab.is_terminal() && self.manager.is_running(&session.id, &tab.id));
+        Some(Worktree { path, busy })
+    }
+
+    fn remove(&self, run: &Run, worker: &SessionRef, worktree: &Worktree, still_safe: &dyn Fn() -> Result<(), String>) -> anyhow::Result<()> {
+        let path = worktree.path.to_string_lossy().into_owned();
+        let expected = [worker.session_id.clone()];
+        let request = crate::session_ops::WorkspaceRemoval {
+            project_path: &run.project_path,
+            path: &path,
+            sessions: crate::session_ops::SessionsFate::Delete,
+            // Never the branch: what was merged is named by it, and what was not is kept by it.
+            delete_branch: false,
+            // `cleanup` has looked already, and looks again through `guard`: clean, and every commit in the lead's branch.
+            confirmation: crate::session_ops::Confirmation::Forced,
+            // Only the worker's own session goes: one somebody else opened there keeps the worktree.
+            expected_sessions: Some(&expected),
+            direct: crate::git::DirectDelete::Never,
+            fetch: crate::landed::Fetch::Skip,
+            guard: Some(still_safe),
+            archive: None,
+            archive_failure: None,
+            archive_retry: None,
+            archive_started: None,
+        };
+        crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &|entry| self.manager.stop_session_confirmed(entry).map_err(|error| format!("{error:#}"))).map_err(|error| anyhow!("{error}"))?;
+        Ok(())
+    }
+
+    fn changed(&self, run: &Run) {
+        self.sink.emit(RUN_EVENT, &super::engine::shown(run));
     }
 }
 

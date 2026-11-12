@@ -667,6 +667,154 @@ describe("a session with no run (PRO-274)", () => {
   });
 });
 
+describe("merging accepted pieces into the lead's branch (PRO-279)", () => {
+  const accepted = (commit: string, files: string[]) => ({ gates: [], outcome: "passed" as const, facts: { files, changedLines: files.length * 10, commit } });
+  const done = (id: string, title: string, commit: string, extra: Partial<RunPiece> = {}): RunPiece =>
+    piece(id, title, { state: "done", branch: `piece-${id}`, worker: { sessionId: `w-${id}`, tabId: "t" }, tries: [{ step: "first", model: "sonnet", outcome: "done", verification: accepted(commit, extra.owns ?? []) }], ...extra });
+  const merged = (commit: string, before: string, after: string, millis: number) => ({ state: "merged" as const, commit, before, after, check: { run: "cargo t && pnpm test", passed: true, exitCode: 0, millis }, at: "2026-11-12T09:00:00Z" });
+  /** The merge of design 18.04: one piece only read, three are in, the fifth conflicts and the sixth waits for it. */
+  const stopped = (): Run => ({
+    id: "run-1", lead: { sessionId: "lead", tabId: "lead-tab" }, projectPath: "/repo", goal: "Move settings reads to the typed store", state: "merging", budget: { points: 25 },
+    workerMode: "bypassPermissions", created: "2026-11-12T08:00:00Z", modified: "2026-11-12T09:10:00Z", approval: { at: "2026-11-12T08:05:00Z" }, ready: [], waiting: [], estimate: null, unestimated: 6,
+    integrationCheck: "cargo t && pnpm test", mergeOrder: ["map", "store", "session", "pipeline", "cli", "docs"],
+    merge: { into: "settings-typed-store", stoppedAt: "cli", checkedHead: "e77a1200000", at: "2026-11-12T09:10:00Z" },
+    pieces: [
+      done("map", "Map every settings read", "0a0a0a00000", { merge: { state: "nothingToMerge", commit: "0a0a0a00000", before: "0a0a0a00000", at: "2026-11-12T09:00:00Z" } }),
+      done("store", "Typed store module and migration", "11111110000", { owns: ["src/store/"], dependsOn: ["map"], merge: merged("11111110000", "0a0a0a00000", "4c1e9a70000", 131_000) }),
+      done("session", "Move session code to the store", "22222220000", { owns: ["src/session_ops.rs"], dependsOn: ["store"], merge: merged("22222220000", "4c1e9a70000", "9b02f3d0000", 124_000) }),
+      done("pipeline", "Move pipeline code to the store", "33333330000", { owns: ["src/pipeline/"], dependsOn: ["store"], merge: merged("33333330000", "9b02f3d0000", "e77a1200000", 129_000) }),
+      done("cli", "Move CLI code to the store", "a31c55e0000", {
+        owns: ["src/control.rs"], dependsOn: ["store"],
+        merge: {
+          state: "conflict", commit: "a31c55e0000", before: "e77a1200000", at: "2026-11-12T09:10:00Z",
+          files: [
+            { path: "src-tauri/src/control.rs", hunks: 2, line: 1184, with: ["session"], excerpt: "<<<<<<< settings-typed-store\nlet mode = store.session().default_mode();\n=======\nlet mode = store.cli().default_mode(project);\n>>>>>>> piece-cli" },
+            { path: "src-tauri/src/session_ops.rs", hunks: 1, line: 40, with: ["session"], owner: "session", excerpt: "<<<<<<< settings-typed-store\na\n=======\nb\n>>>>>>> piece-cli" },
+          ],
+        },
+      }),
+      done("docs", "Update the docs and the CLI guide", "66666660000", { owns: ["docs/"], dependsOn: ["cli"] }),
+    ],
+  });
+  const cells = (id: string) => ({ state: row(id).dataset.mergeState, check: within(row(id)).getByTestId("merge-check").textContent, note: within(row(id)).getByTestId("merge-note").textContent });
+
+  it("shows the merge a row a branch, in merge order: what is in, where it stopped, what waits", async () => {
+    await open(stopped());
+    expect(screen.getByTestId("run-state").textContent).toBe("Merging");
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("Merging in dependency order. 3 of 5 branches are in; piece 5 conflicts.");
+    expect(screen.getByTestId("merge-into").textContent).toBe("settings-typed-store");
+    expect(screen.getByTestId("merge-strip").textContent).toContain("Integration checkcargo t && pnpm test");
+    expect(screen.getByTestId("merge-strip").textContent).toContain("Nothing is pushed. No other branch is touched.");
+    const table = screen.getByRole("table", { name: "Merge" });
+    expect(within(table).getAllByRole("columnheader").map((head) => head.textContent)).toEqual(["Branch", "State", "Commit", "Check after merge", "Note"]);
+    // The piece that only read has no branch to merge: it is said under the table, not listed in it.
+    expect([...table.querySelectorAll<HTMLElement>("[data-piece]")].map((element) => element.dataset.piece)).toEqual(["store", "session", "pipeline", "cli", "docs"]);
+    expect(cells("store")).toEqual({ state: "merged", check: "passed · 2m 11s", note: "" });
+    expect(row("store").textContent).toContain("piece-store → settings-typed-store");
+    expect(row("store").textContent).toContain("4c1e9a7");
+    expect(cells("cli")).toEqual({ state: "conflict", check: "not run", note: "2 files conflict with piece 3" });
+    expect(row("cli").textContent).toContain("a31c55e");
+    expect(cells("docs")).toEqual({ state: "waiting", check: "not run", note: "Waits for 5" });
+    expect(screen.getByTestId("run-footnote").textContent).toBe("Piece 1 was read-only and has nothing to merge. Your branch is back at e77a120, as it was before this merge was tried.");
+  });
+
+  it("opens a conflict with its files, both sides and why, and offers the three ways out", async () => {
+    const run = stopped();
+    const after = { ...run, mergeUnderWay: true };
+    answers.orchestration_send_back = () => ({ ...run, state: "running", pieces: run.pieces.map((p) => (p.id === "cli" ? { ...p, state: "running", merge: undefined } : p)) });
+    answers.orchestration_resolve_in_lead = run;
+    answers.orchestration_merge = after;
+    await open(run);
+    fireEvent.click(within(row("cli")).getByRole("button", { name: "Move CLI code to the store" }));
+    const panel = within(detail()).getByTestId("merge-panel");
+    expect(panel.dataset.mergeState).toBe("conflict");
+    expect(panel.textContent).toContain("Conflict· with piece 3, already merged");
+    expect(within(panel).getAllByRole("listitem").slice(0, 2).map((item) => item.textContent)).toEqual(["Csrc-tauri/src/control.rs2 hunks", "Csrc-tauri/src/session_ops.rs1 hunk"]);
+    const excerpt = within(panel).getByTestId("conflict-excerpt");
+    expect(excerpt.textContent).toContain("control.rs · 1184");
+    expect(excerpt.textContent).toContain("let mode = store.session().default_mode();");
+    expect(excerpt.textContent).toContain("let mode = store.cli().default_mode(project);");
+    expect(panel.textContent).toContain("control.rs was changed by piece 3, already merged, and by piece 5, each from the same starting point.");
+    expect(panel.textContent).toContain("session_ops.rs is listed under piece 3 only, but piece 5 changed it too.");
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Resolve in lead" }));
+    await waitFor(() => expect(calls("orchestration_resolve_in_lead")).toEqual([{ id: "run-1", piece: "cli" }]));
+    fireEvent.click(within(detail()).getByRole("button", { name: "Skip" }));
+    await waitFor(() => expect(calls("orchestration_merge")).toEqual([{ id: "run-1", skip: ["cli"], recheck: false }]));
+    // A pass is under way: nothing else is asked of the merge until it has ended.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Merging" }).hasAttribute("disabled")).toBe(true));
+    expect(within(detail()).getByRole("button", { name: "Send back to worker" }).hasAttribute("disabled")).toBe(true);
+    act(() => mocks.listeners.get("orchestration_run")!({ payload: run }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue merge" }));
+    await waitFor(() => expect(calls("orchestration_merge")[1]).toEqual({ id: "run-1", skip: [], recheck: false }));
+    act(() => mocks.listeners.get("orchestration_run")!({ payload: run }));
+    await waitFor(() => expect(within(detail()).getByRole("button", { name: "Send back to worker" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(within(detail()).getByRole("button", { name: "Send back to worker" }));
+    await waitFor(() => expect(calls("orchestration_send_back")).toEqual([{ id: "run-1", piece: "cli" }]));
+    // Back with its worker: the conflict is no longer this result's, and its row waits to be accepted again.
+    await waitFor(() => expect(cells("cli").state).toBe("notAccepted"));
+    expect(within(detail()).queryByTestId("merge-panel")).toBeNull();
+  });
+
+  it("shows a merge undone by the integration check with what the check printed", async () => {
+    const run = stopped();
+    const failed = { state: "integrationFailed" as const, commit: "a31c55e0000", before: "e77a1200000", at: "2026-11-12T09:10:00Z", check: { run: "cargo t && pnpm test", passed: false, exitCode: 101, millis: 95_000, output: "test control::tests::reads_default ... FAILED" } };
+    await open({ ...run, merge: { ...run.merge!, stoppedAt: undefined }, pieces: run.pieces.map((p) => (p.id === "cli" ? { ...p, merge: failed } : p)) });
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("Merging in dependency order. 3 of 5 branches are in; the integration check failed after piece 5.");
+    expect(cells("cli")).toEqual({ state: "integrationFailed", check: "failed · exit 101", note: "Merge undone" });
+    fireEvent.click(within(row("cli")).getByRole("button", { name: "Move CLI code to the store" }));
+    const panel = within(detail()).getByTestId("merge-panel");
+    expect(panel.textContent).toContain("Check failed· the merge was undone");
+    expect(within(panel).getByTestId("done-check").textContent).toContain("reads_default ... FAILED");
+    expect(within(detail()).queryByRole("button", { name: "Resolve in lead" })).toBeNull();
+    expect(within(detail()).getByRole("button", { name: "Send back to worker" })).toBeTruthy();
+  });
+
+  it("says a merged run is done, and what keeps one with every branch in from done", async () => {
+    const run = stopped();
+    const all = run.pieces.map((p) => (p.id === "cli" || p.id === "docs" ? { ...p, merge: merged(pieceCommit(p), "e77a1200000", `${p.id}aaaa0000`, 60_000) } : p));
+    const finalChecks = [{ piece: "store", run: "cargo t -p store", passed: true, exitCode: 0, millis: 4000 }, { piece: "docs", run: "pnpm docs:check", passed: false, exitCode: 2, millis: 900, output: "docs/cli.md: dead link" }];
+    await open({ ...run, pieces: all, reason: "Every piece is merged into `settings-typed-store`, but the done-check `pnpm docs:check` of piece docs exited 2 on the merged result at 5d5d5d5.", merge: { into: "settings-typed-store", finalChecks, finalHead: "5d5d5d50000" } });
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("Every branch is in. A check failed on the merged result.");
+    expect(screen.getByRole("status").textContent).toContain("of piece docs exited 2");
+    const final = screen.getByTestId("final-checks");
+    expect(final.textContent).toContain("Done-check of piece 6");
+    expect(within(final).getByTestId("done-check").textContent).toContain("docs/cli.md: dead link");
+    expect(screen.getByRole("button", { name: "Continue merge" })).toBeTruthy();
+    cleanup();
+    resetRunsForTests();
+    await open({ ...run, state: "done", pieces: all, merge: { into: "settings-typed-store", finalChecks: [finalChecks[0]], finalHead: "5d5d5d50000" } });
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("Every piece is merged into settings-typed-store and the checks passed on the result. Nothing was pushed.");
+    expect(screen.getByTestId("final-checks").textContent).toContain("1 command passed on 5d5d5d5");
+    expect(screen.queryByRole("button", { name: /merge/i })).toBeNull();
+  });
+
+  it("offers Merge once a result is accepted, and shows the plan's integration check to whoever approves it", async () => {
+    const run = stopped();
+    answers.orchestration_merge = { ...run, mergeUnderWay: true };
+    const fresh = { ...run, merge: undefined, pieces: run.pieces.map((p) => ({ ...p, merge: undefined })) };
+    await open(fresh);
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("Every result is accepted. 6 branches wait to be merged into the lead's branch.");
+    fireEvent.click(screen.getByRole("button", { name: "Merge" }));
+    await waitFor(() => expect(calls("orchestration_merge")).toEqual([{ id: "run-1", skip: [], recheck: false }]));
+    cleanup();
+    resetRunsForTests();
+    const plan = { ...waiting(), integrationCheck: "cargo t && pnpm test" };
+    answers.orchestration_update_plan = (args: unknown) => ({ ...plan, integrationCheck: (args as { plan: RunPlan }).plan.integrationCheck });
+    await open(plan);
+    expect(screen.getByTestId("plan-integration-check").textContent).toContain("After each mergecargo t && pnpm test");
+    fireEvent.click(screen.getByRole("button", { name: "Edit plan" }));
+    fireEvent.change(screen.getByLabelText(/^Integration check/), { target: { value: "  just check  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save plan" }));
+    await waitFor(() => expect((calls("orchestration_update_plan")[0] as { plan: RunPlan }).plan.integrationCheck).toBe("just check"));
+    await waitFor(() => expect(screen.getByTestId("plan-integration-check").textContent).toContain("just check"));
+  });
+});
+
+function pieceCommit(piece: RunPiece): string {
+  return piece.tries?.[piece.tries.length - 1]?.verification?.facts?.commit ?? "";
+}
+
 describe("limits and budget (PRO-280)", () => {
   // Today at 16:10: resetClock names the weekday for a reset on another day.
   const today = new Date();

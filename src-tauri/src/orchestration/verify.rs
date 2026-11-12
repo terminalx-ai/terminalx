@@ -457,8 +457,9 @@ fn branch_state(checkout: &Checkout, commit: &str) -> GateResult {
     }
 }
 
-/// Run one command at the root of the worktree, as its worker was told it would be run.
-fn run_command(checkout: &Checkout, run: &str, project: bool, timeout: Duration) -> CommandRun {
+/// Run one command at the root of a checkout, as a worker was told it would be run: a
+/// worker's worktree for its gates, the lead's checkout for a merged result (`merge`).
+pub(super) fn run_command(cwd: &std::path::Path, run: &str, project: bool, timeout: Duration) -> CommandRun {
     let started = Instant::now();
     // What no worker of a run may do, a check of its result does not do either.
     if let Some((_, found)) = super::guard::refused(run) {
@@ -466,7 +467,7 @@ fn run_command(checkout: &Checkout, run: &str, project: bool, timeout: Duration)
     }
     let mut process = std::process::Command::new("/bin/sh");
     // Both streams in the order they were written: the end of a test run is on either.
-    process.args(["-c", &format!("exec 2>&1\n{run}")]).current_dir(&checkout.cwd);
+    process.args(["-c", &format!("exec 2>&1\n{run}")]).current_dir(cwd);
     #[cfg(unix)]
     process.env("PATH", crate::binpath::login_path());
     let (exit_code, output) = match crate::git::capture_within(process, timeout) {
@@ -496,7 +497,7 @@ fn commands(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, cha
     note_clean(checkout, commit, None);
     let mut runs = Vec::new();
     for (run, project) in wanted {
-        let ran = run_command(checkout, run, project, timeout);
+        let ran = run_command(&checkout.cwd, run, project, timeout);
         let failed = !ran.passed;
         runs.push(ran);
         if failed {

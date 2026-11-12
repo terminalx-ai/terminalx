@@ -156,6 +156,8 @@ mod tests {
             plan_edited: false,
             approval: None,
             reason: None,
+            integration_check: None,
+            merge: None,
             limits: Default::default(),
             usage: Default::default(),
             pause: None,

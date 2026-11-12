@@ -35,7 +35,7 @@ use super::ladder::{self, Step, Verdict};
 use super::plan::{self, Plan, PlanError};
 use super::routing::{self, LeadModel};
 use super::verify::{self as checks, Gate, GateResult, Tally, Verification, Verifier};
-use super::{brief, guard, store, Approval, Hold, Outcome, Piece, PieceState, Run, RunState, SessionRef, Try};
+use super::{brief, guard, store, Approval, Hold, MergeState, Outcome, Piece, PieceState, Run, RunState, SessionRef, Try};
 use crate::models::Model;
 use crate::status::usage::UsageWindow;
 use crate::store::settings::OrchestratorLimits;
@@ -199,11 +199,11 @@ impl EngineError {
         Self { code, message: message.into(), recovery: recovery.map(str::to_owned), details: Value::Null }
     }
 
-    fn internal(error: anyhow::Error) -> Self {
+    pub(super) fn internal(error: anyhow::Error) -> Self {
         Self::new("internal_error", format!("{error:#}"), None)
     }
 
-    fn not_found(id: &str) -> Self {
+    pub(super) fn not_found(id: &str) -> Self {
         Self::new("not_found", format!("No run {id}."), Some("Use a run id from `terminalx runs list --json`."))
     }
 }
@@ -277,6 +277,8 @@ pub fn create(host: &dyn Host, plan: &Plan, lead_session: &str, lead_tab: Option
         plan_edited: false,
         approval: None,
         reason: None,
+        integration_check: plan.integration(),
+        merge: None,
         usage: Default::default(),
         pause: None,
         created: now.clone(),
@@ -321,6 +323,7 @@ pub fn update_plan(host: &dyn Host, id: &str, plan: &Plan) -> Result<Run, Engine
         run.limits.valid().map_err(|message| anyhow::anyhow!(message))?;
         run.goal = plan.goal.trim().to_string();
         run.budget = plan.budget.clone();
+        run.integration_check = plan.integration();
         run.pieces = pieces;
         run.plan_edited = true;
         apply_usage(run, &reading, false);
@@ -438,7 +441,7 @@ pub fn start_retries(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
         .map_err(EngineError::internal)?;
         host.changed(&run);
     }
-    if !matches!(run.state, RunState::Running | RunState::Failed) {
+    if !run.state.live() {
         let waiting = waiting(&run);
         return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new() });
     }
@@ -472,7 +475,7 @@ pub fn approve(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     host.tell_lead(
         run,
         &format!(
-            "The person approved the plan of run {id}.{edited} {started}\n\nDo not poll. Wait with `terminalx wait --children-of {lead} --json`: while this run is open it returns when a piece's result is accepted or a piece is blocked, not each time a worker's turn ends. A worker's `done` is checked by TerminalX before the piece is done (its report, the files it touched, its branch, your commands; a verifier reads the diff only where those cannot settle it), and a result that fails goes back to a fresh worker without you. When the wait returns, read the run with `terminalx runs show {id} --json`, and call `terminalx runs start {id} --json` when a piece is done: it starts the pieces that waited on it."
+            "The person approved the plan of run {id}.{edited} {started}\n\nDo not poll. Wait with `terminalx wait --children-of {lead} --json`: while this run is open it returns when a piece's result is accepted or a piece is blocked, not each time a worker's turn ends. A worker's `done` is checked by TerminalX before the piece is done (its report, the files it touched, its branch, your commands; a verifier reads the diff only where those cannot settle it), and a result that fails goes back to a fresh worker without you. When the wait returns, read the run with `terminalx runs show {id} --json`, and call `terminalx runs start {id} --json` when a piece is done: it starts the pieces that waited on it. Do not merge the workers' branches by hand: `terminalx runs merge {id} --json` merges every accepted piece into your branch in dependency order and runs the integration check after each, and the run is done once all are merged."
         ),
     );
     Ok(start)
@@ -726,7 +729,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         }
         return Ok(after);
     }
-    if !matches!(run.state, RunState::Running | RunState::Failed | RunState::NeedsYou) {
+    if !run.state.followed() {
         return Ok(run);
     }
     // Workers are read outside the store's lock: a transcript is a file read.
@@ -768,9 +771,11 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     let models = if seen.iter().any(|(_, _, now, _)| fell_short(now)) || reading.iter().any(|(_, _, _, now, _)| *now != VerifierNow::Working) { host.models() } else { Vec::new() };
     let mut back_at_work: Vec<SessionRef> = Vec::new();
     let usage = read_usage(host, &run);
+    // What the lead's session has cost, while it resolves a conflict a person gave it.
+    let lead_usd = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).and_then(|_| host.worker_cost(&run.lead).usd);
     let now_ms = host.now_ms();
     let (after, reached) = store::update(id, |run| {
-        if !matches!(run.state, RunState::Running | RunState::Failed | RunState::NeedsYou) {
+        if !run.state.followed() {
             return Ok(None);
         }
         for (piece_id, worker, now, cost) in seen {
@@ -882,6 +887,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             }
             counted(piece, &models);
         }
+        follow_resolution(run, lead_usd);
         apply_usage(run, &usage, false);
         settle(run);
         Ok((run.state == RunState::Running).then(|| budget::reached(run, now_ms)).flatten())
@@ -979,7 +985,7 @@ fn counted(piece: &mut Piece, models: &[Model]) {
 /// still waiting on it: nobody replaced its worker or sent it back to work.
 fn checked_try<'a>(run: &'a mut Run, piece_id: &str, worker: &SessionRef, started: &str) -> Option<&'a mut Piece> {
     // A run paused on its budget still has the results reported before it paused checked.
-    if !matches!(run.state, RunState::Running | RunState::Failed | RunState::NeedsYou) {
+    if !run.state.followed() {
         return None;
     }
     run.pieces.iter_mut().find(|piece| {
@@ -1003,7 +1009,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         // One thread a piece: a second read that got here first has it.
         let Some(_checking) = checks::checking(id, &piece_id) else { continue };
         let run = stored(id)?;
-        if !matches!(run.state, RunState::Running | RunState::Failed | RunState::NeedsYou) {
+        if !run.state.followed() {
             break;
         }
         let Some(piece) = run.piece(&piece_id).filter(|piece| piece.check_waits()) else { continue };
@@ -1186,6 +1192,8 @@ fn climb(piece: &mut Piece, failure: &str, models: &[Model]) {
             piece.worker = None;
             piece.branch = None;
             piece.started_mode = None;
+            // What came of merging the result that fell short says nothing of the next one.
+            piece.merge = None;
             piece.state = PieceState::Queued;
         }
         Verdict::Blocked(why) => {
@@ -1215,7 +1223,7 @@ pub struct CheckFailed {
 pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> Result<CheckFailed, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     let run = refreshed(host, id)?;
-    if !matches!(run.state, RunState::Running | RunState::Failed | RunState::Done) {
+    if !(run.state.live() || run.state == RunState::Done) {
         return Err(EngineError::new("run_not_running", format!("Run {id} is not running ({}). A done-check is reported for a piece of a run that is.", state_name(run.state)), None));
     }
     let Some(piece) = run.piece(piece_id) else {
@@ -1262,25 +1270,201 @@ pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> 
     Ok(CheckFailed { retried: start.started.iter().any(|started| started == piece_id), run: start.run, piece: piece_id.to_string(), blocked, failed: start.failed })
 }
 
-/// What the pieces make of a started run. Done when every piece is; failed
-/// when a piece failed or ran out of tries and nothing is running or could
-/// start; running otherwise.
+/// What sending a piece back did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SentBack {
+    pub run: Run,
+    pub piece: String,
+    /// The worker that has it now: the one whose result it was, or a fresh
+    /// one when that session is gone.
+    pub fresh_worker: bool,
+    /// The piece is blocked: its worker is gone and the ladder ran out.
+    pub blocked: bool,
+    pub failed: Vec<NotStarted>,
+}
+
+/// The accepted result of `piece_id` could not be merged into the lead's
+/// branch (`merge`): give it back to its worker, with the conflict or what
+/// the integration check printed as its brief. The worker that made the
+/// result is asked, in its own worktree, and its next report is checked by
+/// the same gates; when its session is gone the piece takes the ladder's
+/// next step instead, with the same text. No model writes that text.
+pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, EngineError> {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    if super::merge::under_way(id) {
+        return Err(EngineError::new("merge_in_progress", format!("Run {id} is being merged. A piece is sent back once that has ended."), None));
+    }
+    let run = refreshed(host, id)?;
+    if !run.state.live() {
+        return Err(EngineError::new("run_not_running", format!("Run {id} is not running ({}). A piece is sent back in a run that is.", state_name(run.state)), None));
+    }
+    let Some(piece) = run.piece(piece_id) else {
+        let mut error = EngineError::new("piece_not_found", format!("Run {id} has no piece {piece_id}."), Some("Use a piece id from `terminalx runs show --json`."));
+        error.details = json!({"pieces": run.pieces.iter().map(|piece| piece.id.clone()).collect::<Vec<_>>()});
+        return Err(error);
+    };
+    let Some(text) = super::merge::brief(&run, piece) else {
+        let mut error = EngineError::new("nothing_to_send_back", format!("Piece {piece_id} has no failed merge to send back: a piece goes back to its worker when its accepted result conflicts, or fails the integration check."), Some("`terminalx runs show --json` says where each piece's merge stands under `merge`."));
+        error.details = json!({"piece": piece_id, "state": piece.state, "merge": piece.current_merge().map(|merge| merge.state)});
+        return Err(error);
+    };
+    let worker = piece.worker.clone().filter(|worker| host.worker(worker) != WorkerNow::Gone);
+    if let Some(worker) = worker {
+        // A turn in the session it has, started as any worker's is: within the budget and the
+        // worker limits (PRO-280). A fresh worker passes them where it is started, below.
+        if let Some(reached) = budget::reached(&run, host.now_ms()) {
+            return Err(over_budget(host, id, reached, "send the piece back to its worker"));
+        }
+        let app_limit = host.limits(&run.project_path).workers_at_once as usize;
+        let full = if run.in_turn() >= run.limits.workers as usize {
+            Some(format!("this run has {} of its {} workers in a turn", run.in_turn(), run.limits.workers))
+        } else if in_turn_everywhere()? >= app_limit {
+            Some(format!("the app has as many run workers in a turn as it allows ({app_limit})"))
+        } else {
+            None
+        };
+        if let Some(full) = full {
+            let mut error = EngineError::new("no_free_worker", format!("Piece {piece_id} was not sent back: {full}. Its worker would be one more."), Some("Send it back when a worker's turn has ended, or raise the worker limit for this run."));
+            error.details = json!({"piece": piece_id, "inTurn": run.in_turn(), "workers": run.limits.workers});
+            return Err(error);
+        }
+        // Back at work: the try is open again, and what was checked is not what it will report.
+        host.check_reset(&worker);
+        let (after, ()) = store::update(id, |run| {
+            if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id) {
+                piece.state = PieceState::Running;
+                piece.note = Some("Sent back to its worker: its accepted result could not be merged.".into());
+                piece.merge = None;
+                if let Some(attempt) = piece.tries.last_mut() {
+                    (attempt.outcome, attempt.ended, attempt.verification) = (None, None, None);
+                }
+            }
+            settle(run);
+            Ok(())
+        })
+        .map_err(EngineError::internal)?;
+        host.changed(&after);
+        if let Err(error) = host.brief_worker(&worker, &text) {
+            let error = format!("{error:#}");
+            let run = set_piece(id, piece_id, |piece| {
+                piece.state = PieceState::Blocked;
+                piece.note = Some(format!("It was sent back to its worker, which did not take the message: {error}"));
+            })?;
+            host.changed(&run);
+            return Ok(SentBack { run, piece: piece_id.to_string(), fresh_worker: false, blocked: false, failed: vec![NotStarted { piece: piece_id.to_string(), error }] });
+        }
+        // A worker in a turn again is watched for a stall, as any is.
+        host.watch();
+        return Ok(SentBack { run: after, piece: piece_id.to_string(), fresh_worker: false, blocked: false, failed: Vec::new() });
+    }
+    // Its session is gone: a fresh worker on a branch cut from the lead's, which has the merged pieces in it.
+    let failure = failure_text(&text);
+    let models = host.models();
+    let (run, ()) = store::update(id, |run| {
+        if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id) {
+            if let Some(attempt) = piece.tries.last_mut() {
+                attempt.outcome = Some(Outcome::CheckFailed);
+                attempt.detail = Some(failure.clone());
+                attempt.ended = Some(crate::store::index::now());
+            }
+            piece.merge = None;
+            climb(piece, &failure, &models);
+        }
+        settle(run);
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    host.changed(&run);
+    let blocked = run.piece(piece_id).is_some_and(Piece::gave_up);
+    let start = launch_ready(host, id, Launch::Retries)?;
+    Ok(SentBack { run: start.run, piece: piece_id.to_string(), fresh_worker: true, blocked, failed: start.failed })
+}
+
+/// A person chose to have the lead resolve a piece's conflict: the lead is
+/// sent both sides of each conflicting place and the goals of the pieces
+/// involved (`merge::resolve_prompt`), and nothing else.
+///
+/// It is the merge stage's one model call, and the run's budget counts it: a
+/// run past its budget does not start it, and waits for the person instead.
+/// What the lead's session costs from here until the piece's merge is
+/// settled is added to what the run has used ([`follow_resolution`]).
+pub fn resolve_in_lead(host: &dyn Host, id: &str, piece_id: &str) -> Result<Run, EngineError> {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let run = refreshed(host, id)?;
+    let prompt = run.piece(piece_id).and_then(|piece| super::merge::resolve_prompt(&run, piece)).ok_or_else(|| EngineError::new("nothing_to_resolve", format!("Piece {piece_id} of run {id} has no merge conflict to resolve."), None))?;
+    if let Some(reached) = budget::reached(&run, host.now_ms()) {
+        return Err(over_budget(host, id, reached, "ask the lead to resolve the conflict"));
+    }
+    // Not knowing how the lead is signed in is not "free": a subscription's windows are watched either way.
+    let login = host.lead(&run.lead.session_id).map(|lead| host.login(&lead.agent)).unwrap_or(Login::Subscription);
+    let lead_usd = host.worker_cost(&run.lead).usd.unwrap_or(0.0);
+    let (run, ()) = store::update(id, |run| {
+        let merge = run.merge.get_or_insert_with(Default::default);
+        merge.end_resolving();
+        merge.resolving = Some(super::Resolution { piece: piece_id.to_string(), login, lead_usd, usd: 0.0 });
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    host.changed(&run);
+    host.tell_lead(&run, &prompt);
+    Ok(run)
+}
+
+/// The run is past its budget, so a model call of its merge stage was not
+/// started: the run waits for the person (`needsYou`), as it does when a
+/// piece would start, and the caller is told which limit.
+fn over_budget(host: &dyn Host, id: &str, reached: Pause, what: &str) -> EngineError {
+    let message = format!("Run {id} is past its budget, so TerminalX did not {what}. {}", reached.message);
+    if let Err(error) = pause(host, id, reached.clone(), &[]) {
+        log::warn!("mark run {id} as past its budget: {error}");
+    }
+    let mut error = EngineError::new("budget_reached", message, Some("Raise the budget for this run and resume it, or let it go on after the window resets. Resolving the conflict by hand in the lead's checkout, then merging again, uses none of it."));
+    error.details = json!({"run": id, "pause": reached});
+    error
+}
+
+/// Keep what the lead's conflict-resolving call has cost up to date, and
+/// end it once its piece's merge is settled: merged, or sent back to work.
+/// `lead_usd` is what the lead's session has cost now, when it was read.
+fn follow_resolution(run: &mut Run, lead_usd: Option<f64>) {
+    let Some(piece) = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).map(|resolving| resolving.piece.clone()) else { return };
+    let open = run.piece(&piece).and_then(Piece::current_merge).is_some_and(|merge| merge.state == MergeState::Conflict);
+    let Some(merge) = run.merge.as_mut() else { return };
+    if let (Some(now), Some(resolving)) = (lead_usd, merge.resolving.as_mut()) {
+        resolving.usd = (now - resolving.lead_usd).max(0.0);
+    }
+    if !open {
+        merge.end_resolving();
+    }
+}
+
+/// What the pieces make of a started run. Merging when every piece's result
+/// is accepted: it is done once those are merged (`merge`). Failed when a
+/// piece failed or ran out of tries and nothing is running or could start;
+/// running otherwise.
 fn settle(run: &mut Run) {
     if run.state == RunState::NeedsYou {
-        // It waits for the person until every piece is done anyway.
-        if run.pieces.iter().all(|piece| piece.state == PieceState::Done) {
-            run.state = RunState::Done;
+        // It waits for the person until every piece's result is accepted anyway. Merging those
+        // starts no worker and asks no model, so it does not wait on the budget; a merge that
+        // stopped and needs resolving does, and the run stays with the person.
+        let unresolved = run.pieces.iter().any(|piece| piece.current_merge().is_some_and(|merge| matches!(merge.state, MergeState::Conflict | MergeState::IntegrationFailed | MergeState::Failed)));
+        if run.pieces.iter().all(|piece| piece.state == PieceState::Done) && !unresolved {
+            run.state = RunState::Merging;
             run.reason = None;
             run.pause = None;
         }
         return;
     }
-    if !matches!(run.state, RunState::Running | RunState::Failed) {
+    if !run.state.live() {
         return;
     }
     let failed: Vec<&Piece> = run.pieces.iter().filter(|piece| (piece.state == PieceState::Failed && piece.worker.is_some()) || piece.gave_up()).collect();
     let (state, reason) = if run.pieces.iter().all(|piece| piece.state == PieceState::Done) {
-        (RunState::Done, None)
+        // Every result is accepted. The run is done once they are merged into the lead's branch
+        // and the checks pass there (`merge::merge`), which says so itself: what keeps a merged
+        // run from done is its reason until then.
+        (RunState::Merging, if run.state == RunState::Merging { run.reason.clone() } else { None })
     } else if run.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Stalled | PieceState::Verifying)) || !run.ready().is_empty() || failed.is_empty() {
         (RunState::Running, None)
     } else {
@@ -1627,6 +1811,8 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     // A piece whose next try waits is started without the lead: it is not the lead's to start.
     let ready: Vec<String> = if matches!(now.state, RunState::Planned | RunState::Running) { now.ready().into_iter().filter(|piece| !piece.retry_waits()).map(|piece| piece.id.clone()).collect() } else { Vec::new() };
     let under_way = now.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Verifying) || piece.retry_waits());
+    // Every result accepted: the lead is woken to merge them.
+    let to_merge = now.state == RunState::Merging;
     let ended = now.state != RunState::Running;
     let woken = match all {
         true => ended || !under_way,
@@ -1645,7 +1831,12 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     if !ready.is_empty() {
         why.push(format!("Ready to start with `terminalx runs start`: {}.", ready.join(", ")));
     }
-    if ended {
+    if to_merge {
+        why.push(match now.reason.as_deref() {
+            Some(reason) => reason.to_string(),
+            None => format!("Every piece's result is accepted. Merge them into your branch with `terminalx runs merge {} --json`: the run is done once they are merged and the checks pass there.", now.id),
+        });
+    } else if ended {
         why.push(format!("The run is {}.", state_name(now.state)));
     } else if !under_way && ready.is_empty() {
         let held: Vec<String> = now.pieces.iter().filter(|piece| matches!(piece.state, PieceState::Blocked | PieceState::Failed)).map(|piece| piece.id.clone()).collect();
@@ -1670,6 +1861,9 @@ pub fn shown(run: &Run) -> Value {
     // What does not fit in what is left, for the person approving it.
     value["fit"] = json!(if matches!(run.state, RunState::AwaitingApproval | RunState::Planned) { budget::fit(run, chrono::Utc::now().timestamp_millis()) } else { Vec::new() });
     value["maxTries"] = json!(ladder::MAX_TRIES);
+    // The order `runs merge` takes the pieces in, and whether a pass is at work on them now.
+    value["mergeOrder"] = json!(run.merge_order().iter().map(|piece| piece.id.clone()).collect::<Vec<_>>());
+    value["mergeUnderWay"] = json!(super::merge::under_way(&run.id));
     // What checking the results cost: the tokens of every verifier session, apart from the workers'.
     let verifier_tokens: Vec<u64> = run.pieces.iter().flat_map(|piece| &piece.tries).filter_map(|attempt| attempt.verification.as_ref()?.review.as_ref()?.tokens()).collect();
     value["verifierTokens"] = json!((!verifier_tokens.is_empty()).then(|| verifier_tokens.iter().sum::<u64>()));

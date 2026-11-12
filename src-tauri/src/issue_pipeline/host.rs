@@ -382,6 +382,8 @@ impl Host for LocalHost {
 
     fn workspace_idle(&self, _pipeline: &Pipeline, cwd: &Path) -> Result<bool> {
         let cwd = cwd.canonicalize()?;
+        // Closed for work that is no conversation's turn: an orchestration run is being merged into it.
+        if super::admission::closed(&cwd) { return Ok(false); }
         for session in index::load()? {
             if Path::new(&session.cwd).canonicalize().ok().as_ref() != Some(&cwd) { continue; }
             for tab in &session.tabs {

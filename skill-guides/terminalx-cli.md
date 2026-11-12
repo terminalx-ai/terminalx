@@ -597,6 +597,9 @@ terminalx runs show [<run>] --json
 terminalx runs list [--lead <session>] [--all] --json
 terminalx runs stop [<run>] --json
 terminalx runs check-failed <piece> [--run <run>] [--output <file>|-] [--reason <text>] --json
+terminalx runs merge [<run>] [--skip <piece>]... [--recheck] --json
+terminalx runs send-back <piece> [--run <run>] --json
+terminalx runs cleanup [<run>] --yes --json
 ```
 
 `<run>` is a run's id or the start of one. Inside the lead's session it may be left out:
@@ -614,6 +617,7 @@ The plan is a JSON file you write:
   "goal": "Move settings reads to the typed store",
   "budget": {"points": 25},
   "agent": "claude",
+  "integrationCheck": "cargo t && pnpm test",
   "pieces": [
     {
       "id": "store",
@@ -903,10 +907,12 @@ it differ from the one before), `model`, `effort`, `tier`, `worker`, `branch`, `
 `verification` (how its result was checked, above), `started` and `ended`.
 
 - Run `state`: `planned`, `awaitingApproval`, `running`, `needsYou`, `verifying`, `merging`,
-  `done`, `stopped`, `failed`. A run is `done` when every piece is. It is `failed` when a
-  piece ran out of tries and nothing is running or could start; `reason` names the piece and
-  what it holds up. A failed run goes back to `running` when that piece's worker finishes
-  after all. `needsYou`: it reached its budget (see below).
+  `done`, `stopped`, `failed`. A run is `merging` when every piece's result is accepted, and
+  `done` once `runs merge` has merged them all into your branch and the checks passed on the
+  merged result (below). It is `failed` when a piece ran out of tries and nothing is running
+  or could start; `reason` names the piece and what it holds up. A failed run goes back to
+  `running` when that piece's worker finishes after all. `needsYou`: it reached its budget
+  (see below).
 - Piece `state` follows its worker's last report, each time the run is read: `queued` (no
   worker yet, or its next try waits for one), `running`, `verifying` (it reported `done`
   and its result is being checked), `done` (its result passed every check), `blocked` (it
@@ -964,6 +970,118 @@ done become `stopped`. It returns `stopped` (pieces whose worker was running) an
 branches stay as they are. `runs list` lists the runs that have not ended; `--all` includes
 the ended ones, `--lead` only one session's.
 
+#### Merging the accepted pieces
+
+Do not merge workers' branches by hand. `terminalx runs merge` does it, with git and no
+model, for every piece whose result is accepted: one at a time, each after the pieces it
+depends on (`mergeOrder` in `runs show`), into the branch your checkout is on.
+
+```bash
+terminalx runs merge --json
+```
+
+For each piece, in order:
+
+1. **Probe.** `git merge-tree` computes the merge without touching your branch. A conflict
+   marks the piece `conflict` and **stops the merge there**: your branch is exactly where
+   it was, and no later piece is tried.
+2. **Merge.** The commit the piece was accepted as is merged with one merge commit
+   (`git merge --no-ff`). A branch that moved after acceptance is not what is merged.
+3. **Check.** The run's integration check (`integrationCheck` in the plan; the project's
+   own check command when the plan names none) is run in your checkout; exit code 0 passes.
+   When it fails, **that merge alone is undone**, the piece is marked `integrationFailed`
+   with what the check printed, and the merge goes on with the pieces that do not depend
+   on it.
+
+When every piece is in, each piece's `command` done-checks are run once more on the merged
+result. Only then is the run `done`. A check that fails there undoes nothing (no one merge
+is known to be at fault): the run stays `merging` and `reason` names the command and the
+piece. Fix it on your branch, commit, and run `runs merge` again.
+
+The merge never pushes, never touches any branch but yours, and never deletes a worker's
+branch or worktree. While it runs, your checkout is held: no pipeline check or conflict
+resolver starts there, and no other conversation in it starts a turn. It is refused, with
+nothing merged, when the checkout is not free (`checkout_busy`), has uncommitted changes
+in tracked files (`lead_checkout_dirty`), is part way through a merge or rebase
+(`lead_checkout_unfinished`), is on no branch (`lead_detached`) or on another branch than
+the merge began on (`lead_branch_changed`). It runs the plan's commands, so with nobody's
+approval of the plan and a lead that is asked before it runs commands it is refused with
+`checks_not_approved`: the person presses Merge in the Run view instead.
+
+The checks can take long. Give the command a long timeout and wait for it. Do not work in
+your checkout meanwhile: until the merge has ended your other tool calls there are refused,
+and so is a `runs merge` from any other session while you are in a turn. A merge that fails
+its check is undone without discarding uncommitted work: changes in files the merge did not
+touch are kept, and when a file it did touch has changes the merge is left in and the piece
+is marked `failed` with why. The merge goes on in the app when the command stops waiting, `runs show` says how far it
+is (`mergeUnderWay`, and `merge` on the run and on each piece), and a second
+`runs merge` meanwhile is refused with `merge_in_progress`.
+
+The answer:
+
+- `into` (your branch), `head` (the commit it is at now), `integrationCheck`, `pushed`
+  (always `false`), `done`.
+- `merged`: every piece in your branch, in the order merged, each with `piece`, `commit`
+  (what it was accepted as), `mergeCommit` and `range` (`before..after`, that piece's
+  commits). `nothingToMerge` marks a piece that changed no file; `byHand` one you merged
+  yourself.
+- `conflicts`, `integrationFailed`, `skipped`, `failed` (git could not merge it for a
+  reason that is not a conflict): piece ids. `waiting`: each piece not merged, the pieces
+  it waits `on`, and `why`. `stoppedAt`: the piece the merge stopped at.
+- `next`: what to do now, in a sentence or two.
+
+Each piece's `merge` in `runs show` has its `state` (`merged`, `nothingToMerge`,
+`conflict`, `integrationFailed`, `skipped`, `failed`), `commit`, `before` (where your
+branch was; after a conflict or a failed check it is there still), `after` (the merge
+commit), `files` for a conflict (each with `path`, `hunks`, the first conflicting place as
+`excerpt` from `line`, the merged pieces that changed it under `with`, and the piece the
+plan gives it to under `owner`) and `check` (the integration check as it ran: `run`,
+`exitCode`, `passed`, `millis`, and the last 100 lines of `output` when it failed).
+
+When the merge stops on a conflict, choose one, then run `runs merge` again:
+
+- **Send it back.** `terminalx runs send-back <piece> --json` gives the conflict to the
+  piece's worker as its brief: the files, both sides of the first conflicting place of
+  each, and which merged pieces changed them. The worker rebases onto your branch in its
+  own worktree, resolves it, and reports again; its result goes through the same checks,
+  and the piece is merged by the next `runs merge`. If its session is gone, a fresh worker
+  takes it, as the next try of the piece. `send-back` works the same for a piece that is
+  `integrationFailed`: the worker is given what the check printed.
+- **Resolve it yourself.** `git merge <commit>` in your checkout (the piece's `merge.commit`),
+  resolve, commit. The next `runs merge` finds the piece in your branch (`byHand`), runs
+  the integration check on it, and goes on. It does not undo a merge you made.
+- **Leave it out.** `terminalx runs merge --skip <piece> --json` merges the pieces that do
+  not depend on it. The run is not done without it; a later `runs merge` tries it again.
+
+Limits and budget (above) and the merge. Merging holds no worker slot and uses none of the
+budget: it is git and the checks, and a run that waits to be merged counts no worker in a
+turn. The two things that start a model do count:
+
+- `send-back` starts a worker's turn. It is refused with `no_free_worker` when the run, or
+  the app, has as many workers in a turn as it may; send it back when one has ended. A
+  fresh worker for a piece whose session is gone queues for a slot like any next try.
+- Having a conflict resolved by a model (a person pressing Resolve in lead, or `send-back`)
+  counts toward the run's budget: the worker's try by its recorded cost, the lead's turn by
+  what its session costs from the moment it is asked until that piece's merge is settled.
+  A run past its budget starts neither. The command is refused with `budget_reached`, the
+  run becomes `needsYou` with the limit in `pause.message`, and it stays there while a
+  merge needs resolving, until the person raises the budget and resumes it. Resolving the
+  conflict yourself by hand, and `runs merge`, are not held back by the budget.
+
+A run that is `needsYou` when its last piece is accepted, with no merge to resolve, becomes
+`merging` by itself.
+
+A piece whose merge failed the integration check is not checked again until its commit or
+your branch has changed; `--recheck` runs the check again all the same (a flaky test).
+
+`terminalx runs cleanup --yes --json` removes the workers' worktrees, each with its
+session, once you no longer need them. It is separate and explicit: without `--yes` it
+removes nothing and lists what would go. It refuses, per worktree and with the reason, one
+with uncommitted work, one with commits that are not in your branch (a try that fell
+short, a worker that went on after its result was accepted), one whose piece is still
+being worked on or checked, and one with an agent running in it. Branches are always kept.
+It returns `removed` and `refused`.
+
 #### What a worker may not do
 
 Workers run in bypass mode by default, so nothing asks before they edit or run a command.
@@ -972,8 +1090,8 @@ push, does not merge, and does not deploy, publish or open a pull request. They 
 outside the worker's judgment: deny rules handed to its agent at launch, TerminalX's own
 check of every tool call, a git configuration in which every push goes nowhere, and a branch
 with no upstream. A refused command tells the worker to stop and report what is ready.
-Collect a worker's branch from the shared repository yourself (`git merge <its branch>` in
-your worktree); do not ask a worker to push or to merge. A worker gets no issue pipeline
+Do not ask a worker to push or to merge: `terminalx runs merge` brings the accepted branches
+into yours (above). A worker gets no issue pipeline
 (a pipeline would push and merge on its behalf, so every `pipelines` command but `list` and
 `show` is refused for it) and starts no sessions or runs of its own; a session started for
 it all the same has the worker's limits.
@@ -1561,6 +1679,11 @@ JSON failures have this shape:
   them, end your turn, and do not retry: you are told when they decide.
 - `run_exists`: this session already leads a run that has not ended (`details.run`).
 - `run_ended`: the run is done, stopped or failed; nothing more starts in it.
+- `merge_in_progress`, `checkout_busy`, `lead_checkout_dirty`, `lead_checkout_unfinished`,
+  `lead_detached`, `lead_branch_changed`, `checks_not_approved`, `run_not_started`:
+  `runs merge` merged nothing; `message` and `recovery` say what to change first.
+- `nothing_to_send_back`: the piece has no failed merge; `runs send-back` is for a piece
+  whose accepted result conflicts or failed the integration check.
 - `lead_required`, `lead_not_found`, `not_a_repository`: a run needs a lead session the app
   knows, in a project that is a git repository.
 - `confirmation_required`: inspect the target, then repeat the destructive command with

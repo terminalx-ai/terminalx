@@ -2,7 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { orchestration } from "@/lib/api";
 import type {
-  PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunGate, RunHold, RunLimits, RunPiece, RunPlan, RunRefusal, RunReview, RunState, RunVerification,
+  MergeState, PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunGate, RunHold, RunLimits, RunPiece, RunPlan, RunRefusal, RunReview, RunState, RunVerification,
   RunWindowUse, Tier, TryOutcome, TryStep,
 } from "@/types/orchestration";
 
@@ -136,6 +136,7 @@ export function planOf(run: Run): RunPlan {
   return {
     goal: run.goal,
     budget: run.budget,
+    integrationCheck: run.integrationCheck,
     pieces: run.pieces.map((piece) => ({
       id: piece.id,
       title: piece.title,
@@ -416,6 +417,140 @@ export function useRunViewShown(sessionId: string): boolean {
   return !!all[sessionId];
 }
 
+/** Where one piece stands in the merge: what its row of the merge table shows. */
+export type MergeRowState = MergeState | "merging" | "waiting" | "notAccepted";
+
+export const MERGE_STATE_LABEL: Record<MergeRowState, string> = {
+  merged: "Merged",
+  nothingToMerge: "Nothing to merge",
+  conflict: "Conflict",
+  integrationFailed: "Check failed",
+  skipped: "Left out",
+  failed: "Not merged",
+  merging: "Merging",
+  waiting: "Waiting",
+  notAccepted: "Not accepted",
+};
+
+/** A commit as a row names it. */
+export function shortCommit(commit: string | undefined): string {
+  return commit ? commit.slice(0, 7) : "";
+}
+
+/** The merge record of a piece that is about the result it is accepted with now. A piece sent back to
+ * work, or accepted again at another commit, has none: what was merged before says nothing of it. */
+export function currentMerge(piece: RunPiece) {
+  if (piece.state !== "done" || !piece.merge) return undefined;
+  const accepted = pieceCheck(piece)?.facts?.commit;
+  return !accepted || accepted === piece.merge.commit ? piece.merge : undefined;
+}
+
+/** Its accepted result is in the lead's branch, or it has nothing to bring (`Piece::merged` in the engine). */
+export function pieceMerged(piece: RunPiece): boolean {
+  const merge = currentMerge(piece);
+  return merge?.state === "merged" || merge?.state === "nothingToMerge";
+}
+
+export interface MergeRow {
+  piece: RunPiece;
+  number: number;
+  state: MergeRowState;
+  /** The pieces it depends on that are not merged, by their number. */
+  waitsFor: number[];
+}
+
+/** The merge table: every piece with something to merge, in the order they are merged. */
+export function mergeRows(run: Run): MergeRow[] {
+  const numbers = pieceNumbers(run);
+  const order = run.mergeOrder ?? run.pieces.map((piece) => piece.id);
+  return order.flatMap((id) => {
+    const piece = run.pieces.find((candidate) => candidate.id === id);
+    if (!piece) return [];
+    const merge = currentMerge(piece);
+    if (merge?.state === "nothingToMerge") return [];
+    const waitsFor = piece.dependsOn.filter((on) => !run.pieces.some((other) => other.id === on && pieceMerged(other))).map((on) => numbers[on]).filter(Boolean);
+    const merging = !!run.mergeUnderWay && run.merge?.pending?.piece === piece.id;
+    const state: MergeRowState = merging ? "merging" : merge ? merge.state : piece.state === "done" ? "waiting" : "notAccepted";
+    return [{ piece, number: numbers[piece.id], state, waitsFor }];
+  });
+}
+
+/** The pieces that only read: each is accepted and has nothing to merge. */
+export function readOnlyPieces(run: Run): number[] {
+  const numbers = pieceNumbers(run);
+  return run.pieces.filter((piece) => currentMerge(piece)?.state === "nothingToMerge").map((piece) => numbers[piece.id]);
+}
+
+/** The pieces a conflict is with: the ones already merged that changed the same files, by number. */
+export function conflictsWith(run: Run, piece: RunPiece): number[] {
+  const numbers = pieceNumbers(run);
+  const ids = new Set((piece.merge?.files ?? []).flatMap((file) => file.with ?? []));
+  return [...ids].map((id) => numbers[id]).filter(Boolean).sort((a, b) => a - b);
+}
+
+/** `3`, `3 and 5`, `2, 3 and 5`. */
+export function numberList(numbers: number[]): string {
+  return numbers.length <= 1 ? numbers.join("") : `${numbers.slice(0, -1).join(", ")} and ${numbers[numbers.length - 1]}`;
+}
+
+/** What a row's last column says of its piece. */
+export function mergeNote(run: Run, row: MergeRow): string {
+  const merge = row.piece.merge;
+  switch (row.state) {
+    case "conflict": {
+      const files = merge?.files?.length ?? 0;
+      const others = conflictsWith(run, row.piece);
+      return `${files} ${files === 1 ? "file conflicts" : "files conflict"}${others.length ? ` with piece ${numberList(others)}` : ""}`;
+    }
+    case "integrationFailed":
+      return merge?.byHand ? "Merged by the lead; not undone" : "Merge undone";
+    case "merged":
+      return merge?.byHand ? "Merged by the lead" : "";
+    case "skipped":
+      return "Left out of the last merge";
+    case "failed":
+      return merge?.note ?? "Git could not merge it";
+    case "merging":
+      return run.merge?.pending?.after ? "Running the integration check" : "";
+    case "notAccepted":
+      return `Its result is not accepted yet (${PIECE_STATE_LABEL[row.piece.state].toLowerCase()})`;
+    case "waiting":
+      return row.waitsFor.length ? `Waits for ${numberList(row.waitsFor)}` : run.merge?.stoppedAt ? `The merge stopped at ${pieceNumbers(run)[run.merge.stoppedAt] ?? run.merge.stoppedAt}` : "";
+    default:
+      return "";
+  }
+}
+
+/** The line under a run's goal while its pieces are merged: how far, and what holds it up. */
+export function mergeSubtitle(run: Run): string {
+  const rows = mergeRows(run);
+  const numbers = pieceNumbers(run);
+  const merged = rows.filter((row) => row.state === "merged").length;
+  const count = `${merged} of ${rows.length} ${rows.length === 1 ? "branch is" : "branches are"} in`;
+  if (run.state === "done") return `Every piece is merged into ${run.merge?.into || "the lead's branch"} and the checks passed on the result. Nothing was pushed.`;
+  if (run.mergeUnderWay) return `Merging in dependency order. ${count}.`;
+  const stopped = run.merge?.stoppedAt ? rows.find((row) => row.piece.id === run.merge?.stoppedAt) : undefined;
+  if (stopped?.state === "conflict") return `Merging in dependency order. ${count}; piece ${numbers[stopped.piece.id]} conflicts.`;
+  if (stopped) return `Merging in dependency order. ${count}; piece ${numbers[stopped.piece.id]} could not be merged.`;
+  const failed = rows.filter((row) => row.state === "integrationFailed").map((row) => row.number);
+  if (failed.length) return `Merging in dependency order. ${count}; the integration check failed after piece ${numberList(failed)}.`;
+  if (!run.merge) return `Every result is accepted. ${rows.length} ${rows.length === 1 ? "branch waits" : "branches wait"} to be merged into the lead's branch.`;
+  if (rows.length > 0 && merged === rows.length) return run.reason ? "Every branch is in. A check failed on the merged result." : "Every branch is in.";
+  return `Merging in dependency order. ${count}.`;
+}
+
+/** Why a file conflicts, from the plan and the merges alone: who was given it, and who else changed it. */
+export function conflictReasons(run: Run, piece: RunPiece): string[] {
+  const numbers = pieceNumbers(run);
+  const self = numbers[piece.id];
+  return (piece.merge?.files ?? []).map((file) => {
+    const name = file.path.split("/").pop() ?? file.path;
+    const others = (file.with ?? []).map((id) => numbers[id]).filter(Boolean);
+    if (file.owner && file.owner !== piece.id) return `${name} is listed under piece ${numbers[file.owner] ?? file.owner} only, but piece ${self} changed it too.`;
+    if (others.length) return `${name} was changed by piece ${numberList(others)}, already merged, and by piece ${self}, each from the same starting point.`;
+    return `${name} changed on the lead's branch after piece ${self} was started.`;
+  });
+}
 /** `16:10`, or `Tue 16:10` when not today: when a usage window resets. */
 export function resetClock(at: number, now = Date.now()): string {
   const date = new Date(at);

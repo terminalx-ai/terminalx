@@ -138,6 +138,9 @@ Usage:
   terminalx runs start|show|stop [RUN] [--json]
   terminalx runs list [--lead SESSION] [--all] [--json]
   terminalx runs check-failed PIECE [--run RUN] [--output FILE|-] [--reason TEXT] [--json]
+  terminalx runs merge [RUN] [--skip PIECE]... [--recheck] [--json]
+  terminalx runs send-back PIECE [--run RUN] [--json]
+  terminalx runs cleanup [RUN] --yes [--json]
   terminalx vm status|start|stop [--json]
   terminalx vm tools [TOOL] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--json]
@@ -1263,7 +1266,7 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
 /// Orchestration runs: a lead's plan of pieces, and the workers started for
 /// them. Approving a run is not here: a person does that in the app.
 fn parse_runs(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, ControlError>) -> Result<Action, ControlError> {
-    let command = tokens.required_front("runs command (create, start, show, list, stop or check-failed)")?;
+    let command = tokens.required_front("runs command (create, start, show, list, stop, check-failed, merge, send-back or cleanup)")?;
     // Where the command runs: the lead of a new run, and the run meant when none is named.
     let caller = calling_session();
     match command.as_str() {
@@ -1313,12 +1316,41 @@ fn parse_runs(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, Con
             }
             Ok(Action::Rpc { command: "runs.checkFailed".into(), params: json!({"run": run, "piece": piece, "output": said.join("\n"), "caller": caller}), timeout: RUN_START_TIMEOUT })
         }
-        other => Err(invalid(format!("Unknown runs command {other}. Use create, start, show, list, stop or check-failed."))),
+        // Every accepted piece into the lead's branch, in dependency order. It runs the integration
+        // check after each merge, so it answers when those have run.
+        "merge" => {
+            let skip = tokens.options("--skip")?;
+            if skip.iter().any(|piece| piece.trim().is_empty()) {
+                return Err(invalid("--skip needs a piece id."));
+            }
+            let recheck = tokens.flag("--recheck")?;
+            let run = tokens.take_front();
+            tokens.finish()?;
+            Ok(Action::Rpc { command: "runs.merge".into(), params: json!({"run": run, "skip": skip, "recheck": recheck, "caller": caller}), timeout: RUN_MERGE_TIMEOUT })
+        }
+        // A piece whose accepted result conflicts or failed the integration check goes back to its worker.
+        "send-back" => {
+            let piece = tokens.required_front("piece id")?;
+            let run = tokens.option("--run")?;
+            tokens.finish()?;
+            Ok(Action::Rpc { command: "runs.sendBack".into(), params: json!({"run": run, "piece": piece, "caller": caller}), timeout: RUN_START_TIMEOUT })
+        }
+        // The workers' worktrees, once their work is merged. Explicit: nothing goes without --yes.
+        "cleanup" => {
+            let confirmed = tokens.flag("--yes")?;
+            let run = tokens.take_front();
+            tokens.finish()?;
+            Ok(Action::Rpc { command: "runs.cleanup".into(), params: json!({"run": run, "confirmed": confirmed, "caller": caller}), timeout: RUN_START_TIMEOUT })
+        }
+        other => Err(invalid(format!("Unknown runs command {other}. Use create, start, show, list, stop, check-failed, merge, send-back or cleanup."))),
     }
 }
 
 /// Starting a run creates a worktree and a session for each ready piece.
 const RUN_START_TIMEOUT: Duration = Duration::from_secs(300);
+/// A merge runs the integration check after each piece and every done-check at the end, each
+/// for up to half an hour. The pass goes on in the app when the command gives up waiting.
+const RUN_MERGE_TIMEOUT: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// A pipeline step pushes, opens a pull request or asks GitHub to merge
 /// before it answers.
@@ -1583,7 +1615,7 @@ mod tests {
             assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
         }
         // A lead does not approve its own plan: there is no such command, and the guide says so.
-        assert!(parse(&args(&["runs", "approve", "01a1"])).unwrap_err().message.contains("Use create, start, show, list, stop or check-failed"));
+        assert!(parse(&args(&["runs", "approve", "01a1"])).unwrap_err().message.contains("Use create, start, show, list, stop, check-failed, merge, send-back or cleanup"));
 
         // A failed done-check names the piece and carries what the check printed.
         std::fs::write(dir.path().join("check.log"), "test control::tests::reads_default ... FAILED\n").unwrap();
@@ -1594,13 +1626,22 @@ mod tests {
         let mut printed = || Ok("FAILED on stdin\n".to_string());
         let Action::Rpc { params, .. } = parse_with_stdin(&args(&["runs", "check-failed", "cli", "--output", "-"]), &mut printed).unwrap().action else { panic!("expected rpc") };
         assert_eq!(params["output"], "FAILED on stdin");
+        // Merge, send-back and cleanup: the lead's own, in its session or by run.
+        assert_eq!(rpc_of(&["runs", "merge", "--json"]), ("runs.merge".into(), json!({"run": null, "skip": [], "recheck": false, "caller": null}), Duration::from_secs(4 * 60 * 60)));
+        assert_eq!(rpc_of(&["runs", "merge", "01a1", "--skip", "cli", "--skip", "docs", "--recheck"]).1, json!({"run": "01a1", "skip": ["cli", "docs"], "recheck": true, "caller": null}));
+        assert_eq!(rpc_of(&["runs", "send-back", "cli", "--run", "01a1"]), ("runs.sendBack".into(), json!({"run": "01a1", "piece": "cli", "caller": null}), Duration::from_secs(300)));
+        assert_eq!(rpc_of(&["runs", "cleanup", "01a1", "--yes"]).1, json!({"run": "01a1", "confirmed": true, "caller": null}));
+        assert_eq!(rpc_of(&["runs", "cleanup"]), ("runs.cleanup".into(), json!({"run": null, "confirmed": false, "caller": null}), Duration::from_secs(300)));
+        for refused in [&["runs", "merge", "01a1", "extra"][..], &["runs", "merge", "--skip"], &["runs", "merge", "--skip", " "], &["runs", "send-back"], &["runs", "send-back", "cli", "extra"], &["runs", "cleanup", "01a1", "extra"]] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
         for refused in [&["runs", "check-failed"][..], &["runs", "check-failed", "cli"], &["runs", "check-failed", "cli", "--reason", "  "], &["runs", "check-failed", "cli", "--output", "/no/such/file"], &["runs", "check-failed", "cli", "--reason", "x", "extra"]] {
             assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
         }
-        for said in ["terminalx runs create --from PLAN.json|- [--lead SESSION]", "terminalx runs start|show|stop [RUN]", "terminalx runs list [--lead SESSION] [--all]", "terminalx runs check-failed PIECE [--run RUN] [--output FILE|-] [--reason TEXT]"] {
+        for said in ["terminalx runs create --from PLAN.json|- [--lead SESSION]", "terminalx runs start|show|stop [RUN]", "terminalx runs list [--lead SESSION] [--all]", "terminalx runs check-failed PIECE [--run RUN] [--output FILE|-] [--reason TEXT]", "terminalx runs merge [RUN] [--skip PIECE]... [--recheck]", "terminalx runs send-back PIECE [--run RUN]", "terminalx runs cleanup [RUN] --yes"] {
             assert!(help_text().contains(said), "{said}");
         }
-        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneChecks`", "{\"type\": \"command\", \"run\":", "{\"type\": \"review\", \"text\":", "`no_command_check`", "`review_only_without_reason`", "\"reviewOnly\": true", "`owns_outside_repository`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8", "#### Model and effort", "`no_kind`", "`unknown_kind`", "#### When a piece falls short", "#### How a result is checked", "`verifying`", "no verifier session at all", "`reviewDiffLines`", "`verifierTokens`", "does not return each time a\nworker's turn ends", "terminalx runs check-failed <piece>", "never past\n   `high`", "`piece_not_done`", "`modelNote`", "| top | Fable | Astra |"] {
+        for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneChecks`", "{\"type\": \"command\", \"run\":", "{\"type\": \"review\", \"text\":", "`no_command_check`", "`review_only_without_reason`", "\"reviewOnly\": true", "`owns_outside_repository`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8", "#### Model and effort", "`no_kind`", "`unknown_kind`", "#### When a piece falls short", "#### How a result is checked", "`verifying`", "no verifier session at all", "`reviewDiffLines`", "`verifierTokens`", "does not return each time a\nworker's turn ends", "terminalx runs check-failed <piece>", "never past\n   `high`", "`piece_not_done`", "`modelNote`", "| top | Fable | Astra |", "#### Merging the accepted pieces", "terminalx runs merge --json", "**that merge alone is undone**", "`integrationCheck`", "`lead_checkout_dirty`", "`merge_in_progress`", "terminalx runs send-back <piece> --json", "terminalx runs merge --skip <piece> --json", "terminalx runs cleanup --yes --json", "Branches are always kept"] {
             assert!(GUIDE.contains(said), "the guide does not say {said:?}");
         }
     }
@@ -2570,7 +2611,7 @@ mod tests {
             // Reading reports and disagreement.
             "Route on the `status` line", "Check the evidence", "`couldNotRead`", "as a gap", "the one\nobservable fact", "Do not pick the more confident",
             // What stays, and context.
-            "Edits that span pieces", "Judgment calls", "Merging", "pushed or shared", "references, not content",
+            "Edits that span pieces", "Judgment calls", "Merging", "`terminalx runs merge --json`", "`terminalx runs send-back <piece>`", "pushed or shared", "references, not content",
             // Deterministic first, never poll.
             "Never poll", "wait --children-of", "Write a `command` done-check",
             // Models come from the routing table and the ladder.

@@ -3,16 +3,16 @@ import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { PieceStateMark } from "@/components/orchestration/PieceStateMark";
 import {
-  Check, CircleAlert, CircleCheck, CircleDashed, CircleX, Clock, FileJson, FolderOpen, Gauge, Info, Layers, LoaderCircle, Network, Pause, Pencil, Play, ScanSearch,
-  Settings, ShieldAlert, ShieldOff, Sparkles, Square, SquareArrowOutUpRight, Terminal, Trash2, TriangleAlert, UserRoundCheck, X,
+  Check, CircleAlert, CircleCheck, CircleDashed, CircleX, Clock, CornerUpLeft, FileJson, FolderOpen, Gauge, GitMerge, GitPullRequestClosed, Info, Layers, LoaderCircle, Network, Pause, Pencil, Play, ScanSearch,
+  Settings, ShieldAlert, ShieldOff, SkipForward, Sparkles, Square, SquareArrowOutUpRight, Terminal, Trash2, TriangleAlert, UserRoundCheck, X,
 } from "@/icons";
 import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { EFFORT_LABEL, effortChoices, modeLabel, modelForTab, modelLabel, modelOptionText, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
-  budgetText, checksFrom, checkText, costText, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, holdText, mainWindow, noteRun, pieceCheck, pieceMode, pieceNumbers,
-  planOf, raisesMode, refusalOf, requestOrchestratorSettings, resetClock, reviewTokens, RUN_STATE_LABEL, TIER_DOT, tokensText, TRY_OUTCOME_LABEL, TRY_STEP_LABEL, useRun, verifyingText,
-  windowLine, windowName, withoutPiece,
+  budgetText, checksFrom, checkText, conflictReasons, conflictsWith, costText, currentMerge, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, holdText, mainWindow, MERGE_STATE_LABEL, mergeNote, mergeRows, mergeSubtitle, noteRun, numberList, pieceCheck, pieceMerged, pieceMode, pieceNumbers,
+  planOf, raisesMode, readOnlyPieces, refusalOf, requestOrchestratorSettings, resetClock, reviewTokens, RUN_STATE_LABEL, TIER_DOT, tokensText, TRY_OUTCOME_LABEL, TRY_STEP_LABEL, useRun, verifyingText,
+  shortCommit, windowLine, windowName, withoutPiece, type MergeRow, type MergeRowState,
 } from "@/lib/orchestration";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { useSessionRowStatuses } from "@/lib/sessionRowStatus";
@@ -103,6 +103,11 @@ function RunBoard({ run, lead }: { run: Run; lead: SessionEntry }) {
   const editable = waiting || run.state === "planned";
   const numbers = useMemo(() => pieceNumbers(run), [run]);
   const piece = run.pieces.find((candidate) => candidate.id === selected) ?? null;
+  // Once results are being brought together, the table is the merge: a row a branch.
+  const merging = !editable && (!!run.merge || run.state === "merging");
+  // Something accepted is not in the lead's branch yet, or every piece is and the checks on the whole have not passed.
+  const mergeable = (run.state === "merging" || run.state === "running" || run.state === "needsYou" || run.state === "failed") && run.pieces.some((candidate) => candidate.state === "done") && (run.state === "merging" || run.pieces.some((candidate) => candidate.state === "done" && !pieceMerged(candidate)));
+  const merge = (skip: string[] = []) => act("merge", () => orchestration.merge(run.id, { skip }));
   // In one column the piece opens under the plan: bring it into view when a row is picked.
   const select = (id: string) => {
     setSelected(id);
@@ -125,7 +130,7 @@ function RunBoard({ run, lead }: { run: Run; lead: SessionEntry }) {
               <span data-testid="run-state">{RUN_STATE_LABEL[run.state]}</span>
             </div>
             <h1 className="mt-0.5 break-words text-[19px] font-semibold leading-7 tracking-tight">{run.goal}</h1>
-            <p className="mt-1 text-[13px] text-muted-foreground">{subtitle(run)}</p>
+            <p className="mt-1 text-[13px] text-muted-foreground" data-testid="run-subtitle">{merging ? mergeSubtitle(run) : subtitle(run)}</p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             {waiting && <>
@@ -139,6 +144,11 @@ function RunBoard({ run, lead }: { run: Run; lead: SessionEntry }) {
             {(run.state === "running" || run.state === "planned" || run.state === "needsYou" || run.state === "failed" || run.state === "verifying" || run.state === "merging") && (
               <Button variant="outline" disabled={!!busy} onClick={() => void act("stop", async () => (await orchestration.stop(run.id)).run)}><Square />Stop run</Button>
             )}
+            {mergeable && (
+              <Button variant="outline" disabled={!!busy || !!run.mergeUnderWay} title="Merge every accepted piece into the lead's branch, in dependency order. Nothing is pushed." onClick={() => void merge()}>
+                {busy === "merge" || run.mergeUnderWay ? <LoaderCircle className="animate-spin" /> : <GitMerge />}{run.mergeUnderWay ? "Merging" : run.merge ? "Continue merge" : "Merge"}
+              </Button>
+            )}
           </div>
         </header>
         {error && (
@@ -150,15 +160,17 @@ function RunBoard({ run, lead }: { run: Run; lead: SessionEntry }) {
         )}
         {run.state === "needsYou" && <PausedNotice run={run} busy={!!busy} act={act} />}
         {ledger.needs.length > 0 && <RunNeeds needs={ledger.needs} lead={lead.id} />}
-        {run.reason && (run.state === "failed" || run.state === "stopped") && (
-          <p role="status" className={cn("mx-6 mb-3 rounded-lg bg-well px-3 py-2 text-xs", run.state === "failed" ? "text-destructive" : "text-muted-foreground")}>{run.reason}</p>
+        {run.reason && (run.state === "failed" || run.state === "stopped" || run.state === "merging") && (
+          <p role="status" className={cn("mx-6 mb-3 rounded-lg bg-well px-3 py-2 text-xs", run.state === "stopped" ? "text-muted-foreground" : "text-destructive")}>{run.reason}</p>
         )}
         {editingPlan && editable && <PlanForm run={run} busy={!!busy} onCancel={() => setEditingPlan(false)} onSave={async (plan) => { if (await save(plan)) setEditingPlan(false); }} />}
         {editable ? <PlanSummary run={run} busy={!!busy} act={act} /> : <RunSummary run={run} spend={ledger.spend} unpriced={ledger.unpriced} />}
-        <PieceTable run={run} numbers={numbers} selected={selected} editable={editable} busy={!!busy} refused={error?.piece} costOf={ledger.costOf} onSelect={select} onChange={change} />
+        {merging
+          ? <MergeTable run={run} selected={selected} onSelect={select} />
+          : <PieceTable run={run} numbers={numbers} selected={selected} editable={editable} busy={!!busy} refused={error?.piece} costOf={ledger.costOf} onSelect={select} onChange={change} />}
         <p className="flex items-start gap-2 px-6 py-4 text-xs text-faint">
           <Info aria-hidden className="mt-0.5 size-3.5 shrink-0" />
-          <span>{footnote(run)}</span>
+          <span data-testid="run-footnote">{merging ? mergeFootnote(run) : footnote(run)}</span>
         </p>
       </div>
       {piece && (
@@ -171,6 +183,9 @@ function RunBoard({ run, lead }: { run: Run; lead: SessionEntry }) {
           busy={!!busy}
           cost={ledger.costOf(piece)}
           onClose={() => setSelected(null)}
+          onSendBack={() => void act("sendBack", () => orchestration.sendBack(run.id, piece.id))}
+          onResolve={() => void act("resolve", () => orchestration.resolveInLead(run.id, piece.id))}
+          onSkip={() => void merge([piece.id])}
           onSave={(patch) => change(piece.id, patch)}
           onRemove={async () => { if (await save(withoutPiece(planOf(run), piece.id))) setSelected(null); }}
         />
@@ -318,6 +333,120 @@ function PausedNotice({ run, busy, act }: { run: Run; busy: boolean; act: Act })
   );
 }
 
+/** Under the merge table: what had nothing to merge, and where the lead's branch was left. */
+function mergeFootnote(run: Run): string {
+  const read = readOnlyPieces(run);
+  const said = read.length ? [`Piece ${numberList(read)} ${read.length === 1 ? "was" : "were"} read-only and ${read.length === 1 ? "has" : "have"} nothing to merge.`] : [];
+  const stopped = run.merge?.stoppedAt ? run.pieces.find((piece) => piece.id === run.merge?.stoppedAt)?.merge : undefined;
+  if (stopped && (stopped.state === "conflict" || stopped.state === "failed")) said.push(`Your branch is back at ${shortCommit(stopped.before)}, as it was before this merge was tried.`);
+  else if (run.state === "done") said.push("Open the pull request from the lead's branch the usual way. Workers' worktrees stay until terminalx runs cleanup removes them.");
+  else said.push("A merge that conflicts, or fails the integration check, leaves your branch as it was. Workers' branches and worktrees are kept.");
+  return said.join(" ");
+}
+
+const MERGE_STYLE: Record<MergeRowState, { icon: typeof CircleCheck; className: string }> = {
+  merged: { icon: GitMerge, className: "text-merged" },
+  nothingToMerge: { icon: CircleDashed, className: "text-faint" },
+  conflict: { icon: GitPullRequestClosed, className: "text-warning" },
+  integrationFailed: { icon: CircleX, className: "text-destructive" },
+  skipped: { icon: SkipForward, className: "text-faint" },
+  failed: { icon: CircleAlert, className: "text-destructive" },
+  merging: { icon: LoaderCircle, className: "text-accent" },
+  waiting: { icon: CircleDashed, className: "text-faint" },
+  notAccepted: { icon: CircleDashed, className: "text-faint" },
+};
+
+function MergeStateMark({ state }: { state: MergeRowState }) {
+  const { icon: Icon, className } = MERGE_STYLE[state];
+  return <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap text-[13px]", className)}><Icon aria-hidden className={cn("size-3.5 shrink-0", state === "merging" && "animate-spin")} />{MERGE_STATE_LABEL[state]}</span>;
+}
+
+/** How the integration check came out for a row: its result, that it is running, or that it was not run. */
+function checkCell(run: Run, row: MergeRow): { text: string; className: string } {
+  const check = currentMerge(row.piece)?.check;
+  if (row.state === "merging") return run.merge?.pending?.after ? { text: "running", className: "text-info" } : { text: "not run", className: "text-faint" };
+  if (!check) return { text: row.state === "merged" ? "no check set" : "not run", className: "text-faint" };
+  if (check.passed) return { text: `passed · ${durationText(check.millis)}`, className: "text-add" };
+  return { text: check.exitCode != null ? `failed · exit ${check.exitCode}` : "failed · did not finish", className: "text-destructive" };
+}
+
+/** Where the pieces are merged, and with what check: said once, above the branches. */
+function MergeStrip({ run }: { run: Run }) {
+  return (
+    <section aria-label="Merge" className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-hairline px-6 py-2.5 text-[13px]" data-testid="merge-strip">
+      <GitMerge aria-hidden className="size-4 shrink-0 text-faint" />
+      <span className="text-muted-foreground">Into</span>
+      <span className="font-mono text-[12.5px]" data-testid="merge-into">{run.merge?.into || "the lead's branch"}</span>
+      <span aria-hidden className="text-faint">·</span>
+      <span className="text-muted-foreground">Integration check</span>
+      {run.integrationCheck ? <code className={cn(code, "max-w-full break-all")}>{run.integrationCheck}</code> : <span className="text-faint">the project's own check, when it has one</span>}
+      <span className="ml-auto text-xs text-faint">Nothing is pushed. No other branch is touched.</span>
+    </section>
+  );
+}
+
+/** The merge, a row a branch, in the order they are merged: what is in, what stopped, what waits. */
+function MergeTable({ run, selected, onSelect }: { run: Run; selected: string | null; onSelect: (id: string) => void }) {
+  const rows = mergeRows(run);
+  const into = run.merge?.into || "lead";
+  const columns = "grid-cols-[minmax(0,1.5fr)_7.5rem] @[760px]/run:grid-cols-[minmax(0,1.5fr)_7.5rem_4.5rem_8.5rem_minmax(0,1fr)]";
+  const wide = "hidden @[760px]/run:block";
+  return <>
+    <MergeStrip run={run} />
+    <div role="table" aria-label="Merge" className="border-t border-hairline">
+      <div role="row" className={cn("grid items-center gap-x-4 border-b border-hairline px-6 py-2.5", columns)}>
+        {[["Branch", ""], ["State", ""], ["Commit", wide], ["Check after merge", wide], ["Note", wide]].map(([label, visibility]) => <div key={label} role="columnheader" className={cn(kicker, visibility)}>{label}</div>)}
+      </div>
+      {rows.map((row) => {
+        const { piece } = row;
+        const merge = currentMerge(piece);
+        const check = checkCell(run, row);
+        const note = mergeNote(run, row);
+        return (
+          <div key={piece.id} role="row" aria-selected={selected === piece.id} data-piece={piece.id} data-merge-state={row.state}
+            className={cn("grid cursor-default items-center gap-x-4 border-b border-hairline px-6 py-2", columns, selected === piece.id ? "bg-selected" : "hover:bg-veil-card")} onClick={() => onSelect(piece.id)}>
+            <div role="cell" className="flex min-w-0 items-center gap-3">
+              <span className="grid size-5 shrink-0 place-items-center rounded-[5px] bg-veil-raised text-[11px] text-muted-foreground">{row.number}</span>
+              <span className="min-w-0">
+                <button type="button" className="block max-w-full truncate text-left text-[13px] outline-none focus-visible:underline" onClick={() => onSelect(piece.id)}>{piece.title}</button>
+                <span className="block truncate font-mono text-[11.5px] text-faint">{piece.branch ?? piece.id} → {into}</span>
+              </span>
+            </div>
+            <div role="cell"><MergeStateMark state={row.state} /></div>
+            <div role="cell" className={cn("font-mono text-xs text-muted-foreground", wide)} title={merge?.after ?? merge?.commit}>{shortCommit(merge?.after ?? merge?.commit) || "–"}</div>
+            <div role="cell" className={cn("whitespace-nowrap text-xs", check.className, wide)} data-testid="merge-check">{check.text}</div>
+            <div role="cell" className={cn("min-w-0 truncate text-xs text-muted-foreground", wide)} title={note || undefined} data-testid="merge-note">{note}</div>
+          </div>
+        );
+      })}
+      {rows.length === 0 && <p className="border-b border-hairline px-6 py-3 text-xs text-faint">No piece changed a file: there is nothing to merge.</p>}
+    </div>
+    <FinalChecks run={run} />
+  </>;
+}
+
+/** The checks on the whole, once every branch is in: the integration check when it failed there, and each piece's commands run once more. */
+function FinalChecks({ run }: { run: Run }) {
+  const commands = [...(run.merge?.check ? [{ ...run.merge.check, piece: "" }] : []), ...(run.merge?.finalChecks ?? [])];
+  if (!commands.length) return null;
+  const numbers = pieceNumbers(run);
+  const failed = commands.filter((command) => !command.passed);
+  return (
+    <section aria-label="Checks on the merged result" className="px-6 pt-4" data-testid="final-checks">
+      <div className={kicker}>Checks on the merged result</div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {failed.length ? "A check failed with every branch in. Nothing was undone: no one merge is known to be at fault." : `${commands.length} ${commands.length === 1 ? "command" : "commands"} passed on ${shortCommit(run.merge?.finalHead)}: each piece's done-checks, run once more.`}
+      </p>
+      {failed.map((command, index) => (
+        <div key={index}>
+          {command.piece && <div className="mt-2 text-[11.5px] text-faint">Done-check of piece {numbers[command.piece] ?? command.piece}</div>}
+          <CommandCard command={command} label={command.piece ? undefined : "Integration check"} />
+        </div>
+      ))}
+    </section>
+  );
+}
+
 /** Before a run starts: what it is expected to use, and what it runs with. */
 function PlanSummary({ run, busy, act }: { run: Run; busy: boolean; act: Act }) {
   const estimate = estimateText(run.estimate);
@@ -342,6 +471,12 @@ function PlanSummary({ run, busy, act }: { run: Run; busy: boolean; act: Act }) 
           <span className="inline-flex h-7 items-center gap-1.5 rounded-md border border-hairline px-2 text-xs"><ShieldOff aria-hidden className="size-3.5 text-accent" />{modeLabel(run.workerMode)}</span>
         </span>
         <span className="ml-auto flex items-center gap-1.5 text-xs text-add"><CircleCheck aria-hidden className="size-3.5" />No shared files</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-hairline px-3.5 py-2.5 text-[13px]" data-testid="plan-integration-check">
+        <GitMerge aria-hidden className="size-4 shrink-0 text-faint" />
+        <span className="text-muted-foreground">After each merge</span>
+        {run.integrationCheck ? <code className={cn(code, "max-w-full break-all")}>{run.integrationCheck}</code> : <span className="text-muted-foreground">the project's own check command, when it has one</span>}
+        <span className="text-xs text-faint">run by TerminalX in the lead's checkout</span>
       </div>
       <div className="flex flex-col gap-2 border-t border-hairline px-3.5 py-2.5">
         <LimitsEditor run={run} busy={busy} act={act} />
@@ -578,13 +713,13 @@ function gateFailureLine(gate: GateResult): string {
 }
 
 /** One command of the command gate: what was run, how it ended, and for one that failed the end of what it printed. */
-function CommandCard({ command }: { command: CommandRun }) {
+function CommandCard({ command, label }: { command: CommandRun; label?: string }) {
   const lines = (command.output ?? "").split("\n").filter((line) => line.trim()).slice(-12);
   return (
     <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="done-check" data-check={command.passed ? "passed" : "failed"}>
       <div className="flex items-center gap-2 text-xs">
         <Terminal aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="text-muted-foreground">{command.project ? "Project check" : "Done-check"}</span>
+        <span className="text-muted-foreground">{label ?? (command.project ? "Project check" : "Done-check")}</span>
         <span className={cn("ml-auto shrink-0", command.passed ? "text-add" : "text-destructive")}>
           {command.passed ? `passed · ${durationText(command.millis)}` : command.exitCode != null ? `failed · exit ${command.exitCode}` : "failed · did not finish"}
         </span>
@@ -752,11 +887,16 @@ function PlanForm({ run, busy, onCancel, onSave }: { run: Run; busy: boolean; on
   const [goal, setGoal] = useState(run.goal);
   const [points, setPoints] = useState(run.budget.points == null ? "" : String(run.budget.points));
   const [dollars, setDollars] = useState(run.budget.dollars == null ? "" : String(run.budget.dollars));
+  const [integrationCheck, setIntegrationCheck] = useState(run.integrationCheck ?? "");
   const amount = (text: string) => (text.trim() === "" || !Number.isFinite(Number(text)) || Number(text) < 0 ? undefined : Number(text));
   return (
-    <form aria-label="Edit plan" className="mx-6 mb-3 flex flex-col gap-3 rounded-lg bg-well p-3.5 hairline" onSubmit={(event) => { event.preventDefault(); onSave({ ...planOf(run), goal, budget: { points: amount(points), dollars: amount(dollars) } }); }}>
+    <form aria-label="Edit plan" className="mx-6 mb-3 flex flex-col gap-3 rounded-lg bg-well p-3.5 hairline" onSubmit={(event) => { event.preventDefault(); onSave({ ...planOf(run), goal, budget: { points: amount(points), dollars: amount(dollars) }, integrationCheck: integrationCheck.trim() || undefined }); }}>
       <label className="flex flex-col gap-1 text-xs text-muted-foreground">Goal
         <textarea className={cn(field, "min-h-[3.5rem] resize-y text-[13px] text-foreground")} value={goal} onChange={(event) => setGoal(event.target.value)} />
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-muted-foreground">Integration check
+        <input className={cn(field, "font-mono text-foreground")} value={integrationCheck} placeholder="The project's own check command" onChange={(event) => setIntegrationCheck(event.target.value)} />
+        <span className="text-[11px] text-faint">Run by TerminalX in the lead's checkout after each piece is merged; it must exit 0. A merge that fails it is undone.</span>
       </label>
       <div className="flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">Budget, points
@@ -790,7 +930,7 @@ function Lines({ lines, empty }: { lines: string[]; empty: string }) {
 }
 
 /** One piece: its brief as its worker is sent it, and once it has a worker, where that stands. */
-function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSave, onRemove }: {
+function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSendBack, onResolve, onSkip, onSave, onRemove }: {
   run: Run;
   piece: RunPiece;
   number: number;
@@ -798,6 +938,9 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSave
   busy: boolean;
   cost: string | null;
   onClose: () => void;
+  onSendBack: () => void;
+  onResolve: () => void;
+  onSkip: () => void;
   onSave: (patch: Partial<RunPlanPiece>) => Promise<boolean>;
   onRemove: () => void;
 }) {
@@ -806,8 +949,11 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSave
   const brief = piece.brief;
   const tries = piece.tries ?? [];
   const maxTries = run.maxTries ?? 3;
+  // What stopped its merge, while the run can still act on it.
+  const merge = !editable && (run.state === "merging" || run.state === "running" || run.state === "failed") ? currentMerge(piece) : undefined;
+  const unmerged = merge && (merge.state === "conflict" || merge.state === "integrationFailed" || merge.state === "failed") ? merge : undefined;
   return (
-    <aside aria-label={`Piece ${number}: ${piece.title}`} data-testid="piece-detail" className="flex w-full shrink-0 flex-col border-t border-hairline bg-background @[900px]/run:min-h-0 @[900px]/run:w-[min(24rem,36%)] @[900px]/run:border-l @[900px]/run:border-t-0">
+    <aside aria-label={`Piece ${number}: ${piece.title}`} data-testid="piece-detail" className={cn("flex w-full shrink-0 flex-col border-t border-hairline bg-background @[900px]/run:min-h-0 @[900px]/run:border-l @[900px]/run:border-t-0", unmerged ? "@[900px]/run:w-[min(26.5rem,36%)]" : "@[900px]/run:w-[min(24rem,36%)]")}>
       <header className="flex h-10 shrink-0 items-center gap-2 border-b border-hairline px-4">
         <span className="grid size-5 shrink-0 place-items-center rounded-[5px] bg-veil-raised text-[11px] text-muted-foreground">{number}</span>
         <h2 className="min-w-0 truncate text-[13px] font-medium">{piece.title}</h2>
@@ -818,7 +964,9 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSave
         <BriefForm piece={piece} run={run} busy={busy} onCancel={() => setEditing(false)} onSave={async (patch) => { if (await onSave(patch)) setEditing(false); }} />
       ) : <>
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 scrollbar-thin">
-          <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          {/* A piece whose merge stopped opens on that: its result was accepted, which its tries below still say. */}
+          {unmerged && <MergePanel run={run} piece={piece} />}
+          <div className={cn("mb-4 flex flex-wrap items-center gap-x-3 gap-y-1.5", unmerged && "hidden")}>
             {editable ? (piece.kind ? <span className={chip}>{piece.kind}</span> : null) : <PieceStateMark state={piece.state} />}
             {!editable && piece.state === "done" && pieceCheck(piece)?.outcome === "passed" && <span className="text-xs text-muted-foreground" data-testid="piece-check-passed">· {pieceCheck(piece)?.review ? "checked and read" : "check passed"}</span>}
             {!editable && (tries.length > 1 || gaveUp(piece)) && <span className="text-xs text-muted-foreground" data-testid="piece-tries-used">· {tries.length} of {maxTries} tries used</span>}
@@ -873,6 +1021,10 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSave
           {editable ? <>
             <Button variant="outline" disabled={busy} onClick={() => setEditing(true)}><Pencil />Edit brief</Button>
             <Button variant="outline" disabled={busy || run.pieces.length < 2} title={run.pieces.length < 2 ? "A run needs at least one piece. Discard the plan instead." : undefined} onClick={onRemove}><Trash2 />Remove piece</Button>
+          </> : unmerged ? <>
+            <Button size="sm" variant="accent" disabled={busy || !!run.mergeUnderWay} onClick={onSendBack}><CornerUpLeft />Send back to worker</Button>
+            {unmerged.state === "conflict" && <Button size="sm" variant="outline" disabled={busy || !!run.mergeUnderWay} onClick={onResolve}><Sparkles />Resolve in lead</Button>}
+            <Button size="sm" variant="outline" disabled={busy || !!run.mergeUnderWay} onClick={onSkip}><SkipForward />Skip</Button>
           </> : piece.worker ? (
             <>
               <Button variant="outline" onClick={() => selectSession(piece.worker!.sessionId)}><SquareArrowOutUpRight />Open worker</Button>
@@ -882,6 +1034,72 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSave
         </footer>
       </>}
     </aside>
+  );
+}
+
+/** One conflicting place as git marks it: the lead's side, the piece's side, and the marks between. */
+function ConflictExcerpt({ path, line, excerpt }: { path: string; line?: number; excerpt: string }) {
+  let side: "ours" | "theirs" | null = null;
+  return (
+    <div className="mt-2 overflow-hidden rounded-lg bg-well hairline" data-testid="conflict-excerpt">
+      <div className="border-b border-hairline px-3 py-1.5 font-mono text-[11.5px] text-muted-foreground">{path.split("/").pop()}{line != null ? ` · ${line}` : ""}</div>
+      <pre className="max-h-64 overflow-auto px-3 py-2 font-mono text-[11.5px] leading-[19px] scrollbar-thin">
+        {excerpt.split("\n").map((text, index) => {
+          const mark = /^(<<<<<<<|\|\|\|\|\|\|\||=======|>>>>>>>)/.exec(text)?.[1];
+          if (mark === "<<<<<<<") side = "ours";
+          const tone = mark ? "text-faint" : side === "ours" ? "bg-add/10" : side === "theirs" ? "bg-destructive/10" : "";
+          if (mark === "=======") side = "theirs";
+          if (mark === ">>>>>>>") side = null;
+          return <div key={index} className={cn("whitespace-pre-wrap break-words", tone)}>{text || " "}</div>;
+        })}
+      </pre>
+    </div>
+  );
+}
+
+/** Why a piece's accepted result is not in the lead's branch, and what each way out of it does. */
+function MergePanel({ run, piece }: { run: Run; piece: RunPiece }) {
+  const merge = piece.merge!;
+  const others = conflictsWith(run, piece);
+  const files = merge.files ?? [];
+  const shown = files.find((file) => file.excerpt);
+  const into = run.merge?.into || "the lead's branch";
+  return (
+    <div data-testid="merge-panel" data-merge-state={merge.state}>
+      <div className="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <MergeStateMark state={merge.state} />
+        {merge.state === "conflict" && others.length > 0 && <span className="text-xs text-muted-foreground">· with piece {numberList(others)}, already merged</span>}
+        {merge.state === "integrationFailed" && <span className="text-xs text-muted-foreground">· {merge.byHand ? "merged by the lead, not undone" : "the merge was undone"}</span>}
+      </div>
+      {merge.state === "conflict" && <>
+        <Section title="Conflicting files">
+          <ul className="flex flex-col gap-1.5" aria-label="Conflicting files">
+            {files.map((file) => (
+              <li key={file.path} className="flex items-center gap-2 rounded-lg bg-well px-3 py-2 hairline">
+                <span aria-hidden className="font-mono text-[11px] text-warning">C</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px]" title={file.path}>{file.path}</span>
+                <span className="shrink-0 text-[11.5px] text-faint">{file.hunks ? `${file.hunks} ${file.hunks === 1 ? "hunk" : "hunks"}` : "whole file"}</span>
+              </li>
+            ))}
+          </ul>
+          {shown?.excerpt && <ConflictExcerpt path={shown.path} line={shown.line} excerpt={shown.excerpt} />}
+        </Section>
+        <Section title="Why it happened"><Lines lines={conflictReasons(run, piece)} empty="Both sides changed the same lines." /></Section>
+        <Section title="What each choice does">
+          Sending it back gives the conflict to its worker as its brief: it rebases onto {into}, resolves it in its own worktree, and its result is checked again. Resolving in the lead sends the lead both sides and the pieces' goals, to merge it in its own checkout. Skip leaves this piece out and merges the ones that do not depend on it.
+        </Section>
+      </>}
+      {merge.state === "integrationFailed" && <>
+        <Section title="Integration check">
+          {merge.check && <CommandCard command={merge.check} label="Integration check" />}
+          {merge.note && <p className="mt-2 text-warning">{merge.note}</p>}
+        </Section>
+        <Section title="What each choice does">
+          Sending it back gives its worker what the check printed: it rebases onto {into}, makes the check pass, and its result is checked again. Skip leaves this piece out; pieces that depend on it wait for it.
+        </Section>
+      </>}
+      {merge.state === "failed" && <Section title="Why it was not merged"><span className="text-destructive">{merge.note}</span></Section>}
+    </div>
   );
 }
 
