@@ -3,7 +3,7 @@ import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor, type PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { api, errorMessage, gh, git, type CheckAuthority, type GitHubConnectionStatus, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
-import type { BranchInfo, ChangedFile, CommitInfo, UnfinishedMerge, WorkStatus } from "@/types/session";
+import type { BranchInfo, ChangedFile, CommitInfo, ConflictChoice, ConflictFile, UnfinishedMerge, WorkStatus } from "@/types/session";
 
 /** A workspace's Git status, with what is left in progress in it. */
 export interface SourceStatus extends WorkStatus {
@@ -48,6 +48,10 @@ export interface GitSource {
   /** Local only, with `unfinishedMerge`: commit or abort exactly the merge that was read. */
   commitMerge?(merge: UnfinishedMerge): Promise<void>;
   abortMerge?(merge: UnfinishedMerge): Promise<void>;
+  /** Local only, with `unfinishedMerge`: resolve a conflicted file in place (PRO-293). */
+  conflictFile?(merge: UnfinishedMerge, path: string): Promise<ConflictFile>;
+  resolveConflict?(merge: UnfinishedMerge, file: ConflictFile, index: number, choice: ConflictChoice): Promise<ConflictFile>;
+  markResolved?(merge: UnfinishedMerge, file: ConflictFile): Promise<void>;
   ghAvailable(): Promise<boolean>;
   /** Local connection setup; cloud credentials belong to the workspace. */
   githubStatus?(): Promise<GitHubConnectionStatus>;
@@ -102,6 +106,9 @@ export function localGitSource(cwd: string, authority?: CheckAuthority): GitSour
     unfinishedMerge: () => git.unfinishedMerge(cwd),
     commitMerge: (merge) => git.commitMerge(cwd, merge.head, merge.mergeHead).then(() => undefined),
     abortMerge: (merge) => git.abortMerge(cwd, merge.head, merge.mergeHead),
+    conflictFile: (merge, path) => git.conflictFile(cwd, merge.head, merge.mergeHead, path),
+    resolveConflict: (merge, file, index, choice) => git.resolveConflict(cwd, merge.head, merge.mergeHead, file.path, file.version, index, choice),
+    markResolved: (merge, file) => git.markResolved(cwd, merge.head, merge.mergeHead, file.path, file.version),
     ghAvailable: () => gh.available(),
     githubStatus: () => gh.connectionStatus(cwd),
     hasRemote: () => git.hasRemote(cwd),
