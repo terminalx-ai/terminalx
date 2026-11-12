@@ -114,7 +114,7 @@ describe("personal local sections", () => {
     nextSections = [{ ...section("release", [], "Release"), emoji: "🚀" }];
     await submit("Create");
     expect(mocks.invoke).toHaveBeenCalledWith("edit_local_section", { edit: { kind: "create", name: "Release", emoji: "🚀", sessionIds: undefined } });
-    expect(within(screen.getByRole("region", { name: "Release section" })).getByText(/Move sessions here/)).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Release section" })).getByText("Drag sessions here")).toBeTruthy();
     await menu("Release", "Rename section…");
     fireEvent.change(screen.getByLabelText("Section name"), { target: { value: "Ship it" } });
     nextSections = [{ ...nextSections[0]!, name: "Ship it" }]; await submit("Save");
