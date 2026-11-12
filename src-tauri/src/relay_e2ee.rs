@@ -440,8 +440,14 @@ struct E2eeSelectionWire {
 
 impl E2eeClientHandshake {
     pub fn new(desktop_public_key_b64: &str, transport: &str, relay_host_id: Option<&str>) -> Result<Self> {
+        Self::with_secret(StaticSecret::random_from_rng(OsRng).to_bytes(), desktop_public_key_b64, transport, relay_host_id)
+    }
+
+    /// [`Self::new`] for a client whose long-lived key is `secret`: a phone
+    /// racing its direct and Relay candidates sends the same key on both.
+    pub fn with_secret(secret: [u8; 32], desktop_public_key_b64: &str, transport: &str, relay_host_id: Option<&str>) -> Result<Self> {
         let desktop_key: [u8; 32] = decode_standard(desktop_public_key_b64, 32)?.try_into().unwrap();
-        let secret = StaticSecret::random_from_rng(OsRng);
+        let secret = StaticSecret::from(secret);
         let public = X25519PublicKey::from(&secret);
         let mut client_nonce = [0u8; 32];
         OsRng.fill_bytes(&mut client_nonce);

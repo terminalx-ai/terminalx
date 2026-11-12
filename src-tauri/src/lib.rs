@@ -149,6 +149,7 @@ mod models;
 mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
+pub mod power;
 mod project_start;
 mod project_templates;
 mod pty;
@@ -625,6 +626,10 @@ pub fn run() {
             commands::session_guest_leave,
             commands::pairing_generate,
             commands::pairing_revoke,
+            commands::pairing_approve,
+            commands::pairing_decline,
+            commands::pairing_disconnect,
+            commands::pairing_set_keep_awake,
             commands::machine_name,
             commands::set_machine_name,
             commands::add_project,
@@ -788,6 +793,9 @@ pub fn run() {
             commands::pr_attach,
             commands::pr_associations,
             commands::pr_associations_batch,
+            commands::pr_link_candidates,
+            commands::pr_link,
+            commands::pr_unlink,
             commands::pr_details,
             commands::pr_conversation,
             commands::pr_conversation_action,

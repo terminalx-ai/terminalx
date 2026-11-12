@@ -68,7 +68,7 @@ pub struct ConflictHunk {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ConflictSegment {
     Text { text: String },
     Conflict { hunk: ConflictHunk },

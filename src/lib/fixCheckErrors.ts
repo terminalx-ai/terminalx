@@ -60,7 +60,8 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled }: {
         const status = await source.workStatus();
         const result = await sessionPrs(source, sessionId, status.branch === status.defaultBranch ? null : status.branch ?? branch ?? null, isCurrent);
         if (result.error) throw new Error(result.error);
-        const candidates = result.rows.flatMap((row) => row.pr?.state === "OPEN" && actionsRuns(row.pr, true).length ? [row.pr] : []);
+        // A PR linked from another branch (PRO-294) is shown, not worked on here: Push goes to this session's branch, so its agent cannot fix it.
+        const candidates = result.rows.flatMap((row) => row.pr?.state === "OPEN" && (row.current || !row.association?.linked) && actionsRuns(row.pr, true).length ? [row.pr] : []);
         if (candidates.length > 1) throw new Error("Several pull requests have failing checks. Use Fix errors on the pull request you want in the Branch tab.");
         pr = candidates[0];
       }

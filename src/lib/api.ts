@@ -561,6 +561,14 @@ export const api = {
   pairingRetryRelay: () => invoke<PairingStatus>("pairing_retry_relay"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
+  /** Let the phone waiting on this Mac finish pairing (docs/PAIRING-APPROVAL.md). */
+  pairingApprove: (requestId: string) => invoke<PairingStatus>("pairing_approve", { requestId }),
+  /** Refuse it: the unclaimed device, its token and the active code are discarded. */
+  pairingDecline: (requestId: string) => invoke<PairingStatus>("pairing_decline", { requestId }),
+  /** End a device's live connections and keep its pairing; the phone stops reconnecting. */
+  pairingDisconnect: (deviceId: string) => invoke<PairingStatus>("pairing_disconnect", { deviceId }),
+  /** Keep this Mac awake while a phone is connected. */
+  pairingSetKeepAwake: (enabled: boolean) => invoke<PairingStatus>("pairing_set_keep_awake", { enabled }),
   /** This Mac's name as the user's other devices show it (#686). */
   machineName: () => invoke<MachineName>("machine_name"),
   /** Name this Mac; null lets it follow the computer's own name again. */
@@ -2253,6 +2261,27 @@ export interface PrAssociation {
   number: number;
   head: string;
   scope: PrScope;
+  /** Chosen with "Link pull request…" (PRO-294), not opened from this session; only a link can be unlinked. */
+  linked?: boolean;
+}
+
+/** An open pull request as "Link pull request…" lists it. */
+export interface OpenPr extends PullRequest {
+  /** `owner:branch` for a head on a fork, else the branch. */
+  headLabel: string;
+}
+
+/** The repository's open pull requests, and which ones a session already shows. */
+export interface PrLinkCandidates {
+  /** `owner/name`. */
+  repository: string;
+  /** Every open pull request; `prs` holds at most the first 100. */
+  total: number;
+  prs: OpenPr[];
+  /** Canonical URLs this session shows already. */
+  here: string[];
+  /** Canonical URLs another session shows. */
+  elsewhere: string[];
 }
 
 /** Owner-issued privacy provenance for one Actions click, reused unchanged
@@ -2288,6 +2317,9 @@ export const gh = {
   available: () => invoke<boolean>("gh_available"),
   associationsBatch: (sessionIds: string[]) => invoke<Record<string, PrAssociation[]>>("pr_associations_batch", { sessionKeys: sessionIds }),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
+  linkCandidates: (cwd: string, sessionId: string) => invoke<PrLinkCandidates>("pr_link_candidates", { cwd, sessionKey: sessionId }),
+  link: (sessionId: string, association: PrAssociation) => invoke<PrAssociation[]>("pr_link", { sessionKey: sessionId, association }),
+  unlink: (sessionId: string, url: string) => invoke<PrAssociation[]>("pr_unlink", { sessionKey: sessionId, url }),
   list: (cwd: string, branch: string, authority?: CheckAuthority) => invoke<PullRequest[]>("pr_list", { cwd, branch, ...(authority ? { authority } : {}) }),
   details: (cwd: string, number: number, url?: string, authority?: CheckAuthority) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}), ...(authority ? { authority } : {}) }),
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>

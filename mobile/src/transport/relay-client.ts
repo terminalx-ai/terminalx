@@ -38,7 +38,34 @@ export class RelayOuterError extends Error {
   }
 }
 
-type RelayClientOptions =
+/**
+ * How long a pairing connection waits for `e2ee_authenticated` once it has
+ * sent `e2ee_auth`: the Mac holds a QR pairing until the person compares the
+ * fingerprint and approves, for up to two minutes (`APPROVAL_TTL_MS`), and
+ * this leaves a margin (docs/PAIRING-APPROVAL.md).
+ */
+export const PAIRING_APPROVAL_WAIT_MS = 150_000;
+
+/**
+ * The Mac refused this pairing in so many words (a `pairing_refused` message,
+ * docs/PAIRING-APPROVAL.md): the person declined or did not answer in time,
+ * another phone's request was waiting, or the code was no longer active.
+ * A connection that merely drops while waiting is not this: the Mac may still
+ * approve, so it stays an ordinary failure the phone can retry.
+ */
+export class PairingNotApprovedError extends Error {
+  constructor(readonly reason: string) {
+    super("The Mac did not approve this pairing, or the request timed out");
+    this.name = "PairingNotApprovedError";
+  }
+}
+
+/** Only for pairing: wait for the Mac's approval instead of the usual handshake deadline. */
+type ApprovalOptions = {
+  awaitApproval?: { timeoutMs?: number; onWaiting?: () => void };
+};
+
+type RelayClientOptions = ApprovalOptions & (
   | {
       transport?: "relay";
       relay: Omit<PairingRelay, "inviteToken" | "inviteExpiresAt">;
@@ -57,7 +84,7 @@ type RelayClientOptions =
       desktopPublicKeyB64: string;
       clientSecretKey?: Uint8Array;
       createSocket?: (url: string) => WebSocket;
-    };
+    });
 
 export class RelayClient {
   private socket: WebSocket | null = null;
@@ -100,6 +127,7 @@ export class RelayClient {
     this.outerReady = false;
     this.handshakeReady = false;
     this.authenticated = false;
+    this.refusal = null;
     this.resumeConfirmation = null;
     this.fragments = Promise.resolve(false);
     this.assembler = new FragmentAssembler();
@@ -185,6 +213,9 @@ export class RelayClient {
     this.fail(new Error("Relay connection closed"));
   }
 
+  /** The reason of a `pairing_refused` the Mac sent on this connection. */
+  private refusal: string | null = null;
+
   private async handleMessage(raw: unknown): Promise<void> {
     if (!this.socket || !this.session) return;
     if (!this.outerReady) {
@@ -204,6 +235,14 @@ export class RelayClient {
       if (typeof raw !== "string" || !this.session.acceptReady(parseJson(raw))) throw new Error("Invalid E2EE ready");
       this.handshakeReady = true;
       this.socket.send(this.session.sealText(JSON.stringify({ type: "e2ee_auth", v: 2, transcriptHashB64: this.session.transcriptHashB64, deviceToken: this.options.deviceToken })));
+      const approval = this.options.awaitApproval;
+      if (approval) {
+        // The Mac answers at once when it does not gate (an older Mac, an approved device); otherwise it waits for the person.
+        if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+        // No answer at all is not a refusal: the Mac answers a timeout with `pairing_refused` itself.
+        this.handshakeTimer = setTimeout(() => this.fail(new Error("The Mac did not answer the pairing request in time")), approval.timeoutMs ?? PAIRING_APPROVAL_WAIT_MS);
+        approval.onWaiting?.();
+      }
       return;
     }
     // An ArrayBuffer is opened at once: waiting would let a text frame sent
@@ -223,6 +262,12 @@ export class RelayClient {
     }
     const value = parseJson(text);
     if (!this.authenticated) {
+      const refused = this.options.awaitApproval ? pairingRefusal(value) : null;
+      if (refused !== null) {
+        // Kept at once: the Mac closes right after, and that close must not hide the answer.
+        this.refusal = refused;
+        throw new PairingNotApprovedError(refused);
+      }
       if (!isAuthenticated(value, this.session.transcriptHashB64)) throw new Error("E2EE device authentication rejected");
       this.authenticated = true;
       // Asked first and not waited for: only a request too large for one frame waits for the answer.
@@ -260,8 +305,9 @@ export class RelayClient {
     if (isEvent(value)) for (const listener of this.listeners) listener(value);
   }
 
-  private fail(error: Error): void {
+  private fail(cause: Error): void {
     if (this.state === "disconnected" && !this.connectPromise) return;
+    const error = this.refusal !== null && !(cause instanceof PairingNotApprovedError) ? new PairingNotApprovedError(this.refusal) : cause;
     this.setState("disconnected", error);
     const socket = this.socket;
     this.socket = null;
@@ -396,6 +442,13 @@ function parseJson(value: string): unknown {
   } catch {
     throw new Error("Invalid relay JSON");
   }
+}
+
+/** The reason in the Mac's `{type: "pairing_refused", v: 1, reason}`, or null for anything else. */
+function pairingRefusal(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).sort().join(",") === "reason,type,v" && record.type === "pairing_refused" && record.v === 1 && typeof record.reason === "string" ? record.reason : null;
 }
 
 function isAuthenticated(value: unknown, hash: string): boolean {
