@@ -15,6 +15,7 @@ pub mod claude;
 pub mod codex;
 pub mod host;
 pub mod opencode;
+pub mod provider_sandbox;
 pub mod readiness;
 pub mod read_only;
 pub mod reset;
