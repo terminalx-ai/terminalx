@@ -865,6 +865,7 @@ fn start_run(
                 }),
                 cwd,
                 tab: Some(run_tab(automation)),
+                orchestrate: false,
             },
         )
         .map_err(anyhow::Error::msg)?;

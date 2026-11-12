@@ -1,5 +1,5 @@
 import { createContext, useContext, useMemo, type ReactElement } from "react";
-import { CircleAlert, LoaderCircle, Network, ShieldAlert } from "@/icons";
+import { CircleAlert, GitFork, LoaderCircle, Network, ShieldAlert } from "@/icons";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PieceStateIcon, PIECE_STATE_STYLE } from "@/components/orchestration/PieceStateMark";
 import { StatusMarkIcon } from "@/components/ui/SessionStatus";
@@ -33,7 +33,11 @@ export interface LeadFamily {
   run: Run | null;
 }
 
-/** The family a row stands for when it is a lead's: its workers (of every session it stands for) and its run. */
+/**
+ * The family a row stands for when it is a lead's: its workers (of every session it stands for) and its run.
+ * A session whose children only record it as their parent has a family with no run ([`leadsRun`] is false):
+ * they still nest under it, but it is no run's lead (PRO-337).
+ */
 export function useLeadFamily(lead: SessionEntry, peers: readonly SessionEntry[]): LeadFamily | null {
   const { workersOf, runs } = useContext(RunFamiliesContext);
   return useMemo(() => {
@@ -93,9 +97,26 @@ export function NeedsBadge({ needs, className }: { needs: readonly Need[]; class
   );
 }
 
+/** Whether the family's row is a run's lead: only that row has the lead glyph and the run's summary (PRO-337). */
+export function leadsRun(family: LeadFamily | null): family is LeadFamily & { run: Run } {
+  return !!family?.run;
+}
+
 /** A lead row's mark: the run's glyph, where any other row has its status mark. */
 export function LeadGlyph() {
   return <Network aria-hidden data-testid="lead-glyph" className="size-3.5 shrink-0 text-accent" />;
+}
+
+/**
+ * The quieter mark of a session that started others but leads no run (PRO-337):
+ * after its title, the row keeping its own status mark, and no run summary.
+ */
+export function StarterMark() {
+  return (
+    <span role="img" aria-label="Started these sessions" title="Started these sessions" data-testid="starter-mark" className="inline-flex shrink-0 text-faint">
+      <GitFork aria-hidden className="size-3" />
+    </span>
+  );
 }
 
 /**

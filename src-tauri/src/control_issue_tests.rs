@@ -357,6 +357,45 @@ fn worker_limit_child() {
     service.execute("runs.stop", json!({"caller": caller}), "stop").unwrap();
 }
 
+/// PRO-337: a session started with Orchestrate leads a run that waits for a
+/// person's Approve, though the project asks for no approval; another lead's does not.
+#[test]
+fn a_run_from_an_orchestrate_start_waits_for_approval_with_approval_off() {
+    let _home = crate::store::temp_home();
+    let repo = super::tests::git_repo();
+    let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+    let mut settings = crate::store::settings::load();
+    settings.orchestrator.require_approval = false;
+    settings.orchestrator.projects.entry(project.path.clone()).or_default().require_approval = Some(false);
+    crate::store::settings::save(&settings).unwrap();
+    let (service, _sink) = super::tests::headless_service();
+    let lead = |orchestrate: bool| {
+        let request: crate::session_ops::NewSession = serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": true, "tab": {"harness": "claude"}, "orchestrate": orchestrate,
+        })).unwrap();
+        crate::session_ops::create_session_entry(request).unwrap()
+    };
+    let plan = json!({"goal": "Two small pieces", "pieces": [
+        {"id": "one", "title": "First", "kind": "code", "doneChecks": [{"type": "command", "run": "exit 0"}], "owns": ["a/"]},
+        {"id": "two", "title": "Second", "kind": "code", "doneChecks": [{"type": "command", "run": "exit 0"}], "owns": ["b/"]},
+    ]});
+
+    let asked = lead(true);
+    assert!(index::get(&asked.id).unwrap().orchestrate_start(), "the mark is stored with the session");
+    let caller = json!({"session": asked.id, "tab": asked.tabs[0].id});
+    let created = service.execute("runs.create", json!({"plan": plan, "caller": caller}), "create").unwrap();
+    assert_eq!((&created["approvalRequired"], &created["run"]["state"]), (&json!(true), &json!("awaitingApproval")));
+    let sessions_before = index::load().unwrap().len();
+    assert_eq!(service.execute("runs.start", json!({"caller": caller}), "start").unwrap_err().code, "awaiting_approval");
+    assert_eq!(index::load().unwrap().len(), sessions_before, "no worker before approval");
+
+    // A session started the ordinary way follows the setting: its run is ready at once.
+    let plain = lead(false);
+    assert!(!index::get(&plain.id).unwrap().orchestrate_start());
+    let created = service.execute("runs.create", json!({"plan": plan, "caller": {"session": plain.id, "tab": plain.tabs[0].id}}), "create").unwrap();
+    assert_eq!((&created["approvalRequired"], &created["run"]["state"]), (&json!(false), &json!("planned")));
+}
+
 /// A run through the control service, as `terminalx runs` and the window's
 /// Approve drive it, against a real repository and a stand-in `claude`.
 #[test]

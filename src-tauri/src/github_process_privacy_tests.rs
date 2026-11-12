@@ -569,6 +569,7 @@ fn fresh_fixture(root: &Path) -> FetchFixture {
         title: Some("Fetch privacy".into()), use_worktree: true, base_ref: Some("main".into()),
         worktree_name: Some("privacy-fetch".into()), on_main: false, issue: None, automation: None, cwd: None,
         tab: Some(crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
+        orchestrate: false,
     }).unwrap();
     std::fs::write(root.join("real-fetch"), "").unwrap();
     FetchFixture { seed, project, worktree: entry.cwd.into(), session: entry.id }

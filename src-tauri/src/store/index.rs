@@ -560,6 +560,11 @@ pub struct SessionEntry {
 /// then writes it back untouched, and the limits it stands for stay.
 const RUN_WORKER: &str = "runWorker";
 
+/// The key a session started with Orchestrate (PRO-337) is marked with: any run it
+/// leads waits for a person's Approve, whatever `orchestrator.requireApproval`
+/// says. Kept among the unknown keys for the same reason as [`RUN_WORKER`].
+const ORCHESTRATE_START: &str = "orchestrateStart";
+
 impl SessionEntry {
     /// Whether this session was started as an orchestration run's worker
     /// (`orchestration::guard`): it never pushes, merges or deploys.
@@ -570,6 +575,16 @@ impl SessionEntry {
     /// Mark the session as a run's worker. Never unmarked: the limits outlive the run.
     pub fn mark_run_worker(&mut self) {
         self.unknown.insert(RUN_WORKER.into(), serde_json::Value::Bool(true));
+    }
+
+    /// Whether this session was started with Orchestrate: a run it leads always asks first.
+    pub fn orchestrate_start(&self) -> bool {
+        self.unknown.get(ORCHESTRATE_START).is_some_and(|marked| marked == true)
+    }
+
+    /// Mark the session as started with Orchestrate. Never unmarked: the person asked to approve its runs.
+    pub fn mark_orchestrate_start(&mut self) {
+        self.unknown.insert(ORCHESTRATE_START.into(), serde_json::Value::Bool(true));
     }
 
     /// Whether `session_id` is recorded as having started this session.

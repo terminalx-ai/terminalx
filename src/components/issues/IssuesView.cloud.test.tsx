@@ -193,6 +193,18 @@ describe("the Issues view for a cloud project", () => {
     expect(calls("work_status").every((args) => args.projectPath !== PROJECT)).toBe(true);
   });
 
+  it("offers no Orchestrate for a cloud project's issue, even with Orchestration runs on (PRO-337)", async () => {
+    const { noteExperimentalSettings, resetExperimentalSettingsForTests } = await import("@/lib/experimentalSettings");
+    noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: true });
+    try {
+      await openIssue();
+      expect(screen.getByRole("button", { name: "Start session" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Orchestrate" })).toBeNull();
+    } finally {
+      resetExperimentalSettingsForTests();
+    }
+  });
+
   it("starts an issue in the project's workspace, in a worktree named after it, carried on by the runtime", async () => {
     setPrefs({ lastMode: "default", cloudIssuePipelines: { [PROJECT]: { enabled: true, autoMerge: true, requirePerson: false, maxRounds: 2, mergeMethod: "squash", protected: { migrations: true, deploy: true, security: true, paths: [] }, ignoredChecks: [] } } });
     await openIssue();

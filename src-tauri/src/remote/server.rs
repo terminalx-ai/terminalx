@@ -2502,6 +2502,7 @@ impl WorkspaceRpc {
                 automation: None,
                 cwd: None,
                 tab: Some(first_tab),
+                orchestrate: false,
             },
         )
         .map_err(RpcError::internal)?;

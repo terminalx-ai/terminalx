@@ -56,6 +56,9 @@ pub struct Lead {
     pub repository: bool,
     /// The lead's own checkout: where a path a piece owns is looked up.
     pub cwd: String,
+    /// The lead was started with Orchestrate (PRO-337): its runs wait for a
+    /// person's Approve whatever the project's `requireApproval` says.
+    pub ask_first: bool,
 }
 
 /// A worker session, just created for a piece.
@@ -248,7 +251,8 @@ fn models_for(host: &dyn Host, plan: &Plan) -> Vec<Model> {
 }
 
 /// Validate a plan and store it as a run of `lead_session`. It waits for
-/// approval unless its project asks for none.
+/// approval unless its project asks for none and its lead was not started
+/// with Orchestrate.
 pub fn create(host: &dyn Host, plan: &Plan, lead_session: &str, lead_tab: Option<String>) -> Result<Run, EngineError> {
     let lead = host.lead(lead_session)?;
     if !lead.repository {
@@ -259,7 +263,8 @@ pub fn create(host: &dyn Host, plan: &Plan, lead_session: &str, lead_tab: Option
         error.details = json!({"run": open.id, "state": open.state});
         return Err(error);
     }
-    let limits = host.limits(&lead.project_path);
+    let mut limits = host.limits(&lead.project_path);
+    limits.require_approval |= lead.ask_first;
     let agents = host.worker_agents();
     let models = models_for(host, plan);
     let pieces = plan::validate(plan, &rules_for(&limits, &lead, &agents, &models))?;
