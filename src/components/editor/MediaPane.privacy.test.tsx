@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { refreshDataPrivacy, setDataPrivacy } from "@/lib/dataPrivacy";
-import { closeAllEditors, getEditors, openFile } from "@/lib/editors";
+import { closeAllEditors, getEditors, isReviewEditor, openFile } from "@/lib/editors";
 import { localGitSource } from "@/lib/gitSource";
 import { FileDiff } from "@/components/changes/FileDiff";
 import { MediaPane } from "./MediaPane";
@@ -78,7 +78,7 @@ it("withdraws external image sources while retaining loopback media and restores
   const entry = (rel: string) => {
     const id = openFile("privacy-media", "/repo", rel);
     const editor = getEditors().editors.find((editor) => editor.id === id);
-    if (!editor || editor.kind === "diff" || editor.kind === "pr") throw new Error("Expected file editor");
+    if (!editor || isReviewEditor(editor)) throw new Error("Expected file editor");
     return editor;
   };
   render(<><MediaPane entry={entry("local.png")} visible /><MediaPane entry={entry("remote.png")} visible /></>);
