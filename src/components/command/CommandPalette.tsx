@@ -923,7 +923,7 @@ export function CommandPalette({
         </div>
 
         {!statusSessionId && (
-          <div role="tablist" aria-label="Search in" className="mt-2 flex items-center gap-1 border-b border-hairline px-3 pb-2">
+          <div role="tablist" aria-label="Search in" className="mt-2 flex h-10 items-center gap-1 border-b border-hairline px-2.5">
             {PALETTE_TABS.map((item) => (
               <button
                 key={item.id}
@@ -990,10 +990,11 @@ export function CommandPalette({
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-3 border-t border-hairline px-3 py-2 text-[10px] text-faint">
-          <span><kbd className="rounded bg-veil-raised px-1">↑↓</kbd> move</span>
-          <span><kbd className="rounded bg-veil-raised px-1">↵</kbd> open</span>
-          <span><kbd className="rounded bg-veil-raised px-1">Esc</kbd> close</span>
+        <div className="flex h-9 items-center gap-4 border-t border-hairline px-4 text-xs text-faint">
+          <span>↑↓ to move</span>
+          <span>↵ to open</span>
+          {/* Design 07.05: with nothing typed, Settings lists only its pages. */}
+          {scope === "settings" && !query.trim() && <span className="ml-auto truncate">Type to search every setting, not only pages</span>}
         </div>
       </DialogContent>
     </Dialog>
