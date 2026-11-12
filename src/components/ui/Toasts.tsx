@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { AlertCircle, Check, CheckCircle2, CircleX, Copy, MessageCircleQuestion, Play, X } from "@/icons";
+import { AlertCircle, Check, CheckCircle2, CircleX, Copy, MessageCircleQuestion, Play, RotateCw, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { dismissNotice, openNotice, useNotices } from "@/lib/notify";
@@ -7,7 +7,7 @@ import { useSessionStore } from "@/lib/sessions";
 import { WorkspaceSetupToasts } from "@/components/terminal/WorkspaceSetupNotice";
 import { AgentLoginToasts } from "@/components/settings/AgentLoginToasts";
 import { copyText } from "@/lib/clipboard";
-import { dismissError, errorToastText, useErrorToasts, type ErrorToast } from "@/lib/errorToasts";
+import { dismissError, errorToastText, runErrorAction, useErrorToasts, type ErrorToast, type ErrorToastAction } from "@/lib/errorToasts";
 
 /** In-app notices, bottom right; clicking one goes to the session. */
 export function Toasts() {
@@ -62,12 +62,18 @@ export function Toasts() {
  */
 function ErrorToastCard({ toast }: { toast: ErrorToast }) {
   const [copy, setCopy] = useState<"idle" | "copied" | "failed">("idle");
+  const [running, setRunning] = useState<string | null>(null);
   const reset = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(reset.current), []);
   const onCopy = () => {
     window.clearTimeout(reset.current);
     copyText(errorToastText(toast)).then(() => setCopy("copied"), () => setCopy("failed"));
     reset.current = window.setTimeout(() => setCopy("idle"), 2000);
+  };
+  const onAction = (action: ErrorToastAction) => {
+    if (running) return;
+    setRunning(action.label);
+    void runErrorAction(toast.id, action).finally(() => setRunning(null));
   };
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "Escape") return;
@@ -86,20 +92,43 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
       <CircleX className="mt-0.5 size-4 shrink-0 text-destructive" />
       <div className="min-w-0 flex-1">
         <div id={`${toast.id}-title`} className="flex items-center gap-1.5 font-medium">
-          <span className="truncate">Something went wrong</span>
+          <span className={toast.title ? "min-w-0 break-words" : "truncate"}>{toast.title ?? "Something went wrong"}</span>
           {toast.count > 1 && <span className="shrink-0 text-xs font-normal text-faint" aria-label={`${toast.count} times`}>×{toast.count}</span>}
         </div>
         <div id={`${toast.id}-body`} className="mt-0.5 max-h-40 overflow-y-auto break-words text-xs text-muted-foreground">
-          {toast.cause ? <>{toast.action}: <span className="font-mono text-foreground">{toast.cause}</span></> : `${toast.action}.`}
+          {toast.title ? (
+            <>
+              {toast.action ? <div>{toast.action}.</div> : null}
+              {toast.cause ? <div className="font-mono text-foreground" data-error-detail="">{toast.cause}</div> : null}
+            </>
+          ) : toast.cause ? <>{toast.action}: <span className="font-mono text-foreground">{toast.cause}</span></> : `${toast.action}.`}
         </div>
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+        {toast.actions?.map((action) => (
+          <button
+            key={action.label}
+            type="button"
+            disabled={!!running}
+            aria-busy={running === action.label || undefined}
+            onClick={() => onAction(action)}
+            className={cn(
+              "inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs text-muted-foreground hover:bg-veil-strong hover:text-foreground disabled:opacity-60",
+              action.icon === "retry" && "hairline",
+            )}
+          >
+            {action.icon === "retry" ? <RotateCw className={cn("size-3.5", running === action.label && "animate-spin")} /> : null}
+            {action.label}
+          </button>
+        ))}
         <button
           type="button"
           onClick={onCopy}
-          className="mt-2.5 inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs text-muted-foreground hairline hover:bg-veil-strong hover:text-foreground"
+          className="inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs text-muted-foreground hairline hover:bg-veil-strong hover:text-foreground"
         >
           {copy === "copied" ? <Check className="size-3.5 text-add" /> : <Copy className="size-3.5" />}
           {copy === "copied" ? "Copied" : copy === "failed" ? "Couldn't copy" : "Copy error"}
         </button>
+        </div>
         <span className="sr-only" aria-live="polite">{copy === "copied" ? "Error copied to the clipboard" : ""}</span>
       </div>
       <button

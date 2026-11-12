@@ -852,6 +852,38 @@ pub struct CliTab {
 
 /// How soon after it was started a CLI that goes again never got going.
 const STARTUP_EXIT: std::time::Duration = std::time::Duration::from_secs(15);
+/// The longest a new tab's first showing waits to learn whether its agent
+/// got going ([`SessionManager::check_fresh_start`]).
+const FRESH_START_WAIT: Duration = Duration::from_secs(10);
+
+/// What a new tab's first start looks like at one moment (PRO-291).
+#[derive(Debug, Clone, Copy)]
+struct FreshStart {
+    /// The CLI it launched is still the tab's, and still running.
+    cli_live: bool,
+    /// Someone stopped it: that is no failure of its own.
+    stopping: bool,
+    /// The CLI said it is up (its `SessionStart` hook).
+    arrived: bool,
+    /// How long its pane has printed nothing, once it printed anything.
+    quiet: Option<Duration>,
+    elapsed: Duration,
+}
+
+impl FreshStart {
+    /// `Some(true)` once it got going (or the wait is over), `Some(false)`
+    /// when it exited while starting, `None` while it is still starting.
+    fn outcome(self) -> Option<bool> {
+        if self.stopping || self.arrived {
+            return Some(true);
+        }
+        if !self.cli_live {
+            return Some(false);
+        }
+        let settled = self.quiet.is_some_and(|quiet| quiet >= tui::READY_QUIET);
+        (settled || self.elapsed >= FRESH_START_WAIT).then_some(true)
+    }
+}
 
 impl CliTab {
     /// Whether this CLI went before it ever got going: within moments of the
@@ -1147,6 +1179,10 @@ pub struct SessionManager {
     session_stop_pids: Arc<Mutex<HashMap<String, Vec<u32>>>>,
     /// Tabs following their terminal (#437); off until the desktop app asks.
     follow: Arc<follow::Following>,
+    /// Tabs added since their agent was first started, by `key_of` (PRO-291):
+    /// `None` until that first start is known to have got going, then the
+    /// failure, kept for any other window that asks, until the tab closes.
+    fresh_starts: Arc<Mutex<HashMap<String, Option<String>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1379,6 +1415,9 @@ impl Drop for Ticket {
 
 /// How long a restart waits for the outgoing CLI to let go of its conversation.
 const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+/// How long a stop waits, from its signal, for the agent's exit to be
+/// confirmed: what a tab's close tells the reader it waited (PRO-291).
+const STOP_CONFIRM_WAIT: Duration = Duration::from_secs(recovery::CLOSE_WAIT_SECS);
 /// Columns and rows every agent CLI starts at. A view that controls the
 /// pane's size (the desktop's terminal view, a cloud tab's controller)
 /// resizes it from here.
@@ -1579,6 +1618,7 @@ impl SessionManager {
             stop_pids: Arc::new(Mutex::new(Vec::new())),
             session_stop_pids: Arc::default(),
             follow: Arc::default(),
+            fresh_starts: Arc::default(),
         };
         let mut watcher = manager.clone();
         // The polling copy must not keep its own lifetime alive. In particular,
@@ -3863,7 +3903,67 @@ impl SessionManager {
                 return Ok(());
             }
         }
-        self.ensure_started(session_id, tab_id)
+        let key = key_of(session_id, tab_id);
+        let fresh = self.fresh_starts.lock().unwrap().get(&key).cloned();
+        if let Some(Some(failure)) = fresh {
+            bail!(failure);
+        }
+        self.ensure_started(session_id, tab_id)?;
+        if fresh.is_some() {
+            self.check_fresh_start(session_id, tab_id)?;
+        }
+        Ok(())
+    }
+
+    /// A tab just added is shown for the first time: its agent either gets
+    /// going or exits while starting, and the window that opened it says
+    /// which (PRO-291). Waits until the CLI says it is up, goes quiet, or
+    /// [`FRESH_START_WAIT`]; an exit before that fails with the reason and the
+    /// agent's last line ([`recovery::startup_failure`]). A headless agent
+    /// reports its own launch errors, and is not waited for.
+    fn check_fresh_start(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        let key = key_of(session_id, tab_id);
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let launched = {
+            let rt = rt_arc.lock().unwrap();
+            match &rt.engine {
+                Engine::Cli(p) if p.by_hand.is_none() => Some((p.pane_id.clone(), rt.harness.clone())),
+                _ => None,
+            }
+        };
+        let Some((pane, harness)) = launched else {
+            self.fresh_starts.lock().unwrap().remove(&key);
+            return Ok(());
+        };
+        let began = Instant::now();
+        let outcome = loop {
+            let seen = {
+                let rt = rt_arc.lock().unwrap();
+                let cli = match &rt.engine { Engine::Cli(p) if p.pane_id == pane => Some(p), _ => None };
+                FreshStart {
+                    cli_live: cli.is_some() && self.terminals.is_running(&pane),
+                    stopping: rt.stopping,
+                    arrived: cli.is_some_and(|p| p.ready.arrived()),
+                    quiet: self.terminals.quiet_for(&pane),
+                    elapsed: began.elapsed(),
+                }
+            };
+            if let Some(outcome) = seen.outcome() {
+                break outcome;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        if outcome {
+            self.fresh_starts.lock().unwrap().remove(&key);
+            return Ok(());
+        }
+        let output = self.terminals.program_output(&pane).or_else(|| self.terminals.read_output(&pane)).unwrap_or_default();
+        let failure = recovery::startup_failure(&harness, &recovery::EarlyExit::read(&output));
+        log::warn!("[{pane}] exited while starting a new tab");
+        if let Some(slot) = self.fresh_starts.lock().unwrap().get_mut(&key) {
+            *slot = Some(failure.clone());
+        }
+        bail!(failure)
     }
 
     fn stop_with(&self, session_id: &str, tab_id: &str, keep_unread: bool) -> Result<()> {
@@ -3912,6 +4012,7 @@ impl SessionManager {
             }
             (pane, pid)
         };
+        let signalled = Instant::now();
         if let Some(pane) = pane {
             self.terminals.kill_and_wait(&pane, RESTART_WAIT);
         } else if self.host.is_live(&key) {
@@ -3919,7 +4020,7 @@ impl SessionManager {
         } else if let Some(pid) = pid {
             crate::harness::host::terminate(pid);
         }
-        let deadline = Instant::now() + RESTART_WAIT;
+        let deadline = signalled + STOP_CONFIRM_WAIT;
         while pid.is_some_and(crate::harness::host::is_alive) {
             if Instant::now() >= deadline {
                 let mut rt = rt_arc.lock().unwrap();
@@ -3946,8 +4047,17 @@ impl SessionManager {
         use crate::issue_pipeline::admission::{fence, Kind, Scope, TAB_CLOSED};
         let _closing = fence(Kind::Refuse(TAB_CLOSED), [Scope::Tab(session_id.into(), tab_id.into())]);
         let entry = index::get(session_id)?;
-        let pane = entry.tab(tab_id).context("tab not found")?.pane_id();
-        self.stop(session_id, tab_id)?;
+        let tab = entry.tab(tab_id).context("tab not found")?;
+        let pane = tab.pane_id();
+        // An agent that would not exit leaves its tab open, and the reader is
+        // told whose it was and how long it was given (PRO-291).
+        if let Err(error) = self.stop(session_id, tab_id) {
+            if recovery::exit_unconfirmed(&format!("{error:#}")) {
+                bail!(recovery::close_timed_out(agent_name(&tab.harness)));
+            }
+            return Err(error);
+        }
+        self.fresh_starts.lock().unwrap().remove(&key_of(session_id, tab_id));
         // A followed shell is closed by the explicit tab-close action too.
         if crate::pty::is_shell_id(&pane) {
             self.terminals.kill_and_wait(&pane, RESTART_WAIT);
@@ -4430,7 +4540,9 @@ impl SessionManager {
         if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(&index::permission_mode_or_default(tab.permission_mode.as_deref())) {
             bail!("New tabs in a shared session must use a permission mode other than Bypass.");
         }
-        crate::session_ops::add_tab_entry(session_id, tab).map_err(|error| anyhow!(error))
+        let added = crate::session_ops::add_tab_entry(session_id, tab).map_err(|error| anyhow!(error))?;
+        self.fresh_starts.lock().unwrap().insert(key_of(session_id, &added.id), None);
+        Ok(added)
     }
 
     /// The app asks for another permission mode. Neither TUI has a command
@@ -7436,6 +7548,33 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+
+    #[test]
+    fn a_new_tabs_first_start_fails_only_when_its_cli_went_before_getting_going() {
+        let start = |cli_live, stopping, arrived, quiet: Option<u64>, elapsed: u64| {
+            FreshStart { cli_live, stopping, arrived, quiet: quiet.map(Duration::from_millis), elapsed: Duration::from_millis(elapsed) }.outcome()
+        };
+        // Still starting: nothing to say yet.
+        assert_eq!(start(true, false, false, None, 500), None);
+        assert_eq!(start(true, false, false, Some(1_000), 1_500), None);
+        // Up: its hook arrived, or it drew its screen and went quiet.
+        assert_eq!(start(true, false, true, None, 200), Some(true));
+        assert_eq!(start(true, false, false, Some(tui::READY_QUIET.as_millis() as u64), 4_000), Some(true));
+        // Gone before either: it exited while starting.
+        assert_eq!(start(false, false, false, Some(100), 300), Some(false));
+        // Stopped on purpose, or already up when it went: no failure of the start.
+        assert_eq!(start(false, true, false, None, 300), Some(true));
+        assert_eq!(start(false, false, true, None, 300), Some(true));
+        // The wait is bounded: a CLI that never says anything is let be.
+        assert_eq!(start(true, false, false, None, FRESH_START_WAIT.as_millis() as u64), Some(true));
+    }
+
+    #[test]
+    fn closing_waits_as_long_as_its_message_says() {
+        assert_eq!(STOP_CONFIRM_WAIT, Duration::from_secs(recovery::CLOSE_WAIT_SECS));
+        assert!(STOP_CONFIRM_WAIT >= RESTART_WAIT, "the stop's own kill wait fits inside it");
+        assert_eq!(recovery::close_timed_out(agent_name("codex")), "Codex didn't stop within 10 seconds");
+    }
 
     #[test]
     fn permission_timeout_disconnects_before_runtime_lock_cleanup() {

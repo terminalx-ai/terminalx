@@ -65,7 +65,12 @@ beforeEach(async () => {
   backend.calls = [];
 });
 
-afterEach(() => { cleanup(); dropEditors(() => true); });
+afterEach(async () => {
+  cleanup();
+  dropEditors(() => true);
+  const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+  for (const toast of getErrorToasts()) dismissError(toast.id);
+});
 
 describe("the new-tab button", () => {
   it("ends the row of tabs and opens the same menu as before", async () => {
@@ -188,6 +193,45 @@ describe("the tab shortcuts", () => {
     expect(names().indexOf("Review")).toBe(2);
     expect(shown()).toBe("Review");
     void shell;
+  });
+
+  it("leave a tab whose agent would not stop open, on screen, and say so (PRO-291)", async () => {
+    const { api } = await import("@/lib/api");
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    const refused = vi.spyOn(api, "removeTab").mockRejectedValueOnce("Claude Code didn't stop within 10 seconds");
+    render(<TabsHarness />);
+    press(composer(), digit(3));
+    press(composer(), { key: "w", code: "KeyW" });
+    await flush();
+    await flush();
+    expect(names()).toContain("Review");
+    expect(shown()).toBe("Review");
+    const [toast] = getErrorToasts();
+    expect(toast).toMatchObject({ title: "Couldn't close the chat. Try again.", action: "Claude Code didn't stop within 10 seconds, so “Review” is still open", key: "close:agent:a3" });
+    expect(toast.actions?.map((action) => action.label)).toEqual(["Try again"]);
+    refused.mockRestore();
+    dismissError(toast.id);
+  });
+});
+
+describe("the local new-tab menu (PRO-291)", () => {
+  it("closes a tab whose agent exited while starting and says why", async () => {
+    const { agent } = await import("@/lib/api");
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    const started = vi.spyOn(agent, "startOnOpen").mockRejectedValueOnce("codex exited while starting\nerror: unexpected argument '--yolo' found");
+    render(<TabsHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Codex" }));
+    await flush();
+    await flush();
+    expect(backend.callsOf("add_tab")).toHaveLength(1);
+    expect(backend.callsOf("remove_tab")).toHaveLength(1);
+    expect(getSessionStore().sessions.find((entry) => entry.id === "a")!.tabs.map((tab) => tab.id)).toEqual(["a1", "a2", "a3"]);
+    const [toast] = getErrorToasts();
+    expect(toast).toMatchObject({ title: "Couldn't open a new Codex tab: codex exited while starting", cause: "error: unexpected argument '--yolo' found" });
+    expect(toast.actions?.map((action) => action.label)).toEqual(["Try again"]);
+    started.mockRestore();
+    dismissError(toast.id);
   });
 });
 

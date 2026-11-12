@@ -42,21 +42,135 @@ import { isMac, useShortcutKeycaps } from "@/lib/hotkeys";
 import { openSessionShare } from "@/lib/localSharing";
 import { getPrefs } from "@/lib/prefs";
 import { isQuickChat } from "@/lib/quickChats";
-import { archiveSession, forkSession, openSkills, useSessionStore } from "@/lib/sessions";
-import { useTabRow, closePeer, hasOwnTitle, isShellPeer, peerAgent, peerIsLive, peerLabel, peerShell, peerStatus, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { archiveSession, forkSession, getSessionStore, openSkills, removeTab, selectSession, useSessionStore } from "@/lib/sessions";
+import { useTabRow, activatePeer, closePeer, hasOwnTitle, isShellPeer, peerAgent, peerIsLive, peerLabel, peerShell, peerStatus, sessionOfPeer, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { BULK_CLOSE_LABEL, canMoveTab, canReopenTab, canRestartAgent, duplicateTab, moveTabBy, newTab, moveTabToPane, otherPane, planBulkClose, renamePeer, reopenClosedTab, restartTab, setTabMuted, setTabPinned, type BulkClose, type NewTabKind, type TabMove } from "@/lib/tabActions";
 import { tabViewIn } from "@/lib/tabFront";
 import { panesOf, useTabState } from "@/lib/tabLayouts";
-import { toggleTabView, useTabViews } from "@/lib/tabViews";
-import type { SelectedSessionTab } from "@/lib/terminal";
+import { subscribeTabPty, toggleTabView, useTabViews } from "@/lib/tabViews";
+import { getTerminalState, type SelectedSessionTab } from "@/lib/terminal";
 import { IssueLinkContextItems } from "@/components/session/IssueLinkMenuItems";
 import { copyText } from "@/lib/clipboard";
+import { agent as agentApi, errorMessage } from "@/lib/api";
+import { openChatLink, parseChatLink } from "@/lib/chatLinks";
+import { dismissErrorKey, showError, type ErrorToastAction } from "@/lib/errorToasts";
+import type { SessionEntry, TabEntry } from "@/types/session";
 
 const BULK: BulkClose[] = ["others", "right", "left", "idle", "all"];
 
 const copy = (text: string) => void copyText(text).catch(() => {});
 
 const failed = (what: string) => (error: unknown) => console.error(`${what} failed`, error);
+
+// ------------------------------------------------- telling a failed open or close (PRO-291)
+
+/** An agent's name as the app shows it: "Claude Code" for `claude`. */
+const agentNameOf = (harness: string) => getSessionStore().harnesses.find((candidate) => candidate.id === harness)?.name ?? harness;
+
+/** The agent settings file a startup error names, home folder written as `~`: what "Open settings.json" opens. */
+export function settingsFileIn(text: string): string | null {
+  return text.match(/(?:~|\/)[^\s:'"`()]*\/settings(?:\.local)?\.json\b/)?.[0] ?? null;
+}
+
+async function openSettingsFile(sessionId: string, cwd: string, file: string) {
+  const path = file.startsWith("~/") ? `${(await import("@tauri-apps/api/path").then((paths) => paths.homeDir())).replace(/\/+$/, "")}${file.slice(1)}` : file;
+  await openChatLink(parseChatLink(path), { sessionId, cwd });
+}
+
+/**
+ * Open an agent tab and see its agent start (PRO-291). A tab that cannot be
+ * added, or whose agent exits while starting, is not left behind empty: it
+ * is closed, and the toast says why, with the agent's own last line under it,
+ * Try again, and Open settings.json when that line names the agent's
+ * settings file. Resolves whether the tab opened.
+ */
+export async function openAgentTabTelling(session: Pick<SessionEntry, "id" | "cwd">, harness: string, add: () => Promise<TabEntry>): Promise<boolean> {
+  const key = `open:${session.id}:${harness}`;
+  const retry: ErrorToastAction = { label: "Try again", icon: "retry", run: () => openAgentTabTelling(session, harness, add) };
+  const name = agentNameOf(harness);
+  // What was on screen before: it is again if the new tab does not stay.
+  const before = getTerminalState().selected[session.id] ?? null;
+  let tab: TabEntry;
+  try {
+    tab = await add();
+  } catch (error) {
+    showError("", undefined, { title: `Couldn't open a new ${name} tab: ${errorMessage(error).trim().replace(/[.:]+$/, "")}`, key, actions: [retry] });
+    return false;
+  }
+  try {
+    // Listening first, as the tab's own view does, so its pane is not missed.
+    await subscribeTabPty().catch(() => undefined);
+    await agentApi.startOnOpen(session.id, tab.id);
+  } catch (error) {
+    // Nothing to keep: a tab whose agent never got going is closed again.
+    await removeTab(session.id, tab.id).catch(failed("closing the tab that did not start"));
+    if (before && before.id !== tab.id) activatePeer(session.id, before);
+    const [reason, ...rest] = errorMessage(error).trim().split("\n");
+    const detail = rest.join("\n").trim();
+    const file = settingsFileIn(detail);
+    const actions: ErrorToastAction[] = [retry];
+    if (file) actions.push({ label: `Open ${file.split("/").pop()}`, keepOpen: true, run: () => openSettingsFile(session.id, session.cwd, file) });
+    showError("", detail || undefined, { title: `Couldn't open a new ${name} tab: ${reason.replace(/[.:]+$/, "")}`, key, actions });
+    return false;
+  }
+  dismissErrorKey(key);
+  return true;
+}
+
+/**
+ * Close a tab and say so when it would not close (PRO-291): its agent did not
+ * stop in time, so it is still open and back on screen if it was, and the
+ * toast offers Try again. Resolves whether it closed.
+ */
+export async function closeTabTelling(sessionId: string, tab: PeerTab, tabs: PeerTab[], selected: SelectedSessionTab | null | undefined, label: string): Promise<boolean> {
+  const key = `close:${tab.key}`;
+  try {
+    await closePeer(sessionId, tab, tabs, selected);
+  } catch (error) {
+    // The view went to a neighbour before the close was refused: it comes back.
+    if (selected?.kind === tab.kind && selected.id === tab.id) {
+      const owner = sessionOfPeer(sessionId, tab);
+      if (getSessionStore().selectedSessionId !== owner) selectSession(owner);
+      activatePeer(owner, selected);
+    }
+    const cause = errorMessage(error).trim().replace(/[.]+$/, "");
+    const timedOut = /didn't stop within/i.test(cause);
+    const chat = tab.kind === "agent" && !isShellPeer(tab);
+    showError(timedOut ? `${cause}, so “${label}” is still open` : `“${label}” is still open`, timedOut ? undefined : cause, {
+      title: chat ? "Couldn't close the chat. Try again." : "Couldn't close the tab. Try again.",
+      key,
+      actions: [{ label: "Try again", icon: "retry", run: () => closeTabTelling(sessionId, tab, tabs, getTerminalState().selected[sessionId] ?? null, label) }],
+    });
+    return false;
+  }
+  dismissErrorKey(key);
+  return true;
+}
+
+/** Open a tab of any kind from the menu, saying so when it could not be opened. */
+export function openTabTelling(row: TabRow, what: NewTabKind, after?: PeerTab | null): Promise<boolean> {
+  if (what.kind === "agent") {
+    const sessionId = after ? sessionOfPeer(row.session.id, after) : row.session.id;
+    const session = row.sessions.find((candidate) => candidate.id === sessionId) ?? row.session;
+    // Placed by `newTab`; the tab it added is the one its agent is started for.
+    return openAgentTabTelling(session, what.harness, async () => {
+      const key = await newTab(row, what, after);
+      const id = key.slice("agent:".length);
+      const tab = getSessionStore().sessions.find((candidate) => candidate.id === session.id)?.tabs.find((candidate) => candidate.id === id);
+      if (!tab) throw new Error("the new tab was not listed");
+      return tab;
+    });
+  }
+  const noun = what.kind === "terminal" ? "terminal" : "browser tab";
+  const key = `open:${row.session.id}:${what.kind}`;
+  return newTab(row, what, after).then(
+    () => { dismissErrorKey(key); return true; },
+    (error: unknown) => {
+      showError(`Couldn't open a new ${noun}`, error, { key, actions: [{ label: "Try again", icon: "retry", run: () => openTabTelling(row, what, after) }] });
+      return false;
+    },
+  );
+}
 
 /**
  * The right-click menu of one tab, the same on the title bar strip and on
@@ -102,7 +216,7 @@ export function TabMenuItems({
   const counterpart = agentTab && otherAgent(agentTab.harness, store.harnesses);
   const drawnAs = peerAgent(tab);
   const bulk = BULK.map((action) => ({ action, plan: planBulkClose(action, row.tabs, tab) })).filter(({ plan }) => plan.targets.length + plan.pinned.length > 0);
-  const open = (what: NewTabKind) => void newTab(row, what, tab).catch(failed("opening a tab"));
+  const open = (what: NewTabKind) => void openTabTelling(row, what, tab);
   const move = (how: TabMove, text: string, icon: ReactNode, shortcut?: string[]) => (
     <ContextMenuItem disabled={off || !canMoveTab(row, tab, how)} onSelect={() => moveTabBy(row, tab, how)}>
       {icon} {text}
@@ -237,7 +351,7 @@ export function TabMenuItems({
       </ContextMenuSub>
 
       <ContextMenuSeparator />
-      <ContextMenuItem destructive disabled={off} onSelect={() => void closePeer(row.session.id, tab, row.tabs, selected).catch(failed("closing the tab"))}>
+      <ContextMenuItem destructive disabled={off} onSelect={() => void closeTabTelling(row.session.id, tab, row.tabs, selected, label)}>
         <X /> Close tab
         {shown && keys("session.closeTab").length ? <MenuShortcut keys={keys("session.closeTab")} /> : null}
       </ContextMenuItem>
