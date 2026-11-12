@@ -884,7 +884,7 @@ export const SETTINGS_ROWS = [
   }),
   ...SHORTCUT_ACTIONS.map((action) => defineSetting({
     id: `shortcuts.${action.id}`, section: "shortcuts", title: action.label,
-    description: `${action.group} keyboard shortcut.`, searchTerms: [action.group, action.label, "keyboard", "keys"],
+    description: `${action.group} keyboard shortcut.`, searchTerms: [action.group, action.label, "keyboard", "keys", "hotkeys", "key bindings", "shortcut"],
     scope: "user", storage: { kind: "file", location: `$TERMINALX_HOME/settings.json#preferences.shortcuts.${action.id}` }, layout: "content",
   } as const)),
 ] as const;

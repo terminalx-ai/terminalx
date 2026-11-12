@@ -1,7 +1,6 @@
 import { getExperimentalSettings } from "@/lib/experimentalSettings";
-import { indexPaletteItem, rankPaletteItems } from "@/lib/commandPalette";
 
-// Search currently navigates sections; individual row metadata lives in settingsRegistry.
+// The pages ⌘K lists; searching goes by row (settingsSearch.ts), whose metadata lives in settingsRegistry.
 export const SETTINGS_SECTIONS = [
   { id: "account", title: "Account", description: "Sign in, profile and account diagnostics", terms: ["login email subscription"] },
   { id: "devices", title: "Devices", description: "Pair a phone and manage connected devices", terms: ["mobile pairing remote revoke"] },
@@ -23,20 +22,7 @@ export const SETTINGS_SECTIONS = [
 
 export type SettingsTab = (typeof SETTINGS_SECTIONS)[number]["id"];
 
-const sectionIndex = SETTINGS_SECTIONS.map((section) => indexPaletteItem({
-  id: `settings-section:${section.id}`,
-  group: "settings",
-  tab: section.id,
-  primary: section.title,
-  secondary: section.description,
-  recentAt: 0,
-}, [...section.terms]));
-
 /** A section behind a switch in Settings → Experimental is found only while the switch is on. Shared with the row search. */
 export function settingsSectionOffered(tab: SettingsTab): boolean {
   return tab !== "orchestrator" || getExperimentalSettings()?.orchestratorRuns === true;
-}
-
-export function searchSettingsSections(query: string) {
-  return rankPaletteItems(sectionIndex, query).filter((match) => settingsSectionOffered(match.item.tab)).slice(0, 30);
 }

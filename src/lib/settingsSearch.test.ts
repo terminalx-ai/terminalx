@@ -37,6 +37,19 @@ describe("settings row search", () => {
     expect(searchSettings("thme").map((match) => match.id)).toContain("appearance.theme");
   });
 
+  it("keeps finding what the old section search found, now as rows", () => {
+    const first = (query: string) => searchSettings(query)[0]?.id;
+    expect(first("data privacy")).toBe("general.dataPrivacy");
+    expect(first("archive script")).toBe("repositories.scripts");
+    expect(first("setup script")).toBe("repositories.scripts");
+    expect(first("settings file")).toBe("general.settingsFile");
+    expect(first("worktreeinclude")).toBe("repositories.filesToCopy");
+    expect(first("files to copy")).toBe("repositories.filesToCopy");
+    expect(first("variables")).toBe("environment.variables");
+    expect(searchSettings("hotkeys").map((match) => match.section)).toContain("shortcuts");
+    expect(searchSettings("zzzz-no-such-setting")).toEqual([]);
+  });
+
   it("returns the row, its page and highlight ranges for title and description", () => {
     const [sounds] = searchSettings("sounds");
     expect(sounds.id).toBe("general.sounds");
