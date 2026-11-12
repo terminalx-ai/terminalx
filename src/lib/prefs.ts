@@ -53,6 +53,8 @@ export interface Prefs {
   turnChanges: boolean;
   /** A mark per prompt down the transcript's right edge: hover to read one, click to go to it. */
   promptMap: boolean;
+  /** "Also reset files" in the Reset chat dialog: the reader's last choice. */
+  resetFiles: boolean;
   /** Appended to the prompt that sends failed CI logs to an agent. */
   fixErrorsInstructions: string;
   /**
@@ -174,6 +176,7 @@ const DEFAULTS: Prefs = {
   foldToolCalls: false,
   turnChanges: true,
   promptMap: true,
+  resetFiles: false,
   fixErrorsInstructions: "",
   autocorrect: false,
   followUps: "now",
@@ -302,6 +305,7 @@ function load(legacyOnly = false): Prefs {
     // Each entry is checked as it is read (`issueFilterFor`); only the map itself is checked here.
     if (!prefs.issueFilters || typeof prefs.issueFilters !== "object" || Array.isArray(prefs.issueFilters)) prefs.issueFilters = {};
     if (typeof prefs.fixErrorsInstructions !== "string") prefs.fixErrorsInstructions = "";
+    if (typeof prefs.resetFiles !== "boolean") prefs.resetFiles = false;
     prefs.fixErrorsInstructions = prefs.fixErrorsInstructions.slice(0, 8000);
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
