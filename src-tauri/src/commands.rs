@@ -530,12 +530,21 @@ pub async fn cloud_provider(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.provider(provider))
 }
 
-enum ProviderPromptError { Cancelled, Empty, Unavailable }
+enum ProviderPromptError {
+    // Only the AppKit secure dialog can be cancelled or submit an empty field.
+    #[cfg(target_os = "macos")]
+    Cancelled,
+    #[cfg(target_os = "macos")]
+    Empty,
+    Unavailable,
+}
 
 impl ProviderPromptError {
     fn client_error(self) -> crate::cloud_workspaces::CloudWorkspaceClientError {
         let code = match self {
+            #[cfg(target_os = "macos")]
             Self::Cancelled => "cloud_provider_entry_cancelled",
+            #[cfg(target_os = "macos")]
             Self::Empty => "cloud_provider_credential_required",
             Self::Unavailable => "cloud_provider_secure_input_unavailable",
         };
@@ -4998,6 +5007,17 @@ pub struct OrchestratorPatch {
     piece_limit: Option<Option<u32>>,
     #[serde(default, deserialize_with = "given")]
     worker_mode: Option<Option<String>>,
+    /// Over how many changed lines a result is read by a verifier.
+    #[serde(default, deserialize_with = "given")]
+    review_diff_lines: Option<Option<u32>>,
+    /// Cells of the routing table, by kind and then by agent. A cell given
+    /// as `null` loses its override: it follows the app again (for a
+    /// project) or the built-in table (for the app).
+    #[serde(default)]
+    routing: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Option<serde_json::Value>>>,
+    /// Take every override away: "Reset to defaults".
+    #[serde(default)]
+    reset_routing: bool,
 }
 
 /// A field that is present, even as `null`, is `Some`: absent is "leave it".
@@ -5007,7 +5027,12 @@ fn given<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserializer: D)
 
 #[tauri::command]
 pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
-    use crate::store::settings::{MAX_PIECE_LIMIT, WORKER_MODES};
+    use crate::store::settings::{MAX_PIECE_LIMIT, MAX_REVIEW_DIFF_LINES, WORKER_MODES};
+    if let Some(Some(lines)) = patch.review_diff_lines {
+        if !(1..=MAX_REVIEW_DIFF_LINES).contains(&lines) {
+            return Err(format!("A diff is read by a verifier over 1 to {MAX_REVIEW_DIFF_LINES} changed lines, not {lines}."));
+        }
+    }
     if let Some(Some(limit)) = patch.piece_limit {
         if !(1..=MAX_PIECE_LIMIT).contains(&limit) {
             return Err(format!("A plan may have from 1 to {MAX_PIECE_LIMIT} pieces, not {limit}."));
@@ -5018,26 +5043,61 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             return Err(format!("Workers cannot run in {mode}."));
         }
     }
+    // Every cell is checked before anything is stored.
+    use crate::orchestration::routing::{default_route, Route, AGENTS, KINDS};
+    let mut cells: Vec<(&str, &str, Option<Route>)> = Vec::new();
+    for (kind, columns) in &patch.routing {
+        if !KINDS.contains(&kind.as_str()) {
+            return Err(format!("{kind} is not a kind of piece. The kinds are: {}.", KINDS.join(", ")));
+        }
+        for (agent, route) in columns {
+            if !AGENTS.contains(&agent.as_str()) {
+                return Err(format!("The routing table has no column for {agent}."));
+            }
+            let route = match route {
+                Some(value) => Some(Route::read(value).ok_or_else(|| format!("{value} is not a tier and an effort: use small, mid, large or top, and low, medium, high, xhigh, max or none."))?),
+                None => None,
+            };
+            cells.push((kind, agent, route));
+        }
+    }
     let mut settings = store::settings::load();
     let orchestrator = &mut settings.orchestrator;
     match patch.project {
         Some(path) => {
             let project = orchestrator.projects.entry(path.clone()).or_default();
+            if patch.reset_routing { project.routing = Default::default(); }
+            for (kind, agent, route) in cells { project.routing.set(kind, agent, route); }
             if let Some(value) = patch.require_approval { project.require_approval = value; }
             if let Some(value) = patch.piece_limit { project.piece_limit = value; }
             if let Some(value) = patch.worker_mode { project.worker_mode = value; }
+            if let Some(value) = patch.review_diff_lines { project.review_diff_lines = value; }
             // A project that follows the app in everything has no entry of its own.
             if project.is_empty() { orchestrator.projects.remove(&path); }
         }
         None => {
+            if patch.reset_routing { orchestrator.routing = Default::default(); }
+            // Only what differs from the built-in table is kept, so a later change to that table reaches this app.
+            for (kind, agent, route) in cells { orchestrator.routing.set(kind, agent, route.filter(|route| default_route(kind).as_ref() != Some(route))); }
             // The app-wide value has no "follow": `null` is not a value for it.
             if let Some(value) = patch.require_approval { orchestrator.require_approval = value.ok_or("Say whether a run asks first.")?; }
             if let Some(value) = patch.piece_limit { orchestrator.piece_limit = value.ok_or("Say how many pieces a plan may have.")?; }
             if let Some(value) = patch.worker_mode { orchestrator.worker_mode = value.ok_or("Say which mode workers run in.")?; }
+            if let Some(value) = patch.review_diff_lines { orchestrator.review_diff_lines = value.ok_or("Say over how many changed lines a result is read by a verifier.")?; }
         }
     }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.orchestrator)
+}
+
+/// The model each tier runs on today, per agent, for the routing table in
+/// Settings: `{"claude": {"small": Model | null, …}, "codex": {…}}`. `null`
+/// where the agent's CLI lists no model of the tier.
+#[tauri::command]
+pub async fn orchestrator_tier_models(state: State<'_, AppState>, refresh: Option<bool>) -> CmdResult<serde_json::Value> {
+    use crate::orchestration::routing::{model_for, Tier, AGENTS};
+    let models = list_models(state, refresh).await?;
+    Ok(AGENTS.iter().map(|agent| (agent.to_string(), Tier::ALL.iter().map(|tier| (tier.name().to_string(), serde_json::json!(model_for(agent, *tier, &models)))).collect::<serde_json::Map<_, _>>().into())).collect::<serde_json::Map<String, serde_json::Value>>().into())
 }
 
 /// The run a session leads, as it is now, or `null` when it leads none.

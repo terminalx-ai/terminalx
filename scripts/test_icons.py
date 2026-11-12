@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Check source assets; test_packaged_icons.py checks compiled icons (macOS)."""
+"""Check source assets; Apple tool checks also run on macOS in CI."""
 
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -29,7 +30,9 @@ def orange_count(image):
                for r, g, b, a in image.getdata())
 
 
-class IconAssetsTest(unittest.TestCase):
+# iconutil is Apple's ICNS decoder; retain this coverage in the macOS job.
+@unittest.skipUnless(sys.platform == "darwin", "ICNS decoding requires Apple's iconutil")
+class MacosIconAssetsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix="terminalx-icon-check-")
@@ -74,8 +77,9 @@ class IconAssetsTest(unittest.TestCase):
                     else:
                         self.assertLessEqual(max(right, bottom), image.width * 0.92)
 
+class PortableIconAssetsTest(unittest.TestCase):
     def test_linux_pngs_and_every_windows_frame_are_trimmed(self):
-        for variant in self.iconsets:
+        for variant in ("icons", "icons-dev"):
             directory = REPO / "src-tauri" / variant
             images = [(p.name, rgba(p)) for p in directory.glob("*.png")
                       if not p.name.startswith("app-icon")]
@@ -88,7 +92,7 @@ class IconAssetsTest(unittest.TestCase):
                     self.assertGreaterEqual(min(right - left, bottom - top), image.width * 0.87)
 
     def test_mobile_ios_has_opaque_dark_corners_and_correct_badges(self):
-        for variant in self.iconsets:
+        for variant in ("icons", "icons-dev"):
             for path in (REPO / "src-tauri" / variant / "ios").glob("*.png"):
                 with self.subTest(path=path):
                     image = rgba(path)
@@ -99,7 +103,7 @@ class IconAssetsTest(unittest.TestCase):
                     self.assertEqual(orange_count(image) > 0, variant == "icons-dev")
 
     def test_android_uses_dark_background_and_safe_foreground(self):
-        for variant in self.iconsets:
+        for variant in ("icons", "icons-dev"):
             directory = REPO / "src-tauri" / variant / "android"
             self.assertIn("#111111", (directory / "values/ic_launcher_background.xml").read_text())
             for path in directory.glob("mipmap-*/ic_launcher_foreground.png"):

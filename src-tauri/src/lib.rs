@@ -895,6 +895,7 @@ pub fn run() {
             commands::set_experimental_settings,
             commands::orchestrator_settings,
             commands::set_orchestrator_settings,
+            commands::orchestrator_tier_models,
             commands::orchestration_run_for_session,
             commands::orchestration_runs,
             commands::orchestration_create,

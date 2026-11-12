@@ -137,10 +137,9 @@ describe("verifyProposal, with a scripted runner", () => {
 const bash = spawnSync("bash", ["-c", "git --version"]).status === 0;
 describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
   const base = mkdtempSync(join(tmpdir(), "tx-verify-"));
-  // The machine install script may run through sudo. Restricted Linux
-  // sandboxes can become root without permission to traverse a user's 0700
-  // directory; let that process read these generated test fixtures too.
-  chmodSync(base, 0o755);
+  // The sudo install step must traverse this synthetic fixture even when Linux
+  // root lacks CAP_DAC_OVERRIDE. No user data or credentials live here.
+  chmodSync(base, 0o711);
   const github = join(base, "github");
   const root = join(base, "workspace");
   mkdirSync(github);

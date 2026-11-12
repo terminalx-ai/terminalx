@@ -8,13 +8,21 @@ import type { CloudProject } from "@/types/target";
 
 const { updateProject } = vi.hoisted(() => ({ updateProject: vi.fn() }));
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+// What the agents' CLIs list: the reviewer may be put on any of them.
+const MODELS = [
+  { id: "opus", label: "Opus 5.5", harness: "claude", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
+  { id: "sonnet", label: "Sonnet 5.5", harness: "claude", efforts: ["low", "medium", "high"], defaultEffort: "medium" },
+  { id: "haiku", label: "Haiku 5.5", harness: "claude", efforts: [], defaultEffort: null },
+  { id: "gpt-6.1-terra", label: "GPT-6.1-Terra", harness: "codex", efforts: ["low", "medium", "high"], defaultEffort: "low" },
+];
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async (command: string) => (command === "list_models" ? MODELS : undefined)) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/notify", () => ({ notePipelineState: vi.fn() }));
 vi.mock("@/lib/sessions", () => ({ updateProject }));
 
 const { CloudIssuePipelineSettingsDialog, IssuePipelineSettingsDialog } = await import("./IssuePipelineSettingsDialog");
 const { getPrefs, setPrefs } = await import("@/lib/prefs");
+const { noteExperimentalSettings } = await import("@/lib/experimentalSettings");
 
 // As the app fills in a project that set nothing: no choice made for the launch switches.
 const defaults: IssuePipelineSettings = {
@@ -83,6 +91,38 @@ describe("a project's issue pipeline settings", () => {
     expect(saved()).toEqual({ ...defaults, requirePerson: true, maxRounds: 5 });
     finish({ ...project({ ...defaults, requirePerson: true }) });
     await waitFor(() => expect(within(screen.getByRole("radiogroup", { name: "Review rounds" })).getByRole("radio", { name: "5" }).getAttribute("aria-checked")).toBe("true"));
+  });
+
+  it("puts the reviewer on the project's own model and effort, and back on the author's", async () => {
+    const view = render(<IssuePipelineSettingsDialog project={project()} open onOpenChange={() => {}} />);
+    // Part of the orchestrator work: not shown until its switch in Settings → Experimental is on.
+    expect(screen.queryByRole("combobox", { name: "Reviewer model" })).toBeNull();
+    act(() => noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: true }));
+    const model = () => screen.getByRole("combobox", { name: "Reviewer model" }) as HTMLSelectElement;
+    const effort = () => screen.getByRole("combobox", { name: "Reviewer effort" }) as HTMLSelectElement;
+    // Left alone: the reviewer copies the author, and nothing is stored.
+    expect([model().value, effort().value, effort().options[0].textContent]).toEqual(["", "", "The author's effort"]);
+    await waitFor(() => expect([...model().options].map((option) => option.textContent)).toEqual(["The author's model", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5", "GPT-6.1-Terra"]));
+    fireEvent.change(model(), { target: { value: "sonnet" } });
+    expect(saved()).toEqual({ ...defaults, reviewerModel: "sonnet", reviewerEffort: null });
+    view.rerender(<IssuePipelineSettingsDialog project={project({ ...defaults, reviewerModel: "sonnet" })} open onOpenChange={() => {}} />);
+    await waitFor(() => expect(model().value).toBe("sonnet"));
+    // The efforts are the chosen model's own; none named is its default.
+    expect([...effort().options].map((option) => option.textContent)).toEqual(["Default effort", "Low", "Medium", "High"]);
+    fireEvent.change(effort(), { target: { value: "high" } });
+    expect(saved()).toEqual({ ...defaults, reviewerModel: "sonnet", reviewerEffort: "high" });
+    view.rerender(<IssuePipelineSettingsDialog project={project({ ...defaults, reviewerModel: "sonnet", reviewerEffort: "high" })} open onOpenChange={() => {}} />);
+    await waitFor(() => expect(effort().value).toBe("high"));
+    // A model without that effort drops it rather than sending it an effort it does not have.
+    fireEvent.change(model(), { target: { value: "haiku" } });
+    expect(saved()).toEqual({ ...defaults, reviewerModel: "haiku", reviewerEffort: null });
+    // Back to the author's.
+    fireEvent.change(model(), { target: { value: "" } });
+    expect(saved()).toMatchObject({ reviewerModel: null });
+    // With the pipeline off there is no reviewer to choose for.
+    view.unmount();
+    render(<IssuePipelineSettingsDialog project={project({ ...defaults, enabled: false })} open onOpenChange={() => {}} />);
+    expect(model().disabled && effort().disabled).toBe(true);
   });
 
   it.each([["left to its default", undefined], ["turned on", true]])("holds the default off, and says nothing can merge, where a person does the merge, with the switch %s", (_, autoMerge) => {

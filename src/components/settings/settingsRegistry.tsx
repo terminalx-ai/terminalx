@@ -313,6 +313,18 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.workerMode" },
   }),
   defineSetting({
+    id: "orchestrator.reviewDiffLines", section: "orchestrator", title: "A verifier reads a diff over",
+    description: "Changed lines. A result this size or smaller whose commands pass is accepted without a model; a larger one is read by a verifier session first. From 1 to 100000.",
+    searchTerms: ["orchestrator", "verify", "verifier", "review", "diff", "lines", "threshold", "check", "tokens"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.reviewDiffLines" },
+  }),
+  defineSetting({
+    id: "orchestrator.routing", section: "orchestrator", title: "Starting model by kind of piece",
+    description: "The model tier and effort each kind of piece starts on, for Claude Code workers and for Codex workers. A piece that falls short is retried on more effort, then on the next model up.",
+    searchTerms: ["orchestrator", "routing", "table", "model", "effort", "tier", "kind", "haiku", "sonnet", "opus", "fable", "luna", "terra", "sol", "astra", "escalate", "retry"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.routing" }, layout: "content",
+  }),
+  defineSetting({
     id: "general.dataPrivacy", section: "general", title: "Data privacy mode",
     description: "Keep TerminalX cloud and remote features off on this Mac. Your agents still use their own network connections. Your sign-in stays saved.",
     searchTerms: ["privacy", "cloud", "remote", "organisations", "organizations", "pairing", "MCP", "logging", "managed"], scope: "user",
@@ -566,8 +578,8 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "repositories.orchestrator", section: "repositories", title: "Orchestrator",
-    description: "Override for this repository whether a run asks first, how many pieces it may have, and the mode its workers run in.",
-    searchTerms: ["repositories", "orchestrator", "runs", "approval", "pieces", "workers", "permissions"], scope: "repository",
+    description: "Override for this repository whether a run asks first, how many pieces it may have, the mode its workers run in, and the model each kind of piece starts on.",
+    searchTerms: ["repositories", "orchestrator", "runs", "approval", "pieces", "workers", "permissions", "routing", "model", "effort", "tier"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.projects" }, layout: "content",
   }),
   defineSetting({

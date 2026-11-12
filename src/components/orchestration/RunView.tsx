@@ -3,23 +3,23 @@ import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { PieceStateMark } from "@/components/orchestration/PieceStateMark";
 import {
-  Check, CircleAlert, CircleCheck, FileJson, FolderOpen, Gauge, Info, Layers, LoaderCircle, Network, Pencil, Play, ScanSearch,
-  Settings, ShieldAlert, ShieldOff, Sparkles, Square, SquareArrowOutUpRight, Terminal, Trash2, UserRoundCheck, X,
+  Check, CircleAlert, CircleCheck, CircleDashed, CircleX, FileJson, FolderOpen, Gauge, Info, Layers, LoaderCircle, Network, Pencil, Play, ScanSearch,
+  Settings, ShieldAlert, ShieldOff, Sparkles, Square, SquareArrowOutUpRight, Terminal, Trash2, TriangleAlert, UserRoundCheck, X,
 } from "@/icons";
 import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { EFFORT_LABEL, effortChoices, modeLabel, modelForTab, modelLabel, modelOptionText, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
-  budgetText, checksFrom, checkText, estimateText, noteRun, pieceMode, pieceNumbers, planOf, raisesMode, refusalOf, requestOrchestratorSettings,
-  RUN_STATE_LABEL, useRun, withoutPiece,
+  budgetText, checksFrom, checkText, costText, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, noteRun, pieceCheck, pieceMode, pieceNumbers,
+  planOf, raisesMode, refusalOf, requestOrchestratorSettings, reviewTokens, RUN_STATE_LABEL, TIER_DOT, tokensText, TRY_OUTCOME_LABEL, TRY_STEP_LABEL, useRun, verifyingText, withoutPiece,
 } from "@/lib/orchestration";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { useSessionRowStatuses } from "@/lib/sessionRowStatus";
-import { familyNeeds, overBudget, runSpend, sessionSpend, type Need } from "@/lib/runFamily";
+import { familyNeeds, overBudget, pieceSpend, runSpend, type Need } from "@/lib/runFamily";
 import { formatCost } from "@/components/session/SessionCost";
 import { SESSION_STATUSES } from "@terminalx/portable/sessionStatus";
 import { relativeTime } from "@/lib/time";
-import type { Run, RunPiece, RunPlan, RunPlanPiece } from "@/types/orchestration";
+import type { CommandRun, GateResult, PieceTry, Run, RunPiece, RunPlan, RunPlanPiece, RunReview, RunVerification, RunVerifier, Tier } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
 /** What the lead is asked when a person presses Plan a run. The lead decides whether splitting helps at all. */
@@ -68,7 +68,11 @@ function useAction() {
 
 const NO_STATUS = SESSION_STATUSES.find((status) => status.id === "no_changes")!;
 
-/** What each worker has cost, the run's spend, and what waits on the person: read from the sessions as they change (PRO-281). */
+/**
+ * What each piece has cost, the run's spend, and what waits on the person: the
+ * run's record of each try (PRO-275), with a current worker read from its
+ * session as that changes (PRO-281).
+ */
 function useRunLedger(run: Run, lead: SessionEntry) {
   const { sessions } = useSessionStore();
   const byId = useMemo(() => new Map(sessions.map((entry) => [entry.id, entry])), [sessions]);
@@ -76,10 +80,16 @@ function useRunLedger(run: Run, lead: SessionEntry) {
   const statuses = useSessionRowStatuses(useMemo(() => [lead, ...workers], [lead, workers]));
   return useMemo(() => {
     const spend = runSpend(run, byId);
-    const costOf = (piece: RunPiece) => (piece.worker ? sessionSpend(byId.get(piece.worker.sessionId)) : null);
+    const spent = new Map(run.pieces.map((piece) => [piece.id, pieceSpend(piece, byId)]));
+    // `$0.61`, `$0.61+` when a model's tokens are not in it, `null` before any cost was read.
+    const costOf = (piece: RunPiece) => {
+      const { cost, unpriced } = spent.get(piece.id) ?? { cost: null, unpriced: [] };
+      return cost == null ? null : `${formatCost(cost)}${unpriced.length ? "+" : ""}`;
+    };
+    const unpriced = [...spent.values()].some((piece) => piece.unpriced.length > 0) || !!run.costUnpricedModels?.length;
     // The lead's own chat is in front of the person already: the Run view lists what its run waits on.
     const needs = familyNeeds({ lead, leadStatus: NO_STATUS, run, workers, statusOf: (id) => statuses[id] ?? NO_STATUS, spend }).filter((need) => need.text !== "The plan waits for your approval");
-    return { spend, costOf, needs };
+    return { spend, unpriced, costOf, needs };
   }, [run, byId, lead, workers, statuses]);
 }
 
@@ -142,7 +152,7 @@ function RunBoard({ run, lead }: { run: Run; lead: SessionEntry }) {
           <p role="status" className={cn("mx-6 mb-3 rounded-lg bg-well px-3 py-2 text-xs", run.state === "failed" ? "text-destructive" : "text-muted-foreground")}>{run.reason}</p>
         )}
         {editingPlan && editable && <PlanForm run={run} busy={!!busy} onCancel={() => setEditingPlan(false)} onSave={async (plan) => { if (await save(plan)) setEditingPlan(false); }} />}
-        {editable ? <PlanSummary run={run} /> : <RunSummary run={run} spend={ledger.spend} />}
+        {editable ? <PlanSummary run={run} /> : <RunSummary run={run} spend={ledger.spend} unpriced={ledger.unpriced} />}
         <PieceTable run={run} numbers={numbers} selected={selected} editable={editable} busy={!!busy} refused={error?.piece} costOf={ledger.costOf} onSelect={select} onChange={change} />
         <p className="flex items-start gap-2 px-6 py-4 text-xs text-faint">
           <Info aria-hidden className="mt-0.5 size-3.5 shrink-0" />
@@ -193,7 +203,9 @@ function subtitle(run: Run): string {
 function footnote(run: Run): string {
   const bypass = run.pieces.some((piece) => pieceMode(run, piece) === "bypassPermissions");
   const limits = "Push, merge and deploy stay blocked by deny rules.";
-  return bypass ? `In bypass, workers are not asked before edits or commands. ${limits}` : `${limits} Each worker has its own worktree and branch, cut from the lead's.`;
+  // Said once there are results to check: a plan that waits has none.
+  const checked = run.state === "awaitingApproval" || run.state === "planned" ? "" : " A piece is done once its result has passed its checks.";
+  return bypass ? `In bypass, workers are not asked before edits or commands. ${limits}${checked}` : `${limits} Each worker has its own worktree and branch, cut from the lead's.${checked}`;
 }
 
 /** Before a run starts: what it is expected to use, and what it runs with. */
@@ -224,7 +236,7 @@ function PlanSummary({ run }: { run: Run }) {
 }
 
 /** Once a run has started: how far it is, and what it runs with. */
-function RunSummary({ run, spend }: { run: Run; spend: number | null }) {
+function RunSummary({ run, spend, unpriced }: { run: Run; spend: number | null; unpriced: boolean }) {
   const done = run.pieces.filter((piece) => piece.state === "done").length;
   const budget = budgetText(run);
   const estimate = estimateText(run.estimate);
@@ -236,7 +248,7 @@ function RunSummary({ run, spend }: { run: Run; spend: number | null }) {
         <div className="text-[11px] text-faint">Pieces</div>
         <div className="mt-1 text-[13px] text-muted-foreground"><span className="text-xl font-semibold text-foreground" data-testid="run-done">{done}</span> of {run.pieces.length} done</div>
         <div className="mt-2 flex gap-1" aria-hidden>
-          {run.pieces.map((piece) => <span key={piece.id} className={cn("h-1 flex-1 rounded-full", piece.state === "done" ? "bg-add" : piece.state === "running" ? "bg-accent" : piece.state === "blocked" ? "bg-warning" : piece.state === "failed" ? "bg-destructive" : "bg-veil-strong")} />)}
+          {run.pieces.map((piece) => <span key={piece.id} className={cn("h-1 flex-1 rounded-full", piece.state === "done" ? "bg-add" : piece.state === "running" ? "bg-accent" : piece.state === "verifying" ? "bg-info" : piece.state === "failed" ? "bg-destructive" : piece.state === "blocked" ? "bg-warning" : "bg-veil-strong")} />)}
         </div>
         <div className="mt-2 text-[11px] text-faint">{run.pieces.length - done} left</div>
       </div>
@@ -244,7 +256,7 @@ function RunSummary({ run, spend }: { run: Run; spend: number | null }) {
         <div className="text-[11px] text-faint">Spend{budget ? " · budget" : ""}</div>
         {/* Workers' cost as their sessions record it (PRO-273), against the dollars the plan allows. A points budget is shown as set: a run's share of a usage window is not measured. */}
         <div className="mt-1 text-[13px] text-muted-foreground" data-testid="run-spend">
-          <span className={cn("text-xl font-semibold", over ? "text-destructive" : "text-foreground")}>{formatCost(spend ?? 0)}</span>
+          <span className={cn("text-xl font-semibold", over ? "text-destructive" : "text-foreground")}>{formatCost(spend ?? 0)}{unpriced ? "+" : ""}</span>
           {dollars != null ? ` of $${dollars.toFixed(2)}` : budget ? ` · budget ${budget}` : " spent"}
         </div>
         {dollars != null && dollars > 0 && (
@@ -252,7 +264,7 @@ function RunSummary({ run, spend }: { run: Run; spend: number | null }) {
             <div className={cn("h-full rounded-full", over ? "bg-destructive" : "bg-accent")} style={{ width: `${Math.min(100, ((spend ?? 0) / dollars) * 100)}%` }} />
           </div>
         )}
-        <div className="mt-2 text-[11px] text-faint">{over ? "Over budget" : estimate ? `Estimated ${estimate} API-equivalent` : "The plan carries no estimate"}</div>
+        <div className="mt-2 text-[11px] text-faint">{over ? "Over budget" : estimate ? `Estimated ${estimate} API-equivalent` : "The plan carries no estimate"}{unpriced ? " · a model's tokens have no price" : ""}</div>
       </div>
       <div className="rounded-lg bg-well px-3.5 py-3 hairline">
         <div className="text-[11px] text-faint">Workers</div>
@@ -293,14 +305,14 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, costOf, o
   /** The piece the last refused change names. */
   refused?: string;
   /** What a piece's worker has cost so far; `null` with no worker or no price. */
-  costOf: (piece: RunPiece) => number | null;
+  costOf: (piece: RunPiece) => string | null;
   onSelect: (id: string) => void;
   onChange: (id: string, patch: Partial<RunPlanPiece>) => void;
 }) {
   // The plan's columns before it starts; the run's once it has.
   const columns = editable
     ? "grid-cols-[minmax(0,1fr)_13.5rem] @[760px]/run:grid-cols-[minmax(0,1.4fr)_13.5rem_minmax(0,1fr)_3.5rem_5.5rem]"
-    : "grid-cols-[minmax(0,1.5fr)_6.5rem_1.75rem] @[760px]/run:grid-cols-[minmax(0,1.5fr)_minmax(0,0.9fr)_6.5rem_3rem_4rem_minmax(0,1.2fr)_1.75rem]";
+    : "grid-cols-[minmax(0,1.5fr)_6.5rem_1.75rem] @[760px]/run:grid-cols-[minmax(0,1.3fr)_minmax(8.75rem,1fr)_6rem_2.5rem_3.5rem_minmax(0,1fr)_1.75rem]";
   const wide = "hidden @[760px]/run:block";
   const heads = editable ? [["Piece", ""], ["Model and effort", ""], ["Done when", wide], ["After", wide], ["Estimate", wide]] : [["Piece", ""], ["Model", wide], ["State", ""], ["Tries", wide], ["Cost", wide], ["Report", wide], ["", ""]];
   return (
@@ -342,9 +354,9 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, costOf, o
               <div role="cell" className={cn("font-mono text-xs", wide)}>{estimateText(piece.estimate) ?? <span className="text-faint">–</span>}</div>
             </> : <>
               <div role="cell"><PieceStateMark state={piece.state} /></div>
-              <div role="cell" className={cn("font-mono text-xs text-muted-foreground", wide)}>{piece.attempts || "–"}</div>
-              <div role="cell" data-testid="piece-cost" className={cn("font-mono text-xs", wide)}>{piece.worker ? formatCost(costOf(piece)) : <span className="text-faint">–</span>}</div>
-              <div role="cell" title={piece.note} className={cn("min-w-0 truncate text-xs", piece.state === "blocked" ? "text-warning" : piece.state === "failed" ? "text-destructive" : "text-muted-foreground", wide)}>{piece.note ?? (piece.state === "queued" && after ? `Waits for ${after}` : "")}</div>
+              <div role="cell" className={cn("font-mono text-xs text-muted-foreground", wide)}>{piece.tries?.length || piece.attempts || "–"}</div>
+              <div role="cell" data-testid="piece-cost" className={cn("font-mono text-xs", wide)}>{costOf(piece) ?? <span className="text-faint">–</span>}</div>
+              <div role="cell" title={piece.note} className={cn("min-w-0 truncate text-xs", piece.state === "blocked" ? "text-warning" : piece.state === "failed" ? "text-destructive" : "text-muted-foreground", wide)} data-testid="piece-report">{reportLine(piece, after)}</div>
               <div role="cell" className="flex justify-end">
                 {piece.worker && (
                   <Button variant="ghost" size="icon-xs" aria-label={`Open the worker of ${piece.title}`} title="Open worker" onClick={(event) => { event.stopPropagation(); selectSession(piece.worker!.sessionId); }}>
@@ -360,11 +372,189 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, costOf, o
   );
 }
 
-function ModelName({ piece }: { piece: RunPiece }) {
+/** What a row says of its piece: what it waits on while it is checked, else its worker's line, and that a verifier passed it. */
+function reportLine(piece: RunPiece, after: string): string {
+  if (piece.state === "verifying") return verifyingText(piece);
+  const check = pieceCheck(piece);
+  const read = piece.state === "done" && check?.outcome === "passed" && check.review ? (check.review.voters === 1 ? "verifier passed" : `${check.review.verifiers.filter((verifier) => verifier.verdict === "pass").length} of ${check.review.voters} verifiers passed`) : "";
+  return [piece.note ?? (piece.state === "queued" && after ? `Waits for ${after}` : ""), read].filter(Boolean).join(", ");
+}
+
+/** A model and effort as a row names them, marked with its tier's colour when it has a tier. */
+function ModelName({ piece }: { piece: Pick<RunPiece, "agent" | "model" | "effort"> & { tier?: Tier } }) {
   return <>
+    {piece.tier && <span aria-hidden className={cn("mr-1.5 inline-block size-1.5 rounded-full bg-current align-middle", TIER_DOT[piece.tier])} />}
     <span>{piece.model ? modelLabel(piece.agent, piece.model) : `${piece.agent === "codex" ? "Codex" : "Claude"} default`}</span>{" "}
     <span className="text-muted-foreground">{piece.effort ? EFFORT_LABEL[piece.effort] ?? piece.effort : "Default"}</span>
   </>;
+}
+
+/** What a try came to, in the words its row shows: a label, the line after it, and for a failed check what the check printed. */
+function tryResult(attempt: PieceTry): { label: string; text: string; output: string[]; tone: string } {
+  if (!attempt.outcome) return attempt.worker ? { label: "Running", text: "", output: [], tone: "text-accent" } : { label: "Waiting for its worker", text: "", output: [], tone: "text-faint" };
+  const detail = attempt.detail ?? "";
+  const tone = fellShort(attempt) ? "text-destructive" : attempt.outcome === "done" ? "text-foreground" : "text-warning";
+  const label = TRY_OUTCOME_LABEL[attempt.outcome];
+  const failed = attempt.verification?.gates.find((gate) => !gate.passed);
+  // A check TerminalX ran: which gate, in a line. What it printed is shown with the checks, below the tries.
+  if (attempt.outcome === "checkFailed" && failed) return { label, text: gateFailureLine(failed), output: [], tone };
+  if (attempt.outcome === "checkFailed") {
+    const [first = "", ...rest] = detail.split("\n");
+    // The end of what the check printed: that is where a test run says what failed.
+    return { label, text: first.replace(/^The done-check did not hold:\s*/, ""), output: rest.filter((line) => line.trim()).slice(-8), tone };
+  }
+  return { label, text: detail.replace(/^The worker reported (failed|partial):\s*/, "").replace(/^Reported (partial|blocked):\s*/, ""), output: [], tone };
+}
+
+/** A failed gate in a line: the command and how it exited, the files out of scope, or the first thing the gate said. */
+function gateFailureLine(gate: GateResult): string {
+  const command = gate.commands?.find((ran) => !ran.passed);
+  if (command) return `${command.run} ${command.exitCode != null ? `exited ${command.exitCode}` : "did not finish"}`;
+  const lines = (gate.detail ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+  const named = lines.filter((line) => line.startsWith("- ")).map((line) => line.slice(2));
+  if (gate.gate === "scope" && named.length) return `changed ${named.join(", ")}, outside its files`;
+  if (gate.gate === "review" && named.length) return named[0];
+  return `${GATE_LABEL[gate.gate].toLowerCase()}: ${lines[0] ?? "failed"}`;
+}
+
+/** One command of the command gate: what was run, how it ended, and for one that failed the end of what it printed. */
+function CommandCard({ command }: { command: CommandRun }) {
+  const lines = (command.output ?? "").split("\n").filter((line) => line.trim()).slice(-12);
+  return (
+    <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="done-check" data-check={command.passed ? "passed" : "failed"}>
+      <div className="flex items-center gap-2 text-xs">
+        <Terminal aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="text-muted-foreground">{command.project ? "Project check" : "Done-check"}</span>
+        <span className={cn("ml-auto shrink-0", command.passed ? "text-add" : "text-destructive")}>
+          {command.passed ? `passed · ${durationText(command.millis)}` : command.exitCode != null ? `failed · exit ${command.exitCode}` : "failed · did not finish"}
+        </span>
+      </div>
+      <div className="mt-1 break-all font-mono text-xs">{command.run}</div>
+      {lines.length > 0 && (
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11.5px] leading-[17px] text-muted-foreground scrollbar-thin">
+          {lines.map((line, index) => <div key={index}>{line.split(/(FAILED|panicked|error(?=[:\[]))/).map((part, at) => (at % 2 ? <span key={at} className="text-destructive">{part}</span> : part))}</div>)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/** One verifier, or the verifiers of a vote: why a model was asked, what each said, and what it used. */
+function ReviewCard({ agent, review, check }: { agent: string; review: RunReview; check: RunVerification }) {
+  const tokens = tokensText(reviewTokens(review));
+  const passes = review.verifiers.filter((verifier) => verifier.verdict === "pass").length;
+  const status = check.outcome === "passed" ? { text: review.voters === 1 ? "passed" : `passed · ${passes} of ${review.voters}`, tone: "text-add" }
+    : check.outcome === "failed" ? { text: review.voters === 1 ? "failed" : `failed · ${passes} of ${review.voters} passed`, tone: "text-destructive" }
+    : check.outcome === "inconclusive" ? { text: "no verdict", tone: "text-warning" }
+    : { text: "reading", tone: "text-info" };
+  const said = (verifier: RunVerifier) => (verifier.verdict === "pass" ? "Pass" : verifier.verdict === "fail" ? "Fail" : verifier.problem ? "No verdict" : "Reading");
+  return (
+    <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="piece-review" data-review={check.outcome ?? "open"}>
+      <div className="flex items-center gap-2 text-xs">
+        <ScanSearch aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="text-muted-foreground">{review.voters === 1 ? "Verifier" : `Vote · ${review.threshold} of ${review.voters} must pass`}</span>
+        <span className={cn("ml-auto shrink-0", status.tone)}>{status.text}{tokens ? <span className="text-faint" title="What the verifier sessions used, apart from the worker"> · {tokens}</span> : null}</span>
+      </div>
+      <ul className="mt-1 text-[12px] leading-[18px] text-muted-foreground">{review.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+      <ul className="mt-2 flex flex-col gap-2">
+        {review.verifiers.map((verifier, index) => (
+          <li key={index} className="text-xs" data-verdict={verifier.verdict ?? (verifier.problem ? "none" : "open")}>
+            <div className="flex items-center gap-2">
+              <span className="min-w-0 truncate"><ModelName piece={{ agent, model: verifier.model, effort: verifier.effort }} /></span>
+              <span className={cn("shrink-0", verifier.verdict === "pass" ? "text-add" : verifier.verdict === "fail" ? "text-destructive" : verifier.problem ? "text-warning" : "text-info")}>{said(verifier)}</span>
+              {verifier.session && <button type="button" className="ml-auto shrink-0 text-[11.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:underline" onClick={() => selectSession(verifier.session!.sessionId)}>Open</button>}
+            </div>
+            {(verifier.evidence?.length ?? 0) > 0 && <ul className="mt-1 list-disc break-words pl-4 font-mono text-[11.5px] leading-[17px] text-muted-foreground">{verifier.evidence!.map((line) => <li key={line}>{line}</li>)}</ul>}
+            {verifier.problem && <p className="mt-1 text-[11.5px] leading-[17px] text-faint">{verifier.problem}</p>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** How a result was checked: each gate in the order it ran, the commands as TerminalX ran them, and the verifier when one was asked.
+ * The check shown is the current try's, or the last one a try had: a piece waiting for its next worker shows why it went back. */
+function Checks({ piece }: { piece: RunPiece }) {
+  const tries = piece.tries ?? [];
+  let at = tries.length - 1;
+  while (at >= 0 && !tries[at].verification) at -= 1;
+  if (at < 0) return null;
+  const check = tries[at].verification!;
+  const failed = check.gates.find((gate) => !gate.passed);
+  const commands = check.gates.flatMap((gate) => gate.commands ?? []);
+  const outside = failed?.gate === "scope" ? (failed.detail ?? "").split("\n").filter((line) => line.startsWith("- ")).map((line) => line.slice(2)) : [];
+  // The gate under way: the first that has not run, while nothing has failed and the check is open.
+  const next = !failed && !check.outcome ? GATE_ORDER.find((gate) => !check.gates.some((ran) => ran.gate === gate) && (gate !== "review" || !!check.review)) : undefined;
+  return (
+    <Section title={at === tries.length - 1 ? "Checks" : `Checks of try ${at + 1}`}>
+      <div data-testid="piece-checks" data-check-outcome={check.outcome ?? "open"}>
+        <ol aria-label="Gates" className="flex flex-wrap gap-x-3 gap-y-1 text-[11.5px]">
+          {GATE_ORDER.map((gate) => {
+            const ran = check.gates.find((result) => result.gate === gate);
+            const state = ran ? (ran.passed ? "passed" : "failed") : gate === next || (gate === "review" && check.review && !check.outcome) ? "running" : failed ? "skipped" : check.outcome ? "notNeeded" : "waiting";
+            const Icon = state === "passed" ? CircleCheck : state === "failed" ? CircleX : state === "running" ? LoaderCircle : CircleDashed;
+            const unasked = gate === "commands" && !ran && !!check.facts?.commandsNotRun;
+            const words = unasked ? "not run" : state === "notNeeded" ? (gate === "commands" ? "no command" : "not needed") : state === "skipped" ? "not run" : state;
+            return (
+              <li key={gate} data-gate={gate} data-gate-state={state} title={ran?.detail ?? (unasked ? "Not run: nobody approved this plan, and this piece's worker is asked before it runs a command. A verifier read the result instead." : state === "skipped" ? "A check before it failed, so it did not run." : state === "notNeeded" && gate === "review" ? "The checks before it passed and nothing called for a reader: no model was asked." : undefined)}
+                className={cn("inline-flex items-center gap-1 whitespace-nowrap", state === "passed" ? "text-add" : state === "failed" ? "text-destructive" : state === "running" ? "text-info" : "text-faint")}>
+                <Icon aria-hidden className="size-3 shrink-0" />
+                <span className={state === "passed" || state === "failed" ? "text-foreground" : undefined}>{GATE_LABEL[gate]}</span>
+                <span className="sr-only">: {words}</span>
+              </li>
+            );
+          })}
+        </ol>
+        {failed && !failed.commands?.length && failed.gate !== "review" && (
+          <p className="mt-2 whitespace-pre-wrap break-words text-[12.5px] leading-[18px] text-destructive" data-testid="gate-failure">{failed.detail}</p>
+        )}
+        {outside.length > 0 && (
+          <p role="note" className="mt-2 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2.5 text-[12.5px] leading-[18px]">
+            <TriangleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0 text-warning" />
+            <span>The change is outside this piece's files. A worker may not edit another piece's files.</span>
+          </p>
+        )}
+        {commands.map((command, index) => <CommandCard key={index} command={command} />)}
+        {check.review && <ReviewCard agent={piece.agent} review={check.review} check={check} />}
+        {check.outcome === "passed" && !check.review && <p className="mt-2 text-[11.5px] leading-[17px] text-faint">Accepted without a model: the checks above were enough.</p>}
+        {check.outcome === "inconclusive" && <p className="mt-2 text-[12.5px] leading-[18px] text-warning">{check.failure}</p>}
+      </div>
+    </Section>
+  );
+}
+
+/** Every try of a piece, oldest first: what it ran on, what it cost, why it was made, and how it ended. */
+function Tries({ piece }: { piece: RunPiece }) {
+  const tries = piece.tries ?? [];
+  return (
+    <ol aria-label="Tries" className="mt-2" data-testid="piece-tries">
+      {tries.map((attempt, index) => {
+        const result = tryResult(attempt);
+        const cost = costText(attempt.costUsd, attempt.costUnpricedModels);
+        return (
+          <li key={index} className="flex gap-3" data-try={index + 1} data-try-outcome={attempt.outcome ?? (attempt.worker ? "running" : "waiting")}>
+            <div className="flex flex-col items-center">
+              <span className="grid size-5 shrink-0 place-items-center rounded-full bg-veil-raised text-[11px] text-muted-foreground">{index + 1}</span>
+              {index < tries.length - 1 && <span aria-hidden className="mt-1 flex-1 border-l border-hairline" />}
+            </div>
+            <div className="min-w-0 flex-1 pb-3">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="min-w-0 truncate"><ModelName piece={{ agent: piece.agent, model: attempt.model, effort: attempt.effort, tier: attempt.tier }} /></span>
+                {attempt.worker && <button type="button" className="ml-auto shrink-0 text-[11.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:underline" onClick={() => selectSession(attempt.worker!.sessionId)}>Open worker</button>}
+                <span className={cn("shrink-0 font-mono text-[11.5px] text-faint", !attempt.worker && "ml-auto")} title={attempt.costUnpricedModels?.length ? `Without ${attempt.costUnpricedModels.join(", ")}: no price is known for it` : "At API list prices"}>{cost ?? "–"}</span>
+              </div>
+              <div className="mt-0.5 text-[11.5px] leading-4 text-faint">{TRY_STEP_LABEL[attempt.step]}</div>
+              <div className={cn("mt-1 line-clamp-3 break-words text-[12.5px] leading-[18px]", result.tone)} title={result.text || undefined}>
+                {result.label}{result.text ? `: ${result.text}` : ""}
+              </div>
+              {result.output.length > 0 && <pre className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1.5 font-mono text-[11.5px] leading-[17px] text-muted-foreground hairline scrollbar-thin">{result.output.join("\n")}</pre>}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
 }
 
 /** A piece's model and effort, changed where they are read: each change is saved as part of the plan. */
@@ -373,20 +563,24 @@ function ModelAndEffort({ piece, disabled, onChange }: { piece: RunPiece; disabl
   const current = modelForTab(models, piece.model);
   const listed = models.some((model) => model.id === piece.model);
   const efforts = effortChoices(current, piece.effort);
+  // The empty choice is "not named by the plan": the piece's kind decides, and it shows what that came to.
+  const byKind = piece.kind ? `by kind: ${piece.kind}` : "by kind";
+  const kindModel = piece.model ? modelLabel(piece.agent, piece.model) : `${piece.agent === "codex" ? "Codex" : "Claude"} default`;
   return (
     <span className="flex min-w-0 items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
-      <select aria-label={`Model of ${piece.title}`} className={cn(cellSelect, "flex-1")} value={piece.model} disabled={disabled}
+      <select aria-label={`Model of ${piece.title}`} className={cn(cellSelect, "flex-1")} value={piece.modelByKind ? "" : piece.model} disabled={disabled} title={piece.modelByKind ? `From the routing table, ${byKind}` : undefined}
         onChange={(event) => {
           const next = modelForTab(models, event.target.value);
-          // An effort the new model does not have goes back to that model's default.
-          onChange({ model: event.target.value, effort: piece.effort && next?.efforts.includes(piece.effort) ? piece.effort : undefined });
+          // An effort the new model does not have goes back to that model's default; one the kind chose stays the kind's.
+          onChange({ model: event.target.value, effort: !piece.effortByKind && piece.effort && next?.efforts.includes(piece.effort) ? piece.effort : undefined });
         }}>
-        <option value="">{piece.agent === "codex" ? "Codex" : "Claude"} default</option>
+        {/* No model named: the plan is stored again with the routing table's model for the piece's kind. */}
+        <option value="">{piece.modelByKind ? `${kindModel} (${byKind})` : `By kind${piece.kind ? ` (${piece.kind})` : ""}`}</option>
         {piece.model && !listed && <option value={piece.model}>{modelLabel(piece.agent, piece.model)}</option>}
         {models.map((model) => <option key={model.id} value={model.id} title={modelOptionText(model, models)}>{model.label}</option>)}
       </select>
-      <select aria-label={`Effort of ${piece.title}`} className={cn(cellSelect, "w-[5.25rem] shrink-0")} value={piece.effort ?? ""} disabled={disabled} onChange={(event) => onChange({ effort: event.target.value || undefined })}>
-        <option value="">Default</option>
+      <select aria-label={`Effort of ${piece.title}`} className={cn(cellSelect, "w-[5.25rem] shrink-0")} value={piece.effortByKind ? "" : piece.effort ?? ""} disabled={disabled} title={piece.effortByKind ? `From the routing table, ${byKind}` : undefined} onChange={(event) => onChange({ effort: event.target.value || undefined })}>
+        <option value="">{piece.effortByKind && piece.effort ? EFFORT_LABEL[piece.effort] ?? piece.effort : "Default"}</option>
         {efforts.map((effort) => <option key={effort} value={effort}>{EFFORT_LABEL[effort] ?? effort}</option>)}
       </select>
     </span>
@@ -442,7 +636,7 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSave
   number: number;
   editable: boolean;
   busy: boolean;
-  cost: number | null;
+  cost: string | null;
   onClose: () => void;
   onSave: (patch: Partial<RunPlanPiece>) => Promise<boolean>;
   onRemove: () => void;
@@ -450,6 +644,8 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSave
   const [editing, setEditing] = useState(false);
   const mode = pieceMode(run, piece);
   const brief = piece.brief;
+  const tries = piece.tries ?? [];
+  const maxTries = run.maxTries ?? 3;
   return (
     <aside aria-label={`Piece ${number}: ${piece.title}`} data-testid="piece-detail" className="flex w-full shrink-0 flex-col border-t border-hairline bg-background @[900px]/run:min-h-0 @[900px]/run:w-[min(24rem,36%)] @[900px]/run:border-l @[900px]/run:border-t-0">
       <header className="flex h-10 shrink-0 items-center gap-2 border-b border-hairline px-4">
@@ -464,11 +660,19 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSave
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 scrollbar-thin">
           <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1.5">
             {editable ? (piece.kind ? <span className={chip}>{piece.kind}</span> : null) : <PieceStateMark state={piece.state} />}
+            {!editable && piece.state === "done" && pieceCheck(piece)?.outcome === "passed" && <span className="text-xs text-muted-foreground" data-testid="piece-check-passed">· {pieceCheck(piece)?.review ? "checked and read" : "check passed"}</span>}
+            {!editable && (tries.length > 1 || gaveUp(piece)) && <span className="text-xs text-muted-foreground" data-testid="piece-tries-used">· {tries.length} of {maxTries} tries used</span>}
             <span className="ml-auto text-[13px]"><ModelName piece={piece} /></span>
           </div>
+          {piece.modelNote && (
+            <p role="note" className="-mt-2 mb-4 flex items-start gap-1.5 text-xs text-warning"><CircleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />{piece.modelNote}</p>
+          )}
+          {!editable && tries.length > 0 && <Section title="Tries"><Tries piece={piece} /></Section>}
+          {!editable && <Checks piece={piece} />}
           {!editable && (
             <Section title={piece.state === "done" ? "Result" : "Where it stands"}>
               {piece.note ?? (piece.state === "queued" ? (piece.dependsOn.length ? `Waits for ${piece.dependsOn.join(", ")}.` : "Not started yet.") : piece.state === "running" ? "Its worker is working." : "No report.")}
+              {piece.state === "verifying" && <div className="mt-1 text-info">{verifyingText(piece)}. Nothing that depends on it starts until it has passed.</div>}
               {piece.branch && <div className="mt-1.5 break-all font-mono text-[11.5px] text-faint">{piece.branch}</div>}
             </Section>
           )}
@@ -512,7 +716,7 @@ function PieceDetail({ run, piece, number, editable, busy, cost, onClose, onSave
           </> : piece.worker ? (
             <>
               <Button variant="outline" onClick={() => selectSession(piece.worker!.sessionId)}><SquareArrowOutUpRight />Open worker</Button>
-              <span className="ml-auto font-mono text-xs text-faint" data-testid="piece-detail-cost" title="API-equivalent, from the worker's usage records">{formatCost(cost)}</span>
+              <span className="ml-auto font-mono text-xs text-faint" data-testid="piece-detail-cost" title="API-equivalent, from the workers' usage records">{cost ?? "–"}</span>
             </>
           ) : <span className="text-xs text-faint">No worker yet.</span>}
         </footer>

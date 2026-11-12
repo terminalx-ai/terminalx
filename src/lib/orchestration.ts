@@ -1,7 +1,10 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { orchestration } from "@/lib/api";
-import type { PieceState, Run, RunCheck, RunEstimate, RunPiece, RunPlan, RunRefusal, RunState } from "@/types/orchestration";
+import type {
+  PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunGate, RunPiece, RunPlan, RunRefusal, RunReview, RunState, RunVerification, Tier, TryOutcome,
+  TryStep,
+} from "@/types/orchestration";
 
 /** The runs this window has heard of, by the session that leads each: a lead has one run to show, its newest. */
 let runs: Record<string, Run | null> = {};
@@ -150,8 +153,10 @@ export function planOf(run: Run): RunPlan {
       reviewOnlyReason: piece.reviewOnlyReason,
       kind: piece.kind,
       agent: piece.agent,
-      model: piece.model,
-      effort: piece.effort,
+      // What its kind chose is not the plan's to name: left out, the routing table chooses again,
+      // and a piece whose tier has no installed model keeps saying so.
+      model: piece.modelByKind ? "" : piece.model,
+      effort: piece.effortByKind ? undefined : piece.effort,
       permissionMode: piece.permissionMode,
       readsUntrusted: piece.readsUntrusted,
       estimate: piece.estimate,
@@ -207,6 +212,108 @@ export function budgetText(run: Pick<Run, "budget">): string | null {
   return parts.length ? parts.join(" · ") : null;
 }
 
+/** The kinds of piece, in the routing table's order, and what each is used for (`routing::KINDS`). */
+export const PIECE_KINDS: { kind: PieceKind; usedFor: string }[] = [
+  { kind: "search", usedFor: "Finding files, listing call sites" },
+  { kind: "logs", usedFor: "Reading test output and logs" },
+  { kind: "scoped-code", usedFor: "A bug fix or a change with a clear spec" },
+  { kind: "review", usedFor: "Reviewing a diff" },
+  { kind: "code", usedFor: "Everyday engineering" },
+  { kind: "refactor", usedFor: "Architecture, large refactors" },
+  { kind: "research", usedFor: "Deep research and analysis" },
+  { kind: "verify", usedFor: "Checking a worker's result" },
+];
+
+export const ROUTED_AGENTS: { agent: RoutedAgent; name: string }[] = [
+  { agent: "claude", name: "Claude Code" },
+  { agent: "codex", name: "Codex" },
+];
+
+/** Tiers, smallest first, with the family each agent has there (`Tier::family`). */
+export const TIERS: { tier: Tier; label: string; family: Record<RoutedAgent, string> }[] = [
+  { tier: "small", label: "Small", family: { claude: "Haiku", codex: "Luna" } },
+  { tier: "mid", label: "Mid", family: { claude: "Sonnet", codex: "Terra" } },
+  { tier: "large", label: "Large", family: { claude: "Opus", codex: "Sol" } },
+  { tier: "top", label: "Top", family: { claude: "Fable", codex: "Astra" } },
+];
+
+/** The efforts a row of the table may name, lowest first (`routing::EFFORTS`). */
+export const ROUTE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+/** The built-in table (`routing::default_route`): what a row is when nobody changed it. */
+export function defaultRoute(kind: PieceKind): Route {
+  switch (kind) {
+    case "search":
+    case "logs":
+      return { tier: "small" };
+    case "code":
+      return { tier: "large", effort: "medium" };
+    case "refactor":
+    case "research":
+      return { tier: "top", effort: "medium" };
+    default:
+      return { tier: "mid", effort: "medium" };
+  }
+}
+
+export function sameRoute(a: Route | undefined, b: Route | undefined): boolean {
+  return a?.tier === b?.tier && (a?.effort ?? null) === (b?.effort ?? null);
+}
+
+/** The app's table: its changed rows over the built-in ones. */
+export function appRouting(rows: RoutingRows | undefined): RoutingTable {
+  return Object.fromEntries(
+    PIECE_KINDS.map(({ kind }) => [kind, Object.fromEntries(ROUTED_AGENTS.map(({ agent }) => [agent, rows?.[kind]?.[agent] ?? defaultRoute(kind)]))]),
+  ) as RoutingTable;
+}
+
+/** The colour a tier is marked with, wherever a model of it is named. */
+export const TIER_DOT: Record<Tier, string> = { small: "text-info", mid: "text-add", large: "text-accent", top: "text-merged" };
+
+/** What made a try differ from the one before it, as the tries of a piece say it. */
+export const TRY_STEP_LABEL: Record<TryStep, string> = {
+  first: "First try",
+  retry: "Retried with the failure text",
+  effort: "Retried with the failure text, effort raised one level",
+  tier: "Moved up one model at one effort level lower",
+};
+
+/** How a try ended, in a word or two; a try with no outcome is under way or not yet started. */
+export const TRY_OUTCOME_LABEL: Record<TryOutcome, string> = {
+  done: "Done",
+  failed: "Failed",
+  partial: "Partial",
+  checkFailed: "Check failed",
+  blocked: "Blocked",
+  stopped: "Stopped",
+};
+
+/** Whether a try fell short in a way the next one may fix (`Outcome::fell_short`). */
+export function fellShort(attempt: Pick<PieceTry, "outcome">): boolean {
+  return attempt.outcome === "failed" || attempt.outcome === "partial" || attempt.outcome === "checkFailed";
+}
+
+/** `$0.61`; `$0.61+` when a model's tokens are not in it; `null` before any cost was read. */
+export function costText(cost: number | null | undefined, unpriced?: string[]): string | null {
+  if (cost == null) return null;
+  return `$${cost.toFixed(2)}${unpriced?.length ? "+" : ""}`;
+}
+
+/** What a piece's tries cost so far: the run's own sum when it sent one, else the tries added up. */
+export function pieceCost(piece: Pick<RunPiece, "tries" | "costUsd" | "costUnpricedModels">): { cost: number | null; unpriced: string[] } {
+  const tries = piece.tries ?? [];
+  const known = tries.filter((attempt) => attempt.costUsd != null);
+  const cost = piece.costUsd !== undefined ? piece.costUsd : known.length ? known.reduce((sum, attempt) => sum + (attempt.costUsd ?? 0), 0) : null;
+  const unpriced = piece.costUnpricedModels ?? [...new Set(tries.flatMap((attempt) => attempt.costUnpricedModels ?? []))];
+  return { cost, unpriced };
+}
+
+/** The ladder ran out: the piece is blocked and its last try fell short (`Piece::gave_up`). */
+export function gaveUp(piece: Pick<RunPiece, "state" | "tries">): boolean {
+  const last = piece.tries?.[piece.tries.length - 1];
+  return piece.state === "blocked" && !!last && fellShort(last);
+}
+
 export const RUN_STATE_LABEL: Record<RunState, string> = {
   planned: "Ready to start",
   awaitingApproval: "Plan waiting for you",
@@ -221,11 +328,54 @@ export const RUN_STATE_LABEL: Record<RunState, string> = {
 export const PIECE_STATE_LABEL: Record<PieceState, string> = {
   queued: "Queued",
   running: "Running",
+  verifying: "Verifying",
   done: "Done",
   blocked: "Blocked",
   failed: "Failed",
   stopped: "Stopped",
 };
+
+/** A gate as a row names it (`verify::Gate`), in the order they run. */
+export const GATE_LABEL: Record<RunGate, string> = {
+  report: "Report",
+  scope: "Scope",
+  branch: "Branch state",
+  commands: "Command checks",
+  review: "Review",
+};
+export const GATE_ORDER: RunGate[] = ["report", "scope", "branch", "commands", "review"];
+
+/** The check of a piece's current try, when it has one. */
+export function pieceCheck(piece: Pick<RunPiece, "tries">): RunVerification | undefined {
+  return piece.tries?.[piece.tries.length - 1]?.verification;
+}
+
+/** What a piece being checked waits on: the gates TerminalX runs itself, or a verifier's answer. */
+export function verifyingText(piece: Pick<RunPiece, "tries">): string {
+  const review = pieceCheck(piece)?.review;
+  if (!review) return "Running its checks";
+  if (review.voters === 1) return "Waiting on the verifier";
+  const answered = review.verifiers.filter((verifier) => verifier.verdict || verifier.problem).length;
+  return `Waiting on verifiers, ${answered} of ${review.voters} answered`;
+}
+
+/** `38s`, `2m 05s`: how long a command ran. */
+export function durationText(millis: number): string {
+  const seconds = Math.max(1, Math.round(millis / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+/** `5.2k tokens`, `870 tokens`; `null` before any was read. */
+export function tokensText(tokens: number | null | undefined): string | null {
+  if (tokens == null) return null;
+  return `${tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 100_000 ? 0 : 1).replace(/\.0$/, "")}k` : tokens} tokens`;
+}
+
+/** What a review's verifiers used together; `null` before any was read. */
+export function reviewTokens(review: RunReview | undefined): number | null {
+  const read = (review?.verifiers ?? []).filter((verifier) => verifier.tokens);
+  return read.length ? read.reduce((sum, verifier) => sum + verifier.tokens!.input + verifier.tokens!.output + verifier.tokens!.cacheRead + verifier.tokens!.cacheWrite, 0) : null;
+}
 
 /** The 1-based place of each piece in the plan: what "After" names, as the plan's rows are numbered. */
 export function pieceNumbers(run: Pick<Run, "pieces">): Record<string, number> {

@@ -1141,6 +1141,8 @@ pub struct SessionManager {
     writers: Arc<Mutex<HashMap<String, Arc<PaneWriter>>>>,
     starts: Arc<std::sync::atomic::AtomicU64>,
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    /// Only callers hold this sender; its last drop wakes and ends the watcher.
+    watcher_lifetime: Option<std::sync::mpsc::Sender<()>>,
     stop_pids: Arc<Mutex<Vec<u32>>>,
     session_stop_pids: Arc<Mutex<HashMap<String, Vec<u32>>>>,
     /// Tabs following their terminal (#437); off until the desktop app asks.
@@ -1526,6 +1528,7 @@ impl SessionManager {
         status: Arc<crate::status::StatusState>,
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
+        let (watcher_lifetime, stop_watching) = std::sync::mpsc::channel();
         let manager = Self {
             row_prs: Arc::default(),
             mobile: Arc::new(crate::local_runtime::mobile::Registry::default()),
@@ -1542,18 +1545,23 @@ impl SessionManager {
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            watcher_lifetime: Some(watcher_lifetime),
             history_downloads: Arc::default(),
             typing: Arc::default(),
             stop_pids: Arc::new(Mutex::new(Vec::new())),
             session_stop_pids: Arc::default(),
             follow: Arc::default(),
         };
-        let watcher = manager.clone();
-        std::thread::spawn(move || loop {
-            // Short, because an unacknowledged prompt is judged here and the
-            // reader is waiting on it; a pass only looks at each tab.
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            watcher.watch_tabs(recovery::Patience::DEFAULT, Instant::now(), |pane| watcher.terminals.last_output(pane));
+        let mut watcher = manager.clone();
+        // The polling copy must not keep its own lifetime alive. In particular,
+        // dropping a test fixture must release its thread and retained state.
+        drop(watcher.watcher_lifetime.take());
+        std::thread::spawn(move || {
+            // Preserve the five-second polling interval, but wake immediately
+            // when every caller has dropped its manager.
+            while matches!(stop_watching.recv_timeout(std::time::Duration::from_secs(5)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                watcher.watch_tabs(recovery::Patience::DEFAULT, Instant::now(), |pane| watcher.terminals.last_output(pane));
+            }
         });
         manager
     }
@@ -6412,6 +6420,26 @@ impl SessionManager {
             if let Some(reason) = crate::orchestration::guard::refusal(&frame.payload).filter(|_| index::get(&frame.session).is_ok_and(|session| crate::orchestration::guard::limited(&session))) {
                 log::info!("run worker {}/{}: {reason}", frame.session, frame.tab);
                 return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
+            }
+            // A verifier of a run's result reads it and changes nothing: an edit, and a shell
+            // command not known to only read, is refused in every permission mode, whatever its
+            // tab is switched to later.
+            let call = crate::orchestration::guard::verifier_call(&frame.payload);
+            if call != crate::orchestration::guard::VerifierCall::Leave && {
+                let known = crate::orchestration::store::is_verifier(&frame.session, &frame.tab);
+                // The session's entry is read only when the runs could not be.
+                crate::orchestration::guard::reads_only(known, known.is_none().then(|| index::get(&frame.session).ok()).flatten().as_ref(), &frame.tab)
+            } {
+                let output = match call {
+                    crate::orchestration::guard::VerifierCall::Refuse(reason) => {
+                        log::info!("run verifier {}/{}: {reason}", frame.session, frame.tab);
+                        crate::orchestration::guard::refusal_output(&reason)
+                    }
+                    // A command that only reads runs as the reader's replacement for it, in either agent's hook form.
+                    crate::orchestration::guard::VerifierCall::Replace(input) => codex::pty::pre_tool_rewrite(input),
+                    crate::orchestration::guard::VerifierCall::Leave => unreachable!("left alone above"),
+                };
+                return HookReply { output: Some(output), refused: None };
             }
         }
         if frame.event == "StatusLine" {

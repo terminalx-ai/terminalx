@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SESSION_STATUSES } from "@terminalx/portable/sessionStatus";
-import { familyNeeds, modelTier, needsMark, nestWorkers, orderWorkers, overBudget, runningWorkers, runProgress, runSpend } from "./runFamily";
+import { familyNeeds, modelTier, needsMark, nestWorkers, orderWorkers, overBudget, pieceSpend, runningWorkers, runProgress, runSpend } from "./runFamily";
 import type { Run, RunPiece } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
@@ -49,6 +49,22 @@ describe("a run's numbers", () => {
     const byId = new Map([session("w1", "lead", 0.5), session("w2", "lead", 1.25)].map((entry) => [entry.id, entry]));
     expect(runSpend(r, byId)).toBe(1.75);
     expect(runSpend(run([piece("1", "queued")]), byId)).toBeNull();
+  });
+
+  it("counts every try a piece took, its current worker as its session reads now (PRO-275 with PRO-281)", () => {
+    const tries = [
+      { step: "first", model: "sonnet", worker: { sessionId: "w1" }, outcome: "failed", costUsd: 0.6 },
+      { step: "effort", model: "sonnet", worker: { sessionId: "w2" }, costUsd: 0.2 },
+    ] as RunPiece["tries"];
+    const retried = piece("1", "running", "w2", { tries, costUsd: 0.8, costUnpricedModels: ["mystery"] });
+    // The run last read 0.20 for the worker; its session has 0.90 by now.
+    const byId = new Map([session("w2", "lead", 0.9)].map((entry) => [entry.id, entry]));
+    expect(pieceSpend(retried, byId)).toEqual({ cost: 1.5, unpriced: ["mystery"] });
+    expect(runSpend(run([retried]), byId)).toBe(1.5);
+    // A worker the app does not list (deleted, another device): what the run recorded stands.
+    expect(pieceSpend(retried, new Map())).toEqual({ cost: 0.8, unpriced: ["mystery"] });
+    // A piece the run recorded no tries for is its worker's session alone.
+    expect(pieceSpend(piece("2", "running", "w2"), byId)).toEqual({ cost: 0.9, unpriced: [] });
   });
 
   it("is over budget only past the dollars it allows", () => {

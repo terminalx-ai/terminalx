@@ -1,5 +1,6 @@
 import type { StatusDescription } from "@terminalx/portable/sessionStatus";
 import { modelLabel } from "@/lib/models";
+import { pieceCost } from "@/lib/orchestration";
 import { conversationTitle } from "@/lib/sessions";
 import { sessionModels, totals } from "@/components/session/SessionCost";
 import type { PieceState, Run, RunPiece } from "@/types/orchestration";
@@ -57,11 +58,29 @@ export function sessionSpend(session: SessionEntry | undefined): number | null {
   return rows.length ? totals(rows).costUsd : null;
 }
 
-/** What the run's workers have cost so far: the sum of those with a price, `null` while none has one. */
+/**
+ * What a piece's workers have cost so far, API-equivalent. The run records each
+ * try's cost (PRO-275), so a retried piece counts every worker it had; its
+ * current worker is read from its session as that changes (PRO-281), since the
+ * run catches up with a worker's usage only when it next looks. `null` while
+ * none of it has a price.
+ */
+export function pieceSpend(piece: RunPiece, sessions: ReadonlyMap<string, SessionEntry>): { cost: number | null; unpriced: string[] } {
+  const recorded = pieceCost(piece);
+  const live = piece.worker ? sessionSpend(sessions.get(piece.worker.sessionId)) : null;
+  if (live == null) return recorded;
+  const tries = piece.tries ?? [];
+  const last = tries[tries.length - 1];
+  const earlier = last && last.worker?.sessionId === piece.worker!.sessionId ? tries.slice(0, -1) : tries;
+  const before = earlier.reduce((sum, attempt) => sum + (attempt.costUsd ?? 0), 0);
+  return { cost: before + live, unpriced: recorded.unpriced };
+}
+
+/** What the run's workers have cost so far: the sum of the pieces with a price, `null` while none has one. */
 export function runSpend(run: Run, sessions: ReadonlyMap<string, SessionEntry>): number | null {
   let sum: number | null = null;
   for (const piece of run.pieces) {
-    const cost = piece.worker ? sessionSpend(sessions.get(piece.worker.sessionId)) : null;
+    const { cost } = pieceSpend(piece, sessions);
     if (cost != null) sum = (sum ?? 0) + cost;
   }
   return sum;

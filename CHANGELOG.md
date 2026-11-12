@@ -20,14 +20,36 @@
   Settings → Experimental → Orchestration runs; the limits are in Settings →
   Orchestrator and per repository. (PRO-274)
 
+- Experimental: an orchestration run picks each piece's model and effort from
+  the piece's kind. Every piece of a plan names a kind (`search`, `logs`,
+  `scoped-code`, `code`, `refactor`, `research`, `review`, `verify`), and a
+  routing table gives each kind a model tier and an effort, with one column for
+  Claude Code workers and one for Codex workers: small (Haiku, Luna) for
+  searching and reading logs, mid (Sonnet, Terra) for bounded changes and
+  checks, large (Opus, Sol) for everyday engineering, top (Fable, Astra) for
+  refactors and research. The table names tiers, not versions, so a new release
+  takes its place; a tier with no installed model falls back to the lead's
+  model, and the piece says so. A plan may still name a model or an effort for
+  a piece. Edit the table under Settings → Orchestrator, and per repository in
+  its own settings.
+
+  A piece that reports `failed` or `partial`, or whose done-check fails
+  (`terminalx runs check-failed`), is tried again without being asked: first
+  with the failure text and one more level of effort (never past high), then one
+  model tier up at one effort level lower. Each try is a fresh worker that is
+  told what the one before fell short on, and after three tries the piece is
+  blocked and goes back to the lead with what was tried. The Run view shows
+  every try with its model, effort, cost and outcome. (PRO-275)
+
 - Experimental: with Orchestration runs on, a lead's workers sit under it in the
   sidebar, whatever worktree they run in, each named by its piece with its
   model's tier and its piece's state mark. Fold a lead and its row keeps what
   matters: pieces done out of total, how many workers are running, a Needs
   approval or Needs you mark with how many wait on you, and a worker's unread
   mark. Hover it for the pieces that are not done. Clicking a lead opens its
-  run. The Run view now shows what each worker has cost, the run's spend against
-  its dollar budget, and a Needs you list for a blocked piece, a worker waiting
+  run. The Run view's costs follow each worker's usage as it changes, still
+  counting every try a piece took, and set the run's spend against its dollar
+  budget; a Needs you list there names a blocked piece, a worker waiting
   on an answer or spend past the budget, each opening the worker it is about.
   Sessions that no other session started look as before. (PRO-281)
 

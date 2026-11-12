@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::orchestration::routing::{Overrides as RoutingOverrides, Table as RoutingTable};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -86,6 +88,15 @@ pub struct OrchestratorSettings {
     /// The permission mode of a worker whose piece names none.
     #[serde(deserialize_with = "worker_mode")]
     pub worker_mode: String,
+    /// A result whose diff is over this many changed lines is read by a
+    /// verifier even when its commands pass (PRO-278, `orchestration::verify`).
+    #[serde(deserialize_with = "review_diff_lines")]
+    pub review_diff_lines: u32,
+    /// The rows of the routing table a person changed (PRO-275): which tier
+    /// and effort a kind of piece starts on, per agent. A row that is not
+    /// here is the built-in one (`orchestration::routing::default_route`).
+    #[serde(skip_serializing_if = "RoutingOverrides::is_empty")]
+    pub routing: RoutingOverrides,
     /// One project's own answers, by its path. A project without one, or
     /// without a value for a setting, follows the app-wide value.
     pub projects: std::collections::BTreeMap<String, ProjectOrchestratorSettings>,
@@ -100,6 +111,11 @@ pub struct ProjectOrchestratorSettings {
     pub piece_limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_worker_mode")]
     pub worker_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_review_diff_lines")]
+    pub review_diff_lines: Option<u32>,
+    /// The project's own rows of the routing table; the rest follow the app's.
+    #[serde(skip_serializing_if = "RoutingOverrides::is_empty")]
+    pub routing: RoutingOverrides,
 }
 
 impl ProjectOrchestratorSettings {
@@ -115,6 +131,9 @@ pub struct OrchestratorLimits {
     pub require_approval: bool,
     pub piece_limit: u32,
     pub worker_mode: String,
+    pub review_diff_lines: u32,
+    /// The routing table in force: every kind, every agent.
+    pub routing: RoutingTable,
 }
 
 /// Eight: a lead can still read eight reports and hold eight briefs apart;
@@ -131,6 +150,20 @@ pub const DEFAULT_WORKER_MODE: &str = "bypassPermissions";
 
 fn valid_piece_limit(value: &serde_json::Value) -> Option<u32> {
     value.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| (1..=MAX_PIECE_LIMIT).contains(n))
+}
+
+pub use crate::orchestration::verify::{DEFAULT_REVIEW_DIFF_LINES, MAX_REVIEW_DIFF_LINES};
+
+fn valid_review_diff_lines(value: &serde_json::Value) -> Option<u32> {
+    value.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| (1..=MAX_REVIEW_DIFF_LINES).contains(n))
+}
+
+fn review_diff_lines<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<u32, D::Error> {
+    Ok(valid_review_diff_lines(&serde_json::Value::deserialize(deserializer)?).unwrap_or(DEFAULT_REVIEW_DIFF_LINES))
+}
+
+fn project_review_diff_lines<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<u32>, D::Error> {
+    Ok(valid_review_diff_lines(&serde_json::Value::deserialize(deserializer)?))
 }
 
 fn valid_worker_mode(value: &serde_json::Value) -> Option<String> {
@@ -158,7 +191,7 @@ fn project_worker_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std
 
 impl Default for OrchestratorSettings {
     fn default() -> Self {
-        Self { require_approval: true, piece_limit: DEFAULT_PIECE_LIMIT, worker_mode: DEFAULT_WORKER_MODE.into(), projects: Default::default() }
+        Self { require_approval: true, piece_limit: DEFAULT_PIECE_LIMIT, worker_mode: DEFAULT_WORKER_MODE.into(), review_diff_lines: DEFAULT_REVIEW_DIFF_LINES, routing: Default::default(), projects: Default::default() }
     }
 }
 
@@ -170,6 +203,8 @@ impl OrchestratorSettings {
             require_approval: project.and_then(|p| p.require_approval).unwrap_or(self.require_approval),
             piece_limit: project.and_then(|p| p.piece_limit).unwrap_or(self.piece_limit),
             worker_mode: project.and_then(|p| p.worker_mode.clone()).unwrap_or_else(|| self.worker_mode.clone()),
+            review_diff_lines: project.and_then(|p| p.review_diff_lines).unwrap_or(self.review_diff_lines),
+            routing: RoutingTable::resolved(&self.routing, project.map(|p| &p.routing)),
         }
     }
 }
@@ -514,6 +549,9 @@ mod tests {
         assert!(!legacy.experimental.orchestrator_runs);
         let runs: Settings = serde_json::from_value(serde_json::json!({"experimental":{"orchestratorRuns":true}})).unwrap();
         assert!(runs.experimental.orchestrator_runs && !runs.experimental.native_codex);
+        assert!(!legacy.experimental.session_cost);
+        let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
+        assert!(cost.experimental.session_cost && !cost.experimental.native_codex);
     }
 
     #[test]
@@ -545,6 +583,35 @@ mod tests {
         }})).unwrap();
         assert_eq!((damaged.orchestrator.piece_limit, damaged.orchestrator.worker_mode.as_str()), (8, "bypassPermissions"));
         assert!(damaged.orchestrator.projects["/repo"].is_empty());
+    }
+
+    #[test]
+    fn the_routing_table_is_the_built_in_one_until_a_row_is_changed_for_the_app_or_a_project() {
+        use crate::orchestration::routing::{Route, Tier};
+        let route = |tier, effort: Option<&str>| Route { tier, effort: effort.map(str::to_owned) };
+        // Nothing stored: the built-in table, and nothing written for it.
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert_eq!(legacy.orchestrator.for_project("/repo").routing, RoutingTable::default());
+        assert!(serde_json::to_value(&legacy).unwrap()["orchestrator"].get("routing").is_none());
+
+        let set: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {
+            "routing": {"code": {"claude": {"tier": "mid", "effort": "high"}}},
+            "projects": {"/repo": {"routing": {"code": {"claude": {"tier": "top"}}, "search": {"codex": {"tier": "mid", "effort": "low"}}}}},
+        }})).unwrap();
+        let repo = set.orchestrator.for_project("/repo").routing;
+        assert_eq!(repo.route("code", "claude"), Some(&route(Tier::Top, None)));
+        assert_eq!(repo.route("search", "codex"), Some(&route(Tier::Mid, Some("low"))));
+        assert_eq!(repo.route("code", "codex"), Some(&route(Tier::Large, Some("medium"))));
+        // Another project follows the app's row, then the built-in ones.
+        let other = set.orchestrator.for_project("/other").routing;
+        assert_eq!(other.route("code", "claude"), Some(&route(Tier::Mid, Some("high"))));
+        assert_eq!(other.route("search", "codex"), Some(&route(Tier::Small, None)));
+        // Only the changed rows are written, and they read back the same.
+        let written = serde_json::to_value(&set).unwrap();
+        assert_eq!(written["orchestrator"]["routing"], serde_json::json!({"code": {"claude": {"tier": "mid", "effort": "high"}}}));
+        assert_eq!(serde_json::from_value::<Settings>(written).unwrap().orchestrator, set.orchestrator);
+        // A project with a routing row of its own is not "following the app in everything".
+        assert!(!set.orchestrator.projects["/repo"].is_empty());
     }
 
     #[test]
