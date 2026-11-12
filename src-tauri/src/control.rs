@@ -874,7 +874,7 @@ impl ControlService {
                 match command {
                     "runs.takeOver" => {
                         self.manager.accepting_work().map_err(ControlError::internal)?;
-                        let run = engine::take_over(&host, &run.id, &piece).map_err(ControlError::of_run)?;
+                        let run = engine::take_over(&host, &run.id, &piece, engine::By::Cli).map_err(ControlError::of_run)?;
                         Ok(json!({"run": engine::shown(&run), "piece": piece}))
                     }
                     "runs.finish" => {

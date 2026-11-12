@@ -571,6 +571,13 @@ pub fn merge(host: &dyn Checkouts, id: &str, options: &Options) -> Result<Merged
         RunState::Stopped => return Err(EngineError::new("run_ended", format!("Run {id} was stopped. Nothing more is merged in it."), Some("Merge the branches you want by hand, or create a new run for what is left."))),
         _ => {}
     }
+    // What the lead commits for a piece it took over is that piece's result (`engine::finish`): no other
+    // piece's merge lands in its branch meanwhile, to be counted as its work.
+    if let Some(taken) = run.pieces.iter().find(|piece| piece.state == PieceState::Lead) {
+        let mut error = EngineError::new("piece_with_lead", format!("Piece {} is with the lead: nothing is merged into its branch until it is finished or skipped, so its work is not mixed with other pieces'.", taken.id), Some("Finish it with `terminalx runs finish`, or have it skipped, then merge."));
+        error.details = json!({"piece": taken.id});
+        return Err(error);
+    }
     if let Some(unknown) = options.skip.iter().find(|skip| run.piece(skip).is_none()) {
         let mut error = EngineError::new("piece_not_found", format!("Run {id} has no piece {unknown}."), Some("Use a piece id from `terminalx runs show --json`."));
         error.details = json!({"pieces": run.pieces.iter().map(|piece| piece.id.clone()).collect::<Vec<_>>()});

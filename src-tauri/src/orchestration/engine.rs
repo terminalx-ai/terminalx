@@ -1509,6 +1509,17 @@ fn blocked<'a>(run: &'a Run, piece_id: &str, what: &str) -> Result<&'a Piece, En
     Ok(piece)
 }
 
+/// A person approved this run's plan: what changes it (the files a piece owns, a piece left out, a piece
+/// lifted out of its scope into the lead) is theirs, from the Run view, not the lead's from the CLI.
+fn person_only(run: &Run, piece_id: &str, by: By, what: &str) -> Result<(), EngineError> {
+    if by == By::Cli && run.approval.is_some() {
+        let mut error = EngineError::new("person_only", format!("A person approved the plan of run {}: only they {what}, in the session's Run view.", run.id), Some("Tell the person what the piece needs and why, then end your turn. You are told here when they decide."));
+        error.details = json!({"piece": piece_id});
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// A turn of a worker that has a session: within the budget and the worker limits, as any
 /// worker's turn is (PRO-280). `what` names it in the refusal.
 fn turn_fits(host: &dyn Host, run: &Run, piece_id: &str, what: &str) -> Result<(), EngineError> {
@@ -1556,6 +1567,7 @@ pub fn skip(host: &dyn Host, id: &str, piece_id: &str, by: By) -> Result<Skipped
     if !matches!(piece.state, PieceState::Blocked | PieceState::Failed | PieceState::Lead) {
         blocked(&run, piece_id, "skip a piece")?;
     }
+    person_only(&run, piece_id, by, "leave a piece out")?;
     let mut skipped = vec![piece_id.to_string()];
     loop {
         let more: Vec<String> = run.pieces.iter().filter(|other| !skipped.contains(&other.id) && other.state == PieceState::Queued && other.worker.is_none() && other.depends_on.iter().any(|on| skipped.contains(on))).map(|other| other.id.clone()).collect();
@@ -1620,11 +1632,7 @@ pub fn widen(host: &dyn Host, id: &str, piece_id: &str, files: &[String], by: By
     let run = refreshed(host, id)?;
     let piece = blocked(&run, piece_id, "widen a piece's files")?;
     // A person approved the files each piece owns: changing them is theirs, as editing the plan is.
-    if by == By::Cli && run.approval.is_some() {
-        let mut error = EngineError::new("person_only", format!("A person approved the plan of run {id}, with the files each piece owns: only they widen one, in the session's Run view."), Some("Tell the person what piece needs and why, then end your turn. You are told here when they decide."));
-        error.details = json!({"piece": piece_id});
-        return Err(error);
-    }
+    person_only(&run, piece_id, by, "widen the files a piece owns")?;
     let named: Vec<String> = files.iter().map(|file| file.trim().trim_start_matches("./").to_string()).filter(|file| !file.is_empty()).collect();
     let wanted: Vec<String> = if named.is_empty() { piece.outside(&run).into_iter().map(|outside| outside.path).collect() } else { named };
     // A catch-all (`**`, `*/*`, `.`) is not a widening: it is every file.
@@ -1650,7 +1658,9 @@ pub fn widen(host: &dyn Host, id: &str, piece_id: &str, files: &[String], by: By
         return Err(error);
     }
     // A done piece's work is finished, and a skipped one's will not come: only one still to be done is in the way.
-    if let Some((path, other)) = added.iter().find_map(|path| run.pieces.iter().find(|other| other.id != piece_id && plans::owns(&other.owns, path) && !other.state.settled() && other.state != PieceState::Stopped).map(|other| (path, other))) {
+    // A directory or a glob is compared as one: `src/store` meets a piece that owns `src/store/a.rs`.
+    let meets = |path: &str, other: &Piece| other.owns.iter().any(|owned| plans::overlap(path, owned));
+    if let Some((path, other)) = added.iter().find_map(|path| run.pieces.iter().find(|other| other.id != piece_id && meets(path, other) && !other.state.settled() && other.state != PieceState::Stopped).map(|other| (path, other))) {
         let mut error = EngineError::new("owned_by_another", format!("{path} is owned by piece {}, which is {}: two workers would change it at once.", other.id, piece_state_name(other.state)), Some("Widen it once that piece is done, or skip one of them."));
         error.details = json!({"piece": piece_id, "path": path, "owner": other.id, "state": other.state});
         return Err(error);
@@ -1756,10 +1766,12 @@ pub fn note(host: &dyn Host, id: &str, piece_id: &str, text: &str, by: By) -> Re
 /// where it may change any file. `finish` then checks that and makes the
 /// piece done. Like resolving a conflict in the lead, it is a model call the
 /// run's budget counts: a run past it does not start it.
-pub fn take_over(host: &dyn Host, id: &str, piece_id: &str) -> Result<Run, EngineError> {
+pub fn take_over(host: &dyn Host, id: &str, piece_id: &str, by: By) -> Result<Run, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     let run = refreshed(host, id)?;
     let piece = blocked(&run, piece_id, "hand a piece to the lead")?;
+    // It lifts the piece out of the files a person approved for it.
+    person_only(&run, piece_id, by, "hand a piece to the lead")?;
     if let Some(other) = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).filter(|resolving| run.piece(&resolving.piece).is_some_and(|other| other.state == PieceState::Lead || other.current_merge().is_some_and(|merge| merge.state == MergeState::Conflict))) {
         let mut error = EngineError::new("lead_busy", format!("The lead is already working on piece {} for you: it takes one piece at a time.", other.piece), Some("Wait until that piece is settled, or skip it."));
         error.details = json!({"piece": piece_id, "busyWith": other.piece});
@@ -1774,7 +1786,7 @@ pub fn take_over(host: &dyn Host, id: &str, piece_id: &str) -> Result<Run, Engin
     let lead = host.lead(&run.lead.session_id).ok();
     let login = lead.as_ref().map(|lead| host.login(&lead.agent)).unwrap_or(Login::Subscription);
     let lead_usd = host.worker_cost(&run.lead).usd.unwrap_or(0.0);
-    let prompt = brief::take_over(&run, piece, &head);
+    let prompt = brief::take_over(&run, piece, &head, by == By::Person);
     let at = crate::store::index::now();
     let (after, ()) = store::update(id, |run| {
         let merge = run.merge.get_or_insert_with(Default::default);
@@ -1964,13 +1976,8 @@ fn settle(run: &mut Run) {
         (RunState::Running, None)
     } else {
         let names: Vec<String> = failed.iter().map(|piece| piece.id.clone()).collect();
-        let said: Vec<String> = failed
-            .iter()
-            .map(|piece| match piece.gave_up() {
-                true => format!("{} is blocked after {} {}.", piece.id, piece.tries.len(), if piece.tries.len() == 1 { "try" } else { "tries" }),
-                false => format!("{} failed.", piece.id),
-            })
-            .collect();
+        // Only a piece stored before tries were kept gets here: its worker reported failed and it has no ladder.
+        let said: Vec<String> = failed.iter().map(|piece| format!("{} failed.", piece.id)).collect();
         let held: Vec<String> = waiting(run).into_iter().filter(|waiting| waiting.on.iter().any(|on| names.contains(on))).map(|waiting| waiting.piece).collect();
         let held = if held.is_empty() { String::new() } else { format!(" {} cannot start without {}.", held.join(", "), if names.len() == 1 { "it" } else { "them" }) };
         (RunState::Failed, Some(format!("{}{held}", said.join(" "))))

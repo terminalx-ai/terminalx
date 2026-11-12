@@ -882,7 +882,9 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   your checkout, and when they pass the piece is `done` and what waits for it can start. It
   is already in your branch, so `runs merge` counts it as merged by hand. It returns `run`,
   `piece`, `commit` and `checks`. Like resolving a conflict in the lead, it counts toward the
-  run's budget from the moment you are asked until the piece is settled.
+  run's budget from the moment you are asked until the piece is settled. Nothing is merged
+  while a piece is with you (`runs merge` is refused with `piece_with_lead`), so `finish`
+  counts only what you committed.
 - **Widen scope and retry.** `terminalx runs widen <piece> [--own <path>]... --json` adds
   files to what the piece owns and starts a fresh worker on its last try's model and effort
   (step `widened`), briefed with what went before. Without `--own` it takes the files the
@@ -891,6 +893,8 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   `failed`. A try after a widening that falls short blocks the piece again: there is no
   ladder after it. A person approved the files each piece owns, so in a run they approved
   only they widen one (`person_only`); a catch-all such as `**` is refused (`invalid_path`).
+  So are taking a piece over and skipping one in a run they approved: from the CLI those are
+  for a run that asked for no approval.
 - **Send a note to the worker.** `terminalx runs note <piece> --text <text> --json` sends the
   piece's last worker the note in its own session and worktree, as yours (a person's note
   says it is theirs). The piece is `running`
@@ -951,9 +955,9 @@ checked, above; its `facts.changes` lists each changed file with lines `added` a
 - Run `state`: `planned`, `awaitingApproval`, `running`, `needsYou`, `verifying`, `merging`,
   `done`, `stopped`, `failed`. A run is `merging` when every piece's result is accepted, and
   `done` once `runs merge` has merged them all into your branch and the checks passed on the
-  merged result (below), counting a skipped piece as settled. It is `failed` only when a
-  piece's worker reported `failed` with no try to take next and nothing else can run; a
-  blocked piece leaves it `running`, waiting on the person. `needsYou`: it reached its
+  merged result (below), counting a skipped piece as settled. A blocked piece leaves it
+  `running`, waiting on the person. It is `failed` only for a run stored before tries were
+  kept, whose piece's worker reported `failed` and nothing else can run. `needsYou`: it reached its
   budget (see below).
 - Piece `state` follows its worker's last report, each time the run is read: `queued` (no
   worker yet, or its next try waits for one), `running`, `verifying` (it reported `done`

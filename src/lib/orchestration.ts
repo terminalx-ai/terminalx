@@ -555,7 +555,8 @@ export function mergeSubtitle(run: Run): string {
   if (stopped) return `Merging in dependency order. ${count}; piece ${numbers[stopped.piece.id]} could not be merged.`;
   const failed = rows.filter((row) => row.state === "integrationFailed").map((row) => row.number);
   if (failed.length) return `Merging in dependency order. ${count}; the integration check failed after piece ${numberList(failed)}.`;
-  if (!run.merge) return `Every result is accepted. ${rows.length} ${rows.length === 1 ? "branch waits" : "branches wait"} to be merged into the lead's branch.`;
+  // A lead's take-over records its cost under `merge` before any merge began: `into` says one did.
+  if (!run.merge?.into) return `Every result is accepted. ${rows.length} ${rows.length === 1 ? "branch waits" : "branches wait"} to be merged into the lead's branch.`;
   if (rows.length > 0 && merged === rows.length) return run.reason ? "Every branch is in. A check failed on the merged result." : "Every branch is in.";
   return `Merging in dependency order. ${count}.`;
 }

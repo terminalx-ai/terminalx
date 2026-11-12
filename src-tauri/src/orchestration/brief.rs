@@ -91,10 +91,12 @@ fn earlier_tries(piece: &Piece) -> Option<String> {
 /// (`engine::take_over`): the piece as its workers had it, what each try came
 /// to and where its work is, and how to hand the piece back. Built from what
 /// the run recorded; nothing of a worker's conversation.
-pub fn take_over(run: &Run, piece: &Piece, head: &str) -> String {
+/// `by_person`: a person asked for it from the Run view; else the lead asked with `terminalx runs take-over`.
+pub fn take_over(run: &Run, piece: &Piece, head: &str, by_person: bool) -> String {
     let brief = &piece.brief;
+    let who = if by_person { "The person asked you to take over" } else { "You took over" };
     let mut out = format!(
-        "The person asked you to take over piece {} (\"{}\") of run {}: its workers could not finish it. Finish it yourself, in your own checkout. You are not held to the files it owns: its workers were.\n\n",
+        "{who} piece {} (\"{}\") of run {}: its workers could not finish it. Finish it yourself, in your own checkout. You are not held to the files it owns: its workers were.\n\n",
         piece.id, piece.title, run.id
     );
     section(&mut out, "Goal", &brief.goal);
@@ -131,10 +133,11 @@ pub fn take_over(run: &Run, piece: &Piece, head: &str) -> String {
     }
     section(&mut out, "Done when", &done_when(piece));
     out.push_str(&format!(
-        "## When it is done\n\nYour branch was at {} when you took this over: what you commit from here is the piece's result. Take what is right from a try's branch with `git merge` or `git cherry-pick`, or write it yourself, and commit. Then run `terminalx runs finish {} --json`: TerminalX runs the piece's commands in your checkout, and once they pass the piece is done and what waits for it can start. If it cannot be done, say so to the person; `terminalx runs skip {} --json` leaves it out of the run.",
+        "## When it is done\n\nYour branch was at {} when you took this over: what you commit from here is the piece's result. Take what is right from a try's branch with `git merge` or `git cherry-pick`, or write it yourself, and commit. Then run `terminalx runs finish {} --json`: TerminalX runs the piece's commands in your checkout, and once they pass the piece is done and what waits for it can start. Nothing is merged into your branch until then, so what you commit is told apart from the other pieces' work. {}",
         &head[..head.len().min(7)],
         piece.id,
-        piece.id
+        // In a run a person approved, leaving a piece out is theirs.
+        if run.approval.is_some() { "If it cannot be done, say so to the person: they can skip it in the Run view.".to_string() } else { format!("If it cannot be done, say so to the person; `terminalx runs skip {} --json` leaves it out of the run.", piece.id) },
     ));
     out
 }
