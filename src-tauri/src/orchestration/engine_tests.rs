@@ -2198,6 +2198,42 @@ fn merging_holds_no_worker_slot_and_a_conflict_is_resolved_by_a_model_only_withi
 }
 
 #[test]
+fn the_lead_is_not_asked_to_resolve_a_conflict_past_the_budget_nor_in_a_run_that_has_ended() {
+    let _home = crate::store::temp_home();
+    // Past the budget the model call is refused, and the run waits for the person (who may merge by hand).
+    let (host, id) = accepted_pair("lead", 2, 3.0);
+    conflicts(&id, "b");
+    let told = host.world().told.len();
+    let refused = engine::resolve_in_lead(&host, &id, "b").unwrap_err();
+    assert_eq!(refused.code, "budget_reached");
+    assert!(refused.recovery.as_deref().unwrap().contains("works while the run is paused"), "{:?}", refused.recovery);
+    let paused = store::get(&id).unwrap();
+    assert_eq!((paused.state, paused.merge.as_ref().unwrap().resolving.as_ref()), (RunState::NeedsYou, None));
+    assert!(host.world().told[told..].iter().all(|said| !said.contains("from a\n=======\nfrom b")), "the conflict was not sent");
+
+    // Stopped: refused before the budget is looked at, so the run is not paused again, and the lead is told nothing.
+    engine::stop(&host, &id, By::Person).unwrap();
+    conflicts(&id, "b");
+    let told = host.world().told.len();
+    let ended = engine::resolve_in_lead(&host, &id, "b").unwrap_err();
+    assert_eq!((ended.code, &ended.details["state"]), ("run_ended", &json!("stopped")));
+    let stopped = store::get(&id).unwrap();
+    assert_eq!((stopped.state, stopped.merge.as_ref().unwrap().resolving.as_ref()), (RunState::Stopped, None));
+    assert_eq!(host.world().told.len(), told);
+
+    // Done: the same.
+    let (host, id) = accepted_pair("lead-2", 2, 0.5);
+    conflicts(&id, "b");
+    store::update(&id, |run| {
+        run.state = RunState::Done;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(engine::resolve_in_lead(&host, &id, "b").unwrap_err().code, "run_ended");
+    assert_eq!(store::get(&id).unwrap().state, RunState::Done);
+}
+
+#[test]
 fn a_piece_is_sent_back_to_its_worker_only_into_a_free_worker_slot() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| {
