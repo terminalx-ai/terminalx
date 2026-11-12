@@ -101,6 +101,11 @@ pub const RULES: &[Rule] = &[
     // environment does not say; this stops it where it is typed.
     rule(&["terminalx", "tnx"], &["runs", "check-failed"], Limit::Delegate),
     rule(&["terminalx", "tnx"], &["runs", "stop"], Limit::Delegate),
+    // Bringing the pieces together is the lead's: a worker neither merges its run nor sends a
+    // piece back to work, and it removes no other worker's worktree.
+    rule(&["terminalx", "tnx"], &["runs", "merge"], Limit::Merge),
+    rule(&["terminalx", "tnx"], &["runs", "send-back"], Limit::Delegate),
+    rule(&["terminalx", "tnx"], &["runs", "cleanup"], Limit::Delegate),
     rule(&["gh"], &["workflow", "run"], Limit::Deploy),
     rule(&["gh"], &["release", "create"], Limit::Deploy),
     rule(&["npm", "pnpm", "yarn", "bun"], &["publish"], Limit::Deploy),
@@ -744,8 +749,15 @@ mod tests {
             "/Applications/TerminalX.app/Contents/MacOS/terminalx runs check-failed cli --output -",
             "terminalx runs stop 01a1",
             "env -u RACCOON_SESSION_ID tnx runs stop",
+            // Sending a piece back, and removing the workers' worktrees, are the lead's.
+            "terminalx runs send-back cli --run 01a1",
+            "tnx runs cleanup 01a1 --yes",
         ] {
             assert_eq!(limit_of(command), Some(Limit::Delegate), "{command}");
+        }
+        // So is merging the run's pieces: a worker merges nothing, by any command.
+        for command in ["terminalx runs merge", "tnx runs merge 01a1 --skip cli --json", "env -u RACCOON_SESSION_ID terminalx runs merge --recheck"] {
+            assert_eq!(limit_of(command), Some(Limit::Merge), "{command}");
         }
         assert!(refusal(&json!({"tool_name": "Bash", "tool_input": {"command": "terminalx sessions create --quick --agent claude --prompt go"}})).unwrap().contains("no starting sessions of its own"));
     }

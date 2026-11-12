@@ -27,7 +27,19 @@ pub struct Plan {
     /// The agent of a piece that names none; the lead's own when absent.
     #[serde(default)]
     pub agent: Option<String>,
+    /// The command TerminalX runs in the lead's checkout after it merges each
+    /// accepted piece (`runs merge`); exit code 0 passes. The project's own
+    /// check command is run when the plan names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_check: Option<String>,
     pub pieces: Vec<PlanPiece>,
+}
+
+impl Plan {
+    /// The integration check as a run stores it: absent when the plan names none.
+    pub fn integration(&self) -> Option<String> {
+        self.integration_check.as_deref().map(str::trim).filter(|run| !run.is_empty()).map(str::to_owned)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -104,7 +116,7 @@ impl std::fmt::Display for PlanError {
 const PIECE_KEYS: [&str; 21] = [
     "id", "title", "goal", "why", "scope", "outOfScope", "known", "readFirst", "limits", "owns", "dependsOn", "doneChecks", "reviewOnly", "reviewOnlyReason", "kind", "agent", "model", "effort", "permissionMode", "readsUntrusted", "estimate",
 ];
-const PLAN_KEYS: [&str; 4] = ["goal", "budget", "agent", "pieces"];
+const PLAN_KEYS: [&str; 5] = ["goal", "budget", "agent", "integrationCheck", "pieces"];
 
 /// Read a plan from JSON. A key the plan format does not have is refused with the piece
 /// it is in and the key it was probably meant to be: silently dropping `"mode": "manual"`
@@ -174,6 +186,10 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
     }
     if plan.pieces.is_empty() {
         return Err(PlanError::new("plan_invalid", None, "The plan has no pieces. A run needs at least one.".into(), Value::Null));
+    }
+    // TerminalX runs it itself, in the lead's checkout, after each merge: one that pushes, merges or deploys is no check.
+    if let Some((_, found)) = plan.integration().as_deref().and_then(super::guard::refused) {
+        return Err(PlanError::new("check_not_allowed", None, format!("The plan's `integrationCheck` runs `{found}`. It is run by TerminalX on the merged result and may not push, merge or deploy. Use a command that only checks: a test, a build."), json!({"command": found})));
     }
     let (count, limit) = (plan.pieces.len(), rules.piece_limit as usize);
     if count > limit {
@@ -370,6 +386,7 @@ pub fn validate(plan: &Plan, rules: &Rules) -> Result<Vec<Piece>, PlanError> {
             started_mode: None,
             state: PieceState::Queued,
             note: None,
+            merge: None,
             }
         })
         .collect())
@@ -584,7 +601,7 @@ mod tests {
     }
 
     fn plan(pieces: Vec<PlanPiece>) -> Plan {
-        Plan { goal: "Move settings reads to the typed store".into(), budget: Budget::default(), agent: None, pieces }
+        Plan { goal: "Move settings reads to the typed store".into(), budget: Budget::default(), agent: None, integration_check: None, pieces }
     }
 
     fn check(plan: &Plan, limit: u32) -> Result<Vec<Piece>, PlanError> {

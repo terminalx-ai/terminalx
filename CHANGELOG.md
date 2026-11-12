@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Experimental: `terminalx runs merge` brings an orchestration run's accepted
+  pieces into the lead's branch. TerminalX does the git work itself, with no
+  model: one piece at a time, each after the pieces it depends on, one merge
+  commit a piece. A conflict is found with `git merge-tree` before the branch
+  is touched and stops the merge at that piece; the run's integration check
+  (`integrationCheck` in the plan, else the project's own check) runs after
+  each merge, and a merge that fails it is undone alone and names the piece.
+  Each piece's command done-checks run once more on the merged result before
+  the run is `done`. Nothing is pushed and no other branch is touched. A piece
+  that could not be merged goes back to its worker with the conflict as its
+  brief (`runs send-back`), is resolved by the lead, or is left out (`--skip`);
+  the Run view shows the merge a row a branch, with the same three choices.
+  `terminalx runs cleanup --yes` removes the workers' worktrees and refuses one
+  with uncommitted or unmerged work.
 - Experimental: a session can lead an orchestration run. The lead writes a plan
   of pieces (`terminalx runs create --from plan.json`), each with a brief, the
   files it owns, what it depends on and the check that proves it done, and

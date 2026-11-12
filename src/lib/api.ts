@@ -2719,6 +2719,13 @@ export const orchestration = {
   /** Stop a run, or discard a plan nobody approved. */
   stop: (id: string) => invoke<RunStop>("orchestration_stop", { id }),
   updatePlan: (id: string, plan: RunPlan) => invoke<Run>("orchestration_update_plan", { id, plan }),
+  /** Merge every accepted piece into the lead's branch, in dependency order; `skip` leaves pieces out of this pass.
+   * Answers once the pass has begun: the run's events say how it goes. */
+  merge: (id: string, options: { skip?: string[]; recheck?: boolean } = {}) => invoke<Run>("orchestration_merge", { id, skip: options.skip ?? [], recheck: options.recheck ?? false }),
+  /** Give a piece whose accepted result could not be merged back to its worker, with the conflict as its brief. */
+  sendBack: (id: string, piece: string) => invoke<Run>("orchestration_send_back", { id, piece }),
+  /** Have the lead resolve a piece's conflict: it is sent both sides and the pieces' goals. */
+  resolveInLead: (id: string, piece: string) => invoke<Run>("orchestration_resolve_in_lead", { id, piece }),
   settings: () => invoke<OrchestratorSettings>("orchestrator_settings"),
   setSettings: (patch: OrchestratorPatch) => invoke<OrchestratorSettings>("set_orchestrator_settings", { patch }),
 };

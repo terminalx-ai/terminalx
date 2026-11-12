@@ -29,6 +29,12 @@
 //! and none of the worker's reasoning. A result that fails a gate is a try
 //! that fell short, and takes the next step of the same ladder.
 //!
+//! Accepted results are brought together by TerminalX too ([`merge`]): each
+//! piece's accepted commit is merged into the lead's branch in dependency
+//! order, the run's integration check is run after each merge, and a merge
+//! that conflicts or fails its check leaves the lead's branch as it was. No
+//! model takes part, nothing is pushed, and no other branch is touched.
+//!
 //! [`engine`] reaches sessions through [`engine::Host`], so the scheduling is
 //! the same code in the app and under test.
 
@@ -39,6 +45,9 @@ mod engine_tests;
 pub mod guard;
 pub mod host;
 pub mod ladder;
+pub mod merge;
+#[cfg(test)]
+mod merge_tests;
 pub mod plan;
 pub mod routing;
 pub mod store;
@@ -60,9 +69,11 @@ pub enum RunState {
     Running,
     /// Every piece is done and results are being checked.
     Verifying,
-    /// Checked results are being merged into the lead's branch.
+    /// Every piece's result is accepted; they are being merged into the
+    /// lead's branch, or wait for `runs merge` ([`merge`]).
     Merging,
-    /// Every piece is done.
+    /// Every piece is merged into the lead's branch and the checks passed on
+    /// the merged result.
     Done,
     /// A person or the lead stopped it.
     Stopped,
@@ -75,6 +86,142 @@ impl RunState {
     pub fn ended(self) -> bool {
         matches!(self, Self::Done | Self::Stopped | Self::Failed)
     }
+
+    /// Started and not over: its pieces follow their workers, and accepted
+    /// results can be merged. A failed run is one: a piece sent back to work
+    /// brings it back.
+    pub fn live(self) -> bool {
+        matches!(self, Self::Running | Self::Failed | Self::Merging)
+    }
+}
+
+/// What came of bringing a piece's accepted result into the lead's branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MergeState {
+    /// Its commits are in the lead's branch and the integration check passed there.
+    Merged,
+    /// It changed no file: there is nothing to bring in.
+    NothingToMerge,
+    /// Merging it conflicts. The lead's branch was not touched.
+    Conflict,
+    /// It merged, the integration check failed on the result, and the merge was undone.
+    IntegrationFailed,
+    /// Left out of a merge on request, so the pieces after it could go on.
+    Skipped,
+    /// Git could not make the merge for a reason that is not a conflict. The
+    /// lead's branch is as it was.
+    Failed,
+}
+
+/// One file a merge conflicts in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictFile {
+    pub path: String,
+    /// How many places in it conflict. 0 when the conflict is not in its
+    /// lines: one side deleted or renamed it, or it is binary.
+    #[serde(default)]
+    pub hunks: u32,
+    /// The first conflicting place, both sides, as git marks it; cut to fit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
+    /// The line of the merged file its excerpt starts at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    /// The pieces already merged that changed this file, by id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub with: Vec<String>,
+    /// The piece the plan gives this file to, when it is not this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
+/// The last try at merging a piece's accepted result ([`merge`]). It is
+/// about one commit: a piece accepted again at another is not merged by it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PieceMerge {
+    pub state: MergeState,
+    /// The accepted commit that was merged, or that the merge was tried with.
+    pub commit: String,
+    /// Where the lead's branch was before. After a conflict, a failed check
+    /// or a skip it is there still.
+    pub before: String,
+    /// The merge commit, for a piece TerminalX merged: `before..after` is its range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// The lead merged it itself: its commit was found in the lead's branch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_hand: bool,
+    /// Where it conflicts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ConflictFile>,
+    /// The integration check as it ran on the merged result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<verify::CommandRun>,
+    /// One line on the state, where the state does not say it all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub at: String,
+}
+
+impl PieceMerge {
+    /// Its commits are in the lead's branch, or it has none to bring.
+    pub fn is_in(&self) -> bool {
+        matches!(self.state, MergeState::Merged | MergeState::NothingToMerge)
+    }
+}
+
+/// A merge TerminalX made whose integration check has not ended. Stored
+/// before the merge is made, so one cut short (the app stopped) is found and
+/// undone by the next `runs merge`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingMerge {
+    pub piece: String,
+    pub before: String,
+    /// Absent until the merge commit exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// One done-check of a piece, run again on the merged result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinalCheck {
+    pub piece: String,
+    #[serde(flatten)]
+    pub command: verify::CommandRun,
+}
+
+/// Where the merge of a run stands ([`merge`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunMerge {
+    /// The lead's branch: what the pieces are merged into.
+    pub into: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PendingMerge>,
+    /// The piece the last pass stopped at: its merge conflicts, or git could not make it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<String>,
+    /// The commit of the lead's branch the integration check last passed on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_head: Option<String>,
+    /// The integration check on the whole merged result, when it failed
+    /// there: after a merge the lead made by hand, or a commit of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<verify::CommandRun>,
+    /// Every piece's command done-checks, run again once all were merged,
+    /// and the commit they ran on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub final_checks: Vec<FinalCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_head: Option<String>,
+    /// When the last pass ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +489,10 @@ pub struct Piece {
     /// One line on the state: the worker's result, or why it is not done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// What came of merging its accepted result into the lead's branch.
+    /// Absent before that was tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<PieceMerge>,
 }
 
 impl Piece {
@@ -364,6 +515,28 @@ impl Piece {
     /// result: never run, or cut short when the app stopped.
     pub fn check_waits(&self) -> bool {
         self.state == PieceState::Verifying && self.tries.last().is_some_and(|attempt| attempt.verification.as_ref().is_none_or(|check| check.outcome.is_none() && check.review.is_none()))
+    }
+
+    /// The commit its result was accepted as: the one its gates ran on
+    /// ([`verify::Facts::commit`]). `None` for a piece that is not done.
+    pub fn accepted_commit(&self) -> Option<&str> {
+        if self.state != PieceState::Done {
+            return None;
+        }
+        self.tries.last()?.verification.as_ref()?.facts.as_ref()?.commit.as_deref()
+    }
+
+    /// Its accepted result is in the lead's branch: merged, or with nothing
+    /// to merge, as the commit it is accepted at now.
+    pub fn merged(&self) -> bool {
+        self.current_merge().is_some_and(PieceMerge::is_in)
+    }
+
+    /// What came of merging the result it is accepted with now. `None` for a
+    /// piece that is not done, and for a record about another commit: a
+    /// piece accepted again since is not what was merged, or what conflicted.
+    pub fn current_merge(&self) -> Option<&PieceMerge> {
+        self.merge.as_ref().filter(|merge| self.state == PieceState::Done && self.accepted_commit().is_none_or(|commit| commit == merge.commit))
     }
 
     /// What its tries cost so far, and the models that sum leaves out.
@@ -409,9 +582,18 @@ pub struct Run {
     /// project that asks for no approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
-    /// Why it failed or was stopped.
+    /// Why it failed or was stopped, or what keeps a merged run from done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The command run in the lead's checkout after each piece is merged
+    /// ([`merge`]); exit code 0 passes. The plan's; the project's own check
+    /// command is run when the plan names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_check: Option<String>,
+    /// Where merging its pieces into the lead's branch stands. Absent before
+    /// the first `runs merge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<RunMerge>,
     pub created: String,
     pub modified: String,
 }
@@ -429,6 +611,21 @@ impl Run {
             .filter(|piece| piece.worker.is_none() && matches!(piece.state, PieceState::Queued | PieceState::Failed))
             .filter(|piece| piece.depends_on.iter().all(|id| self.piece(id).is_some_and(|dependency| dependency.state == PieceState::Done)))
             .collect()
+    }
+
+    /// The pieces in the order they are merged: each after everything it
+    /// depends on, and otherwise in the plan's order.
+    pub fn merge_order(&self) -> Vec<&Piece> {
+        let mut placed: Vec<&Piece> = Vec::new();
+        while placed.len() < self.pieces.len() {
+            let next = self.pieces.iter().find(|piece| !placed.iter().any(|done| done.id == piece.id) && piece.depends_on.iter().all(|id| self.piece(id).is_none() || placed.iter().any(|done| done.id == *id)));
+            // A cycle cannot be stored (`plan::validate`); one read from an old file ends the order in plan order.
+            match next.or_else(|| self.pieces.iter().find(|piece| !placed.iter().any(|done| done.id == piece.id))) {
+                Some(piece) => placed.push(piece),
+                None => break,
+            }
+        }
+        placed
     }
 
     /// The summed estimate of the pieces that carry one, and how many do not.

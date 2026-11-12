@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// PRO-274, PRO-275, PRO-278: a session's Run view and Settings → Orchestrator in WebKit,
+// PRO-274, PRO-275, PRO-278, PRO-279: a session's Run view and Settings → Orchestrator in WebKit,
 // at the window's wide and narrow sizes, light and dark: a plan waiting for
 // approval, a run with workers and results being checked, a piece blocked
-// after three tries with the done-check that failed, a session with no run,
+// after three tries with the done-check that failed, a merge stopped on a
+// conflict with the three ways out of it, a session with no run,
 // and the settings with the routing table. A synthetic run
 // behind the Tauri stub; nothing is started, and Approve, Edit, Stop and the
 // settings are answered by the stub the way the engine answers them.
@@ -70,6 +71,8 @@ function setup({ mode, scene, enabled }) {
       verifierTokens: (() => { const used = run.pieces.flatMap((piece) => piece.tries ?? []).flatMap((attempt) => attempt.verification?.review?.verifiers ?? []).filter((one) => one.tokens).map((one) => one.tokens.input + one.tokens.output + one.tokens.cacheRead + one.tokens.cacheWrite); return used.length ? used.reduce((sum, value) => sum + value, 0) : null; })(),
       estimate: known.length ? { low: known.reduce((sum, piece) => sum + piece.estimate.low, 0), high: known.reduce((sum, piece) => sum + piece.estimate.high, 0) } : null,
       unestimated: run.pieces.length - known.length,
+      mergeOrder: run.mergeOrder ?? run.pieces.map((piece) => piece.id),
+      mergeUnderWay: !!run.mergeUnderWay,
       ready: run.state === "running" ? run.pieces.filter((piece) => piece.state === "queued" && piece.dependsOn.every(done)).map((piece) => piece.id) : [],
       waiting: run.pieces.filter((piece) => piece.state === "queued").map((piece) => ({ piece: piece.id, on: piece.dependsOn.filter((id) => !done(id)) })),
     };
@@ -143,8 +146,37 @@ function setup({ mode, scene, enabled }) {
     },
     docs: {},
   };
+  // A merge stopped on a conflict (design 18.04): the first piece only read, three branches are in, the fifth
+  // conflicts with the third, and the sixth waits for it.
+  const into = "settings-typed-store";
+  const accepted = (id, model, effort, tierName, note, costUsd, commit, files) => {
+    const piece = once(id, model, effort, tierName, note, costUsd);
+    piece.tries[0].verification = { outcome: "passed", facts: { files, changedLines: files.length * 40, commit }, gates: [gate("report"), gate("scope"), gate("branch"), commands(ran("cargo t", 0, 30_000))] };
+    return { ...piece, branch: `piece-${id}` };
+  };
+  const mergedAs = (commit, before, after, millis) => ({ merge: { state: "merged", commit, before, after, check: ran("cargo t && pnpm test", 0, millis), at: at(3) } });
+  const merging = {
+    map: { ...accepted("map", "haiku", undefined, "small", "41 call sites in 9 files", 0.04, "0a41c2e77a12", []), merge: { state: "nothingToMerge", commit: "0a41c2e77a12", before: "0a41c2e77a12", at: at(9) } },
+    store: { ...accepted("store", "opus", "medium", "large", "Store added, 14 tests pass", 1.82, "1b7d04e2c9aa", ["src-tauri/src/store/settings/mod.rs"]), ...mergedAs("1b7d04e2c9aa", "0a41c2e77a12", "4c1e9a7b20d1", 131_000) },
+    session: { ...accepted("session", "sonnet", "medium", "mid", "17 reads moved", 0.88, "2c88e1f0a3b4", ["src-tauri/src/session.rs", "src-tauri/src/session_ops.rs"]), ...mergedAs("2c88e1f0a3b4", "4c1e9a7b20d1", "9b02f3d5e6f7", 124_000) },
+    pipeline: { ...accepted("pipeline", "sonnet", "medium", "mid", "12 reads moved", 0.74, "3d99f2a1b4c5", ["src-tauri/src/issue_pipeline/engine.rs"]), ...mergedAs("3d99f2a1b4c5", "9b02f3d5e6f7", "e77a120c3d4e", 129_000) },
+    cli: {
+      ...accepted("cli", "opus", "medium", "large", "CLI reads moved", 2.18, "a31c55e9f0a1", ["src-tauri/src/cli.rs", "src-tauri/src/control.rs", "src-tauri/src/session_ops.rs"]),
+      merge: {
+        state: "conflict", commit: "a31c55e9f0a1", before: "e77a120c3d4e", at: at(1),
+        files: [
+          { path: "src-tauri/src/control.rs", hunks: 2, line: 1184, with: ["session"], excerpt: `<<<<<<< ${into}\nlet mode = store.session().default_mode();\n=======\nlet mode = store.cli().default_mode(project);\n>>>>>>> piece-cli` },
+          { path: "src-tauri/src/session_ops.rs", hunks: 1, line: 212, with: ["session"], owner: "session", excerpt: `<<<<<<< ${into}\nlet settings = store.session();\n=======\nlet settings = store.cli();\n>>>>>>> piece-cli` },
+        ],
+      },
+    },
+    docs: { ...accepted("docs", "sonnet", "medium", "mid", "Every documented key exists", 0.52, "6f00a1b2c3d4", ["docs/SETTINGS.md"]), dependsOn: ["cli"] },
+  };
+  const order = pieces.map((piece) => piece.id);
+  const mergingRun = { ...base, state: "merging", approval: { at: at(52) }, integrationCheck: "cargo t && pnpm test", mergeOrder: order, mergeUnderWay: false, merge: { into, stoppedAt: "cli", checkedHead: "e77a120c3d4e", at: at(1) }, pieces: pieces.map((piece) => ({ ...piece, ...merging[piece.id] })) };
   const state = {
     run: scene === "none" ? null
+      : scene === "merging" ? mergingRun
       : scene === "blocked" ? { ...base, state: "failed", reason: "cli is blocked after 3 tries. docs cannot start without it.", approval: { at: at(46) }, pieces: pieces.map((piece) => ({ ...piece, ...blocked[piece.id] })) }
       : scene === "running" ? { ...base, state: "running", approval: { at: at(14) }, pieces: pieces.map((piece) => ({ ...piece, ...running[piece.id] })) }
       : { ...base, state: "awaitingApproval", pieces },
@@ -168,6 +200,22 @@ function setup({ mode, scene, enabled }) {
       const waited = state.run.state === "awaitingApproval";
       state.run = { ...state.run, state: "stopped", reason: waited ? "A person discarded the plan." : "A person stopped the run.", pieces: state.run.pieces.map((piece) => (piece.state === "done" ? piece : { ...piece, state: "stopped" })) };
       return { run: shown(state.run), stopped: [], failed: [] };
+    },
+    // The engine's answers to the three ways out of a conflict, and to going on with the merge.
+    orchestration_merge: (args) => {
+      called("merge", args);
+      // Left out, the piece no longer stops the merge: what waited only on the stop is merged, what depends on it still waits.
+      state.run = { ...state.run, merge: { ...state.run.merge, stoppedAt: args.skip.length ? undefined : state.run.merge.stoppedAt }, pieces: state.run.pieces.map((piece) => (args.skip.includes(piece.id) ? { ...piece, merge: { ...piece.merge, state: "skipped", files: [], note: "Left out of this merge on request." } } : piece)) };
+      return shown(state.run);
+    },
+    orchestration_send_back: (args) => {
+      called("sendBack", args);
+      state.run = { ...state.run, state: "running", merge: { ...state.run.merge, stoppedAt: undefined }, pieces: state.run.pieces.map((piece) => (piece.id === args.piece ? { ...piece, state: "running", note: "Sent back to its worker: its accepted result could not be merged.", merge: undefined, tries: piece.tries.map((attempt) => ({ ...attempt, outcome: undefined, ended: undefined, verification: undefined })) } : piece)) };
+      return shown(state.run);
+    },
+    orchestration_resolve_in_lead: (args) => {
+      called("resolveInLead", args);
+      return shown(state.run);
     },
     orchestration_update_plan: (args) => {
       called("updatePlan", args);
@@ -411,6 +459,50 @@ try {
           "no browser errors": errors.length === 0,
         };
         failed += report(`piece blocked after three tries, ${at}`, checks, { layout, errors, said, cli });
+        await page.close();
+      }
+
+      // A merge stopped on a conflict (design 18.04): the branches in merge order, and the conflict with its three ways out.
+      {
+        const { page, errors } = await start("merging");
+        await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
+        const view = page.getByTestId("run-view");
+        const table = view.getByRole("table", { name: "Merge" });
+        await table.waitFor();
+        await view.locator('[data-piece="cli"] button').first().click();
+        const detail = view.getByTestId("piece-detail");
+        const panel = detail.getByTestId("merge-panel");
+        await panel.waitFor();
+        const layout = await layoutOf(view);
+        await shot(page, "merge-conflict");
+        const wide = size.width >= 1200;
+        const rows = await table.locator("[role=row][data-piece]").evaluateAll((items) => items.map((item) => `${item.dataset.piece}:${item.dataset.mergeState}`).join());
+        const cells = async (id) => (await view.locator(`[data-piece="${id}"] [role=cell]`).allTextContents());
+        const cli = await cells("cli");
+        const said = await panel.textContent();
+        const checks = {
+          "the run says how far the merge is and what stopped it": (await view.getByTestId("run-state").textContent()) === "Merging" && (await view.getByTestId("run-subtitle").textContent()) === "Merging in dependency order. 3 of 5 branches are in; piece 5 conflicts.",
+          "it says where the pieces go, with what check, and that nothing is pushed": await (async () => { const strip = await view.getByTestId("merge-strip").textContent(); return strip.includes("Intosettings-typed-store") && strip.includes("Integration checkcargo t && pnpm test") && strip.includes("Nothing is pushed. No other branch is touched."); })(),
+          "a row a branch, in merge order: three in, the conflict, and the piece that waits for it": rows === "store:merged,session:merged,pipeline:merged,cli:conflict,docs:waiting",
+          "the table's columns are the design's, where there is room": !wide || (await table.getByRole("columnheader").allTextContents()).join() === "Branch,State,Commit,Check after merge,Note",
+          "a merged row shows its branch, its merge commit and how its check went": await (async () => { const store = await cells("store"); return store[0].includes("piece-store → settings-typed-store") && store[1] === "Merged" && (!wide || (store[2] === "4c1e9a7" && store[3] === "passed · 2m 11s")); })(),
+          "the conflict's row shows the piece's commit, that no check ran, and what it conflicts with": cli[1] === "Conflict" && (!wide || (cli[2] === "a31c55e" && cli[3] === "not run" && cli[4] === "2 files conflict with piece 3")),
+          "the piece behind it says what it waits for": !wide || (await cells("docs"))[4] === "Waits for 5",
+          "what had nothing to merge, and where the branch was left, is said under the table": (await view.getByTestId("run-footnote").textContent()) === "Piece 1 was read-only and has nothing to merge. Your branch is back at e77a120, as it was before this merge was tried.",
+          "the conflict names the piece it is with, its files and how much of each": said.includes("Conflict· with piece 3, already merged") && (await panel.getByRole("list", { name: "Conflicting files" }).getByRole("listitem").allTextContents()).join("|") === "Csrc-tauri/src/control.rs2 hunks|Csrc-tauri/src/session_ops.rs1 hunk",
+          "both sides of the first conflicting place are shown": await (async () => { const excerpt = await panel.getByTestId("conflict-excerpt").textContent(); return excerpt.startsWith("control.rs · 1184") && excerpt.includes("let mode = store.session().default_mode();") && excerpt.includes("let mode = store.cli().default_mode(project);"); })(),
+          "why it happened comes from the plan and the merges": said.includes("session_ops.rs is listed under piece 3 only, but piece 5 changed it too."),
+          "the three choices are offered, and Continue merge": (await detail.getByRole("button", { name: "Send back to worker" }).count()) === 1 && (await detail.getByRole("button", { name: "Resolve in lead" }).count()) === 1 && (await detail.getByRole("button", { name: "Skip", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Continue merge" }).count()) === 1,
+          "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
+          "no text is smaller than 10.5px": layout.smallest >= 10.5,
+        };
+        // Skip leaves the piece out; sending it back gives it to its worker and the run is running again.
+        await detail.getByRole("button", { name: "Skip", exact: true }).click();
+        await view.locator('[data-piece="cli"][data-merge-state="skipped"]').waitFor();
+        checks["Skip asks for a merge without the piece"] = JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "merge").map((call) => call.args.skip))) === '[["cli"]]';
+        await shot(page, "merge-skipped");
+        checks["no browser errors"] = errors.length === 0;
+        failed += report(`merge stopped on a conflict, ${at}`, checks, { layout, errors, rows, cli, said });
         await page.close();
       }
 

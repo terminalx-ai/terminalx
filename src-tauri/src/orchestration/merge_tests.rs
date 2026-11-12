@@ -1,0 +1,452 @@
+//! Merging and cleanup against real temporary repositories: a lead's
+//! checkout on its own branch, a worktree and a branch a worker, a bare
+//! remote nothing may reach.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use super::engine::By;
+use super::merge::{self, Checkouts, Options, Worktree};
+use super::{store, MergeState, PendingMerge, Run, RunMerge, RunState, SessionRef};
+
+fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = Command::new("git").current_dir(cwd).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null").output().unwrap();
+    assert!(out.status.success(), "git {args:?} in {}: {}", cwd.display(), String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A project: `lead/` is the lead's checkout on the branch `lead`, cut from
+/// `main`; `workers/<piece>/` is each worker's worktree on `piece-<piece>`.
+struct Repo {
+    root: tempfile::TempDir,
+    mode: Mutex<String>,
+    held: Mutex<Option<String>>,
+    reserved: Mutex<Vec<bool>>,
+    busy: Mutex<BTreeSet<String>>,
+    project_check: Mutex<Option<String>>,
+}
+
+impl Repo {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let lead = root.path().join("lead");
+        std::fs::create_dir_all(&lead).unwrap();
+        git(root.path(), &["init", "--bare", "-q", "origin.git"]);
+        git(&lead, &["init", "-q", "-b", "main"]);
+        for (key, value) in [("user.name", "Lead"), ("user.email", "lead@example.test"), ("commit.gpgsign", "false")] {
+            git(&lead, &["config", key, value]);
+        }
+        std::fs::write(lead.join("shared.txt"), "one\ntwo\nthree\n").unwrap();
+        git(&lead, &["add", "."]);
+        git(&lead, &["commit", "-q", "-m", "Start"]);
+        git(&lead, &["remote", "add", "origin", root.path().join("origin.git").to_str().unwrap()]);
+        git(&lead, &["push", "-q", "origin", "main"]);
+        git(&lead, &["checkout", "-q", "-b", "lead"]);
+        Self { root, mode: Mutex::new("bypassPermissions".into()), held: Mutex::new(None), reserved: Mutex::new(Vec::new()), busy: Mutex::new(BTreeSet::new()), project_check: Mutex::new(None) }
+    }
+
+    fn lead(&self) -> PathBuf {
+        self.root.path().join("lead")
+    }
+
+    fn worker(&self, piece: &str) -> PathBuf {
+        self.root.path().join("workers").join(piece)
+    }
+
+    fn head(&self) -> String {
+        git(&self.lead(), &["rev-parse", "HEAD"])
+    }
+
+    /// A worker's worktree, cut from the lead's branch as it is now, with one
+    /// commit that writes `files`. Returns the commit its result is accepted as.
+    fn work(&self, piece: &str, files: &[(&str, &str)]) -> String {
+        let path = self.worker(piece);
+        git(&self.lead(), &["worktree", "add", "-q", "-b", &format!("piece-{piece}"), path.to_str().unwrap(), "lead"]);
+        if !files.is_empty() {
+            for (name, text) in files {
+                std::fs::write(path.join(name), text).unwrap();
+            }
+            git(&path, &["add", "."]);
+            git(&path, &["commit", "-q", "-m", &format!("Work of {piece}")]);
+        }
+        git(&path, &["rev-parse", "HEAD"])
+    }
+
+    /// Store a run whose pieces are all accepted: `(id, depends on, commit, files changed, done-check)`.
+    fn run(&self, pieces: &[(&str, &[&str], &str, &[&str], &str)], integration: Option<&str>) -> String {
+        let pieces: Vec<Value> = pieces
+            .iter()
+            .map(|(id, on, commit, files, check)| {
+                let worker = json!({"sessionId": id, "tabId": "t1"});
+                json!({
+                    "id": id, "title": format!("Piece {id}"), "brief": {"goal": format!("The goal of {id}")}, "owns": files, "dependsOn": on,
+                    "doneChecks": [{"type": "command", "run": check}], "agent": "claude", "state": "done", "worker": worker, "branch": format!("piece-{id}"),
+                    "tries": [{"step": "first", "worker": worker, "branch": format!("piece-{id}"), "outcome": "done",
+                        "verification": {"gates": [], "facts": {"files": files, "changedLines": files.len(), "commit": commit}, "outcome": "passed"}}],
+                })
+            })
+            .collect();
+        let run: Run = serde_json::from_value(json!({
+            "id": "run-1", "lead": {"sessionId": "lead", "tabId": "t1"}, "projectPath": self.lead(), "goal": "Bring the pieces together", "state": "merging",
+            "pieces": pieces, "workerMode": "bypassPermissions", "approval": {"at": "2026-11-12T09:00:00Z"}, "integrationCheck": integration,
+            "created": "2026-11-12T09:00:00Z", "modified": "2026-11-12T09:00:00Z",
+        }))
+        .unwrap();
+        store::insert(&run).unwrap();
+        run.id
+    }
+
+    fn merge(&self, skip: &[&str], recheck: bool) -> merge::Merged {
+        merge::merge(self, "run-1", &self.options(By::Cli, skip, recheck)).unwrap_or_else(|error| panic!("{}: {}", error.code, error.message))
+    }
+
+    fn options(&self, by: By, skip: &[&str], recheck: bool) -> Options {
+        Options { skip: skip.iter().map(|piece| piece.to_string()).collect(), recheck, by, timeout: Duration::from_secs(60), begun: None }
+    }
+
+    fn state(&self, piece: &str) -> Option<MergeState> {
+        store::get("run-1").unwrap().piece(piece).unwrap().merge.as_ref().map(|merge| merge.state)
+    }
+
+    /// Everything outside the lead's branch that a merge must leave alone.
+    fn elsewhere(&self) -> String {
+        let lead = self.lead();
+        format!("{}\n{}\n{}", git(&lead, &["rev-parse", "main"]), git(&lead, &["ls-remote", "origin"]), git(&lead, &["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/piece-*", "refs/remotes"]))
+    }
+}
+
+impl Checkouts for Repo {
+    fn lead_checkout(&self, _run: &Run) -> anyhow::Result<PathBuf> {
+        Ok(self.lead())
+    }
+
+    fn lead_mode(&self, _run: &Run) -> Option<String> {
+        Some(self.mode.lock().unwrap().clone())
+    }
+
+    fn reserve(&self, _run: &Run, _cwd: &Path, by_lead: bool) -> Result<Box<dyn std::any::Any + Send>, String> {
+        if let Some(why) = self.held.lock().unwrap().clone() {
+            return Err(why);
+        }
+        self.reserved.lock().unwrap().push(by_lead);
+        Ok(Box::new(()))
+    }
+
+    fn project_check(&self, _project_path: &str) -> Option<String> {
+        self.project_check.lock().unwrap().clone()
+    }
+
+    fn worktree(&self, worker: &SessionRef) -> Option<Worktree> {
+        let path = self.worker(&worker.session_id);
+        path.is_dir().then(|| Worktree { path, busy: self.busy.lock().unwrap().contains(&worker.session_id) })
+    }
+
+    fn remove(&self, _run: &Run, _worker: &SessionRef, worktree: &Worktree, still_safe: &dyn Fn() -> Result<(), String>) -> anyhow::Result<()> {
+        still_safe().map_err(|why| anyhow::anyhow!(why))?;
+        git(&self.lead(), &["worktree", "remove", worktree.path.to_str().unwrap()]);
+        Ok(())
+    }
+
+    fn changed(&self, _run: &Run) {}
+}
+
+#[test]
+fn pieces_merge_in_dependency_order_one_commit_range_each_and_nothing_else_moves() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let (a, b, c) = (repo.work("a", &[("a.txt", "a\n")]), repo.work("b", &[("b.txt", "b\n")]), repo.work("c", &[("c.txt", "c\n")]));
+    // A piece that only read: its worktree is where the lead's branch was.
+    let read = repo.work("read", &[]);
+    let log = repo.root.path().join("checked.log");
+    // The plan lists them in another order than they depend on each other.
+    let id = repo.run(
+        &[("c", &["b"], &c, &["c.txt"], "test -f c.txt"), ("read", &[], &read, &[], "true"), ("b", &["a"], &b, &["b.txt"], "test -f b.txt"), ("a", &[], &a, &["a.txt"], "test -f a.txt")],
+        Some(&format!("git log -1 --format=%s >> '{}'", log.display())),
+    );
+    let (start, elsewhere) = (repo.head(), repo.elsewhere());
+
+    let merged = repo.merge(&[], false);
+
+    assert_eq!(merged.merged.iter().map(|commit| commit.piece.as_str()).collect::<Vec<_>>(), ["read", "a", "b", "c"], "each after what it depends on, otherwise in plan order");
+    assert!(merged.merged[0].nothing_to_merge && merged.merged[0].range.is_none());
+    // One merge commit a piece, each on top of the one before: `before..after` is that piece's range.
+    let mut at = start.clone();
+    for (commit, accepted) in merged.merged[1..].iter().zip([&a, &b, &c]) {
+        let merge_commit = commit.merge_commit.clone().unwrap();
+        assert_eq!(commit.range.as_deref(), Some(format!("{at}..{merge_commit}").as_str()));
+        assert_eq!(git(&repo.lead(), &["rev-list", "--parents", "-1", &merge_commit]), format!("{merge_commit} {at} {accepted}"));
+        assert_eq!(git(&repo.lead(), &["rev-list", &format!("{at}..{merge_commit}")]).lines().count(), 2, "the piece's commit and its merge");
+        at = merge_commit;
+    }
+    assert_eq!(repo.head(), at);
+    assert_eq!((merged.head.as_str(), merged.into.as_str(), merged.done, merged.pushed), (at.as_str(), "lead", true, false));
+    // The integration check ran after each merge, on that merge.
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(), ["Merge piece a: Piece a", "Merge piece b: Piece b", "Merge piece c: Piece c"]);
+    let run = store::get(&id).unwrap();
+    assert_eq!((run.state, run.reason.as_deref()), (RunState::Done, None));
+    // Each piece's done-check was run once more on the merged result before the run was done.
+    let rechecked = run.merge.as_ref().unwrap();
+    assert_eq!(rechecked.final_checks.iter().map(|check| (check.piece.as_str(), check.command.run.as_str(), check.command.passed)).collect::<Vec<_>>(), [("read", "true", true), ("a", "test -f a.txt", true), ("b", "test -f b.txt", true), ("c", "test -f c.txt", true)]);
+    assert_eq!(rechecked.final_head.as_deref(), Some(at.as_str()));
+    // Nothing was pushed, the base branch is where it was, and every worker keeps its branch and worktree.
+    assert_eq!(repo.elsewhere(), elsewhere);
+    assert_eq!(git(&repo.lead(), &["status", "--porcelain"]), "");
+    assert!(["a", "b", "c", "read"].iter().all(|piece| repo.worker(piece).is_dir()));
+    assert_eq!(*repo.reserved.lock().unwrap(), [true], "the lead's checkout was held, once, for the whole pass");
+    // Asked again, a run that is done is said as it stands and nothing is run.
+    let again = repo.merge(&[], false);
+    assert!(again.done && again.merged.len() == 4 && repo.head() == at);
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 3);
+}
+
+#[test]
+fn a_conflict_leaves_the_leads_branch_as_it_was_and_stops_the_merge_there() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let a = repo.work("a", &[("shared.txt", "one\ntwo from a\nthree\n")]);
+    let b = repo.work("b", &[("shared.txt", "one\ntwo from b\nthree\n"), ("b.txt", "b\n")]);
+    let c = repo.work("c", &[("c.txt", "c\n")]);
+    let id = repo.run(&[("a", &[], &a, &["shared.txt"], "true"), ("b", &[], &b, &["b.txt"], "true"), ("c", &[], &c, &["c.txt"], "true")], Some("true"));
+    let elsewhere = repo.elsewhere();
+
+    let stopped = repo.merge(&[], false);
+
+    let after_a = stopped.merged[0].merge_commit.clone().unwrap();
+    assert_eq!((stopped.conflicts.as_slice(), stopped.stopped_at.as_deref(), stopped.done), (&["b".to_string()][..], Some("b"), false));
+    // The branch is where it was before the conflicting merge was tried: no merge part way, nothing changed.
+    assert_eq!(repo.head(), after_a);
+    assert_eq!(git(&repo.lead(), &["status", "--porcelain"]), "");
+    assert!(!repo.lead().join(".git/MERGE_HEAD").exists());
+    assert_eq!(std::fs::read_to_string(repo.lead().join("shared.txt")).unwrap(), "one\ntwo from a\nthree\n");
+    let run = store::get(&id).unwrap();
+    let conflict = run.piece("b").unwrap().merge.clone().unwrap();
+    assert_eq!((conflict.state, conflict.commit.as_str(), conflict.before.as_str(), conflict.after), (MergeState::Conflict, b.as_str(), after_a.as_str(), None));
+    let file = &conflict.files[0];
+    assert_eq!((conflict.files.len(), file.path.as_str(), file.hunks, file.line, &file.with, file.owner.as_deref()), (1, "shared.txt", 1, Some(2), &vec!["a".to_string()], Some("a")));
+    let excerpt = file.excerpt.as_deref().unwrap();
+    assert!(excerpt.starts_with("<<<<<<< lead\ntwo from a\n") && excerpt.contains("=======\ntwo from b\n") && excerpt.ends_with(">>>>>>> piece-b"), "{excerpt}");
+    // The piece after it was not tried: the merge stopped.
+    assert_eq!(repo.state("c"), None);
+    assert!(stopped.waiting.iter().any(|held| held.piece == "c" && held.why.contains("stopped at b")));
+    assert!(stopped.next.contains("runs send-back b") && stopped.next.contains("--skip b"), "{}", stopped.next);
+    assert_eq!(run.state, RunState::Merging);
+    // What its worker is told, and what the lead is given to resolve it: the conflict and the goals, cut to fit.
+    let brief = merge::brief(&run, run.piece("b").unwrap()).unwrap();
+    assert!(brief.contains("- shared.txt (1 place; also changed by a (Piece a), already merged") && brief.contains("git rebase lead") && brief.contains("two from b"), "{brief}");
+    let prompt = merge::resolve_prompt(&run, run.piece("b").unwrap()).unwrap();
+    assert!(prompt.contains("- b (Piece b): The goal of b") && prompt.contains("- a (Piece a): The goal of a") && prompt.contains(&format!("git merge {b}")) && prompt.chars().count() <= merge::RESOLVE_LIMIT + 20, "{prompt}");
+
+    // Left out, the pieces that do not depend on it go on. The run is not done without it.
+    let skipped = repo.merge(&["b"], false);
+    assert_eq!((skipped.skipped.as_slice(), repo.state("c"), skipped.done), (&["b".to_string()][..], Some(MergeState::Merged), false));
+    assert_eq!(std::fs::read_to_string(repo.lead().join("shared.txt")).unwrap(), "one\ntwo from a\nthree\n");
+
+    // The lead resolves it itself: the piece is found in its branch, checked, and the run is done.
+    let lead = repo.lead();
+    assert!(!Command::new("git").current_dir(&lead).args(["merge", "--no-edit", &b]).output().unwrap().status.success());
+    std::fs::write(lead.join("shared.txt"), "one\ntwo from a and b\nthree\n").unwrap();
+    git(&lead, &["commit", "-q", "-am", "Merge b by hand"]);
+    let resolved = repo.merge(&[], false);
+    let by_hand = resolved.merged.iter().find(|commit| commit.piece == "b").unwrap();
+    assert!(by_hand.by_hand && by_hand.merge_commit.is_none() && resolved.done, "{:?}", resolved.next);
+    assert_eq!(store::get(&id).unwrap().state, RunState::Done);
+    assert_eq!(repo.elsewhere(), elsewhere);
+}
+
+#[test]
+fn a_failed_integration_check_undoes_that_merge_only_and_names_the_piece() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let a = repo.work("a", &[("a.txt", "a\n")]);
+    let bad = repo.work("bad", &[("broken.txt", "x\n")]);
+    let needs = repo.work("needs", &[("needs.txt", "n\n")]);
+    let free = repo.work("free", &[("free.txt", "f\n")]);
+    let log = repo.root.path().join("checked.log");
+    let check = format!("echo ran >> '{}'; if test -f broken.txt; then echo 'broken.txt breaks the build'; exit 3; fi", log.display());
+    let id = repo.run(&[("a", &[], &a, &["a.txt"], "true"), ("bad", &[], &bad, &["broken.txt"], "true"), ("needs", &["bad"], &needs, &["needs.txt"], "true"), ("free", &[], &free, &["free.txt"], "true")], Some(&check));
+    let elsewhere = repo.elsewhere();
+
+    let merged = repo.merge(&[], false);
+
+    // Only that merge was undone: the piece before it and the one that does not depend on it are in.
+    assert_eq!(merged.merged.iter().map(|commit| commit.piece.as_str()).collect::<Vec<_>>(), ["a", "free"]);
+    assert_eq!((merged.integration_failed.as_slice(), merged.stopped_at.as_deref(), merged.done), (&["bad".to_string()][..], None, false));
+    let lead = repo.lead();
+    assert!(lead.join("a.txt").exists() && lead.join("free.txt").exists() && !lead.join("broken.txt").exists() && !lead.join("needs.txt").exists());
+    assert!(!Command::new("git").current_dir(&lead).args(["merge-base", "--is-ancestor", &bad, "HEAD"]).status().unwrap().success());
+    assert_eq!(git(&lead, &["status", "--porcelain"]), "");
+    let run = store::get(&id).unwrap();
+    let failed = run.piece("bad").unwrap().merge.clone().unwrap();
+    let ran = failed.check.clone().unwrap();
+    assert_eq!((failed.state, failed.before.as_str(), failed.after, ran.exit_code, ran.passed), (MergeState::IntegrationFailed, merged.merged[0].merge_commit.as_deref().unwrap(), None, Some(3), false));
+    assert_eq!(ran.output.as_deref(), Some("broken.txt breaks the build"));
+    // What depends on it waits for it, and says so.
+    assert_eq!(repo.state("needs"), None);
+    assert!(merged.waiting.iter().any(|held| held.piece == "needs" && held.on == ["bad"]));
+    assert!(merged.next.contains("piece bad") && merged.next.contains("runs send-back bad"), "{}", merged.next);
+    assert!(merge::brief(&run, run.piece("bad").unwrap()).unwrap().contains("exited 3. The last lines it printed:\nbroken.txt breaks the build"));
+    assert_eq!(run.merge.as_ref().unwrap().pending, None);
+
+    // The branch has moved since that merge was tried (another piece went in after it): it is tried once more there.
+    let runs = || std::fs::read_to_string(&log).unwrap().lines().count();
+    let before = runs();
+    repo.merge(&[], false);
+    assert_eq!((runs(), repo.state("bad")), (before + 1, Some(MergeState::IntegrationFailed)));
+    assert!(!lead.join("broken.txt").exists() && lead.join("free.txt").exists());
+    // Now nothing has changed: the same commit on the same branch is not checked again, unless asked.
+    repo.merge(&[], false);
+    assert_eq!(runs(), before + 1);
+    repo.merge(&[], true);
+    assert_eq!((runs(), repo.state("bad")), (before + 2, Some(MergeState::IntegrationFailed)));
+    assert_eq!(repo.elsewhere(), elsewhere);
+}
+
+#[test]
+fn a_done_check_that_fails_on_the_merged_result_keeps_the_run_from_done() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let a = repo.work("a", &[("a.txt", "a\n")]);
+    let b = repo.work("b", &[("b.txt", "b\n")]);
+    // Each holds alone; together they do not.
+    let id = repo.run(&[("a", &[], &a, &["a.txt"], "test ! -f b.txt || test -f fixed.txt"), ("b", &[], &b, &["b.txt"], "test -f b.txt")], None);
+
+    let merged = repo.merge(&[], false);
+
+    assert_eq!((merged.merged.len(), merged.done), (2, false));
+    let run = store::get(&id).unwrap();
+    assert_eq!(run.state, RunState::Merging);
+    let reason = run.reason.clone().unwrap();
+    assert!(reason.contains("of piece a exited 1") && reason.contains("Nothing was undone"), "{reason}");
+    assert!(merged.next.starts_with(&reason));
+    // Fixed on the lead's branch, the checks run on the new commit and the run is done.
+    std::fs::write(repo.lead().join("fixed.txt"), "ok\n").unwrap();
+    git(&repo.lead(), &["add", "."]);
+    git(&repo.lead(), &["commit", "-q", "-m", "Make them hold together"]);
+    assert!(repo.merge(&[], false).done);
+    let run = store::get(&id).unwrap();
+    assert_eq!((run.state, run.reason, run.merge.unwrap().final_head), (RunState::Done, None, Some(repo.head())));
+}
+
+#[test]
+fn the_project_check_is_the_integration_check_of_a_plan_that_names_none() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let a = repo.work("a", &[("a.txt", "a\n")]);
+    *repo.project_check.lock().unwrap() = Some("test ! -f a.txt".into());
+    repo.run(&[("a", &[], &a, &["a.txt"], "true")], None);
+    let merged = repo.merge(&[], false);
+    assert_eq!((merged.integration_check.as_deref(), merged.integration_failed.as_slice()), (Some("test ! -f a.txt"), &["a".to_string()][..]));
+    assert!(store::get("run-1").unwrap().piece("a").unwrap().merge.as_ref().unwrap().check.as_ref().unwrap().project);
+}
+
+#[test]
+fn a_merge_is_refused_before_anything_moves_when_the_checkout_is_not_free() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let a = repo.work("a", &[("a.txt", "a\n")]);
+    let id = repo.run(&[("a", &[], &a, &["a.txt"], "true")], Some("true"));
+    let start = repo.head();
+    let refused = |by: By| merge::merge(&repo, &id, &repo.options(by, &[], false)).unwrap_err();
+
+    // Held by someone else: a pipeline's checks, a resolver, another conversation's turn.
+    *repo.held.lock().unwrap() = Some("TerminalX is running a pipeline's checks in it.".into());
+    let busy = refused(By::Cli);
+    assert_eq!(busy.code, "checkout_busy");
+    assert!(busy.message.contains("a pipeline's checks") && busy.message.contains("Nothing was merged"));
+    *repo.held.lock().unwrap() = None;
+
+    // Uncommitted work in tracked files would be lost with an undone merge.
+    std::fs::write(repo.lead().join("shared.txt"), "mine\n").unwrap();
+    assert_eq!(refused(By::Cli).code, "lead_checkout_dirty");
+    git(&repo.lead(), &["checkout", "--", "shared.txt"]);
+
+    // On another branch than the one the merge is for.
+    store::update(&id, |run| {
+        run.merge = Some(RunMerge { into: "elsewhere".into(), ..RunMerge::default() });
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(refused(By::Cli).code, "lead_branch_changed");
+    // Nobody approved the plan and the lead is asked before it runs a command: the plan's commands are a person's to run.
+    store::update(&id, |run| {
+        (run.merge, run.approval) = (None, None);
+        Ok(())
+    })
+    .unwrap();
+    *repo.mode.lock().unwrap() = "manual".into();
+    assert_eq!(refused(By::Cli).code, "checks_not_approved");
+    assert_eq!((repo.head(), repo.state("a")), (start, None));
+    assert_eq!(refused(By::Cli).code, "checks_not_approved");
+    let merged = merge::merge(&repo, &id, &repo.options(By::Person, &[], false)).unwrap();
+    assert!(merged.done);
+    assert_eq!(*repo.reserved.lock().unwrap(), [true, true, false], "a person's merge waits for the lead's turn too");
+    assert_eq!(merge::merge(&repo, &id, &Options { skip: vec!["nope".into()], ..repo.options(By::Cli, &[], false) }).unwrap_err().code, "piece_not_found");
+}
+
+#[test]
+fn a_merge_whose_check_never_finished_is_taken_back_and_made_again() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let a = repo.work("a", &[("a.txt", "a\n")]);
+    let id = repo.run(&[("a", &[], &a, &["a.txt"], "true")], Some("true"));
+    // The app stopped after the merge was made and before its check ended.
+    let before = repo.head();
+    git(&repo.lead(), &["merge", "-q", "--no-ff", "-m", "Merge cut short", &a]);
+    let cut_short = repo.head();
+    store::update(&id, |run| {
+        run.merge = Some(RunMerge { into: "lead".into(), pending: Some(PendingMerge { piece: "a".into(), before: before.clone(), after: Some(cut_short.clone()) }), ..RunMerge::default() });
+        Ok(())
+    })
+    .unwrap();
+
+    let merged = repo.merge(&[], false);
+
+    assert!(merged.done);
+    assert_eq!(merged.merged[0].range.as_deref(), Some(format!("{before}..{}", repo.head()).as_str()));
+    assert_eq!(git(&repo.lead(), &["log", "-1", "--format=%s"]), "Merge piece a: Piece a");
+    assert_eq!(git(&repo.lead(), &["rev-list", "--count", &format!("{before}..HEAD")]), "2");
+    assert_eq!(store::get(&id).unwrap().merge.unwrap().pending, None);
+}
+
+#[test]
+fn cleanup_removes_only_worktrees_whose_work_is_committed_and_merged() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let a = repo.work("a", &[("a.txt", "a\n")]);
+    let b = repo.work("b", &[("b.txt", "b\n")]);
+    let c = repo.work("c", &[("c.txt", "c\n")]);
+    let d = repo.work("d", &[("d.txt", "d\n")]);
+    let id = repo.run(&[("a", &[], &a, &["a.txt"], "true"), ("b", &[], &b, &["b.txt"], "true"), ("c", &[], &c, &["c.txt"], "true"), ("d", &[], &d, &["d.txt"], "true")], None);
+    assert!(repo.merge(&[], false).done);
+    // b went on after its result was accepted: a commit that is in no merge.
+    std::fs::write(repo.worker("b").join("later.txt"), "more\n").unwrap();
+    git(&repo.worker("b"), &["add", "."]);
+    git(&repo.worker("b"), &["commit", "-q", "-m", "Later work"]);
+    // c has a file nobody committed, and an agent is still running in d.
+    std::fs::write(repo.worker("c").join("notes.txt"), "keep me\n").unwrap();
+    repo.busy.lock().unwrap().insert("d".into());
+
+    // Explicit: without --yes nothing goes, and what would is listed.
+    let asked = merge::cleanup(&repo, &id, false).unwrap_err();
+    assert_eq!(asked.code, "confirmation_required");
+    assert_eq!(asked.details["wouldRemove"].as_array().unwrap().iter().map(|fate| fate["piece"].as_str().unwrap()).collect::<Vec<_>>(), ["a"]);
+    assert!(asked.message.contains("Would remove 1 worktree") && asked.message.contains("Would leave 3 worktrees"), "{}", asked.message);
+    assert!(["a", "b", "c", "d"].iter().all(|piece| repo.worker(piece).is_dir()));
+
+    let cleaned = merge::cleanup(&repo, &id, true).unwrap();
+
+    assert_eq!(cleaned.removed.iter().map(|fate| (fate.piece.as_str(), fate.attempt, fate.branch.as_deref())).collect::<Vec<_>>(), [("a", 1, Some("piece-a"))]);
+    let why: Vec<(&str, &str)> = cleaned.refused.iter().map(|fate| (fate.piece.as_str(), fate.reason.as_deref().unwrap())).collect();
+    assert_eq!(why, [("b", "It has 1 commit that is not in `lead`."), ("c", "It has uncommitted work in 1 file: notes.txt."), ("d", "An agent is running in it.")]);
+    assert!(!repo.worker("a").exists() && repo.worker("b").is_dir() && repo.worker("c").join("notes.txt").exists() && repo.worker("d").is_dir());
+    // A worktree is removed; its branch never is.
+    assert_eq!(git(&repo.lead(), &["rev-parse", "piece-a"]), a);
+    // Asked again, what is gone is not listed and what stays still does.
+    let again = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!((again.removed.len(), again.refused.len()), (0, 3));
+}

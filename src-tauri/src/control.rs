@@ -769,8 +769,8 @@ impl ControlService {
             "pipelines.start" | "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
             // A run's workers are sessions of a project on this computer, each in a worktree of its own:
             // the desktop's runtime has those. A cloud workspace's runtime has one checkout, and says so.
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.cleanup" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -786,8 +786,8 @@ impl ControlService {
         // The session the command runs in, when it runs in one the app knows.
         let caller = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok());
         // A run's worker leads no run and steers none, its own lead's included: it may read them.
-        if matches!(command, "runs.create" | "runs.start" | "runs.stop") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
-            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start or stop a run. Report what is ready; the lead decides what happens next.", None::<String>));
+        if matches!(command, "runs.create" | "runs.start" | "runs.stop" | "runs.merge" | "runs.sendBack" | "runs.cleanup") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
+            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start, stop, merge or clean up a run. Report what is ready; the lead decides what happens next.", None::<String>));
         }
         if command == "runs.create" {
             let lead = match optional_string(&params, "lead") {
@@ -845,6 +845,28 @@ impl ControlService {
                 let output = params["output"].as_str().unwrap_or_default();
                 let failed = engine::check_failed(&host, &run.id, &piece, output).map_err(ControlError::of_run)?;
                 Ok(json!({"run": engine::shown(&failed.run), "piece": failed.piece, "retried": failed.retried, "blocked": failed.blocked, "failed": failed.failed}))
+            }
+            // Git work TerminalX does itself: every accepted piece into the lead's branch, in
+            // dependency order, the integration check after each. It pushes nothing.
+            "runs.merge" => {
+                self.manager.accepting_work().map_err(ControlError::internal)?;
+                let mut options = crate::orchestration::merge::Options::new(engine::By::Cli);
+                options.skip = params["skip"].as_array().into_iter().flatten().filter_map(|piece| piece.as_str().map(str::to_owned)).collect();
+                options.recheck = params["recheck"].as_bool().unwrap_or(false);
+                let merged = crate::orchestration::merge::merge(&host, &run.id, &options).map_err(ControlError::of_run)?;
+                let mut value = serde_json::to_value(&merged).map_err(ControlError::internal)?;
+                value["run"] = engine::shown(&merged.run);
+                Ok(value)
+            }
+            "runs.sendBack" => {
+                self.manager.accepting_work().map_err(ControlError::internal)?;
+                let piece = optional_string(&params, "piece").ok_or_else(|| ControlError::invalid("Name the piece to send back to its worker."))?;
+                let sent = engine::send_back(&host, &run.id, &piece).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&sent.run), "piece": sent.piece, "freshWorker": sent.fresh_worker, "blocked": sent.blocked, "failed": sent.failed}))
+            }
+            "runs.cleanup" => {
+                let cleaned = crate::orchestration::merge::cleanup(&host, &run.id, params["confirmed"].as_bool().unwrap_or(false)).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&cleaned.run), "removed": cleaned.removed, "refused": cleaned.refused}))
             }
             "runs.stop" => {
                 let stop = engine::stop(&host, &run.id, engine::By::Cli).map_err(ControlError::of_run)?;

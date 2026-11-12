@@ -1836,6 +1836,36 @@ impl SessionManager {
                 serde_json::to_value(engine::start(&host, string("id")?).map_err(refused)?)?
             }
             "stop" => serde_json::to_value(engine::stop(&host, string("id")?, engine::By::Person).map_err(refused)?)?,
+            // A person's Merge, Continue merge and Skip: the same pass the lead's `runs merge` makes.
+            "merge" => {
+                self.accepting_work()?;
+                let mut options = crate::orchestration::merge::Options::new(engine::By::Person);
+                options.skip = params["skip"].as_array().into_iter().flatten().filter_map(|piece| piece.as_str().map(str::to_owned)).collect();
+                options.recheck = params["recheck"].as_bool().unwrap_or(false);
+                // The checks may run for a long time: the window is answered once the pass holds the
+                // checkout, or with why it could not begin, and follows the run's events from there.
+                let (told, begun) = std::sync::mpsc::channel();
+                options.begun = Some(told.clone());
+                let id = string("id")?.to_string();
+                let run = id.clone();
+                std::thread::Builder::new().name("run-merge".into()).spawn(move || {
+                    let ended = crate::orchestration::merge::merge(&host, &run, &options).map(|_| ());
+                    if let Err(error) = &ended {
+                        log::warn!("merge the pieces of run {run}: {error}");
+                    }
+                    let _ = told.send(ended);
+                })?;
+                begun.recv().context("the merge ended without saying how")?.map_err(refused)?;
+                engine::shown(&store::get(&id)?)
+            }
+            "sendBack" => {
+                self.accepting_work()?;
+                engine::shown(&engine::send_back(&host, string("id")?, string("piece")?).map_err(refused)?.run)
+            }
+            "resolveInLead" => {
+                self.accepting_work()?;
+                engine::shown(&engine::resolve_in_lead(&host, string("id")?, string("piece")?).map_err(refused)?)
+            }
             "updatePlan" => engine::shown(&engine::update_plan(&host, string("id")?, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?).map_err(refused)?),
             _ => anyhow::bail!("unsupported orchestration operation"),
         })

@@ -156,6 +156,8 @@ mod tests {
             plan_edited: false,
             approval: None,
             reason: None,
+            integration_check: None,
+            merge: None,
             created: "2026-11-11T00:00:00Z".into(),
             modified: "2026-11-11T00:00:00Z".into(),
         }

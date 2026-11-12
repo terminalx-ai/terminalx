@@ -5141,6 +5141,29 @@ pub async fn orchestration_stop(app: AppHandle, id: String) -> CmdResult<serde_j
     tauri::async_runtime::spawn_blocking(move || sessions.orchestration("stop", serde_json::json!({"id": id})).map_err(err)).await.map_err(err)?
 }
 
+/// A person's Merge, Continue merge or Skip: every accepted piece into the lead's branch, in
+/// dependency order (`orchestration::merge`). Answers once the pass has begun; the run's events
+/// say how it goes.
+#[tauri::command]
+pub async fn orchestration_merge(app: AppHandle, id: String, skip: Option<Vec<String>>, recheck: Option<bool>) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("merge", serde_json::json!({"id": id, "skip": skip.unwrap_or_default(), "recheck": recheck.unwrap_or(false)})).map_err(err)).await.map_err(err)?
+}
+
+/// Give a piece whose accepted result could not be merged back to its worker, with the conflict as its brief.
+#[tauri::command]
+pub async fn orchestration_send_back(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("sendBack", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
+/// Have the lead resolve a piece's conflict: it is sent both sides and the pieces' goals.
+#[tauri::command]
+pub async fn orchestration_resolve_in_lead(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("resolveInLead", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
 /// Replace the plan of a run that has not started: what Edit saves.
 #[tauri::command]
 pub async fn orchestration_update_plan(app: AppHandle, id: String, plan: serde_json::Value) -> CmdResult<serde_json::Value> {

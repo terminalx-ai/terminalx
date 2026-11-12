@@ -430,8 +430,16 @@ fn start_starts_only_the_pieces_whose_dependencies_are_done() {
     // The last piece done: the run is done, and nothing more starts in it.
     host.reports("docs", Status::Done, "Every documented key exists.");
     let done = engine::refreshed(&host, id).unwrap();
-    assert_eq!(done.state, RunState::Done);
+    // Every result is accepted: the run is done once they are merged into the lead's branch (`merge`).
+    assert_eq!(done.state, RunState::Merging);
     assert!(done.pieces.iter().all(|piece| piece.state == PieceState::Done && piece.attempts == 1));
+    // Nothing is left to start. Once its results are merged the run is done, and nothing starts or stops in it.
+    assert!(engine::start(&host, id).unwrap().started.is_empty());
+    store::update(id, |run| {
+        run.state = RunState::Done;
+        Ok(())
+    })
+    .unwrap();
     assert_eq!(engine::start(&host, id).unwrap_err().code, "run_ended");
     assert_eq!(engine::stop(&host, id, By::Cli).unwrap_err().code, "run_ended");
 }
@@ -1254,7 +1262,7 @@ fn a_review_is_read_by_a_verifier_on_the_verify_row_that_sees_the_diff_and_none_
     host.verifier_replies("guide", 1, &verdict_block(PASS), 5_200);
     engine::worker_turn_ended(&host, "w1-guide");
     let run = store::get(id).unwrap();
-    assert_eq!((run.piece("guide").unwrap().state, run.state), (PieceState::Done, RunState::Done));
+    assert_eq!((run.piece("guide").unwrap().state, run.state), (PieceState::Done, RunState::Merging));
     assert_eq!(gates_of(&run, "guide", 0), (vec![(Gate::Report, true), (Gate::Scope, true), (Gate::Branch, true), (Gate::Review, true)], Some(verify::Outcome::Passed)));
     // What the model step used is on the piece, apart from what its worker used.
     let verifier = &run.piece("guide").unwrap().tries[0].verification.as_ref().unwrap().review.as_ref().unwrap().verifiers[0];
@@ -1505,7 +1513,7 @@ fn a_lead_waiting_on_its_run_is_woken_by_a_piece_settled_not_by_each_turn_that_e
     host.reports("docs", Status::Done, "Documented.");
     engine::refreshed(&host, id).unwrap();
     let done = engine::verify(&host, id).unwrap();
-    assert_eq!(engine::wake(&running, &done, true).unwrap()["why"], json!(["docs is done: its result passed its checks.", "The run is done."]));
+    assert_eq!(engine::wake(&running, &done, true).unwrap()["why"], json!(["docs is done: its result passed its checks.", format!("Every piece's result is accepted. Merge them into your branch with `terminalx runs merge {id} --json`: the run is done once they are merged and the checks pass there.")]));
     // A piece that blocked before the wait began, with nothing else under way: there is nothing to
     // wait for, and the lead is told so at once rather than left asleep to its timeout.
     let (asking, asking_id) = one_piece_for("lead-asking");
@@ -1532,4 +1540,123 @@ fn a_lead_waiting_on_its_run_is_woken_by_a_piece_settled_not_by_each_turn_that_e
     }
     let blocked = store::get(&stuck_id).unwrap();
     assert_eq!(engine::wake(&before, &blocked, false).unwrap()["why"], json!(["cli is blocked after 3 tries.", "The run is failed."]));
+}
+
+/// Two pieces that depend on nothing.
+fn pair() -> Plan {
+    serde_json::from_value(json!({
+        "goal": "Two changes side by side",
+        "integrationCheck": "  cargo t  ",
+        "pieces": [
+            {"id": "a", "title": "The first change", "kind": "code", "doneChecks": [{"type": "command", "run": "cargo t a"}], "owns": ["src/a/"], "model": "sonnet"},
+            {"id": "b", "title": "The second change", "kind": "code", "doneChecks": [{"type": "command", "run": "cargo t b"}], "owns": ["src/b/"], "model": "sonnet"},
+        ],
+    }))
+    .unwrap()
+}
+
+/// What `merge::merge` records for a piece whose merge conflicts: about the commit it is accepted as.
+fn conflicts(id: &str, piece_id: &str) -> String {
+    let (_, commit) = store::update(id, |run| {
+        run.merge = Some(super::RunMerge { into: "lead".into(), stopped_at: Some(piece_id.into()), ..Default::default() });
+        let piece = run.pieces.iter_mut().find(|piece| piece.id == piece_id).unwrap();
+        let commit = piece.accepted_commit().unwrap_or("c0ffee").to_string();
+        piece.merge = Some(super::PieceMerge {
+            state: super::MergeState::Conflict,
+            commit: commit.clone(),
+            before: "abc123".into(),
+            after: None,
+            by_hand: false,
+            files: vec![super::ConflictFile { path: "src/shared.rs".into(), hunks: 1, line: Some(4), excerpt: Some("<<<<<<< lead\nfrom a\n=======\nfrom b\n>>>>>>> raccoon/b".into()), with: vec!["a".into()], owner: None }],
+            check: None,
+            note: None,
+            at: "2026-11-12T09:00:00Z".into(),
+        });
+        Ok(commit)
+    })
+    .unwrap();
+    commit
+}
+
+#[test]
+fn a_run_whose_results_are_all_accepted_waits_to_be_merged_and_wakes_its_lead_for_it() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    host.settings.lock().unwrap().require_approval = false;
+    let run = engine::create(&host, &pair(), "lead", Some("lead-tab".into())).unwrap();
+    assert_eq!(run.integration_check.as_deref(), Some("cargo t"), "the plan's integration check is stored with the run");
+    let id = &run.id;
+    let running = engine::start(&host, id).unwrap().run;
+    host.reports("a", Status::Done, "A done.");
+    host.reports("b", Status::Done, "B done.");
+    let accepted = engine::refreshed(&host, id).unwrap();
+    // Accepted is not merged: the run is done only once `runs merge` has brought the results together.
+    assert_eq!((accepted.state, accepted.reason.as_deref()), (RunState::Merging, None));
+    let woken = engine::wake(&running, &accepted, true).unwrap();
+    assert!(woken["why"].as_array().unwrap().iter().any(|why| why.as_str().unwrap().contains(&format!("terminalx runs merge {id} --json"))), "{woken}");
+    let shown = engine::shown(&accepted);
+    assert_eq!((&shown["mergeOrder"], &shown["mergeUnderWay"], &shown["integrationCheck"]), (&json!(["a", "b"]), &json!(false), &json!("cargo t")));
+    // A plan whose integration check would push, merge or deploy is refused like a done-check that would.
+    let mut pushing = pair();
+    pushing.integration_check = Some("cargo t && git push".into());
+    let refused = engine::create(&Fake::new(), &pushing, "other-lead", None).unwrap_err();
+    assert_eq!((refused.code, &refused.details["command"]), ("check_not_allowed", &json!("git push")));
+    // What keeps a merged run from done stays its reason while it is merging.
+    store::update(id, |run| {
+        run.reason = Some("A done-check failed on the merged result.".into());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(engine::refreshed(&host, id).unwrap().reason.as_deref(), Some("A done-check failed on the merged result."));
+}
+
+#[test]
+fn a_piece_whose_merge_conflicts_goes_back_to_its_worker_with_the_conflict_as_its_brief() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    host.settings.lock().unwrap().require_approval = false;
+    let run = engine::create(&host, &pair(), "lead", Some("lead-tab".into())).unwrap();
+    let id = &run.id;
+    engine::start(&host, id).unwrap();
+    host.reports("a", Status::Done, "A done.");
+    host.reports("b", Status::Done, "B done.");
+    assert_eq!(engine::refreshed(&host, id).unwrap().state, RunState::Merging);
+    // Nothing failed to merge: there is nothing to send back.
+    assert_eq!(engine::send_back(&host, id, "b").unwrap_err().code, "nothing_to_send_back");
+    assert_eq!(engine::send_back(&host, id, "nope").unwrap_err().code, "piece_not_found");
+    assert_eq!(engine::resolve_in_lead(&host, id, "b").unwrap_err().code, "nothing_to_resolve");
+
+    let commit = conflicts(id, "b");
+    // A person may have the lead resolve it: the lead is sent the two sides and the pieces' goals, nothing else.
+    engine::resolve_in_lead(&host, id, "b").unwrap();
+    let told = host.world().told.last().cloned().unwrap();
+    assert!(told.contains("- b (The second change):") && told.contains("- a (The first change):") && told.contains("from a\n=======\nfrom b") && told.contains(&format!("git merge {commit}")), "{told}");
+
+    let worker = host.session_of("b");
+    let sent = engine::send_back(&host, id, "b").unwrap();
+    // The worker that made the result has it again, in its own worktree: no new session, no step of the ladder.
+    assert!(!sent.fresh_worker && !sent.blocked && sent.failed.is_empty());
+    assert_eq!(host.made(), vec!["a", "b"]);
+    let piece = sent.run.piece("b").unwrap();
+    assert_eq!((piece.state, piece.tries.len(), piece.merge.as_ref(), sent.run.state), (PieceState::Running, 1, None, RunState::Running));
+    assert!(piece.tries[0].outcome.is_none() && piece.tries[0].verification.is_none(), "its try is open again, and what was checked is not what it will report");
+    let brief = host.world().briefs[&worker].clone();
+    assert!(brief.contains("it no longer merges into `lead`") && brief.contains("- src/shared.rs (1 place; also changed by a (The first change), already merged)") && brief.contains("git rebase lead") && brief.contains("from b"), "{brief}");
+    assert!(host.world().resets.contains(&worker));
+    // It reports again: the same gates check the result, and the run waits to be merged again.
+    host.reports("b", Status::Done, "Rebased onto lead.");
+    let again = engine::refreshed(&host, id).unwrap();
+    assert_eq!((again.state, again.piece("b").unwrap().state, again.piece("b").unwrap().merge.as_ref()), (RunState::Merging, PieceState::Done, None));
+
+    // Its session deleted: the conflict goes to a fresh worker, as the failure text of the ladder's next step.
+    conflicts(id, "b");
+    host.world().now.remove(&worker);
+    let fresh = engine::send_back(&host, id, "b").unwrap();
+    assert!(fresh.fresh_worker && !fresh.blocked);
+    assert_eq!(host.made(), vec!["a", "b", "b"]);
+    let piece = fresh.run.piece("b").unwrap();
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[0].outcome, piece.merge.as_ref(), fresh.run.state), (PieceState::Running, 2, Some(Outcome::CheckFailed), None, RunState::Running));
+    assert!(piece.tries[0].detail.as_deref().unwrap().contains("src/shared.rs"));
+    let next = host.session_of("b");
+    assert!(next != worker && host.world().briefs[&next].contains("src/shared.rs"), "the next worker is told what conflicted");
 }
