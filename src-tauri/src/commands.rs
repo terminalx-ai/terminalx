@@ -3148,6 +3148,37 @@ pub async fn abort_merge(cwd: String, head: String, merge_head: String) -> CmdRe
     tauri::async_runtime::spawn_blocking(move || crate::unfinished_merge::abort(Path::new(&cwd), &head, &merge_head).map_err(err)).await.map_err(err)?
 }
 
+/// A conflicted file of the merge that was read, cut into its conflicts (PRO-293).
+#[tauri::command]
+pub async fn merge_conflict_file(cwd: String, head: String, merge_head: String, path: String) -> CmdResult<crate::merge_conflicts::ConflictFile> {
+    tauri::async_runtime::spawn_blocking(move || crate::merge_conflicts::read(Path::new(&cwd), &head, &merge_head, &path).map_err(err)).await.map_err(err)?
+}
+
+/// Replace conflict `index` of a file with a side, or both, and the file as
+/// written; refused when the file changed since `version`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_merge_conflict(
+    cwd: String,
+    head: String,
+    merge_head: String,
+    path: String,
+    version: String,
+    index: usize,
+    choice: crate::merge_conflicts::ConflictChoice,
+) -> CmdResult<crate::merge_conflicts::ConflictFile> {
+    tauri::async_runtime::spawn_blocking(move || crate::merge_conflicts::resolve(Path::new(&cwd), &head, &merge_head, &path, &version, index, choice).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+/// Stage a file with no conflict markers left; refused when it changed since
+/// `version` or still has markers.
+#[tauri::command]
+pub async fn mark_conflict_resolved(cwd: String, head: String, merge_head: String, path: String, version: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::merge_conflicts::mark_resolved(Path::new(&cwd), &head, &merge_head, &path, &version).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn git_checkout(cwd: String, name: String, create: bool) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || git::checkout_branch(Path::new(&cwd), &name, create).map_err(err)).await.map_err(err)?
