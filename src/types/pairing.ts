@@ -227,7 +227,35 @@ export interface PairedDevice {
   createdAt: string;
   lastSeenAt?: string;
   revokedAt?: string;
+  /** "7F3A·91C2"; absent until the device has connected once (docs/PAIRING-APPROVAL.md). */
+  fingerprint?: string;
+  /** When the person approved this pairing on the Mac; absent for pairings made before PRO-314. */
+  approvedAt?: string;
+  /** Set while at least one connection from this device is live. */
+  connection?: PairedDeviceConnection;
+  /** How the device reached this Mac the last time it connected. */
+  lastSeenTransport?: MobileE2EETransport;
 }
+
+export interface PairedDeviceConnection {
+  transport: MobileE2EETransport;
+  /** RFC 3339. */
+  since: string;
+}
+
+/** A phone has scanned the code and waits for the person to approve it on this Mac. */
+export interface PairingApprovalRequest {
+  requestId: string;
+  deviceId: string;
+  fingerprint: string;
+  transport: MobileE2EETransport;
+  /** Epoch milliseconds. */
+  requestedAt: number;
+  /** Epoch milliseconds; declined automatically after this. */
+  expiresAt: number;
+}
+
+export const PAIRING_APPROVAL_TTL_MS = 120_000 as const;
 
 export interface PairingCodeStatus {
   pairingUrl: string;
@@ -267,5 +295,8 @@ export interface PairingStatus {
   host: PairingHostMetadata | null;
   devices: PairedDevice[];
   activePairing: PairingCodeStatus | null;
+  pendingApproval: PairingApprovalRequest | null;
+  /** Keep this Mac awake while a phone is connected (default on). */
+  keepAwake: boolean;
   lastError: string | null;
 }

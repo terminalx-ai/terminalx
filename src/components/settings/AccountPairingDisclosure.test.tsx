@@ -46,6 +46,8 @@ vi.mock("@/lib/pairing", () => ({
       host: mocks.host,
       devices: [],
       activePairing: null,
+  pendingApproval: null,
+  keepAwake: true,
       lastError: null,
     },
   }),

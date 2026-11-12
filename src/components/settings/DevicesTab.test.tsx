@@ -9,6 +9,8 @@ const empty: PairingStatus = {
   host: null,
   devices: [],
   activePairing: null,
+  pendingApproval: null,
+  keepAwake: true,
   lastError: null,
 };
 const ready: PairingStatus = {
@@ -34,6 +36,8 @@ const ready: PairingStatus = {
     directAvailable: true,
     transport: "relay",
   },
+  pendingApproval: null,
+  keepAwake: true,
   lastError: null,
 };
 const localReady: PairingStatus = {

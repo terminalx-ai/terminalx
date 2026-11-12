@@ -17,6 +17,8 @@ const emptyStatus: PairingStatus = {
   host: null,
   devices: [],
   activePairing: null,
+  pendingApproval: null,
+  keepAwake: true,
   lastError: null,
 };
 
