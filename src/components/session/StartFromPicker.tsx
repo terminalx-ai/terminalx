@@ -200,7 +200,7 @@ export function StartFromPicker({
             e.preventDefault();
             input.current?.focus();
           }}
-          className="z-(--z-menu) w-[28rem] max-w-[calc(100vw-2rem)] rounded-xl bg-popover glass p-2 text-popover-foreground shadow-surface hairline"
+          className="z-(--z-menu) w-[28rem] max-w-[calc(100vw-2rem)] rounded-xl bg-popover p-2 text-popover-foreground shadow-surface hairline"
         >
           <Tabs.Root value={tab} onValueChange={(value) => setTab(value as Tab)}>
             <Tabs.List aria-label="Start from source" className="mb-2 flex gap-1">

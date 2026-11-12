@@ -340,19 +340,20 @@ describe("status bar usage", () => {
     expect(within(detail).getByText("82% used")).toBeTruthy();
   });
 
-  it("uses an opaque surface for the usage popover, agent details, and reset confirmation", () => {
+  // The popover ground is opaque in every mode, glass included (src/styles/glass.test.ts).
+  it("uses the opaque popover surface for the usage popover, agent details, and reset confirmation", () => {
     const { getByRole } = render(<StatusBar />);
     fireEvent.click(getByRole("button", { name: /Codex 5h 23% used/ }));
 
     const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
-    expect(popover.className).toContain("bg-(--surface-card)");
+    expect(popover.className).toContain("bg-popover");
     fireEvent.click(within(popover).getByRole("button", { name: "Codex, Resets in 3h 5m" }));
 
     const detail = document.querySelector('[data-usage-detail="codex"]') as HTMLElement;
-    expect(detail.className).toContain("bg-(--surface-card)");
+    expect(detail.className).toContain("bg-popover");
     fireEvent.click(within(detail).getByRole("button", { name: "Reset now" }));
 
-    expect(getByRole("dialog", { name: "Reset Codex limits?" }).className).toContain("bg-(--surface-card)");
+    expect(getByRole("dialog", { name: "Reset Codex limits?" }).className).toContain("bg-popover");
   });
 
   it("omits reset copy for a window without a reset timestamp", () => {

@@ -29,6 +29,7 @@ export const yieldsToRowActions =
 export function RowActions({ children, className, persistent = false }: { children: ReactNode; className?: string; persistent?: boolean }) {
   return (
     <span
+      data-row-actions
       className={cn(
         persistent
           ? // Always in the accessibility tree and reachable with Tab; drawn only on hover, focus or an open menu.

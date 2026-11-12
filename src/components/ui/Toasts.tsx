@@ -22,7 +22,7 @@ export function Toasts() {
             key={n.id}
             role="status"
             onClick={() => openNotice(n)}
-            className="pointer-events-auto flex cursor-pointer items-start gap-2.5 rounded-xl bg-popover glass p-3 text-sm shadow-surface hairline animate-fade-in"
+            className="pointer-events-auto flex cursor-pointer items-start gap-2.5 rounded-xl bg-popover p-3 text-sm shadow-surface hairline animate-fade-in"
           >
             <Icon className={cn("mt-0.5 size-4 shrink-0", n.kind === "waiting" ? "text-warning" : n.kind === "failed" ? "text-destructive" : "text-add")} />
             <div className="min-w-0 flex-1">

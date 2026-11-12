@@ -45,7 +45,7 @@ function SetupFailure({ run }: { run: WorkspaceSetup }) {
     } catch (error) { setError(errorMessage(error)); }
     finally { setSending(false); }
   };
-  return <div role="status" className="pointer-events-auto rounded-xl bg-popover glass p-3 text-sm shadow-surface hairline">
+  return <div role="status" className="pointer-events-auto rounded-xl bg-popover p-3 text-sm shadow-surface hairline">
     <div className="flex items-center justify-between gap-2">
       <span className="font-medium text-destructive">Setup failed</span>
       <Button variant="ghost" size="xs" aria-label="Dismiss setup failure" onClick={() => dismissSetup(run)}>Dismiss</Button>

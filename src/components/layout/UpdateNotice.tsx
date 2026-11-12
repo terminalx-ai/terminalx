@@ -39,7 +39,7 @@ export function UpdateNotice() {
       role="dialog"
       aria-label="Update available"
       data-testid="update-notice"
-      className="fixed bottom-10 right-4 z-(--z-menu) w-[20rem] max-w-[calc(100vw-2rem)] rounded-xl bg-popover glass p-3.5 text-popover-foreground shadow-surface hairline animate-fade-in"
+      className="fixed bottom-10 right-4 z-(--z-menu) w-[20rem] max-w-[calc(100vw-2rem)] rounded-xl bg-popover p-3.5 text-popover-foreground shadow-surface hairline animate-fade-in"
     >
       <button type="button" aria-label="Close" onClick={() => dismissUpdateNotice(version)} className="absolute right-2 top-2 rounded-md p-1 text-faint hover:bg-veil-raised hover:text-foreground">
         <X className="size-3.5" />
@@ -76,7 +76,7 @@ function UpdateChoiceCard({ state }: { state: Extract<UpdateState, { kind: "choo
       role="dialog"
       aria-label="Update and restart work in progress?"
       data-testid="update-choice"
-      className="fixed bottom-10 right-4 z-(--z-menu) w-[24rem] max-w-[calc(100vw-2rem)] rounded-xl bg-popover glass p-3.5 text-popover-foreground shadow-surface hairline animate-fade-in"
+      className="fixed bottom-10 right-4 z-(--z-menu) w-[24rem] max-w-[calc(100vw-2rem)] rounded-xl bg-popover p-3.5 text-popover-foreground shadow-surface hairline animate-fade-in"
     >
       <button type="button" aria-label="Not now" onClick={() => void chooseUpdate(null)} className="absolute right-2 top-2 rounded-md p-1 text-faint hover:bg-veil-raised hover:text-foreground">
         <X className="size-3.5" />

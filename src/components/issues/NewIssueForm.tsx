@@ -512,7 +512,7 @@ export function NewIssueForm({
                   sideOffset={4}
                   align="start"
                   collisionPadding={8}
-                  className="z-(--z-menu) w-64 max-w-[calc(100vw-16px)] overflow-hidden rounded-lg bg-popover glass text-popover-foreground shadow-surface hairline animate-fade-in"
+                  className="z-(--z-menu) w-64 max-w-[calc(100vw-16px)] overflow-hidden rounded-lg bg-popover text-popover-foreground shadow-surface hairline animate-fade-in"
                 >
                   {optionsError ? (
                     <div role="alert" className="px-3 py-2 text-xs text-destructive">{optionsError}</div>
@@ -585,7 +585,7 @@ export function NewIssueForm({
                   align="start"
                   sideOffset={4}
                   collisionPadding={8}
-                  className="z-(--z-menu) w-64 max-w-[calc(100vw-1rem)] rounded-lg bg-popover glass pt-1.5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
+                  className="z-(--z-menu) w-64 max-w-[calc(100vw-1rem)] rounded-lg bg-popover pt-1.5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
                 >
                   {scope ? (
                     <LabelChooser labels={options?.labels ?? null} error={optionsError} chosen={draft.labels} onChange={(labels) => update((now) => ({ ...now, labels }))} />
