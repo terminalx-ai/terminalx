@@ -23,7 +23,7 @@ let ConnectedBar: typeof import("./ConnectedBar")["ConnectedBar"];
 
 const viaRelay = device({ connection: { transport: "relay", since: "2026-11-12T09:00:00Z" }, lastSeenTransport: "relay", lastSeenAt: "2026-11-12T09:00:00Z" });
 const viaLan = device({ id: "phone-2", label: "Kitchen iPhone", fingerprint: "AB12·CD34", connection: { transport: "direct", since: "2026-11-12T09:00:00Z" } });
-const lastSeenLan = device({ id: "ipad-1", label: "Studio iPad", platform: "ios", fingerprint: "C04E·5B17", lastSeenAt: "2026-11-03T18:20:00Z", lastSeenTransport: "direct" });
+const lastSeenLan = device({ id: "ipad-1", label: "Studio iPad", platform: "ios", fingerprint: "C04E·5B17·9A2F·13C8", lastSeenAt: "2026-11-03T18:20:00Z", lastSeenTransport: "direct" });
 const neverSeen = device({ id: "phone-3", label: "Old phone", fingerprint: undefined, lastSeenAt: undefined });
 
 async function boot(initial: PairingStatus, answer: (command: string, args: Record<string, unknown>) => PairingStatus = (command) => { throw new Error(command); }) {
@@ -51,7 +51,7 @@ describe("paired device rows", () => {
 
     expect(within(relay).getByText("Priya's iPhone")).toBeTruthy();
     expect(within(relay).getByText("Connected now · through TerminalX Relay")).toBeTruthy();
-    expect(within(relay).getByLabelText("Fingerprint 7F3A·91C2").textContent).toBe("7F3A·91C2");
+    expect(within(relay).getByLabelText("Fingerprint 7F3A·91C2·4E08·B6D1").textContent).toBe("7F3A·91C2·4E08·B6D1");
     expect(within(relay).getByRole("button", { name: "Disconnect Priya's iPhone" })).toBeTruthy();
 
     expect(within(lan).getByText("Connected now · over LAN")).toBeTruthy();
@@ -59,7 +59,7 @@ describe("paired device rows", () => {
 
     const seenText = within(seen).getByText(/^Last seen /).textContent!;
     expect(seenText).toMatch(/^Last seen .*3.*, .*\d{2}.\d{2}.* · over LAN$/);
-    expect(within(seen).getByText("C04E·5B17")).toBeTruthy();
+    expect(within(seen).getByText("C04E·5B17·9A2F·13C8")).toBeTruthy();
     expect(within(seen).queryByRole("button", { name: /^Disconnect/ })).toBeNull();
     expect(within(seen).getByRole("button", { name: "Revoke Studio iPad" })).toBeTruthy();
 

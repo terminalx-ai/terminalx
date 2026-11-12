@@ -286,8 +286,10 @@ function ApprovalPrompt({ request }: { request: PairingApprovalRequest }) {
         <div className="text-[13px] font-medium">{name} wants to pair</div>
         <p className="text-[11.5px] leading-4 text-muted-foreground">Approve only if the phone shows the same fingerprint.</p>
       </div>
-      <div className="w-full rounded-xl bg-well py-4 font-mono text-[22px] tracking-[.06em]" aria-label={`Fingerprint ${request.fingerprint}`}>
-        {request.fingerprint}
+      <div className="grid w-full gap-0.5 rounded-xl bg-well py-3 font-mono text-[20px] leading-7 tracking-[.06em]" aria-label={`Fingerprint ${request.fingerprint}`}>
+        {fingerprintLines(request.fingerprint).map((line) => (
+          <span key={line} aria-hidden>{line}</span>
+        ))}
       </div>
       <div className="text-[11.5px] text-faint">
         Scanned {pathLabel(request.transport)} · declines in {minutesSeconds(remaining)}
@@ -302,4 +304,12 @@ function ApprovalPrompt({ request }: { request: PairingApprovalRequest }) {
       </div>
     </section>
   );
+}
+
+/** "CEF4·2468·FE26·9E4B" as two lines of two groups, so it fits the column and reads in halves. */
+function fingerprintLines(fingerprint: string): string[] {
+  const groups = fingerprint.split("·");
+  if (groups.length < 4) return [fingerprint];
+  const half = Math.ceil(groups.length / 2);
+  return [groups.slice(0, half).join("·"), groups.slice(half).join("·")];
 }

@@ -45,7 +45,7 @@ describe("Settings → Devices", () => {
     );
     expect(screen.getByText("Priya's iPhone")).toBeTruthy();
     expect(screen.getByText("Connected now · through TerminalX Relay")).toBeTruthy();
-    expect(screen.getByText("7F3A·91C2")).toBeTruthy();
+    expect(screen.getByText("7F3A·91C2·4E08·B6D1")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Pair a phone…" }));
     await screen.findByRole("dialog", { name: "Pair a phone" });

@@ -240,13 +240,13 @@ describe("Pair a phone dialog", () => {
 describe("approval prompt", () => {
   let waiting: PairingStatus;
   beforeEach(() => {
-    const request = { requestId: "req-1", deviceId: "phone-2", fingerprint: "1177·11ED", transport: "relay" as const, requestedAt: Date.now(), expiresAt: Date.now() + 118_000 };
+    const request = { requestId: "req-1", deviceId: "phone-2", fingerprint: "CEF4·2468·FE26·9E4B", transport: "relay" as const, requestedAt: Date.now(), expiresAt: Date.now() + 118_000 };
     waiting = { ...emptyStatus, relay: relayReady, activePairing: code(), pendingApproval: request };
   });
 
   it("opens by itself with the fingerprint, and Approve calls the Mac", async () => {
     await boot({ ...emptyStatus, relay: relayReady, activePairing: code() }, (command, args) => {
-      if (command === "pairing_approve") return { ...emptyStatus, relay: relayReady, devices: [device({ id: "phone-2", fingerprint: "1177·11ED", approvedAt: "2026-11-12T10:00:00Z", connection: { transport: "relay", since: "2026-11-12T10:00:00Z" } })] };
+      if (command === "pairing_approve") return { ...emptyStatus, relay: relayReady, devices: [device({ id: "phone-2", fingerprint: "CEF4·2468·FE26·9E4B", approvedAt: "2026-11-12T10:00:00Z", connection: { transport: "relay", since: "2026-11-12T10:00:00Z" } })] };
       throw new Error(`${command} ${JSON.stringify(args)}`);
     });
     render(<PairPhoneDialogHost />);
@@ -254,7 +254,9 @@ describe("approval prompt", () => {
     push(waiting);
 
     const prompt = await screen.findByRole("group", { name: "Approve this phone" });
-    expect(within(prompt).getByLabelText("Fingerprint 1177·11ED").textContent).toBe("1177·11ED");
+    // Named in full, shown as two lines of two groups.
+    const fingerprint = within(prompt).getByLabelText("Fingerprint CEF4·2468·FE26·9E4B");
+    expect(Array.from(fingerprint.children, (line) => line.textContent)).toEqual(["CEF4·2468", "FE26·9E4B"]);
     expect(within(prompt).getByText(/Scanned through TerminalX Relay · declines in 1:5\d/)).toBeTruthy();
     expect(screen.queryByAltText("TerminalX phone pairing QR code")).toBeNull();
     expect(screen.getByRole("radio", { name: "Relay and nearby" }).matches(":disabled")).toBe(true);

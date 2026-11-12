@@ -19,27 +19,43 @@ must serialise to exactly those shapes.
 
 ## Fingerprint
 
-Both sides know both keys before the Mac answers `e2ee_auth`: the host public
-key is pinned in the pairing offer (`publicKeyB64`), and the phone's long-lived
-X25519 key is sent in `e2ee_hello.clientPublicKeyB64`. So no wire message is
-needed to show the same fingerprint on both screens.
+Both sides know every input before the Mac answers `e2ee_auth`: the host public
+key and the one-time device token are in the pairing offer (`publicKeyB64`,
+`deviceToken`), and the phone's long-lived X25519 key is sent in
+`e2ee_hello.clientPublicKeyB64`. So no wire message is needed to show the same
+fingerprint on both screens.
 
 ```
-digest      = SHA-256( "terminalx-pairing-fingerprint.v1" || 0x00 || host_pk[32] || phone_pk[32] )
-fingerprint = upper-hex(digest[0..2]) + "·" + upper-hex(digest[2..4])     e.g. "7F3A·91C2"
+digest      = SHA-256( "terminalx-pairing-fingerprint.v2" || 0x00 || host_pk[32] || phone_pk[32] || SHA-256(deviceToken) )
+fingerprint = upper-hex of digest[0..8] in four groups of two bytes, "·"-separated
+              e.g. "CEF4·2468·FE26·9E4B"
 ```
 
 - `host_pk` and `phone_pk` are the raw 32-byte keys (decode the standard base64).
-- The separator is U+00B7 MIDDLE DOT.
-- The domain string is ASCII, followed by one zero byte.
+- `SHA-256(deviceToken)` is over the token's UTF-8 bytes; the Mac stores exactly
+  this digest (`DeviceEntry.token`, base64url), so it can name devices paired
+  before this change too.
+- The separator is U+00B7 MIDDLE DOT. The domain string is ASCII, followed by one
+  zero byte.
 
-Test vector (both implementations must assert it):
+Why the token and 64 bits (review of PR #923): both keys are long-lived and the
+phone's key crosses the Relay or the LAN in the clear. With only the keys and 32
+bits, someone who had seen a phone's hello could grind a key of their own with the
+same fingerprint ahead of time, connect first with a leaked code, and be approved
+by a person comparing the right-looking code. The device token is new for every
+code and secret until the code is shown, so no search can start before it, and
+2^64 is out of reach in the code's few minutes.
+
+Test vectors (both implementations assert them):
 
 ```
-host_pk  = 32 bytes of 0x01
-phone_pk = 32 bytes of 0x02
-fingerprint = "1177·11ED"
+host_pk = 32 bytes of 0x01, phone_pk = 32 bytes of 0x02, token digest = 32 bytes of 0x03
+  -> "CEF4·2468·FE26·9E4B"
+host_pk = 32 bytes of 0x01, phone_pk = 32 bytes of 0x02, deviceToken = "token-abc"
+  -> "6B3C·CA5D·54D0·FCB6"
 ```
+
+The desktop shows it as two lines of two groups in the approval prompt.
 
 ## The approval step on the Mac
 
@@ -63,9 +79,18 @@ fingerprint = "1177·11ED"
 6. The code's own expiry does not cut a pending approval short; but once the
    code has expired no *new* approval request can start.
 
-The phone waits for `e2ee_authenticated` for up to `APPROVAL_TTL_MS` plus a
-margin (use 150 s) while pairing. A close before `e2ee_authenticated` during
-pairing means "not approved on the Mac, or it timed out".
+When the Mac refuses (declined, timed out, another phone's request is waiting,
+or the code is no longer active) it sends, encrypted, in place of
+`e2ee_authenticated`:
+
+```
+{"type": "pairing_refused", "v": 1, "reason": "not-approved" | "another-phone" | "code-inactive"}
+```
+
+and then closes. Only this message means "not approved" on the phone: a
+connection that drops while waiting, or the phone's own 150 s limit, is an
+ordinary connection failure, and a new pairing's journal is kept so Retry can
+finish it if the person approves meanwhile.
 
 ## Phone name
 

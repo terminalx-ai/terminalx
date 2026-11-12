@@ -77,6 +77,12 @@ class EncryptedPeer extends FakeSocket {
     this.held = null;
     this.encrypted({ type: "e2ee_authenticated", v: 2, transcriptHashB64: hash });
   }
+  /** The Mac refused: it says so, then closes. */
+  refuse(reason = "not-approved") {
+    this.held = null;
+    this.encrypted({ type: "pairing_refused", v: 1, reason });
+    queueMicrotask(() => this.onclose?.({ code: 1000, reason: "" }));
+  }
 
   private emit(value: unknown) { queueMicrotask(() => this.onmessage?.({ data: JSON.stringify(value) })); }
   private encrypted(value: unknown) {
@@ -344,26 +350,40 @@ describe("waiting for the Mac's approval while pairing", () => {
     client.close();
   });
 
-  it("maps a close before e2ee_authenticated to not approved", async () => {
+  it("maps the Mac's pairing_refused to not approved, with its reason", async () => {
     const socket = new EncryptedPeer({ gate: true });
     const { client } = pairing(socket);
     const connecting = client.connect();
     socket.onopen?.(); await flush();
     expect(socket.waiting).toBe(true);
-    socket.onclose?.({ code: 1000, reason: "pairing declined" });
+    socket.refuse("another-phone");
     const error = await connecting.catch((cause: unknown) => cause);
     expect(error).toBeInstanceOf(PairingNotApprovedError);
-    expect((error as PairingNotApprovedError).closeCause).toBeInstanceOf(RelayOuterError);
+    expect((error as PairingNotApprovedError).reason).toBe("another-phone");
   });
 
-  it("gives up as not approved after the approval wait", async () => {
+  it("keeps a connection that drops while waiting an ordinary failure: the Mac may still approve", async () => {
+    const socket = new EncryptedPeer({ gate: true });
+    const { client } = pairing(socket);
+    const connecting = client.connect();
+    socket.onopen?.(); await flush();
+    expect(socket.waiting).toBe(true);
+    socket.onclose?.({ code: 1006, reason: "" });
+    const error = await connecting.catch((cause: unknown) => cause);
+    expect(error).not.toBeInstanceOf(PairingNotApprovedError);
+    expect(error).toBeInstanceOf(RelayOuterError);
+  });
+
+  it("gives up after the approval wait as a failure to retry, not a refusal", async () => {
     vi.useFakeTimers();
     const socket = new EncryptedPeer({ gate: true });
     const { client } = pairing(socket);
     const connecting = client.connect().catch((cause: unknown) => cause);
     socket.onopen?.(); await flush();
     await vi.advanceTimersByTimeAsync(PAIRING_APPROVAL_WAIT_MS);
-    expect(await connecting).toBeInstanceOf(PairingNotApprovedError);
+    const error = await connecting;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(PairingNotApprovedError);
   });
 
   it("connects at once to a Mac that does not gate (an older Mac)", async () => {

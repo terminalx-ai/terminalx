@@ -24,7 +24,7 @@ export function device(patch: Partial<PairedDevice> = {}): PairedDevice {
     bindingGeneration: 0,
     publicKey: "key",
     createdAt: "2026-09-03T00:00:00Z",
-    fingerprint: "7F3A·91C2",
+    fingerprint: "7F3A·91C2·4E08·B6D1",
     ...patch,
   };
 }

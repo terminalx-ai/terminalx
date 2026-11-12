@@ -37,10 +37,10 @@ const fixture = `(() => {
   });
   const devices = [
     { id: "phone-1", label: "Paresh’s iPhone", platform: "ios", token: "t", scope: "driver", provenance: "explicit", bindingGeneration: 0, publicKey: "k",
-      createdAt: "2026-10-01T09:00:00Z", lastSeenAt: "2026-11-12T09:00:00Z", fingerprint: "7F3A·91C2", approvedAt: "2026-10-01T09:00:00Z",
+      createdAt: "2026-10-01T09:00:00Z", lastSeenAt: "2026-11-12T09:00:00Z", fingerprint: "7F3A·91C2·4E08·B6D1", approvedAt: "2026-10-01T09:00:00Z",
       connection: { transport: "relay", since: "2026-11-12T09:00:00Z" }, lastSeenTransport: "relay" },
     { id: "ipad-1", label: "Studio iPad", platform: "ios", token: "t", scope: "driver", provenance: "explicit", bindingGeneration: 0, publicKey: "k",
-      createdAt: "2026-10-01T09:00:00Z", lastSeenAt: "2026-11-03T18:20:00Z", fingerprint: "C04E·5B17", lastSeenTransport: "direct" },
+      createdAt: "2026-10-01T09:00:00Z", lastSeenAt: "2026-11-03T18:20:00Z", fingerprint: "C04E·5B17·9A2F·13C8", lastSeenTransport: "direct" },
   ];
   let status = {
     relay: { phase: "connected", message: null, attempt: 0 },
@@ -116,7 +116,12 @@ function measure(page) {
       const mono = getComputedStyle(probe).fontFamily;
       probe.remove();
       const fingerprints = [...dialog.querySelectorAll('[aria-label^="Fingerprint "]')];
-      out.fingerprints = fingerprints.map((el) => ({ text: el.textContent, mono: getComputedStyle(el).fontFamily === mono }));
+      out.fingerprints = fingerprints.map((el) => ({
+        text: el.getAttribute("aria-label").slice("Fingerprint ".length),
+        mono: getComputedStyle(el).fontFamily === mono,
+        // Every line of it inside its own box: a 64-bit fingerprint must not spill out at the smallest size.
+        fits: el.scrollWidth <= el.clientWidth + 1,
+      }));
       out.rows = [...dialog.querySelectorAll('[data-testid="paired-device"]')].map((row) => Math.round(row.getBoundingClientRect().height));
       out.headerTitle = dialog.querySelector("h2")?.textContent ?? null;
       out.qr = !!dialog.querySelector('img[alt="TerminalX phone pairing QR code"]');
@@ -139,6 +144,7 @@ function commonChecks(m) {
     "no text is cut short": m.clipped.length === 0,
     "paired device rows are 56 px": m.rows.length === 2 && m.rows.every((h) => h === 56),
     "fingerprints are mono": m.fingerprints.length >= 2 && m.fingerprints.every((f) => f.mono),
+    "fingerprints fit their boxes": m.fingerprints.every((f) => f.fits),
     "the connected bar is top-centre and whole": !!m.bar && Math.abs((m.bar.left + m.bar.right) / 2 - vw / 2) < 1.5 && m.bar.top < 12 && !m.bar.cut && m.bar.text.startsWith("Paresh’s iPhone is connected · it can see and drive your sessions"),
     "the connected bar is clear of the dialog": !!m.bar && !!m.dialog && m.bar.bottom <= m.dialog.top,
   };
@@ -177,13 +183,13 @@ try {
       }, m);
 
       // 2. A phone scanned it and waits for approval.
-      await page.evaluate(() => window.__PAIRING__.set({ pendingApproval: { requestId: "req-1", deviceId: "phone-9", fingerprint: "1177·11ED", transport: "relay", requestedAt: Date.now(), expiresAt: Date.now() + 118000 } }));
+      await page.evaluate(() => window.__PAIRING__.set({ pendingApproval: { requestId: "req-1", deviceId: "phone-9", fingerprint: "CEF4·2468·FE26·9E4B", transport: "relay", requestedAt: Date.now(), expiresAt: Date.now() + 118000 } }));
       await dialog.getByRole("group", { name: "Approve this phone" }).waitFor();
       m = await measure(page);
       await page.screenshot({ path: shot("approval") });
       failed += report(`${name}, approval`, {
         ...commonChecks(m),
-        "the waiting phone's fingerprint is shown, mono, with Approve and Decline": m.fingerprints.some((f) => f.text === "1177·11ED" && f.mono) && m.text.includes("Approve") && m.text.includes("Decline"),
+        "the waiting phone's fingerprint is shown, mono, with Approve and Decline": m.fingerprints.some((f) => f.text === "CEF4·2468·FE26·9E4B" && f.mono) && m.text.includes("Approve") && m.text.includes("Decline"),
         "the QR is gone while a phone waits": !m.qr,
       }, m);
 

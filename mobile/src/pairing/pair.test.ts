@@ -17,8 +17,8 @@ const state = vi.hoisted(() => ({
   status: { protocolVersion: 2, product: "TerminalX", deviceScope: "driver" },
   provisionError: null as string | null,
   calls: [] as string[],
-  /** What the Mac does with the e2ee_auth: answer at once (an older Mac), hold it until approved, or decline. */
-  approval: "immediate" as "immediate" | "approve" | "decline",
+  /** What the Mac does with the e2ee_auth: answer at once (an older Mac), hold it until approved, decline, or the connection drops while it waits. */
+  approval: "immediate" as "immediate" | "approve" | "decline" | "drop",
   /** What the Mac answers device.describe with: an older Mac refuses it. */
   describe: "refuse" as "refuse" | "accept" | "fail",
   described: [] as unknown[],
@@ -42,7 +42,7 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
 } }));
 vi.mock("../transport/relay-client", () => ({
   RelayOuterError: class extends Error { constructor(readonly code: number) { super(`relay_outer_${code}`); } },
-  PairingNotApprovedError: class extends Error {},
+  PairingNotApprovedError: class extends Error { constructor(readonly reason: string) { super(reason); } },
   RelayClient: class {
     constructor(private options: { transport?: string; credentialKind?: string; awaitApproval?: { onWaiting?: () => void } }) {}
     async connect() {
@@ -56,7 +56,11 @@ vi.mock("../transport/relay-client", () => ({
       await Promise.resolve();
       if (state.approval === "decline") {
         const { PairingNotApprovedError } = await import("../transport/relay-client");
-        throw new PairingNotApprovedError(new Error("closed while waiting"));
+        throw new PairingNotApprovedError("not-approved");
+      }
+      if (state.approval === "drop") {
+        const { RelayOuterError } = await import("../transport/relay-client");
+        throw new RelayOuterError(1006);
       }
     }
     close() {}
@@ -159,12 +163,12 @@ describe("approval on the Mac", () => {
     state.direct = path === "direct"; state.relay = path === "relay"; state.approval = "approve";
     const offer = parsePairingCode(btoa(JSON.stringify(freshOffer())))!;
     const { progress, result } = await progressOf(offer);
-    const fingerprint = fingerprintForOffer(offer.publicKeyB64, await loadOrCreateE2EESecretKey());
+    const fingerprint = fingerprintForOffer(offer, await loadOrCreateE2EESecretKey());
     expect(progress).toEqual([{ fingerprint, waitingForApproval: false }, { fingerprint, waitingForApproval: true }]);
     expect(await readHosts()).toEqual([result]);
   });
 
-  it("reports a close before e2ee_authenticated as not approved and drops the unrecoverable journal", async () => {
+  it("reports the Mac's refusal as not approved and drops the unrecoverable journal", async () => {
     state.relay = true; state.direct = true; state.approval = "decline";
     const { result } = await progressOf(parsePairingCode(btoa(JSON.stringify(freshOffer())))!);
     expect(result).toMatchObject({ stage: "approval", category: "not-approved" });
@@ -172,6 +176,14 @@ describe("approval on the Mac", () => {
     expect(await readHosts()).toEqual([]);
     expect(await readPairingJournal()).toBeNull();
     expect(await recoverPendingPairing()).toBeNull();
+  });
+
+  it("keeps a new pairing's journal when its connections drop while waiting, so Retry can still finish it", async () => {
+    state.relay = true; state.direct = true; state.approval = "drop";
+    const { result } = await progressOf(parsePairingCode(btoa(JSON.stringify(freshOffer())))!);
+    expect(result).toMatchObject({ stage: "transport" });
+    expect(result).not.toMatchObject({ category: "not-approved" });
+    expect(await readPairingJournal()).not.toBeNull();
   });
 
   it("keeps the journal when a recovery attempt is closed while waiting, since the Mac may have committed it", async () => {

@@ -123,16 +123,36 @@ async fn connect_pending(fixture: &Fixture, secret: [u8; 32], relay: bool) -> Ph
 /// The phone's next message: `true` for `e2ee_authenticated`, `false` when
 /// the Mac closed the connection instead.
 async fn authenticated(phone: &mut Phone) -> bool {
+    answer(phone).await == Answer::Authenticated
+}
+
+#[derive(Debug, PartialEq)]
+enum Answer {
+    Authenticated,
+    /// The Mac's own refusal, with its reason.
+    Refused(String),
+    Closed,
+}
+
+async fn answer(phone: &mut Phone) -> Answer {
     let next = tokio::time::timeout(Duration::from_secs(5), phone.socket.next()).await.expect("the Mac answered the phone");
     match next {
         Some(Ok(Message::Text(text))) => {
             let frame = general_purpose::STANDARD.decode(text.as_bytes()).unwrap();
             let message: serde_json::Value = serde_json::from_slice(&phone.session.open(&frame, PayloadKind::Text).unwrap()).unwrap();
-            assert_eq!(message["type"], "e2ee_authenticated", "{message}");
-            assert_eq!(message["transcriptHashB64"], phone.session.transcript_hash_b64.as_str());
-            true
+            match message["type"].as_str() {
+                Some("e2ee_authenticated") => {
+                    assert_eq!(message["transcriptHashB64"], phone.session.transcript_hash_b64.as_str());
+                    Answer::Authenticated
+                }
+                Some("pairing_refused") => {
+                    assert_eq!(message["v"], 1, "{message}");
+                    Answer::Refused(message["reason"].as_str().unwrap().to_string())
+                }
+                _ => panic!("unexpected message before authentication: {message}"),
+            }
         }
-        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => false,
+        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => Answer::Closed,
         Some(Ok(other)) => panic!("unexpected frame before authentication: {other:?}"),
     }
 }
@@ -178,7 +198,7 @@ async fn approval_holds_both_racing_connections_then_releases_them_together() {
     let fixture = fixture(APPROVAL_TTL_MS);
     let mut direct = connect_pending(&fixture, PHONE, false).await;
     let request = pending_request(&fixture.manager).await;
-    let expected = fingerprint::fingerprint_b64(fixture.host.public(), &direct.key_b64).unwrap();
+    let expected = fingerprint::fingerprint_b64(fixture.host.public(), &direct.key_b64, &token_hash(PENDING_TOKEN)).unwrap();
     assert_eq!((request.device_id.as_str(), request.fingerprint.as_str(), request.transport), (PENDING, expected.as_str(), PairingTransport::Direct));
     assert_eq!(request.expires_at - request.requested_at, APPROVAL_TTL_MS);
     // The phone's Relay candidate, with the same key, waits on the same request.
@@ -234,13 +254,14 @@ async fn a_candidate_that_looked_up_the_device_before_approval_still_goes_on() {
 
     let (host_io, _phone_io) = tokio::io::duplex(1024);
     let mut late = WebSocketStream::from_raw_socket(host_io, Role::Server, None).await;
-    let fingerprint = fingerprint::fingerprint_b64(fixture.host.public(), &direct.key_b64).unwrap();
+    let fingerprint = fingerprint::fingerprint_b64(fixture.host.public(), &direct.key_b64, &token_hash(PENDING_TOKEN)).unwrap();
     tokio::time::timeout(
         Duration::from_secs(1),
         fixture.manager.await_approval(&mut late, &stale, &direct.key_b64, &fingerprint, PairingTransport::Relay),
     )
     .await
     .expect("not held again")
+    .map(|refused| assert_eq!(refused, None))
     .unwrap();
     assert!(fixture.manager.status().pending_approval.is_none());
 }
@@ -251,9 +272,9 @@ async fn a_second_phone_key_while_one_is_pending_is_refused_and_closed() {
     let mut first = connect_pending(&fixture, PHONE, false).await;
     let request = pending_request(&fixture.manager).await;
     let mut other = connect_pending(&fixture, OTHER_PHONE, true).await;
-    assert!(!authenticated(&mut other).await);
+    assert_eq!(answer(&mut other).await, Answer::Refused("another-phone".into()));
     let refused = other.server.await.unwrap().unwrap_err();
-    assert!(format!("{refused:#}").contains("another phone is already waiting"), "{refused:#}");
+    assert!(format!("{refused:#}").contains("another-phone"), "{refused:#}");
     // The first phone's request is untouched.
     assert_eq!(fixture.manager.status().pending_approval, Some(request.clone()));
     still_waiting(&mut first).await;
@@ -276,16 +297,17 @@ async fn decline_leaves_no_device_token_or_code() {
     assert!(fixture.manager.decline_pairing("another-request").is_err());
     let status = fixture.manager.decline_pairing(&request.request_id).unwrap();
     assert!(status.pending_approval.is_none() && status.active_pairing.is_none());
-    assert!(!authenticated(&mut direct).await);
-    assert!(!authenticated(&mut relay).await);
+    // Each candidate is told in so many words, not just closed.
+    assert_eq!(answer(&mut direct).await, Answer::Refused("not-approved".into()));
+    assert_eq!(answer(&mut relay).await, Answer::Refused("not-approved".into()));
     for phone in [direct, relay] {
         let error = phone.server.await.unwrap().unwrap_err();
-        assert!(format!("{error:#}").contains("not approved"), "{error:#}");
+        assert!(format!("{error:#}").contains("not-approved"), "{error:#}");
     }
     nothing_left(&fixture);
     // The credential authenticates nothing any more.
     let mut again = connect_pending(&fixture, PHONE, false).await;
-    assert!(!authenticated(&mut again).await);
+    assert_eq!(answer(&mut again).await, Answer::Closed);
     assert!(fixture.manager.decline_pairing(&request.request_id).is_err());
 }
 
@@ -295,7 +317,7 @@ async fn an_approval_nobody_answers_times_out_and_leaves_no_device_token_or_code
     let mut phone = connect_pending(&fixture, PHONE, true).await;
     let request = pending_request(&fixture.manager).await;
     assert_eq!(request.transport, PairingTransport::Relay);
-    assert!(!authenticated(&mut phone).await);
+    assert_eq!(answer(&mut phone).await, Answer::Refused("not-approved".into()));
     // The request and the code go at once; the device and its token right after.
     eventually("the approval to time out", || fixture.manager.status().pending_approval.is_none()).await;
     assert!(fixture.manager.status().active_pairing.is_none());
@@ -314,9 +336,9 @@ async fn no_new_approval_starts_once_the_code_expired() {
     let fixture = fixture(APPROVAL_TTL_MS);
     fixture.manager.inner.lock().unwrap().active_pairing.as_mut().unwrap().expires_at = Utc::now().timestamp_millis() - 1;
     let mut phone = connect_pending(&fixture, PHONE, false).await;
-    assert!(!authenticated(&mut phone).await);
+    assert_eq!(answer(&mut phone).await, Answer::Refused("code-inactive".into()));
     let error = phone.server.await.unwrap().unwrap_err();
-    assert!(format!("{error:#}").contains("expired"), "{error:#}");
+    assert!(format!("{error:#}").contains("code-inactive"), "{error:#}");
     assert!(fixture.manager.inner.lock().unwrap().pending_approval.is_none());
 }
 
@@ -329,7 +351,7 @@ async fn phones_paired_before_approval_and_account_pairings_are_not_held() {
     manager.registry.add(DeviceEntry { provenance: DeviceProvenance::Automatic, ..entry("automatic", "automatic-credential") }).unwrap();
 
     // Its fingerprint comes from the key it already connected with.
-    let expected = fingerprint::fingerprint_b64(host.public(), &legacy_key).unwrap();
+    let expected = fingerprint::fingerprint_b64(host.public(), &legacy_key, &token_hash("legacy-credential")).unwrap();
     let listed = manager.status().devices.into_iter().find(|device| device.id == "legacy").unwrap();
     assert_eq!((listed.fingerprint.as_deref(), listed.approved_at.as_deref()), (Some(expected.as_str()), None));
 

@@ -47,12 +47,14 @@ export class RelayOuterError extends Error {
 export const PAIRING_APPROVAL_WAIT_MS = 150_000;
 
 /**
- * A pairing connection ended while it waited for the Mac's approval: the
- * person declined, did not answer in time, or the Mac refused this phone's
- * key while another phone's request was pending.
+ * The Mac refused this pairing in so many words (a `pairing_refused` message,
+ * docs/PAIRING-APPROVAL.md): the person declined or did not answer in time,
+ * another phone's request was waiting, or the code was no longer active.
+ * A connection that merely drops while waiting is not this: the Mac may still
+ * approve, so it stays an ordinary failure the phone can retry.
  */
 export class PairingNotApprovedError extends Error {
-  constructor(readonly closeCause?: Error) {
+  constructor(readonly reason: string) {
     super("The Mac did not approve this pairing, or the request timed out");
     this.name = "PairingNotApprovedError";
   }
@@ -125,6 +127,7 @@ export class RelayClient {
     this.outerReady = false;
     this.handshakeReady = false;
     this.authenticated = false;
+    this.refusal = null;
     this.resumeConfirmation = null;
     this.fragments = Promise.resolve(false);
     this.assembler = new FragmentAssembler();
@@ -210,6 +213,9 @@ export class RelayClient {
     this.fail(new Error("Relay connection closed"));
   }
 
+  /** The reason of a `pairing_refused` the Mac sent on this connection. */
+  private refusal: string | null = null;
+
   private async handleMessage(raw: unknown): Promise<void> {
     if (!this.socket || !this.session) return;
     if (!this.outerReady) {
@@ -233,7 +239,8 @@ export class RelayClient {
       if (approval) {
         // The Mac answers at once when it does not gate (an older Mac, an approved device); otherwise it waits for the person.
         if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
-        this.handshakeTimer = setTimeout(() => this.fail(new PairingNotApprovedError(new Error("No approval from the Mac in time"))), approval.timeoutMs ?? PAIRING_APPROVAL_WAIT_MS);
+        // No answer at all is not a refusal: the Mac answers a timeout with `pairing_refused` itself.
+        this.handshakeTimer = setTimeout(() => this.fail(new Error("The Mac did not answer the pairing request in time")), approval.timeoutMs ?? PAIRING_APPROVAL_WAIT_MS);
         approval.onWaiting?.();
       }
       return;
@@ -255,6 +262,12 @@ export class RelayClient {
     }
     const value = parseJson(text);
     if (!this.authenticated) {
+      const refused = this.options.awaitApproval ? pairingRefusal(value) : null;
+      if (refused !== null) {
+        // Kept at once: the Mac closes right after, and that close must not hide the answer.
+        this.refusal = refused;
+        throw new PairingNotApprovedError(refused);
+      }
       if (!isAuthenticated(value, this.session.transcriptHashB64)) throw new Error("E2EE device authentication rejected");
       this.authenticated = true;
       // Asked first and not waited for: only a request too large for one frame waits for the answer.
@@ -294,9 +307,7 @@ export class RelayClient {
 
   private fail(cause: Error): void {
     if (this.state === "disconnected" && !this.connectPromise) return;
-    // The socket closed between e2ee_auth and e2ee_authenticated while pairing: per the contract, the Mac did not approve
-    // (docs/PAIRING-APPROVAL.md). Only a socket close counts; a local protocol or parse error stays what it is.
-    const error = this.options.awaitApproval && this.handshakeReady && !this.authenticated && cause instanceof RelayOuterError ? new PairingNotApprovedError(cause) : cause;
+    const error = this.refusal !== null && !(cause instanceof PairingNotApprovedError) ? new PairingNotApprovedError(this.refusal) : cause;
     this.setState("disconnected", error);
     const socket = this.socket;
     this.socket = null;
@@ -431,6 +442,13 @@ function parseJson(value: string): unknown {
   } catch {
     throw new Error("Invalid relay JSON");
   }
+}
+
+/** The reason in the Mac's `{type: "pairing_refused", v: 1, reason}`, or null for anything else. */
+function pairingRefusal(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).sort().join(",") === "reason,type,v" && record.type === "pairing_refused" && record.v === 1 && typeof record.reason === "string" ? record.reason : null;
 }
 
 function isAuthenticated(value: unknown, hash: string): boolean {

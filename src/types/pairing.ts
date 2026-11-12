@@ -227,7 +227,7 @@ export interface PairedDevice {
   createdAt: string;
   lastSeenAt?: string;
   revokedAt?: string;
-  /** "7F3A·91C2"; absent until the device has connected once (docs/PAIRING-APPROVAL.md). */
+  /** "7F3A·91C2·4E08·B6D1"; absent until the device has connected once (docs/PAIRING-APPROVAL.md). */
   fingerprint?: string;
   /** When the person approved this pairing on the Mac; absent for pairings made before PRO-314. */
   approvedAt?: string;

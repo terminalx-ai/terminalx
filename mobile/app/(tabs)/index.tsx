@@ -164,12 +164,15 @@ function PairingSheet({ visible, progress, error, onClearError, onClose, onPair 
  */
 function PairingApproval({ progress }: { progress: PairingProgress }) {
   const { palette } = useTheme();
-  const [first, second] = progress.fingerprint.split("\u00B7");
+  const groups = progress.fingerprint.split("\u00B7");
+  // Two lines of two groups, as the Mac shows it: 64 bits do not fit one line at this size.
+  const half = Math.ceil(groups.length / 2);
+  const lines = [groups.slice(0, half).join("\u00B7"), groups.slice(half).join("\u00B7")].filter(Boolean);
   return <Card style={styles.approval}>
     <Text accessibilityRole="header" style={[styles.errorTitle, { color: palette.ink }]}>Approve on your Mac</Text>
-    <Text testID="pairing-fingerprint" accessibilityLabel={`Fingerprint ${[...progress.fingerprint.replace("\u00B7", "")].join(" ")}`} style={[styles.fingerprint, { color: palette.ink }]}>{progress.fingerprint}</Text>
+    <Text testID="pairing-fingerprint" accessibilityLabel={`Fingerprint ${[...groups.join("")].join(" ")}`} style={[styles.fingerprint, { color: palette.ink }]}>{lines.join("\n")}</Text>
     <Text accessibilityLiveRegion="polite" style={[styles.detail, { color: palette.muted }]}>{progress.waitingForApproval
-      ? `Check that your Mac shows ${first} ${second}, then choose Approve there. This phone waits up to 2 minutes.`
+      ? `Check that your Mac shows ${groups.join(" ")}, then choose Approve there. This phone waits up to 2 minutes.`
       : "Connecting securely to your Mac. It will show this same fingerprint."}</Text>
   </Card>;
 }
@@ -221,6 +224,6 @@ const styles = StyleSheet.create({
   codeForm: { gap: 14 },
   approval: { padding: 20, gap: 12, alignItems: "center" },
   // The same characters, the same size as on the Mac, so they are compared at a glance.
-  fingerprint: { fontSize: 34, fontWeight: "700", letterSpacing: 2, fontVariant: ["tabular-nums"] },
+  fingerprint: { fontSize: 30, lineHeight: 38, fontWeight: "700", letterSpacing: 2, fontVariant: ["tabular-nums"] },
   codeInput: { minHeight: 120, borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, padding: 14, textAlignVertical: "top", fontSize: 15 },
 });

@@ -114,6 +114,11 @@ pub struct PairingManager {
     keep_awake: Mutex<KeepAwake>,
 }
 
+/// Reasons a `pairing_refused` message gives the phone.
+const REFUSED_NOT_APPROVED: &str = "not-approved";
+const REFUSED_ANOTHER_PHONE: &str = "another-phone";
+const REFUSED_CODE_INACTIVE: &str = "code-inactive";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Approval {
     Waiting,
@@ -1139,9 +1144,19 @@ impl PairingManager {
             PairingConnectionContext::Relay { .. } => PairingTransport::Relay,
         };
         let fingerprint =
-            fingerprint::fingerprint_b64(keypair.public(), &session.client_public_key_b64)?;
-        self.await_approval(&mut socket, &device, &session.client_public_key_b64, &fingerprint, transport)
-            .await?;
+            fingerprint::fingerprint_b64(keypair.public(), &session.client_public_key_b64, &device.token)?;
+        if let Some(reason) = self
+            .await_approval(&mut socket, &device, &session.client_public_key_b64, &fingerprint, transport)
+            .await?
+        {
+            // Said in so many words, so the phone can tell a refusal from a
+            // dropped connection it should retry (docs/PAIRING-APPROVAL.md).
+            let refused = serde_json::json!({ "type": "pairing_refused", "v": 1, "reason": reason });
+            let _ = send_encrypted_text(&mut socket, &mut session, &refused.to_string()).await;
+            let _ = socket.close(None).await;
+            return Err(anyhow!(diagnostics::Category::Authentication)
+                .context(format!("the pairing was refused on this Mac ({reason})")));
+        }
         self.registry
             .touch(&device.id, &session.client_public_key_b64, &fingerprint, transport)?;
         {
@@ -1469,7 +1484,7 @@ impl PairingManager {
                     // Paired before PRO-314: the key it last connected with names it.
                     if device.fingerprint.is_none() && !device.public_key.is_empty() {
                         device.fingerprint = host_public
-                            .and_then(|host| fingerprint::fingerprint_b64(&host, &device.public_key).ok());
+                            .and_then(|host| fingerprint::fingerprint_b64(&host, &device.public_key, &device.token).ok());
                     }
                     device.connection = live.get(&device.id).cloned();
                     device
@@ -1544,6 +1559,10 @@ impl PairingManager {
     /// (docs/PAIRING-APPROVAL.md). Every connection of the scanning phone,
     /// direct and Relay alike, waits on the one request; a different phone
     /// key is refused. Paired devices, and account-bound ones, pass.
+    ///
+    /// `Ok(Some(reason))` is the Mac's own refusal, which the caller tells the
+    /// phone in a `pairing_refused` message before closing; an `Err` is the
+    /// connection failing, which the phone may retry.
     async fn await_approval<S>(
         self: &Arc<Self>,
         socket: &mut WebSocketStream<S>,
@@ -1551,7 +1570,7 @@ impl PairingManager {
         phone_key: &str,
         fingerprint: &str,
         transport: PairingTransport,
-    ) -> Result<()>
+    ) -> Result<Option<&'static str>>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -1559,9 +1578,8 @@ impl PairingManager {
             || device.approved_at.is_some()
             || device.last_seen_at.is_some()
         {
-            return Ok(());
+            return Ok(None);
         }
-        let refused = |why: &'static str| anyhow!(diagnostics::Category::Authentication).context(why);
         let (mut outcome, started) = {
             let mut inner = self.inner.lock().unwrap();
             // Read again under the lock `approve_pairing` saves under: the
@@ -1570,23 +1588,23 @@ impl PairingManager {
             // the approved key.
             let current = self.registry.list()?.into_iter().find(|saved| saved.id == device.id);
             if current.is_some_and(|saved| saved.approved_at.is_some() || saved.last_seen_at.is_some()) {
-                return Ok(());
+                return Ok(None);
             }
             if inner.pending_pairing_device.as_deref() != Some(device.id.as_str()) {
-                return Err(refused("the pairing code is no longer active"));
+                return Ok(Some(REFUSED_CODE_INACTIVE));
             }
             match inner.pending_approval.as_ref() {
                 Some(pending) if pending.request.device_id == device.id => {
                     if pending.phone_key != phone_key {
-                        return Err(refused("another phone is already waiting for approval with this code"));
+                        return Ok(Some(REFUSED_ANOTHER_PHONE));
                     }
                     (pending.outcome.subscribe(), None)
                 }
-                Some(_) => return Err(refused("another pairing is waiting for approval")),
+                Some(_) => return Ok(Some(REFUSED_ANOTHER_PHONE)),
                 None => {
                     let now = Utc::now().timestamp_millis();
                     if !inner.active_pairing.as_ref().is_some_and(|code| code.expires_at > now) {
-                        return Err(refused("the pairing code expired"));
+                        return Ok(Some(REFUSED_CODE_INACTIVE));
                     }
                     let (sender, receiver) = tokio::sync::watch::channel(Approval::Waiting);
                     let request = PairingApprovalRequest {
@@ -1616,11 +1634,13 @@ impl PairingManager {
                 // Copied out at once: the watch guard must not be held across an await.
                 decided = async { outcome.wait_for(|state| *state != Approval::Waiting).await.map(|state| *state) } => {
                     // A request dropped without an answer is declined too.
-                    if matches!(decided, Ok(Approval::Approved)) {
-                        return Ok(());
-                    }
-                    let _ = socket.close(None).await;
-                    return Err(refused("the pairing was not approved on this Mac"));
+                    return Ok(match decided {
+                        Ok(Approval::Approved) => None,
+                        Ok(_) => Some(REFUSED_NOT_APPROVED),
+                        // The request was dropped without an answer: the Mac is
+                        // going away, so this is the connection failing.
+                        Err(_) => bail!("the pairing request ended without an answer"),
+                    });
                 }
                 incoming = socket.next() => match incoming {
                     Some(Ok(Message::Ping(bytes))) => socket.send(Message::Pong(bytes)).await?,

@@ -59,7 +59,7 @@ export async function pairFromOffer(args: {
 }): Promise<StoredHost> {
   const { offer } = args;
   const clientSecretKey = await pairingStep("persistence", loadOrCreateE2EESecretKey);
-  const progress = approvalProgress(offer.publicKeyB64, clientSecretKey, args.onProgress);
+  const progress = approvalProgress(offer, clientSecretKey, args.onProgress);
   if (!offer.relay) return pairDirect(args, clientSecretKey, progress);
   const device = args.device ?? null;
   const existing = await pairingStep("persistence", readPairingJournal);
@@ -76,13 +76,13 @@ export async function recoverPendingPairing(options: { onProgress?: (progress: P
   const journal = await pairingStep("persistence", readPairingJournal);
   if (!journal) return null;
   const clientSecretKey = await pairingStep("persistence", loadOrCreateE2EESecretKey);
-  return recoverPairing(journal, clientSecretKey, approvalProgress(offerFromJournal(journal).publicKeyB64, clientSecretKey, options.onProgress), options.device ?? null);
+  return recoverPairing(journal, clientSecretKey, approvalProgress(offerFromJournal(journal), clientSecretKey, options.onProgress), options.device ?? null);
 }
 
 /** Says the fingerprint at once (it needs no connection), and again once a connection waits for the Mac's approval. */
-function approvalProgress(hostPublicKeyB64: string, clientSecretKey: Uint8Array, onProgress: ((progress: PairingProgress) => void) | undefined): Progress {
+function approvalProgress(offer: { publicKeyB64: string; deviceToken: string }, clientSecretKey: Uint8Array, onProgress: ((progress: PairingProgress) => void) | undefined): Progress {
   if (!onProgress) return undefined;
-  const fingerprint = fingerprintForOffer(hostPublicKeyB64, clientSecretKey);
+  const fingerprint = fingerprintForOffer(offer, clientSecretKey);
   let waiting = false;
   onProgress({ fingerprint, waitingForApproval: false });
   return () => {
