@@ -7,6 +7,7 @@ mod cloud;
 mod crypto;
 mod diagnostics;
 mod direct;
+mod fingerprint;
 mod guest;
 mod host_poll;
 mod mobile;
@@ -44,8 +45,8 @@ use self::crypto::{
 };
 use self::model::{
     AccountMirror, AccountPairingGrant, DeviceEntry, DeviceProvenance, DeviceScope,
-    HostBindingPayload, HostMetadata, PairingCode, PairingOffer, PairingTransport, RelayStatus,
-    CAPABILITY, OFFER_TTL_MS,
+    HostBindingPayload, HostMetadata, PairedDeviceConnection, PairingApprovalRequest, PairingCode,
+    PairingOffer, PairingTransport, RelayStatus, APPROVAL_TTL_MS, CAPABILITY, OFFER_TTL_MS,
 };
 pub use self::model::{MachineName, PairingConnectionMode, PairingStatus, RelayPhase};
 use self::registry::{DeviceRegistry, PairingSecrets};
@@ -61,9 +62,25 @@ struct Inner {
     host: Option<HostMetadata>,
     active_pairing: Option<PairingCode>,
     pending_pairing_device: Option<String>,
+    /// The pending device's phone waits for the person to approve it here.
+    /// Dropping it declines every connection that waits on it.
+    pending_approval: Option<PendingApproval>,
     direct_listener_started: bool,
     direct_listener_retrying: bool,
     last_error: Option<String>,
+}
+
+impl Inner {
+    /// The device's code is spent: no approval waits on it any more.
+    fn forget_pending(&mut self, device_id: &str) {
+        if self.pending_approval.as_ref().is_some_and(|pending| pending.request.device_id == device_id) {
+            self.pending_approval = None;
+        }
+        if self.pending_pairing_device.as_deref() == Some(device_id) {
+            self.pending_pairing_device = None;
+            self.active_pairing = None;
+        }
+    }
 }
 
 pub struct PairingManager {
@@ -84,8 +101,71 @@ pub struct PairingManager {
     stopped: AtomicBool,
     relay_retry: tokio::sync::Notify,
     suspended_account_token: Mutex<Option<String>>,
-    connections: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<()>>>>,
+    /// Live connections by device id. Released before any other lock of the
+    /// manager is taken, as `keep_awake` is.
+    connections: Mutex<HashMap<String, Vec<LiveConnection>>>,
+    connection_serial: AtomicU64,
     mobile: Arc<mobile::MobileRuntime>,
+    /// `APPROVAL_TTL_MS` in the app; fixtures wait less.
+    approval_ttl_ms: i64,
+    /// This Mac's public key once it was read, so a status can show the
+    /// fingerprint of a phone paired before PRO-314 without a Keychain call.
+    host_public: Mutex<Option<[u8; 32]>>,
+    keep_awake: Mutex<KeepAwake>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Approval {
+    Waiting,
+    Approved,
+    Declined,
+}
+
+struct PendingApproval {
+    request: PairingApprovalRequest,
+    /// The phone key the first waiting connection presented; another key is refused.
+    phone_key: String,
+    outcome: tokio::sync::watch::Sender<Approval>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionSignal {
+    /// Revoked, signed out or stopping: close at once.
+    Cancel,
+    /// Disconnected on the Mac: tell the phone, then close; the pairing stays.
+    Disconnect,
+}
+
+struct LiveConnection {
+    serial: u64,
+    signal: mpsc::UnboundedSender<ConnectionSignal>,
+    transport: PairingTransport,
+    since: DateTime<Utc>,
+}
+
+/// Untracks its connection when the connection's handler returns.
+struct ConnectionGuard {
+    manager: Arc<PairingManager>,
+    device_id: String,
+    serial: u64,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.manager.untrack_connection(&self.device_id, self.serial);
+    }
+}
+
+#[derive(Default)]
+struct KeepAwake {
+    /// `settings.pairing.keepAwake`, read once and after the file changes.
+    enabled: Option<bool>,
+    assertion: Option<crate::power::Assertion>,
+}
+
+/// What a phone is sent on each of its connections before the Mac closes them.
+fn disconnected_notification() -> serde_json::Value {
+    serde_json::json!({ "method": "pairing.disconnected", "params": { "reason": "disconnected-on-mac" } })
 }
 
 #[derive(Clone, Debug)]
@@ -119,7 +199,11 @@ impl PairingManager {
             relay_retry: tokio::sync::Notify::new(),
             suspended_account_token: Mutex::new(None),
             connections: Mutex::new(HashMap::new()),
+            connection_serial: AtomicU64::new(1),
             mobile: Arc::new(mobile::MobileRuntime::new()),
+            approval_ttl_ms: APPROVAL_TTL_MS,
+            host_public: Mutex::new(None),
+            keep_awake: Mutex::new(KeepAwake::default()),
         }
     }
 
@@ -153,6 +237,7 @@ impl PairingManager {
         let settings = self.clone();
         sink.listen("settings_file_changed", Box::new(move |_| {
             settings.mobile.broadcast_settings_changed();
+            settings.reload_keep_awake();
         }));
         let events = self.clone();
         sink.listen(
@@ -291,6 +376,10 @@ impl PairingManager {
             revoked_at: None,
             installation_id: None,
             created_request_id: None,
+            fingerprint: None,
+            approved_at: None,
+            connection: None,
+            last_seen_transport: None,
         };
         if let Err(error) = self.registry.add(entry) {
             let _ = self.secrets.delete_device_token(&device_id);
@@ -451,11 +540,12 @@ impl PairingManager {
         if let Some(relay) = self.inner.lock().unwrap().relay.take() {
             relay.shutdown();
         }
-        for senders in self.connections.lock().unwrap().values() {
-            for sender in senders {
-                let _ = sender.send(());
+        for connections in self.connections.lock().unwrap().values() {
+            for connection in connections {
+                let _ = connection.signal.send(ConnectionSignal::Cancel);
             }
         }
+        self.keep_awake.lock().unwrap().assertion = None;
     }
 
     /// Name this Mac for the user's other devices, or with `None` let it follow
@@ -544,9 +634,12 @@ impl PairingManager {
     }
 
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {
-        self.secrets
+        let keypair = self
+            .secrets
             .host_key(create)?
-            .ok_or_else(|| anyhow!("host identity is unavailable"))
+            .ok_or_else(|| anyhow!("host identity is unavailable"))?;
+        *self.host_public.lock().unwrap() = Some(*keypair.public());
+        Ok(keypair)
     }
 
     fn record_relay_diagnostic(
@@ -806,6 +899,10 @@ impl PairingManager {
             revoked_at: None,
             installation_id: Some(grant.client_installation_id.clone()),
             created_request_id: Some(grant.grant_request_id.clone()),
+            fingerprint: None,
+            approved_at: None,
+            connection: None,
+            last_seen_transport: None,
         };
         if let Err(error) = self.registry.add(entry) {
             let _ = self.secrets.delete_device_token(&device_id);
@@ -1037,8 +1134,16 @@ impl PairingManager {
             return Err(anyhow!(diagnostics::Category::Authentication)
                 .context("relay invite was used by a different device credential"));
         }
+        let transport = match &connection {
+            PairingConnectionContext::Direct { .. } => PairingTransport::Direct,
+            PairingConnectionContext::Relay { .. } => PairingTransport::Relay,
+        };
+        let fingerprint =
+            fingerprint::fingerprint_b64(keypair.public(), &session.client_public_key_b64)?;
+        self.await_approval(&mut socket, &device, &session.client_public_key_b64, &fingerprint, transport)
+            .await?;
         self.registry
-            .touch(&device.id, &session.client_public_key_b64)?;
+            .touch(&device.id, &session.client_public_key_b64, &fingerprint, transport)?;
         {
             let mut inner = self.inner.lock().unwrap();
             if inner.pending_pairing_device.as_deref() == Some(&device.id) {
@@ -1053,6 +1158,8 @@ impl PairingManager {
         });
         send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
         mark_logged_in();
+        // Tracked before the runtime registers it, so a revoke meanwhile is not missed.
+        let (_tracked, mut signal_rx) = self.track_connection(&device.id, transport);
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
         let mobile_connection = Arc::new(
             mobile::MobileConnection::open(self, &device, outbound_tx, wire_transport)
@@ -1060,19 +1167,14 @@ impl PairingManager {
                 .context(diagnostics::Category::LocalRuntime)?,
         );
         let mut reassembly = wire::Reassembly::default();
-        let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
-        self.connections
-            .lock()
-            .unwrap()
-            .entry(device.id.clone())
-            .or_default()
-            .push(cancel_tx);
-        self.emit();
         let mut stream_health = tokio::time::interval(std::time::Duration::from_millis(250));
         loop {
             tokio::select! {
                 _ = stream_health.tick() => { mobile_connection.check_buffer()?; }
-                _ = cancel_rx.recv() => {
+                signal = signal_rx.recv() => {
+                    if signal == Some(ConnectionSignal::Disconnect) {
+                        let _ = send_message(&mut socket, &mut session, &disconnected_notification(), mobile_connection.wire()).await;
+                    }
                     mobile_connection.close(self);
                     let _ = socket.close(None).await;
                     return Ok(());
@@ -1169,6 +1271,10 @@ impl PairingManager {
             // devices too instead of lingering after the phone forgot it.
             "pairing.forget" if allowed_method(device.scope, method) => {
                 self.revoke_device(&device.id).await.map(|_| serde_json::json!({ "forgotten": true }))
+            }
+            // What the phone calls itself, sent after pairing and on every connection (PRO-314).
+            "device.describe" if allowed_method(device.scope, method) => {
+                self.describe_device(device, request.get("params"))
             }
             method if allowed_method(device.scope, method) => {
                 // Not abandoned on a timeout: a late `session.send` would still run.
@@ -1320,30 +1426,24 @@ impl PairingManager {
         let _ = self.registry.revoke(device_id)?;
         self.secrets.delete_device_token(device_id)?;
         self.cancel_connections(device_id);
-        let mut inner = self.inner.lock().unwrap();
-        if inner.pending_pairing_device.as_deref() == Some(device_id) {
-            inner.pending_pairing_device = None;
-            inner.active_pairing = None;
-        }
+        self.inner.lock().unwrap().forget_pending(device_id);
         Ok(())
     }
 
     fn discard_unclaimed_pairing(&self, device_id: &str) -> Result<()> {
         let _ = self.registry.discard_unclaimed(device_id)?;
         self.secrets.delete_device_token(device_id)?;
-        let mut inner = self.inner.lock().unwrap();
-        if inner.pending_pairing_device.as_deref() == Some(device_id) {
-            inner.pending_pairing_device = None;
-            inner.active_pairing = None;
-        }
+        self.inner.lock().unwrap().forget_pending(device_id);
         Ok(())
     }
 
     fn cancel_connections(&self, device_id: &str) {
-        if let Some(senders) = self.connections.lock().unwrap().remove(device_id) {
-            for sender in senders {
-                let _ = sender.send(());
+        let removed = self.connections.lock().unwrap().remove(device_id);
+        if let Some(connections) = removed {
+            for connection in connections {
+                let _ = connection.signal.send(ConnectionSignal::Cancel);
             }
+            self.refresh_keep_awake();
         }
     }
 
@@ -1352,6 +1452,9 @@ impl PairingManager {
     }
 
     fn snapshot(&self) -> PairingStatus {
+        let live = self.live_connections();
+        let host_public = *self.host_public.lock().unwrap();
+        let keep_awake = self.keep_awake_enabled();
         let inner = self.inner.lock().unwrap();
         PairingStatus {
             relay: inner.relay_status.clone(),
@@ -1362,11 +1465,22 @@ impl PairingManager {
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|device| device.last_seen_at.is_some())
+                .map(|mut device| {
+                    // Paired before PRO-314: the key it last connected with names it.
+                    if device.fingerprint.is_none() && !device.public_key.is_empty() {
+                        device.fingerprint = host_public
+                            .and_then(|host| fingerprint::fingerprint_b64(&host, &device.public_key).ok());
+                    }
+                    device.connection = live.get(&device.id).cloned();
+                    device
+                })
                 .collect(),
             active_pairing: inner.active_pairing.clone().map(|mut pairing| {
                 pairing.direct_available = inner.direct_listener_started;
                 pairing
             }),
+            pending_approval: inner.pending_approval.as_ref().map(|pending| pending.request.clone()),
+            keep_awake,
             last_error: inner.last_error.clone(),
         }
     }
@@ -1385,10 +1499,12 @@ impl PairingManager {
     fn expire_pairing_if_needed(&self) {
         let expired = {
             let mut inner = self.inner.lock().unwrap();
-            if inner
-                .active_pairing
-                .as_ref()
-                .is_some_and(|pairing| pairing.expires_at <= Utc::now().timestamp_millis())
+            // The code's own expiry does not cut a pending approval short.
+            if inner.pending_approval.is_none()
+                && inner
+                    .active_pairing
+                    .as_ref()
+                    .is_some_and(|pairing| pairing.expires_at <= Utc::now().timestamp_millis())
             {
                 inner.active_pairing = None;
                 inner.pending_pairing_device.take()
@@ -1411,7 +1527,10 @@ impl PairingManager {
                 .saturating_sub(Utc::now().timestamp_millis())
                 .max(0) as u64;
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-            if manager.registry.is_unclaimed(&device_id).unwrap_or(false) {
+            // A pending approval ends by its own deadline, approved or not.
+            if !manager.approval_pending_for(&device_id)
+                && manager.registry.is_unclaimed(&device_id).unwrap_or(false)
+            {
                 let _ = manager.revoke_local(&device_id);
                 if let Some(relay) = manager.current_relay() {
                     relay.revoke(device_id);
@@ -1419,6 +1538,305 @@ impl PairingManager {
                 manager.emit();
             }
         });
+    }
+
+    /// A QR pairing waits here until the person approves it on this Mac
+    /// (docs/PAIRING-APPROVAL.md). Every connection of the scanning phone,
+    /// direct and Relay alike, waits on the one request; a different phone
+    /// key is refused. Paired devices, and account-bound ones, pass.
+    async fn await_approval<S>(
+        self: &Arc<Self>,
+        socket: &mut WebSocketStream<S>,
+        device: &DeviceEntry,
+        phone_key: &str,
+        fingerprint: &str,
+        transport: PairingTransport,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        if device.provenance != DeviceProvenance::Explicit
+            || device.approved_at.is_some()
+            || device.last_seen_at.is_some()
+        {
+            return Ok(());
+        }
+        let refused = |why: &'static str| anyhow!(diagnostics::Category::Authentication).context(why);
+        let (mut outcome, started) = {
+            let mut inner = self.inner.lock().unwrap();
+            // Read again under the lock `approve_pairing` saves under: the
+            // device may have been approved since it was looked up, by a
+            // racing candidate of the same phone. `touch` then holds it to
+            // the approved key.
+            let current = self.registry.list()?.into_iter().find(|saved| saved.id == device.id);
+            if current.is_some_and(|saved| saved.approved_at.is_some() || saved.last_seen_at.is_some()) {
+                return Ok(());
+            }
+            if inner.pending_pairing_device.as_deref() != Some(device.id.as_str()) {
+                return Err(refused("the pairing code is no longer active"));
+            }
+            match inner.pending_approval.as_ref() {
+                Some(pending) if pending.request.device_id == device.id => {
+                    if pending.phone_key != phone_key {
+                        return Err(refused("another phone is already waiting for approval with this code"));
+                    }
+                    (pending.outcome.subscribe(), None)
+                }
+                Some(_) => return Err(refused("another pairing is waiting for approval")),
+                None => {
+                    let now = Utc::now().timestamp_millis();
+                    if !inner.active_pairing.as_ref().is_some_and(|code| code.expires_at > now) {
+                        return Err(refused("the pairing code expired"));
+                    }
+                    let (sender, receiver) = tokio::sync::watch::channel(Approval::Waiting);
+                    let request = PairingApprovalRequest {
+                        request_id: Uuid::new_v4().simple().to_string(),
+                        device_id: device.id.clone(),
+                        fingerprint: fingerprint.into(),
+                        transport,
+                        requested_at: now,
+                        expires_at: now + self.approval_ttl_ms,
+                    };
+                    let request_id = request.request_id.clone();
+                    inner.pending_approval = Some(PendingApproval {
+                        request,
+                        phone_key: phone_key.into(),
+                        outcome: sender,
+                    });
+                    (receiver, Some(request_id))
+                }
+            }
+        };
+        if let Some(request_id) = started {
+            self.emit();
+            self.schedule_approval_expiry(request_id);
+        }
+        loop {
+            tokio::select! {
+                // Copied out at once: the watch guard must not be held across an await.
+                decided = async { outcome.wait_for(|state| *state != Approval::Waiting).await.map(|state| *state) } => {
+                    // A request dropped without an answer is declined too.
+                    if matches!(decided, Ok(Approval::Approved)) {
+                        return Ok(());
+                    }
+                    let _ = socket.close(None).await;
+                    return Err(refused("the pairing was not approved on this Mac"));
+                }
+                incoming = socket.next() => match incoming {
+                    Some(Ok(Message::Ping(bytes))) => socket.send(Message::Pong(bytes)).await?,
+                    Some(Ok(Message::Pong(_) | Message::Frame(_))) => {}
+                    _ => bail!("the phone closed or spoke before the pairing was approved"),
+                },
+            }
+        }
+    }
+
+    /// The person approved the phone whose fingerprint the request shows:
+    /// every connection waiting on it finishes pairing.
+    pub fn approve_pairing(self: &Arc<Self>, request_id: &str) -> Result<PairingStatus> {
+        let (pending, saved) = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(waiting) =
+                inner.pending_approval.as_ref().filter(|pending| pending.request.request_id == request_id)
+            else {
+                bail!("This pairing request is no longer waiting for approval.");
+            };
+            // Saved before the request leaves `Inner`, under the same lock the
+            // gate reads both under: a candidate that reaches the gate now
+            // either joins the request or finds the device approved.
+            let saved = self.registry.approve(&waiting.request.device_id, &waiting.request.fingerprint, &waiting.phone_key);
+            (inner.pending_approval.take().unwrap(), saved)
+        };
+        let device_id = pending.request.device_id.clone();
+        if let Err(error) = saved {
+            drop(pending);
+            self.discard_pending_device(&device_id);
+            self.emit();
+            return Err(error.context("The phone's pairing could not be saved. Generate a new code."));
+        }
+        let _ = pending.outcome.send(Approval::Approved);
+        // Should every waiting connection have closed meanwhile, the phone
+        // may come back with its credential; one that never does is removed.
+        self.schedule_unclaimed_expiration(device_id, Utc::now().timestamp_millis() + self.approval_ttl_ms);
+        self.emit();
+        Ok(self.snapshot())
+    }
+
+    /// Not this phone: no device is left behind and the code is spent.
+    pub fn decline_pairing(&self, request_id: &str) -> Result<PairingStatus> {
+        let pending = self.take_pending_approval(request_id)?;
+        let _ = pending.outcome.send(Approval::Declined);
+        self.discard_pending_device(&pending.request.device_id);
+        self.emit();
+        Ok(self.snapshot())
+    }
+
+    /// The declined request and its code leave together, so no status shows
+    /// the code still active once the request is gone. The device and its
+    /// Keychain token are discarded after, outside the lock.
+    fn take_pending_approval(&self, request_id: &str) -> Result<PendingApproval> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.pending_approval.as_ref().is_some_and(|pending| pending.request.request_id == request_id) {
+            bail!("This pairing request is no longer waiting for approval.");
+        }
+        let pending = inner.pending_approval.take().unwrap();
+        inner.forget_pending(&pending.request.device_id);
+        Ok(pending)
+    }
+
+    /// The device, its Keychain token and its Relay invite are discarded and
+    /// the active code is cleared.
+    fn discard_pending_device(&self, device_id: &str) {
+        if let Err(error) = self.discard_unclaimed_pairing(device_id) {
+            log::warn!("could not discard a declined pairing: {error:#}");
+        }
+        if let Some(relay) = self.current_relay() {
+            relay.revoke(device_id.into());
+        }
+    }
+
+    fn schedule_approval_expiry(self: &Arc<Self>, request_id: String) {
+        let manager = self.clone();
+        let wait = std::time::Duration::from_millis(self.approval_ttl_ms.max(0) as u64);
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(wait).await;
+            if manager.decline_pairing(&request_id).is_ok() {
+                log::info!("a pairing nobody approved within its time was declined");
+            }
+        });
+    }
+
+    fn approval_pending_for(&self, device_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .pending_approval
+            .as_ref()
+            .is_some_and(|pending| pending.request.device_id == device_id)
+    }
+
+    fn track_connection(
+        self: &Arc<Self>,
+        device_id: &str,
+        transport: PairingTransport,
+    ) -> (ConnectionGuard, mpsc::UnboundedReceiver<ConnectionSignal>) {
+        let (signal, receiver) = mpsc::unbounded_channel();
+        let serial = self.connection_serial.fetch_add(1, Ordering::SeqCst);
+        self.connections
+            .lock()
+            .unwrap()
+            .entry(device_id.into())
+            .or_default()
+            .push(LiveConnection { serial, signal, transport, since: Utc::now() });
+        self.refresh_keep_awake();
+        self.emit();
+        let guard = ConnectionGuard { manager: self.clone(), device_id: device_id.into(), serial };
+        (guard, receiver)
+    }
+
+    fn untrack_connection(&self, device_id: &str, serial: u64) {
+        let removed = {
+            let mut connections = self.connections.lock().unwrap();
+            let Some(live) = connections.get_mut(device_id) else { return };
+            let before = live.len();
+            live.retain(|connection| connection.serial != serial);
+            let removed = live.len() != before;
+            if live.is_empty() {
+                connections.remove(device_id);
+            }
+            removed
+        };
+        if removed {
+            self.refresh_keep_awake();
+            self.emit();
+        }
+    }
+
+    /// Each device's most recent live connection.
+    fn live_connections(&self) -> HashMap<String, PairedDeviceConnection> {
+        self.connections
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(device_id, live)| {
+                let latest = live.iter().max_by_key(|connection| (connection.since, connection.serial))?;
+                Some((
+                    device_id.clone(),
+                    PairedDeviceConnection { transport: latest.transport, since: latest.since.to_rfc3339() },
+                ))
+            })
+            .collect()
+    }
+
+    /// End the device's connections and keep its pairing. The phone is told
+    /// first, so it stops reconnecting until the person reconnects it.
+    pub fn disconnect_device(&self, device_id: &str) -> Result<PairingStatus> {
+        if !self.registry.list()?.iter().any(|device| device.id == device_id) {
+            bail!("That device is not paired with this Mac.");
+        }
+        let removed = self.connections.lock().unwrap().remove(device_id);
+        for connection in removed.into_iter().flatten() {
+            let _ = connection.signal.send(ConnectionSignal::Disconnect);
+        }
+        self.refresh_keep_awake();
+        self.emit();
+        Ok(self.snapshot())
+    }
+
+    fn keep_awake_enabled(&self) -> bool {
+        let mut keep_awake = self.keep_awake.lock().unwrap();
+        *keep_awake.enabled.get_or_insert_with(|| crate::store::settings::load().pairing.keep_awake)
+    }
+
+    pub fn set_keep_awake(&self, enabled: bool) -> Result<PairingStatus> {
+        let mut settings = crate::store::settings::load();
+        settings.pairing.keep_awake = enabled;
+        crate::store::settings::save(&settings)?;
+        self.keep_awake.lock().unwrap().enabled = Some(enabled);
+        self.refresh_keep_awake();
+        self.emit();
+        Ok(self.snapshot())
+    }
+
+    /// The settings file changed, perhaps by hand.
+    fn reload_keep_awake(&self) {
+        let before = self.keep_awake.lock().unwrap().enabled.take();
+        if before != Some(self.keep_awake_enabled()) {
+            self.refresh_keep_awake();
+            self.emit();
+        }
+    }
+
+    /// Hold the power assertion exactly while the setting is on and a phone
+    /// connection is live.
+    fn refresh_keep_awake(&self) {
+        let live = !self.connections.lock().unwrap().is_empty();
+        let wanted = live && !self.is_stopped() && self.keep_awake_enabled();
+        let mut keep_awake = self.keep_awake.lock().unwrap();
+        if !wanted {
+            keep_awake.assertion = None;
+        } else if keep_awake.assertion.is_none() {
+            match crate::power::Assertion::hold(crate::power::PHONE_CONNECTED) {
+                Ok(assertion) => keep_awake.assertion = Some(assertion),
+                Err(error) => log::warn!("could not keep this Mac awake for a connected phone: {error:#}"),
+            }
+        }
+    }
+
+    /// `device.describe`: what the phone calls itself, cleaned as a name
+    /// shown on another device is.
+    fn describe_device(&self, device: &DeviceEntry, params: Option<&serde_json::Value>) -> Result<serde_json::Value> {
+        let params: DeviceDescribeParams =
+            serde_json::from_value(params.cloned().unwrap_or_else(|| serde_json::json!({})))
+                .context("invalid device.describe params")?;
+        let label = presentable_name(&params.label)
+            .ok_or_else(|| anyhow!("device.describe label must contain 1 to 64 visible characters"))?;
+        if !matches!(params.platform.as_str(), "ios" | "android") {
+            bail!("device.describe platform must be \"ios\" or \"android\"");
+        }
+        self.registry.describe(&device.id, &label, &params.platform)?;
+        self.emit();
+        Ok(serde_json::json!({ "ok": true }))
     }
 
     fn is_epoch(&self, epoch: u64) -> bool {
@@ -1442,6 +1860,13 @@ struct E2eeAuth {
     #[serde(default)]
     transcript_hash_b64: Option<String>,
     device_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceDescribeParams {
+    label: String,
+    platform: String,
 }
 
 #[derive(Deserialize)]
@@ -1849,6 +2274,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "mac.settings",
     ];
     const DRIVER: &[&str] = &[
+        // What the phone calls itself (PRO-314).
+        "device.describe",
         "pairing.getEndpoints",
         "pairing.provisionRelay",
         "terminal.send",
@@ -1882,6 +2309,9 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
 
 #[cfg(test)]
 mod startup_tests;
+
+#[cfg(test)]
+mod approval_tests;
 
 #[cfg(test)]
 mod tests {
