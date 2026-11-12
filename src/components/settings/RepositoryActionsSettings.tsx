@@ -36,7 +36,7 @@ export function RepositoryActionsSettings({ actions, onChange, onReset }: {
               mutation.clearError();
               setEditing({ action, isNew: false });
             }}>
-              <span className="block truncate text-sm">{action.name}{action.hidden && <span className="ml-2 text-xs text-muted-foreground">Hidden</span>}</span>
+              <span className="block truncate text-sm">{action.name}{[action.runAfterSetup && "runs after setup", action.concurrent && "several at once", action.hidden && "Hidden"].filter(Boolean).map((note) => <span key={String(note)} className="ml-2 text-xs text-muted-foreground">{note}</span>)}</span>
               <span className="block truncate font-mono text-xs text-muted-foreground">{action.command}</span>
             </button>
             <RepositoryOrderButtons name={action.name} index={index} count={actions.length} disabled={mutation.busy} onMove={(direction) => void change(moveRepositoryEntry(actions, action.id, direction))} />
