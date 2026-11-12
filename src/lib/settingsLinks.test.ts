@@ -65,6 +65,20 @@ describe("enableSetting allowlist", () => {
   beforeEach(() => { setPrefs({ sounds: false, animations: false }); forgetSettingToasts(); });
   afterEach(() => { setPrefs({ sounds: true, animations: true }); forgetSettingToasts(); });
 
+  it("turns every linkable row on in the preference its storage names", async () => {
+    const linkable = SETTINGS_ROWS.filter((row) => "linkable" in row && row.linkable);
+    expect(linkable.length).toBeGreaterThan(0);
+    const before = getPrefs();
+    try {
+      for (const row of linkable) {
+        const key = row.storage.location.split("#preferences.")[1] as keyof ReturnType<typeof getPrefs>;
+        setPrefs({ [key]: false });
+        expect(await enableSetting(row.id)).toBe("enabled");
+        expect(getPrefs()[key], row.id).toBe(true);
+      }
+    } finally { setPrefs({ turnChanges: before.turnChanges, promptMap: before.promptMap }); }
+  });
+
   it("turns a linkable row on through its existing setter", async () => {
     expect(await enableSetting("general.sounds")).toBe("enabled");
     expect(getPrefs().sounds).toBe(true);
