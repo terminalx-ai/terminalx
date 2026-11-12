@@ -6,6 +6,8 @@
  * into view when it takes the request, which may be after it has mounted.
  */
 import type { AgentLoginProvider } from "@/lib/api";
+import { settingById, type SettingId } from "@/components/settings/settingsRegistry";
+import { showSettingEnabled, showSettingNotLinkable } from "@/lib/settingsToasts";
 
 const OPEN_ORGANIZATION_SETTINGS = "terminalx:open-organization-settings";
 
@@ -74,4 +76,87 @@ export function takeAgentLoginsSignIn(organizationId: string): AgentLoginProvide
   const agent = wantedSignIn.agent;
   wantedSignIn = null;
   return agent;
+}
+
+// ---- Links to any setting row (PRO-127): terminalx://settings/<row-id>[?enable=1]
+
+/** The scheme and host every setting link starts with. */
+export const SETTING_LINK_PREFIX = "terminalx://settings/";
+const OPEN_SETTING_ROW = "terminalx:open-setting-row";
+
+/** `terminalx://settings/<row-id>`: opens Settings at that row. The id is a registry row id, e.g. `general.sounds`. */
+export function buildSettingLink(id: SettingId): string {
+  return `${SETTING_LINK_PREFIX}${id}`;
+}
+
+export interface ParsedSettingLink {
+  id: SettingId;
+  /** The link asks to turn the setting on (`?enable=1`); only a linkable row ever is. */
+  enable: boolean;
+}
+
+/**
+ * A setting link, or null for anything else: scheme `terminalx:`, host
+ * `settings`, exactly one path segment that is a registry row id, no
+ * credentials, port or fragment, and no query other than `enable=1`.
+ * Strict on purpose: the link may come from any other app.
+ */
+export function parseSettingLink(url: string): ParsedSettingLink | null {
+  if (typeof url !== "string") return null;
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return null; }
+  if (parsed.protocol !== "terminalx:" || parsed.host !== "settings" || parsed.username || parsed.password || parsed.port) return null;
+  if (parsed.hash || url.includes("#")) return null;
+  const segments = parsed.pathname.split("/");
+  if (segments.length !== 2 || segments[0] !== "") return null;
+  const id = segments[1];
+  if (!settingById(id)) return null;
+  // An empty "?" leaves `search` empty, so the raw link is checked too.
+  const enable = url.includes("?");
+  if (enable && parsed.search !== "?enable=1") return null;
+  return { id: id as SettingId, enable };
+}
+
+export type EnableSettingResult = "enabled" | "not-linkable" | "unknown";
+
+/**
+ * Turn a setting on through its row's existing setter. Only rows the registry
+ * marks `linkable` can be: every other row, and any id that is not a row,
+ * changes nothing. The allowlist is the boundary for links from other apps.
+ */
+export async function enableSetting(id: string): Promise<EnableSettingResult> {
+  const row = typeof id === "string" ? settingById(id) : undefined;
+  if (!row) return "unknown";
+  if (!row.linkable) return "not-linkable";
+  await row.linkable.enable();
+  return "enabled";
+}
+
+/** Ask the shell to open Settings at a row (the toast's Open setting, a followed link). */
+export function openSettingRow(id: SettingId): void {
+  window.dispatchEvent(new CustomEvent(OPEN_SETTING_ROW, { detail: id }));
+}
+
+export function onOpenSettingRow(listener: (id: SettingId) => void): () => void {
+  const handler = (event: Event) => listener((event as CustomEvent<SettingId>).detail);
+  window.addEventListener(OPEN_SETTING_ROW, handler);
+  return () => window.removeEventListener(OPEN_SETTING_ROW, handler);
+}
+
+/**
+ * Follow a setting link from outside the app: open Settings at its row and,
+ * with `enable=1`, turn a linkable row on and say so; an unlinkable row is
+ * opened unchanged with a toast saying the link can't turn it on. Returns
+ * false for anything that is not a setting link (nothing opens).
+ */
+export async function followSettingLink(url: string): Promise<boolean> {
+  const link = parseSettingLink(url);
+  if (!link) return false;
+  const row = settingById(link.id)!;
+  openSettingRow(link.id);
+  if (!link.enable) return true;
+  const result = await enableSetting(link.id);
+  if (result === "enabled") showSettingEnabled(row.id, row.title);
+  else if (result === "not-linkable") showSettingNotLinkable(row.id, row.title);
+  return true;
 }

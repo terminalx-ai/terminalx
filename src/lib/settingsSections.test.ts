@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { searchSettingsSections } from "./settingsSections";
+import { noteExperimentalSettings } from "./experimentalSettings";
+import { searchSettingsSections, settingsSectionOffered } from "./settingsSections";
 
 describe("settings section search", () => {
   it("finds the privacy control in General", () => {
@@ -47,5 +48,19 @@ describe("settings section search", () => {
   it("finds repository copy settings by their include-file name", () => {
     expect(searchSettingsSections("worktreeinclude")[0].item.tab).toBe("repositories");
     expect(searchSettingsSections("files to copy")[0].item.tab).toBe("repositories");
+  });
+});
+
+describe("sections behind an Experimental switch", () => {
+  it("offers Orchestrator only while orchestration runs are on, and every other section always", () => {
+    try {
+      noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: false });
+      expect(settingsSectionOffered("orchestrator")).toBe(false);
+      expect(settingsSectionOffered("general")).toBe(true);
+      expect(searchSettingsSections("orchestrator").some((match) => match.item.tab === "orchestrator")).toBe(false);
+      noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: true });
+      expect(settingsSectionOffered("orchestrator")).toBe(true);
+      expect(searchSettingsSections("orchestrator")[0].item.tab).toBe("orchestrator");
+    } finally { noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: false }); }
   });
 });
