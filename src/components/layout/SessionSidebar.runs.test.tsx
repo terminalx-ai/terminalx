@@ -205,3 +205,41 @@ describe("a lead and its workers in the sidebar (PRO-281)", () => {
     expect(mocks.invoke.mock.calls.some(([command]) => command === "orchestration_runs")).toBe(false);
   });
 });
+
+describe("a session that only started others (PRO-337)", () => {
+  it("nests its children with a quieter mark, its own status mark, and no run summary; a run's lead keeps the glyph", async () => {
+    // "lead" leads a run; "starter" leads none, and only its children record it as their parent.
+    await boot([
+      ...family(),
+      session("starter", { title: "Try both parsers" }),
+      session("kid-a", { title: "Parser A", parent: { sessionId: "starter" } }),
+      session("kid-b", { title: "Parser B", parent: { sessionId: "starter" } }),
+    ], [runOf(pieces())]);
+    // An open worker would hold its lead unfolded: open a session of neither family.
+    store.selectSession("other");
+    mount();
+    await waitFor(() => expect(workerRows()).toHaveLength(5));
+    const starter = () => document.querySelector<HTMLElement>('[data-lead="starter"]')!;
+
+    // The run's lead: the glyph, and no starter mark.
+    expect(within(leadRow()).getAllByTestId("lead-glyph")).toHaveLength(1);
+    expect(leadRow().querySelector(":scope > div [data-testid=starter-mark]")).toBeNull();
+    // The starter: its children nest under it, it has the quieter mark with its tooltip, and no lead glyph.
+    expect(within(within(starter()).getByTestId("lead-workers")).getAllByRole("listitem").map((row) => row.dataset.worker)).toEqual(["kid-a", "kid-b"]);
+    const mark = within(starter()).getByTestId("starter-mark");
+    expect([mark.getAttribute("aria-label"), mark.getAttribute("title")]).toEqual(["Started these sessions", "Started these sessions"]);
+    expect(within(starter()).queryByTestId("lead-glyph")).toBeNull();
+
+    // Folded, the run's lead sums up its run; the starter shows no run summary.
+    fireEvent.click(within(leadRow()).getByRole("button", { name: "Fold the workers of Talk lead" }));
+    expect(within(leadRow()).getByTestId("lead-progress").textContent).toBe("1/4");
+    fireEvent.click(within(starter()).getByRole("button", { name: "Fold the workers of Talk starter" }));
+    expect(workerRows()).toHaveLength(0);
+    for (const summary of ["lead-progress", "lead-running", "lead-needs", "lead-glyph"]) expect(within(starter()).queryByTestId(summary)).toBeNull();
+    expect(within(starter()).getByTestId("starter-mark")).toBeTruthy();
+
+    // Opening it opens the session, not a Run view.
+    fireEvent.click(within(starter()).getByRole("button", { name: /Talk starter/, description: /./ }));
+    expect(store.getSessionStore().selectedSessionId).toBe("starter");
+  });
+});

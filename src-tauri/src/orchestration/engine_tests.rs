@@ -80,11 +80,13 @@ struct Fake {
     world: Mutex<World>,
     settings: Mutex<OrchestratorSettings>,
     repository: bool,
+    /// The lead was started with Orchestrate.
+    ask_first: bool,
 }
 
 impl Fake {
     fn new() -> Self {
-        Self { world: Mutex::new(World::default()), settings: Mutex::new(OrchestratorSettings::default()), repository: true }
+        Self { world: Mutex::new(World::default()), settings: Mutex::new(OrchestratorSettings::default()), repository: true, ask_first: false }
     }
 
     fn world(&self) -> std::sync::MutexGuard<'_, World> {
@@ -126,7 +128,7 @@ impl Host for Fake {
         if session_id == "nobody" {
             return Err(EngineError::new("lead_not_found", "No session nobody to lead the run.", None));
         }
-        Ok(Lead { project_path: "/repo".into(), agent: "claude".into(), model: "fable".into(), repository: self.repository, cwd: "/repo".into() })
+        Ok(Lead { project_path: "/repo".into(), agent: "claude".into(), model: "fable".into(), repository: self.repository, cwd: "/repo".into(), ask_first: self.ask_first })
     }
 
     fn worker_agents(&self) -> Vec<String> {
@@ -419,6 +421,25 @@ fn a_project_that_asks_for_no_approval_starts_at_once() {
     let start = engine::start(&host, &run.id).unwrap();
     assert_eq!((start.started, start.run.state, start.run.approval), (vec!["map".to_string()], RunState::Running, None));
     assert!(host.world().told.is_empty(), "the lead started it itself");
+}
+
+/// PRO-337: a lead started with Orchestrate asks first, even where the project asks for no approval.
+#[test]
+fn a_lead_started_with_orchestrate_waits_for_approval_with_approval_off() {
+    let _home = crate::store::temp_home();
+    let host = Fake { ask_first: true, ..Fake::new() };
+    host.settings.lock().unwrap().require_approval = false;
+    host.settings.lock().unwrap().projects.entry("/repo".into()).or_default().require_approval = Some(false);
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    assert_eq!(run.state, RunState::AwaitingApproval);
+    let error = engine::start(&host, &run.id).unwrap_err();
+    assert_eq!(error.code, "awaiting_approval");
+    assert!(host.made().is_empty(), "no worker before approval");
+    // An edit before approval keeps it waiting.
+    assert_eq!(engine::update_plan(&host, &run.id, &plan()).unwrap().state, RunState::AwaitingApproval);
+    let approved = engine::approve(&host, &run.id).unwrap();
+    assert_eq!(approved.run.state, RunState::Running);
+    assert_eq!(host.made(), vec!["map"]);
 }
 
 #[test]

@@ -37,6 +37,9 @@ import { openLocalProject } from "@/lib/projectStart";
 import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
+import { ORCHESTRATE_TITLE, orchestratePrompt, useOrchestrateOffered } from "@/lib/orchestrateStart";
+import { showRunView } from "@/lib/orchestration";
+import { WithTooltip } from "@/components/ui/tooltip";
 import type { WorkStatus } from "@/types/session";
 import { CloudCreateConfirm, cloudStartError, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -153,6 +156,10 @@ export function NewSessionView({
     cloud ? "Cloud workspaces require a person to merge." : undefined,
     // A picked issue makes this a session started from an issue: switches nobody touched follow it.
     issue ? "issue" : "session");
+  // Orchestrate (PRO-337): a session of a local git project can lead a run; a cloud draft, a chat or the compact window cannot.
+  const orchestrateShown = useOrchestrateOffered({ local: !projectless && !cloud && !!project, git: isGit, cloud: !!cloud, quick: projectless, compact });
+  /** The start in progress is an Orchestrate start. */
+  const [orchestrating, setOrchestrating] = useState(false);
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
@@ -361,11 +368,13 @@ export function NewSessionView({
     }
   };
 
-  const create = async () => {
+  const create = async (orchestrateAsked = false) => {
     if (projectless) return createProjectless();
     if (cloud) return createCloud();
     if (!project || !harness || !canSend) return;
+    const orchestrate = orchestrateAsked && orchestrateShown;
     if (dictation.dictating) await stopDictation();
+    setOrchestrating(orchestrate);
     setBusy(true);
     setError(null);
     try {
@@ -392,6 +401,8 @@ export function NewSessionView({
         baseRef: !preset?.cwd && useWorktree ? preset?.fromBranch ?? null : null,
         cwd: preset?.cwd ?? null,
         tab: { harness: harness.id, model: modelId, effort, permissionMode: mode },
+        // Any run it leads waits for the person's Approve, whatever the project's setting.
+        ...(orchestrate ? { orchestrate: true } : {}),
       });
       upsertSession(s);
       let first = pullRequest ? [text.trim(), `Continue work on pull request #${pullRequest.number}: ${pullRequest.title}\n${pullRequest.url}`].filter(Boolean).join("\n\n") : text;
@@ -401,7 +412,10 @@ export function NewSessionView({
         await linkSessionIssue(s.id, ref).catch((cause) => console.error("the new session was not linked to its issue", cause));
         first = [text.trim(), await issuePromptWithComments(project.path, issue)].filter(Boolean).join("\n\n");
       }
-      const prompt = await preparePipelineLaunch(s.id, s.tabs[0].id, first, pipelineLaunch.value);
+      const launched = await preparePipelineLaunch(s.id, s.tabs[0].id, first, pipelineLaunch.value);
+      // The plan-a-run request ends the first prompt, and the session opens on its Run tab.
+      const prompt = orchestrate ? orchestratePrompt(launched) : launched;
+      if (orchestrate) showRunView(s.id, true);
       setText("");
       setIssue(null);
       attach.clear();
@@ -645,8 +659,16 @@ export function NewSessionView({
               <div className="ml-auto flex items-center gap-0.5">
                 <MicButton dictation={dictation} />
                 {!cloud && <AttachButton attach={attach} />}
-                <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={create} aria-label={projectless ? "Ask" : "Create"} title={sendKeys ? `Create (${keycaps(sendKeys).join("")})` : "Create"}>
-                  {busy ? <Loader2 className="animate-spin" /> : null}
+                {orchestrateShown && (
+                  <WithTooltip label={ORCHESTRATE_TITLE} side="top">
+                    <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={() => void create(true)}>
+                      {busy && orchestrating ? <Loader2 className="animate-spin" /> : null}
+                      Orchestrate
+                    </Button>
+                  </WithTooltip>
+                )}
+                <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={() => void create()} aria-label={projectless ? "Ask" : "Create"} title={sendKeys ? `Create (${keycaps(sendKeys).join("")})` : "Create"}>
+                  {busy && !orchestrating ? <Loader2 className="animate-spin" /> : null}
                   {projectless ? "Ask" : "Create"}
                   {sendKeys && !busy && <span className="font-sans opacity-70">{keycaps(sendKeys).join("")}</span>}
                 </Button>

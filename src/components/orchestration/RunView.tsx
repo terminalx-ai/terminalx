@@ -14,6 +14,7 @@ import {
   planOf, raisesMode, readOnlyPieces, refusalOf, requestOrchestratorSettings, resetClock, reviewTokens, RUN_STATE_LABEL, TIER_DOT, tokensText, TRY_OUTCOME_LABEL, TRY_STEP_LABEL, useRun, verifyingText,
   shortCommit, windowLine, windowName, withoutPiece, type MergeRow, type MergeRowState,
 } from "@/lib/orchestration";
+import { PLAN_A_RUN_PROMPT } from "@/lib/orchestrateStart";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { useSessionRowStatuses } from "@/lib/sessionRowStatus";
 import { familyNeeds, overBudget, pieceSpend, runSpend, type Need } from "@/lib/runFamily";
@@ -23,9 +24,7 @@ import { relativeTime } from "@/lib/time";
 import type { Cap, CommandRun, GateResult, PieceTry, Run, RunLimits, RunPiece, RunPlan, RunPlanPiece, RunReview, RunVerification, RunVerifier, Tier } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
-/** What the lead is asked when a person presses Plan a run. The lead decides whether splitting helps at all. */
-export const PLAN_A_RUN_PROMPT =
-  "Plan an orchestration run for the task we are working on. First decide whether splitting it helps: do not split work whose steps each need the one before, or that fits in one session. If it does help, write the plan as a JSON file and store it with `terminalx runs create --from <plan.json> --json` (the plan's fields and rules are under \"Orchestration runs\" in `terminalx skills get terminalx-cli`). Then tell me the plan is ready and stop: I approve it in the Run view before any worker starts. If splitting does not help, say why and go on in this session.";
+export { PLAN_A_RUN_PROMPT };
 
 const kicker = "text-[10.5px] font-medium uppercase tracking-[.08em] text-faint";
 const chip = "inline-flex h-5 items-center rounded-[5px] bg-veil-raised px-1.5 font-mono text-[11px] text-muted-foreground";
@@ -1324,7 +1323,8 @@ function NoRun({ session, onShowChat }: { session: SessionEntry; onShowChat: () 
             </div>
             <dl className="mt-2 divide-y divide-hairline rounded-lg bg-well text-[13px] hairline" data-testid="run-limits">
               {([
-                [ShieldAlert, "Waits for your approval", limits ? (limits.requireApproval ? "On" : "Off") : ""],
+                // A session started with Orchestrate always asks first (PRO-337).
+                [ShieldAlert, "Waits for your approval", limits ? (limits.requireApproval || session.orchestrateStart === true ? "On" : "Off") : ""],
                 [Layers, "Pieces, at most", limits ? String(limits.pieceLimit) : ""],
                 [ShieldOff, "Workers run in", limits ? modeLabel(limits.workerMode) : ""],
               ] as const).map(([Icon, label, value]) => (

@@ -55,7 +55,7 @@ import { setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import type { Project, TabEntry, Workspace } from "@/types/session";
 import type { SessionEntry } from "@/types/session";
 import { useFold } from "./useFold";
-import { LeadGlyph, LeadHoverCard, LeadTrailing, RunFamiliesContext, WorkerMark, WorkerTier, useLeadFamily, useLeadSummary, useWorkerPiece, type RunFamilies } from "./RunRows";
+import { LeadGlyph, LeadHoverCard, LeadTrailing, RunFamiliesContext, StarterMark, WorkerMark, WorkerTier, leadsRun, useLeadFamily, useLeadSummary, useWorkerPiece, type RunFamilies } from "./RunRows";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { showRunView, useRunsByLead } from "@/lib/orchestration";
 import { nestWorkers } from "@/lib/runFamily";
@@ -1178,6 +1178,8 @@ function ConversationRow({
   // A lead (PRO-281): its workers nest under it and fold with it; folded, their marks come up to its row.
   const family = useLeadFamily(session, worker || inArchive ? NO_PEERS : peers);
   const summary = useLeadSummary(family);
+  // Only a run's lead has the run's glyph and summary; a session that only started the ones under it has a quieter mark (PRO-337).
+  const runLead = leadsRun(family);
   const [leadOpen, toggleLead] = useFold(`lead:${session.id}`, true);
   const leadExpanded = !!family && (leadOpen || family.workers.some((entry) => entry.id === selectedSessionId));
   const folded = !!family && family.workers.length > 0 && !leadExpanded;
@@ -1245,7 +1247,7 @@ function ConversationRow({
               if (pickOnClick(event, ids)) return;
               selectSession(session.id);
               // A lead with a run opens on its run (18.07).
-              if (family?.run) showRunView(session.id, true);
+              if (runLead) showRunView(session.id, true);
             }}
             onDoubleClick={picking ? undefined : (rename ?? undefined)}
             aria-current={selected ? "true" : undefined}
@@ -1256,8 +1258,8 @@ function ConversationRow({
           >
             <span className="flex w-full min-w-0 items-center gap-2">
               {/* The row leads with its session status mark; the reader's own status groups rows and is read out here. */}
-              {family ? <LeadGlyph /> : worker ? <WorkerMark piece={piece} status={rowStatus} /> : <StatusMarkIcon status={rowStatus} decorative />}
-              <span id={statusDescriptionId} hidden>{statusText(rowStatus)}. Status: {manualStatusLabel(session.manualStatus)}{summary?.needs.length ? `. Waiting on you: ${summary.needs.map((need) => need.text).join("; ")}` : ""}</span>
+              {runLead ? <LeadGlyph /> : worker ? <WorkerMark piece={piece} status={rowStatus} /> : <StatusMarkIcon status={rowStatus} decorative />}
+              <span id={statusDescriptionId} hidden>{statusText(rowStatus)}. Status: {manualStatusLabel(session.manualStatus)}{runLead && summary?.needs.length ? `. Waiting on you: ${summary.needs.map((need) => need.text).join("; ")}` : ""}</span>
               {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
               {named === "branch" ? (
                 <>
@@ -1270,6 +1272,7 @@ function ConversationRow({
               ) : (
                 <>
                   <span className={cn("min-w-0 flex-1 truncate", worker ? "text-[12.5px]" : "text-[13px]")}>{title}</span>
+                  {family && !runLead && <StarterMark />}
                   {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
                   {unread && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
                 </>
@@ -1281,7 +1284,7 @@ function ConversationRow({
                   <span className="truncate">{locationLabel}</span>
                 </span>
               )}
-              {family && summary ? <LeadTrailing family={family} folded={folded} summary={summary} fallback={<SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />} />
+              {runLead && summary ? <LeadTrailing family={family} folded={folded} summary={summary} fallback={<SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />} />
                 : worker ? <WorkerTier piece={piece} session={session} />
                 : <SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />}
             </span>
@@ -1316,7 +1319,7 @@ function ConversationRow({
   );
 
   function withLeadHover(button: ReactElement) {
-    return folded && family && summary ? <LeadHoverCard family={family} summary={summary} title={title}>{button}</LeadHoverCard> : button;
+    return folded && runLead && summary ? <LeadHoverCard family={family} summary={summary} title={title}>{button}</LeadHoverCard> : button;
   }
 }
 const NO_PEERS: SessionEntry[] = [];

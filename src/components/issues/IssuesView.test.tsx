@@ -1189,6 +1189,26 @@ describe("who is working on an issue (#441)", () => {
     expect(screen.getByTestId("issue-detail").textContent).toContain("First issue body.");
   });
 
+  it("keeps an Orchestrate start's choice through the warning (PRO-337)", async () => {
+    const { noteExperimentalSettings, resetExperimentalSettingsForTests } = await import("@/lib/experimentalSettings");
+    const { PLAN_A_RUN_PROMPT } = await import("@/lib/orchestrateStart");
+    noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: true });
+    claims = { available: true, now: NOW, liveForSeconds: 300, claims: [claim({})] };
+    const onCreated = vi.fn();
+    render(<IssuesView onCreated={onCreated} />);
+    fireEvent.click(await row("Fix login timeout"));
+    await screen.findByText("First issue body.");
+    expect(await screen.findByTestId("issue-work-panel")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Orchestrate" }));
+    await screen.findByTestId("taken-issue-warning");
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Start anyway" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({ orchestrate: true }) });
+    expect(onCreated.mock.calls[0][2].endsWith(PLAN_A_RUN_PROMPT)).toBe(true);
+    resetExperimentalSettingsForTests();
+  });
+
   it("offers this Mac's session instead, and starts nothing on Cancel", async () => {
     (sessionStore as { sessions: unknown[] }).sessions = [localSession({ tabs: [{ id: "t", harness: "claude", status: "in_progress", created: "", modified: "" }] })];
     render(<IssuesView />);
@@ -1311,5 +1331,79 @@ describe("who is working on an issue (#441)", () => {
     expect(detail.queryByText(/your account service has not reported support for it/)).toBeNull();
     expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
     visibility.mockRestore();
+  });
+});
+
+const { noteExperimentalSettings, resetExperimentalSettingsForTests } = await import("@/lib/experimentalSettings");
+const { useRunViewShown, showRunView } = await import("@/lib/orchestration");
+const { PLAN_A_RUN_PROMPT } = await import("@/lib/orchestrateStart");
+
+describe("Orchestrate on an issue (PRO-337)", () => {
+  const RunShown = () => <output data-testid="run-shown">{String(useRunViewShown("session-1"))}</output>;
+  const runsOn = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: on });
+  const orchestrate = () => screen.queryByRole("button", { name: "Orchestrate" });
+  async function open(provider: "github" | "linear", onCreated = vi.fn()) {
+    setPrefs({ issueProvider: provider });
+    const view = render(<><IssuesView onCreated={onCreated} /><RunShown /></>);
+    fireEvent.click(await screen.findByText("Fix login timeout"));
+    await screen.findByText("First issue body.");
+    return { onCreated, view };
+  }
+
+  beforeEach(() => {
+    resetExperimentalSettingsForTests();
+    showRunView("session-1", false);
+  });
+  afterEach(() => resetExperimentalSettingsForTests());
+
+  it.each(["github", "linear"] as const)("is offered beside Start session for a local git project's %s issue only while Orchestration runs is on", async (provider) => {
+    runsOn(true);
+    const on = await open(provider);
+    const row = screen.getByTestId("issue-start-row");
+    expect(within(row).getByRole("button", { name: "Orchestrate" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Start session" })).toBeTruthy();
+    on.view.unmount();
+
+    runsOn(false);
+    const off = await open(provider);
+    expect(orchestrate()).toBeNull();
+    expect(screen.getByRole("button", { name: "Start session" })).toBeTruthy();
+    off.view.unmount();
+
+    // A folder has no git for the workers' worktrees: hidden, not disabled. (Only Linear lists a folder's issues.)
+    if (provider === "linear") {
+      runsOn(true);
+      sessionStore.projects = [{ path: "/repo", name: "Raccoon", kind: "folder" }];
+      await open(provider);
+      expect(screen.getByRole("button", { name: "Start session" })).toBeTruthy();
+      expect(orchestrate()).toBeNull();
+    }
+  });
+
+  it.each(["github", "linear"] as const)("starts the %s issue's session as Start session does, marked to ask first, its first prompt ending with the plan-a-run request, on the Run tab", async (provider) => {
+    runsOn(true);
+    const starts: { req: Record<string, unknown>; prompt: string; runShown: string | null }[] = [];
+    for (const button of ["Start session", "Orchestrate"]) {
+      invoke.mockClear();
+      startPipeline.mockClear();
+      const { onCreated, view } = await open(provider);
+      fireEvent.click(screen.getByRole("button", { name: button }));
+      await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+      const created = invoke.mock.calls.filter(([command]) => command === "create_session");
+      expect(created).toHaveLength(1);
+      // The same pipeline, started the same way: the project's default merges when green.
+      expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", true);
+      starts.push({ req: (created[0][1] as { req: Record<string, unknown> }).req, prompt: onCreated.mock.calls[0][2], runShown: screen.getByTestId("run-shown").textContent });
+      view.unmount();
+    }
+    const [plain, orchestrated] = starts;
+    expect(plain.req.orchestrate).toBeUndefined();
+    expect(orchestrated.req).toEqual({ ...plain.req, orchestrate: true });
+    const issue = provider === "github" ? issues[0] : linearIssues[0];
+    expect(plain.prompt).toBe(`${issuePrompt(issue)}\n\n${BRIEF}`);
+    // One first prompt: the issue, the pipeline's brief, then the request. Nothing is sent after it.
+    expect(orchestrated.prompt).toBe(`${issuePrompt(issue)}\n\n${BRIEF}\n\n${PLAN_A_RUN_PROMPT}`);
+    expect(invoke.mock.calls.some(([command]) => command === "send_message")).toBe(false);
+    expect([plain.runShown, orchestrated.runShown]).toEqual(["false", "true"]);
   });
 });

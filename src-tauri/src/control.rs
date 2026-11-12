@@ -1190,6 +1190,7 @@ impl ControlService {
                         automation: None,
                         cwd: None,
                         tab: Some(first_tab),
+                        orchestrate: false,
                     },
                     p.name.as_deref(),
                 )

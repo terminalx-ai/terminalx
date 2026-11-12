@@ -747,6 +747,7 @@ impl Agent for ManagerAgent {
                 automation: None,
                 cwd: None,
                 tab: Some(new_tab(run)),
+                orchestrate: false,
             },
         )
         .map_err(|error| StartError::NotStarted(anyhow!("{error}")))?;

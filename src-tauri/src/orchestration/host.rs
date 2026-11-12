@@ -89,7 +89,8 @@ impl Host for ManagerHost {
         let session = index::get(session_id).map_err(|_| EngineError::new("lead_not_found", format!("No session {session_id} to lead the run."), Some("Run the command inside the lead's session, or name it with --lead.")))?;
         let (agent, model) = session.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| (tab.harness.clone(), tab.model.clone())).unwrap_or_default();
         let repository = session.kind == SessionKind::Project && crate::git::is_repo(Path::new(&session.cwd));
-        Ok(Lead { project_path: session.project_path, agent, model, repository, cwd: session.cwd })
+        let ask_first = session.orchestrate_start();
+        Ok(Lead { project_path: session.project_path, agent, model, repository, cwd: session.cwd, ask_first })
     }
 
     fn worker_agents(&self) -> Vec<String> {
@@ -152,6 +153,7 @@ impl Host for ManagerHost {
                 automation: None,
                 cwd: None,
                 tab: Some(NewTab { harness: piece.agent.clone(), transport: AgentTransport::Pty, model: piece.model.clone(), effort: piece.effort.clone(), permission_mode: Some(mode.to_string()) }),
+                orchestrate: false,
             },
             None,
         )
