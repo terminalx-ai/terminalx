@@ -624,6 +624,13 @@ describe("a session with no run (PRO-274)", () => {
     expect(PLAN_A_RUN_PROMPT).toContain("I approve it in the Run view before any worker starts");
   });
 
+  it("says a session started with Orchestrate waits for approval though the project asks for none (PRO-337)", async () => {
+    answers.orchestrator_limits = { requireApproval: false, pieceLimit: 12, workerMode: "acceptEdits" };
+    answers.orchestration_run_for_session = null;
+    render(<RunView session={{ ...session, orchestrateStart: true }} onShowChat={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("run-limits").textContent).toBe("Waits for your approvalOnPieces, at most12Workers run inAccept edits"));
+  });
+
   it("opens Settings → Orchestrator from the project's limits", async () => {
     const requested = vi.fn();
     const stop = onOrchestratorSettingsRequest(requested);

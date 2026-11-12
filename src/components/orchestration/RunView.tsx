@@ -1323,7 +1323,8 @@ function NoRun({ session, onShowChat }: { session: SessionEntry; onShowChat: () 
             </div>
             <dl className="mt-2 divide-y divide-hairline rounded-lg bg-well text-[13px] hairline" data-testid="run-limits">
               {([
-                [ShieldAlert, "Waits for your approval", limits ? (limits.requireApproval ? "On" : "Off") : ""],
+                // A session started with Orchestrate always asks first (PRO-337).
+                [ShieldAlert, "Waits for your approval", limits ? (limits.requireApproval || session.orchestrateStart === true ? "On" : "Off") : ""],
                 [Layers, "Pieces, at most", limits ? String(limits.pieceLimit) : ""],
                 [ShieldOff, "Workers run in", limits ? modeLabel(limits.workerMode) : ""],
               ] as const).map(([Icon, label, value]) => (
