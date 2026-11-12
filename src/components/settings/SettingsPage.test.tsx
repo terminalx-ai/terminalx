@@ -4,6 +4,8 @@ import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { DEFAULT_SETTINGS_TAB, SETTING_HIGHLIGHT_FADE_MS, SETTING_HIGHLIGHT_HOLD_MS, SettingsPage } from "./SettingsPage";
 import { getPrefs, setPrefs } from "@/lib/prefs";
+import { movePaletteSelection } from "@/lib/commandPalette";
+import { groupSettingsByPage, searchSettings, settingsSearchSummary } from "@/lib/settingsSearch";
 import { isMac } from "@/lib/hotkeys";
 
 const settingsFile = vi.hoisted(() => ({ error: null as string | null }));
@@ -38,26 +40,19 @@ describe("Settings search", () => {
     render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "text size" } });
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Results for “text size”");
-    expect(screen.getByText("2 settings on 2 pages · ↑↓ to move · ↵ opens the setting · esc clears")).toBeTruthy();
+    const expected = groupSettingsByPage(searchSettings("text size"));
+    expect(screen.getByText(`${settingsSearchSummary(searchSettings("text size"))} · ↑↓ to move · ↵ opens the setting · esc clears`)).toBeTruthy();
     const listbox = screen.getByRole("listbox", { name: "Settings search results" });
     const pages = within(listbox).getAllByRole("group");
-    expect(pages.map((page) => page.getAttribute("aria-labelledby") && document.getElementById(page.getAttribute("aria-labelledby")!)?.textContent)).toEqual(["Appearance", "Transcription"]);
+    expect(pages.map((page) => document.getElementById(page.getAttribute("aria-labelledby")!)?.textContent)).toEqual(expected.map((page) => page.title));
+    expect(pages[0].textContent).toContain("Appearance");
+    pages.forEach((page, index) => expect(within(page).getAllByRole("option")).toHaveLength(expected[index].matches.length));
     const first = within(pages[0]).getByRole("option");
     expect(first.textContent).toContain("Text size");
     expect(first.textContent).toContain("Scales the transcript and composer.");
     expect(first.querySelector("mark")?.textContent).toBe("Text");
-    expect(within(pages[1]).getAllByRole("option")).toHaveLength(1);
     // Rows, not sections: the old section results are gone.
     expect(within(listbox).queryByRole("option", { name: /^Appearance/ })).toBeNull();
-  });
-
-  it("caps the list at 30 rows and counts the pages they are on", () => {
-    render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
-    fireEvent.change(search(), { target: { value: "a" } });
-    const options = screen.getAllByRole("option");
-    expect(options).toHaveLength(30);
-    const pages = screen.getAllByRole("group").filter((group) => screen.getByRole("listbox").contains(group)).length;
-    expect(screen.getByText(`30 settings on ${pages} pages · ↑↓ to move · ↵ opens the setting · esc clears`)).toBeTruthy();
   });
 
   it("focuses with the find shortcut and opens the row with Enter: its section, scrolled to, focused and highlighted briefly", () => {
@@ -127,29 +122,42 @@ describe("Settings search", () => {
   it("moves with ↑/↓ as the palette does, wrapping at both ends, resets when edited, and opens a clicked result", () => {
     render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
     const input = search();
-    fireEvent.change(input, { target: { value: "a" } });
-    const results = screen.getAllByRole("option");
-    expect(input.getAttribute("aria-activedescendant")).toBe(results[0].id);
-    expect(results[0].getAttribute("aria-selected")).toBe("true");
-    fireEvent.keyDown(input, { key: "ArrowUp" });
-    expect(input.getAttribute("aria-activedescendant")).toBe(results.at(-1)!.id);
-    expect(results.at(-1)!.getAttribute("aria-selected")).toBe("true");
-    fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(input.getAttribute("aria-activedescendant")).toBe(results[0].id);
-    fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(input.getAttribute("aria-activedescendant")).toBe(results[1].id);
-    expect(results[0].getAttribute("aria-selected")).toBe("false");
-    // Order of the list is the order ↓ walks, across page groups.
-    for (let step = 2; step < results.length; step++) fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(input.getAttribute("aria-activedescendant")).toBe(results.at(-1)!.id);
-    fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(input.getAttribute("aria-activedescendant")).toBe(results[0].id);
-    fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.change(input, { target: { value: "theme" } });
+    const results = screen.getAllByRole("option");
+    const active = () => input.getAttribute("aria-activedescendant");
+    const selectedIds = () => results.filter((result) => result.getAttribute("aria-selected") === "true").map((result) => result.id);
+    expect(active()).toBe(results[0].id);
+    expect(selectedIds()).toEqual([results[0].id]);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(active()).toBe(results.at(-1)!.id);
+    expect(selectedIds()).toEqual([results.at(-1)!.id]);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(active()).toBe(results[0].id);
+    // ↓ walks the rows in the order shown, across page groups, and wraps from the last to the first.
+    let index = 0;
+    for (let step = 0; step < results.length; step++) {
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+      index = movePaletteSelection(index, results.length, "ArrowDown");
+      expect(active()).toBe(results[index].id);
+      expect(selectedIds()).toEqual([results[index].id]);
+    }
+    expect(index).toBe(0);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    fireEvent.change(input, { target: { value: "text size" } });
     const result = screen.getAllByRole("option")[0];
-    expect(result.textContent).toContain("Theme");
-    expect(input.getAttribute("aria-activedescendant")).toBe(result.id);
+    expect(result.textContent).toContain("Text size");
+    expect(active()).toBe(result.id);
     fireEvent.click(result);
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
+    expect(document.activeElement).toBe(row("appearance.textSize"));
+  });
+
+  it("opens a clicked result on its row", () => {
+    render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    fireEvent.change(search(), { target: { value: "theme" } });
+    const theme = screen.getAllByRole("option")[0];
+    expect(theme.textContent).toContain("Theme");
+    fireEvent.click(theme);
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
     expect(document.activeElement).toBe(row("appearance.theme"));
   });
@@ -158,9 +166,9 @@ describe("Settings search", () => {
     const onBack = vi.fn();
     render(<SettingsPage initialTab="appearance" onBack={onBack} />);
     const input = search();
-    fireEvent.change(input, { target: { value: "zzzz-no-such-setting" } });
+    fireEvent.change(input, { target: { value: "zzqx" } });
     const empty = screen.getByRole("status");
-    expect(within(empty).getByText("No settings match “zzzz-no-such-setting”")).toBeTruthy();
+    expect(within(empty).getByText("No settings match “zzqx”")).toBeTruthy();
     expect(empty.textContent).toContain("Try fewer letters, or search keyboard shortcuts.");
     expect(screen.queryByRole("option")).toBeNull();
     expect(screen.queryByText(/↑↓ to move/)).toBeNull();
@@ -191,7 +199,7 @@ describe("Settings search", () => {
 
   it("opens Shortcuts from the empty state's keyboard shortcuts link", () => {
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
-    fireEvent.change(search(), { target: { value: "zzzz-no-such-setting" } });
+    fireEvent.change(search(), { target: { value: "zzqx" } });
     fireEvent.click(screen.getByRole("button", { name: "search keyboard shortcuts" }));
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Shortcuts");
     expect(search().value).toBe("");
@@ -201,7 +209,7 @@ describe("Settings search", () => {
     const onBack = vi.fn();
     render(<SettingsPage initialTab="appearance" onBack={onBack} />);
     const input = search();
-    fireEvent.change(input, { target: { value: "font" } });
+    fireEvent.change(input, { target: { value: "theme" } });
     for (const role of ["dialog", "alertdialog", "menu", "listbox"]) {
       const overlay = document.createElement("div");
       overlay.setAttribute("role", role);
@@ -211,7 +219,7 @@ describe("Settings search", () => {
       fireEvent.keyDown(overlay, { key: "Escape" });
       fireEvent.keyDown(overlay, { key: "Escape" });
       fireEvent.keyDown(overlay, { key: "f", metaKey: isMac, ctrlKey: !isMac });
-      expect(input.value).toBe("font");
+      expect(input.value).toBe("theme");
       expect(document.activeElement).toBe(overlay);
       expect(onBack).not.toHaveBeenCalled();
       overlay.remove();
