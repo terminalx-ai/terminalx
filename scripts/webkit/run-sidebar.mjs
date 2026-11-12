@@ -211,6 +211,12 @@ try {
     checks["the run view shows spend against the budget"] = (await view.getByTestId("run-spend").textContent()) === "$7.42 of $15.00";
     checks["the run view says what needs the person, with the reason"] = (await view.getByTestId("run-needs").innerText()).includes("Move CLI code to the store: Needs permission");
     checks["the run's line says which piece is blocked and what waits for it"] = (await view.getByText("Piece 5 is blocked. Piece 6 waits for it; nothing else is running.").count()) === 1;
+    // The Run view's side panel, as on a Mac (glass on, PRO-336).
+    await page.evaluate(() => document.documentElement.setAttribute("data-glass", ""));
+    await view.locator('[role="row"][data-piece="cli"]').first().click();
+    await view.getByTestId("piece-detail").waitFor();
+    await page.mouse.move(size.width - 4, size.height - 4);
+    await shot(page, "run-view-panel");
     checks["no browser errors"] = errors.length === 0;
     failed += report(`lead and workers, ${at}`, checks, { workerRows, hover, errors });
     await page.close();
