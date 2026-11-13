@@ -265,6 +265,13 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
         Some((work["sessionId"].as_str()?.to_string(), work["tabId"].as_str()?.to_string()))
     }).collect()).unwrap_or_default();
     let named = |work: &Work| work.session_id.as_ref().zip(work.tab_id.as_ref()).is_some_and(|(session, tab)| stop.iter().any(|(s, t)| s == session && t == tab));
+    // A Linux terminal whose supervisor is gone for good is the reader's
+    // to let go of: shown it, they chose to update anyway. Only those are
+    // released; one still starting or cleaning up goes on holding (#467).
+    #[cfg(target_os = "linux")]
+    for pane in params["stop"].as_array().into_iter().flatten().filter_map(|work| work["pane"].as_str()) {
+        runtime.terminals.release_lost(pane);
+    }
     let unadoptable = runtime.manager.unadoptable();
     let unnamed = unadoptable.iter().filter(|work| !named(work)).count();
     if unnamed > 0 {

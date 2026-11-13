@@ -361,7 +361,7 @@ impl SessionManager {
         // the reader but never by a session and tab, so Update now does not
         // stop them. The handover waits until they have ended (#467).
         #[cfg(target_os = "linux")]
-        work.extend(self.terminals.supervised_work().into_iter().map(|title| Work { kind: WorkKind::Terminal, session_id: None, tab_id: None, harness: None, title: Some(title) }));
+        work.extend(self.terminals.supervised_work().into_iter().map(|launch| Work { kind: WorkKind::Terminal, session_id: None, tab_id: None, harness: None, title: Some(launch.title), pane: Some(launch.id) }));
         work
     }
 
@@ -371,7 +371,7 @@ impl SessionManager {
                 // A drained leader can leave descendants behind. These native
                 // process groups are not among the PTYs the record carries.
                 let kind = if rt.turn_open || matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting) { WorkKind::Turn } else { WorkKind::Processes };
-                Some(Work { kind, session_id: Some(rt.session_id.clone()), tab_id: Some(rt.tab_id.clone()), harness: Some(rt.harness.clone()), title: None })
+                Some(Work { kind, session_id: Some(rt.session_id.clone()), tab_id: Some(rt.tab_id.clone()), harness: Some(rt.harness.clone()), title: None, pane: None })
             }
             _ => None,
         }

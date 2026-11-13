@@ -12,6 +12,10 @@ use uuid::Uuid;
 use std::collections::VecDeque;
 
 const WALL: i32 = 0x4000_0000;
+/// The helper's exit status when its channel was lost and its own all-child
+/// wait then found nothing left: it never exits so otherwise. Reaped from
+/// the exact helper, it settles the launch the runtime had lost (#467).
+pub(super) const EMPTY_AFTER_LOSS: i32 = 124;
 const MAX_CHILDREN: usize = 4096;
 const MAX_CHILD_BYTES: u64 = 64 * 1024;
 
@@ -575,7 +579,7 @@ pub(super) fn run(launch: Uuid) -> i32 {
         }
 
         if channel.is_none() {
-            if matches!(children, Ok(Children::Empty)) { return 124; }
+            if matches!(children, Ok(Children::Empty)) { return EMPTY_AFTER_LOSS; }
             if backoff().is_err() { unsafe { libc::raise(libc::SIGSTOP); } }
         } else {
             let fd = channel.as_ref().unwrap().as_raw_fd();
@@ -608,7 +612,9 @@ pub(super) fn run(launch: Uuid) -> i32 {
                             Ok("sent-launch-loss" | "uncertain-launch-loss")) {
                             assert_single_thread("launch-channel-loss");
                             eprintln!("H1 Launch received; injected helper exit before child creation");
-                            return 124;
+                            // A crash, as far as the runtime can tell: never
+                            // the status that proves the launch empty.
+                            return 126;
                         }
                         attempted = true; // No second fork, even if preparation fails.
                         let prepared = serde_json::from_slice::<Launch>(&config)

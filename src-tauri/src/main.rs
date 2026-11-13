@@ -1,6 +1,12 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// A terminal's supervisor runs before anything else in this process (#467).
+#[cfg(target_os = "linux")]
+#[used]
+#[link_section = ".preinit_array"]
+static PTY_SUPERVISOR: extern "C" fn() = raccoon_lib::pty_supervisor_preinit;
+
 fn main() {
     #[cfg(target_os = "linux")]
     if let Some(code) = raccoon_lib::run_pty_supervisor() { std::process::exit(code); }

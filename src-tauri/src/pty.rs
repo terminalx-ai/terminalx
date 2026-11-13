@@ -425,6 +425,18 @@ impl Drop for Opening<'_> {
     fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); }
 }
 
+/// A supervised launch a handover cannot carry as it stands.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupervisedWork {
+    /// Its pane id.
+    pub id: String,
+    /// Its terminal's title, or the pane id.
+    pub title: String,
+    /// Its supervisor is gone and nothing settles it but the reader.
+    pub lost: bool,
+}
+
 /// Terminals whose supervised launches a handover record cannot carry: a
 /// supervisor's channel and its witness are this process's memory (#467).
 #[cfg(target_os = "linux")]
@@ -1543,13 +1555,31 @@ impl Terminals {
     /// stands (starting, mid-release or lost), by the title or name of its
     /// terminal: what a handover waits for on Linux (#467). Ownership whose
     /// pane was closed is listed too, until its supervisor settles it.
+    /// Each comes with its pane id, and whether it is lost for good: its
+    /// supervisor gone with nothing left to learn, which only the reader
+    /// can release ([`Self::release_lost`]).
     #[cfg(target_os = "linux")]
-    pub(crate) fn supervised_work(&self) -> Vec<String> {
-        let launches: Vec<String> = self.groups.lock().unwrap().iter()
-            .filter(|(_, group)| group.owner().is_some_and(|owner| owner.pending() && !owner.carriable()))
-            .map(|(id, _)| id.clone()).collect();
+    pub(crate) fn supervised_work(&self) -> Vec<SupervisedWork> {
+        let launches: Vec<(String, bool)> = self.groups.lock().unwrap().iter()
+            .filter_map(|(id, group)| group.owner().filter(|owner| owner.pending() && !owner.carriable()).map(|owner| (id.clone(), owner.lost_for_good())))
+            .collect();
         let titles = self.titles.lock().unwrap();
-        launches.into_iter().map(|id| titles.get(&id).cloned().unwrap_or(id)).collect()
+        launches.into_iter().map(|(id, lost)| SupervisedWork { title: titles.get(&id).cloned().unwrap_or_else(|| id.clone()), id, lost }).collect()
+    }
+
+    /// Release the lost launches under pane `id`, at the reader's explicit
+    /// request (#467): what such a launch started may run on, unowned, and
+    /// the log says so. Returns how many were released; one still being
+    /// cleaned up by its supervisor is not, and settles by itself.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn release_lost(&self, id: &str) -> usize {
+        let owners: Vec<_> = self.groups.lock().unwrap().iter().filter(|(pane, _)| pane == id).filter_map(|(_, group)| group.owner().cloned()).collect();
+        let released = owners.iter().filter(|owner| owner.release_lost()).count();
+        if released > 0 {
+            log::warn!("released {released} lost supervised launch(es) of terminal {id} as the reader asked; processes they started may still be running, unowned");
+            self.groups.lock().unwrap().retain(|(_, group)| group.pid().is_some());
+        }
+        released
     }
 
     #[cfg(test)]
@@ -1988,24 +2018,62 @@ mod supervised_tests {
         assert!(terminals.owned_groups().is_empty());
     }
 
-    /// #467/#765: a launch whose supervisor cannot be carried holds the
-    /// handover up, is named for the reader, and is never stopped by it.
+    fn sleeping(terminals: &Terminals, dir: &tempfile::TempDir, id: &str) -> Arc<supervisor::Owner> {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        terminals.spawn(sink, id, PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] }).unwrap();
+        terminals.set_title(id, "Long job");
+        assert!(terminals.supervised_work().is_empty(), "a running launch can be carried");
+        let owner = terminals.panes.lock().unwrap()[id].group.owner().cloned().unwrap();
+        owner
+    }
+
+    /// #467: losing the channel is not losing the launch for good. The live
+    /// helper stops everything and exits with the status only its own
+    /// all-child wait finding nothing gives; reaped, that settles it.
     #[test]
-    fn a_launch_that_cannot_be_carried_holds_the_handover_and_is_named() {
+    fn a_lost_launch_is_settled_by_its_supervisors_own_proof() {
         let dir = tempfile::tempdir().unwrap();
         let terminals = Terminals::new();
-        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
-        terminals.spawn(sink, "lost:shell", PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] }).unwrap();
-        terminals.set_title("lost:shell", "Long job");
-        assert!(terminals.supervised_work().is_empty(), "a running launch can be carried");
-        let owner = terminals.panes.lock().unwrap()["lost:shell"].group.owner().cloned().unwrap();
+        let owner = sleeping(&terminals, &dir, "settles:shell");
+        let shell = owner.pid().unwrap() as i32;
         owner.lose_for_test();
-        wait_for("the observer to let go", || !owner.carriable());
-        assert_eq!(terminals.supervised_work(), ["Long job"]);
+        wait_for("the supervisor's proof", || !owner.pending());
+        assert!(gone(shell), "the supervisor ended the launch before proving it empty");
+        assert!(terminals.supervised_work().is_empty());
+        terminals.freeze(Duration::from_secs(2)).map(|_| ()).expect("nothing holds the handover");
+        terminals.thaw();
+    }
+
+    /// #467/#765: a launch whose supervisor died cannot be settled by anything
+    /// the runtime observes. It holds the handover, is named, by its pane,
+    /// for the reader, is never let go of by itself, and only the reader's
+    /// explicit release (Update now / Restart now naming it) clears it.
+    #[test]
+    fn a_launch_lost_for_good_holds_the_handover_until_the_reader_releases_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let owner = sleeping(&terminals, &dir, "lost:shell");
+        let _running = sleeping(&terminals, &dir, "running:shell");
+        let shell = owner.pid().unwrap() as i32;
+        struct Kill(i32);
+        impl Drop for Kill { fn drop(&mut self) { unsafe { libc::kill(self.0, libc::SIGKILL); } } }
+        let _orphan = Kill(shell);
+        // Killed outright, the supervisor ends nothing: its shell runs on.
+        unsafe { libc::kill(owner.supervisor_for_test().unwrap() as i32, libc::SIGKILL); }
+        wait_for("the dead supervisor to be reaped", || owner.lost_for_good());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(owner.pending(), "nothing the runtime observes settles it");
+        assert!(!gone(shell), "its shell runs on, unowned");
+        assert_eq!(terminals.supervised_work(), [SupervisedWork { id: "lost:shell".into(), title: "Long job".into(), lost: true }]);
         let error = terminals.freeze(Duration::from_secs(2)).map(|_| ()).unwrap_err();
         assert!(error.is::<SupervisedTerminals>(), "{error:#}");
         assert!(!*terminals.frozen.lock().unwrap(), "a refused freeze lets terminals open again");
-        assert!(owner.pending(), "nothing was stopped or forgotten");
+        assert_eq!(terminals.release_lost("running:shell"), 0, "a running launch is never released");
+        assert_eq!(terminals.release_lost("lost:shell"), 1);
+        assert!(!owner.pending() && terminals.supervised_work().is_empty());
+        terminals.freeze(Duration::from_secs(2)).map(|_| ()).expect("released, it holds nothing up");
+        terminals.thaw();
+        terminals.stop_owned_groups(Duration::from_secs(10));
     }
 }
 

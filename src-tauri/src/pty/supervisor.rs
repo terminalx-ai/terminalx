@@ -29,28 +29,32 @@ fn helper_executable() -> io::Result<PathBuf> {
     Ok(PathBuf::from("/proc/self/exe"))
 }
 
-/// The helper runs from the executable's pre-initialisation array: before
-/// any shared library's constructor, Rust's `main` or libtest, so before
-/// anything could start a thread, which `linux::preflight` requires of a
-/// supervisor. (The desktop links GTK and WebKit, whose libraries can start
-/// threads before `main`; tests have libtest's own `main`.) [`dispatch`],
-/// at the top of both mains, refers to this so the linker keeps it, and
-/// still dispatches should it not have run.
+/// Run the helper, and exit, when this process is one. Meant for an
+/// executable's pre-initialisation array: that runs before any shared
+/// library's constructor, Rust's `main` or libtest, so before anything could
+/// start a thread, which `linux::preflight` requires of a supervisor. (The
+/// desktop links GTK and WebKit, whose libraries can start threads before
+/// `main`; tests have libtest's own `main`.) Each executable lists it there
+/// itself: a shared object cannot have that array, and this crate is also
+/// built as one. [`dispatch`], at the top of both mains, still dispatches
+/// should it not have run.
+pub(crate) extern "C" fn dispatch_before_main() {
+    let Ok(cmdline) = std::fs::read("/proc/self/cmdline") else { return };
+    let mut args = cmdline.split(|byte| *byte == 0).skip(1);
+    if args.next() != Some(protocol::HELPER.as_bytes()) { return; }
+    let launch = args.next().and_then(|arg| std::str::from_utf8(arg).ok()).and_then(|arg| Uuid::parse_str(arg).ok());
+    let rest = args.filter(|arg| !arg.is_empty()).count();
+    let code = match (launch, rest) { (Some(launch), 0) => linux::run(launch), _ => 119 };
+    // SAFETY: the helper owns no Rust runtime state that needs unwinding.
+    unsafe { libc::_exit(code) }
+}
+
+/// A test executable built from this crate (the lib's, and the serve
+/// control target's) lists the dispatch itself.
+#[cfg(test)]
 #[used]
 #[link_section = ".preinit_array"]
-static DISPATCH: extern "C" fn() = {
-    extern "C" fn dispatch_before_main() {
-        let Ok(cmdline) = std::fs::read("/proc/self/cmdline") else { return };
-        let mut args = cmdline.split(|byte| *byte == 0).skip(1);
-        if args.next() != Some(protocol::HELPER.as_bytes()) { return; }
-        let launch = args.next().and_then(|arg| std::str::from_utf8(arg).ok()).and_then(|arg| Uuid::parse_str(arg).ok());
-        let rest = args.filter(|arg| !arg.is_empty()).count();
-        let code = match (launch, rest) { (Some(launch), 0) => linux::run(launch), _ => 119 };
-        // SAFETY: the helper owns no Rust runtime state that needs unwinding.
-        unsafe { libc::_exit(code) }
-    }
-    dispatch_before_main
-};
+static TEST_DISPATCH: extern "C" fn() = dispatch_before_main;
 
 /// portable-pty's public environment iterator converts to UTF-8 and drops raw
 /// Unix names/values. Keep a single complete OsString snapshot instead. The
@@ -151,7 +155,6 @@ fn failure(stage: &str, errno: i32, then: &str) -> String {
 }
 
 pub(crate) fn dispatch() -> Option<i32> {
-    std::hint::black_box(&DISPATCH);
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() != Some(std::ffi::OsStr::new(protocol::HELPER)) { return None; }
     let launch = args.next().and_then(|arg| arg.to_str().and_then(|s| Uuid::parse_str(s).ok()));
@@ -206,19 +209,25 @@ pub(crate) enum Parked {
 
 /// The helper process an observer watches: one it spawned, or one the
 /// runtime it replaced spawned in this same process (#765).
-enum Helper { Spawned(Child), Adopted(u32) }
+enum Helper { Spawned(Child), Adopted { pid: u32, exited: Option<Option<i32>> } }
 
 impl Helper {
-    fn id(&self) -> u32 { match self { Self::Spawned(child) => child.id(), Self::Adopted(pid) => *pid } }
+    fn id(&self) -> u32 { match self { Self::Spawned(child) => child.id(), Self::Adopted { pid, .. } => *pid } }
 
-    /// Reap the helper if it has exited.
-    fn try_wait(&mut self) -> io::Result<Option<()>> {
+    /// Reap the helper if it has exited: its exit code, `None` for a signal.
+    /// Once reaped, the same answer again.
+    fn try_wait(&mut self) -> io::Result<Option<Option<i32>>> {
         match self {
-            Self::Spawned(child) => child.try_wait().map(|status| status.map(|_| ())),
-            Self::Adopted(pid) => {
+            Self::Spawned(child) => child.try_wait().map(|status| status.map(|status| status.code())),
+            Self::Adopted { exited: Some(code), .. } => Ok(Some(*code)),
+            Self::Adopted { pid, exited } => {
                 let mut status = 0;
                 let reaped = unsafe { libc::waitpid(*pid as libc::pid_t, &mut status, libc::WNOHANG) };
-                if reaped < 0 { Err(io::Error::last_os_error()) } else { Ok((reaped > 0).then_some(())) }
+                if reaped < 0 { return Err(io::Error::last_os_error()); }
+                if reaped == 0 { return Ok(None); }
+                let code = libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status));
+                *exited = Some(code);
+                Ok(Some(code))
             }
         }
     }
@@ -241,6 +250,8 @@ struct State {
     park: Park,
     /// The observer is in its channel loop, where it can be held still.
     observing: bool,
+    /// The helper has exited and been reaped: nothing more can be learned.
+    reaped: bool,
 }
 
 pub(super) struct Owner {
@@ -260,7 +271,7 @@ impl Owner {
     pub(super) fn reserve() -> Arc<Self> {
         Arc::new(Self { launch: Uuid::new_v4(), state: Mutex::new(State {
             phase: Phase::Reserved, supervisor: None, shell: None,
-            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false,
+            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false, reaped: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
             #[cfg(test)] observer_reaped: AtomicBool::new(false), })
     }
@@ -287,6 +298,24 @@ impl Owner {
             // Held where it could not be carried: let it go on at once.
             None => { state.park = Park::Running; self.changed.notify_all(); Parked::Not }
         }
+    }
+
+    /// Give up a lost launch whose helper has been reaped, at the reader's
+    /// explicit request: there is no channel, witness or child left to learn
+    /// anything from. Processes it started may still run, unowned; the
+    /// caller says so. True when released.
+    pub(super) fn release_lost(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.phase != Phase::Lost || !state.reaped { return false; }
+        state.phase = Phase::Extinct;
+        self.changed.notify_all();
+        true
+    }
+
+    /// Lost, with its helper gone: only the reader can release it now.
+    pub(super) fn lost_for_good(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.phase == Phase::Lost && state.reaped
     }
 
     /// Let a held observer go on: the handover was called off.
@@ -333,13 +362,13 @@ impl Owner {
         let phase = match carried.phase { CarriedPhase::Running => Phase::Running, CarriedPhase::Stopping => Phase::Stopping, CarriedPhase::Unconfirmed => Phase::Unconfirmed };
         let owner = Arc::new(Self { launch, state: Mutex::new(State {
             phase, supervisor: Some(carried.supervisor), shell: Some(carried.shell), shell_status: carried.shell_status,
-            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true,
+            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true, reaped: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
             #[cfg(test)] observer_reaped: AtomicBool::new(false), });
         let observer = owner.clone();
         let resume = Resume { ready: true, empty_received: carried.empty_received, launch_sent: true, sent_claim: carried.sent_claim };
         std::thread::Builder::new().name("pty-supervisor".into())
-            .spawn(move || observer.observe(Helper::Adopted(carried.supervisor), socket, Vec::new(), resume))?;
+            .spawn(move || observer.observe(Helper::Adopted { pid: carried.supervisor, exited: None }, socket, Vec::new(), resume))?;
         Ok(owner)
     }
 
@@ -360,6 +389,9 @@ impl Owner {
     /// Lose the channel as a protocol fault would: ownership stays, unproven.
     #[cfg(test)]
     pub(super) fn lose_for_test(&self) { self.lost("lost for a test"); }
+
+    #[cfg(test)]
+    pub(super) fn supervisor_for_test(&self) -> Option<u32> { self.state.lock().unwrap().supervisor }
 
     pub(super) fn pending(&self) -> bool { self.state.lock().unwrap().phase != Phase::Extinct }
 
@@ -522,17 +554,24 @@ impl Owner {
         drop(socket);
         let until = Instant::now() + Duration::from_secs(1);
         loop {
-            if let Ok(Some(_)) = child.try_wait() {
+            if let Ok(Some(code)) = child.try_wait() {
                 #[cfg(test)] self.observer_reaped.store(true, Ordering::SeqCst);
+                let mut state = self.state.lock().unwrap();
+                state.reaped = true;
                 if delivery == LaunchDelivery::NoLaunch {
                     // Covers failure after the loop's live check as well
                     // as missing pidfd. Only authoritative exact-helper reap
                     // plus known non-delivery can settle without a witness.
-                    // Sent/uncertain Launch remains Lost even after reap.
-                    let mut state = self.state.lock().unwrap();
                     state.phase = Phase::Extinct;
-                    self.changed.notify_all();
+                } else if code == Some(linux::EMPTY_AFTER_LOSS) && state.phase != Phase::Extinct {
+                    // The helper lost its channel, stopped everything and
+                    // exited only once its own all-child wait found nothing:
+                    // the exact helper's reaped status is that proof. Any
+                    // other exit (a signal, a crash) leaves the launch Lost.
+                    log::info!("a supervised launch whose channel was lost was proved empty by its supervisor");
+                    state.phase = Phase::Extinct;
                 }
+                self.changed.notify_all();
                 return;
             }
             if !self.pending() && Instant::now() >= until {
@@ -574,6 +613,9 @@ impl Owner {
                     self.changed.notify_all();
                     return;
                 }
+                // It lost the channel from its side, cleaned up, and found
+                // nothing left; the reap loop after this one settles it.
+                Ok(Some(Some(linux::EMPTY_AFTER_LOSS))) => { self.lost("supervisor ended its launch after losing its channel"); return; }
                 _ => { self.lost("supervisor exited before acknowledged release"); return; }
             }
             // A handover holds the observer here, between whole exchanges:
