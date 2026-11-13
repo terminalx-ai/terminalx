@@ -79,6 +79,8 @@ User-facing webview choices are under `preferences`, for example:
     "windowCeiling": 85,
     "stallMinutes": 10,
     "reviewDiffLines": 400,
+    "triesPerPiece": 3,
+    "effortCeiling": "high",
     "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12, "budgetPoints": 15 } }
   }
 }
@@ -90,9 +92,13 @@ changed lines a result is read by a verifier though its commands pass (`reviewDi
 1 to 100000), how many workers run at once (per run, and across every run of the app), each
 run's budget (dollars for workers on an API key; points of a usage window, and the window
 level past which nothing new starts, for workers on a subscription), and after how many
-minutes of nothing a worker counts as stalled. A project may answer for itself under
+minutes of nothing a worker counts as stalled, and how far a piece that falls short climbs:
+the most tries it gets, the first included (`triesPerPiece`, 1 to 6), and the effort level
+escalation raises it no higher than (`effortCeiling`: `low`, `medium`, `high`, `xhigh` or
+`max`). A run keeps the tries and effort ceiling it was created with; `runs show --json`
+reports them as `maxTries` and `effortCeiling`. A project may answer for itself under
 `projects`, by its path, for approval, the piece limit, the worker mode, the diff threshold,
-its routing rows and the three budget values; a setting it leaves out follows the app-wide
+the tries per piece, the effort ceiling, its routing rows and the three budget values; a setting it leaves out follows the app-wide
 value. Each budget value, and the window level, may be `"none"` for No limit. These are the person's to change, in Settings → Orchestrator: do not edit
 them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
 settings page in the app; the `runs` commands work either way.

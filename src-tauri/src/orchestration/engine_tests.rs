@@ -11,7 +11,7 @@ use crate::store::settings::Cap;
 use super::engine::{self, Activity, By, Cost, EngineError, Host, Lead, Resume, Started, VerifierNow, WorkerNow};
 use super::verify::{self, Checked, Facts, Gate, GateResult};
 use super::plan::Plan;
-use super::ladder::Step;
+use super::ladder::{Ladder, Step};
 use super::routing::Tier;
 use super::{store, Hold, Outcome, Piece, PieceState, Run, RunState, SessionRef, TryReport};
 use crate::status::usage::UsageWindow;
@@ -807,6 +807,58 @@ fn a_failing_piece_follows_the_ladder_and_is_blocked_after_three_tries() {
     let back = engine::start(&host, id).unwrap();
     assert_eq!((back.run.state, back.run.reason.clone(), back.started), (RunState::Running, None, vec!["docs".to_string()]));
     assert_eq!(back.run.piece("cli").unwrap().tries[2].outcome, Some(Outcome::Done));
+}
+
+#[test]
+fn ladder_of_a_run_is_the_projects_when_it_was_created_and_a_later_settings_change_leaves_it() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    {
+        let mut settings = host.settings.lock().unwrap();
+        settings.require_approval = false;
+        // The app says two tries at high; the project says five at medium, and wins.
+        settings.tries_per_piece = 2;
+        settings.effort_ceiling = "high".into();
+        let project = settings.projects.entry("/repo".into()).or_default();
+        project.tries_per_piece = Some(5);
+        project.effort_ceiling = Some("medium".into());
+    }
+    let plan: Plan = serde_json::from_value(json!({"goal": "Move CLI reads", "pieces": [{"id": "cli", "title": "Move CLI code", "kind": "scoped-code", "doneChecks": [{"type": "command", "run": "cargo t control"}], "owns": ["src/cli.rs"]}]})).unwrap();
+    let run = engine::create(&host, &plan, "lead", None).unwrap();
+    assert_eq!(run.ladder, Ladder::new(5, "medium"));
+    let id = run.id.as_str();
+    engine::start(&host, id).unwrap();
+
+    // The settings change while it runs: one try, raised as high as max.
+    {
+        let mut settings = host.settings.lock().unwrap();
+        settings.tries_per_piece = 1;
+        settings.effort_ceiling = "max".into();
+        settings.projects.clear();
+    }
+    // Try 1 fails: with one try it would be blocked, and with max its effort would rise to high.
+    // The run's own ladder holds: sonnet at medium is already at its ceiling, so try 2 is a plain retry.
+    host.reports("cli", Status::Failed, "2 tests fail.");
+    assert_eq!(engine::worker_turn_ended(&host, "w1-cli").as_deref(), Some(id));
+    let stored = store::get(id).unwrap();
+    let piece = stored.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.model.as_str(), piece.effort.as_deref(), piece.tries.last().map(|attempt| attempt.step)), (PieceState::Queued, "sonnet", Some("medium"), Some(Step::Retry)));
+    assert_eq!(stored.ladder, Ladder::new(5, "medium"));
+    let shown = engine::shown(&stored);
+    assert_eq!((&shown["maxTries"], &shown["effortCeiling"]), (&json!(5), &json!("medium")));
+    // Stored and read back, the run keeps it.
+    let read = store::get(id).unwrap();
+    assert_eq!(serde_json::to_value(&read).unwrap()["maxTries"], 5);
+
+    // A run created now takes what the settings say now.
+    let later = engine::create(&host, &plan, "another-lead", None).unwrap();
+    assert_eq!(later.ladder, Ladder::new(1, "max"));
+
+    // A run stored before the ladder was kept reads as three tries and high.
+    let mut old = serde_json::to_value(&stored).unwrap();
+    old.as_object_mut().unwrap().remove("maxTries");
+    old.as_object_mut().unwrap().remove("effortCeiling");
+    assert_eq!(serde_json::from_value::<Run>(old).unwrap().ladder, Ladder::default());
 }
 
 #[test]

@@ -133,6 +133,14 @@ pub struct OrchestratorSettings {
     /// verifier even when its commands pass (PRO-278, `orchestration::verify`).
     #[serde(deserialize_with = "review_diff_lines")]
     pub review_diff_lines: u32,
+    /// The most tries a piece gets, the first included, before it is
+    /// blocked (`orchestration::ladder`). A run keeps the value it was created with.
+    #[serde(deserialize_with = "tries_per_piece")]
+    pub tries_per_piece: u32,
+    /// Escalation raises a piece's effort no higher than this, one of
+    /// `orchestration::routing::EFFORTS`. A run keeps the value it was created with.
+    #[serde(deserialize_with = "effort_ceiling")]
+    pub effort_ceiling: String,
     /// The rows of the routing table a person changed (PRO-275): which tier
     /// and effort a kind of piece starts on, per agent. A row that is not
     /// here is the built-in one (`orchestration::routing::default_route`).
@@ -160,6 +168,10 @@ pub struct ProjectOrchestratorSettings {
     pub window_ceiling: Option<Cap>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_review_diff_lines")]
     pub review_diff_lines: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_tries_per_piece")]
+    pub tries_per_piece: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_effort_ceiling")]
+    pub effort_ceiling: Option<String>,
     /// The project's own rows of the routing table; the rest follow the app's.
     #[serde(skip_serializing_if = "RoutingOverrides::is_empty")]
     pub routing: RoutingOverrides,
@@ -185,6 +197,8 @@ pub struct OrchestratorLimits {
     pub window_ceiling: Cap,
     pub stall_minutes: u32,
     pub review_diff_lines: u32,
+    pub tries_per_piece: u32,
+    pub effort_ceiling: String,
     /// The routing table in force: every kind, every agent.
     pub routing: RoutingTable,
 }
@@ -281,6 +295,12 @@ pub fn valid_stall_minutes(value: u32) -> bool {
     (1..=MAX_STALL_MINUTES).contains(&value)
 }
 
+pub use crate::orchestration::ladder::{valid_ceiling, valid_tries, DEFAULT_EFFORT_CEILING, DEFAULT_MAX_TRIES as DEFAULT_TRIES_PER_PIECE, MAX_TRIES as MAX_TRIES_PER_PIECE, MIN_TRIES as MIN_TRIES_PER_PIECE};
+
+fn read_ceiling(value: &serde_json::Value, valid: fn(&str) -> bool) -> Option<String> {
+    value.as_str().filter(|effort| valid(effort)).map(str::to_owned)
+}
+
 fn read_u32(value: &serde_json::Value, valid: fn(u32) -> bool) -> Option<u32> {
     value.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| valid(*n))
 }
@@ -308,6 +328,10 @@ bounded!(budget_dollars, Cap, read_cap, valid_dollars, Cap::At(DEFAULT_BUDGET_DO
 bounded!(budget_points, Cap, read_cap, valid_percent, Cap::At(DEFAULT_BUDGET_POINTS));
 bounded!(window_ceiling, Cap, read_cap, valid_percent, Cap::At(DEFAULT_WINDOW_CEILING));
 bounded!(stall_minutes, u32, read_u32, valid_stall_minutes, DEFAULT_STALL_MINUTES);
+bounded!(tries_per_piece, u32, read_u32, valid_tries, DEFAULT_TRIES_PER_PIECE);
+bounded!(project_tries_per_piece, u32, read_u32, valid_tries);
+bounded!(effort_ceiling, String, read_ceiling, valid_ceiling, DEFAULT_EFFORT_CEILING.into());
+bounded!(project_effort_ceiling, String, read_ceiling, valid_ceiling);
 bounded!(project_budget_dollars, Cap, read_cap, valid_dollars);
 bounded!(project_budget_points, Cap, read_cap, valid_percent);
 bounded!(project_window_ceiling, Cap, read_cap, valid_percent);
@@ -366,6 +390,8 @@ impl Default for OrchestratorSettings {
             window_ceiling: Cap::At(DEFAULT_WINDOW_CEILING),
             stall_minutes: DEFAULT_STALL_MINUTES,
             review_diff_lines: DEFAULT_REVIEW_DIFF_LINES,
+            tries_per_piece: DEFAULT_TRIES_PER_PIECE,
+            effort_ceiling: DEFAULT_EFFORT_CEILING.into(),
             routing: Default::default(),
             projects: Default::default(),
         }
@@ -387,6 +413,8 @@ impl OrchestratorSettings {
             window_ceiling: project.and_then(|p| p.window_ceiling).unwrap_or(self.window_ceiling),
             stall_minutes: self.stall_minutes,
             review_diff_lines: project.and_then(|p| p.review_diff_lines).unwrap_or(self.review_diff_lines),
+            tries_per_piece: project.and_then(|p| p.tries_per_piece).unwrap_or(self.tries_per_piece),
+            effort_ceiling: project.and_then(|p| p.effort_ceiling.clone()).unwrap_or_else(|| self.effort_ceiling.clone()),
             routing: RoutingTable::resolved(&self.routing, project.map(|p| &p.routing)),
         }
     }
@@ -736,6 +764,56 @@ mod tests {
         assert!(!legacy.experimental.session_cost);
         let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
         assert!(cost.experimental.session_cost && !cost.experimental.native_codex && !cost.experimental.orchestrator_runs);
+    }
+
+    #[test]
+    fn tries_per_piece_and_effort_ceiling_default_bound_write_back_and_follow_a_project() {
+        // A file written before them: three tries, raised no higher than high.
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        let limits = legacy.orchestrator.for_project("/repo");
+        assert_eq!((limits.tries_per_piece, limits.effort_ceiling.as_str()), (3, "high"));
+
+        // App-wide values, and a project's own on top: what it leaves out follows the app.
+        let set: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {
+            "triesPerPiece": 5, "effortCeiling": "xhigh",
+            "projects": {"/repo": {"triesPerPiece": 2, "effortCeiling": "medium"}, "/half": {"effortCeiling": "low"}},
+        }})).unwrap();
+        let repo = set.orchestrator.for_project("/repo");
+        assert_eq!((repo.tries_per_piece, repo.effort_ceiling.as_str()), (2, "medium"));
+        let half = set.orchestrator.for_project("/half");
+        assert_eq!((half.tries_per_piece, half.effort_ceiling.as_str()), (5, "low"));
+        let other = set.orchestrator.for_project("/other");
+        assert_eq!((other.tries_per_piece, other.effort_ceiling.as_str()), (5, "xhigh"));
+
+        // Written back under the same names, and read again unchanged.
+        let written = serde_json::to_value(&set).unwrap();
+        assert_eq!((&written["orchestrator"]["triesPerPiece"], &written["orchestrator"]["effortCeiling"]), (&serde_json::json!(5), &serde_json::json!("xhigh")));
+        assert_eq!(written["orchestrator"]["projects"]["/repo"], serde_json::json!({"triesPerPiece": 2, "effortCeiling": "medium"}));
+        assert_eq!(written["orchestrator"]["projects"]["/half"], serde_json::json!({"effortCeiling": "low"}));
+        assert_eq!(serde_json::from_value::<Settings>(written).unwrap().orchestrator, set.orchestrator);
+        // The limits in force carry them under the same names.
+        let shown = serde_json::to_value(&repo).unwrap();
+        assert_eq!((&shown["triesPerPiece"], &shown["effortCeiling"]), (&serde_json::json!(2), &serde_json::json!("medium")));
+
+        // Each bound and each level is taken; anything else is the default app-wide, and no value for a project.
+        for tries in 1..=6 {
+            let at: OrchestratorSettings = serde_json::from_value(serde_json::json!({"triesPerPiece": tries})).unwrap();
+            assert_eq!(at.tries_per_piece, tries);
+        }
+        for effort in crate::orchestration::routing::EFFORTS {
+            let at: OrchestratorSettings = serde_json::from_value(serde_json::json!({"effortCeiling": effort})).unwrap();
+            assert_eq!(at.effort_ceiling, effort);
+        }
+        for (tries, effort) in [(serde_json::json!(0), serde_json::json!("none")), (serde_json::json!(7), serde_json::json!("High")), (serde_json::json!(2.5), serde_json::json!(3)), (serde_json::json!("three"), serde_json::Value::Null), (serde_json::json!(-1), serde_json::json!(""))] {
+            let damaged: OrchestratorSettings = serde_json::from_value(serde_json::json!({
+                "triesPerPiece": tries, "effortCeiling": effort,
+                "projects": {"/repo": {"triesPerPiece": tries, "effortCeiling": effort}},
+            })).unwrap();
+            assert_eq!((damaged.tries_per_piece, damaged.effort_ceiling.as_str()), (3, "high"), "{tries} {effort}");
+            assert!(damaged.projects["/repo"].is_empty(), "{tries} {effort}");
+            let repo = damaged.for_project("/repo");
+            assert_eq!((repo.tries_per_piece, repo.effort_ceiling.as_str()), (3, "high"));
+        }
     }
 
     #[test]

@@ -405,6 +405,7 @@ mod tests {
         Run {
             id: "run-1".into(),
             lead: SessionRef { session_id: "lead".into(), tab_id: None },
+            ladder: Default::default(),
             project_path: "/repo".into(),
             goal: "g".into(),
             state: RunState::Running,

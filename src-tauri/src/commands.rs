@@ -5119,6 +5119,12 @@ pub struct OrchestratorPatch {
     /// Over how many changed lines a result is read by a verifier.
     #[serde(default, deserialize_with = "given")]
     review_diff_lines: Option<Option<u32>>,
+    /// Tries per piece, the first included (1 to 6). A run keeps the value it was created with.
+    #[serde(default, deserialize_with = "given")]
+    tries_per_piece: Option<Option<u32>>,
+    /// Raise effort no higher than this level (low, medium, high, xhigh or max).
+    #[serde(default, deserialize_with = "given")]
+    effort_ceiling: Option<Option<String>>,
     /// Cells of the routing table, by kind and then by agent. A cell given
     /// as `null` loses its override: it follows the app again (for a
     /// project) or the built-in table (for the app).
@@ -5136,7 +5142,13 @@ fn given<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserializer: D)
 
 #[tauri::command]
 pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
-    use crate::store::settings::{valid_dollars, valid_percent, valid_stall_minutes, valid_workers, MAX_BUDGET_DOLLARS, MAX_PIECE_LIMIT, MAX_REVIEW_DIFF_LINES, MAX_STALL_MINUTES, MAX_WORKERS, WORKER_MODES};
+    use crate::store::settings::{valid_ceiling, valid_dollars, valid_percent, valid_stall_minutes, valid_tries, valid_workers, MAX_BUDGET_DOLLARS, MAX_PIECE_LIMIT, MAX_REVIEW_DIFF_LINES, MAX_STALL_MINUTES, MAX_TRIES_PER_PIECE, MAX_WORKERS, MIN_TRIES_PER_PIECE, WORKER_MODES};
+    if let Some(Some(tries)) = patch.tries_per_piece.filter(|tries| tries.is_some_and(|tries| !valid_tries(tries))) {
+        return Err(format!("A piece gets from {MIN_TRIES_PER_PIECE} to {MAX_TRIES_PER_PIECE} tries, not {tries}."));
+    }
+    if let Some(Some(effort)) = patch.effort_ceiling.as_ref().filter(|effort| effort.as_deref().is_some_and(|effort| !valid_ceiling(effort))) {
+        return Err(format!("{effort} is not an effort level: use {}.", crate::orchestration::routing::EFFORTS.join(", ")));
+    }
     if let Some(Some(lines)) = patch.review_diff_lines {
         if !(1..=MAX_REVIEW_DIFF_LINES).contains(&lines) {
             return Err(format!("A diff is read by a verifier over 1 to {MAX_REVIEW_DIFF_LINES} changed lines, not {lines}."));
@@ -5204,6 +5216,8 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
                 return Err("Worker limits and the stall time are set for the whole app, not for one project.".into());
             }
             if let Some(value) = patch.review_diff_lines { project.review_diff_lines = value; }
+            if let Some(value) = patch.tries_per_piece { project.tries_per_piece = value; }
+            if let Some(value) = patch.effort_ceiling { project.effort_ceiling = value; }
             // A project that follows the app in everything has no entry of its own.
             if project.is_empty() { orchestrator.projects.remove(&path); }
         }
@@ -5222,6 +5236,8 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             if let Some(value) = patch.budget_points { orchestrator.budget_points = value.ok_or("Say how many points a run may use.")?; }
             if let Some(value) = patch.window_ceiling { orchestrator.window_ceiling = value.ok_or("Say how full a window may get.")?; }
             if let Some(value) = patch.review_diff_lines { orchestrator.review_diff_lines = value.ok_or("Say over how many changed lines a result is read by a verifier.")?; }
+            if let Some(value) = patch.tries_per_piece { orchestrator.tries_per_piece = value.ok_or("Say how many tries a piece gets.")?; }
+            if let Some(value) = patch.effort_ceiling { orchestrator.effort_ceiling = value.ok_or("Say how high effort may be raised.")?; }
         }
     }
     store::settings::save(&settings).map_err(err)?;

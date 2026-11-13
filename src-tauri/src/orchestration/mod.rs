@@ -817,6 +817,11 @@ pub struct Run {
     /// Its worker limit and budget (PRO-280).
     #[serde(default)]
     pub limits: budget::RunLimits,
+    /// Its tries per piece and effort ceiling (`maxTries`, `effortCeiling`),
+    /// as the project had them set when the run was created: a later change
+    /// to the settings leaves this run's ladder as it was.
+    #[serde(flatten)]
+    pub ladder: ladder::Ladder,
     /// What it has used, as of its last refresh.
     #[serde(default)]
     pub usage: budget::RunUsage,
