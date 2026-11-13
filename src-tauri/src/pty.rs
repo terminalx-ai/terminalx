@@ -290,9 +290,20 @@ impl OwnedGroup {
         // until the supervisor proves the launch has no process left.
         #[cfg(target_os = "linux")]
         if let Some(owner) = self.owner() { return owner.pid(); }
+        // macOS keeps main's answer, the leader's process group: the session
+        // census below is strict, and on a busy Mac it could leave a stop
+        // unconfirmed (Darwin census work is on its own hold, #467).
+        #[cfg(target_os = "macos")]
+        {
+            let mut owned = self.0.lock().unwrap();
+            if owned.is_some_and(|pid| !group_alive(pid)) { *owned = None; }
+            *owned
+        }
+        #[cfg(not(target_os = "macos"))]
         self.pid_with(settled_session_jobs)
     }
 
+    #[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
     fn pid_with(&self, census: impl FnOnce(u32) -> Result<Vec<(u32, u32)>>) -> Option<u32> {
         let mut owned = self.0.lock().unwrap();
         if let Some(pid) = *owned {
@@ -308,6 +319,15 @@ impl OwnedGroup {
         #[cfg(target_os = "linux")]
         if let Some(owner) = self.owner() { let _ = force; owner.stop(); return; }
         let mut owned = self.0.lock().unwrap();
+        // macOS: main's signal, to the leader's process group only.
+        #[cfg(target_os = "macos")]
+        if let Some(pid) = *owned {
+            if !group_alive(pid) { *owned = None; return; }
+            // A reaped leader's PID is not authority to signal an unrelated
+            // process. Only the PTY's original process group is owned here.
+            unsafe { libc::kill(-(pid as i32), if force { libc::SIGKILL } else { libc::SIGTERM }); }
+        }
+        #[cfg(not(target_os = "macos"))]
         if let Some(pid) = *owned {
             #[cfg(unix)]
             match settled_session_jobs(pid) {
@@ -356,6 +376,8 @@ fn group_alive(pid: u32) -> bool {
 /// rarely gives a clean one at the first try. Each try is a whole new
 /// census: an indeterminate one still never counts as empty.
 #[cfg(unix)]
+// Unused on macOS, which keeps main's leader-group stop (#467 follow-up).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn settled_session_jobs(session: u32) -> Result<Vec<(u32, u32)>> {
     const TRIES: usize = 64;
     let mut last = None;
@@ -373,11 +395,15 @@ fn settled_session_jobs(session: u32) -> Result<Vec<(u32, u32)>> { session_jobs(
 /// Enumerate before signalling: once the shell exits its jobs may be reparented,
 /// but they retain this session. An inspection failure is not evidence of exit.
 #[cfg(unix)]
+// Unused on macOS, which keeps main's leader-group stop (#467 follow-up).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn session_jobs(session: u32) -> Result<Vec<(u32, u32)>> {
     session_jobs_from_pids(session, process_ids()?)
 }
 
 #[cfg(unix)]
+// Unused on macOS, which keeps main's leader-group stop (#467 follow-up).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn session_jobs_from_pids(session: u32, pids: Vec<i32>) -> Result<Vec<(u32, u32)>> {
     let mut jobs = Vec::new();
     let started = Instant::now();
@@ -399,6 +425,8 @@ fn session_jobs_from_pids(session: u32, pids: Vec<i32>) -> Result<Vec<(u32, u32)
 // Do not use ps here: it can silently omit a sampled PID that vanishes while
 // formatting the table, hiding precisely the churn that must refuse retirement.
 #[cfg(target_os = "macos")]
+// Unused on macOS, which keeps main's leader-group stop (#467 follow-up).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn process_ids() -> Result<Vec<i32>> {
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     anyhow::ensure!(count > 0, "cannot size process census");
