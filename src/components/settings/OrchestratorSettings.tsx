@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { errorMessage, orchestration } from "@/lib/api";
-import { modeLabel, PERMISSION_MODES } from "@/lib/models";
+import { EFFORT_LABEL, modeLabel, PERMISSION_MODES } from "@/lib/models";
+import { ROUTE_EFFORTS } from "@/lib/orchestration";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { useSessionStore } from "@/lib/sessions";
 import type { Cap, OrchestratorPatch, OrchestratorSettings as Settings } from "@/types/orchestration";
@@ -17,6 +18,16 @@ const numberClass = "h-7 w-16 rounded-md border border-hairline bg-background px
 
 function modeName(mode: string): string {
   return PERMISSION_MODES.some((known) => known.id === mode) ? modeLabel(mode) : mode;
+}
+
+function effortName(effort: string): string {
+  return EFFORT_LABEL[effort] ?? effort;
+}
+
+/** The levels a ceiling can be: every routing effort, and the stored one should the file name another. */
+function ceilingChoices(...stored: (string | undefined)[]): string[] {
+  const extra = stored.filter((effort): effort is string => !!effort && !ROUTE_EFFORTS.includes(effort));
+  return [...ROUTE_EFFORTS, ...new Set(extra)];
 }
 
 /** The settings as stored, read again whenever the file changes, and one way to change them. */
@@ -98,14 +109,16 @@ function NumberField({ value, placeholder, disabled, label, min, max, step = 1, 
 
 /** A budget or the window level (PRO-335): a number, or No limit with the switch beside it; off, `offText` (when given) stands in for the field.
  * Turned back on, the app-wide field returns to `fallback`; a repository's field (with a `placeholder`) follows the default again. */
-function CapField({ value, placeholder, label, offLabel, offText, fallback, disabled, onSave, ...bounds }: {
+function CapField({ value, placeholder, label, offLabel, offText, fallback, disabled, stack, onSave, ...bounds }: {
   value: Cap | undefined; placeholder?: string; label: string; offLabel: string; offText?: string; fallback?: number; disabled: boolean;
+  /** The switch under the field, for a half-width card. */
+  stack?: boolean;
   min: number; max: number; step?: number; prefix?: string; suffix?: string; onSave: (value: Cap | null) => void;
 }) {
   const off = value === "none";
   return (
-    <span className="inline-flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
-      {off ? offText && <span className="text-xs text-muted-foreground">{offText}</span> : (
+    <span className={stack ? "inline-flex flex-col items-end gap-1" : "inline-flex flex-wrap items-center justify-end gap-x-3 gap-y-1"}>
+      {off ? offText && <span className={stack ? "max-w-[9.5rem] text-right text-xs text-muted-foreground" : "text-xs text-muted-foreground"}>{offText}</span> : (
         <NumberField label={label} value={value} placeholder={placeholder} disabled={disabled} {...bounds} onSave={onSave} />
       )}
       <label className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -125,6 +138,10 @@ function capPlaceholder(cap: Cap | undefined): string {
 const MAX_WORKERS = 50;
 const MAX_DOLLARS = 10000;
 const MAX_STALL_MINUTES = 240;
+/** The most tries a piece takes (the runtime's bound on `triesPerPiece`; it defaults to 3 there). */
+const MAX_TRIES = 6;
+/** The effort a retry is raised no higher than unless set (the runtime's default for `effortCeiling`). */
+const DEFAULT_EFFORT_CEILING = "high";
 /** What a budget turned back on starts from: the defaults (`DEFAULT_BUDGET_*`, `DEFAULT_WINDOW_CEILING` in store/settings.rs). */
 const DEFAULT_DOLLARS = 15;
 const DEFAULT_POINTS = 25;
@@ -132,55 +149,85 @@ const DEFAULT_CEILING = 85;
 /** What the window level says when it is off, here and in a repository. */
 const CEILING_OFF = "Off: a run can use the whole window";
 
+/** A titled group of rows on a raised card, as design 18.05 has them. */
+function Card({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div role="group" aria-label={title} className="min-w-0">
+      <div className="mb-2 text-xs font-medium uppercase tracking-wide text-faint">{title}</div>
+      <div className="rounded-lg bg-well hairline">{children}</div>
+    </div>
+  );
+}
+
+/** One row of a card, with the hairline between rows. */
+function CardRow({ children }: { children: ReactNode }) {
+  return <div className="min-w-0 border-b border-hairline px-4 last:border-b-0">{children}</div>;
+}
+
 /** Settings → Orchestrator: what a lead's run of workers may do without asking, for every project. */
 export function OrchestratorTab() {
   const { settings, error, save } = useOrchestratorSettings();
   const ready = settings !== null;
   return (
-    <div className="flex flex-col" data-testid="orchestrator-settings">
-      <p className="pb-3 text-[13px] text-muted-foreground">How a lead session splits work across worker sessions: whether it asks first, how far it may split, the permissions its workers run with, which model each kind of piece starts on, and the limits a run stays inside. A repository can answer for itself in its own settings.</p>
-      <div className="mb-1 mt-2 text-xs font-medium uppercase tracking-wide text-faint">Runs</div>
-      <RegisteredSetting setting="orchestrator.requireApproval"
-        control={<Switch aria-label="Ask before a run starts" checked={settings?.requireApproval ?? true} disabled={!ready} onCheckedChange={(on) => void save({ requireApproval: on })} />}
-      />
-      <RegisteredSetting setting="orchestrator.workersPerRun"
-        control={<NumberField label="Workers at once, per run" value={settings?.workersPerRun} min={1} max={MAX_WORKERS} disabled={!ready} onSave={(value) => value !== null && void save({ workersPerRun: value })} />}
-      />
-      <RegisteredSetting setting="orchestrator.workersAtOnce"
-        control={<NumberField label="Workers at once, whole app" value={settings?.workersAtOnce} min={1} max={MAX_WORKERS} disabled={!ready} onSave={(value) => value !== null && void save({ workersAtOnce: value })} />}
-      />
-      <RegisteredSetting setting="orchestrator.pieceLimit"
-        control={<NumberField label="Pieces per run, at most" value={settings?.pieceLimit} min={1} max={MAX_PIECES} disabled={!ready} onSave={(limit) => void save({ pieceLimit: limit })} />}
-      />
-      <RegisteredSetting setting="orchestrator.workerMode"
-        control={
-          <select aria-label="Workers run in" className={selectClass} value={settings?.workerMode ?? "bypassPermissions"} disabled={!ready} onChange={(event) => void save({ workerMode: event.target.value })}>
-            {WORKER_MODES.map((mode) => <option key={mode} value={mode}>{modeName(mode)}</option>)}
-          </select>
-        }
-      />
-      <div className="mb-1 mt-4 text-xs font-medium uppercase tracking-wide text-faint">Budget and stalls</div>
-      <RegisteredSetting setting="orchestrator.budgetDollars"
-        control={<CapField label="Budget per run, API key" offLabel="No limit" fallback={DEFAULT_DOLLARS} value={settings?.budgetDollars} min={0.01} max={MAX_DOLLARS} step={0.01} prefix="$" disabled={!ready} onSave={(value) => value !== null && void save({ budgetDollars: value })} />}
-      />
-      <RegisteredSetting setting="orchestrator.budgetPoints"
-        control={<CapField label="Budget per run, subscription" offLabel="No limit" fallback={DEFAULT_POINTS} value={settings?.budgetPoints} min={1} max={100} suffix="pts" disabled={!ready} onSave={(value) => value !== null && void save({ budgetPoints: value })} />}
-      />
-      <RegisteredSetting setting="orchestrator.windowCeiling"
-        control={<CapField label="Pause when a window passes" offLabel="Off" offText={CEILING_OFF} fallback={DEFAULT_CEILING} value={settings?.windowCeiling} min={1} max={100} suffix="%" disabled={!ready} onSave={(value) => value !== null && void save({ windowCeiling: value })} />}
-      />
-      <RegisteredSetting setting="orchestrator.stallMinutes"
-        control={<NumberField label="Mark a worker stalled after" value={settings?.stallMinutes} min={1} max={MAX_STALL_MINUTES} suffix="min" disabled={!ready} onSave={(value) => value !== null && void save({ stallMinutes: value })} />}
-      />
-      <div className="mb-1 mt-4 text-xs font-medium uppercase tracking-wide text-faint">Checking results</div>
-      <p className="pb-1 text-xs leading-relaxed text-muted-foreground">When a worker reports done, TerminalX checks the result itself before the piece is done: its report, the files it touched, its branch, and the plan's commands. None of that uses a model. A verifier session reads the diff only when the piece has no command, the change touches a security area, the piece is a refactor, the plan asks for a review, or the diff is large. The verifier's model is the <span className="font-mono">verify</span> row of the table below.</p>
-      <RegisteredSetting setting="orchestrator.reviewDiffLines"
-        control={<NumberField wide min={1} max={MAX_DIFF_LINES} label="Changed lines a result is accepted at without a verifier, at most" value={settings?.reviewDiffLines} disabled={!ready} onSave={(lines) => void save({ reviewDiffLines: lines })} />}
-      />
+    <div className="flex flex-col gap-5 @container/orchestrator" data-testid="orchestrator-settings">
+      <p className="text-[13px] text-muted-foreground">How a lead session splits work across worker sessions: whether it asks first, how far it may split, the permissions its workers run with, which model each kind of piece starts on, and the limits a run stays inside. A repository can answer for itself in its own settings.</p>
+      <div className="grid items-start gap-5 @[38rem]/orchestrator:grid-cols-2">
+        <Card title="Runs">
+          <CardRow><RegisteredSetting setting="orchestrator.requireApproval"
+            control={<Switch aria-label="Ask before a run starts" checked={settings?.requireApproval ?? true} disabled={!ready} onCheckedChange={(on) => void save({ requireApproval: on })} />}
+          /></CardRow>
+          <CardRow><RegisteredSetting setting="orchestrator.workersPerRun"
+            control={<NumberField label="Workers at once, per run" value={settings?.workersPerRun} min={1} max={MAX_WORKERS} disabled={!ready} onSave={(value) => value !== null && void save({ workersPerRun: value })} />}
+          /></CardRow>
+          <CardRow><RegisteredSetting setting="orchestrator.workersAtOnce"
+            control={<NumberField label="Workers at once, whole app" value={settings?.workersAtOnce} min={1} max={MAX_WORKERS} disabled={!ready} onSave={(value) => value !== null && void save({ workersAtOnce: value })} />}
+          /></CardRow>
+          <CardRow><RegisteredSetting setting="orchestrator.pieceLimit"
+            control={<NumberField label="Pieces per run, at most" value={settings?.pieceLimit} min={1} max={MAX_PIECES} disabled={!ready} onSave={(limit) => void save({ pieceLimit: limit })} />}
+          /></CardRow>
+          <CardRow><RegisteredSetting setting="orchestrator.workerMode"
+            control={
+              <select aria-label="Workers run in" className={selectClass} value={settings?.workerMode ?? "bypassPermissions"} disabled={!ready} onChange={(event) => void save({ workerMode: event.target.value })}>
+                {WORKER_MODES.map((mode) => <option key={mode} value={mode}>{modeName(mode)}</option>)}
+              </select>
+            }
+          /></CardRow>
+          <CardRow><RegisteredSetting setting="orchestrator.triesPerPiece"
+            control={<NumberField label="Tries per piece" value={settings?.triesPerPiece} min={1} max={MAX_TRIES} disabled={!ready} onSave={(value) => value !== null && void save({ triesPerPiece: value })} />}
+          /></CardRow>
+        </Card>
+        <Card title="Budget and stalls">
+          <CardRow><RegisteredSetting setting="orchestrator.budgetDollars"
+            control={<CapField stack label="Budget per run, API key" offLabel="No limit" fallback={DEFAULT_DOLLARS} value={settings?.budgetDollars} min={0.01} max={MAX_DOLLARS} step={0.01} prefix="$" disabled={!ready} onSave={(value) => value !== null && void save({ budgetDollars: value })} />}
+          /></CardRow>
+          <CardRow><RegisteredSetting setting="orchestrator.budgetPoints"
+            control={<CapField stack label="Budget per run, subscription" offLabel="No limit" fallback={DEFAULT_POINTS} value={settings?.budgetPoints} min={1} max={100} suffix="pts" disabled={!ready} onSave={(value) => value !== null && void save({ budgetPoints: value })} />}
+          /></CardRow>
+          <CardRow><RegisteredSetting setting="orchestrator.windowCeiling"
+            control={<CapField stack label="Pause when a window passes" offLabel="Off" offText={CEILING_OFF} fallback={DEFAULT_CEILING} value={settings?.windowCeiling} min={1} max={100} suffix="%" disabled={!ready} onSave={(value) => value !== null && void save({ windowCeiling: value })} />}
+          /></CardRow>
+          <CardRow><RegisteredSetting setting="orchestrator.stallMinutes"
+            control={<NumberField label="Mark a worker stalled after" value={settings?.stallMinutes} min={1} max={MAX_STALL_MINUTES} suffix="min" disabled={!ready} onSave={(value) => value !== null && void save({ stallMinutes: value })} />}
+          /></CardRow>
+          <CardRow><RegisteredSetting setting="orchestrator.effortCeiling"
+            control={
+              <select aria-label="Raise effort no higher than" className={selectClass} value={settings?.effortCeiling ?? DEFAULT_EFFORT_CEILING} disabled={!ready} onChange={(event) => void save({ effortCeiling: event.target.value })}>
+                {ceilingChoices(settings?.effortCeiling).map((effort) => <option key={effort} value={effort}>{effortName(effort)}</option>)}
+              </select>
+            }
+          /></CardRow>
+        </Card>
+      </div>
+      <Card title="Checking results">
+        <p className="border-b border-hairline px-4 py-2 text-xs leading-relaxed text-muted-foreground">When a worker reports done, TerminalX checks the result itself before the piece is done: its report, the files it touched, its branch, and the plan's commands. None of that uses a model. A verifier session reads the diff only when the piece has no command, the change touches a security area, the piece is a refactor, the plan asks for a review, or the diff is large. The verifier's model is the <span className="font-mono">verify</span> row of the table below.</p>
+        <CardRow><RegisteredSetting setting="orchestrator.reviewDiffLines"
+          control={<NumberField wide min={1} max={MAX_DIFF_LINES} label="Changed lines a result is accepted at without a verifier, at most" value={settings?.reviewDiffLines} disabled={!ready} onSave={(lines) => void save({ reviewDiffLines: lines })} />}
+        /></CardRow>
+      </Card>
       <RegisteredSetting setting="orchestrator.routing">
         <div><RoutingTableSettings settings={settings} save={(patch) => void save(patch)} /></div>
       </RegisteredSetting>
-      {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
+      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
     </div>
   );
 }
@@ -234,6 +281,13 @@ export function RepositoryOrchestratorSettings({ projectPath }: { projectPath: s
             {WORKER_MODES.map((mode) => <option key={mode} value={mode}>{modeName(mode)}</option>)}
           </select>
         </div>
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2">
+          <div className="min-w-0">
+            <div className="text-[13px] font-medium">Tries per piece</div>
+            <div className="text-xs leading-relaxed text-muted-foreground">Retry, raise effort, then move up a model. Leave empty to follow the default.</div>
+          </div>
+          <NumberField label={`Tries per piece in ${project.name}`} value={own.triesPerPiece} placeholder={settings ? String(settings.triesPerPiece) : ""} min={1} max={MAX_TRIES} disabled={!ready} onSave={(tries) => void save({ project: projectPath, triesPerPiece: tries })} />
+        </div>
         {([
           ["budgetDollars", "Budget per run, API key", "Dollars its workers on an API key may spend.", "No limit", undefined, { min: 0.01, max: MAX_DOLLARS, step: 0.01, prefix: "$" }],
           ["budgetPoints", "Budget per run, subscription", "Points of a usage window one run may use.", "No limit", undefined, { min: 1, max: 100, suffix: "pts" }],
@@ -247,6 +301,16 @@ export function RepositoryOrchestratorSettings({ projectPath }: { projectPath: s
             <CapField label={`${title} in ${project.name}`} offLabel={offLabel} offText={offText} value={own[key]} placeholder={capPlaceholder(settings?.[key])} disabled={!ready} {...bounds} onSave={(value) => void save({ project: projectPath, [key]: value })} />
           </div>
         ))}
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2">
+          <div className="min-w-0">
+            <div className="text-[13px] font-medium">Raise effort no higher than</div>
+            <div className="text-xs leading-relaxed text-muted-foreground">Past this, the next model up is tried.</div>
+          </div>
+          <select aria-label={`Raise effort in ${project.name} no higher than`} className={selectClass} value={own.effortCeiling ?? ""} disabled={!ready} onChange={(event) => void save({ project: projectPath, effortCeiling: event.target.value || null })}>
+            <option value="">Default ({effortName(settings?.effortCeiling ?? DEFAULT_EFFORT_CEILING)})</option>
+            {ceilingChoices(own.effortCeiling, settings?.effortCeiling).map((effort) => <option key={effort} value={effort}>{effortName(effort)}</option>)}
+          </select>
+        </div>
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 py-2">
           <div className="min-w-0">
             <div className="text-[13px] font-medium">A verifier reads a diff over</div>
