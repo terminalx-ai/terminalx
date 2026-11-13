@@ -2173,6 +2173,29 @@ mod supervised_tests {
         terminals.kill_all_and_wait_confirmed(&["plain:shell".into(), "next:shell".into()], Duration::from_secs(10)).unwrap();
     }
 
+    /// #467 review: a lost launch whose helper never exits (here stopped)
+    /// becomes the reader's to release after the grace, and releasing it
+    /// leaves no helper behind.
+    #[test]
+    fn a_lost_launch_whose_supervisor_never_exits_can_be_released_after_a_while() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let owner = sleeping(&terminals, &dir, "stuck:shell");
+        let shell = owner.pid().unwrap() as i32;
+        struct Kill(i32);
+        impl Drop for Kill { fn drop(&mut self) { unsafe { libc::kill(self.0, libc::SIGKILL); } } }
+        let _orphan = Kill(shell);
+        let helper = owner.supervisor_for_test().unwrap() as i32;
+        unsafe { libc::kill(helper, libc::SIGSTOP); }
+        owner.lose_for_test();
+        assert_eq!(terminals.release_lost("stuck:shell"), 0, "not at once: it might still settle");
+        wait_for("the grace", || owner.lost_for_good());
+        assert!(terminals.supervised_work().iter().any(|work| work.id == "stuck:shell" && work.lost));
+        assert_eq!(terminals.release_lost("stuck:shell"), 1);
+        wait_for("the stopped helper to be killed and reaped", || gone(helper));
+        assert!(terminals.supervised_work().is_empty());
+    }
+
     /// #467/#765: a launch whose supervisor died cannot be settled by anything
     /// the runtime observes. It holds the handover, is named, by its pane,
     /// for the reader, is never let go of by itself, and only the reader's

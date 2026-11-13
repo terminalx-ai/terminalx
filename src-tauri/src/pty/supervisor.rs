@@ -171,6 +171,14 @@ pub(crate) fn dispatch() -> Option<i32> {
     Some(match (launch, args.next()) { (Some(launch), None) => linux::run(launch), _ => 119 })
 }
 
+/// How long a lost launch's helper may go on without exiting before the
+/// reader can release the launch anyway (#467 review): one stopped or stuck
+/// in the kernel never settles it.
+#[cfg(not(test))]
+const LOST_GRACE: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const LOST_GRACE: Duration = Duration::from_secs(1);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase { Reserved, Bootstrapping, Running, Stopping, Unconfirmed, Proven, Lost, Extinct }
 
@@ -267,6 +275,8 @@ struct State {
     reaped: bool,
     /// What preflight found this system lacking, before any launch.
     unsupported: Option<String>,
+    /// When the launch was lost.
+    lost_at: Option<Instant>,
     /// A Stop came while the observer was held for a handover, after the
     /// state was last taken for the record (#765 review).
     stopped_while_parked: bool,
@@ -305,7 +315,7 @@ impl Owner {
     pub(super) fn reserve() -> Arc<Self> {
         Arc::new(Self { launch: Uuid::new_v4(), state: Mutex::new(State {
             phase: Phase::Reserved, supervisor: None, shell: None,
-            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false, reaped: false, unsupported: None, stopped_while_parked: false,
+            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false, reaped: false, unsupported: None, lost_at: None, stopped_while_parked: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
             #[cfg(test)] observer_reaped: AtomicBool::new(false), #[cfg(test)] fault: TEST_FAULT.with(|slot| slot.borrow().clone()), })
     }
@@ -340,16 +350,20 @@ impl Owner {
     /// caller says so. True when released.
     pub(super) fn release_lost(&self) -> bool {
         let mut state = self.state.lock().unwrap();
-        if state.phase != Phase::Lost || !state.reaped { return false; }
+        if !Self::given_up(&state) { return false; }
+        // A helper that never exited (stopped, or stuck in the kernel) is
+        // killed and reaped by its observer once this is no longer pending.
         state.phase = Phase::Extinct;
         self.changed.notify_all();
         true
     }
 
-    /// Lost, with its helper gone: only the reader can release it now.
-    pub(super) fn lost_for_good(&self) -> bool {
-        let state = self.state.lock().unwrap();
-        state.phase == Phase::Lost && state.reaped
+    /// Lost, with nothing left to learn: its helper gone, or not heard from
+    /// for [`LOST_GRACE`]. Only the reader can release it now.
+    pub(super) fn lost_for_good(&self) -> bool { Self::given_up(&self.state.lock().unwrap()) }
+
+    fn given_up(state: &State) -> bool {
+        state.phase == Phase::Lost && (state.reaped || state.lost_at.is_some_and(|at| at.elapsed() >= LOST_GRACE))
     }
 
     /// Bring a held launch's carried state up to date for the record: a Stop
@@ -416,7 +430,7 @@ impl Owner {
         let phase = match carried.phase { CarriedPhase::Running => Phase::Running, CarriedPhase::Stopping => Phase::Stopping, CarriedPhase::Unconfirmed => Phase::Unconfirmed };
         let owner = Arc::new(Self { launch, state: Mutex::new(State {
             phase, supervisor: Some(carried.supervisor), shell: Some(carried.shell), shell_status: carried.shell_status,
-            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true, reaped: false, unsupported: None, stopped_while_parked: false,
+            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true, reaped: false, unsupported: None, lost_at: None, stopped_while_parked: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
             #[cfg(test)] observer_reaped: AtomicBool::new(false), #[cfg(test)] fault: TEST_FAULT.with(|slot| slot.borrow().clone()), });
         let observer = owner.clone();
@@ -502,6 +516,7 @@ impl Owner {
     fn lost(&self, reason: &str) {
         let mut state = self.state.lock().unwrap();
         if state.phase == Phase::Extinct { return; }
+        if state.phase != Phase::Lost { state.lost_at = Some(Instant::now()); }
         state.phase = Phase::Lost;
         if state.boot.is_none() { state.boot = Some(Err(reason.into())); }
         self.changed.notify_all();
