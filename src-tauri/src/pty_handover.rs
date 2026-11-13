@@ -283,6 +283,26 @@ impl Terminals {
         for owner in self.supervisors() { owner.unpark(); }
     }
 
+    /// Take each held supervisor's state again, just before the record is
+    /// written: a terminal closed since the freeze goes over as stopping.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn refresh_frozen(&self, frozen: &mut Frozen) {
+        let owners = self.supervisors();
+        // Each carried state is one launch's; a launch's id names its owner.
+        let carried = frozen.panes.iter_mut().filter_map(|pane| pane.supervised.as_mut().map(|(carried, _)| carried))
+            .chain(frozen.supervised.iter_mut().map(|(_, carried, _)| carried));
+        for carried in carried {
+            if let Some(owner) = owners.iter().find(|owner| owner.launch_is(carried)) { owner.refresh(carried); }
+        }
+    }
+
+    /// A supervised launch was stopped after its state went into the record:
+    /// the handover must be called off so that Stop is not lost (#765).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn stopped_since_refresh(&self) -> bool {
+        self.supervisors().iter().any(|owner| owner.stopped_while_parked())
+    }
+
     /// Every launch a supervisor still owns, with or without a pane.
     #[cfg(target_os = "linux")]
     fn supervisors(&self) -> Vec<Arc<super::supervisor::Owner>> {
@@ -662,6 +682,50 @@ mod tests {
         // The old owner never reaps or reports it: in a real handover its
         // threads are gone with its process image.
         std::mem::forget(old);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sleeper(terminals: &Terminals, dir: &tempfile::TempDir, id: &str) -> u32 {
+        terminals.spawn(Arc::new(crate::sink::BroadcastSink::new(64)), id, PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] }).unwrap();
+        terminals.pid(id).unwrap()
+    }
+
+    /// #467 review: a terminal closed while the handover holds its
+    /// supervisor goes into the record as stopping, and the runtime that
+    /// takes over ends it; nothing keeps running unseen.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_terminal_closed_during_a_handover_is_stopped_by_the_runtime_that_takes_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Terminals::new();
+        let pid = sleeper(&old, &dir, "closing");
+        let mut frozen = old.freeze(Duration::from_secs(5)).unwrap();
+        old.kill("closing");
+        assert!(old.stopped_since_refresh(), "held, the observer sent nothing for that Stop");
+        old.refresh_frozen(&mut frozen);
+        assert!(!old.stopped_since_refresh(), "the record now carries it");
+        let pane = frozen.panes.remove(0);
+        assert!(pane.supervised.as_ref().unwrap().0.stopping_for_test(), "carried as stopping");
+        let new = Terminals::new();
+        new.adopt(Arc::new(crate::sink::BroadcastSink::new(64)), pane).unwrap();
+        wait_for("the runtime that took over to end it", || !crate::harness::host::is_alive(pid) && new.owned_groups().is_empty());
+    }
+
+    /// #467 review: one closed after its state went into the record calls
+    /// the handover off, and its Stop goes ahead where it was asked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_terminal_closed_after_the_record_calls_the_handover_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Terminals::new();
+        let pid = sleeper(&old, &dir, "late");
+        let mut frozen = old.freeze(Duration::from_secs(5)).unwrap();
+        old.refresh_frozen(&mut frozen);
+        assert!(!old.stopped_since_refresh());
+        old.kill("late");
+        assert!(old.stopped_since_refresh(), "the handover must be called off");
+        old.thaw();
+        wait_for("its Stop to go ahead once thawed", || !crate::harness::host::is_alive(pid) && old.owned_groups().is_empty());
     }
 
     /// #765: a handover called off leaves every pane as it was.

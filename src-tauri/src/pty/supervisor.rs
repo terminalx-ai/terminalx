@@ -196,6 +196,9 @@ pub(crate) struct Carried {
 }
 
 impl Carried {
+    #[cfg(test)]
+    pub(crate) fn stopping_for_test(&self) -> bool { self.phase == CarriedPhase::Stopping && self.stop_claim > 0 }
+
     /// The launch's shell, as its pane names it.
     pub(crate) fn shell(&self) -> u32 { self.shell }
 
@@ -262,6 +265,9 @@ struct State {
     observing: bool,
     /// The helper has exited and been reaped: nothing more can be learned.
     reaped: bool,
+    /// A Stop came while the observer was held for a handover, after the
+    /// state was last taken for the record (#765 review).
+    stopped_while_parked: bool,
 }
 
 pub(super) struct Owner {
@@ -281,7 +287,7 @@ impl Owner {
     pub(super) fn reserve() -> Arc<Self> {
         Arc::new(Self { launch: Uuid::new_v4(), state: Mutex::new(State {
             phase: Phase::Reserved, supervisor: None, shell: None,
-            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false, reaped: false,
+            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false, reaped: false, stopped_while_parked: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
             #[cfg(test)] observer_reaped: AtomicBool::new(false), })
     }
@@ -328,10 +334,30 @@ impl Owner {
         state.phase == Phase::Lost && state.reaped
     }
 
+    /// Bring a held launch's carried state up to date for the record: a Stop
+    /// that came since it was held goes over as Stopping, with its claim,
+    /// for the runtime that takes over to send. From here on any further
+    /// Stop shows in [`Self::stopped_while_parked`].
+    pub(super) fn refresh(&self, carried: &mut Carried) {
+        let mut state = self.state.lock().unwrap();
+        if state.stop_claim > carried.stop_claim {
+            carried.stop_claim = state.stop_claim;
+            carried.phase = match state.phase { Phase::Unconfirmed => CarriedPhase::Unconfirmed, _ => CarriedPhase::Stopping };
+        }
+        state.stopped_while_parked = false;
+    }
+
+    /// Whether `carried` is this launch's.
+    pub(super) fn launch_is(&self, carried: &Carried) -> bool { carried.launch == self.launch.to_string() }
+
+    /// A Stop came since the state was last taken for the record.
+    pub(super) fn stopped_while_parked(&self) -> bool { self.state.lock().unwrap().stopped_while_parked }
+
     /// Let a held observer go on: the handover was called off.
     pub(super) fn unpark(&self) {
         self.carried.lock().unwrap().take();
         let mut state = self.state.lock().unwrap();
+        state.stopped_while_parked = false;
         state.park = Park::Running;
         self.changed.notify_all();
     }
@@ -372,7 +398,7 @@ impl Owner {
         let phase = match carried.phase { CarriedPhase::Running => Phase::Running, CarriedPhase::Stopping => Phase::Stopping, CarriedPhase::Unconfirmed => Phase::Unconfirmed };
         let owner = Arc::new(Self { launch, state: Mutex::new(State {
             phase, supervisor: Some(carried.supervisor), shell: Some(carried.shell), shell_status: carried.shell_status,
-            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true, reaped: false,
+            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true, reaped: false, stopped_while_parked: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
             #[cfg(test)] observer_reaped: AtomicBool::new(false), });
         let observer = owner.clone();
@@ -426,6 +452,9 @@ impl Owner {
         let Some(claim) = state.stop_claim.checked_add(1) else { state.phase = Phase::Lost; return };
         state.stop_claim = claim;
         state.phase = Phase::Stopping;
+        // Held for a handover, the observer sends nothing: the record must
+        // say so, or the handover is called off (`refresh`).
+        if state.park != Park::Running { state.stopped_while_parked = true; }
         self.changed.notify_all();
     }
 
