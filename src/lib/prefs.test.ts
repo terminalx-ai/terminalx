@@ -466,3 +466,16 @@ describe("dashboard preferences", () => {
     expect((await import("./prefs")).getPrefs().dashboard).toEqual({ view: "board", sort: { column: "updated", direction: "desc" }, hiddenColumns: ["branch"] });
   });
 });
+
+describe("reset chat file choice (PRO-261)", () => {
+  it("starts unchecked, remembers the choice across a restart and ignores a malformed value", async () => {
+    const prefs = await import("./prefs");
+    expect(prefs.getPrefs().resetFiles).toBe(false);
+    prefs.setPrefs({ resetFiles: true });
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().resetFiles).toBe(true);
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ resetFiles: "yes" }));
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().resetFiles).toBe(false);
+  });
+});
