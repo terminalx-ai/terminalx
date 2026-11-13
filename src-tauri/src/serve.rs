@@ -736,7 +736,7 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
             supervised,
         };
         if let Err(error) = terminals.adopt(emit.clone(), frozen) {
-            log::error!("take over the terminal {id}: {error:#}; its program runs on unwatched");
+            log::error!("take over the terminal {id}: {error:#}; its program runs on unwatched, or, under a supervisor whose channel is let go, is ended by it");
         }
     }
     terminals.adopt_rest(retained, groups);
@@ -745,7 +745,7 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
         let id = launch.id.clone();
         let socket = adopted.take(launch.supervisor.fd)?;
         if let Err(error) = terminals.adopt_supervised(&launch.id, launch.supervisor.state, socket) {
-            log::error!("take over the supervised launch of {id}: {error:#}; its processes run on unwatched");
+            log::error!("take over the supervised launch of {id}: {error:#}; its supervisor, its channel let go, ends what it runs");
         }
     }
     let mut waits = Vec::new();
