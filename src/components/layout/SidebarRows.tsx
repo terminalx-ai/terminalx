@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, type HTMLAttributes, type ReactNode, type Ref } from "react";
 import { Archive, ArrowUp, ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Pin, Terminal, TriangleAlert, X } from "@/icons";
+import { fileChipIcon } from "@/components/chat/FileChip";
 import { AgentMark, agentName } from "@/components/AgentMark";
 import { actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { formatSize } from "@/lib/workspaceSizes";
@@ -391,8 +392,8 @@ export function BrowserTabRow({ label, url, agentTarget, ...row }: TabRowBase & 
 }
 
 /** A full-width diff, pull request or merge conflict, sharing selection with the workspace strip. */
-export function ReviewTabRow({ label, kind, dirty, ...row }: TabRowBase & { label: string; kind: "diff" | "pr" | "conflict"; dirty: boolean }) {
-  const Icon = kind === "diff" ? FileDiff : kind === "conflict" ? TriangleAlert : GitPullRequest;
+export function ReviewTabRow({ label, kind, dirty, ...row }: TabRowBase & { label: string; kind: "diff" | "pr" | "conflict" | "attachment"; dirty: boolean }) {
+  const Icon = kind === "diff" ? FileDiff : kind === "conflict" ? TriangleAlert : kind === "attachment" ? fileChipIcon(label) : GitPullRequest;
   return <TabRow {...row} tone="peer" label={label} title={label} closeLabel={`Close ${label}`}>
     <Icon className={kind === "conflict" ? "size-3.5 shrink-0 text-warning" : "size-3.5 shrink-0"} />
     <span className="min-w-0 flex-1 truncate">{label}</span>

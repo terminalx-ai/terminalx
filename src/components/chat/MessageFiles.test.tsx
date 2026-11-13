@@ -25,6 +25,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { buildTranscript } from "@/lib/transcript";
 import { closeAllEditors, getEditors } from "@/lib/editors";
 import { setPrefs } from "@/lib/prefs";
+import { getTerminalState } from "@/lib/terminal";
 import { api, attachments, fs } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -77,11 +78,13 @@ it("opens a chip's file in a read-only tab: its path, when it was sent, Preview 
   render(<Session files={[NOTES, SHOT]} />);
   fireEvent.click(screen.getByRole("button", { name: "Open notes.md" }));
   const toolbar = await screen.findByTestId("attachment-toolbar");
-  expect(getEditors().editors).toMatchObject([{ sessionId: SESSION, root: "/Users/me/.terminalx/attachments/files", rel: "k3f9qa/notes.md", kind: "text", viewMode: "preview", attachment: { path: NOTES.path, sentAt: SENT } }]);
+  expect(getEditors().editors).toMatchObject([{ sessionId: SESSION, root: "/Users/me/.terminalx/attachments/files", rel: "k3f9qa/notes.md", kind: "attachment", media: "text", viewMode: "preview", attachment: { path: NOTES.path, sentAt: SENT } }]);
   expect(within(toolbar).getByTestId("attachment-path").textContent).toBe("~/.terminalx/attachments/files/k3f9qa/notes.md");
   expect(within(toolbar).getByTestId("attachment-path").getAttribute("title")).toBe(NOTES.path);
   expect(within(toolbar).getByTestId("attachment-sent").textContent).toBe("on your message · 14:31");
-  expect(screen.getByRole("tab", { name: /notes\.md/ }).getAttribute("title")).toBe("~/.terminalx/attachments/files/k3f9qa/notes.md");
+  // A centre tab of the session (screen 03.22), beside its agent tabs, not a file in the side pane.
+  expect(getTerminalState().selected[SESSION]).toEqual({ kind: "review", id: getEditors().editors[0].id });
+  expect(screen.getByRole("tabpanel", { name: "notes.md" })).toBeDefined();
   // The copy that was sent: no Save, no git gutter.
   expect(within(toolbar).queryByRole("button", { name: "Save" })).toBeNull();
   expect(fs.readText).toHaveBeenCalledWith(NOTES.path);
@@ -103,10 +106,10 @@ it("focuses the tab the file already has when its chip is clicked again", async 
   await screen.findByTestId("attachment-toolbar");
   fireEvent.click(screen.getByRole("button", { name: "Open shot.png" }));
   await waitFor(() => expect(getEditors().editors).toHaveLength(2));
-  expect(getEditors().editors[1]).toMatchObject({ kind: "image", rel: "k3f9qa/shot.png" });
+  expect(getEditors().editors[1]).toMatchObject({ kind: "attachment", media: "image", rel: "k3f9qa/shot.png" });
   fireEvent.click(screen.getByRole("button", { name: "Open notes.md" }));
   expect(getEditors().editors).toHaveLength(2);
-  expect(getEditors().active[SESSION]).toBe(getEditors().editors[0].id);
+  expect(getTerminalState().selected[SESSION]).toEqual({ kind: "review", id: getEditors().editors[0].id });
 });
 
 it("Copy writes the file's contents; Download asks where, then saves a copy there", async () => {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { getTerminalState } from "@/lib/terminal";
 import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, setDiffMode, serializeReviewTabs, restoreReviewTabs, openAttachment, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 
@@ -185,15 +186,25 @@ describe("conflict tabs (PRO-293)", () => {
 
 describe("attachment tabs (PRO-290)", () => {
   const folder = "/Users/me/.terminalx/attachments/s1";
-  it("hang off the session's attachments folder as <folder>/<name>, read-only, markdown in Preview", () => {
+  it("open in a centre tab of the session, hung off its attachments folder as <folder>/<name>, read-only, markdown in Preview", () => {
     const id = openAttachment("s1", { path: `${folder}/k3f9qa/notes.md`, name: "notes.md" }, "2026-11-13T14:31:00Z", "/repo");
     expect(getEditors().editors.find((e) => e.id === id)).toMatchObject({
-      root: folder, rel: "k3f9qa/notes.md", name: "notes.md", kind: "text", viewMode: "preview", workspaceRoot: "/repo",
+      root: folder, rel: "k3f9qa/notes.md", name: "notes.md", kind: "attachment", media: "text", viewMode: "preview", workspaceRoot: "/repo",
       attachment: { path: `${folder}/k3f9qa/notes.md`, sentAt: "2026-11-13T14:31:00Z" },
     });
     setEditorDirty(id, true);
     expect(getEditors().editors.find((e) => e.id === id)?.dirty).toBe(false);
-    expect(getEditors().active.s1).toBe(id);
+    expect(getTerminalState().selected.s1).toEqual({ kind: "review", id });
+    toggleViewMode(id);
+    expect(getEditors().editors.find((e) => e.id === id)?.viewMode).toBe("source");
+  });
+
+  it("come back after a restart, and a forged one does not", () => {
+    const id = openAttachment("s1", { path: `${folder}/k3f9qa/notes.md`, name: "notes.md" }, "2026-11-13T14:31:00Z");
+    const saved = JSON.parse(serializeReviewTabs(getEditors()));
+    expect(restoreReviewTabs(JSON.stringify(saved)).editors).toMatchObject([{ id, kind: "attachment", media: "text", attachment: { path: `${folder}/k3f9qa/notes.md` } }]);
+    saved.editors[0].attachment.path = "/etc/passwd";
+    expect(restoreReviewTabs(JSON.stringify(saved)).editors).toEqual([]);
   });
 
   it("focus the tab they already have; two folders' files of one name are two tabs; media keeps its kind", () => {
@@ -201,10 +212,10 @@ describe("attachment tabs (PRO-290)", () => {
     const second = openAttachment("s1", { path: `${folder}/bbbbbb/plan.md`, name: "plan.md" });
     const image = openAttachment("s1", { path: `${folder}/bbbbbb/shot.png`, name: "shot.png" });
     expect(new Set([first, second, image]).size).toBe(3);
-    expect(getEditors().editors.find((e) => e.id === image)?.kind).toBe("image");
+    expect(getEditors().editors.find((e) => e.id === image)).toMatchObject({ kind: "attachment", media: "image" });
     expect(openAttachment("s1", { path: `${folder}/aaaaaa/plan.md`, name: "plan.md" })).toBe(first);
     expect(getEditors().editors).toHaveLength(3);
-    expect(getEditors().active.s1).toBe(first);
+    expect(getTerminalState().selected.s1).toEqual({ kind: "review", id: first });
   });
 
   it("stay apart from an ordinary file tab of the same path", () => {
