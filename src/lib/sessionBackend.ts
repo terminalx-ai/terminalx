@@ -231,12 +231,12 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     },
     send: async (tabId, text, images, options) => {
       if (!options?.files?.length) return agent.send(sessionId, tabId, text, images, false, options?.pressedAt);
-      const stored = await attachments.store(sessionId, options.files);
+      const stored = await storeOnce(sessionId, options.files);
       return agent.send(sessionId, tabId, text, images, false, options.pressedAt, stored);
     },
     steer: (tabId, text) => agent.send(sessionId, tabId, text, []).then(() => undefined),
     changeHeldQueue: (tabId, change) => agent.changeHeldQueue(sessionId, tabId, change),
-    storeFiles: (files) => attachments.store(sessionId, files),
+    storeFiles: (files) => storeOnce(sessionId, files),
     sendQueuedNow: (tabId, seq) => agent.sendQueuedNow(sessionId, tabId, seq),
     resendUnsent: (tabId) => agent.resendUnsent(sessionId, tabId),
     resendMessage: (tabId, seq) => agent.resendMessage(sessionId, tabId, seq),
@@ -258,6 +258,25 @@ export function localSessionBackend(sessionId: string): SessionBackend {
 }
 
 /**
+ * Files already copied into a session's attachments folder, by the composer's
+ * own `FileInput` object (PRO-290). A send or hold that fails after its files
+ * were stored gives the composer the very same objects back, so trying again
+ * reuses those copies instead of storing the files into another new folder.
+ */
+const storedFiles = new WeakMap<FileInput, { sessionId: string; ref: FileRef }>();
+
+/** Store the files not stored for this session yet, in one new folder, and return every file's reference in order. */
+export async function storeOnce(sessionId: string, files: FileInput[]): Promise<FileRef[]> {
+  const fresh = files.filter((file) => storedFiles.get(file)?.sessionId !== sessionId);
+  if (fresh.length) {
+    const refs = await attachments.store(sessionId, fresh);
+    if (refs.length !== fresh.length) throw new Error("The attachments folder did not take every file.");
+    fresh.forEach((file, index) => storedFiles.set(file, { sessionId, ref: refs[index] }));
+  }
+  return files.map((file) => storedFiles.get(file)!.ref);
+}
+
+/**
  * The first message of a session just created from the new-session screen:
  * it had no session to store files in until now (PRO-290), so they are stored
  * here and go with the message by reference. Without files it is sent exactly
@@ -266,7 +285,7 @@ export function localSessionBackend(sessionId: string): SessionBackend {
 export async function sendFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]): Promise<SendOutcome> {
   if (!files?.length) return agent.send(sessionId, tabId, text, images);
   // Nothing else on screen holds this message any more: a store that fails says so, rather than leaving the session silent.
-  const stored = await attachments.store(sessionId, files).catch((error) => {
+  const stored = await storeOnce(sessionId, files).catch((error) => {
     showError(`Couldn't attach ${files.length === 1 ? files[0].name : `${files.length} files`} to the first message`, error);
     throw error;
   });

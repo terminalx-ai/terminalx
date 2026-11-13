@@ -921,6 +921,29 @@ fn a_prompt_sent_from_the_composer_is_one_message_not_two() {
     }
 }
 
+/// An image and files sent with nothing typed (PRO-290): the agent is handed
+/// only the block of paths, and the CLI records its image label in front of
+/// it. That record is the composer message's echo, not a second message.
+#[test]
+fn an_image_and_files_with_no_text_are_one_message_with_its_files() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let files = vec![FileRef { path: "/h/attachments/s/k3f9qa/notes.md".into(), name: "notes.md".into(), media_type: None, size: None }];
+        let agent = crate::attachments::with_block("", &files);
+        let prompt = PromptText { files: files.clone(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: agent.clone(), display: String::new() };
+        let image = vec![ImageRef { url: "attachments/s/0.png".into(), media_type: Some("image/png".into()), name: None }];
+        let cwd = rig._dir.path().to_string_lossy().into_owned();
+        assert!(!rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, image, &cwd, None).1);
+        rig.stamp();
+        rig.cli_takes(&rig.cli().with_image(&agent));
+        rig.cli_replies("seen");
+        assert_eq!(rig.told(), ["user: ", "reply: seen", "end"], "{kind:?}: one message, not the raw paths again");
+        let events = rig.events();
+        let prompts: Vec<_> = events.iter().filter_map(|e| match &e.payload { Payload::UserMessage { images, files, .. } => Some((images.len(), files.clone())), _ => None }).collect();
+        assert_eq!(prompts, [(1, files)], "{kind:?}: the composer's copy, with its image and files, is the one kept");
+    }
+}
+
 #[test]
 fn a_composer_prompt_and_then_a_terminal_prompt_are_two_messages_in_order() {
     for kind in BOTH {

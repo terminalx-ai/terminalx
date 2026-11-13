@@ -278,15 +278,18 @@ pub fn with_block(text: &str, files: &[FileRef]) -> String {
 
 /// A prompt as the agent got it, split back into the text the person typed
 /// and the files attached to it: the last block of [`with_block`]'s shape
-/// (the header alone on its line, at the start or after a blank line, then
-/// one absolute path per line up to a blank line or the end). Anything after
-/// the block, such as context the app appended, stays in the text.
+/// (the header alone on its line, at the start, after a blank line, or after
+/// nothing but the image labels a CLI puts in front of a prompt with no text,
+/// then one absolute path per line up to a blank line or the end). Anything
+/// after the block, such as context the app appended, stays in the text; the
+/// image labels stay too, for whatever takes them off an image's prompt.
 pub fn split_block(text: &str) -> (String, Vec<FileRef>) {
     let mut starts: Vec<usize> = text.match_indices(BLOCK_HEADER).map(|(at, _)| at).collect();
     starts.reverse();
     for at in starts {
         let before = &text[..at];
-        if !(before.is_empty() || before.ends_with("\n\n")) { continue; }
+        let labels_only = only_image_labels(before);
+        if !(before.is_empty() || before.ends_with("\n\n") || labels_only) { continue; }
         let after = &text[at + BLOCK_HEADER.len()..];
         let Some(after) = after.strip_prefix('\n') else { continue };
         let (block, rest) = match after.find("\n\n") {
@@ -304,7 +307,7 @@ pub fn split_block(text: &str) -> (String, Vec<FileRef>) {
                 size: std::fs::metadata(p).ok().filter(|meta| meta.is_file()).map(|meta| meta.len()),
             }
         }).collect();
-        let typed = before.strip_suffix("\n\n").unwrap_or(before);
+        let typed = if labels_only { before.trim_end() } else { before.strip_suffix("\n\n").unwrap_or(before) };
         let text = match (typed.is_empty(), rest.is_empty()) {
             (_, true) => typed.to_string(),
             (true, false) => rest.to_string(),
@@ -313,6 +316,20 @@ pub fn split_block(text: &str) -> (String, Vec<FileRef>) {
         return (text, files);
     }
     (text.to_string(), Vec::new())
+}
+
+/// Whether `text` is one or more of the labels Claude Code (`[Image #1]`) and
+/// Codex (`[Image #1] `) record for pasted images, and nothing else.
+fn only_image_labels(text: &str) -> bool {
+    let mut rest = text.trim_start();
+    let mut labels = 0;
+    while let Some(after) = rest.strip_prefix("[Image #") {
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        let Some(after) = after[digits..].strip_prefix(']').filter(|_| digits > 0) else { return false };
+        labels += 1;
+        rest = after.trim_start();
+    }
+    labels > 0 && rest.is_empty()
 }
 
 #[cfg(test)]
@@ -500,8 +517,15 @@ mod tests {
         // Context the app appends after the block stays with the text.
         let (text, back) = split_block(&format!("{agent}\n\nThe user reverted a.txt."));
         assert_eq!((text.as_str(), back.len()), ("Review this\n\nThe user reverted a.txt.", 2));
+        // An image sent with the files and no text: the CLI puts its label in
+        // front of the block (Claude Code with no space, Codex with one).
+        let block = with_block("", &files);
+        for recorded in [format!("[Image #1]{block}"), format!("[Image #1] {block}"), format!("[Image #2] [Image #3] {block}")] {
+            let (text, back) = split_block(&recorded);
+            assert_eq!((text.as_str(), back.len()), (recorded[..recorded.find(BLOCK_HEADER).unwrap()].trim_end(), 2), "{recorded:?}");
+        }
         // The person's own words are left alone.
-        for typed in ["Attached files: none", "see\nAttached files:\n/a", "Attached files:\nnot a path", "Attached files:\n"] {
+        for typed in ["Attached files: none", "see\nAttached files:\n/a", "Attached files:\nnot a path", "Attached files:\n", "[Image #]Attached files:\n/a", "[Image #1] see Attached files:\n/a"] {
             assert_eq!(split_block(typed), (typed.to_string(), Vec::new()), "{typed:?}");
         }
     }

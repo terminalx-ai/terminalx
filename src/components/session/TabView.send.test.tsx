@@ -224,6 +224,28 @@ describe("sending files (PRO-290)", () => {
     await waitFor(() => expect(screen.queryByTitle("notes.md")).toBeNull());
   });
 
+  it("stores a file once: a send that fails after storing it is tried again with the same copy", async () => {
+    runtime(false);
+    const normal = mocks.invoke.getMockImplementation()!;
+    let sends = 0;
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "store_attachments") return stored("f4");
+      if (command === "send_message" && ++sends === 1) throw new Error("the runtime restarted");
+      return normal(command, args);
+    });
+    render(<Tab />);
+    drop([notes()]);
+    await screen.findByTitle("notes.md");
+    fireEvent.change(field(), { target: { value: "Read these notes" } });
+    fireEvent.keyDown(field(), { key: "Enter" });
+    await waitFor(() => expect(field().value).toBe("Read these notes"));
+    expect(await screen.findByTitle("notes.md")).toBeTruthy();
+    fireEvent.keyDown(field(), { key: "Enter" });
+    await waitFor(() => expect(sends).toBe(2));
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "send_message").map(([, args]) => (args as { files?: unknown }).files)).toEqual([stored("f4"), stored("f4")]);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "store_attachments")).toHaveLength(1);
+  });
+
   it("sends nothing and gives the file back when it cannot be stored, and stores it again on the next send", async () => {
     runtime(false);
     const normal = mocks.invoke.getMockImplementation()!;

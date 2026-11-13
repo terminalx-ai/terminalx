@@ -54,8 +54,10 @@ impl Queue {
                 // Admission excludes other senders until this delivery publishes
                 // its prompt. A crash between that and the final queue snapshot
                 // must not offer the already-published message a second time.
-                Payload::UserMessage { text, images, .. } if queue.items.iter().any(|item|
-                    Some(&item.id) == queue.sending.as_ref() && &item.text == text && item.images.len() == images.len()) => {
+                // Matched as the chat's `heldQueueFrom` matches it: text, and
+                // how many images and files (the published refs are re-read).
+                Payload::UserMessage { text, images, files, .. } if queue.items.iter().any(|item|
+                    Some(&item.id) == queue.sending.as_ref() && &item.text == text && item.images.len() == images.len() && item.files.len() == files.len()) => {
                     let id = queue.sending.take().unwrap();
                     queue.items.retain(|item| item.id != id);
                     queue.next = None;

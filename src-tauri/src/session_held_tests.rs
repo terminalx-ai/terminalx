@@ -446,3 +446,21 @@ fn archive_uses_live_membership_and_invalidates_unopened_log_membership_after_an
     rig.manager.tabs.lock().unwrap().remove(&key_of(SESSION, TAB));
     assert!(!rig.manager.has_held_queue(SESSION, TAB).unwrap());
 }
+
+/// PRO-290: the same text sent without the claimed follow-up's files is not
+/// that follow-up's delivery; with them it is.
+#[test]
+fn a_claimed_follow_up_with_files_is_matched_on_its_files_too() {
+    let rig = started();
+    enqueue(&rig, "next");
+    let mut claimed = queue(&rig);
+    let file = FileRef { path: "/h/attachments/s/k3f9qa/notes.md".into(), name: "notes.md".into(), media_type: None, size: None };
+    claimed.items[0].files = vec![file.clone()];
+    claimed.sending = Some(claimed.items[0].id.clone());
+    rig.manager.save_held(&mut rig.rt().lock().unwrap(), claimed).unwrap();
+    let message = |files: Vec<FileRef>| Payload::UserMessage { text: "next".into(), author: None, images: Vec::new(), queued: false, files, baseline: None, cwd: None };
+    rig.manager.publish(&mut rig.rt().lock().unwrap(), message(Vec::new()), None);
+    assert_eq!(Queue::replay(&rig.manager.load_events(SESSION, TAB).unwrap()).items.len(), 1, "a message without the files is another send");
+    rig.manager.publish(&mut rig.rt().lock().unwrap(), message(vec![file]), None);
+    assert!(Queue::replay(&rig.manager.load_events(SESSION, TAB).unwrap()).items.is_empty(), "the delivery with its files consumes it");
+}
