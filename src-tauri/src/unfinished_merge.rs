@@ -20,7 +20,7 @@
 //! more than one commit (an octopus) cannot be worked out again this way, so
 //! none of its files is.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -50,14 +50,26 @@ pub struct UnfinishedMerge {
     pub changed_here: Vec<String>,
     /// Uncommitted paths exactly as Git merged them.
     pub from_base: Vec<String>,
+    /// The branch HEAD is on (`raccoon/teams-billing`); `None` when detached.
+    pub branch: Option<String>,
+    /// For each path in `conflicted`, how many conflict-marker blocks it
+    /// holds now: 0 for a binary file, one deleted on a side, or one that
+    /// cannot be read ([`crate::merge_conflicts`]).
+    pub conflict_counts: BTreeMap<String, usize>,
 }
 
 impl UnfinishedMerge {
     /// What is being merged, in a few words: `origin/main`, or
     /// `commit 1a2b3c4d5e` when no branch points at it.
     pub fn what(&self) -> String {
-        self.names.first().cloned().unwrap_or_else(|| format!("commit {}", short(&self.merge_head)))
+        describe(&self.names, &self.merge_head)
     }
+}
+
+/// What is being merged, from the branches pointing at it: the first, or
+/// `commit 1a2b3c4d5e` when there are none.
+pub(crate) fn describe(names: &[String], merge_head: &str) -> String {
+    names.first().cloned().unwrap_or_else(|| format!("commit {}", short(merge_head)))
 }
 
 /// The commits `MERGE_HEAD` names; empty when no merge is in progress.
@@ -89,7 +101,7 @@ fn differing(cwd: &Path, a: &str, b: &str) -> Result<BTreeSet<String>> {
 
 /// Branches that point at `commit`, remote-tracking ones first: those are
 /// what a base usually is.
-fn names_of(cwd: &Path, commit: &str) -> Result<Vec<String>> {
+pub(crate) fn names_of(cwd: &Path, commit: &str) -> Result<Vec<String>> {
     let out = git::run(cwd, &["for-each-ref", &format!("--points-at={commit}"), "--format=%(refname)", "refs/remotes", "refs/heads"])?;
     let (mut remote, mut local) = (Vec::new(), Vec::new());
     for name in out.lines().map(str::trim) {
@@ -127,12 +139,14 @@ pub fn read(cwd: &Path) -> Result<Option<UnfinishedMerge>> {
         if as_merged { from_base.push(file.path.clone()) } else { changed_here.push(file.path.clone()) }
     }
     let incoming = git::run(cwd, &["rev-list", "--count", &format!("{head}..{merge_head}")])?.trim().parse().unwrap_or(0);
-    Ok(Some(UnfinishedMerge { names: names_of(cwd, &merge_head)?, head, merge_head, incoming, conflicted, changed_here, from_base }))
+    let conflict_counts = crate::merge_conflicts::counts(cwd, &conflicted);
+    let branch = git::current_branch(cwd);
+    Ok(Some(UnfinishedMerge { names: names_of(cwd, &merge_head)?, head, merge_head, incoming, conflicted, changed_here, from_base, branch, conflict_counts }))
 }
 
 /// That the checkout still holds exactly the merge someone looked at: HEAD
 /// at `head`, merging `merge_head` alone.
-fn expect(cwd: &Path, head: &str, merge_head: &str) -> Result<()> {
+pub(crate) fn expect(cwd: &Path, head: &str, merge_head: &str) -> Result<()> {
     let heads = merge_heads(cwd)?;
     if heads.is_empty() {
         bail!("No merge is in progress in this checkout any more.");
@@ -260,6 +274,8 @@ mod tests {
         assert_eq!(merge.what(), "origin/main");
         assert_eq!(merge.incoming, 2);
         assert_eq!(merge.conflicted, ["CHANGELOG.md"]);
+        assert_eq!(merge.branch.as_deref(), Some("raccoon/736-work"));
+        assert_eq!(merge.conflict_counts, BTreeMap::from([("CHANGELOG.md".to_string(), 1)]));
         assert!(merge.changed_here.is_empty(), "{:?}", merge.changed_here);
         // Added and deleted by the base alike.
         assert_eq!(merge.from_base, ["src/a.rs", "src/b.rs", "src/c.rs", "src/old.rs"]);
@@ -272,12 +288,39 @@ mod tests {
         write(root, "notes.txt", "scratch\n");
         let merge = read(root).unwrap().unwrap();
         assert!(merge.conflicted.is_empty());
+        assert!(merge.conflict_counts.is_empty());
         assert_eq!(merge.changed_here, ["CHANGELOG.md", "notes.txt", "src/b.rs"]);
         assert_eq!(merge.from_base, ["src/a.rs", "src/c.rs", "src/old.rs"]);
         // Reading it changed nothing.
         assert_eq!(merge_heads(root).unwrap(), std::slice::from_ref(&base));
         assert_eq!(ok(root, &["rev-parse", "HEAD"]), head);
         assert_eq!(std::fs::read_to_string(root.join("src/b.rs")).unwrap(), "fn b() { todo!() }\n");
+    }
+
+    #[test]
+    fn the_branch_and_conflict_counts_are_read_and_serialized_in_camel_case() {
+        let (dir, head, base) = half_merged();
+        let root = dir.path();
+        // A second conflict in the changelog, written by hand, and one more conflicted file.
+        ok(root, &["merge", "--abort"]);
+        ok(root, &["checkout", "-q", "--detach", &head]);
+        assert!(!git(root, &["merge", "--no-ff", "--no-commit", &base]).status.success());
+        let merge = read(root).unwrap().unwrap();
+        assert_eq!(merge.branch, None, "detached");
+        let text = std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
+        write(root, "CHANGELOG.md", &format!("{text}between\n{text}"));
+        let merge = read(root).unwrap().unwrap();
+        assert_eq!(merge.conflict_counts["CHANGELOG.md"], 2);
+        let json = serde_json::to_value(&merge).unwrap();
+        assert_eq!(json["branch"], serde_json::Value::Null);
+        assert_eq!(json["conflictCounts"], serde_json::json!({"CHANGELOG.md": 2}));
+        // The fields that were there keep their names.
+        for key in ["head", "mergeHead", "names", "incoming", "conflicted", "changedHere", "fromBase"] {
+            assert!(json.get(key).is_some(), "{key} in {json}");
+        }
+        // A conflicted file that is gone from disk counts 0.
+        std::fs::remove_file(root.join("CHANGELOG.md")).unwrap();
+        assert_eq!(read(root).unwrap().unwrap().conflict_counts["CHANGELOG.md"], 0);
     }
 
     #[test]

@@ -3120,7 +3120,14 @@ pub async fn branch_step_action(state: State<'_, AppState>, session_id: String, 
 
 #[tauri::command]
 pub async fn git_commit(cwd: String, message: String, paths: Option<Vec<String>>) -> CmdResult<String> {
-    tauri::async_runtime::spawn_blocking(move || git::commit_all(Path::new(&cwd), &message, paths.as_deref()).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || {
+        if paths.as_deref().is_some_and(|paths| !paths.is_empty()) {
+            git::commit_all(Path::new(&cwd), &message, paths.as_deref())
+        } else {
+            git::commit_staged_or_all(Path::new(&cwd), &message)
+        }
+        .map_err(err)
+    }).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -3188,6 +3195,37 @@ pub async fn abort_merge(cwd: String, head: String, merge_head: String) -> CmdRe
     tauri::async_runtime::spawn_blocking(move || crate::unfinished_merge::abort(Path::new(&cwd), &head, &merge_head).map_err(err)).await.map_err(err)?
 }
 
+/// A conflicted file of the merge that was read, cut into its conflicts (PRO-293).
+#[tauri::command]
+pub async fn merge_conflict_file(cwd: String, head: String, merge_head: String, path: String) -> CmdResult<crate::merge_conflicts::ConflictFile> {
+    tauri::async_runtime::spawn_blocking(move || crate::merge_conflicts::read(Path::new(&cwd), &head, &merge_head, &path).map_err(err)).await.map_err(err)?
+}
+
+/// Replace conflict `index` of a file with a side, or both, and the file as
+/// written; refused when the file changed since `version`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_merge_conflict(
+    cwd: String,
+    head: String,
+    merge_head: String,
+    path: String,
+    version: String,
+    index: usize,
+    choice: crate::merge_conflicts::ConflictChoice,
+) -> CmdResult<crate::merge_conflicts::ConflictFile> {
+    tauri::async_runtime::spawn_blocking(move || crate::merge_conflicts::resolve(Path::new(&cwd), &head, &merge_head, &path, &version, index, choice).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+/// Stage a file with no conflict markers left; refused when it changed since
+/// `version` or still has markers.
+#[tauri::command]
+pub async fn mark_conflict_resolved(cwd: String, head: String, merge_head: String, path: String, version: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::merge_conflicts::mark_resolved(Path::new(&cwd), &head, &merge_head, &path, &version).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn git_checkout(cwd: String, name: String, create: bool) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || git::checkout_branch(Path::new(&cwd), &name, create).map_err(err)).await.map_err(err)?
@@ -3206,6 +3244,116 @@ pub async fn working_changes(cwd: String, hide_whitespace: Option<bool>) -> CmdR
     })
     .await
     .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn working_change_sets(
+    cwd: String,
+    hide_whitespace: Option<bool>,
+) -> CmdResult<(String, String, Vec<git::ChangedFile>, Vec<git::ChangedFile>)> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::working_change_sets(Path::new(&cwd), hide_whitespace.unwrap_or(false)).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_stage_paths(cwd: String, paths: Vec<String>) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::stage_paths(Path::new(&cwd), &paths).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_unstage_paths(cwd: String, paths: Vec<String>) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::unstage_paths(Path::new(&cwd), &paths).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_unstage_all(cwd: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || git::unstage_all(Path::new(&cwd)).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_apply_hunk(
+    cwd: String,
+    path: String,
+    old_path: Option<String>,
+    index: usize,
+    reverse: bool,
+) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::apply_hunk(Path::new(&cwd), &path, old_path.as_deref(), index, reverse).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_hunk_count(
+    cwd: String,
+    path: String,
+    old_path: Option<String>,
+    staged: bool,
+) -> CmdResult<usize> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::hunk_count(Path::new(&cwd), &path, old_path.as_deref(), staged).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn generate_commit_message(cwd: String, agent: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<String> {
+        if !matches!(agent.as_str(), "claude" | "codex") {
+            return Err("Choose Claude Code or Codex.".to_string());
+        }
+        let p = Path::new(&cwd);
+        let diff = git::staged_diff(p, 48 * 1024).map_err(err)?;
+        let prompt = format!("Write one concise conventional commit subject for these staged changes. Return only the subject, with no quotes or markdown.\n\n{diff}");
+        let mut command = std::process::Command::new(crate::binpath::resolve(&agent).unwrap_or_else(|| std::path::PathBuf::from(&agent)));
+        // Keep repository instructions and hooks out of this one-shot request;
+        // the only repository content provided to the model is the staged diff.
+        command.env("PATH", crate::binpath::login_path()).current_dir(std::env::temp_dir());
+        if agent == "claude" {
+            command.args(["-p", "--model", "haiku", "--output-format", "text", "--safe-mode", "--tools", ""]).arg(prompt);
+        } else {
+            command.args(["exec", "--model", "gpt-5-mini", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config"]).arg(prompt);
+        }
+        let output = crate::git::output_within(command, std::time::Duration::from_secs(90))
+            .map_err(|error| match error {
+                crate::git::RunError::TimedOut => format!("{label} took too long. Try again.", label = if agent == "claude" { "Claude Code" } else { "Codex" }),
+                crate::git::RunError::Failed(message) if is_agent_sign_in_error(&message) => format!("{} is signed out. Sign in to the agent, then try again.", if agent == "claude" { "Claude Code" } else { "Codex" }),
+                crate::git::RunError::Failed(message) => format!("{} could not generate a commit message: {message}", if agent == "claude" { "Claude Code" } else { "Codex" }),
+                _ => format!("{} could not start. Check that its CLI is installed.", if agent == "claude" { "Claude Code" } else { "Codex" }),
+            })?;
+        let subject = output.lines().map(str::trim).find(|line| !line.is_empty()).ok_or_else(|| "The agent returned an empty commit message.".to_string())?;
+        Ok(subject.trim_matches(['`', '"', '\'']).to_string())
+    }).await.map_err(err)?
+}
+
+fn is_agent_sign_in_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "not logged in",
+        "sign in",
+        "log in",
+        "unauthorized",
+        "authentication required",
+        "api key",
+    ]
+    .iter()
+    .any(|part| message.contains(part))
 }
 
 #[tauri::command]
@@ -4111,6 +4259,13 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    #[test]
+    fn commit_message_generation_recognizes_signed_out_agents() {
+        assert!(super::is_agent_sign_in_error("Not logged in. Please run /login."));
+        assert!(super::is_agent_sign_in_error("Authentication required: invalid API key"));
+        assert!(!super::is_agent_sign_in_error("The model is temporarily unavailable."));
+    }
+
     #[test]
     fn revealing_configuration_never_grants_consent() {
         use tauri_plugin_dialog::MessageDialogResult;

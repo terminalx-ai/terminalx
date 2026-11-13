@@ -16,6 +16,7 @@ import { DiffOptions } from "./DiffOptions";
 import { useDiffOptions } from "@/lib/diffOptions";
 import { ReviewFileList } from "./ReviewFileList";
 import { AddRemote, GitError } from "./GitRecovery";
+import { setPrefs, usePrefs } from "@/lib/prefs";
 
 export type RepoView = "uncommitted" | "history";
 
@@ -47,13 +48,19 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
-  const { head, files, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick + revision, hideWhitespace);
+  const { head, index, files, staged, unstaged, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick + revision, hideWhitespace);
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedStaged, setSelectedStaged] = useState(false);
   const review = useReviewComments();
   useEffect(() => { review?.refresh(); }, [files, head, review?.refresh]);
-  const current = files.find((file) => file.path === selected);
+  const current = (selectedStaged ? staged : unstaged).find((file) => file.path === selected) ?? files.find((file) => file.path === selected);
+  useEffect(() => {
+    if (!selected) return;
+    if (!selectedStaged && !unstaged.some((file) => file.path === selected) && staged.some((file) => file.path === selected)) setSelectedStaged(true);
+    else if (selectedStaged && !staged.some((file) => file.path === selected) && unstaged.some((file) => file.path === selected)) setSelectedStaged(false);
+  }, [selected, selectedStaged, staged, unstaged]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -62,6 +69,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   /** Null until the history is read: an empty list is then really empty. */
   const [commits, setCommits] = useState<CommitInfo[] | null>(null);
   const [openCommit, setOpenCommit] = useState<string | null>(null);
+  const prefs = usePrefs();
+  const [commitAgent, setCommitAgent] = useState<"claude" | "codex">("claude");
 
   useEffect(() => {
     setDiscarding(null);
@@ -113,6 +122,19 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
     }
   };
   const commit = () => void run("commit", () => source.commit(message.trim())).then((ok) => ok && setMessage(""));
+  const pathArgs = (file: ChangedFile) => [file.path, ...(file.oldPath ? [file.oldPath] : [])];
+  const stageFile = (file: ChangedFile) => void run("stage", async () => { await source.stagePaths?.(pathArgs(file)); });
+  const unstageFile = (file: ChangedFile) => void run("unstage", async () => { await source.unstagePaths?.(pathArgs(file)); });
+  const applyHunk = (index: number) => {
+    if (!current || !source.applyHunk) return;
+    void run(selectedStaged ? "unstage hunk" : "stage hunk", () => source.applyHunk!(current.path, current.oldPath, index, selectedStaged));
+  };
+  const generateMessage = () => void run("generate message", async () => {
+    if (!source.generateCommitMessage) throw new Error("Commit message generation is available for local repositories.");
+    const generated = await source.generateCommitMessage(commitAgent);
+    if (selectedSource.current.generation === generation) setMessage(generated);
+  });
+  const commitLabel = staged.length ? `Commit ${staged.length} staged file${staged.length === 1 ? "" : "s"}` : `Commit all ${files.length} file${files.length === 1 ? "" : "s"}`;
   const push = () => void run("push", async () => {
     if (source.hasRemote && !await source.hasRemote()) {
       if (selectedSource.current.generation === generation) setNeedsRemote(true);
@@ -156,7 +178,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           <span>
             {status?.operation ? `A ${status.operation} is in progress. ` : ""}
             {status?.conflicted?.length
-              ? `Conflicts in ${status.conflicted.join(", ")}: resolve them in the workspace before committing.`
+              ? status.operation === "merge" && source.unfinishedMerge && source.conflictFile && source.canWrite
+                ? `Conflicts in ${status.conflicted.join(", ")}: open each from Merge in progress in Changes to resolve it there, or ask the agent to, before committing.`
+                : `Conflicts in ${status.conflicted.join(", ")}: resolve them in the workspace before committing.`
               : status?.operation === "merge" && source.unfinishedMerge
                 ? "Commit or abort it from Changes, which shows what the merge brought in."
                 : "Finish or abort it in the workspace's terminal."}
@@ -187,15 +211,19 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                 placeholder="Commit message (⌘⏎ to commit)"
                 className="w-full resize-none bg-transparent px-1 text-[13px] outline-none placeholder:text-faint"
               />
+              {source.generateCommitMessage && <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[11px]">
+                <label className="flex items-center gap-1"><input type="checkbox" checked={prefs.writeCommitMessagesWithAgent} onChange={(event) => setPrefs({ writeCommitMessagesWithAgent: event.target.checked })} />Write commit messages with the agent</label>
+                <span className="text-faint">Uses your own quota.</span>
+                {prefs.writeCommitMessagesWithAgent && <><select aria-label="Commit message agent" value={commitAgent} onChange={(event) => setCommitAgent(event.target.value as "claude" | "codex")} className="rounded bg-background px-1 py-0.5"><option value="claude">Claude</option><option value="codex">Codex</option></select><Button size="xs" variant="secondary" disabled={!staged.length || !!busy} onClick={generateMessage}>{busy === "generate message" ? <Loader2 className="animate-spin" /> : null}Generate message</Button></>}
+              </div>}
               <div className="flex items-center gap-1">
                 <Button
                   size="sm"
                   variant="accent"
-                  // Committing stages everything, conflict markers included.
                   disabled={!message.trim() || !files.length || !!busy || !!status?.conflicted?.length}
                   onClick={commit}
                 >
-                  {busy === "commit" ? <Loader2 className="animate-spin" /> : <Check />} Commit
+                  {busy === "commit" ? <Loader2 className="animate-spin" /> : <Check />} {commitLabel}
                 </Button>
                 <WithTooltip label="Push">
                   <Button size="sm" variant="secondary" disabled={!!busy} onClick={push}>
@@ -219,13 +247,25 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
             </div>
           </div>}
           <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[35%] border-b border-hairline" : "flex-1")}>
-            <ReviewFileList
+            {source.stagePaths && source.unstagePaths ? <div className="space-y-2 px-2 pb-2">
+              <section aria-label="Staged">
+                <div className="flex items-center justify-between px-2 py-1 text-xs"><h3 className="font-medium">Staged · {staged.length}</h3><Button size="xs" variant="ghost" disabled={!staged.length || !!busy} onClick={() => void run("unstage all", async () => { await source.unstageAll?.(); })}>Unstage all</Button></div>
+                <ReviewFileList workspace={source.key} base={head ?? undefined} files={staged} selected={selectedStaged ? selected : null} onSelect={(p) => { setSelectedStaged(true); setSelected(p); }} empty="Nothing staged yet."
+                  trailing={(file) => <Button size="xs" variant="ghost" disabled={!!busy} onClick={() => unstageFile(file)}>Unstage</Button>} />
+              </section>
+              <section aria-label="Unstaged">
+                <div className="flex items-center justify-between px-2 py-1 text-xs"><h3 className="font-medium">Unstaged · {unstaged.length}</h3><Button size="xs" variant="ghost" disabled={!unstaged.length || !!busy} onClick={() => void run("stage all", () => source.stagePaths!(unstaged.flatMap(pathArgs)))}>Stage all</Button></div>
+                <ReviewFileList workspace={source.key} base={head ?? undefined} files={unstaged} selected={!selectedStaged ? selected : null} onSelect={(p) => { setSelectedStaged(false); setSelected(p); }} empty="Working tree is clean."
+                  trailing={(file) => <Button size="xs" variant="ghost" disabled={!!busy} onClick={() => stageFile(file)}>Stage</Button>} />
+              </section>
+            </div> : <ReviewFileList
               workspace={source.key}
               base={head ?? undefined}
               files={files}
               selected={selected}
               onSelect={(p) => {
                 const file = files.find((f) => f.path === p);
+                setSelectedStaged(false);
                 if (onOpenDiff && file && head) onOpenDiff(file, { base: head, head: null });
                 else setSelected((s) => s === p ? null : p);
               }}
@@ -233,10 +273,11 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
               trailing={(f) => source.discard && writable && (
                 <DiscardButton path={f.path} onClick={() => setDiscarding(f)} />
               )}
-            />
+            />}
           </div>
           {current && head && <div className="min-h-0 flex-1">
-            <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={head} head={null} revision={tick} onDiscard={source.discard && writable ? () => setDiscarding(current) : undefined} />
+            <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={selectedStaged ? head : index ?? head} head={selectedStaged ? index : null} revision={tick} onDiscard={source.discard && writable ? () => setDiscarding(current) : undefined}
+              staging={source.applyHunk ? { staged: selectedStaged, disabled: !!busy, onHunk: applyHunk } : undefined} />
           </div>}
         </>
       )}

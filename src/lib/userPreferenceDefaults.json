@@ -11,6 +11,7 @@
   "transcriptLayout": "wide",
   "foldToolCalls": false,
   "turnChanges": true,
+  "writeCommitMessagesWithAgent": false,
   "promptMap": true,
   "autocorrect": false,
   "useWorktree": true,

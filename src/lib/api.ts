@@ -31,6 +31,8 @@ import type {
   TabEntry,
   TabStatus,
   UnfinishedMerge,
+  ConflictChoice,
+  ConflictFile,
   WorkStatus,
   WorkspaceRemoveReport,
   Leftover,
@@ -2236,12 +2238,28 @@ export const git = {
   discard: (cwd: string, path: string, base: string | null = null, oldPath: string | null = null) => invoke<void>("git_discard", { cwd, path, base, oldPath }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
   workingChanges: (cwd: string, hideWhitespace = false) => invoke<[string, ChangedFile[]]>("working_changes", { cwd, hideWhitespace }),
+  workingChangeSets: (cwd: string, hideWhitespace = false) => invoke<[string, string, ChangedFile[], ChangedFile[]]>("working_change_sets", { cwd, hideWhitespace }),
+  stagePaths: (cwd: string, paths: string[]) => invoke<void>("git_stage_paths", { cwd, paths }),
+  unstagePaths: (cwd: string, paths: string[]) => invoke<void>("git_unstage_paths", { cwd, paths }),
+  unstageAll: (cwd: string) => invoke<void>("git_unstage_all", { cwd }),
+  applyHunk: (cwd: string, path: string, oldPath: string | undefined, index: number, reverse: boolean) => invoke<void>("git_apply_hunk", { cwd, path, oldPath: oldPath ?? null, index, reverse }),
+  hunkCount: (cwd: string, path: string, oldPath: string | undefined, staged: boolean) => invoke<number>("git_hunk_count", { cwd, path, oldPath: oldPath ?? null, staged }),
+  generateCommitMessage: (cwd: string, agent: "claude" | "codex") => invoke<string>("generate_commit_message", { cwd, agent }),
   /** The merge left in progress in the checkout, with what each uncommitted file is; null when none is. */
   unfinishedMerge: (cwd: string) => invoke<UnfinishedMerge | null>("unfinished_merge", { cwd }),
   /** Commit the merge that was read; refused if the checkout moved on or a file is still conflicted. */
   commitMerge: (cwd: string, head: string, mergeHead: string) => invoke<string>("commit_merge", { cwd, head, mergeHead }),
   /** `git merge --abort` of the merge that was read, and no other. */
   abortMerge: (cwd: string, head: string, mergeHead: string) => invoke<void>("abort_merge", { cwd, head, mergeHead }),
+  /** A conflicted file of the merge that was read, cut into its conflicts (PRO-293). */
+  conflictFile: (cwd: string, head: string, mergeHead: string, path: string) =>
+    invoke<ConflictFile>("merge_conflict_file", { cwd, head, mergeHead, path }),
+  /** Replace one conflict with a side, or both, and return the file as written. Refused when the file changed since `version`. */
+  resolveConflict: (cwd: string, head: string, mergeHead: string, path: string, version: string, index: number, choice: ConflictChoice) =>
+    invoke<ConflictFile>("resolve_merge_conflict", { cwd, head, mergeHead, path, version, index, choice }),
+  /** Stage a file with no conflict markers left (`git add`). Refused when it changed since `version` or still has markers. */
+  markResolved: (cwd: string, head: string, mergeHead: string, path: string, version: string) =>
+    invoke<void>("mark_conflict_resolved", { cwd, head, mergeHead, path, version }),
 };
 
 export type PrScope = { kind: "local"; cwd: string } | { kind: "cloud"; workspace: string; repo: string };
