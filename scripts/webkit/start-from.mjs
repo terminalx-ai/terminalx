@@ -1,13 +1,12 @@
 // PRO-184: run the built app with real keyboard events in WebKit (headless in the local macOS VM).
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
-import { webkit } from "playwright";
 import { launch, open, serve } from "./harness.mjs";
 
 const shots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
 if (shots) await mkdir(shots, { recursive: true });
 const server = await serve();
-const browser = process.env.WEBKIT_START_FROM_HEADED ? await webkit.launch({ headless: false, timeout: 120000 }) : await launch();
+const browser = process.env.WEBKIT_START_FROM_HEADED ? await launch({ headless: false, timeout: 120000 }) : await launch();
 try {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 900, height: 800 }, { extra: `
     const pr = { number: 12, title: "Fix parser from a fork", author: "alice", state: "OPEN", url: "https://github.com/acme/app/pull/12" };
