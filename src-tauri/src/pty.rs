@@ -222,6 +222,9 @@ impl StoppingPane {
 
     pub(crate) fn pid(&self) -> Option<u32> { self.group.pid() }
 
+    /// Its processes are not known to be gone.
+    pub(crate) fn pending(&self) -> bool { self.group.pid().is_some() }
+
     pub(crate) fn wait_all(panes: &[Self], timeout: Duration) -> bool {
         for pane in panes { pane.group.signal(false); }
         let start = Instant::now();

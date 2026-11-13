@@ -2448,6 +2448,29 @@ impl SessionManager {
         crate::cloud_grants::sign_in_required_for_launch(harness, &launch)
     }
 
+    /// Whether an earlier stop of this tab is still unconfirmed: retained
+    /// launches a Stop has to finish before anything is removed (#467).
+    pub(crate) fn stop_unconfirmed(&self, session_id: &str, tab_id: &str) -> bool {
+        let key = key_of(session_id, tab_id);
+        if self.stopping_ptys.lock().unwrap().get(&key).is_some_and(|panes| panes.iter().any(pty::StoppingPane::pending)) { return true; }
+        let runtime = self.tabs.lock().unwrap().get(&key).cloned();
+        if runtime.is_some_and(|runtime| runtime.lock().unwrap().stopping) { return true; }
+        let pane = index::get(session_id).ok().and_then(|entry| entry.tab(tab_id).map(TabEntry::pane_id)).unwrap_or_else(|| Self::pane_id(tab_id));
+        !self.terminals.detached_stops(&pane).is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_status_for_test(&self, session_id: &str, tab_id: &str, status: TabStatus) {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        let mut rt = runtime.lock().unwrap();
+        self.set_status(&mut rt, status);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_for_test(&self, session_id: &str, tab_id: &str) -> TabStatus {
+        self.runtime(session_id, tab_id).unwrap().lock().unwrap().status
+    }
+
     pub fn is_running(&self, session_id: &str, tab_id: &str) -> bool {
         let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
         runtime.is_some_and(|runtime| {

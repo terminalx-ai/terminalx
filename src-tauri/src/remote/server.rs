@@ -3105,7 +3105,13 @@ impl WorkspaceRpc {
         // Without agents (tests) nothing is running to stop.
         if let Some(manager) = &self.sessions {
             for tab_id in &closing {
-                manager.stop(&session.id, tab_id).map_err(RpcError::internal)?;
+                // As main: an idle tab has nothing to stop, and stopping it
+                // would post "Session closed" into its log and read an
+                // unread reply. A running one, or one whose earlier stop is
+                // still unconfirmed (#467), is stopped and must confirm.
+                if manager.is_running(&session.id, tab_id) || manager.stop_unconfirmed(&session.id, tab_id) {
+                    manager.stop(&session.id, tab_id).map_err(RpcError::internal)?;
+                }
             }
         }
         if params.get("remove").and_then(Value::as_bool) == Some(true) {
