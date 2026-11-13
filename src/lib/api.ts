@@ -2248,6 +2248,8 @@ export const git = {
   pull: (cwd: string) => invoke<string>("git_pull", { cwd }),
   discard: (cwd: string, path: string, base: string | null = null, oldPath: string | null = null) => invoke<void>("git_discard", { cwd, path, base, oldPath }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
+  /** On a detached HEAD, make a branch at the commit it is on, named from `name`, and check it out (PRO-295); returns the branch. */
+  branchHere: (projectPath: string, cwd: string, name: string | null) => invoke<string>("git_branch_here", { projectPath, cwd, name }),
   workingChanges: (cwd: string, hideWhitespace = false) => invoke<[string, ChangedFile[]]>("working_changes", { cwd, hideWhitespace }),
   workingChangeSets: (cwd: string, hideWhitespace = false) => invoke<[string, string, ChangedFile[], ChangedFile[]]>("working_change_sets", { cwd, hideWhitespace }),
   stagePaths: (cwd: string, paths: string[]) => invoke<void>("git_stage_paths", { cwd, paths }),

@@ -1,6 +1,6 @@
 import { ReviewCommentsProvider, useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { openConflict, openDiff, useEditors } from "@/lib/editors";
 import { useTerminals } from "@/lib/terminal";
 import { changeRange, type ChangeRange } from "@/lib/changes";
@@ -18,6 +18,8 @@ import { CommitPicker } from "./CommitPicker";
 import { checkpointChoices, commitRange, readChangesChoice, saveChangesChoice, type ChangesChoice, type ChangesScope } from "@/lib/changesScope";
 import { MergeInProgress } from "./MergeInProgress";
 import { RepoPanel } from "./RepoPanel";
+import { showCompareSwitchFailed } from "@/lib/branchToasts";
+import { dismissErrorKey } from "@/lib/errorToasts";
 
 /**
  * Review the accumulated workspace by default; turn snapshots are opt-in.
@@ -68,6 +70,8 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [branchError, setBranchError] = useState<string | null>(null);
   const [draft, setDraft] = useState(choice.target ?? "");
+  const targetInput = useRef<HTMLInputElement>(null);
+  const [switching, setSwitching] = useState(false);
   const [tick, setTick] = useState(0);
   const [result, setResult] = useState<{ range: ChangeRange; target: string; files: ChangedFile[]; merge: UnfinishedMerge | null; mergeError: string | null;
     /** A merge's own files: what is uncommitted against HEAD, whichever scope is shown. */
@@ -163,6 +167,34 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
     }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [source, choice.scope, choice.target, choice.commit, choice.checkpoint, checkpoint?.base, checkpoint?.head, choice.scope === "turn" ? turnRange?.base : null, choice.scope === "turn" ? turnRange?.head : null, active, tick, workingTree, live, reads, hideWhitespace]);
+  // A comparison branch is tried before it is switched to (PRO-295): one that cannot be used leaves the comparison
+  // where it was, and a toast says why, what it still compares against, and git's own words.
+  const applyTarget = async () => {
+    const target = draft.trim() || null;
+    if (switching) return;
+    if (!target || target === choice.target) {
+      dismissErrorKey("compare-switch");
+      choose({ ...choice, target });
+      return;
+    }
+    setSwitching(true);
+    try {
+      await source.reviewRange(target, false);
+    } catch (e) {
+      showCompareSwitchFailed({
+        target,
+        current: result?.target ?? choice.target ?? "the automatic base branch",
+        error: source.errorMessage(e),
+        branches,
+        onChooseAnother: () => { targetInput.current?.focus(); targetInput.current?.select(); },
+      });
+      return;
+    } finally {
+      setSwitching(false);
+    }
+    dismissErrorKey("compare-switch");
+    choose({ ...choice, target });
+  };
   // Turn, checkpoint and commit scopes are fixed snapshots; All and Uncommitted are live comparisons a tab can refresh.
   const fixed = choice.scope === "turn" || choice.scope === "checkpoint" || choice.scope === "commit";
   const onOpenDiff = editor ? (file: ChangedFile, range: ChangeRange) => openDiff(editor.sessionId, editor.root, file.path, fixed
@@ -196,11 +228,11 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
         </label>
         {choice.scope !== "all" && <Button size="xs" variant="ghost" onClick={() => choose({ ...choice, scope: "all" })}>Back to all changes</Button>}
         {choice.scope === "commit" && <CommitPicker source={source} active={active} value={choice.commit} onChange={(commit) => choose({ ...choice, commit })} />}
-        {choice.scope === "all" && <form className="flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); choose({ ...choice, target: draft.trim() || null }); }}>
+        {choice.scope === "all" && <form className="flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); void applyTarget(); }}>
           <label htmlFor={targetId}>Target</label>
-          <input id={targetId} list={`${targetId}-branches`} aria-label="Comparison target" className="min-w-0 flex-1 rounded bg-well p-1 font-mono" value={draft} placeholder={result?.target ?? "Automatic base branch"} onChange={(e) => setDraft(e.target.value)} />
+          <input ref={targetInput} id={targetId} list={`${targetId}-branches`} aria-label="Comparison target" className="min-w-0 flex-1 rounded bg-well p-1 font-mono" value={draft} placeholder={result?.target ?? "Automatic base branch"} onChange={(e) => setDraft(e.target.value)} />
           <datalist id={`${targetId}-branches`}>{branches.map((branch) => <option key={branch.name} value={branch.name}>{branch.current ? "Current branch" : branch.remote ? "Remote branch" : "Local branch"}</option>)}</datalist>
-          <Button type="submit" variant="secondary" size="sm">Apply</Button>
+          <Button type="submit" variant="secondary" size="sm" disabled={switching} aria-busy={switching || undefined}>Apply</Button>
         </form>}
         {choice.scope === "all" && branchError && <p className="text-muted-foreground">Branch suggestions unavailable: {branchError}</p>}
         {!repo && <p className="break-words text-muted-foreground">{result

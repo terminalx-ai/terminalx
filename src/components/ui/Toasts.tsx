@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { AlertCircle, Check, CheckCircle2, CircleX, Copy, MessageCircleQuestion, Play, RotateCw, X } from "@/icons";
+import { AlertCircle, Check, CheckCircle2, CircleX, Copy, GitBranch, GitBranchPlus, MessageCircleQuestion, Play, RotateCw, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { dismissNotice, openNotice, useNotices } from "@/lib/notify";
@@ -89,9 +89,20 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
       aria-describedby={`${toast.id}-body`}
       data-error-toast=""
       onKeyDown={onKeyDown}
-      className="pointer-events-auto flex items-start gap-2.5 rounded-xl bg-popover p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in"
+      data-tone={toast.tone}
+      className={cn(
+        "pointer-events-auto flex items-start gap-2.5 bg-popover text-sm text-card-foreground shadow-surface animate-fade-in",
+        // The branch toasts (PRO-295) have an edge in their colour, as their screens draw them.
+        toast.tone ? "rounded-lg border px-3.5 py-3" : "rounded-xl p-3 hairline",
+        toast.tone === "warning" && "border-warning/40",
+        toast.tone === "error" && "border-destructive/40",
+      )}
     >
-      <CircleX className="mt-0.5 size-4 shrink-0 text-destructive" />
+      {toast.icon === "branch" ? (
+        <GitBranch aria-hidden className={cn("mt-0.5 size-4 shrink-0", toast.tone === "warning" ? "text-warning" : "text-destructive")} />
+      ) : (
+        <CircleX aria-hidden className={cn("mt-0.5 size-4 shrink-0", toast.tone === "warning" ? "text-warning" : "text-destructive")} />
+      )}
       <div className="min-w-0 flex-1">
         <div id={`${toast.id}-title`} className="flex items-center gap-1.5 font-medium">
           <span className={toast.title ? "min-w-0 break-words" : "truncate"}>{toast.title ?? "Something went wrong"}</span>
@@ -101,7 +112,9 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
           {toast.title ? (
             <>
               {toast.action ? <div>{toast.action}.</div> : null}
-              {toast.cause ? <div className="font-mono text-foreground" data-error-detail="">{toast.cause}</div> : null}
+              {toast.cause && toast.detail === "line" ? (
+                <div className="mt-1.5 truncate rounded-md bg-raised px-2 py-1 font-mono text-[11.5px] hairline" title={toast.cause} data-error-detail="">{toast.cause}</div>
+              ) : toast.cause ? <div className="font-mono text-foreground" data-error-detail="">{toast.cause}</div> : null}
             </>
           ) : toast.cause ? <>{toast.action}: <span className="font-mono text-foreground">{toast.cause}</span></> : `${toast.action}.`}
         </div>
@@ -114,22 +127,25 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
             aria-busy={running === action.label || undefined}
             onClick={() => onAction(action)}
             className={cn(
-              "inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs text-muted-foreground hover:bg-veil-strong hover:text-foreground disabled:opacity-60",
-              action.icon === "retry" && "hairline",
+              "inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs disabled:opacity-60",
+              action.primary ? "bg-foreground font-medium text-background hover:opacity-90" : "text-muted-foreground hover:bg-veil-strong hover:text-foreground",
+              !action.primary && (action.icon || toast.tone) && "hairline",
             )}
           >
             {action.icon === "retry" ? <RotateCw className={cn("size-3.5", running === action.label && "animate-spin")} /> : null}
+            {action.icon === "branch" ? <GitBranch className="size-3.5" /> : null}
+            {action.icon === "branch-plus" ? <GitBranchPlus className="size-3.5" /> : null}
             {action.label}
           </button>
         ))}
-        <button
+        {toast.copy !== false && <button
           type="button"
           onClick={onCopy}
           className="inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs text-muted-foreground hairline hover:bg-veil-strong hover:text-foreground"
         >
           {copy === "copied" ? <Check className="size-3.5 text-add" /> : <Copy className="size-3.5" />}
           {copy === "copied" ? "Copied" : copy === "failed" ? "Couldn't copy" : "Copy error"}
-        </button>
+        </button>}
         </div>
         <span className="sr-only" aria-live="polite">{copy === "copied" ? "Error copied to the clipboard" : ""}</span>
       </div>

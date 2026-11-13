@@ -1854,6 +1854,26 @@ pub fn checkout_branch(cwd: &Path, name: &str, create: bool) -> Result<()> {
     Ok(())
 }
 
+/// Put a checkout on a detached HEAD onto a new branch at the commit it is on
+/// (PRO-295), named `name` under the project's branch prefix as a new
+/// worktree's branch is: nobody has named it yet, so it reads as a drawn name
+/// until it is renamed. Uncommitted work stays where it is. Refused when the
+/// checkout is already on a branch, has no commit, or the branch exists.
+pub fn branch_here(project: &Path, cwd: &Path, name: &str) -> Result<String> {
+    if let Some(branch) = current_branch(cwd) {
+        bail!("This checkout is already on {branch}.");
+    }
+    if head_commit(cwd).is_none() {
+        bail!("This checkout has no commit to make a branch at.");
+    }
+    let branch = worktree_branch_for(project, name)?;
+    if branch.starts_with('-') || branch_exists(cwd, &branch) {
+        bail!("A branch named {branch} already exists.");
+    }
+    run(cwd, &["checkout", "-b", &branch])?;
+    Ok(branch)
+}
+
 /// This person's Git identity (`user.name`, `user.email` from their global
 /// config), which authors the commits they make in a cloud workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2088,6 +2108,35 @@ mod tests {
         assert!(unstaged.iter().any(|file| file.path == "a.txt"));
     }
 
+
+    #[test]
+    fn a_branch_here_is_made_at_the_detached_commit_and_checked_out() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = dir.path();
+        std::fs::write(project.join("b.txt"), "two\n").unwrap();
+        run(project, &["add", "."]).unwrap();
+        run(project, &["commit", "-qm", "second"]).unwrap();
+        let detached = run(project, &["rev-parse", "HEAD~1"]).unwrap().trim().to_string();
+        run(project, &["checkout", "-q", "--detach", &detached]).unwrap();
+        std::fs::write(project.join("a.txt"), "edited, not committed\n").unwrap();
+        assert!(current_branch(project).is_none());
+
+        let branch = branch_here(project, project, "calm-moss-robin").unwrap();
+        assert_eq!(branch, worktree_branch_for(project, "calm-moss-robin").unwrap());
+        assert_eq!(current_branch(project).as_deref(), Some(branch.as_str()));
+        // At the commit it was detached at, not main's tip, with the uncommitted edit kept.
+        assert_eq!(run(project, &["rev-parse", "HEAD"]).unwrap().trim(), detached);
+        assert_eq!(run(project, &["rev-parse", &branch]).unwrap().trim(), detached);
+        assert_eq!(std::fs::read_to_string(project.join("a.txt")).unwrap(), "edited, not committed\n");
+
+        // On a branch now, so there is nothing to make; and a name already a branch is never taken over.
+        assert!(branch_here(project, project, "tidy-sage-wren").unwrap_err().to_string().contains("already on"));
+        run(project, &["checkout", "-q", "--detach", "main"]).unwrap();
+        assert!(branch_here(project, project, "calm-moss-robin").unwrap_err().to_string().contains("already exists"));
+        assert_eq!(run(project, &["rev-parse", &branch]).unwrap().trim(), detached);
+        assert!(current_branch(project).is_none());
+    }
 
     #[test]
     fn pr_checkout_uses_the_fetched_head_and_cleans_up_a_failed_checkout() {

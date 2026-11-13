@@ -40,7 +40,8 @@ import { errorMessage } from "@/lib/api";
 import { reportError, showError } from "@/lib/errorToasts";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { branchSessionsAsTabs } from "@/lib/tabLayouts";
-import { branchMerged, conversationBranch } from "@/lib/checkout";
+import { branchMerged, checkoutLabel, conversationBranch } from "@/lib/checkout";
+import { showDetachedRename } from "@/lib/branchToasts";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
 import { addProject, archiveSession, archiveSessions, conversationTitle, openProjectOverview, pinSession, removeProject, selectSession, setSessionUnread, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
 import { ROW_ATTRIBUTE, isPicked, pickOnClick, togglePicked, usePickedSessions } from "@/lib/rowSelection";
@@ -503,7 +504,21 @@ function ProjectGroup({
   );
   // The branch whose Rename dialog is open. The project's own checkout keeps its branch; its label can still change.
   const [renaming, setRenaming] = useState<string | null>(null);
-  const renameBranch = (branch: string) => (branch && group.project && group.project.kind !== "folder" ? () => setRenaming(branch) : null);
+  // On a detached HEAD there is no branch to rename: Rename… says so, and offers to make one at the commit (PRO-295).
+  // The row's branch reads "detached at 1a2b3c4" then (or nothing): it is the checkout that says there is no branch.
+  const detachedAt = (branch: string, sessions: SessionEntry[]) => {
+    const session = sessions.find((entry) => entry.id === selectedId) ?? sessions[0];
+    if (!session || session.worktreeRemoved) return null;
+    const checkout = workspaces.find((workspace) => canon(workspace.path) === canon(session.cwd));
+    if (!checkout || checkout.branch || !checkout.head || (branch && branch !== checkoutLabel(checkout))) return null;
+    return { cwd: checkout.path, head: checkout.head, title: conversationTitle(session) || null };
+  };
+  const renameBranch = (branch: string, sessions: SessionEntry[]) => {
+    if (!group.project || group.project.kind === "folder") return null;
+    const detached = detachedAt(branch, sessions);
+    if (detached) return () => void showDetachedRename({ projectPath: group.path, ...detached });
+    return branch ? () => setRenaming(branch) : null;
+  };
   const nav = useSessionStore();
   const sort = useSidebarSortable(canon(group.path));
   const overviewOpen = nav.view === "project" && !!nav.selectedProject && canon(nav.selectedProject) === canon(group.path);
@@ -564,7 +579,7 @@ function ProjectGroup({
       merged={!sessions[0].worktreeRemoved && merged.has(branch)}
       onNewSession={newSessionOn(branch, sessions)}
       label={labels[branch]}
-      onRenameBranch={renameBranch(branch)}
+      onRenameBranch={renameBranch(branch, sessions)}
       linkTo={null}
     />
   );
@@ -608,7 +623,7 @@ function ProjectGroup({
         opened={filtered}
         merged={!sessions[0].worktreeRemoved && merged.has(branch)}
         onNewSession={newSessionOn(branch, sessions)}
-        onRename={renameBranch(branch)}
+        onRename={renameBranch(branch, sessions)}
       />
     );
   return (
