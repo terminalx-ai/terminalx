@@ -234,3 +234,57 @@ fn user_state_cannot_supply_or_remove_system_policy() {
     std::fs::remove_file(impostor).unwrap();
     assert_eq!(f.resolve().values["branchPrefix"].value, "admin/");
 }
+
+#[test]
+fn sparse_checkout_accepts_repository_folders_and_refuses_anything_else() {
+    let accepted = [json!([]), json!(["src"]), json!(["packages/web", "docs", "a.b/c-d_e", "naïve dir/x"]),
+        json!([format!("{}", "a".repeat(SPARSE_CHECKOUT_MAX_PATH))]),
+        Value::Array((0..SPARSE_CHECKOUT_MAX_FOLDERS).map(|n| json!(format!("f{n}"))).collect())];
+    for value in accepted {
+        assert!(valid("sparseCheckout", &value, Layer::RepositoryLocal), "{value}");
+    }
+    let refused = [json!(null), json!("src"), json!({"src": true}), json!([1]), json!([null]), json!([""]),
+        json!(["/src"]), json!(["src/"]), json!(["a//b"]), json!(["."]), json!(["./a"]), json!(["a/.."]), json!(["../a"]),
+        json!(["a\\b"]), json!(["a*"]), json!(["a?"]), json!(["[a]"]), json!(["!a"]), json!(["a\nb"]), json!(["a\tb"]), json!(["a\u{7f}"]),
+        json!(["src", "src"]), json!([format!("{}", "a".repeat(SPARSE_CHECKOUT_MAX_PATH + 1))]),
+        Value::Array((0..=SPARSE_CHECKOUT_MAX_FOLDERS).map(|n| json!(format!("f{n}"))).collect())];
+    for value in refused {
+        assert!(!valid("sparseCheckout", &value, Layer::RepositoryLocal), "{value}");
+    }
+    let registration = REGISTRY.iter().find(|r| r.key == "sparseCheckout").unwrap();
+    assert!(registration.repository_configurable && registration.managed_lockable && !registration.requires_trust);
+}
+
+#[test]
+fn sparse_checkout_is_written_to_the_shared_file_and_needs_no_trust() {
+    let f = Fixture::new();
+    assert!(!f.resolve().values.contains_key("sparseCheckout"), "absent means a full checkout");
+    f.store.write(Some(&f.repository()), Layer::RepositoryShared, "sparseCheckout", Some(json!(["src", "docs/api"]))).unwrap();
+    let written: Value = serde_json::from_slice(&std::fs::read(f.repo.path().join(".terminalx").join(SHARED)).unwrap()).unwrap();
+    assert_eq!(written, json!({"sparseCheckout": ["src", "docs/api"]}));
+    let resolved = f.resolve();
+    assert_eq!(resolved.values["sparseCheckout"].value, json!(["src", "docs/api"]));
+    assert_eq!(resolved.values["sparseCheckout"].source, Layer::RepositoryShared);
+    assert!(resolved.require_trust().is_ok(), "a folder list executes nothing");
+    assert!(f.store.write(Some(&f.repository()), Layer::RepositoryShared, "sparseCheckout", Some(json!(["../outside"]))).is_err());
+    f.store.write(Some(&f.repository()), Layer::RepositoryShared, "sparseCheckout", Some(json!([]))).unwrap();
+    assert_eq!(f.resolve().values["sparseCheckout"].value, json!([]), "root files only");
+    f.store.write(Some(&f.repository()), Layer::RepositoryShared, "sparseCheckout", None).unwrap();
+    assert!(!f.resolve().values.contains_key("sparseCheckout"));
+}
+
+#[test]
+fn sparse_checkout_is_a_repository_setting_a_user_file_cannot_give_every_repository() {
+    let f = Fixture::new();
+    f.file(Layer::User, json!({"sparseCheckout": ["src"]}));
+    let resolved = f.resolve();
+    assert!(!resolved.values.contains_key("sparseCheckout"));
+    assert!(resolved.warnings.iter().any(|warning| warning.ends_with("sparseCheckout")));
+    // A malformed shared list is ignored with a warning, never half-applied.
+    f.file(Layer::RepositoryShared, json!({"sparseCheckout": ["src", "/etc"]}));
+    assert!(!f.resolve().values.contains_key("sparseCheckout"));
+    f.file(Layer::Managed, json!({"sparseCheckout": ["managed"]}));
+    let locked = f.resolve();
+    assert_eq!(locked.values["sparseCheckout"].value, json!(["managed"]));
+    assert!(locked.values["sparseCheckout"].locked);
+}
