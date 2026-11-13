@@ -1010,19 +1010,20 @@ reason to veto or broaden a scoped stop.
 | Nonwaiting terminal teardown | Requests termination without promising confirmed exit; retained launch ownership remains available to later confirmation. |
 
 These results are bounded OS observations of owned work, not a universal
-process-containment certificate. On macOS they still come from the session
-census, whose reviewed internal-truncation omission remains open under its
-separate mechanism hold: propagating a failed wait repairs known-live and
-indeterminate caller handling, but does not detect an unobserved false-empty
-census.
+process-containment certificate.
 
-The census is strict: any process on the machine that ends between being
-listed and being asked makes it indeterminate, because that process might
-have forked into the session first. On a busy Mac, a clean census at the
-first try is therefore rare, and a stop could run out its wait. So an
-indeterminate census is taken again, up to 64 times per question. Each
-retry is a whole new census, and an indeterminate one still never counts as
-empty (`settled_session_jobs`).
+On macOS they come from main's answer: whether the pane leader's process
+group is still alive, signalled as a group. The session census the backup
+added (stopping every job group of the session, and retiring a launch only
+once the whole session is seen empty) is not applied on macOS. That census
+is strict: any process on the machine that ends between being listed and
+being asked makes it indeterminate. On a busy Mac a stop then ran out its
+wait: `archive_script`'s timeout test failed 13 of 30 runs under 6-way
+parallel load, against main's 0 of 30. Retrying the census helped, but
+still failed 4 of 100 runs at a system load near 10. Darwin census work is
+on its own hold, so macOS keeps main's behaviour until that work lands.
+The census code stays, `cfg`-gated, for Linux panes adopted from a runtime
+from before the supervisor, and for other Unix systems (`settled_session_jobs`).
 
 On Linux the census is no longer the authority; see
 [Linux PTY ownership](#linux-pty-ownership-467).
@@ -1095,6 +1096,13 @@ left its session, stay owned. Stop moves a launch through these steps:
    of the supervisor is still live.
 5. The runtime then lets the supervisor exit, and reaps it.
 
+Where preflight finds the system lacking something (an older kernel, no
+`CONFIG_PROC_CHILDREN`, a seccomp filter denying pidfds or `close_range`),
+nothing is started under a supervisor. That launch, and every later one
+of the runtime, opens as before the supervisor, through portable-pty with
+main's census, and every window is told once: "Terminals on this system
+stop when TerminalX quits (missing: …)".
+
 Some things never count as success: a timeout, a lost or out-of-order
 channel, a supervisor that died after a launch was sent, or an uncertain
 send. These keep the launch owned (`OwnedGroup::pid` stays `Some`), so Stop,
@@ -1106,8 +1114,10 @@ its all-child wait finds nothing left (`linux::EMPTY_AFTER_LOSS`). The
 runtime reaps that exact helper, and that status is the proof. A
 supervisor that is killed or crashes ends with anything else, and leaves
 the launch lost for good: nothing it started can be observed any more, but
-it may still run. Only the reader releases such a launch, explicitly (see
-below). It is never forgotten silently.
+it may still run. So does one whose helper has not exited a minute after
+the loss, being stopped or stuck in the kernel. Only the reader releases
+such a launch, explicitly (see below); its helper is then killed and
+reaped. It is never forgotten silently.
 
 ### Integration with the runtime
 
@@ -1153,6 +1163,16 @@ The in-place handover carries supervised launches:
 
 Shells, agents and their jobs keep running in the same terminals, as on
 macOS. A handover that is called off lets every observer go on.
+
+A terminal closed while the handover holds its supervisor is not lost.
+Each held launch's state is taken again just before the record is written,
+so such a Stop goes over as stopping and the runtime that takes over sends
+it. A Stop that comes after that, up to the exec, calls the handover off,
+and the Stop goes ahead where it was asked. If the runtime taking over
+cannot adopt a carried supervisor, its channel closes, and the supervisor
+ends what the launch runs. The helper is reaped, and every window names
+the terminal: "A terminal could not be kept running through the update and
+was stopped".
 
 A launch that cannot be carried as it stands is listed in
 `runtime.handover.plan` by its terminal's title, as a `Terminal` item with
