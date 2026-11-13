@@ -470,8 +470,15 @@ impl Owner {
     }
     /// What this system lacks, when preflight said so before any launch:
     /// nothing was started, and the launch can be made without a supervisor.
+    /// Waits briefly for the helper that said so to be reaped: only then is
+    /// it certain that nothing was started.
     pub(super) fn unsupported(&self) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut state = self.state.lock().unwrap();
+        while state.unsupported.is_some() && state.phase != Phase::Extinct {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else { break };
+            state = self.changed.wait_timeout(state, left).unwrap().0;
+        }
         if state.phase == Phase::Extinct { state.unsupported.clone() } else { None }
     }
 

@@ -1133,14 +1133,13 @@ impl Terminals {
             Ok(shell) => Ok((Waiter::Supervised(owner.clone()), Some(shell), Arc::new(OwnedGroup::supervised(owner, shell)), opening)),
             // Preflight said what this system lacks, before any launch:
             // nothing was started, and none of its launches will be.
-            Err(error) if owner.unsupported().is_some() => {
-                let missing = owner.unsupported().unwrap_or_default();
-                log::warn!("terminals open without a supervisor on this system: {error}");
-                let first = self.unsupervised.lock().unwrap().replace(missing.clone()).is_none();
-                if first { self.notice(format!("Terminals on this system stop when TerminalX quits (missing: {missing}).")); }
-                Err(Unsupervised(missing).into())
-            }
             Err(error) => {
+                if let Some(missing) = owner.unsupported() {
+                    log::warn!("terminals open without a supervisor on this system: {error}");
+                    let first = self.unsupervised.lock().unwrap().replace(missing.clone()).is_none();
+                    if first { self.notice(format!("Terminals on this system stop when TerminalX quits (missing: {missing}).")); }
+                    return Err(Unsupervised(missing).into());
+                }
                 if owner.pending() {
                     let shell = owner.pid().unwrap_or_default();
                     self.groups.lock().unwrap().push((id.to_string(), Arc::new(OwnedGroup::supervised(owner, shell))));
