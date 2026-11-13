@@ -27,6 +27,13 @@ export interface GitSource {
   /** False for a read-only (participate) attachment. */
   canWrite: boolean;
   workingChanges(hideWhitespace?: boolean): Promise<{ head: string | null; files: ChangedFile[] }>;
+  workingChangeSets?(hideWhitespace?: boolean): Promise<{ head: string | null; index: string | null; staged: ChangedFile[]; unstaged: ChangedFile[] }>;
+  stagePaths?(paths: string[]): Promise<void>;
+  unstagePaths?(paths: string[]): Promise<void>;
+  unstageAll?(): Promise<void>;
+  applyHunk?(path: string, oldPath: string | undefined, index: number, reverse: boolean): Promise<void>;
+  hunkCount?(path: string, oldPath: string | undefined, staged: boolean): Promise<number>;
+  generateCommitMessage?(agent: "claude" | "codex"): Promise<string>;
   reviewRange(target: string | null, uncommitted: boolean): Promise<{ target: string; base: string; head: string }>;
   changesBetween(base: string, head: string | null, hideWhitespace?: boolean): Promise<ChangedFile[]>;
   fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }>;
@@ -87,6 +94,13 @@ export function localGitSource(cwd: string, authority?: CheckAuthority): GitSour
     cloud: false,
     canWrite: true,
     workingChanges: (hideWhitespace) => git.workingChanges(cwd, hideWhitespace).then(([head, files]) => ({ head, files })),
+    workingChangeSets: (hideWhitespace) => git.workingChangeSets(cwd, hideWhitespace).then(([head, index, staged, unstaged]) => ({ head, index, staged, unstaged })),
+    stagePaths: (paths) => git.stagePaths(cwd, paths),
+    unstagePaths: (paths) => git.unstagePaths(cwd, paths),
+    unstageAll: () => git.unstageAll(cwd),
+    applyHunk: (path, oldPath, index, reverse) => git.applyHunk(cwd, path, oldPath, index, reverse),
+    hunkCount: (path, oldPath, staged) => git.hunkCount(cwd, path, oldPath, staged),
+    generateCommitMessage: (agent) => git.generateCommitMessage(cwd, agent),
     reviewRange: (target, uncommitted) => api.reviewRange(cwd, target, uncommitted),
     changesBetween: (base, head, hideWhitespace) => api.changesBetween(cwd, base, head, hideWhitespace),
     fileContentsAt: (path, base, head) => api.fileContentsAt(cwd, path, base, head),
