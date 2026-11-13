@@ -323,12 +323,27 @@ pub fn agent_note(cwd: &Path) -> Option<String> {
     Some(note_text(cone, &entries))
 }
 
+/// Longest folder name a note quotes.
+const NOTE_NAME: usize = 100;
+
+/// Whether the system prompt may quote `entry`. The names come from the
+/// repository (its shared settings file needs no trust), so only path-like
+/// ones are: no spaces, quotes or backticks, nothing that reads as prose.
+fn quotable(entry: &str) -> bool {
+    !entry.is_empty() && entry.len() <= NOTE_NAME
+        && entry.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b'@' | b'+' | b'*' | b'!'))
+}
+
 /// The note for a sparse checkout of `entries`: folders in cone mode, the
-/// sparse-checkout patterns otherwise.
+/// sparse-checkout patterns otherwise. Names that are not [`quotable`], and
+/// any past the first `NOTE_FOLDERS`, are counted, not quoted.
 pub(crate) fn note_text(cone: bool, entries: &[String]) -> String {
-    let mut named = entries.iter().take(NOTE_FOLDERS).map(|entry| format!("`{entry}`")).collect::<Vec<_>>().join(", ");
-    if entries.len() > NOTE_FOLDERS {
-        named.push_str(&format!(" and {} more (`git sparse-checkout list` names them all)", entries.len() - NOTE_FOLDERS));
+    let quoted: Vec<&String> = entries.iter().filter(|entry| quotable(entry)).take(NOTE_FOLDERS).collect();
+    let mut named = quoted.iter().map(|entry| format!("`{entry}`")).collect::<Vec<_>>().join(", ");
+    let more = entries.len() - quoted.len();
+    if more > 0 {
+        let lead = if quoted.is_empty() { "" } else { " and " };
+        named.push_str(&format!("{lead}{more} {} (`git sparse-checkout list` names them all)", if quoted.is_empty() { "of them" } else { "more" }));
     }
     let here = match (cone, entries.is_empty()) {
         (true, true) => "only the files at the repository's root are on disk here, no folder".to_string(),
