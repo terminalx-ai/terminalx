@@ -1993,6 +1993,24 @@ pub async fn workspace_setup(state: State<'_, AppState>, operation: String, sess
     github_work(move || sessions.workspace_setup(&operation, session_id.as_deref(), pane_id.as_deref()).map_err(err)).await.map_err(err)?
 }
 
+/// Start a project's saved action in a terminal tab of `session_id`, or hand
+/// back the running tab of a non-concurrent one unless `restart` (PRO-363).
+#[tauri::command]
+pub async fn action_run(state: State<'_, AppState>, session_id: String, action_id: String, restart: Option<bool>) -> CmdResult<crate::action_runner::RunOutcome> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    let options = crate::action_runner::RunOptions { restart: restart.unwrap_or(false) };
+    tauri::async_runtime::spawn_blocking(move || crate::action_runner::run(&runtime.terminals()?, &session_id, &action_id, options))
+        .await.map_err(err)?.map_err(err)
+}
+
+/// Each saved action's open tab in a session: running, or exited with its code.
+#[tauri::command]
+pub async fn action_states(state: State<'_, AppState>, session_id: String) -> CmdResult<Vec<crate::action_runner::ActionRun>> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || crate::action_runner::states(&runtime.terminals()?, &session_id))
+        .await.map_err(err)?.map_err(err)
+}
+
 /// Tell every window what a session is now. The window that made a change
 /// updates its own copy from the reply; another window showing the same
 /// session (the floating one beside the main one) only learns of it here.

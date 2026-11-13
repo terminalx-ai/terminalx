@@ -221,3 +221,46 @@ fn an_untrusted_committed_archive_script_leaves_the_saved_setup_running() {
     rig.wait(&entry.id, Status::Succeeded);
     assert_eq!(std::fs::read_to_string(Path::new(&entry.cwd).join("marker")).unwrap(), "saved");
 }
+
+#[test]
+fn run_after_setup_actions_start_only_once_setup_succeeds() {
+    use crate::action_runner::{self, State};
+    let mut rig = Rig::new();
+    action_runner::observe(rig.manager.sink().clone());
+    let entry = rig.entry("after");
+    let cwd = Path::new(&entry.cwd).to_path_buf();
+    let runs = |rig: &Rig| action_runner::states(&rig.manager, &entry.id).unwrap();
+    let action = |id: &str, command: &str, run_after_setup: bool| projects::RepositoryActionEntry {
+        id: id.into(), name: id.into(), command: command.into(), run_after_setup, ..Default::default()
+    };
+    projects::update(rig.root.to_str().unwrap(), ProjectPatch { actions: Some(vec![
+        // Proves it ran after setup's own work, in the same workspace.
+        action("dev", "test -f setup-done && printf ran >> ran", true),
+        action("manual", "printf manual > manual", false),
+    ]), ..Default::default() }).unwrap();
+
+    rig.script("exit 3");
+    prepare(&entry).unwrap();
+    start(&rig.manager, &entry.id, false).unwrap();
+    assert_eq!(rig.wait(&entry.id, Status::Failed).exit_code, Some(3));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(runs(&rig).is_empty(), "a failed setup starts nothing");
+    assert!(!cwd.join("ran").exists());
+
+    rig.script("sleep 0.3; printf done > setup-done");
+    start(&rig.manager, &entry.id, true).unwrap();
+    // Nothing is started while setup is still running.
+    rig.wait(&entry.id, Status::Running);
+    assert!(runs(&rig).is_empty());
+    rig.wait(&entry.id, Status::Succeeded);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let run = loop {
+        if let Some(run) = runs(&rig).into_iter().find(|r| r.state == State::Exited && r.ended.is_some()) { break run }
+        assert!(Instant::now() < deadline, "the run-after-setup action never finished: {:?}", runs(&rig));
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!((run.action_id.as_str(), run.exit_code), ("dev", Some(0)));
+    assert_eq!(std::fs::read_to_string(cwd.join("ran")).unwrap(), "ran");
+    assert_eq!(runs(&rig).len(), 1, "only the run-after-setup action runs");
+    assert!(!cwd.join("manual").exists());
+}
