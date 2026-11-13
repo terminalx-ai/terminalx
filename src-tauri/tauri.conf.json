@@ -63,7 +63,9 @@
     "createUpdaterArtifacts": true,
     "resources": {
       "../native/computer-use-macos/.build/release/TerminalX Computer Use Helper.app": "TerminalX Computer Use Helper.app",
-      "target/local-runtime/": "local-runtime/"
+      "target/local-runtime/": "local-runtime/",
+      "../schemas/settings.schema.json": "schemas/settings.schema.json",
+      "../schemas/repository-settings.schema.json": "schemas/repository-settings.schema.json"
     }
   },
   "plugins": {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, setDiffMode, serializeReviewTabs, restoreReviewTabs, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
+import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, setDiffMode, serializeReviewTabs, restoreReviewTabs, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 
 afterEach(async () => {
@@ -150,4 +150,35 @@ it("keeps the file-pane selection independent from workspace reviews", async () 
   expect(getEditors().active.s).toBe(file);
   await closeAllEditors("s", true);
   expect(getEditors().editors.map((e) => e.id)).toEqual([review]);
+});
+
+describe("conflict tabs (PRO-293)", () => {
+  const merge = { head: "1".repeat(40), mergeHead: "5".repeat(40) };
+
+  it("opens one tab per conflicted file, titled with what is left, and points it at a newer merge on reopen", () => {
+    const id = openConflict("s", "/repo", "/repo/apps/api/seats.ts", merge, 2);
+    const entry = getEditors().editors.find((e) => e.id === id);
+    expect(entry).toMatchObject({ kind: "conflict", rel: "apps/api/seats.ts", name: "seats.ts · 2 conflicts", conflict: { ...merge, conflicts: 2 } });
+    setConflictCount(id, 1);
+    expect(getEditors().editors.find((e) => e.id === id)?.name).toBe("seats.ts · 1 conflict");
+    const next = { head: "2".repeat(40), mergeHead: "6".repeat(40) };
+    expect(openConflict("s", "/repo", "apps/api/seats.ts", next, 3)).toBe(id);
+    expect(getEditors().editors.filter((e) => e.kind === "conflict")).toHaveLength(1);
+    expect(getEditors().editors.find((e) => e.id === id)).toMatchObject({ name: "seats.ts · 3 conflicts", conflict: { ...next, conflicts: 3 } });
+    expect(() => openConflict("s", "/repo", "../outside.ts", merge, 1)).toThrow("outside the repository");
+    expect(conflictTabName("a/b.ts", 0)).toBe("b.ts · 0 conflicts");
+  });
+
+  it("restores a conflict tab's locator with its count, and drops one that is malformed", () => {
+    const id = openConflict("s", "/repo", "seats.ts", merge, 2);
+    const saved = JSON.parse(serializeReviewTabs(getEditors()));
+    const restored = restoreReviewTabs(JSON.stringify(saved));
+    expect(restored.editors.find((e) => e.id === id)).toMatchObject({ kind: "conflict", name: "seats.ts · 2 conflicts", conflict: { ...merge, conflicts: 2 } });
+    for (const conflict of [undefined, { ...merge, head: "not a commit", conflicts: 1 }, { ...merge, conflicts: -1 }]) {
+      const bad = { ...saved, editors: saved.editors.map((e: { id: string }) => e.id === id ? { ...e, conflict } : e) };
+      expect(restoreReviewTabs(JSON.stringify(bad)).editors.some((e) => e.id === id)).toBe(false);
+    }
+    const escaped = { ...saved, editors: saved.editors.map((e: { id: string }) => e.id === id ? { ...e, rel: "../x.ts" } : e) };
+    expect(restoreReviewTabs(JSON.stringify(escaped)).editors.some((e) => e.id === id)).toBe(false);
+  });
 });

@@ -1,5 +1,8 @@
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { SettingsFileError } from "./SettingsFile";
+import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSources";
+import { useSettingsFile } from "@/lib/settingsFile";
+import type { SourceBadgeKind } from "@/lib/settingSources";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Bot, Building2, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Mic, Network, Palette, Plug, Return, Search, Settings2, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
@@ -8,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { useSessionStore } from "@/lib/sessions";
-import { resolveSetting, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
+import { resolveSetting, sectionShowsUserValues, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
 import { settingsSectionRenderers } from "./sectionRenderers";
 import { HighlightedText } from "@/components/ui/HighlightedText";
 import { movePaletteSelection, type PaletteNavigationKey } from "@/lib/commandPalette";
@@ -260,6 +263,8 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
         </nav>
       </aside>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Open settings.json, top right of every page (PRO-140). */}
+        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center justify-end gap-2 px-3 empty:hidden"><OpenSettingsFileButton /></div>
         <div className="flex min-h-0 flex-1">
         <section ref={content} className={cn(
           "min-w-0 flex-1 overflow-y-auto scrollbar-thin",
@@ -319,10 +324,23 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
           <div hidden={searching} className="mx-auto w-full max-w-[48rem] p-6 pb-12" key={`${section}:${project?.path ?? ""}`}>
             <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="mb-5 break-words text-xl font-semibold tracking-tight outline-none">{section === "repositories" && project ? project.name : SETTINGS_SECTIONS[section].title}</h2>
             {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
+            <SectionBadgeLegend section={section} />
           </div>
         </section>
         </div>
       </div>
+      <CantSaveToast />
     </main>
   );
+}
+
+/**
+ * The badges a page can show. General holds Layered configuration, whose values
+ * come from every layer; other pages show "Your value" on rows kept in the user file.
+ */
+const LAYERED_BADGES: readonly SourceBadgeKind[] = ["managed", "project", "overridesProject", "yours"];
+function SectionBadgeLegend({ section }: { section: SettingsSection }) {
+  const { file } = useSettingsFile();
+  const kinds: readonly SourceBadgeKind[] = section === "general" ? LAYERED_BADGES : file && sectionShowsUserValues(section) ? ["yours"] : [];
+  return <BadgeLegend kinds={kinds} />;
 }

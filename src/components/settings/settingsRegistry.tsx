@@ -4,6 +4,8 @@ import { cn } from "@/lib/cn";
 import { SHORTCUT_ACTIONS } from "@/lib/shortcuts";
 import { setPrefs } from "@/lib/prefs";
 import { SettingRowActions } from "./SettingRowActions";
+import { userFileKeys } from "@/lib/settingSources";
+import { UserFileRowAccessory } from "./SettingSources";
 
 export const NATIVE_CODEX_DESCRIPTION =
   "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.";
@@ -74,6 +76,9 @@ export interface SettingRegistration extends SettingDefinition {
  * adapters supply live controls and (only when needed) a status-dependent description.
  * Content rows retain the native structure of editors, lists and organization sections. */
 function defineSetting<const T extends SettingDefinition>(definition: T): T & SettingRegistration {
+  // A row kept in the user file shows "Your value" and its row menu beside its title (PRO-140).
+  const keys = userFileKeys(definition.storage.location);
+  const accessory = keys.length ? <UserFileRowAccessory keys={keys} title={definition.title} /> : undefined;
   return { ...definition, render: ({ children, instance, ...props }) => {
     const anchor = { "data-setting-id": definition.id, "data-setting-instance": instance, tabIndex: -1 };
     if (definition.layout === "content") {
@@ -85,8 +90,9 @@ function defineSetting<const T extends SettingDefinition>(definition: T): T & Se
       <div className={cn("flex flex-col gap-1.5 py-2", disabled && "opacity-60")}>
         <div className={cn("flex gap-4", stacked ? "flex-col" : "items-center justify-between")}>
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[13px] font-medium">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] font-medium">
               <span id={id} className="min-w-0">{label}</span>
+              {accessory}
               <SettingRowActions id={definition.id as SettingId} title={definition.title} label={label} />
             </div>
             {description && <div className="text-xs leading-relaxed text-muted-foreground">{description}</div>}
@@ -901,6 +907,10 @@ const byId = new Map<string, SettingRegistration>(SETTINGS_ROWS.map((row) => [ro
 if (byId.size !== SETTINGS_ROWS.length) throw new Error("Duplicate settings row id");
 export function settingById(id: string): SettingRegistration | undefined { return byId.get(id); }
 export function settingsInSection(section: SettingsSection): readonly SettingRegistration[] { return SETTINGS_ROWS.filter((row) => row.section === section); }
+/** Whether a section has rows that show "Your value" (rows kept in the user file, drawn as rows). */
+export function sectionShowsUserValues(section: SettingsSection): boolean {
+  return settingsInSection(section).some((row) => row.layout !== "content" && userFileKeys(row.storage.location).length > 0);
+}
 type ContentSettingId = Extract<(typeof SETTINGS_ROWS)[number], { layout: "content" }>["id"];
 type RegisteredProps = Omit<RowProps, "children" | "control"> & (
   | { setting: ContentSettingId; children: ReactElement; control?: never }
