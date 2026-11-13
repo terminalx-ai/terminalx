@@ -4,12 +4,14 @@ import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
 import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
-import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
+import { onOpenOrganizationSettings, onOpenSettingRow } from "@/lib/settingsLinks";
+import { bootSettingDeepLinks, useUnknownSettingLink } from "@/lib/settingsDeepLink";
+import type { SettingId } from "@/components/settings/settingsRegistry";
 import { onProjectSettingsRequest } from "@/lib/projectAdded";
 import { onOrchestratorSettingsRequest, showRunView, useRun } from "@/lib/orchestration";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { ProjectAddedNotice } from "@/components/ui/ProjectAddedNotice";
-import { PanelLeft, PanelRight } from "@/icons";
+import { AlertCircle, PanelLeft, PanelRight } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
@@ -180,6 +182,12 @@ export function AppShell() {
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
+  // A setting's row (PRO-127): a toast's Open setting, and a terminalx://settings/<row-id> link from
+  // another app, which focuses the app on that row (Settings scrolls to it and highlights it). A link
+  // naming no row opens Settings at its default page.
+  useEffect(() => onOpenSettingRow((id) => openSettings(id)), [openSettings]);
+  const openSettingAt = useCallback((row: SettingId | null) => openSettings(row ?? undefined), [openSettings]);
+  useEffect(() => bootSettingDeepLinks(openSettingAt), [openSettingAt]);
   // A project's own settings, from the "Project added" notice: its Scripts, where the setup script lives.
   useEffect(() => onProjectSettingsRequest((projectPath) => {
     setSettingsTab("repositories.scripts");
@@ -293,6 +301,7 @@ export function AppShell() {
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <CloseUndoNotices />
         <Toasts />
+        <UnknownSettingLinkToast />
         <ProjectAddedNotice />
         <WorktreeCopyNotices />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
@@ -538,4 +547,14 @@ function UnselectedWorkspace({
       {underDialog && <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />}
     </>
   );
+}
+
+/** "No setting matches that link": a terminalx://settings link named a row this app has not got (PRO-127). */
+function UnknownSettingLinkToast() {
+  const notice = useUnknownSettingLink();
+  if (!notice) return null;
+  return <div role="status" aria-label={notice.message} className="pointer-events-auto flex min-h-10 items-center gap-2 rounded-lg bg-popover px-3 py-2 text-[12.5px] text-card-foreground shadow-surface hairline animate-fade-in">
+    <AlertCircle className="size-3.5 shrink-0 text-warning" />
+    <span className="min-w-0">{notice.message}</span>
+  </div>;
 }

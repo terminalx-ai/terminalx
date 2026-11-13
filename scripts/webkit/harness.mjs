@@ -27,7 +27,33 @@ export async function serve() {
   return { url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() };
 }
 
-export const launch = () => webkit.launch();
+// Pages must not play the app's attention chimes through this Mac's speakers
+// while checks run: the fixtures move tabs to "waiting" and "done", and the
+// sounds preference defaults to on. tone() already treats a missing audio
+// device as silence, so an AudioContext that can't be built mutes it.
+const muteAudio = `(() => {
+  const Muted = class { constructor() { throw new Error("audio is muted in WebKit checks"); } };
+  window.AudioContext = Muted;
+  window.webkitAudioContext = Muted;
+})();`;
+
+/** WebKit with every page and context it opens muted. Takes webkit.launch's options. */
+export async function launch(options) {
+  const browser = await webkit.launch(options);
+  const newContext = browser.newContext.bind(browser);
+  browser.newContext = async (...args) => {
+    const context = await newContext(...args);
+    await context.addInitScript(muteAudio);
+    return context;
+  };
+  const newPage = browser.newPage.bind(browser);
+  browser.newPage = async (...args) => {
+    const page = await newPage(...args);
+    await page.addInitScript(muteAudio);
+    return page;
+  };
+  return browser;
+}
 
 /**
  * A page of the app with `fixture` behind its Tauri bridge. `extra` is a

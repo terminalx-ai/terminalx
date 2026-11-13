@@ -320,7 +320,7 @@ pub fn create(host: &dyn Host, plan: &Plan, lead_session: &str, lead_tab: Option
     // The windows it would draw on, for the person approving it: nothing counts yet.
     update_usage(host, &mut run);
     store::insert(&run).map_err(EngineError::internal)?;
-    host.changed(&run);
+    changed(host, &run);
     Ok(run)
 }
 
@@ -362,7 +362,7 @@ pub fn update_plan(host: &dyn Host, id: &str, plan: &Plan) -> Result<Run, Engine
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&run);
+    changed(host, &run);
     Ok(run)
 }
 
@@ -423,7 +423,7 @@ pub fn start(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
                 Ok(())
             })
             .map_err(EngineError::internal)?;
-            host.changed(&run);
+            changed(host, &run);
             let why = run.pause.as_ref().map(|pause| pause.message.clone()).unwrap_or_else(|| run.reason.clone().unwrap_or_default());
             let mut error = EngineError::new(
                 "needs_you",
@@ -475,7 +475,7 @@ fn start_retries_locked(host: &dyn Host, id: &str) -> Result<Start, EngineError>
             Ok(())
         })
         .map_err(EngineError::internal)?;
-        host.changed(&run);
+        changed(host, &run);
     }
     if !run.state.live() {
         let waiting = waiting(&run);
@@ -571,7 +571,7 @@ fn pause(host: &dyn Host, id: &str, pause: Pause, held: &[String]) -> Result<Run
     })
     .map_err(EngineError::internal)?;
     if paused_now {
-        host.changed(&run);
+        changed(host, &run);
         let reset = match pause.window.as_ref().and_then(|window| window.resets_at) {
             Some(_) => " They can also let it go on once the window resets.",
             None => "",
@@ -717,7 +717,7 @@ fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, Engi
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&run);
+    changed(host, &run);
     if !started.is_empty() {
         host.watch();
     }
@@ -761,7 +761,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         })
         .map_err(EngineError::internal)?;
         if after != run {
-            host.changed(&after);
+            changed(host, &after);
         }
         return Ok(after);
     }
@@ -948,7 +948,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         Some(reached) => pause(host, id, reached, &[])?,
         None => {
             if after != run {
-                host.changed(&after);
+                changed(host, &after);
             }
             after
         }
@@ -1142,10 +1142,19 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     stored(id)
 }
 
+/// Say that a stored run changed. Every change the engine stores is said
+/// through here, so a run that has just ended (done, failed or stopped) has the
+/// agents of its finished workers stopped on every path that ends it
+/// ([`super::stop_finished`]); workers still under way are left running.
+fn changed(host: &dyn Host, run: &Run) {
+    host.changed(run);
+    super::stop_finished(run, &|worker| host.stop_worker(worker));
+}
+
 /// Say that a run changed, and ask for the next try of a piece that now waits for one.
 fn announce(host: &dyn Host, before: &Run, after: &Run) {
     if after != before {
-        host.changed(after);
+        changed(host, after);
     }
     if after.pieces.iter().any(|piece| piece.retry_waits() && !before.piece(&piece.id).is_some_and(Piece::retry_waits)) {
         host.retry_waits(&after.id);
@@ -1316,7 +1325,7 @@ pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> 
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&run);
+    changed(host, &run);
     let blocked = run.piece(piece_id).is_some_and(Piece::gave_up);
     let start = launch_ready(host, id, Launch::Retries)?;
     Ok(CheckFailed { retried: start.started.iter().any(|started| started == piece_id), run: start.run, piece: piece_id.to_string(), blocked, failed: start.failed })
@@ -1396,14 +1405,14 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
             Ok(())
         })
         .map_err(EngineError::internal)?;
-        host.changed(&after);
+        changed(host, &after);
         if let Err(error) = host.brief_worker(&worker, &text) {
             let error = format!("{error:#}");
             let run = set_piece(id, piece_id, |piece| {
                 piece.state = PieceState::Blocked;
                 piece.note = Some(format!("It was sent back to its worker, which did not take the message: {error}"));
             })?;
-            host.changed(&run);
+            changed(host, &run);
             return Ok(SentBack { run, piece: piece_id.to_string(), fresh_worker: false, blocked: false, failed: vec![NotStarted { piece: piece_id.to_string(), error }] });
         }
         // A worker in a turn again is watched for a stall, as any is.
@@ -1428,7 +1437,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&run);
+    changed(host, &run);
     let blocked = run.piece(piece_id).is_some_and(Piece::gave_up);
     let start = launch_ready(host, id, Launch::Retries)?;
     Ok(SentBack { run: start.run, piece: piece_id.to_string(), fresh_worker: true, blocked, failed: start.failed })
@@ -1465,7 +1474,7 @@ pub fn resolve_in_lead(host: &dyn Host, id: &str, piece_id: &str) -> Result<Run,
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&run);
+    changed(host, &run);
     host.tell_lead(&run, &prompt);
     Ok(run)
 }
@@ -1604,7 +1613,7 @@ pub fn skip(host: &dyn Host, id: &str, piece_id: &str, by: By) -> Result<Skipped
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&after);
+    changed(host, &after);
     if by == By::Person {
         let with = if skipped.len() > 1 { format!(", and with it {}, which depend{} on it", skipped[1..].join(", "), if skipped.len() == 2 { "s" } else { "" }) } else { String::new() };
         host.tell_lead(
@@ -1696,7 +1705,7 @@ pub fn widen(host: &dyn Host, id: &str, piece_id: &str, files: &[String], by: By
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&after);
+    changed(host, &after);
     if by == By::Person {
         host.tell_lead(&after, &format!("The person widened piece {piece_id} of run {id} to own {} as well, and had it tried again by a fresh worker. You are told here how it goes, as for any piece.", added.join(", ")));
     }
@@ -1748,14 +1757,14 @@ pub fn note(host: &dyn Host, id: &str, piece_id: &str, text: &str, by: By) -> Re
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&after);
+    changed(host, &after);
     if let Err(error) = host.brief_worker(&worker, &note_text(text, by)) {
         let error = format!("{error:#}");
         let run = set_piece(id, piece_id, |piece| {
             piece.state = PieceState::Blocked;
             piece.note = Some(format!("A note was sent to its worker, which did not take it: {error}"));
         })?;
-        host.changed(&run);
+        changed(host, &run);
         let mut refusal = EngineError::new("note_not_taken", format!("The worker of piece {piece_id} did not take the note: {error}"), None);
         refusal.details = json!({"piece": piece_id});
         return Err(refusal);
@@ -1814,7 +1823,7 @@ pub fn take_over(host: &dyn Host, id: &str, piece_id: &str, by: By) -> Result<Ru
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&after);
+    changed(host, &after);
     host.tell_lead(&after, &prompt);
     Ok(after)
 }
@@ -1908,7 +1917,7 @@ pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) 
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&after);
+    changed(host, &after);
     if let Some(failed) = failed {
         let mut error = EngineError::new("checks_failed", format!("Piece {piece_id} is not done: `{}` {} in the lead's checkout. It stays with the lead.", failed.run, failed.exit_code.map_or("did not finish".to_string(), |code| format!("exited {code}"))), Some("Fix it in the lead's checkout, commit, and finish the piece again."));
         error.details = json!({"piece": piece_id, "check": failed});
@@ -2053,11 +2062,14 @@ pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
     })
     .map_err(EngineError::internal)?;
     if after != run {
-        host.changed(&after);
+        changed(host, &after);
         if by == By::Person {
             let said = if waited { format!("The person discarded the plan of run {id}. No worker was started. Ask them what to change before you plan again.") } else { format!("The person stopped run {id}. Its workers were stopped; their sessions and branches are as they left them. Do not start another run for this unless they ask.") };
             host.tell_lead(&after, &said);
         }
+    } else {
+        // Stopped already: a finished worker started again since is stopped once more, as any.
+        super::stop_finished(&after, &|worker| host.stop_worker(worker));
     }
     // Its workers' slots are free for other runs, which start under the same lock.
     drop(starting);
@@ -2079,7 +2091,7 @@ pub fn set_limits(host: &dyn Host, id: &str, limits: RunLimits) -> Result<Run, E
         Ok(())
     })
     .map_err(EngineError::internal)?;
-    host.changed(&run);
+    changed(host, &run);
     // A higher worker limit is room for what queued.
     if run.state == RunState::Running {
         host.fill_later();
@@ -2118,7 +2130,7 @@ fn resume_locked(host: &dyn Host, id: &str, how: Resume, by_reset: bool) -> Resu
             Ok(())
         })
         .map_err(EngineError::internal)?;
-        host.changed(&run);
+        changed(host, &run);
         host.watch();
         let waiting = waiting(&run);
         return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new() });
@@ -2268,7 +2280,7 @@ fn mark_stalls(host: &dyn Host, id: &str, now: i64) -> Result<(), EngineError> {
     })
     .map_err(EngineError::internal)?;
     if after != run {
-        host.changed(&after);
+        changed(host, &after);
     }
     for (piece, title, session, minutes) in newly {
         host.tell_lead(

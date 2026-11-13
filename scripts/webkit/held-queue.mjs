@@ -3,8 +3,7 @@
 // pnpm build && node scripts/webkit/held-queue.mjs (run UI checks in the Lume VM).
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
-import { webkit } from "playwright";
-import { open, openConversation, serve, tab } from "./harness.mjs";
+import { launch, open, openConversation, serve, tab } from "./harness.mjs";
 
 const extra = `(() => {
   localStorage.setItem("raccoon.prefs", JSON.stringify({ followUps: "hold" }));
@@ -40,7 +39,7 @@ const screenshots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, { recursive: true });
 let browser;
 try {
-  browser = await webkit.launch({ headless: true });
+  browser = await launch({ headless: true });
   for (const colorScheme of ["light", "dark"]) {
   const page = await open(browser, server.url, { cloud:false, localProjects:1, localSession:true }, { width:1100, height:800 }, { extra, colorScheme });
   await openConversation(page, "Local long session");

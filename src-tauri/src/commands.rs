@@ -5756,7 +5756,7 @@ pub async fn workspace_disposition(project_path: String, path: String, fetch: Op
 
 fn require_archive_runtime<'a>(state: &crate::AppState, paths: impl Iterator<Item = &'a str>) -> CmdResult<()> {
     for path in paths {
-        if !projects::scripts(Path::new(path)).map_err(err)?.archive.trim().is_empty() {
+        if !crate::store::configuration::archive_script(Path::new(path)).map_err(err)?.script.trim().is_empty() {
             return state.sessions().map_err(err)?.require_archive_support().map_err(err);
         }
     }

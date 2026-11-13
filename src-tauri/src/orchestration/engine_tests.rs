@@ -2852,3 +2852,106 @@ fn a_plan_a_person_approved_is_theirs_to_change_the_lead_takes_over_widens_or_sk
     assert_eq!(engine::skip(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "person_only");
     assert_eq!(engine::skip(&host, &id, "cli", engine::By::Person).unwrap().skipped, vec!["cli", "docs"]);
 }
+
+/// A stored run of `lead` whose pieces are given as JSON, each with what it needs to be read.
+fn stored_run(state: &str, pieces: serde_json::Value) -> Run {
+    let pieces: Vec<serde_json::Value> = pieces
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|piece| {
+            let mut full = json!({"title": "A piece", "brief": {"goal": "Do it"}, "owns": [], "dependsOn": [], "doneChecks": [{"type": "command", "run": "true"}], "agent": "claude"});
+            full.as_object_mut().unwrap().extend(piece.as_object().unwrap().clone());
+            full
+        })
+        .collect();
+    let run: Run = serde_json::from_value(json!({
+        "id": "run-ended", "lead": {"sessionId": "lead", "tabId": "lead-tab"}, "projectPath": "/repo", "goal": "End tidily", "state": state,
+        "pieces": pieces, "workerMode": "bypassPermissions", "created": "2026-11-13T09:00:00Z", "modified": "2026-11-13T09:00:00Z",
+    }))
+    .unwrap();
+    store::insert(&run).unwrap();
+    run
+}
+
+fn attempt(step: &str, worker: &str, outcome: Option<&str>) -> serde_json::Value {
+    json!({"step": step, "worker": {"sessionId": worker, "tabId": "t1"}, "outcome": outcome, "at": "2026-11-13T09:00:00Z"})
+}
+
+#[test]
+fn an_ended_run_stops_the_agents_of_finished_tries_only() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    let pieces = json!([
+        {"id": "accepted", "state": "done", "worker": {"sessionId": "wa", "tabId": "t1"}, "tries": [attempt("first", "wa", Some("done"))]},
+        {"id": "old", "state": "failed", "worker": {"sessionId": "wb", "tabId": "t1"}, "tries": []},
+        // Blocked on a question: its worker waits for a person's note.
+        {"id": "asks", "state": "blocked", "worker": {"sessionId": "wc", "tabId": "t1"}, "tries": [attempt("first", "wc", Some("blocked"))]},
+        // The ladder ran out: both tries are finished.
+        {"id": "gave-up", "state": "blocked", "worker": {"sessionId": "wd2", "tabId": "t1"}, "tries": [attempt("first", "wd1", Some("failed")), attempt("effort", "wd2", Some("partial"))]},
+        // Taken over by the lead: the worker of its first try is finished, the lead is not a worker to stop.
+        {"id": "with-lead", "state": "lead", "worker": {"sessionId": "we", "tabId": "t1"}, "tries": [attempt("first", "we", Some("failed")), attempt("lead", "lead", None)]},
+        {"id": "working", "state": "running", "worker": {"sessionId": "wf", "tabId": "t1"}, "tries": [attempt("first", "wf", None)]},
+        {"id": "left-out", "state": "skipped", "worker": {"sessionId": "wg", "tabId": "t1"}, "tries": [attempt("first", "wg", Some("stopped"))]},
+    ]);
+    let mut run = stored_run("failed", pieces);
+    let everyone = ["wa", "wb", "wc", "wd1", "wd2", "we", "wf", "wg", "lead"];
+    host.world().running.extend(everyone.iter().map(|session| session.to_string()));
+    let names = |sessions: Vec<&SessionRef>| sessions.into_iter().map(|worker| worker.session_id.clone()).collect::<Vec<_>>();
+    assert_eq!(names(run.finished_workers()), ["wa", "wb", "wd1", "wd2", "we", "wg"]);
+
+    // A run that has not ended stops nothing.
+    for state in [RunState::Running, RunState::Merging, RunState::NeedsYou] {
+        run.state = state;
+        assert!(super::stop_finished(&run, &|worker| host.stop_worker(worker)).is_empty());
+    }
+    assert!(host.world().stopped.is_empty());
+    for state in [RunState::Failed, RunState::Done, RunState::Stopped] {
+        run.state = state;
+        super::stop_finished(&run, &|worker| host.stop_worker(worker));
+    }
+    assert_eq!(host.world().stopped, ["wa", "wb", "wd1", "wd2", "we", "wg"], "each is stopped once: asked again, nothing more runs");
+    assert_eq!(host.world().running.iter().cloned().collect::<Vec<_>>(), ["lead", "wc", "wf"], "the lead and every try under way go on");
+}
+
+#[test]
+fn a_run_that_fails_stops_its_finished_workers() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    // A piece stored before tries were kept reports `failed` with no ladder: that fails the run.
+    let run = stored_run("running", json!([
+        {"id": "accepted", "state": "done", "worker": {"sessionId": "wa", "tabId": "t1"}, "tries": [attempt("first", "wa", Some("done"))]},
+        {"id": "old", "state": "running", "worker": {"sessionId": "wb", "tabId": "t1"}, "tries": []},
+    ]));
+    host.world().now.insert("wb".into(), WorkerNow::Reported { status: Status::Failed, result: "It cannot be done.".into(), report: TryReport::default() });
+    host.world().running.extend(["wa".to_string(), "wb".to_string(), "lead".to_string()]);
+
+    let after = engine::refreshed(&host, &run.id).unwrap();
+
+    assert_eq!(after.state, RunState::Failed, "{:?}", after.reason);
+    assert_eq!(host.world().stopped, ["wa", "wb"]);
+    assert!(host.world().running.contains("lead"));
+}
+
+#[test]
+fn stopping_a_run_also_stops_the_idle_agent_of_a_try_that_ended_before() {
+    let _home = crate::store::temp_home();
+    let (host, id) = one_piece();
+    host.reports("cli", Status::Failed, "2 tests fail.");
+    engine::worker_turn_ended(&host, "w1-cli");
+    // Its turn ended with its report; its agent sits idle in its worktree, and the next try waits.
+    host.world().running.insert("w1-cli".into());
+    host.world().running.insert("lead".into());
+    assert!(store::get(&id).unwrap().piece("cli").unwrap().worker.is_none());
+    assert!(host.world().stopped.is_empty(), "a run that goes on stops no worker");
+
+    let stopped = engine::stop(&host, &id, By::Cli).unwrap();
+
+    assert!(stopped.stopped.is_empty(), "no piece had a worker in a turn");
+    assert_eq!(host.world().stopped, ["w1-cli"]);
+    assert!(host.world().running.contains("lead"));
+    // Started again by hand and stopped again, it is stopped once more.
+    host.world().running.insert("w1-cli".into());
+    engine::stop(&host, &id, By::Cli).unwrap();
+    assert_eq!(host.world().stopped, ["w1-cli", "w1-cli"]);
+}

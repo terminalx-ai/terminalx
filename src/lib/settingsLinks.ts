@@ -6,6 +6,7 @@
  * into view when it takes the request, which may be after it has mounted.
  */
 import type { AgentLoginProvider } from "@/lib/api";
+import { settingById, type SettingId } from "@/components/settings/settingsRegistry";
 
 const OPEN_ORGANIZATION_SETTINGS = "terminalx:open-organization-settings";
 
@@ -74,4 +75,45 @@ export function takeAgentLoginsSignIn(organizationId: string): AgentLoginProvide
   const agent = wantedSignIn.agent;
   wantedSignIn = null;
   return agent;
+}
+
+// ---- Links to any setting row (PRO-127): terminalx://settings/<row-id>[?enable=1]
+
+/** The scheme and host every setting link starts with. */
+export const SETTING_LINK_PREFIX = "terminalx://settings/";
+const OPEN_SETTING_ROW = "terminalx:open-setting-row";
+
+/**
+ * `terminalx://settings/<row-id>`: opens Settings at that row. The id is a registry row id, e.g. `general.sounds`.
+ * Only this side builds links. A link coming in is checked by the native side (desktop_links.rs) and followed by
+ * settingsDeepLink.ts, so there is one parser, not two.
+ */
+export function buildSettingLink(id: SettingId): string {
+  return `${SETTING_LINK_PREFIX}${id}`;
+}
+
+export type EnableSettingResult = "enabled" | "not-linkable" | "unknown";
+
+/**
+ * Turn a setting on through its row's existing setter. Only rows the registry
+ * marks `linkable` can be: every other row, and any id that is not a row,
+ * changes nothing. The allowlist is the boundary for links from other apps.
+ */
+export async function enableSetting(id: string): Promise<EnableSettingResult> {
+  const row = typeof id === "string" ? settingById(id) : undefined;
+  if (!row) return "unknown";
+  if (!row.linkable) return "not-linkable";
+  await row.linkable.enable();
+  return "enabled";
+}
+
+/** Ask the shell to open Settings at a row (the toast's Open setting, a followed link). */
+export function openSettingRow(id: SettingId): void {
+  window.dispatchEvent(new CustomEvent(OPEN_SETTING_ROW, { detail: id }));
+}
+
+export function onOpenSettingRow(listener: (id: SettingId) => void): () => void {
+  const handler = (event: Event) => listener((event as CustomEvent<SettingId>).detail);
+  window.addEventListener(OPEN_SETTING_ROW, handler);
+  return () => window.removeEventListener(OPEN_SETTING_ROW, handler);
 }

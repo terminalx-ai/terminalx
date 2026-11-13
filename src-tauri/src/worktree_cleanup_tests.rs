@@ -921,7 +921,7 @@ fn bulk_archive_runs_every_hook_and_keeps_failures_for_separate_confirmation() {
     let f = Fixture::new();
     let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
     crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "case $TERMINALX_BRANCH in *fails*) exit 23;; esac\nexit 0".into() }), ..Default::default()
+        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "case $TERMINALX_BRANCH in *fails*) exit 23;; esac\nexit 0".into(), archive_timeout_minutes: None }), ..Default::default()
     }).unwrap();
     let fails = f.worktree(&f.alpha(), "fails");
     let succeeds = f.worktree(&f.alpha(), "succeeds");
@@ -950,7 +950,7 @@ fn archive_changes_are_checked_again_before_bulk_removal() {
     let f = Fixture::new();
     let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
     crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "echo keep > new-file".into() }), ..Default::default()
+        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "echo keep > new-file".into(), archive_timeout_minutes: None }), ..Default::default()
     }).unwrap();
     let tree = f.worktree(&f.alpha(), "changes");
     let item = f.item(&f.find(&tree));
@@ -981,7 +981,7 @@ fn archive_may_remove_reviewed_ignored_data_but_cannot_add_new_ignored_data() {
     let f = Fixture::new();
     let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
     let save = |script: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: script.into() }), ..Default::default()
+        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: script.into(), archive_timeout_minutes: None }), ..Default::default()
     }).unwrap();
     let shrinks = f.worktree(&f.alpha(), "shrinks");
     std::fs::write(shrinks.join(".env"), "local-data").unwrap();

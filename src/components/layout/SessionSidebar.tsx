@@ -56,10 +56,10 @@ import { setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import type { Project, TabEntry, Workspace } from "@/types/session";
 import type { SessionEntry } from "@/types/session";
 import { useFold } from "./useFold";
-import { LeadGlyph, LeadHoverCard, LeadTrailing, QueuedPieceRow, RunFamiliesContext, StarterMark, WorkerMark, WorkerTier, leadsRun, useLeadFamily, useLeadSummary, useWorkerPiece, type RunFamilies } from "./RunRows";
+import { LeadGlyph, LeadHoverCard, LeadTrailing, QueuedPieceRow, RunFamiliesContext, StarterMark, TryMark, WorkerMark, WorkerTier, leadsRun, useLeadFamily, useLeadSummary, useWorkerPiece, type RunFamilies } from "./RunRows";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { showRunView, useRunsByLead } from "@/lib/orchestration";
-import { nestWorkers } from "@/lib/runFamily";
+import { familyHolds, nestWorkers, workerTitle } from "@/lib/runFamily";
 import { StatusMarkIcon } from "@/components/ui/SessionStatus";
 import { statusText } from "@terminalx/portable/sessionStatus";
 import { useSessionRowStatus } from "@/lib/sessionRowStatus";
@@ -521,9 +521,9 @@ function ProjectGroup({
   // they run in, instead of each taking a branch row of its own. Off, every session is listed as before.
   const orchestrating = useExperimentalSettings()?.orchestratorRuns === true;
   const runs = useRunsByLead(orchestrating);
-  const nested = useMemo(() => (orchestrating ? nestWorkers(group.sessions) : { top: group.sessions, workersOf: {} }), [orchestrating, group.sessions]);
+  const nested = useMemo(() => (orchestrating ? nestWorkers(group.sessions, runs) : { top: group.sessions, workersOf: {} }), [orchestrating, group.sessions, runs]);
   const families = useMemo<RunFamilies>(() => ({ workersOf: nested.workersOf, runs }), [nested.workersOf, runs]);
-  const holds = (session: SessionEntry, id: string | null) => session.id === id || !!nested.workersOf[session.id]?.some((worker) => worker.id === id);
+  const holds = (session: SessionEntry, id: string | null) => session.id === id || familyHolds(nested.workersOf, session.id, id);
   // One row per branch, newest work first; the conversations come in that order already.
   const branches = useMemo(() => {
     const byBranch = new Map<string, { key: string; branch: string; sessions: SessionEntry[] }>();
@@ -847,7 +847,7 @@ function BranchRow({
 }) {
   const sort = useSidebarSortable(sortId);
   const { workersOf } = useContext(RunFamiliesContext);
-  const holdsSelected = sessions.some((session) => session.id === selectedId || workersOf[session.id]?.some((worker) => worker.id === selectedId));
+  const holdsSelected = sessions.some((session) => session.id === selectedId || familyHolds(workersOf, session.id, selectedId));
   const removed = sessions.every((session) => session.worktreeRemoved);
   const cleanup = useMergedStatus(LOCAL_HOST, removed ? null : sessions[0]?.cwd);
   const foldKey = removed ? `removed:${sessions[0].removedWorkspace?.path ?? sessions[0].id}` : branch;
@@ -1177,20 +1177,25 @@ function ConversationRow({
 }) {
   const sort = useSidebarSortable(sortId);
   const { sessions, selectedSessionId } = useSessionStore();
-  // A lead (PRO-281): its workers nest under it and fold with it; folded, their marks come up to its row.
-  const family = useLeadFamily(session, worker || inArchive ? NO_PEERS : peers);
+  // A lead (PRO-281): its workers nest under it and fold with it; folded, their marks come up to its row. A lead
+  // its coordinator started is one of its coordinator's rows and a lead too, with its own workers (PRO-364).
+  const { workersOf } = useContext(RunFamiliesContext);
+  const family = useLeadFamily(session, inArchive ? NO_PEERS : peers);
   const summary = useLeadSummary(family);
   // Only a run's lead has the run's glyph and summary; a session that only started the ones under it has a quieter mark (PRO-337).
   const runLead = leadsRun(family);
   const [leadOpen, toggleLead] = useFold(`lead:${session.id}`, true);
-  const leadExpanded = !!family && (leadOpen || family.workers.some((entry) => entry.id === selectedSessionId));
+  const leadExpanded = !!family && (leadOpen || peers.some((peer) => familyHolds(workersOf, peer.id, selectedSessionId)));
   // Its rows are its workers and, before their workers start, its queued pieces (18.03): either folds with it.
   const folded = !!family && family.rows.length > 0 && !leadExpanded;
-  const { piece } = useWorkerPiece(session);
+  const { piece, found } = useWorkerPiece(session);
+  // An earlier try at a piece is drawn quieter than the piece's current one (PRO-364).
+  const earlierTry = worker && !!found && !found.current;
   // A lead goes by its title, as a run's rows are read (18.07): its branch is in its tooltip, its run's glyph leads it.
   if (family) named = "title";
   const statusDescriptionId = useId();
-  const title = worker && piece ? piece.title : family ? conversationTitle(session) : named === "branch" ? (peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session)) : sidebarConversationTitle(session, branch, sessions);
+  // A row under its lead goes by its piece, else its session's own title: never its tab's, the brief's first line (PRO-364).
+  const title = worker ? workerTitle(session, found) : family ? conversationTitle(session) : named === "branch" ? (peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session)) : sidebarConversationTitle(session, branch, sessions);
   const draft = useSessionDraft(peers);
   const unread = peers.some(isUnread) || (folded && !!summary?.unread);
   // The sessions the row stands for, picked as one for the bulk bar (#718).
@@ -1209,7 +1214,8 @@ function ConversationRow({
   // Rename is of what the row shows: its branch's label, or its conversation's title.
   const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
   return (
-    <li ref={sort.ref} style={sort.style} className={family ? "[--lead-indent:var(--indent,0px)]" : undefined} data-lead={family ? session.id : undefined} data-worker={worker ? session.id : undefined}>
+    <li ref={sort.ref} style={sort.style} className={family ? "[--own-indent:var(--indent,0px)]" : undefined} data-lead={family ? session.id : undefined} data-worker={worker ? session.id : undefined}
+      data-try={worker && found ? found.number : undefined} data-earlier-try={earlierTry ? "" : undefined}>
       <AsyncDropdownMenu>
         <AsyncContextMenu>
         <ContextMenuTrigger asChild>
@@ -1261,7 +1267,7 @@ function ConversationRow({
           >
             <span className="flex w-full min-w-0 items-center gap-2">
               {/* The row leads with its session status mark; the reader's own status groups rows and is read out here. */}
-              {runLead ? <LeadGlyph /> : worker ? <WorkerMark piece={piece} status={rowStatus} /> : <StatusMarkIcon status={rowStatus} decorative />}
+              {runLead ? <LeadGlyph /> : worker ? <WorkerMark piece={earlierTry ? null : piece} status={rowStatus} /> : <StatusMarkIcon status={rowStatus} decorative />}
               <span id={statusDescriptionId} hidden>{statusText(rowStatus)}. Status: {manualStatusLabel(session.manualStatus)}{runLead && summary?.needs.length ? `. Waiting on you: ${summary.needs.map((need) => need.text).join("; ")}` : ""}</span>
               {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
               {named === "branch" ? (
@@ -1274,7 +1280,8 @@ function ConversationRow({
                 </>
               ) : (
                 <>
-                  <span className={cn("min-w-0 flex-1 truncate", worker ? "text-[12.5px]" : "text-[13px]")}>{title}</span>
+                  <span className={cn("min-w-0 flex-1 truncate", worker ? "text-[12.5px]" : "text-[13px]", earlierTry && "text-muted-foreground")}>{title}</span>
+                  {worker && <TryMark found={found} />}
                   {family && !runLead && <StarterMark />}
                   {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
                   {unread && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
@@ -1288,7 +1295,7 @@ function ConversationRow({
                 </span>
               )}
               {runLead && summary ? <LeadTrailing family={family} folded={folded} summary={summary} fallback={<SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />} />
-                : worker ? <WorkerTier piece={piece} session={session} />
+                : worker ? <WorkerTier piece={piece} found={found} session={session} />
                 : <SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />}
             </span>
             <DraftPreview text={draft} />
@@ -1312,7 +1319,7 @@ function ConversationRow({
         </DropdownMenuContent>
       </AsyncDropdownMenu>
       {family && leadExpanded && family.rows.length > 0 && (
-        <ul aria-label={`Workers of ${title}`} data-testid="lead-workers" className="mt-0.5 flex flex-col gap-0.5 [--indent:calc(var(--lead-indent,0px)+16px)]">
+        <ul aria-label={`Workers of ${title}`} data-testid="lead-workers" className="mt-0.5 flex flex-col gap-0.5 [--lead-indent:var(--own-indent,0px)] [--indent:calc(var(--own-indent,0px)+16px)]">
           {family.rows.map((row) => row.kind === "worker"
             ? <ConversationRow key={row.session.id} session={row.session} selected={row.session.id === selectedSessionId} branch={null} linkTo={null} worker />
             : <QueuedPieceRow key={`queued:${row.piece.id}`} piece={row.piece} run={family.run!} />)}

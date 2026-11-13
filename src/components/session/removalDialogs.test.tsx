@@ -305,10 +305,30 @@ it("keeps the workspace when archive-failure consent is declined", async () => {
   openDelete();
   await screen.findByText("Clean and merged: safe to remove.");
   fireEvent.click(removeButton());
-  await screen.findByText(/Archive script failed/);
-  fireEvent.click(screen.getByRole("button", { name: "Keep as is" }));
+  expect((await screen.findByRole("heading", { name: "Archive script failed (exit 7). Remove anyway?" }))).toBeTruthy();
+  expect(screen.getByText("The workspace is still there.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Open log" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Remove anyway" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Keep workspace" }));
   expect(mocks.removeWorkspace).toHaveBeenCalledTimes(1);
   expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it.each([
+  [{ code: 1, timedOut: false, detail: "no such project" }, "Archive script failed (exit 1). Remove anyway?", "It printed “no such project”. The workspace is still there."],
+  [{ code: 124, timedOut: true, detail: "waiting…", timeoutMinutes: 2 }, "Archive script failed (exit 124). Remove anyway?", "The script timed out after 2 minutes. The workspace is still there."],
+  [{ code: null, timedOut: true }, "Archive script failed (exit unknown). Remove anyway?", "The script timed out after 5 minutes. The workspace is still there."],
+])("asks about a failed archive script with what it printed or how long it ran: %j", async (fields, title, detail) => {
+  mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+  mocks.removeWorkspace.mockRejectedValueOnce(`ARCHIVE_SCRIPT_FAILED:${JSON.stringify({ token: "receipt", pane: "archive:run", ...fields })}`);
+  render(<WorkspaceRemoveDialog />);
+  openDelete();
+  await screen.findByText("Clean and merged: safe to remove.");
+  fireEvent.click(removeButton());
+  expect(await screen.findByRole("heading", { name: title })).toBeTruthy();
+  expect(screen.getByText(detail)).toBeTruthy();
+  // The question replaces the removal form: nothing else to choose there.
+  expect(screen.queryByText("Clean and merged: safe to remove.")).toBeNull();
 });
 
 it("offers consent for a recorded unattended failure and shows its saved log", async () => {

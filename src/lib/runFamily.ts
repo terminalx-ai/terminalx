@@ -3,16 +3,21 @@ import { modelLabel } from "@/lib/models";
 import { donePieces, pieceCost } from "@/lib/orchestration";
 import { conversationTitle } from "@/lib/sessions";
 import { sessionModels, totals } from "@/components/session/SessionCost";
-import type { PieceState, Run, RunPiece } from "@/types/orchestration";
+import type { PieceState, PieceTry, Run, RunPiece } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
 /**
  * A lead and the sessions it started, as the sidebar draws them (PRO-281). A
  * session nests under the session that started it (`parent`, PRO-270) when
  * that session is listed beside it, whatever worktree either runs in. Workers
- * of workers nest under the same lead: the sidebar draws one level.
+ * of workers nest under the same lead, one level, unless the one between leads
+ * a run (`runs`, by its lead's id): a lead a coordinator started keeps its own
+ * workers under it, and sits among its coordinator's (PRO-364).
  */
-export function nestWorkers(sessions: readonly SessionEntry[]): { top: SessionEntry[]; workersOf: Record<string, SessionEntry[]> } {
+export function nestWorkers(
+  sessions: readonly SessionEntry[],
+  runs: Readonly<Record<string, Run | null | undefined>> = {},
+): { top: SessionEntry[]; workersOf: Record<string, SessionEntry[]> } {
   const listed = new Map(sessions.map((session) => [session.id, session]));
   const leadOf = (session: SessionEntry): string | null => {
     const seen = new Set([session.id]);
@@ -22,6 +27,14 @@ export function nestWorkers(sessions: readonly SessionEntry[]): { top: SessionEn
       if (seen.has(at)) return null;
       seen.add(at);
       lead = at;
+      // The nearest session that leads a run holds what is under it.
+      if (runs[at]) break;
+    }
+    if (!lead) return null;
+    // A loop further up still nests nothing.
+    for (let at = listed.get(lead)!.parent?.sessionId; at && listed.has(at); at = listed.get(at)!.parent?.sessionId) {
+      if (seen.has(at)) return null;
+      seen.add(at);
     }
     return lead;
   };
@@ -35,16 +48,82 @@ export function nestWorkers(sessions: readonly SessionEntry[]): { top: SessionEn
   return { top, workersOf };
 }
 
-/** The piece a session works on in `run`, if it is one of its workers. */
+/** Whether `id` is in the family under `lead`, at any depth: an open session holds every lead above it unfolded. */
+export function familyHolds(workersOf: Readonly<Record<string, readonly SessionEntry[]>>, lead: string, id: string | null): boolean {
+  if (!id) return false;
+  const seen = new Set<string>([lead]);
+  const queue = [lead];
+  while (queue.length) {
+    for (const worker of workersOf[queue.shift()!] ?? []) {
+      if (worker.id === id) return true;
+      if (!seen.has(worker.id)) {
+        seen.add(worker.id);
+        queue.push(worker.id);
+      }
+    }
+  }
+  return false;
+}
+
+/** The piece a session works on in `run` as its current worker, if it is. */
 export function pieceOf(run: Run | null | undefined, sessionId: string): RunPiece | null {
   return run?.pieces.find((piece) => piece.worker?.sessionId === sessionId) ?? null;
 }
 
-/** A lead's workers in the run's order: its pieces first, as the plan numbers them, then any other session it started. */
+/** Which try at a piece a session ran: 1 for the first. `current` while it is the piece's worker now. */
+export interface WorkerTry {
+  piece: RunPiece;
+  /** Where the piece is in the plan. */
+  index: number;
+  number: number;
+  /** How many tries the piece has had, this one included: past one, every try's row says which it is. */
+  of: number;
+  current: boolean;
+  /** The try's own record, absent for a piece that keeps none. */
+  attempt?: PieceTry;
+}
+
+/**
+ * The try a session ran at a piece of `run`, the current one or an earlier one
+ * (PRO-364): every try's worker is in `piece.tries[]`, the current one also in
+ * `piece.worker`.
+ */
+export function tryOf(run: Run | null | undefined, sessionId: string): WorkerTry | null {
+  for (const [index, piece] of (run?.pieces ?? []).entries()) {
+    const tries = piece.tries ?? [];
+    const at = tries.findIndex((attempt) => attempt.worker?.sessionId === sessionId);
+    const current = piece.worker?.sessionId === sessionId;
+    const of = Math.max(1, tries.length);
+    if (at >= 0) return { piece, index, number: at + 1, of, current, attempt: tries[at] };
+    if (current) return { piece, index, number: of, of, current };
+  }
+  return null;
+}
+
+/**
+ * A lead's workers in the run's order: its pieces first, as the plan numbers
+ * them, each piece's tries in the order they ran, then any other session it started.
+ */
 export function orderWorkers(workers: readonly SessionEntry[], run: Run | null | undefined): SessionEntry[] {
   if (!run) return [...workers];
-  const place = new Map(run.pieces.flatMap((piece, index) => (piece.worker ? [[piece.worker.sessionId, index] as const] : [])));
-  return [...workers].sort((a, b) => (place.get(a.id) ?? Infinity) - (place.get(b.id) ?? Infinity));
+  const place = new Map(workers.map((worker) => {
+    const found = tryOf(run, worker.id);
+    return [worker.id, found ? [found.index, found.number] : [Infinity, 0]] as const;
+  }));
+  return [...workers].sort((a, b) => {
+    const [pa, ta] = place.get(a.id)!;
+    const [pb, tb] = place.get(b.id)!;
+    return pa === pb ? ta - tb : pa - pb;
+  });
+}
+
+/**
+ * What a session's row under its lead is called (PRO-364): its piece's title
+ * when it ran one, else the session's own title. Never its tab's, which for a
+ * worker is the first line of the brief it was sent.
+ */
+export function workerTitle(session: SessionEntry, found: Pick<WorkerTry, "piece"> | null): string {
+  return found?.piece.title ?? (session.title?.trim() || conversationTitle(session));
 }
 
 /** A piece the sidebar lists before its worker exists: queued, and no worker started for it yet (18.03, 18.07). */
@@ -57,16 +136,16 @@ export type FamilyRow = { kind: "worker"; session: SessionEntry } | { kind: "que
 
 /**
  * The rows under a lead, in the run's order: each piece where the plan numbers
- * it, as its worker's row or, before that worker starts, as the queued piece;
- * then any other session the lead started. A piece's worker row takes the
+ * it, as its worker's row (each earlier try's too) or, before that worker
+ * starts, as the queued piece; then any other session the lead started. A piece's worker row takes the
  * place its queued row had.
  */
 export function familyRows(workers: readonly SessionEntry[], run: Run | null | undefined): FamilyRow[] {
   const ordered = orderWorkers(workers, run);
   if (!run) return ordered.map((session) => ({ kind: "worker", session }));
-  const place = new Map(run.pieces.flatMap((piece, index) => (piece.worker ? [[piece.worker.sessionId, index] as const] : [])));
+  // Every try's worker sits in its piece's place, not only the current one's (PRO-364).
   const rows: { at: number; row: FamilyRow }[] = [
-    ...ordered.map((session) => ({ at: place.get(session.id) ?? Infinity, row: { kind: "worker", session } as FamilyRow })),
+    ...ordered.map((session) => ({ at: tryOf(run, session.id)?.index ?? Infinity, row: { kind: "worker", session } as FamilyRow })),
     ...run.pieces.flatMap((piece, index) => (awaitsWorker(piece) ? [{ at: index, row: { kind: "queued", piece } as FamilyRow }] : [])),
   ];
   // Stable: workers keep `orderWorkers`' order among themselves, and a piece has one row.
@@ -173,9 +252,8 @@ export function familyNeeds({ lead, leadStatus, run, workers, statusOf, spend }:
   for (const worker of workers) {
     const status = statusOf(worker.id);
     if (!waitsOnPerson(status)) continue;
-    const piece = pieceOf(run, worker.id);
     asked.add(worker.id);
-    needs.push({ kind: kind(status), sessionId: worker.id, text: `${piece?.title ?? conversationTitle(worker)}: ${status.detail}` });
+    needs.push({ kind: kind(status), sessionId: worker.id, text: `${workerTitle(worker, tryOf(run, worker.id))}: ${status.detail}` });
   }
   for (const piece of run?.pieces ?? []) {
     if (piece.state !== "blocked" || (piece.worker && asked.has(piece.worker.sessionId))) continue;

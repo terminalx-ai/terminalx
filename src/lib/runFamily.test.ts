@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SESSION_STATUSES } from "@terminalx/portable/sessionStatus";
-import { awaitsWorker, familyNeeds, familyRows, modelTier, needsMark, nestWorkers, orderWorkers, overBudget, pieceSpend, runningWorkers, runProgress, runSpend } from "./runFamily";
+import { awaitsWorker, familyHolds, familyNeeds, familyRows, modelTier, needsMark, nestWorkers, orderWorkers, overBudget, pieceSpend, runningWorkers, runProgress, runSpend, tryOf, workerTitle } from "./runFamily";
 import type { Run, RunPiece } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
@@ -56,8 +56,78 @@ describe("familyRows", () => {
     expect(ids(familyRows([], run([piece("1", "skipped"), piece("2", "queued", "gone")])))).toEqual([]);
   });
 
+  it("keeps every try of a retried piece in the piece's place, a queued piece after them", () => {
+    const tries = [
+      { step: "first", model: "haiku", worker: { sessionId: "t1" }, outcome: "failed" },
+      { step: "tier", model: "sonnet", worker: { sessionId: "t2" } },
+    ] as RunPiece["tries"];
+    const r = run([piece("1", "done", "w1"), piece("2", "running", "t2", { tries }), piece("3", "queued")]);
+    expect(ids(familyRows([session("x"), session("t2"), session("w1"), session("t1")], r))).toEqual(["w1", "t1", "t2", "queued:3", "x"]);
+  });
+
   it("is the workers alone when the lead leads no run", () => {
     expect(ids(familyRows([session("b"), session("a")], null))).toEqual(["b", "a"]);
+  });
+});
+
+describe("leads a coordinator started (PRO-364)", () => {
+  it("keeps a nested lead's workers under it, and the lead among its coordinator's", () => {
+    const list = [
+      session("coord"),
+      session("l1", "coord"), session("l1a", "l1"), session("l1b", "l1"),
+      session("l2", "coord"), session("l2a", "l2"), session("l2b", "l2"), session("l2c", "l2"),
+      session("l3", "coord"), session("l3a", "l3"), session("l3b", "l3"),
+    ];
+    const runs = { l1: run([]), l2: run([]), l3: run([]) };
+    const { top, workersOf } = nestWorkers(list, runs);
+    expect(top.map((entry) => entry.id)).toEqual(["coord"]);
+    expect(workersOf.coord.map((entry) => entry.id)).toEqual(["l1", "l2", "l3"]);
+    expect(workersOf.l1.map((entry) => entry.id)).toEqual(["l1a", "l1b"]);
+    expect(workersOf.l2.map((entry) => entry.id)).toEqual(["l2a", "l2b", "l2c"]);
+    expect(workersOf.l3.map((entry) => entry.id)).toEqual(["l3a", "l3b"]);
+    // An open worker of a nested lead holds the coordinator open too.
+    expect(familyHolds(workersOf, "coord", "l2b")).toBe(true);
+    expect(familyHolds(workersOf, "l1", "l2b")).toBe(false);
+  });
+
+  it("still nests nothing of a loop above a nested lead", () => {
+    const { top } = nestWorkers([session("a", "b"), session("b", "a"), session("w", "a")], { a: run([]) });
+    expect(top.map((entry) => entry.id)).toEqual(["a", "b", "w"]);
+  });
+});
+
+describe("every try of a piece (PRO-364)", () => {
+  const tries = [
+    { step: "first", model: "haiku", worker: { sessionId: "t1" }, outcome: "failed" },
+    { step: "tier", model: "sonnet", worker: { sessionId: "t2" }, outcome: "failed" },
+    { step: "effort", model: "opus", worker: { sessionId: "t3" } },
+  ] as RunPiece["tries"];
+  const retried = () => run([piece("1", "done", "w1"), piece("2", "running", "t3", { tries }), piece("3", "queued")]);
+
+  it("finds each try's piece and number, and only the last is current", () => {
+    const r = retried();
+    expect(["t1", "t2", "t3"].map((id) => { const found = tryOf(r, id)!; return [found.piece.id, found.number, found.of, found.current]; }))
+      .toEqual([["2", 1, 3, false], ["2", 2, 3, false], ["2", 3, 3, true]]);
+    // A piece tried once is one try of one: its row has no "try N" mark.
+    expect(tryOf(r, "w1")).toMatchObject({ number: 1, of: 1, current: true });
+    expect(tryOf(r, "x")).toBeNull();
+  });
+
+  it("orders a piece's tries as they ran, in the piece's place", () => {
+    const list = [session("x"), session("t3"), session("w1"), session("t1"), session("t2")];
+    expect(orderWorkers(list, retried()).map((entry) => entry.id)).toEqual(["w1", "t1", "t2", "t3", "x"]);
+  });
+
+  it("names every try by its piece, and a row with no piece by its session's title, not its tab's", () => {
+    const r = retried();
+    expect(["t1", "t2", "t3"].map((id) => workerTitle(session(id), tryOf(r, id)))).toEqual(["Piece 2", "Piece 2", "Piece 2"]);
+    const briefed = { ...session("w", "lead"), title: "Sidebar rows", tabs: [{ id: "w-t", title: "You are a worker in a run led by another session." }] } as unknown as SessionEntry;
+    expect(workerTitle(briefed, null)).toBe("Sidebar rows");
+  });
+
+  it("names an earlier try that asks by its piece", () => {
+    const needs = familyNeeds({ lead: session("lead"), leadStatus: status("no_changes"), run: retried(), workers: [session("t1")], statusOf: () => status("needs_permission"), spend: null });
+    expect(needs[0].text.startsWith("Piece 2: ")).toBe(true);
   });
 });
 

@@ -152,12 +152,83 @@ pub(crate) struct DeletePreview {
     /// It is not clean and merged, so deleting it needs `--force` as well as
     /// `--yes`.
     pub needs_force: bool,
+    /// The workers of runs led from this worktree, in sessions elsewhere.
+    /// Deleting the lead alone would leave each of them a top-level row, so
+    /// the delete cleans their run up first, or refuses while one of them
+    /// cannot go.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub orphans: Vec<Orphan>,
+}
+
+/// A worker of a run whose lead is in the worktree being deleted, in a
+/// session outside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Orphan {
+    pub run: String,
+    pub piece: String,
+    /// Which try of the piece, from 1.
+    #[serde(rename = "try")]
+    pub attempt: usize,
+    pub session: WorktreeSession,
+    /// The worker's worktree, when it has one of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    /// Why the run's cleanup would not remove it; absent for one it would.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
+}
+
+impl Orphan {
+    /// A worker with no worktree of its own left to remove, that nothing blocks: the run's cleanup
+    /// has nothing to do for it, so the delete leaves its session as it is.
+    pub(crate) fn keeps_session(&self) -> bool {
+        self.worktree.is_none() && self.blocked.is_none()
+    }
+
+    fn describe(&self) -> String {
+        let at = self.worktree.as_deref().map(|path| format!(" in {path}")).unwrap_or_default();
+        let blocked = self.blocked.as_deref().map(|why| format!(" Blocks the delete: {why}")).unwrap_or_default();
+        let blocked = if self.keeps_session() { " Its worktree is already gone, so it does not block the delete, and its session stays as it is.".to_string() } else { blocked };
+        format!("{} — run {}, piece {} (try {}){at}.{blocked}", self.session.describe(), self.run, self.piece, self.attempt)
+    }
+}
+
+/// The orphans listed one per line.
+pub(crate) fn orphan_listing(orphans: &[Orphan]) -> String {
+    orphans.iter().map(Orphan::describe).collect::<Vec<_>>().join("\n")
+}
+
+/// The runs `orphans` belong to, each once, in order.
+pub(crate) fn orphan_runs(orphans: &[Orphan]) -> Vec<String> {
+    let mut runs: Vec<String> = Vec::new();
+    for orphan in orphans {
+        if !runs.contains(&orphan.run) {
+            runs.push(orphan.run.clone());
+        }
+    }
+    runs
+}
+
+/// What to do about workers that keep a lead's worktree from being deleted.
+pub(crate) fn orphans_recovery(orphans: &[Orphan], worktree: &str) -> String {
+    let runs = orphan_runs(orphans);
+    let cleanups = runs.iter().map(|run| format!("terminalx runs cleanup {run}")).collect::<Vec<_>>().join(", ");
+    format!(
+        "Settle each worker listed (merge or send back its piece, commit or drop what it left), or remove its worktree yourself with terminalx worktrees delete <its worktree>; {cleanups} shows what the run's cleanup would remove. Then repeat terminalx worktrees delete {worktree} --dry-run."
+    )
 }
 
 impl DeletePreview {
     pub(crate) fn new(project: &str, worktree: crate::workspaces::Workspace, sessions: Vec<WorktreeSession>, landed: crate::landed::Landed) -> Self {
         let needs_force = !landed.safe;
-        Self { dry_run: true, project: project.to_string(), worktree, sessions, landed, needs_force }
+        Self { dry_run: true, project: project.to_string(), worktree, sessions, landed, needs_force, orphans: Vec::new() }
+    }
+
+    /// The same preview, with the workers of the runs it leads.
+    pub(crate) fn with_orphans(mut self, orphans: Vec<Orphan>) -> Self {
+        self.orphans = orphans;
+        self
     }
 
     /// The `--sessions` value that names exactly the sessions shown.
@@ -185,6 +256,23 @@ impl DeletePreview {
             out.push(format!("Git: {branch} is clean and merged into {base}."));
         }
         out.push("The branch itself is kept.".to_string());
+        if !self.orphans.is_empty() {
+            let runs = orphan_runs(&self.orphans).join(", ");
+            let blocked = self.orphans.iter().filter(|orphan| orphan.blocked.is_some()).count();
+            let kept = self.orphans.iter().filter(|orphan| orphan.keeps_session()).count();
+            out.push(format!(
+                "It holds the lead of run {runs}, whose {} would be left without a lead:",
+                plural(self.orphans.len(), "worker is in a session elsewhere and", "workers are in sessions elsewhere and"),
+            ));
+            out.push(orphan_listing(&self.orphans));
+            out.push(if blocked == 0 && kept == 0 {
+                "With --yes, the run's cleanup removes each of them, worktree and session, before this worktree goes; their branches are kept.".to_string()
+            } else if blocked == 0 {
+                format!("With --yes, the run's cleanup removes the others, worktree and session, before this worktree goes; their branches are kept. Not removed, because there is no worktree left to remove: {}.", plural(kept, "worker", "workers"))
+            } else {
+                format!("With --yes, the delete is refused while {} cannot be removed by the run's cleanup; nothing is removed.", plural(blocked, "worker", "workers"))
+            });
+        }
         out.join("\n")
     }
 }
