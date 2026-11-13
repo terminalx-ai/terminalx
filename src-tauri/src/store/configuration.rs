@@ -346,7 +346,7 @@ impl Store {
         ensure!(matches!(layer, Layer::User | Layer::RepositoryLocal | Layer::RepositoryShared), "Managed values are read-only.");
         let registration = REGISTRY.iter().find(|r| r.key == key).context("Unknown configuration key.")?;
         ensure!(layer == Layer::User || registration.repository_configurable, "This key cannot be set by a repository.");
-        ensure!(layer != Layer::User || !per_repository(key), "Save this repository's own scripts from Settings → Repositories → Scripts.");
+        ensure!(layer != Layer::User || !per_repository(key), "Save this repository's own scripts from Settings → Projects → Scripts.");
         // Secret environment writes remain in the existing Keychain editor. File
         // environment is deliberately authored/reviewed explicitly, never migrated.
         ensure!(key != "environment", "Edit file environment explicitly; use Settings → Environment for private variables.");
@@ -454,7 +454,7 @@ impl Resolution {
         let Some(value) = self.values.get(key) else { return Ok(String::new()) };
         let text = value.value.as_str().unwrap_or_default().to_string();
         ensure!(text.trim().is_empty() || !self.trust.as_ref().is_some_and(|trust| trust.required && trust.keys.iter().any(|k| k == key)),
-            "This repository's .terminalx/settings.json sets a {} script that is not trusted yet. Open Settings → Repositories → Scripts and choose Review and trust.",
+            "This repository's .terminalx/settings.json sets a {} script that is not trusted yet. Open Settings → Projects → Scripts and choose Review and trust.",
             if key == SETUP_SCRIPT { "setup" } else { "archive" });
         Ok(text)
     }

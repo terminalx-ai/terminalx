@@ -77,6 +77,9 @@ it("bounds an attached log and explicitly identifies a truncated tail", () => {
   expect(prompt.length).toBeLessThan(66_000);
   expect(prompt).toContain("Earlier output omitted");
   expect(prompt).toContain("failure at end");
+  // The agent is pointed at the page as Settings names it now (PRO-131).
+  expect(prompt).toContain("Settings → Projects → Scripts");
+  expect(prompt).not.toContain("Repositories");
 });
 
 it("stops the exact running or queued attempt and keeps rerun disabled while stopping", async () => {

@@ -35,11 +35,18 @@ describe("repository action validation and ordering", () => {
 });
 
 describe("preview URL templates", () => {
-  it("expands the active session's first and numbered ports everywhere in a URL", () => {
+  // PRO-363: $PORT is the first port of the block and $PORT_1..$PORT_9 the ones after it.
+  it("expands $PORT to the first port and $PORT_n to the nth port after it, everywhere in a URL", () => {
     const ports = Array.from({ length: 10 }, (_, index) => 4010 + index);
     expect(expandPreviewUrl("http://localhost:$PORT", ports)).toEqual({ url: "http://localhost:4010/" });
-    expect(expandPreviewUrl("http://localhost:$PORT_1/?api=$PORT_2&last=$PORT_10&again=$PORT", ports)).toEqual({ url: "http://localhost:4010/?api=4011&last=4019&again=4010" });
+    expect(expandPreviewUrl("http://localhost:$PORT_1", ports)).toEqual({ url: "http://localhost:4011/" });
+    expect(expandPreviewUrl("http://localhost:$PORT_1/?api=$PORT_2&last=$PORT_9&again=$PORT", ports)).toEqual({ url: "http://localhost:4011/?api=4012&last=4019&again=4010" });
     expect(expandPreviewUrl("http://localhost:$PORT", [5010])).toEqual({ url: "http://localhost:5010/" });
+  });
+
+  it("stops at $PORT_9, the last port of a block of 10", () => {
+    const ports = Array.from({ length: 10 }, (_, index) => 4010 + index);
+    expect(expandPreviewUrl("http://localhost:$PORT_10", ports)).toEqual({ error: "A workspace has 10 ports: use $PORT, then $PORT_1 to $PORT_9." });
   });
 
   it("supports literal URLs, IPv6, paths, queries and fragments without any port allocation", () => {
@@ -53,7 +60,7 @@ describe("preview URL templates", () => {
 
   it("requires every referenced port", () => {
     expect(expandPreviewUrl("http://localhost:$PORT")).toMatchObject({ error: expect.stringContaining("No allocated port") });
-    expect(expandPreviewUrl("http://localhost:$PORT_2", [3000])).toMatchObject({ error: expect.stringContaining("$PORT_2") });
+    expect(expandPreviewUrl("http://localhost:$PORT_1", [3000])).toMatchObject({ error: expect.stringContaining("$PORT_1") });
   });
 
   it.each(["$PORT_0", "$PORT_01", "$PORT_", "$PORT_no", "$PORT_2foo", "$PORTfoo", "${PORT}", "$PORT_999999999999999999999999", "$OTHER"]) ("rejects unsupported placeholder %s", (variable) => {
@@ -65,7 +72,7 @@ describe("preview URL templates", () => {
   });
 
   it("validates saved templates without allocating ports and checks unique preview names", () => {
-    const entry = { id: "web", name: "Web", url: "http://localhost:$PORT_10" };
+    const entry = { id: "web", name: "Web", url: "http://localhost:$PORT_9" };
     expect(validatePreviewUrl(entry, [entry])).toEqual({ name: undefined, url: undefined });
     expect(validatePreviewUrl({ ...entry, id: "other", name: " web " }, [entry]).name).toBe("Choose a unique name.");
     expect(validatePreviewUrl({ ...entry, name: "", url: "" }, []).name).toBe("Enter a name.");

@@ -178,6 +178,7 @@ mod session_usage;
 mod session_names;
 mod session_ops;
 mod workspace_setup;
+mod action_runner;
 mod stray_processes;
 pub mod serve;
 pub mod sink;
@@ -458,6 +459,8 @@ pub fn run() {
             }
             local_runtime::ui::observe(app.handle());
             let sink: Arc<dyn sink::EventSink> = Arc::new(app.handle().clone());
+            // Saved actions' exit codes, from every runtime pty_exit (PRO-363).
+            action_runner::observe(sink.clone());
             let endpoint = hooks::prepare_control()?;
             let asking = app.handle().clone();
             let ask: issue_control::Ask = Arc::new(move |question: issue_control::Question| {
@@ -705,6 +708,9 @@ pub fn run() {
             commands::stats_usage_refresh,
             commands::create_session,
             commands::workspace_setup,
+            commands::action_run,
+            commands::action_states,
+            commands::workspace_ports,
             commands::create_quick_chat,
             commands::set_quick_chat_cwd,
             commands::move_quick_chat_to_project,

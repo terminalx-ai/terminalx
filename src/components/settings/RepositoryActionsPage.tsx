@@ -19,7 +19,7 @@ export function useRepository(projectPath: string) {
  * only after a save succeeds, so a failed save leaves the stored list on screen with the error.
  *
  * `readRepositoryFile` is optional. Pass it where a repository file can supply actions: it
- * returns them, or null/[] when there is none. "Reset to repository file" is shown only while it
+ * returns them, or null/[] when there is none. "Reset to terminalx.json" is shown only while it
  * has returned some, and saving them replaces the local list. Keep the function stable (module
  * level or memoised): a new one each render reads the file again.
  */

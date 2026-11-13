@@ -82,6 +82,9 @@ const ACTIONS = [
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
   { id: "session.archive", label: "Archive session", group: "Session", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
+  // PRO-363: the Run menu's first visible action, or the menu itself as a picker when there are several. ⌘R is free in the
+  // terminal and the editor on macOS; elsewhere Ctrl+R is the shell's history search, so the default adds Alt.
+  { id: "session.runAction", label: "Run the project's action", group: "Session", keys: ["mod+alt+r"], macKeys: ["mod+r"] },
   { id: "git.commitPush", label: "Commit and push", group: "Session", keys: ["mod+shift+y"] },
   { id: "git.pull", label: "Pull latest", group: "Session", keys: ["mod+shift+l"] },
   // Main's "Fix failing CI checks" owns mod+shift+x: defaults are claimed first-listed-first,

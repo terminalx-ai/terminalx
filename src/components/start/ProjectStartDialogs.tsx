@@ -604,7 +604,7 @@ function QuickStartDialog() {
 
         <div className="mt-6 flex flex-wrap items-center gap-2 border-t border-hairline px-5 py-4">
           <button type="button" className="text-left text-[11.5px] text-faint underline-offset-2 outline-none hover:text-muted-foreground hover:underline focus-visible:underline" onClick={() => { close(); requestTemplateSettings(); }}>
-            Add your own templates in Settings › Projects
+            Add your own templates in Settings › Project templates
           </button>
           <div className="ml-auto flex gap-2">
             <Button variant="outline" className="text-muted-foreground" onClick={close} aria-keyshortcuts="Escape">

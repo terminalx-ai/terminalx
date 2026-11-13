@@ -202,7 +202,7 @@ export function AppShell() {
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }), []);
-  // "Add your own templates in Settings › Projects", from Create a project.
+  // "Add your own templates in Settings › Project templates", from Create a project.
   useEffect(() => onTemplateSettingsRequest(() => openSettings("projects.templates")), [openSettings]);
   // The empty model picker's way out: Settings › Agents, where the agent's sign-in is checked.
   useEffect(() => onAgentSettingsRequest(() => openSettings("agents")), [openSettings]);

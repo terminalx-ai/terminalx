@@ -25,6 +25,24 @@ fn recorded_threads_keep_github_coordinates_and_deleted_authors() {
 }
 
 #[test]
+fn comment_authors_carry_a_display_name_only_when_github_has_one() {
+    let mut recording: Value = serde_json::from_str(RECORDING).unwrap();
+    let comments = &mut recording["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"][0];
+    comments["author"] = json!({"login": "aisha", "name": "Aisha Khan"});
+    let result = list_with(URL, &mut |args| {
+        assert!(args.iter().any(|arg| arg.contains("author { login ... on User { name } }")));
+        Ok(recording.to_string())
+    }).unwrap();
+    let author = result.threads[0].comments[0].author.as_ref().unwrap();
+    assert_eq!((author.login.as_str(), author.name.as_deref()), ("aisha", Some("Aisha Khan")));
+    assert_eq!(serde_json::to_value(author).unwrap(), json!({"login": "aisha", "name": "Aisha Khan"}));
+    // The recorded bot reviewer has a login and no name, and serializes without one.
+    let bot = result.threads[1].comments[0].author.as_ref().unwrap();
+    assert!(bot.name.is_none());
+    assert_eq!(serde_json::to_value(bot).unwrap().get("name"), None);
+}
+
+#[test]
 fn paginates_threads_and_each_threads_comments() {
     let mut page: Value = serde_json::from_str(RECORDING).unwrap();
     let connection = &mut page["data"]["repository"]["pullRequest"]["reviewThreads"];

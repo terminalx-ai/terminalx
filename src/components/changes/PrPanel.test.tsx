@@ -547,8 +547,9 @@ it.each(["panel", "inline", "centre"])("loads review threads for the selected PR
     throw Error(command);
   });
   render(<PrPanel cwd={cwd} sessionId="author" branch={pr.head} selectedPr={surface === "centre" ? association(pr) : undefined} active busy={false} inline={surface === "inline"} />);
-  fireEvent.click(await screen.findByRole("button", { name: /^▸ Review threads/ }));
+  // Read as soon as the PR is shown: its counts lead the Checks section (PRO-234).
   await screen.findByText("No review threads.");
+  expect(screen.getByTestId("review-thread-counts").textContent).toBe("0 open · 0 resolved");
   expect(mocks.invoke).toHaveBeenCalledWith("pr_review_threads", { url: pr.url });
 });
 

@@ -26,6 +26,7 @@ import { actionsRuns, checkCounts, checkSummary, isFailingCheck, runSignature, w
 import { NextLine } from "./NextStep";
 import { PrConversation, useDocumentVisible } from "./PrConversation";
 import { ReviewThreads } from "./ReviewThreads";
+import { noteSessionPrs } from "@/lib/reviewThreads";
 
 type WorkspaceCleanup = {
   projectPath: string;
@@ -198,6 +199,8 @@ export function PrPanel({
       .then(([{ pullRequests, workStatus, landedWork }, workspaceCheck]) => {
         if (cancelled) return;
         setRows(pullRequests.rows);
+        // The Changes view finds the same PR for its review threads without asking GitHub again (PRO-234).
+        if (!selectedPr) noteSessionPrs(source, sessionId, pullRequests.rows.flatMap((row) => row.pr ? [row.pr] : []));
         setLoadedSelection(selection);
         setStatus(workStatus);
         setLanded(landedWork);
@@ -401,7 +404,7 @@ export function PrPanel({
           setRows((previous) => previous.map((entry) => entry.identity === row.identity && entry.pr && (entry.pr.title !== title || entry.pr.body !== body) ? { ...entry, pr: { ...entry.pr, title, body } } : entry));
         }} />;
         const ready = mergeReadiness(pr);
-        const reviews = <ReviewThreads source={source} url={pr.url} sessionId={sessionId} active={active} prState={pr.state} />;
+        const reviews = <ReviewThreads source={source} url={pr.url} number={pr.number} sessionId={sessionId} active={active} prState={pr.state} />;
         const checks = <PrChecks pr={pr} source={source} showSummary={!inline} disabled={!!working || loading || !fresh} fixBusy={fixBusy}
           onRerun={(failedOnly) => rerun(pr, failedOnly)}
           onFix={onFixErrors && pr.state === "OPEN" && ownWork(row) ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;

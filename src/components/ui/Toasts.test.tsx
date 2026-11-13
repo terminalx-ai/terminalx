@@ -234,6 +234,22 @@ it("keeps an error until it is closed, stacked under the notices, and copies its
   expect(screen.getAllByRole("alert")).toHaveLength(2);
 });
 
+it("shows a success on the same card with a check mark, read out politely, and no Copy error (PRO-234)", () => {
+  render(<Toasts />);
+  act(() => {
+    showError("Aisha's comment on src/seats.ts · lines 3–5 · PR #14", undefined, {
+      title: "Thread resolved on GitHub", tone: "success",
+      actions: [{ label: "View on GitHub", keepOpen: true, run: () => undefined }],
+    });
+  });
+  expect(screen.queryByRole("alert")).toBeNull();
+  const toast = screen.getByRole("status", { name: "Thread resolved on GitHub" });
+  expect(toast.dataset.toastTone).toBe("success");
+  expect(within(toast).getByRole("button", { name: "View on GitHub" })).toBeTruthy();
+  expect(within(toast).queryByRole("button", { name: "Copy error" })).toBeNull();
+  expect(toast.textContent).toContain("Aisha's comment on src/seats.ts · lines 3–5 · PR #14.");
+});
+
 it("says when the copy failed", async () => {
   render(<Toasts />);
   act(() => { showError("Couldn't pin “web”", "locked"); });

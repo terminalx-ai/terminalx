@@ -141,6 +141,6 @@ function ConfigurationEditor({ project }: { project: string | null }) {
       <tbody>{Object.entries(resolved.values).filter(([key]) => key.startsWith("environment.")).map(([key, entry]) => <tr key={key}><td className="break-all py-1 font-mono">{key.slice(12)}</td><td>{layerLabels[entry.source]}</td><td>{entry.locked ? "Locked" : "Value hidden"}</td></tr>)}</tbody>
     </table>}
     <SettingsFiles files={files} error={filesError} />
-    <p className="text-xs text-muted-foreground">Repository files: .terminalx/settings.json and .terminalx/settings.local.json. Private variables stay in Settings → Environment. Setup and archive scripts are edited in Settings → Repositories → Scripts.</p>
+    <p className="text-xs text-muted-foreground">Repository files: .terminalx/settings.json and .terminalx/settings.local.json. Private variables stay in Settings → Environment. Setup and archive scripts are edited in Settings → Projects → Scripts.</p>
   </div>;
 }

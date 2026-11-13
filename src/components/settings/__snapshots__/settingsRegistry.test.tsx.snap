@@ -172,6 +172,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "shortcuts.app.quickChat",
   "shortcuts.session.archive",
   "shortcuts.session.newTab",
+  "shortcuts.session.runAction",
   "shortcuts.git.commitPush",
   "shortcuts.git.pull",
   "shortcuts.git.fixChecks",
