@@ -51,10 +51,25 @@ shows the actual location and offers **Create settings file** when it is absent.
 Keep the file private: it can contain a Linear API key. Do not print or copy the
 whole file into a conversation.
 
-The current precedence is user file → app defaults. A missing key inherits its
-default; removing a key resets it. Repository and organization layers are not
-available yet. The layered resolver and schema follow-up will supply the schema
-and source badges once those features land.
+Precedence, highest first: system managed policy → repository local
+(`<primary checkout>/.terminalx/settings.local.json`) → repository shared
+(`<primary checkout>/.terminalx/settings.json`) → user file → app defaults.
+Repository and managed files take only the keys listed under Layered
+configuration below; every other key lives in the user file. A missing key
+inherits from the layer below; removing a key resets it, and Settings' row menu
+**Reset to inherited value** does the same (`reset_user_setting`), leaving the
+rest of the file as it is. Settings marks each row with the layer its value comes
+from, and **Settings files** lists every file with its path, how many keys it
+sets, its Git state (repository files) and its first problem by key and line.
+
+The file is checked against a JSON schema generated from the app's own validator:
+`schemas/settings.schema.json` in the source, kept current at
+`$TERMINALX_HOME/schemas/settings.schema.json` by each start. Files the app writes
+get `"$schema": "./schemas/settings.schema.json"` so editors complete keys and
+flag typos and wrong values; a `$schema` already in the file is kept. The local
+repository file the app writes gets the published
+`https://raw.githubusercontent.com/terminalx-ai/terminalx/main/schemas/repository-settings.schema.json`;
+the committed shared file does not, because older TerminalX builds warn about it.
 
 User-facing webview choices are under `preferences`, for example:
 
@@ -106,12 +121,14 @@ overwriting choices already in the file. Navigation state and pane sizes stay
 local to the webview. Leave `preferencesMigrated` alone.
 
 Edits reload automatically, including editor saves that replace the file.
-Unknown keys and `$schema` are allowed and preserved when Settings saves.
+Unknown keys and `$schema` are allowed and preserved when Settings saves (the
+schema flags unknown keys, because this build ignores them).
 An invalid type or option produces one error with its key and line in Settings.
 Every valid field still applies, including on a cold start. Only invalid fields
 use their previous value (or their default if none was loaded). Settings refuses
-to overwrite a file containing invalid entries; fix those entries in the editor
-before saving through the UI. Malformed JSON retains the running process's
+to overwrite a file containing invalid entries ("Can't save: ~/.raccoon/settings.json
+has an error on line N"); fix those entries in the editor before saving or
+resetting through the UI. Malformed JSON retains the running process's
 previous settings; a process with no readable object uses defaults.
 
 Deleting the file resets all settings to defaults, including clearing the Linear
@@ -166,10 +183,13 @@ Reads supported effective settings with their source layer and managed lock.
 Environment values are redacted. Precedence is managed, repository local,
 repository shared, user, defaults. All workspaces inherit files from the primary
 checkout: `.terminalx/settings.json` and ignored `.terminalx/settings.local.json`.
-Shared environment and branch prefixes require the person's native trust approval;
+Repository and managed files accept `branchPrefix` and `environment` (and
+`$schema`); a key they may not set is ignored and named, with its line, in
+Settings files. Shared environment and branch prefixes require the person's native trust approval;
 the CLI cannot grant it. An untrusted launch directs the person to Settings →
 General → Layered configuration. Setup and archive scripts and files to copy are
-not read from repository files yet. See `docs/layered-configuration.md` for scope.
+not read from repository files yet. See `docs/layered-configuration.md` for every
+file location, the schemas and scope.
 
 ### Sessions a session started (`parent`)
 

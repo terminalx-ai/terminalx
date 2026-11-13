@@ -3,7 +3,7 @@ import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor, type PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { api, errorMessage, gh, git, type CheckAuthority, type GitHubConnectionStatus, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
-import type { BranchInfo, ChangedFile, CommitInfo, UnfinishedMerge, WorkStatus } from "@/types/session";
+import type { BranchInfo, ChangedFile, CommitInfo, ConflictChoice, ConflictFile, UnfinishedMerge, WorkStatus } from "@/types/session";
 
 /** A workspace's Git status, with what is left in progress in it. */
 export interface SourceStatus extends WorkStatus {
@@ -27,6 +27,13 @@ export interface GitSource {
   /** False for a read-only (participate) attachment. */
   canWrite: boolean;
   workingChanges(hideWhitespace?: boolean): Promise<{ head: string | null; files: ChangedFile[] }>;
+  workingChangeSets?(hideWhitespace?: boolean): Promise<{ head: string | null; index: string | null; staged: ChangedFile[]; unstaged: ChangedFile[] }>;
+  stagePaths?(paths: string[]): Promise<void>;
+  unstagePaths?(paths: string[]): Promise<void>;
+  unstageAll?(): Promise<void>;
+  applyHunk?(path: string, oldPath: string | undefined, index: number, reverse: boolean): Promise<void>;
+  hunkCount?(path: string, oldPath: string | undefined, staged: boolean): Promise<number>;
+  generateCommitMessage?(agent: "claude" | "codex"): Promise<string>;
   reviewRange(target: string | null, uncommitted: boolean): Promise<{ target: string; base: string; head: string }>;
   changesBetween(base: string, head: string | null, hideWhitespace?: boolean): Promise<ChangedFile[]>;
   fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }>;
@@ -48,6 +55,10 @@ export interface GitSource {
   /** Local only, with `unfinishedMerge`: commit or abort exactly the merge that was read. */
   commitMerge?(merge: UnfinishedMerge): Promise<void>;
   abortMerge?(merge: UnfinishedMerge): Promise<void>;
+  /** Local only, with `unfinishedMerge`: resolve a conflicted file in place (PRO-293). */
+  conflictFile?(merge: UnfinishedMerge, path: string): Promise<ConflictFile>;
+  resolveConflict?(merge: UnfinishedMerge, file: ConflictFile, index: number, choice: ConflictChoice): Promise<ConflictFile>;
+  markResolved?(merge: UnfinishedMerge, file: ConflictFile): Promise<void>;
   ghAvailable(): Promise<boolean>;
   /** Local connection setup; cloud credentials belong to the workspace. */
   githubStatus?(): Promise<GitHubConnectionStatus>;
@@ -87,6 +98,13 @@ export function localGitSource(cwd: string, authority?: CheckAuthority): GitSour
     cloud: false,
     canWrite: true,
     workingChanges: (hideWhitespace) => git.workingChanges(cwd, hideWhitespace).then(([head, files]) => ({ head, files })),
+    workingChangeSets: (hideWhitespace) => git.workingChangeSets(cwd, hideWhitespace).then(([head, index, staged, unstaged]) => ({ head, index, staged, unstaged })),
+    stagePaths: (paths) => git.stagePaths(cwd, paths),
+    unstagePaths: (paths) => git.unstagePaths(cwd, paths),
+    unstageAll: () => git.unstageAll(cwd),
+    applyHunk: (path, oldPath, index, reverse) => git.applyHunk(cwd, path, oldPath, index, reverse),
+    hunkCount: (path, oldPath, staged) => git.hunkCount(cwd, path, oldPath, staged),
+    generateCommitMessage: (agent) => git.generateCommitMessage(cwd, agent),
     reviewRange: (target, uncommitted) => api.reviewRange(cwd, target, uncommitted),
     changesBetween: (base, head, hideWhitespace) => api.changesBetween(cwd, base, head, hideWhitespace),
     fileContentsAt: (path, base, head) => api.fileContentsAt(cwd, path, base, head),
@@ -102,6 +120,9 @@ export function localGitSource(cwd: string, authority?: CheckAuthority): GitSour
     unfinishedMerge: () => git.unfinishedMerge(cwd),
     commitMerge: (merge) => git.commitMerge(cwd, merge.head, merge.mergeHead).then(() => undefined),
     abortMerge: (merge) => git.abortMerge(cwd, merge.head, merge.mergeHead),
+    conflictFile: (merge, path) => git.conflictFile(cwd, merge.head, merge.mergeHead, path),
+    resolveConflict: (merge, file, index, choice) => git.resolveConflict(cwd, merge.head, merge.mergeHead, file.path, file.version, index, choice),
+    markResolved: (merge, file) => git.markResolved(cwd, merge.head, merge.mergeHead, file.path, file.version),
     ghAvailable: () => gh.available(),
     githubStatus: () => gh.connectionStatus(cwd),
     hasRemote: () => git.hasRemote(cwd),

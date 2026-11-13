@@ -1,6 +1,7 @@
 //! User settings shared by the runtime and every window.
 
 pub mod file;
+pub mod schema;
 
 use std::path::PathBuf;
 

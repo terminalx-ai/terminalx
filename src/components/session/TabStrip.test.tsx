@@ -16,7 +16,8 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCo
 
 vi.mock("@/components/editor/DiffEditorPane", () => ({ DiffEditorPane: () => <div>Review diff</div> }));
 vi.mock("@/components/changes/PrPanel", () => ({ PrPanel: () => <div>Review PR</div> }));
-const { dropEditors, getEditors, openDiff, openPr, setEditorDirty } = await import("@/lib/editors");
+vi.mock("@/components/changes/ConflictView", () => ({ ConflictView: () => <div>Review conflict</div> }));
+const { dropEditors, getEditors, openConflict, openDiff, openPr, setConflictCount, setEditorDirty } = await import("@/lib/editors");
 const { ask } = await import("@tauri-apps/plugin-dialog");
 const { getTerminalState, restoreSessionTabSelection, selectSessionTab } = await import("@/lib/terminal");
 const { newTab } = await import("@/lib/tabActions");
@@ -228,6 +229,21 @@ describe("review tabs in the workspace row", () => {
   const review = () => screen.queryByRole("tabpanel", { name: /app.ts|PR #12/ });
   const label = (kind: "diff" | "pr") => kind === "diff" ? "app.ts · All changes" : "PR #12";
   const chooseReview = (kind: "diff" | "pr") => fireEvent.click(within(strip()).getByRole("tab", { name: label(kind) }));
+
+  it("names a merge conflict tab by its file and the conflicts left in it, with the warning icon (PRO-293)", () => {
+    render(<TabsHarness reviews />);
+    let id = "";
+    act(() => { id = openConflict("a", FEATURE, "src/billing/seats.ts", { head: "1".repeat(40), mergeHead: "5".repeat(40) }, 2); });
+    const conflict = within(strip()).getByRole("tab", { name: "seats.ts · 2 conflicts" });
+    expect(shown()).toBe("seats.ts · 2 conflicts");
+    expect(conflict.getAttribute("aria-description")).toBe("Merge conflict");
+    const icon = within(conflict).getByLabelText("Merge conflict");
+    expect(icon.getAttribute("class")).toContain("text-warning");
+    expect(screen.getByText("Review conflict")).toBeTruthy();
+    // The count follows the latest read of the file.
+    act(() => setConflictCount(id, 1));
+    expect(within(strip()).getByRole("tab", { name: "seats.ts · 1 conflict" })).toBeTruthy();
+  });
 
   it.each(["diff", "pr"] as const)("clicks select agent, terminal and browser tabs while a %s stays open", async (kind) => {
     render(<TabsHarness reviews />);

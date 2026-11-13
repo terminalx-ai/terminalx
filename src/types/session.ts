@@ -358,7 +358,62 @@ export interface UnfinishedMerge {
   changedHere: string[];
   /** Uncommitted paths exactly as Git merged them. */
   fromBase: string[];
+  /** The branch HEAD is on (`raccoon/teams-billing`); null when detached. */
+  branch: string | null;
+  /** For each path in `conflicted`, how many conflict-marker blocks it holds now (0 for a binary or delete conflict). */
+  conflictCounts: Record<string, number>;
 }
+
+/** Where one side of a conflicted file's text came from (PRO-293). */
+export interface ConflictSide {
+  /** The branch: this checkout's branch for yours, what is being merged for theirs (`origin/main`, or `commit 1a2b3c4d5e`). */
+  branch: string;
+  /** The last commit on this side, since the merge base, that changed the file; null when there is none to read. */
+  commit: {
+    id: string;
+    subject: string;
+    author: string;
+    /** Commit time, Unix seconds. */
+    time: number;
+    /** The pull request the commit names (`… (#209)`, `Merge pull request #209 …`); null when it names none. */
+    pr: number | null;
+  } | null;
+}
+
+/** One `<<<<<<<` … `>>>>>>>` block, as it is on disk now. */
+export interface ConflictHunk {
+  /** Its place among the file's conflicts, from 0. */
+  index: number;
+  /** 1-based line of its `<<<<<<<` marker in the file on disk. */
+  line: number;
+  /** The text between `<<<<<<<` and `|||||||`/`=======`, each line with its line ending. */
+  ours: string;
+  /** The text between `=======` and `>>>>>>>`. */
+  theirs: string;
+  /** The common ancestor's text, when the file was written with diff3 or zdiff3 markers. */
+  base: string | null;
+}
+
+/** The file on disk, cut into the text outside conflicts and the conflicts. */
+export type ConflictSegment =
+  | { kind: "text"; text: string }
+  | { kind: "conflict"; hunk: ConflictHunk };
+
+/** A conflicted file of a merge in progress, as read from disk (PRO-293). */
+export interface ConflictFile {
+  path: string;
+  /** SHA-256 of the bytes read. A write is refused when the file no longer has them. */
+  version: string;
+  segments: ConflictSegment[];
+  /** How many conflict hunks `segments` holds. */
+  conflicts: number;
+  ours: ConflictSide;
+  theirs: ConflictSide;
+  /** Why the file cannot be resolved hunk by hunk (binary, deleted on one side); null when it can. */
+  unsupported: string | null;
+}
+
+export type ConflictChoice = "ours" | "theirs" | "both";
 
 export interface WorkspaceDisposition {
   exists: boolean;

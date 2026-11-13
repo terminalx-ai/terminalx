@@ -119,8 +119,11 @@ export function SettingRow({
   stacked,
   disabled,
   id,
+  titleAccessory,
 }: {
   label: string;
+  /** Beside the title: where the value comes from and the row's actions (PRO-140). */
+  titleAccessory?: React.ReactNode;
   description?: React.ReactNode;
   control: React.ReactNode;
   stacked?: boolean;
@@ -131,9 +134,18 @@ export function SettingRow({
     <div className={cn("flex flex-col gap-1.5 py-2", disabled && "opacity-60")}>
       <div className={cn("flex gap-4", stacked ? "flex-col" : "items-center justify-between")}>
         <div className="min-w-0">
-          <div id={id} className="text-[13px] font-medium">
-            {label}
-          </div>
+          {titleAccessory ? (
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <div id={id} className="text-[13px] font-medium">
+                {label}
+              </div>
+              {titleAccessory}
+            </div>
+          ) : (
+            <div id={id} className="text-[13px] font-medium">
+              {label}
+            </div>
+          )}
           {description && <div className="text-xs leading-relaxed text-muted-foreground">{description}</div>}
         </div>
         <div className={cn(stacked ? "" : "shrink-0")}>{control}</div>

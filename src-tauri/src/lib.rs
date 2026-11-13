@@ -113,6 +113,7 @@ pub fn run_git_transport_cli() -> Option<i32> {
     { None }
 }
 mod unfinished_merge;
+mod merge_conflicts;
 mod pr_associations;
 mod github_identity;
 mod ssh_containment;
@@ -453,6 +454,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             transparency::reduce_transparency,
             configuration_commands::configuration_resolve,
+            configuration_commands::settings_files_list,
+            configuration_commands::open_settings_file,
             configuration_watch::configuration_watch,
             configuration_commands::configuration_write,
             configuration_commands::configuration_review,
@@ -751,6 +754,12 @@ pub fn run() {
             drag_text::dropped_text,
             commands::invalidate_file_index,
             commands::git_commit,
+            commands::git_stage_paths,
+            commands::git_unstage_paths,
+            commands::git_unstage_all,
+            commands::git_apply_hunk,
+            commands::git_hunk_count,
+            commands::generate_commit_message,
             commands::git_identity,
             commands::cloud_mirror_status,
             commands::cloud_mirror_enable,
@@ -782,8 +791,12 @@ pub fn run() {
             commands::unfinished_merge,
             commands::commit_merge,
             commands::abort_merge,
+            commands::merge_conflict_file,
+            commands::resolve_merge_conflict,
+            commands::mark_conflict_resolved,
             commands::git_checkout,
             commands::working_changes,
+            commands::working_change_sets,
             commands::pr_list,
             commands::pr_search,
             commands::pr_attach,
@@ -907,6 +920,7 @@ pub fn run() {
             store::settings::file::settings_file_status,
             store::settings::file::update_user_preferences,
             store::settings::file::create_settings_file,
+            store::settings::file::reset_user_setting,
             commands::set_experimental_settings,
             commands::orchestrator_settings,
             commands::set_orchestrator_settings,
