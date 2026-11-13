@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Terminal, TerminalSquare, X } from "@/icons";
+import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Terminal, TerminalSquare, TriangleAlert, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { StatusStripe } from "@/components/layout/SidebarRows";
 import { Button } from "@/components/ui/button";
@@ -41,7 +41,8 @@ const STATUS_DOT: Partial<Record<TabStatus, string>> = {
 
 /** What a tab is now, at a glance: the mark of the agent in it, a terminal, a page. */
 export function TabIcon({ tab, className = "size-3.5 shrink-0" }: { tab: PeerTab; className?: string }) {
-  if (tab.kind === "review") return tab.editor.kind === "diff" ? <FileDiff className={className} /> : <GitPullRequest className={className} />;
+  if (tab.kind === "review") return tab.editor.kind === "diff" ? <FileDiff className={className} />
+    : tab.editor.kind === "conflict" ? <TriangleAlert className={cn(className, "text-warning")} aria-label="Merge conflict" /> : <GitPullRequest className={className} />;
   const agent = peerAgent(tab);
   if (agent) return <AgentMark id={agent} className={className} decorative />;
   return tab.kind === "browser" ? <Globe className={className} /> : <TerminalSquare className={className} />;

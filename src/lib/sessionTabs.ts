@@ -328,10 +328,13 @@ export function peerLabel(tab: PeerTab, layout: TabLayout, harnessName: (id: str
   return tab.kind === "review" ? tab.editor.name : browserPageLabel(tab.page);
 }
 
+/** How a full-width review tab is named, by its editor kind. */
+const REVIEW_KINDS: Record<string, string> = { diff: "File diff", pr: "Pull request", conflict: "Merge conflict" };
+
 /** What kind of tab it is now: its agent's name, "Terminal" (with the agent running in it, if one is) or "Browser page". */
 export function peerKind(tab: PeerTab, harnessName: (id: string) => string | undefined): string {
   if (tab.kind === "browser") return "Browser page";
-  if (tab.kind === "review") return tab.editor.kind === "diff" ? "File diff" : "Pull request";
+  if (tab.kind === "review") return REVIEW_KINDS[tab.editor.kind] ?? "Pull request";
   const agent = peerAgent(tab);
   const name = agent ? harnessName(agent) || agent : null;
   if (!isShellPeer(tab)) return name ?? "Agent";
