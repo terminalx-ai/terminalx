@@ -1085,12 +1085,16 @@ that process. The shell's exit status is reported, but a shell exiting does
 not end the launch: jobs it left, including ones that called `setsid` and
 left its session, stay owned. Stop moves a launch through these steps:
 
-1. The runtime sends a numbered Stop claim.
+1. The runtime sends a numbered Stop claim with a grace.
 2. The supervisor signals each direct child it still holds, through a pidfd
-   taken and checked against its unreaped identity: TERM first, then KILL
-   after the 400 ms grace.
-3. After two seconds it reports "unconfirmed". A new Stop restarts the
-   escalation.
+   taken and checked against its unreaped identity: TERM once to each
+   (a child it comes to hold later, such as an orphan, gets its own), then
+   KILL once the grace is over. The caller's own escalation sets the grace,
+   as on macOS: a closed pane's Stop gives two seconds, and Stop forces its
+   KILL after 400 ms by sending the same claim again with no grace. A Stop
+   the supervisor starts by itself (its channel lost) gives 400 ms.
+3. 1.6 seconds after the KILL it reports "unconfirmed" (two seconds into a
+   default Stop). A new Stop restarts the escalation.
 4. Only `ECHILD` from the all-child wait, for the current claim, makes it
    report "extinct". The runtime accepts that only while its pidfd witness
    of the supervisor is still live.

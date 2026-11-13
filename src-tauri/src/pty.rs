@@ -42,6 +42,9 @@ pub(crate) const MAX_CHUNK: usize = 32 * 1024;
 pub(crate) const SCROLLBACK_BYTES: usize = 512 * 1024;
 /// How long a pane gets to exit on its own before it is killed outright.
 const TERM_GRACE: Duration = Duration::from_millis(400);
+/// How long a closed pane's processes have after TERM before they are
+/// killed ([`OwnedGroup::terminate`]).
+const TERMINATE_GRACE: Duration = Duration::from_secs(2);
 /// How long a write waits for the program in a pane to take any of its input.
 /// A program that has stopped reading fills the terminal's input queue after
 /// about 1 KB, and a write past that would otherwise wait for ever, holding
@@ -317,10 +320,12 @@ impl OwnedGroup {
     fn signal(&self, force: bool) {
         #[cfg(test)]
         if self.1.load(Ordering::SeqCst) { return; }
-        // The supervisor sends TERM, then KILL after the same grace, to
-        // every process of the launch, and keeps going until none is left.
+        // The supervisor sends TERM, and KILL when the caller forces it, as
+        // the signals below do: Stop forces after TERM_GRACE, a closed pane
+        // after TERMINATE_GRACE. Not forced, it kills after TERMINATE_GRACE
+        // by itself, and keeps going until none is left.
         #[cfg(target_os = "linux")]
-        if let Some(owner) = self.owner() { let _ = force; owner.stop(); return; }
+        if let Some(owner) = self.owner() { owner.stop_within(if force { Duration::ZERO } else { TERMINATE_GRACE }); return; }
         let mut owned = self.0.lock().unwrap();
         // macOS: main's signal, to the leader's process group only.
         #[cfg(target_os = "macos")]
@@ -358,7 +363,7 @@ impl OwnedGroup {
         let group = self.clone();
         std::thread::spawn(move || {
             let start = Instant::now();
-            while group.pid().is_some() && start.elapsed() < Duration::from_secs(2) {
+            while group.pid().is_some() && start.elapsed() < TERMINATE_GRACE {
                 std::thread::sleep(Duration::from_millis(20));
             }
             group.signal(true);
@@ -2151,6 +2156,35 @@ mod supervised_tests {
         terminals.stop_owned_groups(Duration::from_secs(10));
         assert!(gone(job), "Stop All ended it");
         assert!(terminals.owned_groups().is_empty());
+    }
+
+    /// A supervised launch is signalled as main signals one: a closed pane
+    /// gets one TERM and [`TERMINATE_GRACE`] before KILL, and Stop forces
+    /// KILL after [`TERM_GRACE`]. A TERM sent on every supervisor tick ran a
+    /// shell's trap again and again, and a KILL at 400 ms whatever the
+    /// caller cut a closed pane's shutdown short (#943's action restart).
+    #[test]
+    fn a_closed_terminal_gets_one_term_and_the_whole_grace_and_stop_still_forces() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terms = dir.path().join("terms");
+        // Its shutdown takes longer than Stop's grace, and well within a closed pane's.
+        let command = r#"sh -c 'trap "printf t >> terms; sleep 0.8; printf d >> terms; exit 0" TERM; : > ready; while :; do sleep 0.05; done'"#;
+        terminals.spawn(sink.clone(), "grace:shell", PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(command), env: &[] }).unwrap();
+        let owner = terminals.panes.lock().unwrap()["grace:shell"].group.owner().cloned().expect("a supervised launch");
+        wait_for("the trap to be set", || dir.path().join("ready").exists());
+        terminals.kill("grace:shell");
+        wait_for("the launch to end", || !owner.pending());
+        assert_eq!(std::fs::read_to_string(&terms).unwrap(), "td", "one TERM, and time for the trap to finish");
+
+        // Stop forces: a program that ignores TERM is killed after TERM_GRACE, not TERMINATE_GRACE.
+        let command = r#"sh -c 'trap "" TERM; : > stubborn; while :; do sleep 0.05; done'"#;
+        terminals.spawn(sink, "force:shell", PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(command), env: &[] }).unwrap();
+        wait_for("the stubborn program", || dir.path().join("stubborn").exists());
+        let started = Instant::now();
+        assert!(terminals.stop_keep_output("force:shell", Duration::from_secs(10)), "Stop confirmed");
+        assert!(started.elapsed() < TERMINATE_GRACE, "Stop forced its KILL after {:?}", started.elapsed());
     }
 
     fn sleeping(terminals: &Terminals, dir: &tempfile::TempDir, id: &str) -> Arc<supervisor::Owner> {
