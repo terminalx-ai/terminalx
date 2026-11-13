@@ -122,8 +122,9 @@ fn exits() -> &'static parking_lot::Mutex<HashMap<String, Exit>> {
 /// or ⌘R beside Run after setup) open one tab, and a restart waiting for its
 /// old run holds up only that action. Every run is decided in the runtime
 /// process: the desktop asks it through `runtime.pty.actionRun`.
-fn action_lock(session: &str, action: &str) -> Arc<parking_lot::Mutex<()>> {
-    static LOCKS: OnceLock<parking_lot::Mutex<HashMap<(String, String), Arc<parking_lot::Mutex<()>>>>> = OnceLock::new();
+type ActionLock = Arc<parking_lot::Mutex<()>>;
+fn action_lock(session: &str, action: &str) -> ActionLock {
+    static LOCKS: OnceLock<parking_lot::Mutex<HashMap<(String, String), ActionLock>>> = OnceLock::new();
     let mut locks = LOCKS.get_or_init(Default::default).lock();
     // A lock nobody holds or waits on is dropped, so the map stays small.
     locks.retain(|_, lock| Arc::strong_count(lock) > 1);
