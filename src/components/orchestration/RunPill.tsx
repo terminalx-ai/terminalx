@@ -1,5 +1,6 @@
 import { CircleAlert, LoaderCircle, ShieldAlert } from "@/icons";
 import { cn } from "@/lib/cn";
+import { isMac, useShortcutKeys } from "@/lib/hotkeys";
 import { usePrefs } from "@/lib/prefs";
 import type { Run } from "@/types/orchestration";
 
@@ -35,5 +36,21 @@ export function RunPill({ run, onOpen }: { run: Run | null | undefined; onOpen: 
       <Icon aria-hidden className={cn("size-3.5", pill.kind === "running" && animations && "animate-spin")} />
       {pill.text}
     </div>
+  );
+}
+
+/**
+ * The keys that open the Run view, beside the pill in a lead's title bar (18.01): "⌘⇧O run view". The reader's
+ * own keys when they changed them (Settings → Keyboard shortcuts); nothing when the action has none.
+ */
+export function RunViewHint({ className }: { className?: string }) {
+  const keys = useShortcutKeys("app.runView");
+  if (!keys.length) return null;
+  const text = keys.join(isMac ? "" : "+");
+  return (
+    <span data-testid="run-view-hint" title="Open the Run view (Go → Run View)" className={cn("mr-1.5 inline-flex shrink-0 items-center gap-1 self-center whitespace-nowrap text-[11.5px] text-faint", className)}>
+      <kbd className="font-sans text-muted-foreground">{text}</kbd>
+      <span>run view</span>
+    </span>
   );
 }

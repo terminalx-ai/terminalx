@@ -8,6 +8,7 @@
 //   the dictation row with its two bindings;
 // - a shortcut changed in the tab is the shortcut at the next keypress, its old
 //   keys do nothing, and the command palette shows the new keys;
+// - the Run view is listed on keys of its own (⌘⇧O), with Automations kept on ⌘⇧R;
 // - holding Right Option in the composer opens the microphone and releasing it
 //   closes it; Left Option and a Right Option combination never do.
 //
@@ -72,6 +73,12 @@ const fits = (layout) => ({
   await openShortcuts(page);
   let layout = await measure(page);
   failed += report("shortcuts tab at 960 px", fits(layout), layout);
+
+  // PRO-362: the Run view has keys of its own, listed here; Automations keeps ⌘⇧R, which the drafts had drawn for it.
+  const keysOf = (id) => page.locator(`[data-shortcut="${id}"] button[data-binding]`).allTextContents();
+  const runView = await keysOf("app.runView");
+  const automations = await keysOf("app.automations");
+  failed += report("the Run view's keys in the Shortcuts tab", { "Run view is listed, on ⌘⇧O": runView.join(" | ") === "⌘⇧O", "Automations keeps ⌘⇧R": automations.join(" | ") === "⌘⇧R" }, { runView, automations });
 
   // The longest label, with keys another action has: the recorder and its longest message.
   const long = page.locator('[data-shortcut="session.toggleTerminalView"]');

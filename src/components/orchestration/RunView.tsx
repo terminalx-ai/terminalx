@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import { PieceStateMark } from "@/components/orchestration/PieceStateMark";
 import {
-  Check, CircleAlert, CircleCheck, CircleDashed, CircleX, Clock, CornerUpLeft, FileJson, FileText, FolderOpen, Gauge, GitMerge, GitPullRequestClosed, Info, Layers, LoaderCircle, MessageSquare, Network, Pause, Pencil, Play, RotateCw, ScanSearch,
+  Check, ChevronDown, CircleAlert, CircleCheck, CircleDashed, CircleX, Clock, CornerUpLeft, FileJson, FileText, FolderOpen, Gauge, GitMerge, GitPullRequestClosed, Info, Layers, LoaderCircle, MessageSquare, Network, Pause, Pencil, Play, RotateCw, ScanSearch,
   Send, Settings, ShieldAlert, ShieldOff, SkipForward, Sparkles, Square, SquareArrowOutUpRight, Terminal, Trash2, TriangleAlert, Users, X,
 } from "@/icons";
 import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
@@ -31,7 +33,6 @@ const kicker = "text-[10.5px] font-medium uppercase tracking-[.08em] text-faint"
 const chip = "inline-flex h-5 items-center rounded-[5px] bg-veil-raised px-1.5 font-mono text-[11px] text-muted-foreground";
 const code = "rounded bg-veil-raised px-1 font-mono text-[12px]";
 const field = "w-full rounded-md border border-hairline bg-background px-2 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
-const cellSelect = "h-7 min-w-0 max-w-full rounded-md border border-hairline bg-background px-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60";
 
 /** A session's Run view: the run it leads, or how to start one. */
 export function RunView({ session, onShowChat }: { session: SessionEntry; onShowChat: () => void }) {
@@ -897,32 +898,66 @@ function Tries({ piece }: { piece: RunPiece }) {
   );
 }
 
-/** A piece's model and effort, changed where they are read: each change is saved as part of the plan. */
+/** The tiers `modelTier` names, as the routing table's tiers. */
+const NAMED_TIER: Record<string, Tier | undefined> = { Haiku: "small", Sonnet: "mid", Opus: "large", Fable: "top" };
+
+/**
+ * A piece's model and effort as one pill (18.02): the tier's dot, the model, the effort. It opens one menu with
+ * both choices, as the composer's model picker does; each change is saved as part of the plan.
+ */
 function ModelAndEffort({ piece, disabled, onChange }: { piece: RunPiece; disabled: boolean; onChange: (patch: Partial<RunPlanPiece>) => void }) {
   const models = useModels(piece.agent);
+  const menu = useRowMenu();
   const current = modelForTab(models, piece.model);
   const listed = models.some((model) => model.id === piece.model);
   const efforts = effortChoices(current, piece.effort);
   // The empty choice is "not named by the plan": the piece's kind decides, and it shows what that came to.
   const byKind = piece.kind ? `by kind: ${piece.kind}` : "by kind";
   const kindModel = piece.model ? modelLabel(piece.agent, piece.model) : `${piece.agent === "codex" ? "Codex" : "Claude"} default`;
+  const modelValue = piece.modelByKind ? "" : piece.model;
+  const effortValue = piece.effortByKind ? "" : piece.effort ?? "";
+  const fromKind = [piece.modelByKind && "model", piece.effortByKind && "effort"].filter(Boolean).join(" and ");
+  // The engine's tier when it gave one; else the tier the model's own name places it in (a plan's named model).
+  const tier = piece.tier ?? NAMED_TIER[modelTier(piece.agent, piece.model).text];
+  const chooseModel = (model: string) => {
+    if (model === modelValue) return;
+    const next = modelForTab(models, model);
+    // An effort the new model does not have goes back to that model's default; one the kind chose stays the kind's.
+    onChange({ model, effort: !piece.effortByKind && piece.effort && next?.efforts.includes(piece.effort) ? piece.effort : undefined });
+  };
+  const chooseEffort = (effort: string) => {
+    if (effort !== effortValue) onChange({ effort: effort || undefined });
+  };
   return (
-    <span className="flex min-w-0 items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
-      <select aria-label={`Model of ${piece.title}`} className={cn(cellSelect, "flex-1")} value={piece.modelByKind ? "" : piece.model} disabled={disabled} title={piece.modelByKind ? `From the routing table, ${byKind}` : undefined}
-        onChange={(event) => {
-          const next = modelForTab(models, event.target.value);
-          // An effort the new model does not have goes back to that model's default; one the kind chose stays the kind's.
-          onChange({ model: event.target.value, effort: !piece.effortByKind && piece.effort && next?.efforts.includes(piece.effort) ? piece.effort : undefined });
-        }}>
-        {/* No model named: the plan is stored again with the routing table's model for the piece's kind. */}
-        <option value="">{piece.modelByKind ? `${kindModel} (${byKind})` : `By kind${piece.kind ? ` (${piece.kind})` : ""}`}</option>
-        {piece.model && !listed && <option value={piece.model}>{modelLabel(piece.agent, piece.model)}</option>}
-        {models.map((model) => <option key={model.id} value={model.id} title={modelOptionText(model, models)}>{model.label}</option>)}
-      </select>
-      <select aria-label={`Effort of ${piece.title}`} className={cn(cellSelect, "w-[5.25rem] shrink-0")} value={piece.effortByKind ? "" : piece.effort ?? ""} disabled={disabled} title={piece.effortByKind ? `From the routing table, ${byKind}` : undefined} onChange={(event) => onChange({ effort: event.target.value || undefined })}>
-        <option value="">{piece.effortByKind && piece.effort ? EFFORT_LABEL[piece.effort] ?? piece.effort : "Default"}</option>
-        {efforts.map((effort) => <option key={effort} value={effort}>{EFFORT_LABEL[effort] ?? effort}</option>)}
-      </select>
+    <span className="flex min-w-0" onClick={(event) => event.stopPropagation()}>
+      <DropdownMenu {...menu.root}>
+        <DropdownMenuTrigger asChild {...menu.trigger}>
+          <button
+            type="button" disabled={disabled} data-testid="piece-model-pill"
+            aria-label={`Model and effort of ${piece.title}`}
+            title={fromKind ? `The ${fromKind} come from the routing table, ${byKind}` : undefined}
+            className="inline-flex h-7 min-w-0 max-w-full items-center gap-1 rounded-md border border-hairline bg-background px-2 text-xs outline-none hover:bg-veil-card focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60 data-[state=open]:bg-veil-raised"
+          >
+            <span className="min-w-0 truncate"><ModelName piece={{ ...piece, tier }} /></span>
+            <ChevronDown aria-hidden className="size-3 shrink-0 text-faint" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="min-w-[14rem]">
+          <DropdownMenuLabel>Model</DropdownMenuLabel>
+          <DropdownMenuRadioGroup aria-label={`Model of ${piece.title}`} value={modelValue} onValueChange={chooseModel}>
+            {/* No model named: the plan is stored again with the routing table's model for the piece's kind. */}
+            <DropdownMenuRadioItem value="">{piece.modelByKind ? `${kindModel} (${byKind})` : `By kind${piece.kind ? ` (${piece.kind})` : ""}`}</DropdownMenuRadioItem>
+            {piece.model && !listed && <DropdownMenuRadioItem value={piece.model}>{modelLabel(piece.agent, piece.model)}</DropdownMenuRadioItem>}
+            {models.map((model) => <DropdownMenuRadioItem key={model.id} value={model.id} title={modelOptionText(model, models)}>{model.label}</DropdownMenuRadioItem>)}
+          </DropdownMenuRadioGroup>
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel>Effort</DropdownMenuLabel>
+          <DropdownMenuRadioGroup aria-label={`Effort of ${piece.title}`} value={effortValue} onValueChange={chooseEffort}>
+            <DropdownMenuRadioItem value="">{piece.effortByKind && piece.effort ? `${EFFORT_LABEL[piece.effort] ?? piece.effort} (${byKind})` : "Default"}</DropdownMenuRadioItem>
+            {efforts.map((effort) => <DropdownMenuRadioItem key={effort} value={effort}>{EFFORT_LABEL[effort] ?? effort}</DropdownMenuRadioItem>)}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </span>
   );
 }
