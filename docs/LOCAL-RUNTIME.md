@@ -1014,7 +1014,17 @@ process-containment certificate. On macOS they still come from the session
 census, whose reviewed internal-truncation omission remains open under its
 separate mechanism hold: propagating a failed wait repairs known-live and
 indeterminate caller handling, but does not detect an unobserved false-empty
-census. On Linux the census is no longer the authority; see
+census.
+
+The census is strict: any process on the machine that ends between being
+listed and being asked makes it indeterminate, because that process might
+have forked into the session first. On a busy Mac, a clean census at the
+first try is therefore rare, and a stop could run out its wait. So an
+indeterminate census is taken again, up to 64 times per question. Each
+retry is a whole new census, and an indeterminate one still never counts as
+empty (`settled_session_jobs`).
+
+On Linux the census is no longer the authority; see
 [Linux PTY ownership](#linux-pty-ownership-467).
 
 The compatibility `kill_and_wait`/`kill_all_and_wait` wrappers log failure for
@@ -1106,6 +1116,10 @@ Only the process creation in `Terminals::spawn_after` changes on Linux:
 - portable-pty's spawn is replaced by the supervisor bootstrap;
 - `Waiter::Supervised` waits on the shell status the supervisor reports;
 - `OwnedGroup` defers `pid` and `signal` to the launch's supervisor.
+- A supervised pane's writer does not type the newline and VEOF that
+  portable-pty's writer sends when dropped. On macOS the group signal
+  reaches the program before those bytes do; a supervisor's Stop arrives a
+  moment later, so the program would read them as input.
 
 Every caller (Stop, Stop All, tab and session removal, merged cleanup,
 resource kills, the stop confirmation above) is main's code unchanged. The
