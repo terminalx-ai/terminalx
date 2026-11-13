@@ -3,7 +3,7 @@ import { Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { IconPicker, RepositoryIcon } from "@/components/ui/IconPicker";
+import { RepositoryIcon } from "@/components/ui/IconPicker";
 import { moveRepositoryEntry, validateAction, type RepositoryAction } from "@/lib/repositoryActions";
 import { RepositoryFieldError, RepositoryOrderButtons, repositoryInputClass, useRepositoryMutation } from "./repositoryEditor";
 
@@ -27,7 +27,7 @@ export function RepositoryActionsSettings({ actions, onChange, onReset }: {
           setEditing({ isNew: true, action: { id: crypto.randomUUID(), name: "", icon: "terminal", command: "", runAfterSetup: false, concurrent: false, hidden: false } });
         }}><Plus />Add action</Button>
       </div>
-      {!actions.length && <p className="text-sm text-muted-foreground">Add commands for this repository, such as a dev server, tests or lint.</p>}
+      {!actions.length && <p className="text-sm text-muted-foreground">Add commands for this project, such as a dev server, tests or lint.</p>}
       <ol aria-label="Saved actions" className="divide-y divide-hairline">
         {actions.map((action, index) => (
           <li key={action.id} className="flex flex-wrap items-center gap-1 py-2">
@@ -45,7 +45,7 @@ export function RepositoryActionsSettings({ actions, onChange, onReset }: {
           </li>
         ))}
       </ol>
-      {onReset && <Button variant="outline" size="sm" disabled={mutation.busy} onClick={() => void mutation.run(onReset)}>Reset to repository file</Button>}
+      {onReset && <Button variant="outline" size="sm" disabled={mutation.busy} onClick={() => void mutation.run(onReset)}>Reset to terminalx.json</Button>}
       {!editing && <RepositoryFieldError id={errorId} error={mutation.error} />}
       {editing && <ActionDialog
         key={editing.action.id}
@@ -92,7 +92,7 @@ function ActionDialog({ action, actions, isNew, busy, error, onClose, onSave }: 
       <DialogContent showClose={!busy}>
         <DialogHeader>
           <DialogTitle className="text-base font-semibold">{isNew ? "Add action" : "Edit action"}</DialogTitle>
-          <DialogDescription className="text-xs text-muted-foreground">Name a command for this repository. Save with ⌘↵.</DialogDescription>
+          <DialogDescription className="text-xs text-muted-foreground">Name a command for this project. Save with ⌘↵.</DialogDescription>
         </DialogHeader>
         <form onSubmit={(event) => { event.preventDefault(); void submit(); }} onKeyDown={(event) => {
           if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.nativeEvent.isComposing) {
@@ -107,7 +107,6 @@ function ActionDialog({ action, actions, isNew, busy, error, onClose, onSave }: 
               <input id={`${id}-name`} autoFocus value={draft.name} aria-invalid={!!errors.name} aria-describedby={errors.name ? `${id}-name-error` : undefined} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className={repositoryInputClass} />
               <RepositoryFieldError id={`${id}-name-error`} error={errors.name} />
             </div>
-            <IconPicker value={draft.icon} onChange={(icon) => setDraft({ ...draft, icon })} />
             <div>
               <label htmlFor={`${id}-command`} className="mb-1 block text-xs font-medium">Command</label>
               <textarea id={`${id}-command`} rows={5} spellCheck={false} autoCapitalize="off" autoCorrect="off" value={draft.command} aria-invalid={!!errors.command} aria-describedby={errors.command ? `${id}-command-error` : undefined} onChange={(event) => setDraft({ ...draft, command: event.target.value })} className={`${repositoryInputClass} resize-y font-mono`} />

@@ -13,7 +13,8 @@ export const NATIVE_CODEX_DESCRIPTION =
 export const ORCHESTRATOR_RUNS_DESCRIPTION =
   "A session can lead a run: it splits one goal into pieces, and each piece goes to a worker session on its own branch. Shows the Run view in a session, where you approve the lead's plan before any worker starts, and Settings → Orchestrator. The terminalx runs commands work either way.";
 
-export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Repositories", "Admin", "More"] as const;
+// PRO-131: the group of a person's projects is "Projects"; its templates page is "Project templates". Ids stay as they were.
+export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Projects", "Admin", "More"] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number];
 export const SETTINGS_SECTIONS = {
   account: { title: "Account", group: "Personal", entry: "account.identity" },
@@ -25,8 +26,8 @@ export const SETTINGS_SECTIONS = {
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
-  projects: { title: "Projects", group: "Repositories", entry: "projects.templates" },
-  repositories: { title: "Repositories", group: "Repositories", entry: "repositories.rootPath" },
+  projects: { title: "Project templates", group: "Projects", entry: "projects.templates" },
+  repositories: { title: "Projects", group: "Projects", entry: "repositories.rootPath" },
   organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar" },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup" },
   shortcuts: { title: "Shortcuts", group: "More", entry: "shortcuts.systemWide" },
@@ -647,14 +648,14 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "repositories.rootPath", section: "repositories", title: "Root path",
-    description: "Reveal or copy the repository's root path.",
-    searchTerms: ["repositories", "general", "root", "path"], scope: "repository",
+    description: "Reveal or copy the project's root path.",
+    searchTerms: ["repositories", "projects", "general", "root", "path"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects.path" }, layout: "content",
   }),
   defineSetting({
-    id: "repositories.workspacesPath", section: "repositories", title: "Workspaces path",
-    description: "Reveal or copy the directory used for new workspaces.",
-    searchTerms: ["repositories", "general", "workspaces", "worktrees", "path"], scope: "repository",
+    id: "repositories.workspacesPath", section: "repositories", title: "Worktree folder",
+    description: "Reveal or copy the folder new workspaces are created in.",
+    searchTerms: ["repositories", "projects", "general", "workspaces path", "workspaces", "worktrees", "folder", "path"], scope: "repository",
     storage: { kind: "action", location: "Repository worktree directory" }, layout: "content",
   }),
   defineSetting({
@@ -665,8 +666,8 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "repositories.filesToCopy", section: "repositories", title: "Files to copy",
-    description: "Copy matching ignored, untracked files into new workspaces.",
-    searchTerms: ["repositories", "files", "copy", "ignored", "globs", "worktreeinclude", "env"], scope: "repository",
+    description: "Copy matching ignored, untracked files into new workspaces. On the project's General page.",
+    searchTerms: ["repositories", "projects", "general", "files", "copy", "ignored", "globs", "worktreeinclude", "env"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects.repositorySettings.filesToCopy; repository .worktreeinclude overrides" }, layout: "content",
   }),
   defineSetting({
@@ -690,14 +691,14 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "repositories.actions", section: "repositories", title: "Actions",
-    description: "Commands this repository's sessions can run, in order: name, icon, command, run after setup.",
+    description: "Commands this project's sessions can run, in order: name, command, run after setup.",
     searchTerms: ["repository", "actions", "run", "commands", "dev server", "tests"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].actions" }, layout: "content",
   }),
   defineSetting({
     id: "repositories.previewUrls", section: "repositories", title: "Preview URLs",
-    description: "Addresses to open for this repository's sessions; $PORT and $PORT_n use the session's ports.",
-    searchTerms: ["repository", "preview", "urls", "localhost", "port", "browser"], scope: "repository",
+    description: "Addresses to open for this project's sessions; $PORT and $PORT_n use the session's ports. On the project's General page.",
+    searchTerms: ["repository", "projects", "general", "preview", "urls", "localhost", "port", "browser"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].previewUrls" }, layout: "content",
   }),
   defineSetting({
