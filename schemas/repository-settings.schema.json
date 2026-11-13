@@ -75,6 +75,17 @@
       "maxLength": 65536,
       "pattern": "^[^\\u0000]*$",
       "type": "string"
+    },
+    "sparseCheckout": {
+      "description": "Folders new workspaces of this repository check out, relative to its root, such as \"packages/web\"; root files are always checked out. An empty list checks out root files only; absent checks out everything. Each folder is at most 1024 bytes.",
+      "items": {
+        "maxLength": 1024,
+        "pattern": "^(?:[^./\\\\*?\\x00-\\x1f\\x7f-\\x9f][^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]*|\\.[^./\\\\*?\\x00-\\x1f\\x7f-\\x9f][^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]*|\\.\\.[^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]+)(?:/(?:[^./\\\\*?\\x00-\\x1f\\x7f-\\x9f][^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]*|\\.[^./\\\\*?\\x00-\\x1f\\x7f-\\x9f][^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]*|\\.\\.[^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]+))*$",
+        "type": "string"
+      },
+      "maxItems": 1000,
+      "type": "array",
+      "uniqueItems": true
     }
   },
   "title": "TerminalX repository settings",

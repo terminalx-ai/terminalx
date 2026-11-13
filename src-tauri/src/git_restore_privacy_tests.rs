@@ -40,7 +40,7 @@ pub(super) fn run(root: &Path, managed: bool, runtime: &tokio::runtime::Runtime)
             path:created.path.clone(), name:created.name, branch:created.branch.clone(), commit:commit.clone(),
             pr:crate::merged_cleanup::PrRef { number:1,title:"Recorded fixture removal".into(),url:"https://example.test/pr/1".into(),head:commit.clone() },
             local_branch:crate::merged_cleanup::BranchFate::Deleted, remote_branch:crate::merged_cleanup::BranchFate::Deleted,
-            sessions_kept:vec![session_id.clone()], sessions_deleted:Vec::new(), restored_at:None,
+            sessions_kept:vec![session_id.clone()], sessions_deleted:Vec::new(), restored_at:None, sparse_checkout:None,
         };
         let file = root.join("merged-cleanup.json");
         let mut ledger: Value = crate::store::read_json(&file).unwrap().unwrap_or_else(|| json!({"removed":[]}));

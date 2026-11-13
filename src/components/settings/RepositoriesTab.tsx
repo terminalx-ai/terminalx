@@ -11,6 +11,7 @@ import { MergedCleanupSettings } from "./MergedCleanupSettings";
 import { RepositoryOrchestratorSettings } from "./OrchestratorSettings";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { RepositoryScriptsTab } from "./RepositoryScriptsTab";
+import { SparseCheckoutRow } from "./SparseCheckoutRow";
 
 export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath?: string; row?: string | null; onSelectRow?: (row: SettingId) => void }) {
   const { projects } = useSessionStore();
@@ -92,6 +93,7 @@ export function RepositorySettingsPage({ project, page }: { project: Project; pa
         <>
           <RegisteredSetting setting="repositories.rootPath" instance={project.path}>{pathRow("Root path", project.path)}</RegisteredSetting>
           {preview && <RegisteredSetting setting="repositories.workspacesPath" instance={project.path}>{pathRow("Workspaces path", preview.workspacesPath)}</RegisteredSetting>}
+          <RegisteredSetting setting="repositories.sparseCheckout" instance={project.path}><SparseCheckoutRow project={project} /></RegisteredSetting>
         </>
       ) : (
         <RegisteredSetting setting="repositories.filesToCopy" instance={project.path}>

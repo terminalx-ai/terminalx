@@ -93,6 +93,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "projects.templates",
   "repositories.rootPath",
   "repositories.workspacesPath",
+  "repositories.sparseCheckout",
   "repositories.filesToCopy",
   "repositories.mergedCleanup",
   "repositories.orchestrator",

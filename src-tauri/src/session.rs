@@ -4980,8 +4980,14 @@ impl SessionManager {
             }
         }
         // The Local VM's driver, while the reader has it on (`local_vm.rs`).
-        let computer = crate::local_vm::launch_args(&tab.harness, config.args.contains("--append-system-prompt"));
-        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}", launch.command, config.args, computer), &unset);
+        let computer = crate::local_vm::launch_args(&tab.harness);
+        // One appended prompt for everything the agent is told: the
+        // workspace's prompts, the Local VM's note, and which folders a
+        // sparse checkout has (`sparse_checkout.rs`). A second
+        // `--append-system-prompt` or `developer_instructions` would replace the first.
+        let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
+        let prompt = crate::cloud_config::prompt_args(&tab.harness, &[config.prompt.as_deref(), computer.note, sparse.as_deref()]);
+        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt), &unset);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         // Kept up with the file this tab's tail follows, wherever it moves,

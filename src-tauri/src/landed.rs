@@ -298,8 +298,19 @@ fn stash_list(cwd: &Path) -> Option<String> {
 /// `git ls-files -v`. A change to one is invisible and would be deleted with
 /// the worktree. `None` when the list cannot be read.
 pub(crate) fn hidden_from_status(cwd: &Path) -> Option<u32> {
-    let out = git::run(cwd, &["ls-files", "-v"]).ok()?;
-    Some(out.lines().filter(|line| line.starts_with('S') || line.chars().next().is_some_and(|flag| flag.is_ascii_lowercase())).count() as u32)
+    let out = git::run(cwd, &["ls-files", "-v", "-z"]).ok()?;
+    // A sparse checkout marks every file outside its folders skip-worktree.
+    // One that is not on disk was never checked out, so it hides no change;
+    // one that is on disk (or assume-unchanged) still could.
+    let sparse = git::run(cwd, &["config", "--bool", "core.sparseCheckout"]).is_ok_and(|value| value.trim() == "true");
+    Some(out.split('\0').filter(|entry| {
+        let (flag, path) = (entry.chars().next(), entry.get(2..).unwrap_or_default());
+        match flag {
+            Some('S') => !(sparse && std::fs::symlink_metadata(cwd.join(path)).is_err()),
+            Some(flag) => flag.is_ascii_lowercase(),
+            None => false,
+        }
+    }).count() as u32)
 }
 
 /// After a patch match: would merging `rev` into `base` leave `base` as it

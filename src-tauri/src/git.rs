@@ -918,8 +918,9 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     let (fetched, warning) = fetch_worktree_base(project, base, timeout);
     let base = resolve_base(project, base)?;
     let path = worktree_path(project, name);
+    let sparse = crate::store::configuration::sparse_checkout(project)?;
     std::fs::create_dir_all(worktree_root(project))?;
-    run(project, &["worktree", "add", "--no-track", "-b", &branch, arg(&path)?, &base])?;
+    worktree_add(project, &["--no-track", "-b", &branch, arg(&path)?, &base], &path, sparse.as_deref(), Some(&branch), true)?;
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
     let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
@@ -942,9 +943,11 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         bail!("bad branch name");
     }
     let path = worktree_path(project, name);
+    let sparse = crate::store::configuration::sparse_checkout(project)?;
+    let sparse = sparse.as_deref();
     std::fs::create_dir_all(worktree_root(project))?;
     let local = if branch_exists(project, branch) {
-        add_checkout(project, &path, &[branch], branch)?;
+        add_checkout(project, &path, &[branch], branch, sparse)?;
         branch.to_string()
     } else {
         let remote = format!("refs/remotes/{branch}");
@@ -953,9 +956,9 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         }
         let local = branch.split_once('/').map(|(_, rest)| rest).unwrap_or(branch).to_string();
         if branch_exists(project, &local) {
-            add_checkout(project, &path, &[&local], &local)?;
+            add_checkout(project, &path, &[&local], &local, sparse)?;
         } else {
-            run(project, &["worktree", "add", "--track", "-b", &local, arg(&path)?, branch])?;
+            worktree_add(project, &["--track", "-b", &local, arg(&path)?, branch], &path, sparse, Some(&local), true)?;
         }
         local
     };
@@ -977,14 +980,16 @@ pub fn checkout_pr_worktree(project: &Path, name: &str, number: u64) -> Result<C
     checkout_pr_worktree_with(project, name, number, crate::github::checkout_pr)
 }
 
-fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: impl FnOnce(&Path, u64, &str) -> Result<()>) -> Result<CreatedWorktree> {
+pub(crate) fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: impl FnOnce(&Path, u64, &str) -> Result<()>) -> Result<CreatedWorktree> {
     if name.is_empty() || name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') || number == 0 { bail!("Invalid pull request worktree"); }
     let branch = worktree_branch_for(project, name)?;
     if branch_exists(project, &branch) { bail!("Branch {branch} already exists"); }
     let path = worktree_path(project, name);
     if path.exists() { bail!("Worktree path already exists: {}", path.display()); }
+    let sparse = crate::store::configuration::sparse_checkout(project)?;
     std::fs::create_dir_all(worktree_root(project))?;
-    run(project, &["worktree", "add", "--detach", arg(&path)?, "HEAD"])?;
+    // Narrowed before the PR's branch is checked out, which then keeps to the same folders.
+    worktree_add(project, &["--detach", arg(&path)?, "HEAD"], &path, sparse.as_deref(), None, true)?;
     // Before the file copy below: it refuses to stage inside an unignored folder.
     ensure_worktree_dir_ignored(project);
     let result = (|| {
@@ -1006,11 +1011,35 @@ fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: 
     result
 }
 
+/// `git worktree add` with `args` (its options, the path and the commit).
+/// With `sparse`, the repository's `sparseCheckout` folders, the new
+/// worktree checks out only those folders and the root files: it is added
+/// without a checkout, narrowed in its own configuration, then checked out,
+/// so the primary checkout and other worktrees are left as they are. One that
+/// cannot be narrowed is removed again, with the branch `-b` made for it (`created`).
+/// Without `hooks`, the repository's checkout hooks do not run (a restore).
+pub(crate) fn worktree_add(project: &Path, args: &[&str], path: &Path, sparse: Option<&[String]>, created: Option<&str>, hooks: bool) -> Result<()> {
+    let mut command = if hooks { vec![] } else { vec!["-c", "core.hooksPath=/dev/null"] };
+    command.extend(["worktree", "add"]);
+    if sparse.is_some() { command.push("--no-checkout"); }
+    command.extend_from_slice(args);
+    run(project, &command)?;
+    let Some(folders) = sparse else { return Ok(()) };
+    if let Err(error) = crate::sparse_checkout::populate(path, folders, hooks) {
+        // Only the checkout made just now, which has never hosted a session.
+        if run(project, &["worktree", "remove", "--force", arg(path)?]).is_ok() {
+            if let Some(branch) = created { let _ = run(project, &["branch", "-D", branch]); }
+        }
+        bail!("Could not check out only the chosen folders: {error:#}");
+    }
+    Ok(())
+}
+
 /// `git worktree add <path> <branch>`, saying plainly when the branch is already checked out somewhere.
-fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str) -> Result<()> {
-    let mut args = vec!["worktree", "add", arg(path)?];
+fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str, sparse: Option<&[String]>) -> Result<()> {
+    let mut args = vec![arg(path)?];
     args.extend_from_slice(rest);
-    run(project, &args).map(|_| ()).map_err(|e| {
+    worktree_add(project, &args, path, sparse, None, true).map_err(|e| {
         let text = e.to_string();
         if text.contains("already checked out") || text.contains("already used by worktree") {
             anyhow::anyhow!("{branch} is already checked out in another folder. Open that workspace instead, or pick New branch.")

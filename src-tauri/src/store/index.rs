@@ -388,6 +388,10 @@ pub struct RemovedWorkspace {
     /// The repository that owned the checkout, including for guest/quick sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// The folders it checked out when it was a sparse workspace, so a restore
+    /// narrows the new checkout the same way. Absent for a full checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse_checkout: Option<Vec<String>>,
 }
 
 /// The repo a chat's agent is working in: its root, and the branch checked out there.
