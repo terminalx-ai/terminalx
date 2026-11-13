@@ -510,6 +510,9 @@
         "useWorktree": {
           "description": "Each session gets its own git worktree so agents never step on each other. Off runs sessions in the project's own checkout.",
           "type": "boolean"
+        },
+        "writeCommitMessagesWithAgent": {
+          "type": "boolean"
         }
       },
       "type": "object"
