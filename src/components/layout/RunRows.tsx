@@ -9,8 +9,8 @@ import { isUnread } from "@/lib/dashboard";
 import { PIECE_STATE_LABEL } from "@/lib/orchestration";
 import { usePrefs } from "@/lib/prefs";
 import { useSessionRowStatuses } from "@/lib/sessionRowStatus";
-import { conversationTitle, useSessionStore } from "@/lib/sessions";
-import { familyNeeds, modelTier, needsMark, orderWorkers, pieceOf, runningWorkers, runProgress, runSpend, workerModel, type Need } from "@/lib/runFamily";
+import { useSessionStore } from "@/lib/sessions";
+import { familyNeeds, modelTier, needsMark, orderWorkers, runningWorkers, runProgress, runSpend, tryOf, workerModel, workerTitle, type Need, type WorkerTry } from "@/lib/runFamily";
 import { SESSION_STATUSES, type StatusDescription } from "@terminalx/portable/sessionStatus";
 import type { Run, RunPiece } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
@@ -47,11 +47,26 @@ export function useLeadFamily(lead: SessionEntry, peers: readonly SessionEntry[]
   }, [lead, peers, workersOf, runs]);
 }
 
-/** The run a worker's piece is in: the run its lead leads. */
-export function useWorkerPiece(worker: SessionEntry): { piece: RunPiece | null; run: Run | null } {
+/**
+ * The piece a worker ran a try at, in the run its lead leads (PRO-364): `piece` is set for every try, the
+ * earlier ones too, and `found` says which try it was and whether it is the piece's current one.
+ */
+export function useWorkerPiece(worker: SessionEntry): { piece: RunPiece | null; run: Run | null; found: WorkerTry | null } {
   const { runs } = useContext(RunFamiliesContext);
   const run = worker.parent ? runs[worker.parent.sessionId] ?? null : null;
-  return { piece: pieceOf(run, worker.id), run };
+  const found = tryOf(run, worker.id);
+  return { piece: found?.piece ?? null, run, found };
+}
+
+/** A try past a piece's first, after its title: a quiet "try N" (PRO-364). */
+export function TryMark({ found }: { found: WorkerTry | null }) {
+  if (!found || found.number < 2) return null;
+  return (
+    <span data-testid="try-mark" data-try={found.number} title={found.current ? `Try ${found.number}, the piece's current one` : `Try ${found.number}, an earlier one`}
+      className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
+      try {found.number}
+    </span>
+  );
 }
 
 const fallback = SESSION_STATUSES.find((status) => status.id === "no_changes")!;
@@ -213,7 +228,7 @@ export function LeadHoverCard({ family, summary, title, children }: { family: Le
               <li key={worker.id} className="flex min-w-0 items-center gap-2">
                 <StatusMarkIcon status={status} decorative />
                 <span className="shrink-0 text-muted-foreground">{status.label}</span>
-                <span className="min-w-0 flex-1 truncate">{conversationTitle(worker)}</span>
+                <span className="min-w-0 flex-1 truncate">{workerTitle(worker, null)}</span>
               </li>
             );
           })}
@@ -230,9 +245,10 @@ export function WorkerMark({ piece, status }: { piece: RunPiece | null; status: 
   return <StatusMarkIcon status={status} decorative={false} />;
 }
 
-/** A worker row's metadata: its model as one word, coloured by tier (18.07). */
-export function WorkerTier({ piece, session }: { piece: RunPiece | null; session: SessionEntry }) {
-  const { agent, model } = workerModel(piece, session);
+/** A worker row's metadata: its model as one word, coloured by tier (18.07). An earlier try says the model it ran on. */
+export function WorkerTier({ piece, found, session }: { piece: RunPiece | null; found?: WorkerTry | null; session: SessionEntry }) {
+  const earlier = found && !found.current && found.attempt?.model ? { ...found.piece, model: found.attempt.model } : piece;
+  const { agent, model } = workerModel(earlier, session);
   const tier = modelTier(agent, model);
   return <span data-row-meta="model" className={cn("shrink-0 font-mono text-[10.5px]", tier.className)}>{tier.text}</span>;
 }
