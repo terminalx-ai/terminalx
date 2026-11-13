@@ -18,18 +18,21 @@ export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath
   const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
   if (!project) return <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>;
   if (project.kind === "folder") return <MergedCleanupSettings projectPath={project.path} />;
-  const files = row === "repositories.filesToCopy";
+  const page = row === "repositories.filesToCopy" ? "files" : row === "repositories.scripts" ? "scripts" : "general";
+  const tab = (id: typeof page, label: string, target: SettingId) => <Button size="sm" variant={page === id ? "outline" : "ghost"} aria-current={page === id ? "page" : undefined} onClick={() => onSelectRow?.(target)}>{label}</Button>;
   return <>
     <nav aria-label="Repository settings" className="mb-5 flex flex-wrap gap-2">
-      <Button size="sm" variant={files ? "ghost" : "outline"} aria-current={!files ? "page" : undefined} onClick={() => onSelectRow?.("repositories.rootPath")}>General</Button>
-      <Button size="sm" variant={files ? "outline" : "ghost"} aria-current={files ? "page" : undefined} onClick={() => onSelectRow?.("repositories.filesToCopy")}>Files to copy</Button>
+      {tab("general", "General", "repositories.rootPath")}
+      {tab("scripts", "Scripts", "repositories.scripts")}
+      {tab("files", "Files to copy", "repositories.filesToCopy")}
     </nav>
-    <RepositorySettingsPage key={project.path} project={project} page={files ? "files" : "general"} />
-    <div hidden={files}>
-      <div className="mt-8"><MergedCleanupSettings projectPath={project.path} /></div>
-      <div className="mt-8"><RepositoryScriptsTab projectPath={project.path} /></div>
-      {orchestratorRuns && <div className="mt-8"><RepositoryOrchestratorSettings projectPath={project.path} /></div>}
-    </div>
+    {page === "scripts" ? <RepositoryScriptsTab projectPath={project.path} /> : <>
+      <RepositorySettingsPage key={project.path} project={project} page={page} />
+      <div hidden={page === "files"}>
+        <div className="mt-8"><MergedCleanupSettings projectPath={project.path} /></div>
+        {orchestratorRuns && <div className="mt-8"><RepositoryOrchestratorSettings projectPath={project.path} /></div>}
+      </div>
+    </>}
   </>;
 }
 

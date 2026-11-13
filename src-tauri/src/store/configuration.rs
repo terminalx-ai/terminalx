@@ -1,6 +1,7 @@
-//! Layered settings supported independently of PRO-131/140/149. The registry is
+//! Layered settings supported independently of PRO-131/140. The registry is
 //! deliberately opt-in: adding a field to Settings never gives a repository
-//! permission to set it. No scripts are executed by this module.
+//! permission to set it. No scripts are executed by this module: [`scripts`]
+//! only says which setup and archive commands a repository's hooks may run.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,7 +33,20 @@ pub const REGISTRY: &[Key] = &[
     Key { key: "worktreeDir", repository_configurable: false, managed_lockable: false, requires_trust: false },
     Key { key: "branchPrefix", repository_configurable: true, managed_lockable: true, requires_trust: true },
     Key { key: "environment", repository_configurable: true, managed_lockable: true, requires_trust: true },
+    // Scripts run commands, so a committed value needs trust. The user layer for
+    // them is the per-repository project store, never the global settings file.
+    Key { key: SETUP_SCRIPT, repository_configurable: true, managed_lockable: true, requires_trust: true },
+    Key { key: ARCHIVE_SCRIPT, repository_configurable: true, managed_lockable: true, requires_trust: true },
+    Key { key: ARCHIVE_TIMEOUT, repository_configurable: true, managed_lockable: true, requires_trust: false },
 ];
+pub const SETUP_SCRIPT: &str = "setupScript";
+pub const ARCHIVE_SCRIPT: &str = "archiveScript";
+pub const ARCHIVE_TIMEOUT: &str = "archiveTimeoutMinutes";
+/// The archive timeouts Settings offers; anything else in a file is ignored.
+pub const ARCHIVE_TIMEOUT_CHOICES: &[u64] = &[1, 2, 5, 10, 15, 30];
+pub const DEFAULT_ARCHIVE_TIMEOUT_MINUTES: u64 = 5;
+const SCRIPT_LIMIT: usize = 64 * 1024;
+fn per_repository(key: &str) -> bool { matches!(key, SETUP_SCRIPT | ARCHIVE_SCRIPT | ARCHIVE_TIMEOUT) }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,7 +72,12 @@ pub struct Trust {
     pub keys: Vec<String>,
 }
 
-pub struct Repository { pub root: PathBuf, identity: String }
+pub struct Repository {
+    pub root: PathBuf,
+    identity: String,
+    /// The path asked about: the project whose saved scripts are its user layer.
+    project: PathBuf,
+}
 
 /// No hooks, fsmonitor, inherited Git discovery variables or shell are used to
 /// discover the checkout. All workspaces inherit the primary checkout's files.
@@ -79,7 +98,7 @@ pub fn repository(path: &Path) -> Result<Repository> {
     let worktrees = git(&checkout, &["worktree", "list", "--porcelain", "-z"])?;
     let primary = worktrees.split('\0').find_map(|line| line.strip_prefix("worktree ")).context("Repository has no primary checkout.")?;
     let root = PathBuf::from(primary).canonicalize()?;
-    Ok(Repository { root, identity: common.to_string_lossy().into_owned() })
+    Ok(Repository { root, identity: common.to_string_lossy().into_owned(), project: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()) })
 }
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 fn object(bytes: &[u8]) -> Result<Map<String, Value>> {
@@ -105,6 +124,8 @@ fn valid(key: &str, value: &Value, layer: Layer) -> bool {
         "environment" => value.as_object().is_some_and(|env| env.len() <= 256 && env.iter().all(|(name, value)| {
             super::environment::validate_name(name).is_ok() && value.as_str().is_some_and(|s| s.len() <= 64 * 1024 && !s.contains('\0'))
         })),
+        SETUP_SCRIPT | ARCHIVE_SCRIPT => value.as_str().is_some_and(|s| s.len() <= SCRIPT_LIMIT && !s.contains('\0')),
+        ARCHIVE_TIMEOUT => value.as_u64().is_some_and(|minutes| ARCHIVE_TIMEOUT_CHOICES.contains(&minutes)),
         _ => false
     }
 }
@@ -114,7 +135,7 @@ fn apply(values: &mut BTreeMap<String, ResolvedValue>, document: Map<String, Val
         let allowed = registration.is_some_and(|r| match layer {
             Layer::RepositoryLocal | Layer::RepositoryShared => r.repository_configurable,
             Layer::Managed => r.managed_lockable,
-            Layer::User => r.key != "environment",
+            Layer::User => r.key != "environment" && !per_repository(r.key),
             _ => true,
         });
         if !allowed || !valid(&key, &value, layer) {
@@ -138,9 +159,20 @@ pub struct Store {
     // Only resolver fixtures bypass ownership checks; production has no path override.
     #[cfg(test)]
     managed_fixture: Option<PathBuf>,
+    #[cfg(test)]
+    saved_scripts: Option<super::projects::RepositoryScripts>,
 }
 impl Store {
-    pub fn current() -> Result<Self> { Ok(Self { home: super::root()?.canonicalize()?, #[cfg(test)] managed_fixture: None }) }
+    pub fn current() -> Result<Self> { Ok(Self { home: super::root()?.canonicalize()?, #[cfg(test)] managed_fixture: None, #[cfg(test)] saved_scripts: None }) }
+    /// The Scripts page's own values for this repository: its user layer.
+    fn saved_scripts(&self, repository: &Repository) -> Result<super::projects::RepositoryScripts> {
+        #[cfg(test)]
+        if let Some(saved) = &self.saved_scripts { return Ok(saved.clone()); }
+        let saved = super::projects::scripts(&repository.project)?;
+        // A workspace path asks about its primary checkout's project.
+        if saved == Default::default() && repository.project != repository.root { return super::projects::scripts(&repository.root) }
+        Ok(saved)
+    }
     fn managed(&self) -> Result<Option<Vec<u8>>> {
         #[cfg(test)]
         if let Some(path) = &self.managed_fixture {
@@ -164,6 +196,9 @@ impl Store {
         let mut values = BTreeMap::new();
         let mut warnings = Vec::new();
         apply(&mut values, json!({"worktreeDir": defaults.worktree_dir, "branchPrefix": defaults.branch_prefix}).as_object().unwrap().clone(), Layer::Defaults, &mut warnings)?;
+        if repository.is_some() {
+            apply(&mut values, json!({SETUP_SCRIPT: "", ARCHIVE_SCRIPT: "", ARCHIVE_TIMEOUT: DEFAULT_ARCHIVE_TIMEOUT_MINUTES}).as_object().unwrap().clone(), Layer::Defaults, &mut warnings)?;
+        }
         if let Some(bytes) = home.read(SHARED)? {
             match object(&bytes) {
                 // settings::file recovers each field independently, so one
@@ -174,6 +209,15 @@ impl Store {
         }
         let mut trust = None;
         if let Some(repository) = repository {
+            let saved = self.saved_scripts(repository)?;
+            let user = [(SETUP_SCRIPT, (!saved.setup.trim().is_empty()).then(|| json!(saved.setup))),
+                (ARCHIVE_SCRIPT, (!saved.archive.trim().is_empty()).then(|| json!(saved.archive))),
+                (ARCHIVE_TIMEOUT, saved.archive_timeout_minutes.map(|minutes| json!(minutes)))];
+            for (key, value) in user {
+                if let Some(value) = value.filter(|value| valid(key, value, Layer::User)) {
+                    values.insert(key.into(), ResolvedValue { value, source: Layer::User, locked: false, redacted: false });
+                }
+            }
             let dir = Directory::open(&repository.root.join(".terminalx"), false)?;
             if let Some(bytes) = read(dir.as_ref(), SHARED)? {
                 let hash = digest(&bytes);
@@ -225,6 +269,7 @@ impl Store {
         ensure!(matches!(layer, Layer::User | Layer::RepositoryLocal | Layer::RepositoryShared), "Managed values are read-only.");
         let registration = REGISTRY.iter().find(|r| r.key == key).context("Unknown configuration key.")?;
         ensure!(layer == Layer::User || registration.repository_configurable, "This key cannot be set by a repository.");
+        ensure!(layer != Layer::User || !per_repository(key), "Save this repository's own scripts from Settings → Repositories → Scripts.");
         // Secret environment writes remain in the existing Keychain editor. File
         // environment is deliberately authored/reviewed explicitly, never migrated.
         ensure!(key != "environment", "Edit file environment explicitly; use Settings → Environment for private variables.");
@@ -295,6 +340,44 @@ pub(crate) fn with_private_sources(project: Option<&str>, mut resolved: Resoluti
     }
     resolved.refresh_trust();
     resolved
+}
+
+/// The setup and archive commands a repository's hooks run, after every layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scripts {
+    pub setup: String,
+    pub archive: String,
+    pub archive_timeout: Duration,
+}
+impl Resolution {
+    /// A committed script that is not trusted is refused, never skipped: the
+    /// caller asks (archive) or reports (setup) instead of running nothing silently.
+    pub fn scripts(&self) -> Result<Scripts> {
+        let text = |key: &str| -> Result<String> {
+            let Some(value) = self.values.get(key) else { return Ok(String::new()) };
+            let text = value.value.as_str().unwrap_or_default().to_string();
+            ensure!(text.trim().is_empty() || !self.trust.as_ref().is_some_and(|trust| trust.required && trust.keys.iter().any(|k| k == key)),
+                "This repository's .terminalx/settings.json sets a {} script that is not trusted yet. Open Settings → Repositories → Scripts and choose Review and trust.",
+                if key == SETUP_SCRIPT { "setup" } else { "archive" });
+            Ok(text)
+        };
+        let minutes = self.values.get(ARCHIVE_TIMEOUT).and_then(|value| value.value.as_u64()).unwrap_or(DEFAULT_ARCHIVE_TIMEOUT_MINUTES);
+        Ok(Scripts { setup: text(SETUP_SCRIPT)?, archive: text(ARCHIVE_SCRIPT)?, archive_timeout: Duration::from_secs(minutes * 60) })
+    }
+}
+/// Scripts for a project or one of its workspaces. A folder that is not a Git
+/// checkout has no repository layers, so only the project store applies; a
+/// checkout whose configuration cannot be read fails rather than run less.
+pub fn scripts(project: &Path) -> Result<Scripts> {
+    match repository(project) {
+        Ok(repository) => Store::current()?.resolve(Some(&repository))?.scripts(),
+        Err(_) if !project.join(".terminalx").exists() && !project.join(".git").exists() => {
+            let saved = super::projects::scripts(project)?;
+            let minutes = saved.archive_timeout_minutes.filter(|m| ARCHIVE_TIMEOUT_CHOICES.contains(m)).unwrap_or(DEFAULT_ARCHIVE_TIMEOUT_MINUTES);
+            Ok(Scripts { setup: saved.setup, archive: saved.archive, archive_timeout: Duration::from_secs(minutes * 60) })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Policy/read failures are errors, never an empty prefix that could classify

@@ -1,14 +1,14 @@
-//! Local archive hooks. Only scripts explicitly saved in the project store run.
+//! Local archive hooks. The script comes from `configuration::scripts`: the
+//! Scripts page's saved value, or a repository file once it is trusted.
 //! A failed run grants a short-lived, single-use receipt, bound to its checkout
 //! and script. A force-delete flag is never consent to skip a failed hook.
 use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::{Arc, Mutex, OnceLock, Weak}, time::{Duration, Instant}};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::{pty::{PaneSpec, PtyExit, Terminals}, sink::EventSink, store::{index::SessionEntry, projects}};
+use crate::{pty::{PaneSpec, PtyExit, Terminals}, sink::EventSink, store::{configuration, index::SessionEntry}};
 
 pub const FAILURE_PREFIX: &str = "ARCHIVE_SCRIPT_FAILED:";
-const TIMEOUT: Duration = Duration::from_secs(300);
-// A bulk run can contain many five-minute timeouts. Consent remains usable
+// A bulk run can contain many long timeouts. Consent remains usable
 // when that run finally presents all failures together.
 const RECEIPT_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -30,12 +30,19 @@ pub struct Failure {
     pub log: Option<String>,
     #[serde(default)]
     pub sessions_stopped: bool,
+    /// The script's last line of output, for the failure dialog's detail line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The timeout the run had; absent from failures recorded before it was configurable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_minutes: Option<u64>,
 }
 
 impl Failure {
     pub fn message(&self) -> String {
+        let minutes = self.timeout_minutes.unwrap_or(configuration::DEFAULT_ARCHIVE_TIMEOUT_MINUTES);
         format!("Archive script failed (exit {}). Remove anyway?{}", self.code.map_or("unknown".into(), |code| code.to_string()),
-            if self.timed_out { " The script timed out after 5 minutes." } else { "" })
+            if self.timed_out { format!(" The script timed out after {minutes} minute{}.", if minutes == 1 { "" } else { "s" }) } else { String::new() })
             + if self.sessions_stopped { " Its sessions are stopped." } else { "" }
     }
     pub fn from_error(error: &str) -> Option<Self> {
@@ -114,7 +121,8 @@ impl Drop for RemovalLease {
 /// Called inside the removal fence, before the final Git/session checks.
 pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], confirmed: Option<&str>, retry: Option<&str>, runner: Option<Runner<'_>>, started: &dyn Fn()) -> Result<bool> {
     anyhow::ensure!(confirmed.is_none() || retry.is_none(), "Choose either retrying the archive script or removing anyway.");
-    let script = projects::scripts(project)?.archive;
+    let scripts = configuration::scripts(project)?;
+    let script = scripts.archive;
     if script.trim().is_empty() || !path.exists() {
         // A cleared hook no longer needs consent. Release its matching old log
         // immediately rather than retaining it until expiry.
@@ -164,7 +172,7 @@ pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], co
     }
     let session = sessions.iter().find(|session| canonical(Path::new(&session.cwd)) == path);
     let env = environment(&project, &path, session);
-    let failure = run(runner, &path, &script, &env, TIMEOUT, started)?;
+    let failure = run(runner, &path, &script, &env, scripts.archive_timeout, started)?;
     if let Some(mut failure) = failure {
         failure.sessions_stopped = !sessions.is_empty();
         if !runner.unattended { remember(runner, project, path, identity, script, &failure); }
@@ -275,8 +283,28 @@ fn run(runner: Runner<'_>, path: &Path, script: &str, env: &[(String, String)], 
     let result = run.wait(timeout, &std::sync::atomic::AtomicBool::new(false))?;
     if result.code == Some(0) { return Ok(None) }
     pane.keep = !runner.unattended;
+    let detail = last_line(&result.log);
     Ok(Some(Failure { token: uuid::Uuid::new_v4().to_string(), pane: id.clone(), code: result.code, timed_out: result.timed_out,
-        log: runner.unattended.then_some(result.log), sessions_stopped: false }))
+        log: runner.unattended.then_some(result.log), sessions_stopped: false, detail, timeout_minutes: Some(timeout.as_secs().div_ceil(60)) }))
+}
+
+/// The last line a person would read in the terminal: escape sequences and
+/// control characters removed, at most 200 characters.
+pub(crate) fn last_line(log: &str) -> Option<String> {
+    let mut plain = String::with_capacity(log.len());
+    let mut chars = log.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.next() {
+                Some('[') => { while let Some(c) = chars.next() { if ('@'..='~').contains(&c) { break } } }
+                Some(']') => { while let Some(c) = chars.next() { if c == '\u{7}' { break } if c == '\u{1b}' { chars.next(); break } } }
+                _ => {}
+            }
+        } else if c == '\n' || c == '\r' { plain.push('\n'); }
+        else if !c.is_control() || c == '\t' { plain.push(c); }
+    }
+    let line = plain.lines().map(str::trim).rfind(|line| !line.is_empty())?;
+    Some(if line.chars().count() > 200 { format!("{}…", line.chars().take(199).collect::<String>()) } else { line.to_string() })
 }
 
 #[cfg(all(test, unix))]
@@ -297,6 +325,9 @@ mod tests {
         let failure = run(runner, &path, "printf '%s\\n' \"$PWD\" \"$PRO149_VALUE\"; exit 17", &env, Duration::from_secs(10), &|| {}).unwrap().unwrap();
         assert_eq!(failure.code, Some(17));
         assert!(!failure.timed_out);
+        assert_eq!(failure.detail.as_deref(), Some("spaces ' and $literal"));
+        assert_eq!(failure.timeout_minutes, Some(1));
+        assert_eq!(failure.message(), "Archive script failed (exit 17). Remove anyway?");
         let output = String::from_utf8_lossy(&terminals.read_output(&failure.pane).unwrap()).into_owned();
         assert!(output.contains(path.to_str().unwrap()), "{output}");
         assert!(output.contains("spaces ' and $literal"), "{output}");
@@ -328,6 +359,8 @@ mod tests {
             let failed = run(Runner { terminals: &terminals, sink: &sink, unattended }, dir.path(), "echo before-timeout; sleep 60 & wait", &[], Duration::from_secs(2), &|| {}).unwrap().unwrap();
             assert_eq!(failed.code, Some(124));
             assert!(failed.timed_out);
+            assert_eq!(failed.detail.as_deref(), Some("before-timeout"));
+            assert_eq!(failed.message(), "Archive script failed (exit 124). Remove anyway? The script timed out after 1 minute.");
             assert!(start.elapsed() < Duration::from_secs(12));
             if unattended {
                 assert!(terminals.panes().is_empty());
@@ -352,6 +385,18 @@ mod tests {
         reap_receipts(Instant::now());
         assert!(terminals.panes().is_empty());
         assert!(!receipts().lock().unwrap().contains_key(&failure.token));
+    }
+
+    #[test]
+    fn the_detail_line_is_the_last_readable_line() {
+        assert_eq!(last_line("one\r\n\u{1b}[31mno such project\u{1b}[0m\r\n\r\n").as_deref(), Some("no such project"));
+        assert_eq!(last_line("\u{1b}]0;title\u{7}done\u{8}"), Some("done".into()));
+        assert_eq!(last_line(" \n\t\n"), None);
+        assert_eq!(last_line(&"x".repeat(500)).unwrap().chars().count(), 200);
+        let recorded = Failure { token: "t".into(), pane: "p".into(), code: Some(1), timed_out: true, log: None, sessions_stopped: true, detail: None, timeout_minutes: None };
+        assert_eq!(recorded.message(), "Archive script failed (exit 1). Remove anyway? The script timed out after 5 minutes. Its sessions are stopped.");
+        let older: Failure = serde_json::from_str(r#"{"token":"t","pane":"p","code":null,"timedOut":false}"#).unwrap();
+        assert_eq!((older.detail, older.timeout_minutes), (None, None));
     }
 
     #[test]

@@ -92,7 +92,7 @@ fn publish(manager: &SessionManager, setup: &Setup) -> Result<()> {
     Ok(())
 }
 fn script(entry: &SessionEntry) -> Result<Option<String>> {
-    let command = store::projects::scripts(Path::new(&entry.project_path))?.setup;
+    let command = store::configuration::scripts(Path::new(&entry.project_path))?.setup;
     Ok((!command.trim().is_empty()).then_some(command))
 }
 fn attempt(entry: &SessionEntry, command: String) -> Setup {

@@ -1566,7 +1566,7 @@ mod tests {
         let dir = repo();
         let project = projects::add(dir.path().to_str().unwrap()).unwrap();
         projects::update(&project.path, projects::ProjectPatch {
-            scripts: Some(projects::RepositoryScripts { setup: "exit 0".into(), archive: String::new() }), ..Default::default()
+            scripts: Some(projects::RepositoryScripts { setup: "exit 0".into(), archive: String::new(), archive_timeout_minutes: None }), ..Default::default()
         }).unwrap();
         // Setup cannot write its status after the index has landed. (Making the
         // sessions folder a file would also stop the index, which lives in it.)
@@ -1807,7 +1807,7 @@ mod tests {
         let _home = crate::store::temp_home();
         let dir = repo();
         let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
-        let script = crate::store::projects::RepositoryScripts { setup: "future setup".into(), archive: "printf 'session:%s\\n' \"$TERMINALX_SESSION_ID\"; printf 'attribution:%s\\n' \"${RACCOON_SESSION_ID:-none}\"; exit 19".into() };
+        let script = crate::store::projects::RepositoryScripts { setup: "future setup".into(), archive: "printf 'session:%s\\n' \"$TERMINALX_SESSION_ID\"; printf 'attribution:%s\\n' \"${RACCOON_SESSION_ID:-none}\"; exit 19".into(), archive_timeout_minutes: None };
         crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch { scripts: Some(script.clone()), ..Default::default() }).unwrap();
         assert_eq!(crate::store::projects::scripts(dir.path()).unwrap(), script);
         let session = worktree_session(dir.path());
@@ -1839,7 +1839,7 @@ mod tests {
         let dir = repo();
         let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
         let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
         }).unwrap();
         save("exit 8");
         let session = worktree_session(dir.path());
@@ -1866,7 +1866,7 @@ mod tests {
             let dir = repo();
             let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
             let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-                scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+                scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
             }).unwrap();
             save("exit 8");
             let session = worktree_session(dir.path());

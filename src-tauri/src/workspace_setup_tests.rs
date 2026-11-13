@@ -24,7 +24,7 @@ impl Rig {
         Self { manager, root, ids: Vec::new(), _dir: dir, _home: home }
     }
     fn script(&self, command: &str) {
-        projects::update(self.root.to_str().unwrap(), ProjectPatch { scripts: Some(RepositoryScripts { setup: command.into(), archive: String::new() }), ..Default::default() }).unwrap();
+        projects::update(self.root.to_str().unwrap(), ProjectPatch { scripts: Some(RepositoryScripts { setup: command.into(), archive: String::new(), archive_timeout_minutes: None }), ..Default::default() }).unwrap();
     }
     fn entry(&mut self, id: &str) -> SessionEntry {
         let cwd = self.root.join(format!("work tree '{id}' $literal"));

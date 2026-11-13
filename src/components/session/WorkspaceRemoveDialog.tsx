@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, FolderInput, GitMerge, GitPullRequest, Loader2, Trash2 } from "@/icons";
+import { AlertTriangle, Check, FileText, FolderInput, GitMerge, GitPullRequest, Loader2, RotateCcw, Trash2 } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -7,7 +7,7 @@ import { Switch } from "@/components/ui/controls";
 import { CONVERSATION_DELETION } from "@/lib/conversationRetention";
 import type { ArchiveFailure } from "@terminalx/portable/workspace";
 import { ArchiveTerminal } from "@/components/terminal/ArchiveTerminal";
-import { archiveFailure, archiveFailureMessage, useArchiveTerminal } from "@/lib/archiveScript";
+import { archiveFailure, archiveFailureDetail, archiveFailureTitle, useArchiveTerminal } from "@/lib/archiveScript";
 import { errorMessage } from "@/lib/api";
 import { closeWorkspaceRemove, openWorktreeCleanup, useDialogs } from "@/lib/dialogs";
 import { relocateSession } from "@/lib/sessions";
@@ -146,6 +146,35 @@ export function WorkspaceRemoveDialog() {
     }
   };
 
+  const removable = !busy && known && confirmable && !disp?.isMain && !(settle && keepUnavailable);
+  if (failure) {
+    // The archive script failed or timed out: nothing was removed. Ask only this, as its own small dialog.
+    return (
+      <Dialog open onOpenChange={(o) => !o && !busy && closeWorkspaceRemove()}>
+        <DialogContent width="max-w-[30rem]">
+          <DialogHeader>
+            <DialogTitle className="pr-6">{archiveFailureTitle(failure)}</DialogTitle>
+            <DialogDescription className="wrap-anywhere">{archiveFailureDetail(failure)}</DialogDescription>
+          </DialogHeader>
+          {error && <div role="alert" className="mt-3 whitespace-pre-line text-xs text-destructive">{error}</div>}
+          {showLog && failure.pane && <div className="mt-3"><ArchiveTerminal pane={failure.pane} output={failure.log} /></div>}
+          <DialogFooter className="mt-4 flex-wrap">
+            <Button variant="ghost" size="sm" className="mr-auto" disabled={!removable} onClick={() => void remove(undefined, failure.token)}>
+              <RotateCcw /> Run archive script again
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setShowLog(!showLog)}>
+              <FileText /> {showLog ? "Hide log" : "Open log"}
+            </Button>
+            <Button variant="outline" size="sm" disabled={!!busy} onClick={closeWorkspaceRemove}>Keep workspace</Button>
+            <Button variant="destructive" size="sm" disabled={!removable} onClick={() => void remove(failure.token)}>
+              {busy === "remove" ? <Loader2 className="animate-spin" /> : null} Remove anyway
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
   return (
     <Dialog open onOpenChange={(o) => !o && !busy && closeWorkspaceRemove()}>
       <DialogContent width="max-w-[30rem]">
@@ -241,13 +270,8 @@ export function WorkspaceRemoveDialog() {
           </label>
         )}
 
-        {!failure && request.archiveNotice && <p className="mt-3 text-xs text-warning">{request.archiveNotice}</p>}
-        {failure && <div role="alert" className="mt-3 text-xs text-destructive">
-          <p>{archiveFailureMessage(failure)}</p>
-          <Button variant="outline" size="xs" onClick={() => setShowLog(!showLog)}>{showLog ? "Hide log" : "Open log"}</Button>
-          <Button variant="outline" size="xs" className="ml-2" disabled={!!busy || !known || !confirmable || !!disp?.isMain || (settle && !!keepUnavailable)} onClick={() => void remove(undefined, failure.token)}>Run archive script again</Button>
-        </div>}
-        {(busy === "remove" && archivePane || showLog && failure?.pane) && <ArchiveTerminal pane={showLog && failure ? failure.pane : archivePane!} output={showLog ? failure?.log : undefined} />}
+        {request.archiveNotice && <p className="mt-3 text-xs text-warning">{request.archiveNotice}</p>}
+        {busy === "remove" && archivePane && <ArchiveTerminal pane={archivePane} />}
         <DialogFooter className="mt-4">
           <Button variant="ghost" onClick={closeWorkspaceRemove} disabled={!!busy}>
             {settle ? "Keep as is" : "Cancel"}
@@ -262,8 +286,8 @@ export function WorkspaceRemoveDialog() {
               {busy === "relocate" ? <Loader2 className="animate-spin" /> : <FolderInput />} Move session to project
             </Button>
           )}
-          <Button variant={risky || !settle ? "destructive" : "default"} onClick={() => void remove(failure?.token)} disabled={!!busy || !known || !confirmable || !!disp?.isMain || (settle && !!keepUnavailable)}>
-            {busy === "remove" ? <Loader2 className="animate-spin" /> : <Trash2 />} {failure ? "Remove anyway" : risky ? `${verb} anyway…` : settle ? "Remove workspace" : "Delete conversations and workspace"}
+          <Button variant={risky || !settle ? "destructive" : "default"} onClick={() => void remove()} disabled={!removable}>
+            {busy === "remove" ? <Loader2 className="animate-spin" /> : <Trash2 />} {risky ? `${verb} anyway…` : settle ? "Remove workspace" : "Delete conversations and workspace"}
           </Button>
         </DialogFooter>
       </DialogContent>

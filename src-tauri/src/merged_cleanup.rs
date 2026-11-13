@@ -460,7 +460,7 @@ impl Pass<'_> {
             (status.reason, status.detail, status.fresh, status.sessions) = (Some(reason), detail, fresh, sessions);
         };
 
-        let script = match crate::store::projects::scripts(&repository.root) {
+        let script = match crate::store::configuration::scripts(&repository.root) {
             Ok(scripts) => scripts.archive,
             Err(error) => return keep(self, Vec::new(), "its scripts could not be read".into(), Some(error.to_string())),
         };

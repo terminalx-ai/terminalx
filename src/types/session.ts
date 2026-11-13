@@ -226,6 +226,8 @@ export interface SessionEntry {
 export interface RepositoryScripts {
   setup: string;
   archive: string;
+  /** Absent means the default, 5 minutes. One of the Scripts page's choices. */
+  archiveTimeoutMinutes?: number | null;
 }
 
 export interface Project {
