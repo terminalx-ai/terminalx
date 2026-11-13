@@ -152,10 +152,10 @@ describe("Settings search", () => {
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "worktreeinclude" } });
     fireEvent.click(screen.getByRole("option", { name: /Files to copy/ }));
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Repositories");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Projects");
     const navigation = screen.getByRole("navigation", { name: "Settings sections" });
-    expect(within(navigation).getByRole("group", { name: "Repositories" })).toBeTruthy();
-    expect(screen.getByText("Choose a repository to view its settings.")).toBeTruthy();
+    expect(within(navigation).getByRole("group", { name: "Projects" })).toBeTruthy();
+    expect(screen.getByText("Choose a project to view its settings.")).toBeTruthy();
   });
 
   it("moves with ↑/↓ as the palette does, wrapping at both ends, resets when edited, and opens a clicked result", () => {
@@ -456,7 +456,7 @@ describe("grouped settings navigation and row links (PRO-123)", () => {
   it("shows all five navigation groups and keeps their section destinations", () => {
     render(<SettingsPage onBack={vi.fn()} />);
     const nav = within(screen.getByRole("navigation", { name: "Settings sections" }));
-    for (const group of ["Personal", "Agents & environment", "Repositories", "Admin", "More"]) expect(nav.getByRole("group", { name: group })).toBeTruthy();
+    for (const group of ["Personal", "Agents & environment", "Projects", "Admin", "More"]) expect(nav.getByRole("group", { name: group })).toBeTruthy();
     expect(within(nav.getByRole("group", { name: "Personal" })).getByRole("button", { name: "Appearance" })).toBeTruthy();
     expect(within(nav.getByRole("group", { name: "Admin" })).getByRole("button", { name: "Organizations" })).toBeTruthy();
   });

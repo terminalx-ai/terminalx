@@ -27,7 +27,7 @@ describe("repository settings pages", () => {
     render(<RepositoryActionsPage projectPath="/repo" />);
     fireEvent.click(screen.getByRole("button", { name: "Delete Dev" }));
     await waitFor(() => expect(mock.update).toHaveBeenCalledWith("/repo", { actions: [] } satisfies ProjectPatch));
-    expect(screen.queryByRole("button", { name: "Reset to repository file" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reset to terminalx.json" })).toBeNull();
   });
 
   it("shows a failed save inline and as a toast, keeping the stored list", async () => {
@@ -43,14 +43,14 @@ describe("repository settings pages", () => {
     mock.update.mockResolvedValue(undefined);
     const file = { ...dev, id: "f", name: "From file" };
     const { unmount } = render(<RepositoryActionsPage projectPath="/repo" readRepositoryFile={async () => [file]} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Reset to repository file" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Reset to terminalx.json" }));
     await waitFor(() => expect(mock.update).toHaveBeenCalledWith("/repo", { actions: [file] }));
     unmount();
     for (const none of [async () => null, async () => [] as RepositoryAction[], async () => { throw new Error("unreadable"); }]) {
       const view = render(<RepositoryActionsPage projectPath="/repo" readRepositoryFile={none} />);
       await screen.findByRole("button", { name: "Edit Dev" });
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(screen.queryByRole("button", { name: "Reset to repository file" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Reset to terminalx.json" })).toBeNull();
       view.unmount();
     }
   });

@@ -179,7 +179,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     setSelectionRequest((request) => request + 1);
   };
   // A repository row opens on the repository already open, else the first one listed; with none added, on the
-  // Repositories page that says so.
+  // Projects page that says so.
   const open = (match: SettingSearchMatch) => {
     if (match.section !== "repositories") return choose(match.section, undefined, match.id);
     const path = project?.path ?? repositories[0]?.path;
@@ -235,13 +235,13 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
           {SETTINGS_GROUPS.map((group, index) => (
             <div key={group} role="group" aria-labelledby={`settings-group-${index}`}>
               <div id={`settings-group-${index}`} className="flex h-6 items-center px-2 text-[12px] text-faint">{group}</div>
-              {group === "Repositories" && (
+              {group === "Projects" && (
                 <button type="button" aria-current={section === "projects" ? "page" : undefined} onClick={() => choose("projects")} className={navClass(section === "projects")}>
                   <FolderPlus aria-hidden className="size-4 shrink-0" />
                   <span className="truncate">{SETTINGS_SECTIONS.projects.title}</span>
                 </button>
               )}
-              {group === "Repositories" ? (
+              {group === "Projects" ? (
                 // One row a repository, its badge and name, opening its settings: no expander holding a single item.
                 repositories.length ? repositories.map((repository) => {
                   const selected = section === "repositories" && project?.path === repository.path;
@@ -251,7 +251,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                       <span className="truncate">{repository.name}</span>
                     </button>
                   );
-                }) : <p className="px-2 py-2 text-xs text-faint">No repositories added.</p>
+                }) : <p className="px-2 py-2 text-xs text-faint">No projects added.</p>
               ) : Object.entries(SETTINGS_SECTIONS).filter(([key, entry]) => entry.group === group && offered(key)).map(([key, entry]) => (
                 <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => choose(key as SettingsSection)} className={navClass(section === key)}>
                   {(() => { const Icon = SECTION_ICONS[key as SettingsSection]; return <Icon aria-hidden className="size-4 shrink-0" />; })()}
