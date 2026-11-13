@@ -29,7 +29,7 @@ export function ValueSource({ value, label, repository, files, onReset }: {
     <DropdownMenuTrigger asChild>
       <SourceBadge kind={kind} aria-haspopup="menu" aria-label={`${label}: where this value comes from`} />
     </DropdownMenuTrigger>
-    <DropdownMenuContent align="start" className="w-[23rem] max-w-[calc(100vw-2rem)] p-1.5">
+    <DropdownMenuContent align="start" className="w-[26rem] max-w-[calc(100vw-2rem)] p-1.5">
       <div className="px-2 pt-1.5 pb-2">
         <div className="text-[13px] font-medium">Where this value comes from</div>
         <div className="text-xs text-muted-foreground">Highest first. The first layer with a value wins.</div>

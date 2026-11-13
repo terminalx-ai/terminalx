@@ -149,7 +149,7 @@ it("lists each layer in the popover and Reset to project value removes the local
   const menu = await screen.findByRole("menu");
   expect(within(menu).getByText("Where this value comes from")).toBeTruthy();
   const rows = within(menu).getByRole("list", { name: "Layers" }).querySelectorAll("li");
-  expect([...rows].map((row) => row.textContent)).toEqual(["Managednot set", "Project · local.terminalx/settings.local.jsontx/", "Project · shared.terminalx/settings.jsonteam/", "Your settingsme/", "Default"]);
+  expect([...rows].map((row) => row.textContent)).toEqual(["Managednot set", "Project · local.terminalx/settings.local.jsontx/", "Project · shared.terminalx/settings.jsonteam/", "Your settingsme/", "Defaultempty"]);
   expect(rows[1].getAttribute("aria-current")).toBe("true");
   expect(within(rows[1]).getByLabelText("Applies")).toBeTruthy();
   expect(within(rows[2]).getByText("team/").className).toContain("line-through");

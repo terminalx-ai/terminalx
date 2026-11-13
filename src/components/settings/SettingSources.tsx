@@ -65,6 +65,9 @@ export async function revealSettingsPath(path: string, displayPath: string): Pro
   }
 }
 
+/** The user file's path as shown; a runtime older than PRO-140 sends only the absolute path. */
+export const shownPath = (file: Pick<SettingsFileStatus, "path" | "displayPath">) => file.displayPath || file.path;
+
 /** The user file exists before anything opens it, so an editor never opens nothing. */
 async function ensureUserFile(file: SettingsFileStatus): Promise<void> {
   if (!file.exists) await createSettingsFile();
@@ -95,7 +98,7 @@ export function UserFileRowAccessory({ keys, title }: { keys: readonly string[];
       <DropdownMenuContent align="start" className="min-w-[15rem]">
         <DropdownMenuItem disabled={!set.length || busy} onSelect={reset}><RotateCcw />Reset to default</DropdownMenuItem>
         <DropdownMenuSeparator />
-        <div className="px-2 py-1.5 text-xs text-muted-foreground">Saved in <span className="font-mono">{file.displayPath}</span></div>
+        <div className="px-2 py-1.5 text-xs text-muted-foreground">Saved in <span className="font-mono">{shownPath(file)}</span></div>
       </DropdownMenuContent>
     </DropdownMenu>
   </>;
@@ -105,11 +108,12 @@ export function UserFileRowAccessory({ keys, title }: { keys: readonly string[];
 export function OpenSettingsFileButton() {
   const { file } = useSettingsFile();
   if (!file) return null;
-  const name = shortFileName(file.displayPath);
+  const displayPath = shownPath(file);
+  const name = shortFileName(displayPath);
   const line = file.problem?.line;
   const broken = !!file.problem;
-  const open = (app?: (typeof EDITORS)[number]) => void ensureUserFile(file).then(() => openSettingsPath(file.path, file.displayPath, app), (error: unknown) => showError(`Couldn’t create ${file.displayPath}`, error));
-  const reveal = () => void ensureUserFile(file).then(() => revealSettingsPath(file.path, file.displayPath), (error: unknown) => showError(`Couldn’t create ${file.displayPath}`, error));
+  const open = (app?: (typeof EDITORS)[number]) => void ensureUserFile(file).then(() => openSettingsPath(file.path, displayPath, app), (error: unknown) => showError(`Couldn’t create ${displayPath}`, error));
+  const reveal = () => void ensureUserFile(file).then(() => revealSettingsPath(file.path, displayPath), (error: unknown) => showError(`Couldn’t create ${displayPath}`, error));
   const part = "inline-flex h-7 shrink-0 items-center whitespace-nowrap text-xs outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40";
   return <div data-open-settings-file="" className={cn("flex shrink-0 items-stretch overflow-hidden rounded-md hairline", broken ? "text-destructive" : "text-foreground")}>
     <button type="button" onClick={() => open()} className={cn(part, "gap-1.5 px-2.5 [&_svg]:size-3.5")}>
@@ -124,7 +128,7 @@ export function OpenSettingsFileButton() {
         <DropdownMenuLabel>Open</DropdownMenuLabel>
         <DropdownMenuItem onSelect={() => open()} className="items-start">
           <UserRound className="mt-0.5" />
-          <span className="flex min-w-0 flex-col"><span>Your settings</span><span className="truncate font-mono text-xs text-muted-foreground">{file.displayPath}</span></span>
+          <span className="flex min-w-0 flex-col"><span>Your settings</span><span className="truncate font-mono text-xs text-muted-foreground">{displayPath}</span></span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Open in</DropdownMenuLabel>
@@ -149,21 +153,22 @@ export function CantSaveToast() {
   useEffect(() => () => window.clearTimeout(reset.current), []);
   const problem = file?.problem;
   if (!file || !problem || !saveFailure) return null;
-  const title = cantSaveTitle(file.displayPath, problem);
+  const displayPath = shownPath(file);
+  const title = cantSaveTitle(displayPath, problem);
   const onCopy = () => {
     window.clearTimeout(reset.current);
-    copyText(cantSaveCopy(file.displayPath, problem)).then(() => setCopy("copied"), () => setCopy("failed"));
+    copyText(cantSaveCopy(displayPath, problem)).then(() => setCopy("copied"), () => setCopy("failed"));
     reset.current = window.setTimeout(() => setCopy("idle"), 2000);
   };
-  return <div role="alert" aria-labelledby="cant-save-title" data-cant-save="" className="pointer-events-auto fixed right-4 bottom-4 z-(--z-toast) flex w-[26rem] max-w-[calc(100vw-2rem)] items-start gap-2.5 rounded-xl bg-popover p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in">
+  return <div role="alert" aria-labelledby="cant-save-title" data-cant-save="" className="pointer-events-auto fixed right-4 bottom-10 z-(--z-toast) flex w-[26rem] max-w-[calc(100vw-2rem)] items-start gap-2.5 rounded-xl bg-popover p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in">
     <AlertCircle aria-hidden className="mt-0.5 size-4 shrink-0 text-destructive" />
     <div className="min-w-0 flex-1">
       <div id="cant-save-title" className="font-medium">{title}</div>
       <p className="mt-0.5 break-words text-xs text-muted-foreground">
-        {problem.key && <span className="font-mono text-foreground">{problem.key}</span>}{problem.key && ": "}{problem.message} {cantSaveEffect(problem)}
+        {problem.key && <span className="font-mono text-foreground">{problem.key}</span>}{problem.key && ": "}{problem.message.replace(/\.$/, "")}. {cantSaveEffect(problem)}
       </p>
       <div className="mt-2.5 flex flex-wrap gap-2">
-        <Button size="sm" variant="outline" onClick={() => void openSettingsPath(file.path, file.displayPath)}><FileText />Open file</Button>
+        <Button size="sm" variant="outline" onClick={() => void openSettingsPath(file.path, displayPath)}><FileText />Open file</Button>
         <Button size="sm" variant="ghost" className="hairline" onClick={onCopy}>
           {copy === "copied" ? <Check className="text-add" /> : <Copy />}
           {copy === "copied" ? "Copied" : copy === "failed" ? "Couldn’t copy" : "Copy error"}

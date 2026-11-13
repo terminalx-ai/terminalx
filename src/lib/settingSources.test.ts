@@ -39,7 +39,7 @@ describe("where a value comes from", () => {
       ["Project · local", "tx/", true, false],
       ["Project · shared", "team/", false, true],
       ["Your settings", "me/", false, true],
-      ["Default", "", false, true],
+      ["Default", "empty", false, true],
     ]);
   });
 

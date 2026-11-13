@@ -7,10 +7,12 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   // the legacy preferences whose migration the layout checks exercise.
   const settingsKey = "__pw_settings_file__";
   const settings = JSON.parse(sessionStorage.getItem(settingsKey) || "null") ?? {
-    file: { path: "/Users/demo/.raccoon/settings.json", exists: false, error: null, preferences: {} },
+    file: { path: "/Users/demo/.raccoon/settings.json", displayPath: "~/.raccoon/settings.json", exists: false, error: null, problem: null, setKeys: [], preferences: {} },
     migrated: false,
   };
   const saveSettings = () => {
+    // PRO-140: the keys the file sets itself, as the native layer names them.
+    settings.file.setKeys = Object.keys(settings.file.preferences).map((key) => `preferences.${key}`);
     sessionStorage.setItem(settingsKey, JSON.stringify(settings));
     window.__PW_STUB__.emit("settings_file_changed", null);
     return structuredClone(settings.file);
@@ -37,6 +39,14 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
       return saveSettings();
     },
     create_settings_file: () => { settings.file.exists = true; return saveSettings(); },
+    reset_user_setting: ({ key }) => {
+      if (key.startsWith("preferences.")) delete settings.file.preferences[key.slice("preferences.".length)];
+      return saveSettings();
+    },
+    settings_files_list: () => [
+      { layer: "user", path: settings.file.path, displayPath: settings.file.displayPath, exists: settings.file.exists, keys: Object.keys(settings.file.preferences).length, git: null, problem: settings.file.problem },
+      { layer: "defaults", path: null, displayPath: null, exists: true, keys: 0, git: null, problem: null },
+    ],
     // Layout fixtures have no app update. The generic plugin handle below is
     // truthy and would otherwise become a bogus Update after the startup check.
     "plugin:updater|check": null,

@@ -78,6 +78,7 @@ export interface LayerRow {
 
 export function formatLayerValue(entry: Pick<ConfigurationLayerValue, "value" | "redacted">): string {
   if (entry.redacted) return "hidden";
+  if (entry.value === "") return "empty";
   if (typeof entry.value === "string") return entry.value;
   return JSON.stringify(entry.value) ?? "";
 }
