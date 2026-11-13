@@ -189,6 +189,7 @@ describe("a tab's right-click menu", () => {
       "Archive",
       "Share…",
       "Link to issue…",
+      "Link pull request…",
       "Delete…",
       "Split right",
       "Move tab",

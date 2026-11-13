@@ -25,6 +25,8 @@ function setup({ mode, scene, enabled }) {
   // The sidebar names a row by its session or by its one agent, as its layout has it.
   session.tabs[0].title = session.title;
   session.tabs[0].status = "completed";
+  // The lead's own model and effort: the Run view's Lead card (18.01).
+  Object.assign(session.tabs[0], { harness: "claude", model: "fable", effort: "medium" });
   const at = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
   const model = (id, label, efforts) => ({ id, label, harness: "claude", efforts, defaultEffort: "medium", acceptsImages: true, isDefault: id === "sonnet", upgrade: null, description: null, alias: true, resolved: null });
   answers.list_models = [model("haiku", "Haiku 5.5", []), model("sonnet", "Sonnet 5.5", ["low", "medium", "high"]), model("opus", "Opus 5.5", ["low", "medium", "high", "max"]), model("fable", "Fable 5.2", ["low", "medium", "high", "max"])];
@@ -77,7 +79,13 @@ function setup({ mode, scene, enabled }) {
       waiting: run.pieces.filter((piece) => piece.state === "queued").map((piece) => ({ piece: piece.id, on: piece.dependsOn.filter((id) => !done(id)) })),
     };
   };
-  const base = { id: "01a1cabc-2fa5-7380-8770-af2097ca9149", lead: { sessionId: session.id, tabId: session.tabs[0].id }, projectPath: session.projectPath, goal: "Move settings reads to the typed store", budget: { points: 25 }, workerMode: "bypassPermissions", created: at(20), modified: at(1) };
+  // Today at 16:10, the 5h window's reset.
+  const resets = (() => { const now = new Date(); return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 16, 10).getTime(); })();
+  // As a runtime with PRO-280 sends it: the run's own limits, and what it has used of a subscription's window.
+  const base = {
+    id: "01a1cabc-2fa5-7380-8770-af2097ca9149", lead: { sessionId: session.id, tabId: session.tabs[0].id }, projectPath: session.projectPath, goal: "Move settings reads to the typed store", budget: { points: 25 }, workerMode: "bypassPermissions", created: at(20), modified: at(1),
+    limits: { workers: 4, dollars: 15, points: 25, ceiling: 85 }, usage: { dollars: 0, subscription: true, windows: [{ agent: "claude", key: "five_hour", label: "5h", percent: 41, start: 32, resetsAt: resets, points: 9 }] },
+  };
   const worker = (id) => ({ sessionId: `worker-${id}`, tabId: `worker-${id}-tab` });
   const started = (id, state, note, attempts = 1) => ({ state, note, attempts, worker: worker(id), branch: `raccoon/${id}-piece`, startedMode: "bypassPermissions" });
   // How a result was checked (PRO-278): the gates TerminalX ran itself, and the verifier where one was asked.
@@ -85,19 +93,25 @@ function setup({ mode, scene, enabled }) {
   const ran = (run, exitCode, millis, output) => ({ run, exitCode, passed: exitCode === 0, millis, ...(output ? { output } : {}) });
   const commands = (...runs) => ({ gate: "commands", passed: runs.every((command) => command.passed), commands: runs });
   const verifier = (id, extra = {}) => ({ session: { sessionId: `worker-${id}`, tabId: `worker-${id}-verifier` }, model: "sonnet", effort: "medium", ...extra });
-  const tried = (id, model, effort, tierName, costUsd, verification) => [{ step: "first", model, effort, tier: tierName, worker: worker(id), branch: `raccoon/${id}-piece`, outcome: "done", costUsd, verification, started: at(13), ended: at(4) }];
+  const tried = (id, model, effort, tierName, costUsd, verification, report, outputTokens) => [{ step: "first", model, effort, tier: tierName, worker: worker(id), branch: `raccoon/${id}-piece`, outcome: "done", costUsd, verification, report, outputTokens, started: at(13), ended: at(4) }];
   const running = {
     // Review only: no command to run, so a verifier read the list.
     map: { ...started("map", "done", "41 call sites in 9 files."), tier: "small", tries: tried("map", "haiku", undefined, "small", 0.04, {
       outcome: "passed", facts: { files: [], changedLines: 0, commit: "9d2c1b0" }, gates: [gate("report"), gate("scope"), gate("branch"), gate("review", true, "The verifier passed it.")],
       review: { reasons: ["No command proves this piece: it is checked by review alone."], voters: 1, threshold: 1, promptChars: 3100, verifiers: [verifier("map", { verdict: "pass", tokens: { input: 2900, output: 240, cacheRead: 0, cacheWrite: 0 } })] },
-    }) },
+    }, { result: "41 call sites in 9 files.", evidence: ["`rg -n 'settings::get' src-tauri/src`: 41 matches in 9 files"], couldNotRead: ["src-tauri/src/generated/settings_schema.rs: generated at build time, not in the checkout"] }, 6_800) },
     // Accepted by the gates, then read because the plan asks for a review.
     store: { ...started("store", "done", "Store added, 14 tests pass. Unknown keys are kept on save."), tier: "large", tries: tried("store", "opus", "medium", "large", 1.82, {
-      outcome: "passed", facts: { files: ["src-tauri/src/store/settings/mod.rs", "src-tauri/src/store/settings/migrate.rs", "src-tauri/src/store/mod.rs"], changedLines: 312, commit: "4c1e9a7" },
+      outcome: "passed", facts: { files: ["src-tauri/src/store/settings/mod.rs", "src-tauri/src/store/settings/migrate.rs", "src-tauri/src/store/mod.rs"], changedLines: 312, commit: "4c1e9a7",
+        changes: [{ path: "src-tauri/src/store/settings/mod.rs", added: 212 }, { path: "src-tauri/src/store/settings/migrate.rs", added: 96 }, { path: "src-tauri/src/store/mod.rs", added: 3, removed: 1 }] },
       gates: [gate("report"), gate("scope", true, "3 files changed, all within what the piece owns."), gate("branch"), commands(ran("cargo t store::settings", 0, 37_600)), gate("review", true, "The verifier passed it.")],
       review: { reasons: ["The plan asks for a review of this piece."], voters: 1, threshold: 1, promptChars: 21_400, verifiers: [verifier("store", { verdict: "pass", tokens: { input: 6100, output: 310, cacheRead: 0, cacheWrite: 0 } })] },
-    }) },
+    }, {
+      result: "Added a typed settings store with a one-way migration from the old JSON file. Reads go through one module; unknown keys are kept on save.",
+      evidence: ["cargo t store::settings: exit 0 · 14 passed", "cargo clippy -p raccoon: exit 0"],
+      changed: { files: ["src-tauri/src/store/settings/mod.rs", "src-tauri/src/store/settings/migrate.rs", "src-tauri/src/store/mod.rs"], branch: "raccoon/store-piece", commit: "4c1e9a7" },
+      uncertain: ["Whether the Windows settings path needs the same migration; no Windows build was run."],
+    }, 41_300) },
     session: { ...started("session", "running"), tier: "mid", tries: [{ step: "first", model: "sonnet", effort: "medium", tier: "mid", worker: worker("session"), branch: "raccoon/session-piece", costUsd: 0.61, started: at(6) }] },
     // Its commands passed; it touches a security area, so a verifier is reading the diff.
     pipeline: { ...started("pipeline", "verifying", "12 reads moved"), tier: "mid", tries: tried("pipeline", "sonnet", "medium", "mid", 0.74, {
@@ -138,11 +152,18 @@ function setup({ mode, scene, enabled }) {
       tries: [
         { ...attempt("cli", 1, "first", "sonnet", "medium", "mid", "checkFailed", "The result did not pass the command checks check.", 0.61), verification: { outcome: "failed", gates: [gate("report"), gate("scope"), gate("branch"), commands(ran("cargo t control", 101, 39_000, "test control::tests::create_reads_default_mode ... FAILED\ntest control::tests::create_reads_project_mode ... FAILED"))] } },
         { ...attempt("cli", 2, "effort", "sonnet", "high", "mid", "checkFailed", "The result did not pass the command checks check.", 0.92), verification: { outcome: "failed", gates: [gate("report"), gate("scope"), gate("branch"), commands(ran("cargo t control", 101, 40_000, "test control::tests::create_reads_default_mode ... FAILED"))] } },
-        { ...attempt("cli", 3, "tier", "opus", "medium", "large", "checkFailed", "The result did not pass the command checks check.", 2.18), verification: {
+        { ...attempt("cli", 3, "tier", "opus", "medium", "large", "checkFailed", "The result did not pass the command checks check.", 2.18), outputTokens: 58_400, verification: {
           outcome: "failed", facts: { files: ["src-tauri/src/cli.rs", "src-tauri/src/control.rs"], changedLines: 96, commit: "e19c7d4" },
           gates: [gate("report"), gate("scope"), gate("branch"), commands(ran("cargo t control", 101, 41_000, "running 12 tests\ntest control::tests::create_reads_default_mode ... FAILED\nleft: Some(\"manual\")  right: Some(\"auto\")\ncontrol.rs:1184"))],
+        }, report: {
+          result: "The default mode now comes from the store, but `sessions_create` still reads the old file when the project has an override. That path is in `src-tauri/src/store/settings/mod.rs`, which piece 2 owns.",
+          evidence: ["cargo t control: exit 101", "src-tauri/src/control.rs:1184"],
+          changed: { files: ["src-tauri/src/cli.rs", "src-tauri/src/control.rs"], branch: "raccoon/cli-try3-piece", commit: "e19c7d4" },
+          notDone: ["The override path in src-tauri/src/store/settings/mod.rs: outside this piece's files"],
         } },
       ],
+      // What `engine::shown` names outside its files, from that report.
+      outside: [{ path: "src-tauri/src/store/settings/mod.rs", owner: "store" }],
     },
     docs: {},
   };
@@ -177,10 +198,12 @@ function setup({ mode, scene, enabled }) {
   const state = {
     run: scene === "none" ? null
       : scene === "merging" ? mergingRun
-      : scene === "blocked" ? { ...base, state: "failed", reason: "cli is blocked after 3 tries. docs cannot start without it.", approval: { at: at(46) }, pieces: pieces.map((piece) => ({ ...piece, ...blocked[piece.id] })) }
+      // A blocked piece leaves the run running: it waits on the person (PRO-361).
+      : scene === "blocked" ? { ...base, state: "running", approval: { at: at(46) }, pieces: pieces.map((piece) => ({ ...piece, ...blocked[piece.id] })) }
       : scene === "running" ? { ...base, state: "running", approval: { at: at(14) }, pieces: pieces.map((piece) => ({ ...piece, ...running[piece.id] })) }
       : { ...base, state: "awaitingApproval", pieces },
-    settings: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", reviewDiffLines: 400, projects: {} },
+    // Every value Settings → Orchestrator shows, as `orchestrator_settings` answers.
+    settings: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, reviewDiffLines: 400, projects: {} },
     experimental: { nativeCodex: false, orchestratorRuns: enabled },
   };
   window.__RUNS__ = { state, calls: [] };
@@ -215,6 +238,30 @@ function setup({ mode, scene, enabled }) {
     },
     orchestration_resolve_in_lead: (args) => {
       called("resolveInLead", args);
+      return shown(state.run);
+    },
+    // A blocked piece's four ways on (PRO-361), as the engine answers them.
+    orchestration_take_over: (args) => {
+      called("takeOver", args);
+      state.run = { ...state.run, pieces: state.run.pieces.map((piece) => (piece.id === args.piece ? { ...piece, state: "lead", note: "Taken over by the lead: it finishes the piece in its own checkout.", tries: [...piece.tries, { step: "lead", model: "fable", worker: base.lead, fromCommit: "e77a120c3d4e", started: new Date().toISOString() }] } : piece)) };
+      return shown(state.run);
+    },
+    orchestration_widen: (args) => {
+      called("widen", args);
+      state.run = { ...state.run, pieces: state.run.pieces.map((piece) => (piece.id === args.piece ? { ...piece, ...started(piece.id, "running"), owns: [...piece.owns, ...args.own], outside: undefined, tries: [...piece.tries, { step: "widened", model: piece.model, effort: piece.effort, tier: piece.tier, worker: worker(`${piece.id}-4`), started: new Date().toISOString() }] } : piece)) };
+      return shown(state.run);
+    },
+    orchestration_note: (args) => {
+      called("note", args);
+      state.run = { ...state.run, pieces: state.run.pieces.map((piece) => (piece.id === args.piece ? { ...piece, state: "running", note: "A person sent its worker a note." } : piece)) };
+      return shown(state.run);
+    },
+    orchestration_skip: (args) => {
+      called("skip", args);
+      const out = new Set([args.piece]);
+      for (const piece of state.run.pieces) if (piece.state === "queued" && piece.dependsOn.some((on) => out.has(on))) out.add(piece.id);
+      state.run = { ...state.run, pieces: state.run.pieces.map((piece) => (out.has(piece.id) ? { ...piece, state: "skipped", note: piece.id === args.piece ? "Skipped by a person: the run goes on without it, and it is not merged." : `Skipped with piece ${args.piece}, which it depends on.` } : piece)) };
+      if (state.run.pieces.every((piece) => piece.state === "done" || piece.state === "skipped")) state.run = { ...state.run, state: "merging" };
       return shown(state.run);
     },
     orchestration_update_plan: (args) => {
@@ -275,6 +322,8 @@ const layoutOf = (view) => view.evaluate((node) => {
   const bounds = node.getBoundingClientRect();
   return {
     scrolls: [node, ...node.querySelectorAll("*")].some((element) => element.scrollWidth > element.clientWidth + 1 && getComputedStyle(element).overflowX !== "hidden" && getComputedStyle(element).overflowX !== "clip" && !element.matches("select, input, textarea, code, .truncate")),
+    // Which, when one does: what to look at.
+    scrollers: [node, ...node.querySelectorAll("*")].filter((element) => element.scrollWidth > element.clientWidth + 1 && getComputedStyle(element).overflowX !== "hidden" && getComputedStyle(element).overflowX !== "clip" && !element.matches("select, input, textarea, code, .truncate")).map((element) => `${element.tagName.toLowerCase()} "${element.textContent.slice(0, 40)}" ${element.scrollWidth}>${element.clientWidth}`),
     outside: [...node.querySelectorAll("button, select, h1, [role=row]")].filter((element) => { const box = element.getBoundingClientRect(); return box.width > 0 && (box.left < bounds.left - 1 || box.right > bounds.right + 1); }).length,
     overlaps: buttons.some((box, index) => buttons.slice(index + 1).some((other) => box.left < other.right - 0.5 && box.right > other.left + 0.5 && box.top < other.bottom - 0.5 && box.bottom > other.top + 0.5)),
     rows: [...node.querySelectorAll("[role=row][data-piece]")].map((row) => ({ piece: row.dataset.piece, state: row.dataset.pieceState, height: Math.round(row.getBoundingClientRect().height), text: row.textContent })),
@@ -285,7 +334,8 @@ const layoutOf = (view) => view.evaluate((node) => {
 const server = await serve();
 const browser = await launch();
 let failed = 0;
-const sizes = [{ width: 1440, height: 900 }, { width: 1000, height: 700 }];
+// 1280 with the piece open is where titles were squeezed (PRO-361): the panel gives way first.
+const sizes = [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 1000, height: 700 }];
 try {
   for (const mode of ["dark", "light"]) {
     for (const size of sizes) {
@@ -324,8 +374,9 @@ try {
           "the plan is headed as waiting, with its goal and that nothing starts yet": (await view.getByTestId("run-state").textContent()) === "Plan waiting for you" && (await view.getByRole("heading", { level: 1 }).textContent()) === GOAL && (await view.getByText("The lead split this into 6 pieces. Nothing starts until you approve.").count()) === 1,
           "Discard, Edit plan and Approve and start are offered": (await view.getByRole("button", { name: "Discard", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Edit plan", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Approve and start", exact: true }).count()) === 1,
           "the estimate sums the pieces that carry one and says how many do": (await view.getByTestId("run-estimate").textContent()) === "$3.15–5.15" && (await view.getByText("API-equivalent, for 5 of 6 pieces").count()) === 1,
-          "the budget, the workers' mode and that no file is shared are stated": (await view.getByRole("region", { name: "Plan summary" }).textContent()).includes("Budget25 pointsWorkers run inBypass permissionsNo shared files"),
-          "six pieces, each on one row, with what it waits on": layout.rows.length === 6 && layout.rows.every((row) => row.height <= 56) && (size.width < 1200 || layout.rows[5].text.includes("3, 4, 5")),
+          "the budget, the workers' mode and that no file is shared are stated": (await view.getByTestId("plan-limits").textContent()).startsWith("Budget25 pointsAt once") && (await view.getByTestId("plan-limits").textContent()).endsWith("Workers run inBypassNo shared files"),
+          // A long title wraps rather than being cut short (PRO-361): a row is as tall as its title needs, never more than three lines.
+          "six pieces, each on one row, with what it waits on": layout.rows.length === 6 && layout.rows.every((row) => row.height <= 112) && (size.width < 1200 || layout.rows[5].text.includes("3, 4, 5")),
           "a piece that reads outside text says it will run in bypass, in its row and in its brief": layout.rows[5].text.includes("outside text · bypass") && warned === "Reads text from outside the repository, and will run in bypass" && untrusted.includes("reads text from outside the repository") && untrusted.includes("It will run in bypass: nothing asks before it acts on what it reads."),
           "a piece's brief states its goal, scope, done-check, limits and report": ["GoalEvery settings read in the session code goes through the typed store.", "WhyPiece 6 documents the keys", "src-tauri/src/session.rs", "Out of scope: the store itself, pipeline and CLI code.", "The 17 call sites listed by piece 1 for these files.", "docs/SETTINGS.md", "cargo t session", "! rg -q 'settings::get' src-tauri/src/session.rs src-tauri/src/session_ops.rs", "reads no text from outside the repository", "Push, merge and deploy are denied at launch, not left to the brief.", "terminalx-report"].every((said) => brief.includes(said)),
           "a piece checked by review alone says so, with its reason and its vote": untrusted.includes("Review only, no command: Prose: nothing to run.") && untrusted.includes("No key's meaning changed in the rewrite. · vote, 2 of 3"),
@@ -405,7 +456,13 @@ try {
           "a piece being checked shows its gates passed and its verifier reading": verifying.gates === "report:passed,scope:passed,branch:passed,commands:passed,review:running" && ["Verifierreading", "The change touches a security area: authorization.", "Reading"].every((said) => verifying.review.includes(said)) && verifying.text.includes("Waiting on the verifier. Nothing that depends on it starts until it has passed."),
           "a piece on its second try shows the check that sent the first back": retried.title.includes("Checks of try 1") && retried.gates === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && retried.check.includes("Done-checkfailed · exit 101cargo t control") && retried.check.includes("test result: FAILED. 10 passed; 2 failed"),
           "the checks fit their panel at every size": [verifying.layout, retried.layout].every((seen) => !seen.scrolls && seen.outside === 0 && !seen.overlaps && seen.smallest >= 10.5),
-          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultStore added, 14 tests pass.") && detail.includes("raccoon/store-piece") && (await view.getByTestId("piece-detail").getByRole("button", { name: "Open worker", exact: true }).count()) === 2,
+          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultAdded a typed settings store") && detail.includes("raccoon/store-piece · 4c1e9a7") && (await view.getByTestId("piece-detail").getByRole("button", { name: "Open worker", exact: true }).count()) === 1,
+          "a done piece shows every section of its worker's report, saying so where one is empty (18.01)": ["Evidencecargo t store::settings exit 0 · 14 passed", "Changedsrc-tauri/src/store/settings/mod.rs+212", "src-tauri/src/store/mod.rs+3−1", "Not doneNothing", "Could not readNothing", "UncertainWhether the Windows settings path"].every((said) => detail.includes(said)),
+          "its footer offers the worker and the diff, and says what it cost and used": (await panel.getByRole("button", { name: "View diff", exact: true }).count()) === 1 && (await panel.getByTestId("piece-detail-cost").textContent()) === "$1.82 · 41k out",
+          "only the done pieces' segments are coloured": (await view.getByTestId("run-pieces").locator("[data-segment]").evaluateAll((items) => items.map((item) => item.dataset.segment).join())) === "done,done,open,open,open,open",
+          "Merge is shown and stays disabled until every piece is done": (await view.getByTestId("run-merge").isDisabled()) && (await view.getByTestId("run-merge").getAttribute("title")) === "Merge unlocks when every piece is done.",
+          "spend is in dollars first, the window's points under it, and the lead's model and effort beside it": (await view.getByTestId("run-spend").textContent()) === "$4.13 of $15.00" && (await view.getByTestId("run-points").textContent()).startsWith("9 of 25 points · 5h window at 41% · resets") && (await view.getByTestId("run-lead").textContent()).includes("Fable 5.2 Medium"),
+          "no piece title is cut short": (await view.getByTestId("piece-title").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth + 1 && !getComputedStyle(item).textOverflow.includes("ellipsis")))),
           "the plan can no longer be edited or approved": (await view.getByRole("button", { name: "Approve and start" }).count()) === 0 && (await view.getByRole("button", { name: "Edit plan" }).count()) === 0 && (await view.getByRole("combobox").count()) === 0,
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
         };
@@ -439,7 +496,11 @@ try {
         const cells = async (id) => (await view.locator(`[data-piece="${id}"] [role=cell]`).allTextContents());
         const cli = await cells("cli");
         const checks = {
-          "the run says which piece holds it up": (await view.getByTestId("run-state").textContent()) === "Run failed" && (await view.getByRole("status").filter({ hasText: "cli is blocked after 3 tries. docs cannot start without it." }).count()) === 1,
+          "one line says which piece holds the run up, by number, and the run has not failed (18.03)": (await view.getByTestId("run-state").textContent()) === "Run" && (await view.getByTestId("run-subtitle").textContent()) === "Piece 5 is blocked. Piece 6 waits for it; nothing else is running." && (await view.getByTestId("run-needs").count()) === 0 && !(await view.textContent()).includes("cli is blocked"),
+          "Stop run is offered, and Merge waits for every piece": (await view.getByRole("button", { name: "Stop run", exact: true }).count()) === 1 && (await view.getByTestId("run-merge").isDisabled()),
+          "blocked is red": (await view.locator('[data-piece="cli"] [role=cell]').nth(2).locator("span").first().evaluate((node) => node.className)).includes("text-destructive"),
+          "the panel shows its worker's last report and that the fix is outside its files": (await detail.textContent()).includes("Worker's last reportThe default mode now comes from the store") && (await detail.getByTestId("piece-outside").textContent()).startsWith("The fix is outside this piece's files. A worker may not edit another piece's files.src-tauri/src/store/settings/mod.rs · piece 2 owns it"),
+          "the four ways on are offered": (await detail.getByTestId("blocked-actions").getByRole("button").allTextContents()).join("|") === "Take over in lead|Widen scope and retry|Send a note to the worker|Skip piece",
           "four pieces are done, one is blocked and one waits": layout.rows.map((row) => row.state).join() === "done,done,done,done,blocked,queued" && (await view.getByTestId("run-done").textContent()) === "4",
           "the blocked piece's row shows the model it ended on, its three tries and what they cost": cli[1] === "Opus 5.5 Medium" && cli[2] === "Blocked" && cli[3] === "3" && cli[4] === "$3.71",
           "a piece that needed a second try shows two, and what both cost": (await cells("pipeline")).slice(3, 5).join() === "2,$0.97",
@@ -452,12 +513,19 @@ try {
           "the failed done-check shows its command, its exit code and the end of what it printed": await (async () => { const check = await detail.getByTestId("done-check").textContent(); return check.startsWith("Done-checkfailed · exit 101cargo t control") && check.includes("test control::tests::create_reads_default_mode ... FAILED") && check.includes('left: Some("manual")  right: Some("auto")') && check.includes("control.rs:1184"); })(),
           "the gates before the command passed, and no model was asked after it failed": (await detail.locator("[data-gate]").evaluateAll((items) => items.map((item) => `${item.dataset.gate}:${item.dataset.gateState}`).join())) === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && (await detail.getByTestId("piece-review").count()) === 0,
           "a piece a verifier passed says so in its row": !wide || (await view.locator('[data-piece="pipeline"]').getByTestId("piece-report").textContent()) === "12 reads moved, verifier passed",
-          "every try can be opened": (await detail.getByRole("button", { name: "Open worker", exact: true }).count()) === 4,
+          "every try can be opened": (await detail.getByRole("button", { name: "Open worker", exact: true }).count()) === 3,
           "the table's columns are the design's, where there is room": !wide || (await view.getByRole("table", { name: "Pieces" }).getByRole("columnheader").allTextContents()).join() === "Piece,Model,State,Tries,Cost,Report,Worker",
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
           "no text is smaller than 10.5px": layout.smallest >= 10.5,
           "no browser errors": errors.length === 0,
         };
+        // Skip piece: it says what goes with it, and the run goes on to its merge without them.
+        await detail.getByRole("button", { name: "Skip piece", exact: true }).click();
+        const confirm = await detail.getByRole("group", { name: "Skip piece" }).textContent();
+        await detail.getByRole("group", { name: "Skip piece" }).getByRole("button", { name: "Skip", exact: true }).click();
+        // Every other piece is done: the run goes on to its merge, where both are listed as skipped.
+        await page.waitForFunction(() => { const row = document.querySelector('[data-piece="cli"]'); return row?.dataset.pieceState === "skipped" || row?.dataset.mergeState === "skipped"; });
+        checks["Skip piece says what goes with it and leaves both out"] = confirm.includes("Skip piece 5, and piece 6 with it, which depends on it?") && JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "skip").map((call) => call.args))) === JSON.stringify([{ id: "01a1cabc-2fa5-7380-8770-af2097ca9149", piece: "cli" }]) && (await view.locator('[data-piece="docs"]').getAttribute("data-merge-state")) === "skipped" && (await view.getByTestId("run-subtitle").textContent()) === "Every result is accepted. 4 branches wait to be merged into the lead's branch.";
         failed += report(`piece blocked after three tries, ${at}`, checks, { layout, errors, said, cli });
         await page.close();
       }
@@ -492,7 +560,8 @@ try {
           "the conflict names the piece it is with, its files and how much of each": said.includes("Conflict· with piece 3, already merged") && (await panel.getByRole("list", { name: "Conflicting files" }).getByRole("listitem").allTextContents()).join("|") === "Csrc-tauri/src/control.rs2 hunks|Csrc-tauri/src/session_ops.rs1 hunk",
           "both sides of the first conflicting place are shown": await (async () => { const excerpt = await panel.getByTestId("conflict-excerpt").textContent(); return excerpt.startsWith("control.rs · 1184") && excerpt.includes("let mode = store.session().default_mode();") && excerpt.includes("let mode = store.cli().default_mode(project);"); })(),
           "why it happened comes from the plan and the merges": said.includes("session_ops.rs is listed under piece 3 only, but piece 5 changed it too."),
-          "the three choices are offered, and Continue merge": (await detail.getByRole("button", { name: "Send back to worker" }).count()) === 1 && (await detail.getByRole("button", { name: "Resolve in lead" }).count()) === 1 && (await detail.getByRole("button", { name: "Skip", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Continue merge" }).count()) === 1,
+          "the three choices are offered, and Continue merge waits for one of them (18.04)": (await detail.getByRole("button", { name: "Send back to worker" }).count()) === 1 && (await detail.getByRole("button", { name: "Resolve in lead" }).count()) === 1 && (await detail.getByRole("button", { name: "Skip", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Continue merge" }).isDisabled()),
+          "the conflicted piece is not counted done": (await view.getByTestId("run-done").textContent()) === "5" && (await view.getByTestId("run-pieces").textContent()).includes("5 of 6 done"),
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
           "no text is smaller than 10.5px": layout.smallest >= 10.5,
         };
@@ -518,7 +587,7 @@ try {
         await shot(page, "none");
         const checks = {
           "it says what a run is and offers both ways to start one": (await view.getByRole("button", { name: "Plan a run", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Choose file", exact: true }).count()) === 1 && (await view.getByText("terminalx runs create --from plan.json", { exact: true }).count()) === 1,
-          "it shows what this project allows, as the settings have it": (await view.getByTestId("run-limits").textContent()) === "Waits for your approvalOnPieces, at most8Workers run inBypass permissions",
+          "it shows what this project allows, as the settings have it": (await view.getByTestId("run-limits").textContent()) === "Waits for your approvalOnPieces, at most8Workers at once4Budget, API key$15.00Budget, subscription25 pointsWorkers run inBypass",
           "it says when to split and when not to": (await view.getByRole("list").getByRole("listitem").count()) === 4,
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
         };

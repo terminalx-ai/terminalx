@@ -1983,6 +1983,25 @@ impl SessionManager {
                 self.accepting_work()?;
                 engine::shown(&engine::resolve_in_lead(&host, string("id")?, string("piece")?).map_err(refused)?)
             }
+            // A blocked piece (PRO-361, 18.03): the person's four actions, and checking what the lead did with one it took over.
+            "takeOver" => {
+                self.accepting_work()?;
+                engine::shown(&engine::take_over(&host, string("id")?, string("piece")?, engine::By::Person).map_err(refused)?)
+            }
+            "finish" => {
+                self.accepting_work()?;
+                engine::shown(&engine::finish(&host, string("id")?, string("piece")?, engine::By::Person, false).map_err(refused)?.run)
+            }
+            "widen" => {
+                self.accepting_work()?;
+                let own: Vec<String> = params["own"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
+                engine::shown(&engine::widen(&host, string("id")?, string("piece")?, &own, engine::By::Person).map_err(refused)?.run)
+            }
+            "note" => {
+                self.accepting_work()?;
+                engine::shown(&engine::note(&host, string("id")?, string("piece")?, string("text")?, engine::By::Person).map_err(refused)?)
+            }
+            "skip" => engine::shown(&engine::skip(&host, string("id")?, string("piece")?, engine::By::Person).map_err(refused)?.run),
             "updatePlan" => engine::shown(&engine::update_plan(&host, string("id")?, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?).map_err(refused)?),
             // A person's own limits for one run (PRO-280): from the approval view, or a paused run's.
             "setLimits" => engine::shown(&engine::set_limits(&host, string("id")?, serde_json::from_value(params["limits"].clone()).context("limits are not a run's limits")?).map_err(refused)?),

@@ -39,6 +39,12 @@ pub enum Step {
     Effort,
     /// One model tier up, at one effort level lower.
     Tier,
+    /// A person widened the piece's files after it was blocked and had it
+    /// tried again (`engine::widen`): the last try's model and effort.
+    Widened,
+    /// The lead took the piece over (`engine::take_over`) and finishes it in
+    /// its own checkout.
+    Lead,
 }
 
 /// What the next try runs on.
@@ -119,6 +125,8 @@ pub fn describe(step: Step) -> &'static str {
         Step::Retry => "tried again with the failure text",
         Step::Effort => "tried again with the failure text, effort raised one level",
         Step::Tier => "moved up one model at one effort level lower",
+        Step::Widened => "tried again with its files widened",
+        Step::Lead => "taken over by the lead",
     }
 }
 

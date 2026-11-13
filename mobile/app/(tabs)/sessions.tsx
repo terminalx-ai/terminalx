@@ -50,7 +50,8 @@ export default function SessionsScreen() {
 
   const host = app.activeHost;
   const connected = app.connectionStage === "connected";
-  const diagnostic = connected ? undefined : [...app.logs].reverse().find((entry) => ["Trying connection paths", "Relay path failed", "Connection attempt failed"].includes(entry.message));
+  const heldByMac = app.connectionStage === "disconnected-on-mac";
+  const diagnostic = connected || heldByMac ? undefined : [...app.logs].reverse().find((entry) => ["Trying connection paths", "Relay path failed", "Connection attempt failed"].includes(entry.message));
   const stage = connectionCopy(app.connectionStage, app.connectionAttempt);
   const open = (row: ChatRow, tabId = row.tabId) => router.push({ pathname: "/session/[sessionId]", params: { sessionId: row.session.id, tabId, hostId: host.id, title: row.title } });
   const toggle = (project: string) => setCollapsed((current) => { const next = new Set(current); if (next.has(project)) next.delete(project); else next.add(project); return next; });
@@ -74,7 +75,7 @@ export default function SessionsScreen() {
       </View>
       {!connected ? <View style={styles.offline}>
         <Text style={[styles.offlineText, { color: palette.muted }]}><Text style={{ color: palette.warning }}>{stage.title}. </Text>{diagnostic?.detail ? `${diagnostic.message}: ${diagnostic.detail}` : stage.hint ?? "Showing what this phone saved."}</Text>
-        <Button label="Retry" kind="secondary" onPress={() => app.connection.restart("retry was tapped")} style={styles.retry} />
+        <Button label={heldByMac ? "Reconnect" : "Retry"} kind="secondary" onPress={() => app.connection.restart(heldByMac ? "reconnect was chosen" : "retry was tapped", true)} style={styles.retry} />
       </View> : null}
     </View>
   </View>;
@@ -142,6 +143,7 @@ function ProjectChat({ row, onOpen }: { row: ChatRow; onOpen(tabId: string): voi
 
 function connectionCopy(stage: string, attempt: number): { title: string; hint?: string } {
   if (stage === "connected") return { title: "Live · end-to-end encrypted" };
+  if (stage === "disconnected-on-mac") return { title: "Disconnected on your Mac", hint: "This phone stays paired. Reconnect when you want it back." };
   if (stage === "unreachable") return { title: "Unreachable", hint: "Check that the Mac is awake and reachable over Wi-Fi, VPN, or relay." };
   if (stage === "cant-connect") return { title: `Can’t connect · attempt ${attempt}` };
   return { title: "Reconnecting…" };

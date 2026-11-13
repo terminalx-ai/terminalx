@@ -33,6 +33,9 @@ vi.mock("expo-speech-recognition", () => ({
   useSpeechRecognitionEvent: () => undefined,
 }));
 
+// The device's name is native: tests have none, and the name comes from Platform, unless a test says otherwise.
+vi.mock("expo-constants", () => ({ default: { deviceName: undefined } }));
+
 // The device's safe area is native: no notch, no home indicator in tests, unless a test says otherwise.
 vi.mock("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),

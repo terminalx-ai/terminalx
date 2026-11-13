@@ -1660,6 +1660,46 @@ pub async fn pairing_revoke(
     state.pairing.revoke_device(&device_id).await.map_err(err)
 }
 
+/// The person approved the phone waiting with `request_id` (PRO-314).
+#[tauri::command]
+pub async fn pairing_approve(
+    request_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.approve_pairing(&request_id)).await.map_err(err)?.map_err(err)
+}
+
+/// Off the main thread: declining removes the device token from the Keychain.
+#[tauri::command]
+pub async fn pairing_decline(
+    request_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.decline_pairing(&request_id)).await.map_err(err)?.map_err(err)
+}
+
+/// End a phone's connections and keep its pairing.
+#[tauri::command]
+pub async fn pairing_disconnect(
+    device_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.disconnect_device(&device_id)).await.map_err(err)?.map_err(err)
+}
+
+/// Keep this Mac awake while a phone is connected.
+#[tauri::command]
+pub async fn pairing_set_keep_awake(
+    enabled: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.set_keep_awake(enabled)).await.map_err(err)?.map_err(err)
+}
+
 /// This Mac's name as the user's other devices show it (#686).
 #[tauri::command]
 pub async fn machine_name(state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::pairing::MachineName> {
@@ -3181,6 +3221,40 @@ pub async fn pr_search(cwd: String, query: String) -> CmdResult<Vec<crate::githu
 #[tauri::command]
 pub async fn pr_attach(cwd: String, number: u64) -> CmdResult<String> {
     github_work(move || crate::github::attach_pr(Path::new(&cwd), number).map_err(err)).await.map_err(err)?
+}
+
+/// "Link pull request…" (PRO-294): the repository's open pull requests, and
+/// which of them this session or another one already shows.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrLinkCandidates {
+    #[serde(flatten)]
+    open: crate::github::OpenPrs,
+    /// Canonical URLs this session already shows (opened here or linked).
+    here: Vec<String>,
+    /// Canonical URLs another existing session shows.
+    elsewhere: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn pr_link_candidates(cwd: String, session_key: String) -> CmdResult<PrLinkCandidates> {
+    let open = github_work(move || crate::github::open_prs(Path::new(&cwd)).map_err(err)).await.map_err(err)??;
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<PrLinkCandidates> {
+        let urls: Vec<String> = open.prs.iter().map(|row| row.pr.url.clone()).collect();
+        let here = crate::pr_associations::for_session(&session_key, vec![])?.into_iter().map(|row| row.url).collect();
+        let elsewhere = crate::pr_associations::linked_elsewhere(&session_key, &urls)?.into_keys().collect();
+        Ok(PrLinkCandidates { open, here, elsewhere })
+    }).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn pr_link(session_key: String, association: crate::pr_associations::Association) -> CmdResult<Vec<crate::pr_associations::Association>> {
+    tauri::async_runtime::spawn_blocking(move || crate::pr_associations::link(&session_key, association).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_unlink(session_key: String, url: String) -> CmdResult<Vec<crate::pr_associations::Association>> {
+    tauri::async_runtime::spawn_blocking(move || crate::pr_associations::unlink(&session_key, &url).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -5226,6 +5300,41 @@ pub async fn orchestration_send_back(app: AppHandle, id: String, piece: String) 
 pub async fn orchestration_resolve_in_lead(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.orchestration("resolveInLead", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
+/// Have the lead take over a blocked piece and finish it in its own checkout (PRO-361).
+#[tauri::command]
+pub async fn orchestration_take_over(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("takeOver", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
+/// Check what the lead committed for a piece it took over, and make it done when its checks pass.
+#[tauri::command]
+pub async fn orchestration_finish(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finish", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
+/// Widen a blocked piece's files (the ones its last report names outside them, when `own` is empty) and try it again.
+#[tauri::command]
+pub async fn orchestration_widen(app: AppHandle, id: String, piece: String, own: Option<Vec<String>>) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("widen", serde_json::json!({"id": id, "piece": piece, "own": own.unwrap_or_default()})).map_err(err)).await.map_err(err)?
+}
+
+/// Send a blocked piece's worker a note: its try opens again.
+#[tauri::command]
+pub async fn orchestration_note(app: AppHandle, id: String, piece: String, text: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("note", serde_json::json!({"id": id, "piece": piece, "text": text})).map_err(err)).await.map_err(err)?
+}
+
+/// Leave a blocked piece out of its run, with the pieces that depend on it and have not started.
+#[tauri::command]
+pub async fn orchestration_skip(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("skip", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
 }
 
 /// Replace the plan of a run that has not started: what Edit saves.

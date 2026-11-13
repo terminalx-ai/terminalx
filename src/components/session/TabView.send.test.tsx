@@ -163,10 +163,14 @@ describe("sending a message (#727)", () => {
     // The median of five: the first send also pays for compiling the code it runs.
     const median = (times: number[]) => [...times].sort((a, b) => a - b)[Math.floor(times.length / 2)];
     const said = (times: { cpu: number[]; wall: number[] }) => `cpu ${times.cpu.map(Math.round).join(", ")} ms; wall ${times.wall.map(Math.round).join(", ")} ms`;
-    expect(median(atOnce.cpu), `drawn as sending: ${said(atOnce)}`).toBeLessThan(100);
-    expect(median(asSent.cpu), `drawn as sent: ${said(asSent)}`).toBeLessThan(100);
-    expect(median(atOnce.wall), `drawn as sending: ${said(atOnce)}`).toBeLessThan(400);
-    expect(median(asSent.wall), `drawn as sent: ${said(asSent)}`).toBeLessThan(400);
+    // Hosted CI runners are slower per core: medians of 108-114 ms CPU were
+    // measured there for the same work. The regression this guards (#727) cost
+    // 3-4 s, so three times the bound on CI still catches it many times over.
+    const slack = process.env.CI ? 3 : 1;
+    expect(median(atOnce.cpu), `drawn as sending: ${said(atOnce)}`).toBeLessThan(100 * slack);
+    expect(median(asSent.cpu), `drawn as sent: ${said(asSent)}`).toBeLessThan(100 * slack);
+    expect(median(atOnce.wall), `drawn as sending: ${said(atOnce)}`).toBeLessThan(400 * slack);
+    expect(median(asSent.wall), `drawn as sent: ${said(asSent)}`).toBeLessThan(400 * slack);
     expect(document.querySelectorAll("[data-turn]").length).toBeLessThan(20);
   });
 });

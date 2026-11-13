@@ -87,7 +87,8 @@ describe("familyNeeds", () => {
       ["approval", "lead", "Lead: Needs answer"],
       ["attention", "lead", "Over budget: $3.00 of $1.00"],
       ["approval", "w2", "Piece 2: Needs permission"],
-      ["attention", "w1", "Piece 1: Reported blocked: no access"],
+      // A blocked piece is answered in the lead's Run view (PRO-361).
+      ["attention", "lead", "Piece 1: Reported blocked: no access"],
     ]);
     expect(needsMark(needs)).toBe("attention");
     expect(needsMark(needs.filter((need) => need.kind === "approval"))).toBe("approval");

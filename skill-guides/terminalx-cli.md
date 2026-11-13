@@ -599,6 +599,11 @@ terminalx runs stop [<run>] --json
 terminalx runs check-failed <piece> [--run <run>] [--output <file>|-] [--reason <text>] --json
 terminalx runs merge [<run>] [--skip <piece>]... [--recheck] --json
 terminalx runs send-back <piece> [--run <run>] --json
+terminalx runs take-over <piece> [--run <run>] --json
+terminalx runs finish <piece> [--run <run>] --json
+terminalx runs widen <piece> [--own <path>]... [--run <run>] --json
+terminalx runs note <piece> --text <text>|--text-file <file>|- [--run <run>] --json
+terminalx runs skip <piece> [--run <run>] --json
 terminalx runs cleanup [<run>] --yes --json
 ```
 
@@ -862,10 +867,45 @@ conversation. A piece gets at most three tries:
 
 After the third try, or the second when no model tier above it is installed, the piece is
 `blocked` and its `note` says what was tried and what failed last. Three is also the most
-rounds of checking and fixing a piece gets: each try is checked once, and there is no fourth. A run in which nothing
-else can run is then `failed`, and `reason` names the piece. From there the choice is
-yours: `send` its last worker what it is missing (the piece is `running` again and takes
-its next report), do the piece yourself, or tell the person.
+rounds of checking and fixing a piece gets: each try is checked once, and there is no fourth
+unless the person widens the piece (below). The run does not fail on a blocked piece: it
+stays `running` and waits on the person, who sees four choices in the Run view. Each is a
+`runs` command too; `wait` tells you when nothing else is under way.
+
+#### A blocked piece
+
+- **Take over in lead.** `terminalx runs take-over <piece> --json` hands the piece to you:
+  you are sent its goal, what each try came to and where its work is, its worker's last
+  report and the files it names outside the piece's own. The piece is `lead`. Finish it in
+  your own checkout (you are not held to its files), commit, then run
+  `terminalx runs finish <piece> --json`: TerminalX runs the piece's command done-checks in
+  your checkout, and when they pass the piece is `done` and what waits for it can start. It
+  is already in your branch, so `runs merge` counts it as merged by hand. It returns `run`,
+  `piece`, `commit` and `checks`. Like resolving a conflict in the lead, it counts toward the
+  run's budget from the moment you are asked until the piece is settled. Nothing is merged
+  while a piece is with you (`runs merge` is refused with `piece_with_lead`), so `finish`
+  counts only what you committed.
+- **Widen scope and retry.** `terminalx runs widen <piece> [--own <path>]... --json` adds
+  files to what the piece owns and starts a fresh worker on its last try's model and effort
+  (step `widened`), briefed with what went before. Without `--own` it takes the files the
+  piece's last report and check name outside its scope (`outside` in `runs show`, each with
+  the `owner` piece when one owns it). It returns `run`, `piece`, `added`, `started` and
+  `failed`. A try after a widening that falls short blocks the piece again: there is no
+  ladder after it. A person approved the files each piece owns, so in a run they approved
+  only they widen one (`person_only`); a catch-all such as `**` is refused (`invalid_path`).
+  So are taking a piece over and skipping one in a run they approved: from the CLI those are
+  for a run that asked for no approval.
+- **Send a note to the worker.** `terminalx runs note <piece> --text <text> --json` sends the
+  piece's last worker the note in its own session and worktree, as yours (a person's note
+  says it is theirs). The piece is `running`
+  again and takes its next report, which is checked as any is.
+- **Skip piece.** `terminalx runs skip <piece> --json` leaves the piece out: no worker works
+  on it again and it is not merged. Pieces that depend on it and have not started are left
+  out with it (`skipped` lists them all). The run is done once every other piece is merged.
+  It asks no model, so it works while the run is paused on its budget.
+
+The person's choice is told to you in your session. Do not act on a blocked piece yourself
+unless the person asks you to; a piece you took over is yours to finish or skip.
 
 So after `wait` returns, read the run, not only the reports: `sessions report` still lists
 the worker that fell short with its `failed` report (or with a `done` report whose result
@@ -902,26 +942,30 @@ one to the piece's kind), `attempts`, `worker` (`sessionId`, `tabId`), `branch`,
 `startedMode`, `login` (`apiKey` or `subscription`), `queuedFor`, `note`, `costUsd` and
 `tries`. `model`, `effort`, `worker` and `branch` are those of its current try.
 
-`tries` is every try, oldest first: `step` (`first`, `retry`, `effort` or `tier`: what made
-it differ from the one before), `model`, `effort`, `tier`, `worker`, `branch`, `outcome`
-(`done`, `failed`, `partial`, `checkFailed`, `blocked`, `stopped`; absent while it runs),
-`detail` (the result line, or the failure text the next try was given), `costUsd`,
-`verification` (how its result was checked, above), `started` and `ended`.
+`tries` is every try, oldest first: `step` (`first`, `retry`, `effort`, `tier`, `widened` or
+`lead`: what made it differ from the one before), `model`, `effort`, `tier`, `worker`,
+`branch`, `outcome` (`done`, `failed`, `partial`, `checkFailed`, `blocked`, `stopped`;
+absent while it runs), `detail` (the result line, or the failure text the next try was
+given), `report` (its worker's report: `result`, `evidence`, `changed`, `notDone`,
+`couldNotRead`, `uncertain`), `costUsd`, `outputTokens`, `verification` (how its result was
+checked, above; its `facts.changes` lists each changed file with lines `added` and
+`removed`), `fromCommit` (a try you took over: where your branch was then), `started` and
+`ended`.
 
 - Run `state`: `planned`, `awaitingApproval`, `running`, `needsYou`, `verifying`, `merging`,
   `done`, `stopped`, `failed`. A run is `merging` when every piece's result is accepted, and
   `done` once `runs merge` has merged them all into your branch and the checks passed on the
-  merged result (below). It is `failed` when a piece ran out of tries and nothing is running
-  or could start; `reason` names the piece and what it holds up. A failed run goes back to
-  `running` when that piece's worker finishes after all. `needsYou`: it reached its budget
-  (see below).
+  merged result (below), counting a skipped piece as settled. A blocked piece leaves it
+  `running`, waiting on the person. It is `failed` only for a run stored before tries were
+  kept, whose piece's worker reported `failed` and nothing else can run. `needsYou`: it reached its
+  budget (see below).
 - Piece `state` follows its worker's last report, each time the run is read: `queued` (no
   worker yet, or its next try waits for one), `running`, `verifying` (it reported `done`
   and its result is being checked), `done` (its result passed every check), `blocked` (it
   ran out of tries, reported `blocked`, waits on a person, its review could not be finished,
   or its session was deleted; `note` says which), `failed` (its worker could not be
-  started), `stopped`. A `done` piece stays done when its worker's session is deleted
-  afterwards.
+  started), `stopped`, `skipped` (a person left it out) and `lead` (you took it over). A
+  `done` piece stays done when its worker's session is deleted afterwards.
 
 #### Limits and budget
 
@@ -966,8 +1010,8 @@ in `usage`.
 
 
 A `done` piece passed its checks; that is as much as they prove. When you find something
-they did not catch, report it with `runs check-failed`. To get a `blocked` piece moving, `send` its worker what it needs: the piece is `running` again while
-the worker works, and takes its next report.
+they did not catch, report it with `runs check-failed`. A `blocked` piece is the person's
+to decide (above); `runs note` is how a note reaches its worker, so the piece follows it.
 
 `runs stop` stops every running worker and marks the run `stopped`; pieces that were not
 done become `stopped`. It returns `stopped` (pieces whose worker was running) and `failed`
@@ -1700,6 +1744,17 @@ JSON failures have this shape:
   `runs merge` merged nothing; `message` and `recovery` say what to change first.
 - `nothing_to_send_back`: the piece has no failed merge; `runs send-back` is for a piece
   whose accepted result conflicts or failed the integration check.
+- `piece_not_blocked`: `take-over`, `widen`, `note` and `skip` are for a piece that is
+  `blocked` (or `failed`; `skip` also takes one you took over). `details.state` says where
+  it is.
+- `nothing_to_widen`, `owned_by_another`, `invalid_path`, `person_only`: `runs widen` added nothing. Name
+  the files with `--own`, wait until the piece that owns a file is done, or give a path
+  relative to the repository's root.
+- `worker_gone`, `empty_note`, `note_not_taken`: `runs note` reached no worker; widen the
+  piece to start a fresh one.
+- `lead_busy`: you already have a piece of this run to finish. `not_taken_over`,
+  `uncommitted`, `nothing_committed`, `checks_failed`: `runs finish` did not make the piece
+  done; commit your work, or fix what the check printed (`details.check`), and finish again.
 - `lead_required`, `lead_not_found`, `not_a_repository`: a run needs a lead session the app
   knows, in a project that is a git repository.
 - `confirmation_required`: inspect the target, then repeat the destructive command with

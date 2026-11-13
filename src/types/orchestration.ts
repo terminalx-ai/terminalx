@@ -2,7 +2,8 @@
  * Mirrors `src-tauri/src/orchestration/mod.rs`, as `engine::shown` sends it. */
 
 export type RunState = "planned" | "awaitingApproval" | "running" | "needsYou" | "verifying" | "merging" | "done" | "stopped" | "failed";
-export type PieceState = "queued" | "running" | "stalled" | "verifying" | "done" | "blocked" | "failed" | "stopped";
+/** `skipped`: a person left it out; `lead`: the lead took it over and finishes it in its own checkout (PRO-361). */
+export type PieceState = "queued" | "running" | "stalled" | "verifying" | "done" | "blocked" | "failed" | "stopped" | "skipped" | "lead";
 /** What keeps a piece the lead asked for from starting (PRO-280). */
 export type RunHold = "runLimit" | "appLimit" | "budget";
 
@@ -73,7 +74,7 @@ export type RoutingTable = Record<PieceKind, Record<RoutedAgent, Route>>;
 export type TierModels = Record<RoutedAgent, Record<Tier, { id: string; label: string; efforts: string[]; defaultEffort: string | null } | null>>;
 
 /** What made a try differ from the one before it (`ladder::Step`). */
-export type TryStep = "first" | "retry" | "effort" | "tier";
+export type TryStep = "first" | "retry" | "effort" | "tier" | "widened" | "lead";
 export type TryOutcome = "done" | "failed" | "partial" | "checkFailed" | "blocked" | "stopped";
 
 /** One of the checks a result goes through, in the order they run (`verify::Gate`). Only `review` uses a model. */
@@ -133,13 +134,36 @@ export interface RunReview {
 /** How one try's result was checked (`verify::Verification`): the gates that ran, in order, a failure last. */
 export interface RunVerification {
   gates: GateResult[];
-  facts?: { files: string[]; changedLines: number; securityAreas?: string[]; /** The piece has commands and TerminalX did not run them unasked. */ commandsNotRun?: boolean; commit?: string };
+  facts?: { files: string[]; changedLines: number; /** Each changed file with its lines, as `git diff --numstat` counts them. */ changes?: FileChange[]; securityAreas?: string[]; /** The piece has commands and TerminalX did not run them unasked. */ commandsNotRun?: boolean; commit?: string };
   review?: RunReview;
   /** Absent while it is under way. */
   outcome?: "passed" | "failed" | "inconclusive";
   failure?: string;
   started?: string;
   ended?: string;
+}
+
+/** One changed file; a binary file has no lines to count. */
+export interface FileChange {
+  path: string;
+  added?: number;
+  removed?: number;
+}
+
+/** What a worker's report said beyond its status (`TryReport`). */
+export interface TryReport {
+  result: string;
+  evidence?: string[];
+  changed?: { files: string[]; branch?: string; commit?: string };
+  notDone?: string[];
+  couldNotRead?: string[];
+  uncertain?: string[];
+}
+
+/** A file a piece's last report or check names that it does not own, and the piece that owns it. */
+export interface OutsideFile {
+  path: string;
+  owner?: string;
 }
 
 /** One try at a piece: the worker it ran in, on what, at what cost, to what end. */
@@ -162,6 +186,12 @@ export interface PieceTry {
   costUnpricedModels?: string[];
   /** How its result was checked; absent before its worker reported. */
   verification?: RunVerification;
+  /** Its worker's report, in full; absent before it reported. */
+  report?: TryReport;
+  /** The output tokens its worker's session used. */
+  outputTokens?: number;
+  /** A try the lead took over: the commit its branch was at then. */
+  fromCommit?: string;
   started?: string;
   ended?: string;
 }
@@ -247,6 +277,8 @@ export interface RunPiece {
   note?: string;
   /** What came of merging its accepted result; absent before that was tried. */
   merge?: PieceMerge;
+  /** Files its last report or check names outside what it owns (`runs show`). */
+  outside?: OutsideFile[];
 }
 
 /** What came of bringing a piece's accepted result into the lead's branch (`orchestration::MergeState`). */

@@ -445,7 +445,8 @@ describe("a repository's own routing table (PRO-275)", () => {
       { project: "/repo", routing: { code: { claude: { tier: "top", effort: "medium" } } } },
       { project: "/repo", routing: { code: { claude: null } } },
     ]);
-    expect(chosen(select("Claude Code model for code"))).toBe("Default (Sonnet 5.5)");
+    // The select follows the saved table one render after the store has it.
+    await waitFor(() => expect(chosen(select("Claude Code model for code"))).toBe("Default (Sonnet 5.5)"));
   });
 
   it("drops every row of its own with Follow the defaults", async () => {
