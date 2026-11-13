@@ -175,6 +175,44 @@ pub fn list_dir(root: &Path, rel: &str) -> Result<Vec<DirEntry>> {
     Ok(out)
 }
 
+/// Every file the All files tree can show, for its name filter: the same
+/// rules as [`list_dir`] (hidden files included, `.gitignore`d ones left
+/// out), walked to the bottom. `truncated` when `limit` cut it short.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileList {
+    pub paths: Vec<String>,
+    pub truncated: bool,
+}
+
+pub fn list_all(root: &Path, limit: usize) -> Result<FileList> {
+    let mut paths = Vec::new();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !(name == ".git" || name == ".raccoon" || name == ".DS_Store")
+        })
+        .build();
+    for entry in walker.flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        if paths.len() >= limit {
+            return Ok(FileList { paths, truncated: true });
+        }
+        if let Ok(rel) = entry.path().strip_prefix(root) {
+            paths.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    Ok(FileList { paths, truncated: false })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextFile {
@@ -686,6 +724,27 @@ fn rewrite_text(rw: &Rewriter, text: &str, lines: Option<&[u32]>) -> (String, us
 #[cfg(test)]
 mod tree_tests {
     use super::*;
+
+    /// The All files filter sees what the tree shows: hidden files and
+    /// folders such as node_modules unless .gitignore leaves them out.
+    #[test]
+    fn the_filter_list_follows_the_trees_rules_and_says_when_it_was_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        for path in [".github/workflows/ci.yml", ".env.example", "node_modules/pkg/index.js", "src/main.rs", "build/out.bin", ".git/HEAD", ".raccoon/x", ".DS_Store"] {
+            std::fs::create_dir_all(p.join(path).parent().unwrap()).unwrap();
+            std::fs::write(p.join(path), "x").unwrap();
+        }
+        std::fs::write(p.join(".gitignore"), "build/\n").unwrap();
+        let mut all = list_all(p, 100).unwrap();
+        all.paths.sort();
+        assert_eq!(all.paths, [".env.example", ".github/workflows/ci.yml", ".gitignore", "node_modules/pkg/index.js", "src/main.rs"]);
+        assert!(!all.truncated);
+        let cut = list_all(p, 2).unwrap();
+        assert_eq!(cut.paths.len(), 2);
+        assert!(cut.truncated, "a capped list says so");
+        assert!(!list_all(p, 5).unwrap().truncated, "exactly the limit is complete");
+    }
 
     #[test]
     fn lists_reads_writes_and_greps() {

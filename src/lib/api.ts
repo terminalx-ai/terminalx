@@ -2127,8 +2127,15 @@ export interface SlashCommand {
   source: "builtin" | "plugin" | "user";
 }
 
+/** Every file the All files tree shows (hidden ones too, `.gitignore`d ones not), cut at `limit`. */
+export interface FileList {
+  paths: string[];
+  truncated: boolean;
+}
+
 export const files = {
   search: (cwd: string, query: string, limit = 40) => invoke<FileHit[]>("search_files", { cwd, query, limit }),
+  list: (cwd: string, limit?: number) => invoke<FileList>("list_files", { cwd, limit: limit ?? null }),
   invalidate: (cwd: string) => invoke<void>("invalidate_file_index", { cwd }),
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
   /** The plain text of the drag that just ended on the window: the drop event itself carries only file paths. */

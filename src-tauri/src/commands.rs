@@ -2992,6 +2992,14 @@ pub async fn status_resource_kill(
 // ------------------------------------------------------------------ files & commands
 
 #[tauri::command]
+pub async fn list_files(cwd: String, limit: Option<usize>) -> CmdResult<crate::files::FileList> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::list_all(Path::new(&cwd), limit.unwrap_or(60_000)))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
 pub async fn search_files(cwd: String, query: String, limit: Option<usize>) -> CmdResult<Vec<crate::files::FileHit>> {
     tauri::async_runtime::spawn_blocking(move || crate::files::search(Path::new(&cwd), &query, limit.unwrap_or(40)).map_err(err))
         .await

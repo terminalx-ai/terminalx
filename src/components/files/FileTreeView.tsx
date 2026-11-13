@@ -11,7 +11,6 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import type { ChangeStatus } from "@/types/session";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { copyText } from "@/lib/clipboard";
-import { showError } from "@/lib/errorToasts";
 import { openProjectSearch } from "@/lib/projectSearch";
 import { keycaps, useKeymap } from "@/lib/shortcuts";
 import { Button } from "@/components/ui/button";
@@ -33,6 +32,9 @@ interface Row {
  * `query`, and the folders above them, from the workspace's whole file list.
  * Counts are entries (files and folders) that match, and all of them.
  */
+/** The most files the filter reads; past it the count says it is incomplete. */
+export const FILTER_LIMIT = 60_000;
+
 export function filterRows(paths: string[], query: string, rootName: string): { rows: Row[]; matched: number; total: number } {
   const q = query.toLocaleLowerCase();
   const kids = new Map<string, Map<string, boolean>>();
@@ -138,9 +140,11 @@ function RootedFileTreeView({
   const container = useRef<HTMLDivElement>(null);
   const filterInput = useRef<HTMLInputElement>(null);
   const [filter, setFilter] = useState("");
-  const [allFiles, setAllFiles] = useState<string[] | null>(null);
+  // The whole list for the filter, by the tree's own rules; `truncated` when the cap cut it.
+  const [allFiles, setAllFiles] = useState<{ paths: string[]; truncated: boolean } | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
   const query = filter.trim();
-  const canFilter = !!reader.findFiles;
+  const canFilter = !!reader.listFiles;
   const filtering = canFilter && query !== "";
   const searchKeys = useKeymap()["files.search"][0];
   const editors = useEditors();
@@ -175,18 +179,21 @@ function RootedFileTreeView({
   // The whole file list, read once a filter is typed and again after a refresh.
   const wanted = filtering && active;
   useEffect(() => {
-    if (!wanted || !reader.findFiles) return;
+    if (!wanted || !reader.listFiles) return;
     let cancelled = false;
+    setListError(null);
     reader
-      .findFiles("", 200000)
-      .then((hits) => !cancelled && setAllFiles(hits.map((h) => h.path)))
+      .listFiles(FILTER_LIMIT)
+      .then((list) => {
+        if (!cancelled) setAllFiles(list);
+      })
       .catch((e) => {
-        if (!cancelled) showError("Filter files by name", e);
+        if (!cancelled) setListError(source ? fileErrorText(e) : String(e));
       });
     return () => {
       cancelled = true;
     };
-  }, [wanted, reader, refreshTick]);
+  }, [wanted, reader, refreshTick, source]);
 
   // First listing on show; a refresh re-lists every directory still open.
   useEffect(() => {
@@ -276,7 +283,7 @@ function RootedFileTreeView({
   );
 
   // The visible rows, flattened, so keyboard movement is index arithmetic.
-  const filtered = useMemo(() => (filtering && allFiles ? filterRows(allFiles, query, rootName) : null), [filtering, allFiles, query, rootName]);
+  const filtered = useMemo(() => (filtering && allFiles ? filterRows(allFiles.paths, query, rootName) : null), [filtering, allFiles, query, rootName]);
   const plainRows = useMemo(() => {
     const out: Row[] = [{ path: "", name: rootName, isDir: true, depth: 0 }];
     const walk = (rel: string, depth: number) => {
@@ -290,7 +297,9 @@ function RootedFileTreeView({
     if (expanded.has("")) walk("", 1);
     return out;
   }, [children, expanded, rootName]);
-  const rows = filtered ? filtered.rows : plainRows;
+  // While the list loads, or when it could not, the plain tree's folders would not answer to the
+  // filter: show nothing in their place (the state says why).
+  const rows = filtered ? filtered.rows : filtering ? [] : plainRows;
   const noMatch = !!filtered && filtered.matched === 0;
 
   const activate = useCallback(
@@ -406,8 +415,12 @@ function RootedFileTreeView({
               className="min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-faint"
             />
             {filtering && filtered && (
-              <span className="shrink-0 whitespace-nowrap text-[11px] tabular-nums text-faint" data-testid="file-tree-filter-count">
-                {filtered.matched} of {filtered.total}
+              <span
+                className="shrink-0 whitespace-nowrap text-[11px] tabular-nums text-faint"
+                data-testid="file-tree-filter-count"
+                title={allFiles?.truncated ? `Only the first ${FILTER_LIMIT.toLocaleString()} files are filtered` : undefined}
+              >
+                {filtered.matched} of {filtered.total}{allFiles?.truncated ? "+" : ""}
               </span>
             )}
             {filter && (
@@ -426,6 +439,17 @@ function RootedFileTreeView({
       className="animate-panel-content min-h-0 flex-1 overflow-auto py-1 outline-none scrollbar-thin focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/40"
     >
       {error && <div className="px-3 py-2 text-xs text-destructive">{error}</div>}
+      {filtering && listError && (
+        <div role="alert" className="px-3 py-2 text-xs text-destructive" data-testid="file-tree-filter-error">
+          Couldn’t list the files to filter: {listError}
+        </div>
+      )}
+      {filtering && !listError && !allFiles && <div className="px-3 py-2 text-xs text-faint">Listing files…</div>}
+      {filtering && allFiles?.truncated && !noMatch && (
+        <div className="px-3 py-1 text-[11px] text-faint" data-testid="file-tree-filter-truncated">
+          Only the first {FILTER_LIMIT.toLocaleString()} files are filtered.
+        </div>
+      )}
       {noMatch && (
         <div className="px-6 pt-10 text-center" data-testid="file-tree-no-match">
           <div className="mx-auto grid size-9 place-items-center rounded-lg bg-veil-strong text-muted-foreground">

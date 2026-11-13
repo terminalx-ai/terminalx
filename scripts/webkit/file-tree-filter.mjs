@@ -25,7 +25,7 @@ function setup() {
     list_sessions: [{ id: "filter-session", projectPath: "/repos/p0", cwd: "/repos/p0", title: "Filter session", created: at, modified: at, archived: false, pinned: false, worktreeRemoved: false, branch: "main", tabs: [tab("first", "First conversation")], activeTab: "first" }],
     list_workspaces: [{ path: "/repos/p0", name: "local-0", branch: "main", head: "abc", isMain: true, managed: false, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 }],
     list_dir: ({ rel }) => (rel ? [] : top),
-    search_files: ({ query, limit }) => paths.slice(0, limit).map((path) => ({ path, name: path.split("/").pop(), score: 0 })),
+    list_files: () => ({ paths, truncated: false }),
     load_tab_events: [], tab_pane: null, pty_shells: [], pty_detach_all: null, browser_pages: [], set_active_tab: null,
     work_status: { isRepo: true, dirty: false, branch: "main", defaultBranch: "main", head: "abc" },
     working_changes: ["abc", []],
