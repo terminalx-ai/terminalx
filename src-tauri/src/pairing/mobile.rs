@@ -2153,6 +2153,7 @@ mod tests {
             Payload::UserMessage { author: None,
                 text: format!("prompt {seq}"),
                 images: Vec::new(),
+                files: Vec::new(),
                 baseline: None,
                 queued: false,
                 cwd: None,

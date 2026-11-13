@@ -27,6 +27,8 @@ pub(super) struct Sent {
     pub seq: u64,
     pub text: String,
     pub images: Vec<ImageRef>,
+    /// Its attached files (PRO-290), typed again as the block they went in.
+    pub files: Vec<FileRef>,
     pub unconfirmed: bool,
 }
 
@@ -125,6 +127,7 @@ pub(super) fn said_in(log: &Path, conversation: Option<&str>) -> Said {
                     seq,
                     text: payload["text"].as_str().unwrap_or_default().to_string(),
                     images: serde_json::from_value(payload["images"].clone()).unwrap_or_default(),
+                    files: serde_json::from_value(payload["files"].clone()).unwrap_or_default(),
                     unconfirmed: false,
                 };
                 if payload["queued"].as_bool() == Some(true) { pending.insert(seq); }
@@ -153,6 +156,7 @@ pub(super) fn sent_at(log: &Path, seq: u64) -> Option<Sent> {
             seq,
             text: payload["text"].as_str().unwrap_or_default().to_string(),
             images: serde_json::from_value(payload["images"].clone()).unwrap_or_default(),
+            files: serde_json::from_value(payload["files"].clone()).unwrap_or_default(),
             unconfirmed: false,
         })
     })
@@ -222,6 +226,7 @@ impl SessionManager {
     /// that message's echo. Delivery is held to the same proof as any
     /// composer prompt's.
     fn redeliver(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, mut sent: Sent) {
+        sent.text = crate::attachments::with_block(&sent.text, &sent.files);
         match crate::checkpoints::sent_context(&rt.session_id, &rt.tab_id, sent.seq) {
             Ok(context) if !context.is_empty() => sent.text.push_str(&format!("\n\n{context}")),
             Err(error) => {
@@ -234,7 +239,7 @@ impl SessionManager {
         let Engine::Cli(p) = &rt.engine else { return };
         let (pane, ready, stops) = (p.pane_id.clone(), p.ready.clone(), p.input.stops);
         let queued = rt.turn_open && !rt.turn_by_command;
-        let echo = ComposerEcho { queued, seq: sent.seq, ..ComposerEcho::new(sent.text.clone(), sent.images.len()) };
+        let echo = ComposerEcho { queued, seq: sent.seq, ..ComposerEcho::new(crate::attachments::split_block(&sent.text).0, sent.images.len()) };
         self.await_composer_echo(rt, echo, &sent.text);
         let attachments = sent.images.iter().map(|image| image.url.clone()).collect();
         self.type_prompt(rt_arc, &pane, sent.text, attachments, PromptDelivery { ready: Some(ready), seq: Some(sent.seq), queued, stops, ..Default::default() });
@@ -257,8 +262,9 @@ impl SessionManager {
         let log = store::log_path(session_id, tab_id)?;
         let sent = sent_at(&log, seq).ok_or_else(|| anyhow!("That message is no longer in this conversation's record."))?;
         let images = sent.images.iter().map(image_input).collect::<Result<Vec<_>>>()?;
+        let files = crate::attachments::admit_refs(session_id, &sent.files, images.len())?;
         crate::checkpoints::requeue_sent(session_id, tab_id, seq)?;
-        self.send(session_id, tab_id, sent.text, images)
+        self.send_pressed(session_id, tab_id, sent.text, images, None, files)
     }
 
     /// The last prompt the tab's agent never answered, as it was sent: what
@@ -299,7 +305,7 @@ mod tests {
     }
 
     fn sent(seq: u64, text: &str) -> Sent {
-        Sent { seq, text: text.into(), images: Vec::new(), unconfirmed: false }
+        Sent { seq, text: text.into(), images: Vec::new(), files: Vec::new(), unconfirmed: false }
     }
 
     fn log(lines: &[String]) -> (tempfile::TempDir, PathBuf) {

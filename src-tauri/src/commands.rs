@@ -2700,6 +2700,7 @@ pub fn session_guest_send(state: State<'_, AppState>, connection_id: String, req
 pub fn session_guest_leave(state: State<'_, AppState>, connection_id: Option<String>) { state.pairing.leave_guest_connection(connection_id.as_deref()); }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn send_message(
     state: State<'_, AppState>,
     session_id: String,
@@ -2708,17 +2709,41 @@ pub async fn send_message(
     images: Option<Vec<ImageInput>>,
     confirm_delivery: Option<bool>,
     pressed_at: Option<i64>,
+    files: Option<Vec<crate::events::FileRef>>,
 ) -> CmdResult<SendOutcome> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let files = files.unwrap_or_default();
         if confirm_delivery.unwrap_or(false) {
+            if !files.is_empty() { return Err(err("A handoff cannot carry attached files.")); }
             m.send_confirmed(&session_id, &tab_id, text).map_err(err)
         } else {
-            m.send_pressed(&session_id, &tab_id, text, images.unwrap_or_default(), pressed_at).map_err(err)
+            m.send_pressed(&session_id, &tab_id, text, images.unwrap_or_default(), pressed_at, files).map_err(err)
         }
     })
         .await
         .map_err(err)?
+}
+
+/// Copy files into one new folder of the session's attachments folder
+/// (PRO-290), for a message to carry. Refuses reserved names, files over the
+/// size limit and more than ten.
+#[tauri::command]
+pub async fn store_attachments(session_id: String, files: Vec<crate::attachments::FileInput>) -> CmdResult<Vec<crate::events::FileRef>> {
+    tauri::async_runtime::spawn_blocking(move || crate::attachments::store(&session_id, &files).map_err(err)).await.map_err(err)?
+}
+
+/// Size and media type of dropped or picked paths, in the order given.
+#[tauri::command]
+pub async fn inspect_attachments(paths: Vec<String>) -> CmdResult<Vec<crate::attachments::FileFacts>> {
+    tauri::async_runtime::spawn_blocking(move || Ok(crate::attachments::inspect(&paths))).await.map_err(err)?
+}
+
+/// A file tab's Download: a copy of a stored attachment, written where the
+/// person chose in the save dialog.
+#[tauri::command]
+pub async fn save_attachment_copy(path: String, to: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::attachments::save_copy(&path, &to).map_err(err)).await.map_err(err)?
 }
 
 /// The chat drew a message it sent (#727): its timings go into the tab's

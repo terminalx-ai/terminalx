@@ -64,7 +64,7 @@ fn empty_write_retries_revalidate_mobile_and_shared_authority() {
             let launch = engine.launch.clone();
             let mut rt = rt_arc.lock().unwrap();
             rt.engine = Engine::CodexStdio(engine);
-            let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, text: "revocable prompt".into(), images: vec![], baseline: None, queued: true, cwd: None }, None).seq;
+            let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, text: "revocable prompt".into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None }, None).seq;
             rt.stdio_followups.active = Some((seq, false));
             rt.open_turn();
             let sink = Arc::new(StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
@@ -131,7 +131,7 @@ fn recreated_runtime_reconciles_pending_prompts_and_acknowledged_turns() {
         let manager = make_manager();
         let rt_arc = manager.runtime("stdio-recovery", "tab").unwrap();
         let mut rt = rt_arc.lock().unwrap();
-        let user = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: vec![], baseline: None, queued: true, cwd: None };
+        let user = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None };
         let first = manager.publish(&mut rt, user("first"), None).seq;
         if matches!(state, "acknowledged" | "started" | "active-with-pending" | "completed" | "completed-with-pending") {
             manager.publish(&mut rt, Payload::PromptAbsorbed { prompt_seq: first }, None);
@@ -1786,7 +1786,7 @@ fn child_fixture() {
         const REVOKED: &str = "account/read failed: workspace routing discovery unauthorized (401)";
         let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
         engine.start("fix the build".into(), Vec::new()).unwrap();
-        manager.publish(&mut rt, Payload::UserMessage { author: None, text: "fix the build".into(), images: vec![], baseline: None, queued: false, cwd: None }, None);
+        manager.publish(&mut rt, Payload::UserMessage { author: None, text: "fix the build".into(), images: vec![], files: Vec::new(), baseline: None, queued: false, cwd: None }, None);
         rt.open_turn();
         drop(rt);
         let sink = StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) };

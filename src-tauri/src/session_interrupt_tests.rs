@@ -293,7 +293,7 @@ impl Headless {
             let record = format!("cat > '{}'", wire.display());
             rig.manager.spawn_child(&mut rt, &rig.rt, Path::new("/bin/sh"), &["-c".to_string(), record], &cwd).unwrap();
             // The first prompt, as `send` starts one on a tab with no process yet.
-            rig.manager.publish(&mut rt, Payload::UserMessage { author: None, text: "first".into(), images: Vec::new(), baseline: None, queued: false, cwd: Some(cwd.clone()) }, None);
+            rig.manager.publish(&mut rt, Payload::UserMessage { author: None, text: "first".into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: Some(cwd.clone()) }, None);
             let Engine::Acp(agent) = &mut rt.engine else { unreachable!() };
             let actions = agent.start("first".into(), Vec::new());
             rig.manager.apply_actions(&mut rt, actions);

@@ -293,7 +293,7 @@ fn a_new_message_brings_an_archived_session_back() {
         std::sync::Arc::new(crate::harness::host::Host::new()), std::sync::Arc::new(crate::pty::Terminals::new()),
         std::sync::Arc::new(Default::default()), std::sync::Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
     );
-    let message = |text: &str| crate::events::Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+    let message = |text: &str| crate::events::Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
 
     // The agent's own words are not a message to the session.
     manager.publish_external("archived", "archived-tab", crate::events::Payload::Status { text: "Stopped".into() }).unwrap();

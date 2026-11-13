@@ -219,12 +219,16 @@ impl Sessions {
     }
 
     pub fn send(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
-        self.send_pressed(session, tab, text, images, None)
+        self.send_pressed(session, tab, text, images, None, Vec::new())
     }
 
     /// A composer's send, with when Send was pressed (`SessionManager::send_pressed`).
-    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>) -> Result<SendOutcome> {
-        self.tab("send", session, tab, json!({"text":text,"images":images,"pressedAt":pressed_at}))
+    /// `files`: stored attachments (PRO-290), sent only when there are any,
+    /// so an older runtime is never handed a parameter it does not know.
+    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<crate::events::FileRef>) -> Result<SendOutcome> {
+        let mut params = json!({"text":text,"images":images,"pressedAt":pressed_at});
+        if !files.is_empty() { params["files"] = json!(files); }
+        self.tab("send", session, tab, params)
     }
 
     /// The window drew a sent message (`SessionManager::note_shown`).

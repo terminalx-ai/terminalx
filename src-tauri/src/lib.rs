@@ -92,6 +92,7 @@ mod floating;
 #[cfg(feature = "desktop")]
 mod media;
 mod media_types;
+mod attachments;
 mod branch_overview;
 #[cfg(feature = "desktop")]
 mod branch_step;
@@ -768,6 +769,9 @@ pub fn run() {
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
+            commands::store_attachments,
+            commands::inspect_attachments,
+            commands::save_attachment_copy,
             commands::report_send_shown,
             commands::report_terminal_view,
             commands::report_recovery_ui,

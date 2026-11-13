@@ -494,8 +494,10 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
         }
         return;
     }
-    let text = as_typed(prompt);
-    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+    // The paths of attached files went to the model after the typed text
+    // (PRO-290): the chat shows them as files again.
+    let (text, files) = crate::attachments::split_block(&as_typed(prompt));
+    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), files, baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
 /// What started a turn when the prompt in a `user` record is not the
@@ -611,8 +613,10 @@ fn decode_queued_prompt(v: &Value, out: &mut Vec<Payload>) {
     if prompt.trim().is_empty() || command_output(&prompt) {
         return;
     }
-    let text = as_typed(prompt);
-    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+    // The paths of attached files went to the model after the typed text
+    // (PRO-290): the chat shows them as files again.
+    let (text, files) = crate::attachments::split_block(&as_typed(prompt));
+    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), files, baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
 fn decode_assistant(v: &Value, out: &mut Vec<Payload>) {
