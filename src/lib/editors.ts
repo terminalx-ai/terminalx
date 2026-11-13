@@ -44,7 +44,22 @@ interface EditorBase {
   jump?: { line: number; col?: number; nonce: number };
 }
 
-export interface FileEditorEntry extends EditorBase { kind: FileKind }
+export interface FileEditorEntry extends EditorBase {
+  kind: FileKind;
+  /**
+   * A file attached to a sent message (PRO-290, screen 03.22): read-only,
+   * with Copy and Download in place of Save. `root` is the session's
+   * attachments folder, `rel` is `<folder>/<name>`.
+   */
+  attachment?: AttachmentInfo;
+}
+
+export interface AttachmentInfo {
+  /** The absolute stored path (`FileRef.path`). */
+  path: string;
+  /** When the message carrying it was sent (its `messageTs`), for "on your message · HH:MM". */
+  sentAt?: string;
+}
 export type DiffMode = "diff" | "entire" | "preview" | "edit";
 export interface DiffEditorEntry extends EditorBase {
   kind: "diff";
@@ -178,7 +193,7 @@ let nonce = 0;
  * reader wants a line, which only source can show, so it forces source mode.
  */
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
-  const existing = state.editors.find((e) => !isReviewEditor(e) && e.sessionId === sessionId && e.root === root && e.rel === rel);
+  const existing = state.editors.find((e) => !isReviewEditor(e) && !e.attachment && e.sessionId === sessionId && e.root === root && e.rel === rel);
   const selected = getTerminalState().selected[sessionId];
   if (selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
   const kind = fileKind(rel);
@@ -205,6 +220,43 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
     kind,
     viewMode: jump ? "source" : isMarkdown(rel) ? "preview" : "source",
     jump,
+  };
+  set({ editors: [...state.editors, entry], active: { ...state.active, [sessionId]: id }, collapsed });
+  return id;
+}
+
+/**
+ * Open (or focus) a file attached to a sent message (PRO-290) in a centre
+ * tab of its session. Stored at `…/attachments/<session>/<folder>/<name>`:
+ * the tab hangs off the session's attachments folder with `<folder>/<name>`
+ * as its path, so two files of one name sent in different messages are two
+ * tabs. Images, audio and video open in the media surfaces; markdown in
+ * Preview. Opening it again focuses the tab it already has.
+ */
+export function openAttachment(sessionId: string, file: { path: string; name: string }, sentAt?: string, workspaceRoot?: string) {
+  const parts = file.path.split("/");
+  if (parts.length < 4 || !file.path.startsWith("/") || parts.includes("..")) throw new Error("This attachment's path is not a stored file.");
+  const root = parts.slice(0, -2).join("/");
+  const rel = parts.slice(-2).join("/");
+  const id = JSON.stringify([sessionId, "attachment", file.path]);
+  const selected = getTerminalState().selected[sessionId];
+  if (selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
+  const collapsed = { ...state.collapsed, [sessionId]: false };
+  if (state.editors.some((e) => e.id === id)) {
+    set({ active: { ...state.active, [sessionId]: id }, collapsed });
+    return id;
+  }
+  const entry: FileEditorEntry = {
+    id,
+    sessionId,
+    workspaceRoot: workspaceRoot ?? root,
+    root,
+    rel,
+    name: file.name || fileName(rel),
+    dirty: false,
+    kind: fileKind(rel),
+    viewMode: isMarkdown(rel) ? "preview" : "source",
+    attachment: { path: file.path, ...(sentAt ? { sentAt } : {}) },
   };
   set({ editors: [...state.editors, entry], active: { ...state.active, [sessionId]: id }, collapsed });
   return id;
@@ -365,7 +417,7 @@ export function pruneReviewTabs(sessions: readonly { id: string; worktreeRemoved
 
 export function setEditorDirty(id: string, dirty: boolean) {
   const e = state.editors.find((x) => x.id === id);
-  if (!e || (e.kind !== "text" && e.kind !== "diff") || e.dirty === dirty) return;
+  if (!e || (e.kind !== "text" && e.kind !== "diff") || e.dirty === dirty || (e.kind === "text" && e.attachment && dirty)) return;
   set({ editors: state.editors.map((x) => (x.id === id ? { ...x, dirty } : x)) });
 }
 

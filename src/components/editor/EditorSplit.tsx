@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { FileTypeIcon } from "@/components/files/FileTypeIcon";
 import { cn } from "@/lib/cn";
+import { shortPath } from "@/lib/paths";
 import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import {
@@ -150,7 +151,8 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab, revi
                 role="tab"
                 aria-selected={isActive}
                 tabIndex={0}
-                title={e.rel}
+                title={"attachment" in e && e.attachment ? shortPath(e.attachment.path) : e.rel}
+                data-attachment={"attachment" in e && e.attachment ? "" : undefined}
                 onClick={() => setActiveEditor(sessionId, e.id)}
                 onKeyDown={(k) => k.key === "Enter" && setActiveEditor(sessionId, e.id)}
                 onAuxClick={(k) => k.button === 1 && void closeEditor(e.id)}

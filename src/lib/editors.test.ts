@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, setDiffMode, serializeReviewTabs, restoreReviewTabs, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
+import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, setDiffMode, serializeReviewTabs, restoreReviewTabs, openAttachment, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 
 afterEach(async () => {
@@ -180,5 +180,43 @@ describe("conflict tabs (PRO-293)", () => {
     }
     const escaped = { ...saved, editors: saved.editors.map((e: { id: string }) => e.id === id ? { ...e, rel: "../x.ts" } : e) };
     expect(restoreReviewTabs(JSON.stringify(escaped)).editors.some((e) => e.id === id)).toBe(false);
+  });
+});
+
+describe("attachment tabs (PRO-290)", () => {
+  const folder = "/Users/me/.terminalx/attachments/s1";
+  it("hang off the session's attachments folder as <folder>/<name>, read-only, markdown in Preview", () => {
+    const id = openAttachment("s1", { path: `${folder}/k3f9qa/notes.md`, name: "notes.md" }, "2026-11-13T14:31:00Z", "/repo");
+    expect(getEditors().editors.find((e) => e.id === id)).toMatchObject({
+      root: folder, rel: "k3f9qa/notes.md", name: "notes.md", kind: "text", viewMode: "preview", workspaceRoot: "/repo",
+      attachment: { path: `${folder}/k3f9qa/notes.md`, sentAt: "2026-11-13T14:31:00Z" },
+    });
+    setEditorDirty(id, true);
+    expect(getEditors().editors.find((e) => e.id === id)?.dirty).toBe(false);
+    expect(getEditors().active.s1).toBe(id);
+  });
+
+  it("focus the tab they already have; two folders' files of one name are two tabs; media keeps its kind", () => {
+    const first = openAttachment("s1", { path: `${folder}/aaaaaa/plan.md`, name: "plan.md" });
+    const second = openAttachment("s1", { path: `${folder}/bbbbbb/plan.md`, name: "plan.md" });
+    const image = openAttachment("s1", { path: `${folder}/bbbbbb/shot.png`, name: "shot.png" });
+    expect(new Set([first, second, image]).size).toBe(3);
+    expect(getEditors().editors.find((e) => e.id === image)?.kind).toBe("image");
+    expect(openAttachment("s1", { path: `${folder}/aaaaaa/plan.md`, name: "plan.md" })).toBe(first);
+    expect(getEditors().editors).toHaveLength(3);
+    expect(getEditors().active.s1).toBe(first);
+  });
+
+  it("stay apart from an ordinary file tab of the same path", () => {
+    const attachment = openAttachment("s1", { path: `${folder}/aaaaaa/plan.md`, name: "plan.md" });
+    const plain = openFile("s1", folder, "aaaaaa/plan.md");
+    expect(plain).not.toBe(attachment);
+    expect(getEditors().editors.find((e) => e.id === plain)).not.toHaveProperty("attachment");
+  });
+
+  it("refuse a path that is not a stored file", () => {
+    expect(() => openAttachment("s1", { path: "notes.md", name: "notes.md" })).toThrow();
+    expect(() => openAttachment("s1", { path: `${folder}/../x/notes.md`, name: "notes.md" })).toThrow();
+    expect(getEditors().editors).toHaveLength(0);
   });
 });

@@ -27,6 +27,7 @@ import { changedSince, fileErrorText, isConflict, stashBuffer, takeStashedBuffer
 import { useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { EditorToolbar } from "./EditorToolbar";
+import { AttachmentToolbar } from "./AttachmentToolbar";
 import { FindBar, findPanel, type FindPanelHandle } from "./FindPanel";
 
 // ---- git gutter: which lines differ from HEAD
@@ -127,7 +128,9 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
   const [docText, setDocText] = useState("");
   const source = useFileSource(entry.source, entry.root);
   const cloud = source?.kind === "cloud";
-  const readOnly = !!source?.readOnly;
+  // A sent message's file (PRO-290) is the copy that was sent: never edited.
+  const attachment = entry.attachment;
+  const readOnly = !!source?.readOnly || !!attachment;
   const abs = `${entry.root}/${entry.rel}`;
   const markdown = isMarkdown(entry.rel);
   const preview = markdown && entry.viewMode === "preview";
@@ -157,7 +160,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
   const write = useCallback(
     async (base: string | null | undefined) => {
       const view = viewRef.current;
-      if (!view || !source || source.readOnly) return;
+      if (!view || !source || source.readOnly || attachment) return;
       const text = view.state.doc.toString();
       try {
         markSaved(text, await source.writeText(entry.rel, text, base));
@@ -166,7 +169,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
         else setError(describeError(e));
       }
     },
-    [source, entry.rel, markSaved, describeError],
+    [source, entry.rel, markSaved, describeError, attachment],
   );
 
   const save = useCallback(() => write(fileState.current.etag), [write]);
@@ -272,8 +275,8 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
           highlightSelectionMatches(),
           findPanel(setFind),
           languageFor(entry.rel),
-          EditorState.readOnly.of(source.readOnly),
-          EditorView.editable.of(!source.readOnly),
+          EditorState.readOnly.of(source.readOnly || !!attachment),
+          EditorView.editable.of(!source.readOnly && !attachment),
           keymap.of([
             ...closeBracketsKeymap,
             ...defaultKeymap,
@@ -302,7 +305,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
           const now = await source.stat(entry.rel).catch(() => fileState.current);
           if (!cancelled && changedSince(fileState.current, now)) setChangedOnDisk(true);
         }
-        if (source.kind !== "local") return;
+        if (source.kind !== "local" || attachment) return;
         try {
           const tree = await api.headTree(entry.root);
           if (cancelled || !tree) return;
@@ -335,7 +338,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
       viewRef.current = null;
       setFind(null);
     };
-  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError, embedded]);
+  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError, embedded, attachment]);
 
   // Jump to a line when asked (from search results or the tree).
   useEffect(() => {
@@ -394,7 +397,23 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <EditorToolbar
+      {attachment ? (
+        <AttachmentToolbar
+          path={attachment.path}
+          name={entry.name}
+          sentAt={attachment.sentAt}
+          markdown={markdown && !embedded}
+          viewMode={entry.viewMode}
+          onViewModeChange={(mode) => setViewMode(entry.id, mode)}
+          copyContents={() => {
+            // Not text: like a media file, its path is what can be copied.
+            if (status === "binary") return attachment.path;
+            if (status !== "ready") throw new Error("it has not been read yet");
+            if (truncated) throw new Error("only its first 4 MB could be read. Use Download for the whole file");
+            return viewRef.current?.state.doc.toString() ?? docText;
+          }}
+        />
+      ) : <EditorToolbar
         path={abs}
         relativePath={entry.rel}
         markdown={markdown && !embedded}
@@ -407,7 +426,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
         saveDisabled={!dirty || readOnly || !source}
         saveKeys={saveKeys}
         onSave={() => void save()}
-      />
+      />}
       {conflict && (
         <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 bg-destructive/10 px-3 py-1.5 text-xs text-foreground" data-testid="editor-conflict">
           <AlertTriangle className="size-3.5 text-destructive" />
@@ -440,7 +459,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
       {error && <div className="shrink-0 px-3 py-1.5 text-xs text-destructive">{error}</div>}
       {status === "binary" && (
         <div className="p-4 text-sm text-muted-foreground">
-          Cannot preview {entry.name}. {cloud ? "It is binary or not UTF-8 text." : "This binary format is unsupported. Use Reveal in Finder to open it externally."}
+          Cannot preview {entry.name}. {cloud ? "It is binary or not UTF-8 text." : attachment ? "It is not text. Use Download to save a copy, or Reveal in Finder from the More menu." : "This binary format is unsupported. Use Reveal in Finder to open it externally."}
         </div>
       )}
       {status === "loading" && <div className="p-4 text-sm text-muted-foreground">Loading…</div>}
