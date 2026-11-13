@@ -1,0 +1,602 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "$TERMINALX_HOME/settings.json (default ~/.raccoon/settings.json). A missing key inherits its default; repository and managed settings are layered above this file.",
+  "properties": {
+    "$schema": {
+      "description": "The JSON schema editors check this file against.",
+      "type": "string"
+    },
+    "agents": {
+      "additionalProperties": false,
+      "properties": {
+        "idleStopMinutes": {
+          "description": "An agent sitting at its prompt still holds its memory, its MCP servers and its language server. Once it has had nothing to do for this long it is stopped; its conversation stays, and your next message starts it again where it left off. An agent at work, waiting for your answer, or waiting on something it started (a background command, monitor or agent, a wakeup or scheduled job, a process it left running) keeps running, and so does one you started yourself in a terminal. An agent in an archived session, or one whose workspace was removed, is stopped after 10 idle minutes.",
+          "enum": [
+            0,
+            30,
+            60,
+            120,
+            240,
+            480,
+            1440
+          ],
+          "type": "integer"
+        },
+        "readOnlyCommands": {
+          "description": "Run common discovery commands without an approval card: ls, cat, rg, grep, pwd, and git status, diff and log. Every command in a chain or pipe must qualify. Redirects, shell expansions, unknown options and commands that can run helpers still ask. Turn this off to ask for every command. Commands you explicitly allow for a session keep that allowance in the approved directory until TerminalX restarts.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "branchPrefix": {
+      "type": "string"
+    },
+    "conversations": {
+      "additionalProperties": false,
+      "properties": {
+        "archiveIdleDays": {
+          "description": "A conversation nobody has written in for this long leaves the sidebar's list for its archive: View → Show archived lists it under its project, and the command palette still finds it. Nothing is deleted, and its next message brings it back. A conversation stays while it is pinned or open, while any of its tabs is working, waiting for you or holding a queued message, while its last reply is unread, while its worktree has uncommitted or unpushed work, and while its issue pipeline's pull request is open.",
+          "enum": [
+            0,
+            1,
+            3,
+            7,
+            14,
+            30
+          ],
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "diagnostics": {
+      "additionalProperties": false,
+      "properties": {
+        "recoveryIncidents": {
+          "description": "When a session warns that it needs attention, TerminalX notes on this Mac when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "experimental": {
+      "additionalProperties": false,
+      "properties": {
+        "nativeCodex": {
+          "description": "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.",
+          "type": "boolean"
+        },
+        "orchestratorRuns": {
+          "description": "A session can lead a run: it splits one goal into pieces, and each piece goes to a worker session on its own branch. Shows the Run view in a session, where you approve the lead's plan before any worker starts, and Settings → Orchestrator. The terminalx runs commands work either way.",
+          "type": "boolean"
+        },
+        "sessionCost": {
+          "description": "Show each session's estimated cost in its header, with its tokens by model. On a subscription it is what the tokens would cost at API prices, not what you are billed.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "extraBinDirs": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "floating": {
+      "additionalProperties": false,
+      "properties": {
+        "alwaysOnTop": {
+          "description": "The floating chat window stays above other apps’ windows. Off lets it go behind them like any other window; the pin in the window does the same.",
+          "type": "boolean"
+        },
+        "retentionDays": {
+          "description": "A quick chat nobody has touched for this long is deleted with its scratch folder. Pinned and archived chats, and one with a terminal still running, are kept. You can always delete one by hand.",
+          "maximum": 3650,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shortcut": {
+          "description": "Show or hide the floating chat window from any app.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "linearApiKey": {
+      "description": "Connect a personal API key for Linear issues.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "linearViewer": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "machineName": {
+      "description": "Name this computer for your paired devices.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mergedCleanup": {
+      "additionalProperties": false,
+      "properties": {
+        "deleteConversations": {
+          "description": "Whether to delete conversations when removing a merged workspace.",
+          "type": "boolean"
+        },
+        "enabled": {
+          "description": "For workspaces TerminalX created. Once a workspace's pull request is merged, its worktree and local branch are deleted, and its branch on the remote too while that still points at the merged commit. Nothing is forced: a workspace with uncommitted or unmerged work, ignored local files, a turn running or a terminal open stays, and its row says why.",
+          "type": "boolean"
+        },
+        "graceMinutes": {
+          "description": "Counted from when the merge is first seen, and from the last thing done in the workspace's sessions if that is later. A notice offers to keep the workspace, and a removal can be undone while its commit is still in the repository.",
+          "enum": [
+            5,
+            10,
+            30,
+            60
+          ],
+          "type": "integer"
+        },
+        "projects": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "description": "Override automatic merged-workspace cleanup for this repository.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "notifications": {
+      "type": "boolean"
+    },
+    "orchestrator": {
+      "additionalProperties": false,
+      "properties": {
+        "budgetDollars": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 10000.0,
+              "type": "number"
+            },
+            {
+              "description": "No limit.",
+              "pattern": "^\\s*[Nn][Oo][Nn][Ee]\\s*$",
+              "type": "string"
+            }
+          ],
+          "description": "Dollars its workers on an API key may spend; then the run starts nothing new and asks you. No limit lets a run spend until its work is done; its cost is still shown."
+        },
+        "budgetPoints": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 100.0,
+              "type": "number"
+            },
+            {
+              "description": "No limit.",
+              "pattern": "^\\s*[Nn][Oo][Nn][Ee]\\s*$",
+              "type": "string"
+            }
+          ],
+          "description": "Points of a usage window one run may use: the change in the window while it runs, which counts everything else you run too. No limit leaves only the window level to pause it."
+        },
+        "pieceLimit": {
+          "description": "A larger plan is refused, and the lead is told the limit. From 1 to 50.",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "projects": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "budgetDollars": {
+                "anyOf": [
+                  {
+                    "exclusiveMinimum": 0,
+                    "maximum": 10000.0,
+                    "type": "number"
+                  },
+                  {
+                    "description": "No limit.",
+                    "pattern": "^\\s*[Nn][Oo][Nn][Ee]\\s*$",
+                    "type": "string"
+                  }
+                ]
+              },
+              "budgetPoints": {
+                "anyOf": [
+                  {
+                    "exclusiveMinimum": 0,
+                    "maximum": 100.0,
+                    "type": "number"
+                  },
+                  {
+                    "description": "No limit.",
+                    "pattern": "^\\s*[Nn][Oo][Nn][Ee]\\s*$",
+                    "type": "string"
+                  }
+                ]
+              },
+              "pieceLimit": {
+                "maximum": 50,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "requireApproval": {
+                "type": "boolean"
+              },
+              "reviewDiffLines": {
+                "maximum": 100000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "routing": {
+                "additionalProperties": {
+                  "additionalProperties": {
+                    "type": "object"
+                  },
+                  "type": "object"
+                },
+                "description": "Changed rows of the orchestration routing table: which tier and effort a kind of piece starts on, per agent.",
+                "type": "object"
+              },
+              "windowCeiling": {
+                "anyOf": [
+                  {
+                    "exclusiveMinimum": 0,
+                    "maximum": 100.0,
+                    "type": "number"
+                  },
+                  {
+                    "description": "No limit.",
+                    "pattern": "^\\s*[Nn][Oo][Nn][Ee]\\s*$",
+                    "type": "string"
+                  }
+                ]
+              },
+              "workerMode": {
+                "enum": [
+                  "plan",
+                  "manual",
+                  "auto",
+                  "acceptEdits",
+                  "bypassPermissions"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "description": "Override for this repository whether a run asks first, how many pieces it may have, the mode its workers run in, the model each kind of piece starts on, and its budget.",
+          "type": "object"
+        },
+        "requireApproval": {
+          "description": "Show the plan and wait for Approve. Off: a lead starts its workers as soon as its plan is stored.",
+          "type": "boolean"
+        },
+        "reviewDiffLines": {
+          "description": "Changed lines. A result this size or smaller whose commands pass is accepted without a model; a larger one is read by a verifier session first. From 1 to 100000.",
+          "maximum": 100000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "routing": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "object"
+            },
+            "type": "object"
+          },
+          "description": "The model tier and effort each kind of piece starts on, for Claude Code workers and for Codex workers. A piece that falls short is retried on more effort, then on the next model up.",
+          "type": "object"
+        },
+        "stallMinutes": {
+          "description": "No tool call or file change, no command running, and its agent idle. A long build is not a stall.",
+          "maximum": 240,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "windowCeiling": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 100.0,
+              "type": "number"
+            },
+            {
+              "description": "No limit.",
+              "pattern": "^\\s*[Nn][Oo][Nn][Ee]\\s*$",
+              "type": "string"
+            }
+          ],
+          "description": "Whoever used it; the run can go on after the reset. Keeps your own window from running out. Off, a run can use the whole window."
+        },
+        "workerMode": {
+          "description": "The permission mode a worker starts in unless its piece names another. Push, merge and deploy stay blocked by deny rules in every mode.",
+          "enum": [
+            "plan",
+            "manual",
+            "auto",
+            "acceptEdits",
+            "bypassPermissions"
+          ],
+          "type": "string"
+        },
+        "workersAtOnce": {
+          "description": "Across every run. Sessions you start by hand are never counted or queued.",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workersPerRun": {
+          "description": "The rest wait in a queue and start by themselves as workers finish. From 1 to 50.",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "pairing": {
+      "additionalProperties": false,
+      "properties": {
+        "keepAwake": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "preferences": {
+      "additionalProperties": false,
+      "properties": {
+        "animations": {
+          "description": "The raccoon forages in an empty session and runs along the composer while an agent is working. Off follows your system's reduced-motion setting automatically.",
+          "type": "boolean"
+        },
+        "autocorrect": {
+          "description": "Your keyboard's spelling correction, smart quotes and dashes, and text replacements apply in prompts, answers to an agent's questions, and notes. Off leaves what you type exactly as typed.",
+          "type": "boolean"
+        },
+        "branchSessions": {
+          "description": "Several sessions on one branch: as tabs beside each other in the tab bar, with one row for the branch in the sidebar; or listed under the branch in the sidebar, with the tab bar holding only the open session's tabs. Without the tab bar they are in the sidebar.",
+          "enum": [
+            "tabs",
+            "sidebar"
+          ],
+          "type": "string"
+        },
+        "foldToolCalls": {
+          "description": "Once an agent starts answering, the tool calls it made collapse under one line. Off (the default) keeps every step in view.",
+          "type": "boolean"
+        },
+        "fontScale": {
+          "description": "Scales the transcript and composer. Chrome stays the same size.",
+          "enum": [
+            "sm",
+            "md",
+            "lg"
+          ],
+          "type": "string"
+        },
+        "hiddenOrganizations": {
+          "description": "Open an organization’s settings and choose whether it appears in the sidebar.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "linkActions": {
+          "description": "Show both browser destinations in the link action menu.",
+          "type": "boolean"
+        },
+        "linkBrowser": {
+          "description": "Choose a browser for website links, or ask each time.",
+          "enum": [
+            "terminalx",
+            "system",
+            "ask"
+          ],
+          "type": "string"
+        },
+        "linkBrowserChosen": {
+          "description": "Choose a browser for website links, or ask each time.",
+          "type": "boolean"
+        },
+        "mode": {
+          "description": "System follows macOS and switches with it.",
+          "enum": [
+            "system",
+            "light",
+            "dark"
+          ],
+          "type": "string"
+        },
+        "organizationDisplay": {
+          "description": "Local is always shown. These display preferences are saved on this desktop. Showing or switching organizations never wakes a workspace.",
+          "enum": [
+            "all",
+            "one"
+          ],
+          "type": "string"
+        },
+        "promptMap": {
+          "description": "A mark for each of your prompts down the right edge of a conversation. Hover one to read it, click to go back to it.",
+          "type": "boolean"
+        },
+        "selectedOrganization": {
+          "description": "Local is always shown. These display preferences are saved on this desktop. Showing or switching organizations never wakes a workspace.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shortcuts": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Restore every app shortcut to its default.",
+          "type": "object"
+        },
+        "shortcutsVersion": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sidebarLayout": {
+          "enum": [
+            "simple",
+            "list",
+            "status"
+          ],
+          "type": "string"
+        },
+        "sounds": {
+          "description": "A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there.",
+          "type": "boolean"
+        },
+        "tabStrip": {
+          "description": "A session's agents, terminals and browser pages as a row of tabs under the title bar, in the same order as the sidebar. Off leaves them in the sidebar only.",
+          "type": "boolean"
+        },
+        "theme": {
+          "description": "Choose the application color palette.",
+          "enum": [
+            "den",
+            "slate",
+            "moss",
+            "ember"
+          ],
+          "type": "string"
+        },
+        "transcriptLayout": {
+          "description": "Wide puts your prompt as a full-width card. Chat right-aligns it like a message.",
+          "enum": [
+            "wide",
+            "chat"
+          ],
+          "type": "string"
+        },
+        "turnChanges": {
+          "description": "Under each finished turn, the files the agent changed with the lines it added and removed. Click a file to open it.",
+          "type": "boolean"
+        },
+        "updateChannel": {
+          "description": "Beta gets builds earlier. Either way nothing installs without your say-so.",
+          "enum": [
+            "stable",
+            "beta"
+          ],
+          "type": "string"
+        },
+        "useWorktree": {
+          "description": "Each session gets its own git worktree so agents never step on each other. Off runs sessions in the project's own checkout.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "preferencesMigrated": {
+      "type": "boolean"
+    },
+    "quitBehavior": {
+      "description": "Keep agents running in the background or stop them when quitting.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "statusBar": {
+      "additionalProperties": false,
+      "properties": {
+        "percent": {
+          "description": "Meters can show what has been used or what remains; urgency always follows usage.",
+          "enum": [
+            "used",
+            "remaining"
+          ],
+          "type": "string"
+        },
+        "resources": {
+          "description": "Show the live agent count and the most recently sampled memory total.",
+          "type": "boolean"
+        },
+        "usage": {
+          "description": "Show the tightest usage window and its reset countdown.",
+          "type": "boolean"
+        },
+        "usageMode": {
+          "enum": [
+            "detailed",
+            "compact"
+          ],
+          "type": "string"
+        },
+        "usageRefreshMinutes": {
+          "description": "How often usage is fetched again while the app is on screen. Off still refreshes when you return to the app or press Refresh.",
+          "enum": [
+            0,
+            1,
+            2,
+            5,
+            15
+          ],
+          "type": "integer"
+        },
+        "visible": {
+          "description": "Show app-wide agent usage and the resources used by live tabs along the bottom edge.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "transcriptionInputDevice": {
+      "description": "Choose the microphone used for dictation.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "transcriptionModel": {
+      "description": "Select, download, or delete an on-device speech recognition model.",
+      "type": "string"
+    },
+    "transcriptionMute": {
+      "description": "Keeps whatever is playing out of the transcript. Unmuted automatically when recording stops.",
+      "type": "boolean"
+    },
+    "workStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "shareWithTeam": {
+          "description": "Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with this Mac’s name. Prompts, transcripts, paths and code never leave this Mac.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "worktreeDir": {
+      "type": "string"
+    }
+  },
+  "title": "TerminalX user settings",
+  "type": "object"
+}
