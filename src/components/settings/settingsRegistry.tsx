@@ -625,6 +625,24 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].scripts" }, layout: "content",
   }),
   defineSetting({
+    id: "repositories.actions", section: "repositories", title: "Actions",
+    description: "Commands this repository's sessions can run, in order: name, icon, command, run after setup.",
+    searchTerms: ["repository", "actions", "run", "commands", "dev server", "tests"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].actions" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.previewUrls", section: "repositories", title: "Preview URLs",
+    description: "Addresses to open for this repository's sessions; $PORT and $PORT_n use the session's ports.",
+    searchTerms: ["repository", "preview", "urls", "localhost", "port", "browser"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].previewUrls" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.environment", section: "repositories", title: "Environment",
+    description: "Environment variables for this repository's agents and shells, and the ones its settings file documents.",
+    searchTerms: ["repository", "environment", "variables", "env", "secrets", "keychain", "dotenv"], scope: "repository",
+    storage: { kind: "system", location: "macOS Keychain (values); $TERMINALX_HOME/environment.json (names, repository scope)" }, layout: "content",
+  }),
+  defineSetting({
     id: "shortcuts.systemWide", section: "shortcuts", title: "System-wide shortcut",
     description: "Show or hide the floating chat window from any app.",
     searchTerms: ["shortcuts", "system-wide", "shortcut"], scope: "user",

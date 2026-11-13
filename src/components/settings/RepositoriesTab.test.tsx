@@ -10,6 +10,9 @@ vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ projects: mock.proj
 vi.mock("./MergedCleanupSettings", () => ({ MergedCleanupSettings: () => null }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: mock.reveal }));
 vi.mock("@/lib/clipboard", () => ({ copyText: mock.copy }));
+vi.mock("./RepositoryActionsPage", () => ({ RepositoryActionsPage: ({ projectPath }: { projectPath: string }) => <p>Actions page for {projectPath}</p> }));
+vi.mock("./RepositoryPreviewUrlsPage", () => ({ RepositoryPreviewUrlsPage: ({ projectPath }: { projectPath: string }) => <p>Preview URLs page for {projectPath}</p> }));
+vi.mock("./RepositoryEnvironmentSettings", () => ({ RepositoryEnvironmentSettings: ({ projectPath }: { projectPath: string }) => <p>Environment page for {projectPath}</p> }));
 const project: Project = { path: "/repo", name: "Example", repositorySettings: { filesToCopy: [".env*"] } };
 const result = (patterns = [".env*"], fromIncludeFile = false): RepositoryFilesPreview => ({
   rootPath: "/repo", workspacesPath: "/repo/.raccoon/worktrees", fromIncludeFile,
@@ -133,5 +136,26 @@ describe("Repository settings", () => {
     await screen.findByText("105 more matches omitted from preview.");
     expect(screen.getByText("Ignored-file scan limit reached")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("opens the Actions, Preview URLs and Environment pages from their rows and its nav (PRO-155, PRO-144)", async () => {
+    const onSelectRow = vi.fn();
+    const { rerender } = render(<RepositoriesTab projectPath="/repo" row="repositories.actions" onSelectRow={onSelectRow} />);
+    expect(screen.getByText("Actions page for /repo")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Actions" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.queryByText("Root path")).toBeNull();
+    rerender(<RepositoriesTab projectPath="/repo" row="repositories.previewUrls" onSelectRow={onSelectRow} />);
+    expect(screen.getByText("Preview URLs page for /repo")).toBeTruthy();
+    rerender(<RepositoriesTab projectPath="/repo" row="repositories.environment" onSelectRow={onSelectRow} />);
+    expect(screen.getByText("Environment page for /repo")).toBeTruthy();
+    expect(document.querySelector('[data-setting-id="repositories.environment"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Preview URLs" }));
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    expect(onSelectRow.mock.calls).toEqual([["repositories.previewUrls"], ["repositories.rootPath"]]);
+    // Rows that live on General, such as Scripts, still open General.
+    rerender(<RepositoriesTab projectPath="/repo" row="repositories.scripts" onSelectRow={onSelectRow} />);
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.queryByText("Actions page for /repo")).toBeNull();
+    await act(async () => undefined);
   });
 });
