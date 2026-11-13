@@ -568,7 +568,6 @@ impl Owner {
                     // exited only once its own all-child wait found nothing:
                     // the exact helper's reaped status is that proof. Any
                     // other exit (a signal, a crash) leaves the launch Lost.
-                    log::info!("a supervised launch whose channel was lost was proved empty by its supervisor");
                     state.phase = Phase::Extinct;
                 }
                 self.changed.notify_all();
