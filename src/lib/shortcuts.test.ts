@@ -39,6 +39,26 @@ describe("the shortcut registry", () => {
     }
   });
 
+  // PRO-362: the drafts drew ⌘⇧R for the Run view, which Automations has. Its own keys are free on every platform,
+  // and are none of the menu keys the system itself puts in the native menus (Edit, Hide, Minimize, Quit).
+  it("gives the Run view keys no other action has, in the Go menu, and leaves Automations its own", () => {
+    const action = SHORTCUT_ACTIONS.find((entry) => entry.id === "app.runView")!;
+    expect(action).toMatchObject({ label: "Run view", group: "App", menu: { section: "go", label: "Run View" } });
+    const system = ["mod+z", "mod+shift+z", "mod+x", "mod+c", "mod+v", "mod+a", "mod+q", "mod+h", "mod+alt+h", "mod+m", "alt+shift+space"];
+    for (const mac of [true, false]) {
+      const keymap = resolveKeymap({}, mac);
+      expect(keymap["app.runView"]).toEqual(["mod+shift+o"]);
+      expect(keymap["app.automations"]).toEqual(["mod+shift+r"]);
+      const owners = SHORTCUT_ACTIONS.filter((entry) => keymap[entry.id].includes("mod+shift+o")).map((entry) => entry.id);
+      expect(owners).toEqual(["app.runView"]);
+      expect(system).not.toContain("mod+shift+o");
+      expect(bindingProblem("app.runView", "mod+shift+o", mac)).toBeNull();
+      expect(isTerminalReserved("mod+shift+o", mac)).toBe(false);
+    }
+    expect(keycaps("mod+shift+o", true)).toEqual(["⌘", "⇧", "O"]);
+    expect(keycaps("mod+shift+o", false)).toEqual(["Ctrl", "Shift", "O"]);
+  });
+
   it("covers the three kinds of binding", () => {
     expect(bindingKind("mod+k")).toBe("chord");
     expect(bindingKind("escape")).toBe("key");

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SESSION_STATUSES } from "@terminalx/portable/sessionStatus";
-import { familyHolds, familyNeeds, modelTier, needsMark, nestWorkers, orderWorkers, overBudget, pieceSpend, runningWorkers, runProgress, runSpend, tryOf, workerTitle } from "./runFamily";
+import { awaitsWorker, familyHolds, familyNeeds, familyRows, modelTier, needsMark, nestWorkers, orderWorkers, overBudget, pieceSpend, runningWorkers, runProgress, runSpend, tryOf, workerTitle } from "./runFamily";
 import type { Run, RunPiece } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
@@ -33,6 +33,40 @@ describe("nestWorkers", () => {
   it("nests nothing of a loop in the records", () => {
     const { top } = nestWorkers([session("a", "b"), session("b", "a")]);
     expect(top.map((entry) => entry.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("familyRows", () => {
+  const ids = (rows: ReturnType<typeof familyRows>) => rows.map((row) => (row.kind === "worker" ? row.session.id : `queued:${row.piece.id}`));
+
+  it("lists a queued piece with no worker where the plan numbers it, among the workers, and other sessions last", () => {
+    const r = run([piece("1", "done", "w1"), piece("2", "queued", undefined, { dependsOn: ["1"] }), piece("3", "running", "w3"), piece("4", "queued")]);
+    expect(ids(familyRows([session("x"), session("w3"), session("w1")], r))).toEqual(["w1", "queued:2", "w3", "queued:4", "x"]);
+  });
+
+  it("puts the worker's row in its queued row's place once the worker starts", () => {
+    const before = run([piece("1", "running", "w1"), piece("2", "queued"), piece("3", "queued")]);
+    const after = run([piece("1", "running", "w1"), piece("2", "running", "w2"), piece("3", "queued")]);
+    expect(ids(familyRows([session("w1")], before))).toEqual(["w1", "queued:2", "queued:3"]);
+    expect(ids(familyRows([session("w1"), session("w2")], after))).toEqual(["w1", "w2", "queued:3"]);
+  });
+
+  it("lists no row for a piece that is not queued and has no worker, nor for a queued one whose worker started", () => {
+    expect([piece("a", "queued"), piece("b", "queued", "w"), piece("c", "skipped"), piece("d", "blocked")].map(awaitsWorker)).toEqual([true, false, false, false]);
+    expect(ids(familyRows([], run([piece("1", "skipped"), piece("2", "queued", "gone")])))).toEqual([]);
+  });
+
+  it("keeps every try of a retried piece in the piece's place, a queued piece after them", () => {
+    const tries = [
+      { step: "first", model: "haiku", worker: { sessionId: "t1" }, outcome: "failed" },
+      { step: "tier", model: "sonnet", worker: { sessionId: "t2" } },
+    ] as RunPiece["tries"];
+    const r = run([piece("1", "done", "w1"), piece("2", "running", "t2", { tries }), piece("3", "queued")]);
+    expect(ids(familyRows([session("x"), session("t2"), session("w1"), session("t1")], r))).toEqual(["w1", "t1", "t2", "queued:3", "x"]);
+  });
+
+  it("is the workers alone when the lead leads no run", () => {
+    expect(ids(familyRows([session("b"), session("a")], null))).toEqual(["b", "a"]);
   });
 });
 

@@ -56,7 +56,7 @@ import { setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import type { Project, TabEntry, Workspace } from "@/types/session";
 import type { SessionEntry } from "@/types/session";
 import { useFold } from "./useFold";
-import { LeadGlyph, LeadHoverCard, LeadTrailing, RunFamiliesContext, StarterMark, TryMark, WorkerMark, WorkerTier, leadsRun, useLeadFamily, useLeadSummary, useWorkerPiece, type RunFamilies } from "./RunRows";
+import { LeadGlyph, LeadHoverCard, LeadTrailing, QueuedPieceRow, RunFamiliesContext, StarterMark, TryMark, WorkerMark, WorkerTier, leadsRun, useLeadFamily, useLeadSummary, useWorkerPiece, type RunFamilies } from "./RunRows";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { showRunView, useRunsByLead } from "@/lib/orchestration";
 import { familyHolds, nestWorkers, workerTitle } from "@/lib/runFamily";
@@ -1186,7 +1186,8 @@ function ConversationRow({
   const runLead = leadsRun(family);
   const [leadOpen, toggleLead] = useFold(`lead:${session.id}`, true);
   const leadExpanded = !!family && (leadOpen || peers.some((peer) => familyHolds(workersOf, peer.id, selectedSessionId)));
-  const folded = !!family && family.workers.length > 0 && !leadExpanded;
+  // Its rows are its workers and, before their workers start, its queued pieces (18.03): either folds with it.
+  const folded = !!family && family.rows.length > 0 && !leadExpanded;
   const { piece, found } = useWorkerPiece(session);
   // An earlier try at a piece is drawn quieter than the piece's current one (PRO-364).
   const earlierTry = worker && !!found && !found.current;
@@ -1236,7 +1237,7 @@ function ConversationRow({
           {/* A worker hangs from its lead's glyph by a line. */}
           {worker && <span aria-hidden className="pointer-events-none absolute inset-y-0 left-[calc(var(--lead-indent,0px)+1rem+7px)] border-l border-hairline" />}
           {/* A lead folds its workers by the chevron in front of its glyph; the row itself opens the lead. */}
-          {family && family.workers.length > 0 && (
+          {family && family.rows.length > 0 && (
             <button
               type="button"
               onClick={toggleLead}
@@ -1317,11 +1318,11 @@ function ConversationRow({
           <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </DropdownMenuContent>
       </AsyncDropdownMenu>
-      {family && leadExpanded && family.workers.length > 0 && (
+      {family && leadExpanded && family.rows.length > 0 && (
         <ul aria-label={`Workers of ${title}`} data-testid="lead-workers" className="mt-0.5 flex flex-col gap-0.5 [--lead-indent:var(--own-indent,0px)] [--indent:calc(var(--own-indent,0px)+16px)]">
-          {family.workers.map((entry) => (
-            <ConversationRow key={entry.id} session={entry} selected={entry.id === selectedSessionId} branch={null} linkTo={null} worker />
-          ))}
+          {family.rows.map((row) => row.kind === "worker"
+            ? <ConversationRow key={row.session.id} session={row.session} selected={row.session.id === selectedSessionId} branch={null} linkTo={null} worker />
+            : <QueuedPieceRow key={`queued:${row.piece.id}`} piece={row.piece} run={family.run!} />)}
         </ul>
       )}
     </li>

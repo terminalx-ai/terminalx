@@ -116,7 +116,7 @@ pub(super) static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
 // These object keys are user-defined, rather than settings field names.
 pub(super) static DYNAMIC_MAPS: LazyLock<BTreeMap<&str, Value>> = LazyLock::new(|| BTreeMap::from([
     ("mergedCleanup.projects", Value::Bool(false)),
-    ("orchestrator.projects", serde_json::json!({"requireApproval": false, "pieceLimit": 0, "workerMode": "", "reviewDiffLines": 0, "budgetDollars": 0.5, "budgetPoints": 0.5, "windowCeiling": 0.5})),
+    ("orchestrator.projects", serde_json::json!({"requireApproval": false, "pieceLimit": 0, "workerMode": "", "reviewDiffLines": 0, "triesPerPiece": 0, "effortCeiling": "", "budgetDollars": 0.5, "budgetPoints": 0.5, "windowCeiling": 0.5})),
     ("preferences.shortcuts", serde_json::json!([""])),
 ]));
 
@@ -698,6 +698,26 @@ mod tests {
             assert!(error.contains("orchestrator.windowCeiling") && error.contains("\"none\""), "{error}");
         }
         assert!(parse(&json!({"orchestrator": {"projects": {"/repo": {"budgetDollars": "lots"}}}}).to_string()).unwrap_err().to_string().contains("budgetDollars"));
+    }
+
+    #[test]
+    fn the_tries_per_piece_and_the_effort_ceiling_are_checked_with_their_key() {
+        let settings = parse(&json!({"orchestrator": {"triesPerPiece": 6, "effortCeiling": "max", "projects": {"/repo": {"triesPerPiece": 1, "effortCeiling": "low"}}}}).to_string()).unwrap();
+        assert_eq!((settings.orchestrator.tries_per_piece, settings.orchestrator.effort_ceiling.as_str()), (6, "max"));
+        let repo = settings.orchestrator.for_project("/repo");
+        assert_eq!((repo.tries_per_piece, repo.effort_ceiling.as_str()), (1, "low"));
+        for bad in [json!(0), json!(7), json!("3"), Value::Null] {
+            let error = parse(&json!({"orchestrator": {"triesPerPiece": bad}}).to_string()).unwrap_err().to_string();
+            assert!(error.contains("orchestrator.triesPerPiece") && error.contains("1 to 6"), "{error}");
+            let error = parse(&json!({"orchestrator": {"projects": {"/repo": {"triesPerPiece": bad}}}}).to_string()).unwrap_err().to_string();
+            assert!(error.contains("triesPerPiece") && error.contains("1 to 6"), "{error}");
+        }
+        for bad in [json!("High"), json!("none"), json!(3), Value::Null] {
+            let error = parse(&json!({"orchestrator": {"effortCeiling": bad}}).to_string()).unwrap_err().to_string();
+            assert!(error.contains("orchestrator.effortCeiling") && error.contains("xhigh"), "{error}");
+            let error = parse(&json!({"orchestrator": {"projects": {"/repo": {"effortCeiling": bad}}}}).to_string()).unwrap_err().to_string();
+            assert!(error.contains("effortCeiling") && error.contains("xhigh"), "{error}");
+        }
     }
 
     #[test]

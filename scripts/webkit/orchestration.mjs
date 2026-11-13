@@ -356,10 +356,12 @@ try {
         await strip.waitFor();
         const flagged = await strip.getByRole("status", { name: "A plan waits for your approval" }).count();
         const chatFirst = (await page.getByTestId("run-view").count()) === 0;
-        await strip.getByRole("tab", { name: /^Run/ }).click();
+        // The title bar names the keys that open the Run view (18.01), and they open it (PRO-362): ⌘⇧O, as ⌘⇧R is Automations.
+        const hint = await page.getByTestId("run-view-hint").textContent();
+        await page.keyboard.press("Meta+Shift+O");
         const view = page.getByTestId("run-view");
         await view.getByRole("table", { name: "Plan" }).waitFor();
-        await page.waitForFunction(() => document.querySelectorAll('[data-testid="run-view"] select option[value="opus"]').length > 0);
+        const opened = (await view.count()) === 1;
         const layout = await layoutOf(view);
         const detail = view.getByTestId("piece-detail");
         const pick = (id) => view.locator(`[data-piece="${id}"] button`).first().click();
@@ -371,6 +373,9 @@ try {
         const warned = await view.locator('[data-piece="docs"]').getByRole("note").getAttribute("aria-label");
         const checks = {
           "the session opens on its chat, and the Run tab says a plan waits": chatFirst && flagged === 1,
+          "the title bar shows ⌘⇧O run view, and ⌘⇧O opens the Run view": hint === "⌘⇧Orun view" && opened,
+          // Model and effort are one pill (18.02): the tier's dot, the model, the effort.
+          "each piece's model and effort is one pill, marked with its tier's dot": (await view.getByTestId("piece-model-pill").count()) === 6 && (await view.locator('[data-piece="store"] [data-testid="piece-model-pill"] .rounded-full').count()) === 1,
           "the plan is headed as waiting, with its goal and that nothing starts yet": (await view.getByTestId("run-state").textContent()) === "Plan waiting for you" && (await view.getByRole("heading", { level: 1 }).textContent()) === GOAL && (await view.getByText("The lead split this into 6 pieces. Nothing starts until you approve.").count()) === 1,
           "Discard, Edit plan and Approve and start are offered": (await view.getByRole("button", { name: "Discard", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Edit plan", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Approve and start", exact: true }).count()) === 1,
           "the estimate sums the pieces that carry one and says how many do": (await view.getByTestId("run-estimate").textContent()) === "$3.15–5.15" && (await view.getByText("API-equivalent, for 5 of 6 pieces").count()) === 1,
@@ -385,7 +390,8 @@ try {
           "no text is smaller than 10.5px": layout.smallest >= 10.5,
         };
         // Edit: a model changed where it is read is saved as the plan, with every other piece as it was.
-        await view.getByRole("combobox", { name: "Model of Typed store module and migration" }).selectOption("sonnet");
+        await view.getByRole("button", { name: "Model and effort of Typed store module and migration", exact: true }).click();
+        await page.getByRole("group", { name: "Model of Typed store module and migration", exact: true }).getByRole("menuitemradio", { name: "Sonnet 5.5", exact: true }).click();
         await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "updatePlan"));
         let calls = await page.evaluate(() => window.__RUNS__.calls);
         checks["changing a piece's model saves the whole plan with that one change"] = calls[0].args.id === "01a1cabc-2fa5-7380-8770-af2097ca9149" && calls[0].args.plan.pieces.length === 6 && calls[0].args.plan.pieces[1].model === "sonnet" && calls[0].args.plan.pieces[1].effort === "medium" && calls[0].args.plan.pieces[2].goal === "Every settings read in the session code goes through the typed store.";

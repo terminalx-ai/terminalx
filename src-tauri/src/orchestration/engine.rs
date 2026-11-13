@@ -302,6 +302,9 @@ pub fn create(host: &dyn Host, plan: &Plan, lead_session: &str, lead_tab: Option
         budget: plan.budget.clone(),
         pieces,
         limits: RunLimits::new(&limits, &plan.budget),
+        // The ladder holds as Settings had it now, for every try of the run.
+        max_tries: limits.tries_per_piece,
+        effort_ceiling: limits.effort_ceiling,
         worker_mode: limits.worker_mode,
         plan_edited: false,
         approval: None,
@@ -809,6 +812,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     let lead_usd = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).and_then(|_| host.worker_cost(&run.lead).usd);
     let now_ms = host.now_ms();
     let (after, reached) = store::update(id, |run| {
+        let rules = run.ladder();
         if !run.state.followed() {
             return Ok(None);
         }
@@ -895,7 +899,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                 }
             }
             if let Some(failure) = short {
-                climb(piece, &failure, &models);
+                climb(piece, &failure, &models, &rules);
             }
         }
         for (piece_id, index, session, now, tokens) in reading {
@@ -925,7 +929,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                 }
                 continue;
             }
-            counted(piece, &models);
+            counted(piece, &models, &rules);
         }
         follow_resolution(run, lead_usd);
         apply_usage(run, &usage, false);
@@ -975,7 +979,7 @@ fn gate_failure(gate: &GateResult) -> String {
 /// End the check of a piece's current try. Passed: the piece is done.
 /// Failed: the try fell short, and `said` is the failure text the ladder
 /// gives the next one. Inconclusive: the piece is blocked, and `said` is why.
-fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, models: &[Model]) {
+fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, models: &[Model], rules: &ladder::Rules) {
     let at = crate::store::index::now();
     let Some(attempt) = piece.tries.last_mut() else { return };
     let check = attempt.verification.get_or_insert_with(Verification::default);
@@ -989,7 +993,7 @@ fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, m
             attempt.outcome = Some(Outcome::CheckFailed);
             attempt.detail = Some(failure.clone());
             attempt.ended = Some(at);
-            climb(piece, &failure, models);
+            climb(piece, &failure, models, rules);
         }
         checks::Outcome::Inconclusive => {
             piece.state = PieceState::Blocked;
@@ -1000,7 +1004,7 @@ fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, m
 
 /// Count the verdicts of a piece's review once every verifier has given
 /// one or stopped without, and end the check with what they come to.
-fn counted(piece: &mut Piece, models: &[Model]) {
+fn counted(piece: &mut Piece, models: &[Model], rules: &ladder::Rules) {
     let Some(check) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).filter(|check| check.review_open()) else { return };
     let Some(review) = check.review.as_ref() else { return };
     let passes = review.verifiers.iter().filter(|verifier| verifier.verdict == Some(checks::Decision::Pass)).count();
@@ -1018,7 +1022,7 @@ fn counted(piece: &mut Piece, models: &[Model]) {
         }
         Tally::Inconclusive(why) => (checks::Outcome::Inconclusive, Some(why)),
     };
-    conclude(piece, outcome, said, models);
+    conclude(piece, outcome, said, models, rules);
 }
 
 /// The current try of `piece_id` is the one whose check began at `started`,
@@ -1062,12 +1066,13 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         if reasons.is_empty() {
             let models = if failed.is_some() { host.models() } else { Vec::new() };
             let (after, ()) = store::update(id, |run| {
+                let rules = run.ladder();
                 if let Some(piece) = checked_try(run, &piece_id, &worker, &started) {
                     if let Some(check) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()) {
                         check.gates.extend(checked.gates.iter().cloned());
                         check.facts = Some(checked.facts.clone());
                     }
-                    conclude(piece, if failed.is_some() { checks::Outcome::Failed } else { checks::Outcome::Passed }, failed.clone(), &models);
+                    conclude(piece, if failed.is_some() { checks::Outcome::Failed } else { checks::Outcome::Passed }, failed.clone(), &models, &rules);
                 }
                 settle(run);
                 Ok(())
@@ -1117,6 +1122,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             .collect();
         // One that could not be asked has said all it will: a review nobody can answer ends here.
         let (last, ()) = store::update(id, |run| {
+            let rules = run.ladder();
             if let Some(piece) = checked_try(run, &piece_id, &worker, &started) {
                 if let Some(review) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).and_then(|check| check.review.as_mut()) {
                     for (index, problem) in &unsent {
@@ -1125,7 +1131,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                         }
                     }
                 }
-                counted(piece, &models);
+                counted(piece, &models, &rules);
             }
             settle(run);
             Ok(())
@@ -1225,14 +1231,14 @@ fn on(model: &str, effort: Option<&str>) -> String {
 /// of the ladder. Either the piece is queued again on what that step names,
 /// for a fresh worker, or it is blocked with what was tried. Its last try
 /// already carries its outcome. Safe to repeat on a piece that is blocked.
-fn climb(piece: &mut Piece, failure: &str, models: &[Model]) {
+fn climb(piece: &mut Piece, failure: &str, models: &[Model], rules: &ladder::Rules) {
     // A piece stored before tries were kept has no ladder to climb.
     let Some(last) = piece.tries.last().cloned() else { return };
     let tries = piece.tries.len();
     // A try a person asked for past the ladder (its files widened) is the last: the person decides again.
     let verdict = match piece.tries.iter().any(|attempt| attempt.step == Step::Widened) {
         true => Verdict::Blocked("The try after a person widened its files fell short too.".into()),
-        false => ladder::next(&piece.agent, tries, &last.model, last.effort.as_deref(), last.tier, models),
+        false => ladder::next(&piece.agent, tries, rules, &last.model, last.effort.as_deref(), last.tier, models),
     };
     match verdict {
         Verdict::Again(next) => {
@@ -1302,6 +1308,7 @@ pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> 
     let failure = format!("The done-check did not hold: {}\n{}", checks.join("; "), failure_text(output));
     let models = host.models();
     let (run, ()) = store::update(id, |run| {
+        let rules = run.ladder();
         // A run that was done is not, with a piece whose check failed.
         if run.state == RunState::Done {
             run.state = RunState::Running;
@@ -1312,7 +1319,7 @@ pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> 
                 attempt.detail = Some(failure.clone());
                 attempt.ended = Some(crate::store::index::now());
             }
-            climb(piece, &failure, &models);
+            climb(piece, &failure, &models, &rules);
         }
         settle(run);
         Ok(())
@@ -1416,6 +1423,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
     let failure = failure_text(&text);
     let models = host.models();
     let (run, ()) = store::update(id, |run| {
+        let rules = run.ladder();
         if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id) {
             if let Some(attempt) = piece.tries.last_mut() {
                 attempt.outcome = Some(Outcome::CheckFailed);
@@ -1423,7 +1431,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
                 attempt.ended = Some(crate::store::index::now());
             }
             piece.merge = None;
-            climb(piece, &failure, &models);
+            climb(piece, &failure, &models, &rules);
         }
         settle(run);
         Ok(())
@@ -2382,7 +2390,7 @@ pub fn shown(run: &Run) -> Value {
     value["inTurn"] = json!(run.in_turn());
     // What does not fit in what is left, for the person approving it.
     value["fit"] = json!(if matches!(run.state, RunState::AwaitingApproval | RunState::Planned) { budget::fit(run, chrono::Utc::now().timestamp_millis()) } else { Vec::new() });
-    value["maxTries"] = json!(ladder::MAX_TRIES);
+    // `maxTries` and `effortCeiling` are the run's own fields: its ladder as Settings had it when it was made.
     // The order `runs merge` takes the pieces in, and whether a pass is at work on them now.
     value["mergeOrder"] = json!(run.merge_order().iter().map(|piece| piece.id.clone()).collect::<Vec<_>>());
     value["mergeUnderWay"] = json!(super::merge::under_way(&run.id));

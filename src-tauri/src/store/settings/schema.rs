@@ -61,6 +61,8 @@ const PIECES: &str = "expected a number of pieces from 1 to 50";
 const DIFF_LINES: &str = "expected a number of changed lines from 1 to 100000";
 const WORKERS: &str = "expected a number of workers from 1 to 50";
 const DOLLARS: &str = "expected dollars above 0, at most 10000, or \"none\" for no limit";
+const TRIES: &str = "expected a number of tries from 1 to 6";
+const CEILING: &str = "expected one of low, medium, high, xhigh or max";
 const PERCENT: &str = "expected a percentage above 0, at most 100, or \"none\" for no limit";
 
 pub(crate) const CONSTRAINTS: &[Constraint] = &[
@@ -89,6 +91,11 @@ pub(crate) const CONSTRAINTS: &[Constraint] = &[
     whole("orchestrator.workersPerRun", 1, super::MAX_WORKERS, WORKERS),
     whole("orchestrator.workersAtOnce", 1, super::MAX_WORKERS, WORKERS),
     whole("orchestrator.stallMinutes", 1, super::MAX_STALL_MINUTES, "expected minutes from 1 to 240"),
+    // PRO-362: how many tries a piece gets and the effort escalation stops at.
+    whole("orchestrator.triesPerPiece", 1, super::MAX_TRIES_PER_PIECE, TRIES),
+    whole("orchestrator.projects.*.triesPerPiece", 1, super::MAX_TRIES_PER_PIECE, TRIES),
+    Constraint { key: "orchestrator.effortCeiling", rule: Rule::OneOf(&crate::orchestration::routing::EFFORTS), why: CEILING },
+    Constraint { key: "orchestrator.projects.*.effortCeiling", rule: Rule::OneOf(&crate::orchestration::routing::EFFORTS), why: CEILING },
     // PRO-335: a budget or the window level may also be "none", No limit.
     cap("orchestrator.budgetDollars", super::MAX_BUDGET_DOLLARS, DOLLARS),
     cap("orchestrator.projects.*.budgetDollars", super::MAX_BUDGET_DOLLARS, DOLLARS),

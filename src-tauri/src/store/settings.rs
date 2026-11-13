@@ -134,6 +134,15 @@ pub struct OrchestratorSettings {
     /// verifier even when its commands pass (PRO-278, `orchestration::verify`).
     #[serde(deserialize_with = "review_diff_lines")]
     pub review_diff_lines: u32,
+    /// The tries a piece gets, the first included, before it is blocked and
+    /// goes back to the lead (`orchestration::ladder`). A run keeps the value
+    /// it was made with.
+    #[serde(deserialize_with = "tries_per_piece")]
+    pub tries_per_piece: u32,
+    /// Escalation raises a piece's effort no higher than this, one of
+    /// `orchestration::routing::EFFORTS`. A run keeps the value it was made with.
+    #[serde(deserialize_with = "effort_ceiling")]
+    pub effort_ceiling: String,
     /// The rows of the routing table a person changed (PRO-275): which tier
     /// and effort a kind of piece starts on, per agent. A row that is not
     /// here is the built-in one (`orchestration::routing::default_route`).
@@ -161,6 +170,10 @@ pub struct ProjectOrchestratorSettings {
     pub window_ceiling: Option<Cap>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_review_diff_lines")]
     pub review_diff_lines: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_tries_per_piece")]
+    pub tries_per_piece: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "project_effort_ceiling")]
+    pub effort_ceiling: Option<String>,
     /// The project's own rows of the routing table; the rest follow the app's.
     #[serde(skip_serializing_if = "RoutingOverrides::is_empty")]
     pub routing: RoutingOverrides,
@@ -186,6 +199,8 @@ pub struct OrchestratorLimits {
     pub window_ceiling: Cap,
     pub stall_minutes: u32,
     pub review_diff_lines: u32,
+    pub tries_per_piece: u32,
+    pub effort_ceiling: String,
     /// The routing table in force: every kind, every agent.
     pub routing: RoutingTable,
 }
@@ -331,6 +346,23 @@ fn project_review_diff_lines<'de, D: serde::Deserializer<'de>>(deserializer: D) 
     Ok(valid_review_diff_lines(&serde_json::Value::deserialize(deserializer)?))
 }
 
+pub use crate::orchestration::ladder::{valid_ceiling as valid_effort_ceiling, valid_tries as valid_tries_per_piece, DEFAULT_EFFORT_CEILING, DEFAULT_TRIES_PER_PIECE, MAX_TRIES_PER_PIECE};
+
+bounded!(tries_per_piece, u32, read_u32, valid_tries_per_piece, DEFAULT_TRIES_PER_PIECE);
+bounded!(project_tries_per_piece, u32, read_u32, valid_tries_per_piece);
+
+fn read_effort_ceiling(value: &serde_json::Value) -> Option<String> {
+    value.as_str().filter(|effort| valid_effort_ceiling(effort)).map(str::to_owned)
+}
+
+fn effort_ceiling<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<String, D::Error> {
+    Ok(read_effort_ceiling(&serde_json::Value::deserialize(deserializer)?).unwrap_or_else(|| DEFAULT_EFFORT_CEILING.into()))
+}
+
+fn project_effort_ceiling<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<String>, D::Error> {
+    Ok(read_effort_ceiling(&serde_json::Value::deserialize(deserializer)?))
+}
+
 fn valid_worker_mode(value: &serde_json::Value) -> Option<String> {
     value.as_str().filter(|mode| WORKER_MODES.contains(mode)).map(str::to_owned)
 }
@@ -367,6 +399,8 @@ impl Default for OrchestratorSettings {
             window_ceiling: Cap::At(DEFAULT_WINDOW_CEILING),
             stall_minutes: DEFAULT_STALL_MINUTES,
             review_diff_lines: DEFAULT_REVIEW_DIFF_LINES,
+            tries_per_piece: DEFAULT_TRIES_PER_PIECE,
+            effort_ceiling: DEFAULT_EFFORT_CEILING.into(),
             routing: Default::default(),
             projects: Default::default(),
         }
@@ -388,6 +422,8 @@ impl OrchestratorSettings {
             window_ceiling: project.and_then(|p| p.window_ceiling).unwrap_or(self.window_ceiling),
             stall_minutes: self.stall_minutes,
             review_diff_lines: project.and_then(|p| p.review_diff_lines).unwrap_or(self.review_diff_lines),
+            tries_per_piece: project.and_then(|p| p.tries_per_piece).unwrap_or(self.tries_per_piece),
+            effort_ceiling: project.and_then(|p| p.effort_ceiling.clone()).unwrap_or_else(|| self.effort_ceiling.clone()),
             routing: RoutingTable::resolved(&self.routing, project.map(|p| &p.routing)),
         }
     }
@@ -768,6 +804,47 @@ mod tests {
         assert_eq!((limits.workers_per_run, limits.workers_at_once, limits.stall_minutes), (4, 8, 10));
         assert_eq!((limits.budget_dollars, limits.budget_points, limits.window_ceiling), (Cap::At(15.0), Cap::At(25.0), Cap::At(85.0)));
         assert!(damaged.orchestrator.projects["/repo"].is_empty());
+    }
+
+    #[test]
+    fn a_piece_gets_three_tries_never_past_high_unless_the_app_or_a_project_says_otherwise() {
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        let limits = legacy.orchestrator.for_project("/repo");
+        assert_eq!((limits.tries_per_piece, limits.effort_ceiling.as_str()), (3, "high"));
+
+        let set: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {
+            "triesPerPiece": 5, "effortCeiling": "xhigh",
+            "projects": {"/repo": {"triesPerPiece": 1}, "/other": {"effortCeiling": "medium"}},
+        }})).unwrap();
+        let repo = set.orchestrator.for_project("/repo");
+        assert_eq!((repo.tries_per_piece, repo.effort_ceiling.as_str()), (1, "xhigh"), "a key the project leaves out follows the app");
+        let other = set.orchestrator.for_project("/other");
+        assert_eq!((other.tries_per_piece, other.effort_ceiling.as_str()), (5, "medium"));
+        assert_eq!(set.orchestrator.for_project("/elsewhere").tries_per_piece, 5);
+        let written = serde_json::to_value(&set).unwrap();
+        assert_eq!((&written["orchestrator"]["triesPerPiece"], &written["orchestrator"]["effortCeiling"]), (&serde_json::json!(5), &serde_json::json!("xhigh")));
+        assert_eq!(written["orchestrator"]["projects"]["/repo"], serde_json::json!({"triesPerPiece": 1}));
+        assert_eq!(written["orchestrator"]["projects"]["/other"], serde_json::json!({"effortCeiling": "medium"}));
+        assert_eq!(serde_json::from_value::<Settings>(written).unwrap().orchestrator, set.orchestrator);
+
+        // Every bound and every level is taken; past them a value is the default, and a project's is no value.
+        for tries in 1..=6 {
+            let settings: OrchestratorSettings = serde_json::from_value(serde_json::json!({"triesPerPiece": tries})).unwrap();
+            assert_eq!(settings.tries_per_piece, tries);
+        }
+        for effort in crate::orchestration::routing::EFFORTS {
+            let settings: OrchestratorSettings = serde_json::from_value(serde_json::json!({"effortCeiling": effort})).unwrap();
+            assert_eq!(settings.effort_ceiling, effort);
+        }
+        for (tries, effort) in [(serde_json::json!(0), serde_json::json!("none")), (serde_json::json!(7), serde_json::json!("High")), (serde_json::json!(2.5), serde_json::json!(3)), (serde_json::json!("3"), serde_json::Value::Null)] {
+            let damaged: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {
+                "triesPerPiece": tries, "effortCeiling": effort,
+                "projects": {"/repo": {"triesPerPiece": tries, "effortCeiling": effort}},
+            }})).unwrap();
+            let limits = damaged.orchestrator.for_project("/repo");
+            assert_eq!((limits.tries_per_piece, limits.effort_ceiling.as_str()), (3, "high"), "{tries} and {effort}");
+            assert!(damaged.orchestrator.projects["/repo"].is_empty());
+        }
     }
 
     #[test]
