@@ -11,6 +11,7 @@ const { CommandPalette } = await import("./CommandPalette");
 const store = await import("@/lib/sessions");
 const { searchSettings } = await import("@/lib/settingsSearch");
 const { onProjectSettingsRequest } = await import("@/lib/projectAdded");
+const { noteExperimentalSettings } = await import("@/lib/experimentalSettings");
 
 beforeEach(async () => {
   mocks.invoke.mockReset().mockImplementation(async (command: string) => {
@@ -124,6 +125,24 @@ describe("settings in the command palette", () => {
     // Typed for: only setting rows, no command, session or project, though commands match "sounds" too.
     expect(groupIds()).toEqual(["palette-group-settings"]);
     expect(screen.getAllByRole("option").every((option) => option.id.startsWith("palette:setting:"))).toBe(true);
+  });
+
+  it("finds a row behind an Experimental switch only while it is on, and at once when it turns on", async () => {
+    const switches = (orchestratorRuns: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns });
+    act(() => switches(false));
+    try {
+      const { input } = palette();
+      await narrowToSettings(input);
+      fireEvent.change(input, { target: { value: "orchestrator" } });
+      await screen.findByRole("option", { name: /^Orchestration runs/ });
+      expect(screen.queryByRole("option", { name: /^Orchestrator/ })).toBeNull();
+      act(() => switches(true));
+      expect(await screen.findByRole("option", { name: /^Orchestrator/ })).toBeTruthy();
+      act(() => switches(false));
+      await waitFor(() => expect(screen.queryByRole("option", { name: /^Orchestrator/ })).toBeNull());
+    } finally {
+      act(() => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: false }));
+    }
   });
 
   it("lists every Settings page on one line with nothing typed, opens one, and moves with the arrows", async () => {

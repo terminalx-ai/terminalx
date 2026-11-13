@@ -1,4 +1,5 @@
 import { getExperimentalSettings } from "@/lib/experimentalSettings";
+import type { SettingRegistration } from "@/components/settings/settingsRegistry";
 
 // The pages ⌘K lists; searching goes by row (settingsSearch.ts), whose metadata lives in settingsRegistry.
 export const SETTINGS_SECTIONS = [
@@ -25,4 +26,13 @@ export type SettingsTab = (typeof SETTINGS_SECTIONS)[number]["id"];
 /** A section behind a switch in Settings → Experimental is found only while the switch is on. Shared with the row search. */
 export function settingsSectionOffered(tab: SettingsTab): boolean {
   return tab !== "orchestrator" || getExperimentalSettings()?.orchestratorRuns === true;
+}
+
+/**
+ * Whether a row is shown, and so findable: its section is offered and, when the
+ * row names an Experimental switch (`requires`), that switch is on. Off until
+ * the switches are read, as everywhere else.
+ */
+export function settingOffered(row: Pick<SettingRegistration, "section" | "requires">): boolean {
+  return settingsSectionOffered(row.section) && (!row.requires || getExperimentalSettings()?.[row.requires] === true);
 }

@@ -1,5 +1,5 @@
 import { indexPaletteItem, rankPaletteItems, type MatchRange } from "@/lib/commandPalette";
-import { settingsSectionOffered } from "@/lib/settingsSections";
+import { settingOffered } from "@/lib/settingsSections";
 import { SETTINGS_ROWS, SETTINGS_SECTIONS, type SettingId, type SettingRegistration, type SettingsSection } from "@/components/settings/settingsRegistry";
 
 /**
@@ -74,16 +74,16 @@ function nearlyIn(text: string, word: string): boolean {
 
 /**
  * Rows matching `query`, best first, at most SETTINGS_SEARCH_LIMIT. A blank
- * query matches nothing: the page lists its sections instead. Rows of a
- * section behind an Experimental switch (Orchestrator) are found only while
- * that switch is on, by the same rule as the section search.
+ * query matches nothing: the page lists its sections instead. Rows
+ * behind an Experimental switch (the Orchestrator section, a repository's
+ * Orchestrator row) are found only while that switch is on.
  */
 export function searchSettings(query: string): SettingSearchMatch[] {
   if (!query.trim()) return [];
   const matches: SettingSearchMatch[] = [];
   for (const match of rankPaletteItems(rowIndex, query)) {
     const row = match.item.row;
-    if (!settingsSectionOffered(row.section) || !wordsFound(row, query, match.primaryRanges)) continue;
+    if (!settingOffered(row) || !wordsFound(row, query, match.primaryRanges)) continue;
     matches.push({
       id: row.id as SettingId,
       row,

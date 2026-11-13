@@ -56,6 +56,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { HighlightedText } from "@/components/ui/HighlightedText";
 import { SETTINGS_SECTIONS as SETTINGS_PAGES, settingsSectionOffered } from "@/lib/settingsSections";
 import { searchSettings } from "@/lib/settingsSearch";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { requestProjectSettings } from "@/lib/projectAdded";
 import type { SettingsSection } from "@/components/settings/settingsRegistry";
 import { AgentMark } from "@/components/AgentMark";
@@ -309,6 +310,8 @@ export function CommandPalette({
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<PaletteScope>("all");
   const deferredQuery = useDeferredValue(query);
+  // Settings behind an Experimental switch are listed and found only while it is on; the list follows the switch.
+  const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
   const [statusSessionId, setStatusSessionId] = useState<string | null>(null);
@@ -843,7 +846,7 @@ export function CommandPalette({
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
       ...(settingsFirst ? [settingsGroup, commandGroup] : [commandGroup, settingsGroup]),
     ].filter((group) => paletteScopeShows(scope, group.id));
-  }, [statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading]);
+  }, [statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading, orchestratorRuns]);
 
   const renderedGroups = useMemo(() => {
     let offset = 0;

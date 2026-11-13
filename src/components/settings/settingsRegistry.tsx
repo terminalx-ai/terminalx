@@ -58,6 +58,13 @@ interface SettingDefinition {
    * network sharing, the account, or an Experimental switch.
    */
   linkable?: { enable: () => Promise<void> };
+  /**
+   * The Experimental switch this row is behind. While it is off the row is
+   * not shown on its page, so Settings search and ⌘K must not offer it either
+   * (lib/settingsSections.ts `settingOffered`). A whole section behind a
+   * switch is `settingsSectionOffered`'s.
+   */
+  requires?: "orchestratorRuns";
 }
 export interface SettingRegistration extends SettingDefinition {
   render: (props: RowProps) => ReactNode;
@@ -649,6 +656,7 @@ export const SETTINGS_ROWS = [
     description: "Override for this repository whether a run asks first, how many pieces it may have, the mode its workers run in, the model each kind of piece starts on, and its budget.",
     searchTerms: ["repositories", "orchestrator", "runs", "approval", "pieces", "workers", "permissions", "routing", "model", "effort", "tier", "budget", "points", "dollars", "window"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.projects" }, layout: "content",
+    requires: "orchestratorRuns",
   }),
   defineSetting({
     id: "repositories.scripts", section: "repositories", title: "Scripts",

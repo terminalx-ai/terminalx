@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SETTINGS_ROWS } from "@/components/settings/settingsRegistry";
 import { noteExperimentalSettings } from "@/lib/experimentalSettings";
+import { settingOffered } from "@/lib/settingsSections";
 import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSearchSummary } from "./settingsSearch";
 
 const orchestratorRuns = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: on });
@@ -82,6 +83,30 @@ describe("settings row search", () => {
     orchestratorRuns(true);
     const ids = searchSettings("budget").map((match) => match.id);
     expect(ids.slice(0, 2)).toEqual(["orchestrator.budgetDollars", "orchestrator.budgetPoints"]);
+  });
+
+  it("does not find a repository's Orchestrator row while the switch is off, and finds it the moment it is on", () => {
+    // The row is on the Repositories page, which is always offered: the switch gates the row itself.
+    const named = () => searchSettings("orchestrator").map((match) => match.id);
+    expect(named()).not.toContain("repositories.orchestrator");
+    expect(searchSettings("orchestrator").some((match) => match.row.title.startsWith("Orchestrator") || match.section === "orchestrator")).toBe(false);
+    expect(named()).toContain("experimental.orchestratorRuns");
+    orchestratorRuns(true);
+    expect(named()).toContain("repositories.orchestrator");
+    expect(searchSettings("orchestrator")[0].row.title).toBe("Orchestrator");
+    orchestratorRuns(false);
+    expect(named()).not.toContain("repositories.orchestrator");
+  });
+
+  it("offers every row behind a switch only while that switch is on, and every other row always", () => {
+    const behind = SETTINGS_ROWS.filter((row) => "requires" in row && row.requires);
+    expect(behind.map((row) => row.id)).toEqual(["repositories.orchestrator"]);
+    expect(behind.every((row) => !settingOffered(row))).toBe(true);
+    orchestratorRuns(true);
+    expect(behind.every((row) => settingOffered(row))).toBe(true);
+    orchestratorRuns(false);
+    // Off until the switches are read, as for a section.
+    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator").every((row) => settingOffered(row))).toBe(true);
   });
 
   it("groups matches by page in order of their best match and counts them", () => {
