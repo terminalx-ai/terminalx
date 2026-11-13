@@ -61,6 +61,23 @@ describe("settings row search", () => {
     expect(searchSettings("keychain").map((match) => match.id)).toContain("repositories.environment");
   });
 
+  it("finds every project row under 'Projects', by its new name and the old one (PRO-131)", () => {
+    const first = (query: string) => searchSettings(query)[0]?.id;
+    expect(first("worktree folder")).toBe("repositories.workspacesPath");
+    expect(first("workspaces path")).toBe("repositories.workspacesPath");
+    expect(first("root path")).toBe("repositories.rootPath");
+    expect(first("project templates")).toBe("projects.templates");
+    for (const query of ["preview urls", "files to copy"]) {
+      const [match] = searchSettings(query);
+      expect(match.sectionTitle).toBe("Projects");
+    }
+    expect(searchSettings("project templates")[0].sectionTitle).toBe("Project templates");
+    // Every row a project or the templates page holds is still found by its title.
+    for (const row of SETTINGS_ROWS.filter((row) => (row.section === "repositories" || row.section === "projects") && settingOffered(row))) {
+      expect(searchSettings(row.title).map((match) => match.id), row.id).toContain(row.id);
+    }
+  });
+
   it("returns the row, its page and highlight ranges for title and description", () => {
     const [sounds] = searchSettings("sounds");
     expect(sounds.id).toBe("general.sounds");

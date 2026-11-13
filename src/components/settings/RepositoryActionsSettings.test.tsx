@@ -26,20 +26,23 @@ describe("repository action editor", () => {
     expect(within(screen.getByRole("button", { name: "Edit Test" })).queryByText("several at once")).toBeNull();
   });
 
-  it("adds a multiline command, selected icon and switches using Command+Enter", async () => {
+  it("adds a multiline command and switches using Command+Enter; the dialog has no icon or 'Can run in' field (PRO-155)", async () => {
     const save = vi.fn(async () => {});
     render(<Editor initial={[]} save={save} />);
     fireEvent.click(screen.getByRole("button", { name: "Add action" }));
     edit("Name", "  Develop  ");
     const command = "  echo ready\npnpm dev\n";
     edit("Command", command);
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "rocket" } });
-    fireEvent.click(screen.getByRole("button", { name: "Rocket" }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.queryByRole("searchbox")).toBeNull();
+    expect(dialog.queryByRole("group", { name: /icon/i })).toBeNull();
+    expect(dialog.queryByText(/icon/i)).toBeNull();
+    expect(dialog.queryByText(/can run in/i)).toBeNull();
     fireEvent.click(screen.getByRole("switch", { name: "Run after setup" }));
     fireEvent.click(screen.getByRole("switch", { name: "Allow several at once" }));
     fireEvent.keyDown(screen.getByRole("textbox", { name: "Command" }), { key: "Enter", metaKey: true });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(save).toHaveBeenCalledExactlyOnceWith([{ id: expect.any(String), name: "Develop", command, icon: "rocket", concurrent: true, runAfterSetup: true, hidden: false }]);
+    expect(save).toHaveBeenCalledExactlyOnceWith([{ id: expect.any(String), name: "Develop", command, icon: "terminal", concurrent: true, runAfterSetup: true, hidden: false }]);
     expect(screen.getByRole("button", { name: "Edit Develop" })).toBeTruthy();
   });
 
@@ -129,17 +132,17 @@ describe("repository action editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete Dev" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Edit Dev" })).toBeNull());
     save.mockRejectedValueOnce(new Error("Repository file is unreadable."));
-    fireEvent.click(screen.getByRole("button", { name: "Reset to repository file" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reset to terminalx.json" }));
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Repository file is unreadable.");
     expect(screen.getByRole("button", { name: "Edit Test" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Reset to repository file" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reset to terminalx.json" }));
     await screen.findByRole("button", { name: "Edit Dev" });
     expect(screen.queryByRole("button", { name: "Edit Test" })).toBeNull();
   });
 
   it("does not offer repository-file reset without a repository source", () => {
     render(<Editor />);
-    expect(screen.queryByRole("button", { name: "Reset to repository file" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reset to terminalx.json" })).toBeNull();
   });
 
   it("refuses to save an action that was deleted while the dialog was open", async () => {

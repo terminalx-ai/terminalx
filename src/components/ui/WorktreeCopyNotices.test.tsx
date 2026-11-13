@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { SessionEntry } from "@/types/session";
-import { WorktreeCopyNotices } from "./WorktreeCopyNotices";
+import { WorktreeCopyNotices, copiedStepText } from "./WorktreeCopyNotices";
 
 const mock = vi.hoisted(() => ({ listener: undefined as undefined | ((event: { payload: Partial<SessionEntry> }) => void), unlisten: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (_name, listener) => { mock.listener = listener; return mock.unlisten; }) }));
@@ -19,7 +19,7 @@ it("lists skipped files and errors, deduplicates creation events, and dismisses 
   fireEvent.click(screen.getByRole("button", { name: "Dismiss file copy notice for feature" }));
   expect(screen.queryByRole("status")).toBeNull();
   act(() => mock.listener?.({ payload: { ...payload, worktreeBase: { ...payload.worktreeBase, fileCopy: { copiedCount: 1, copiedBytes: 10, skippedCount: 0, warnings: [], skipped: [], error: null } } } }));
-  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.getByText("Copied a file")).toBeTruthy();
   await act(async () => view.unmount());
   expect(mock.unlisten).toHaveBeenCalled();
 });
@@ -41,4 +41,14 @@ it("shows a cleanup warning even when no files were skipped", () => {
     warnings: [{ path: ".env", reason: "Copied, but could not remove temporary file" }], error: null,
   } } } }));
   expect(screen.getByRole("status")).toBeTruthy();
+});
+
+it("words the Copied step for one file and for several", () => {
+  expect(copiedStepText({ copiedCount: 0, firstCopied: null })).toBeNull();
+  expect(copiedStepText({ copiedCount: 1, firstCopied: ".env.local" })).toBe("Copied .env.local");
+  expect(copiedStepText({ copiedCount: 2, firstCopied: ".env.local" })).toBe("Copied .env.local and 1 other file");
+  expect(copiedStepText({ copiedCount: 3, firstCopied: ".env.local" })).toBe("Copied .env.local and 2 other files");
+  render(<WorktreeCopyNotices />);
+  act(() => mock.listener?.({ payload: { id: "c", title: "c", worktreeBase: { commit: "a", fetched: false, warning: null, fileCopy: { copiedCount: 3, copiedBytes: 3, firstCopied: ".env.local", skippedCount: 0, skipped: [], warnings: [], error: null } } } }));
+  expect(screen.getByText("Copied .env.local and 2 other files")).toBeTruthy();
 });

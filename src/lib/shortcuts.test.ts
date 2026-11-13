@@ -59,6 +59,21 @@ describe("the shortcut registry", () => {
     expect(keycaps("mod+shift+o", false)).toEqual(["Ctrl", "Shift", "O"]);
   });
 
+  // PRO-363: ⌘R runs the project's action. Off macOS Ctrl+R is the shell's history search, which a terminal keeps,
+  // so the default there adds Alt; neither is another action's, a terminal's or an editing key.
+  it("runs the project's action on ⌘R on macOS and Ctrl+Alt+R elsewhere, keys no other action or terminal has", () => {
+    expect(SHORTCUT_ACTIONS.find((entry) => entry.id === "session.runAction")).toMatchObject({ label: "Run the project's action", group: "Session" });
+    for (const [mac, chord] of [[true, "mod+r"], [false, "mod+alt+r"]] as const) {
+      const keymap = resolveKeymap({}, mac);
+      expect(keymap["session.runAction"]).toEqual([chord]);
+      expect(SHORTCUT_ACTIONS.filter((entry) => keymap[entry.id].includes(chord)).map((entry) => entry.id)).toEqual(["session.runAction"]);
+      expect(bindingProblem("session.runAction", chord, mac)).toBeNull();
+      expect(isTerminalReserved(chord, mac)).toBe(false);
+    }
+    expect(isTerminalReserved("mod+r", false)).toBe(true);
+    expect(keycaps("mod+r", true)).toEqual(["⌘", "R"]);
+  });
+
   it("covers the three kinds of binding", () => {
     expect(bindingKind("mod+k")).toBe("chord");
     expect(bindingKind("escape")).toBe("key");

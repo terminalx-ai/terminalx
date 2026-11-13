@@ -26,6 +26,7 @@ import {
   GitBranch,
   GitPullRequest,
   HardDrive,
+  Globe,
   Home,
   Info,
   KeyRound,
@@ -36,6 +37,7 @@ import {
   Mic,
   Moon,
   PanelLeft,
+  Play,
   PanelRight,
   Palette,
   Plug,
@@ -118,6 +120,8 @@ import type { SettingsTab } from "@/components/settings/SettingsPage";
 import { openWorktreeCleanup } from "@/lib/dialogs";
 import { openPairPhone } from "@/lib/pairing";
 import type { Project, SessionEntry } from "@/types/session";
+import { offersRunMenu, openPreview, startAction } from "@/components/session/RunMenu";
+import { visibleActions } from "@/lib/repositoryActions";
 
 const GROUP_CAPS: Record<string, number> = {
   smart: 5,
@@ -580,8 +584,26 @@ export function CommandPalette({
         ? [indexPaletteItem({ id: "command:cloud-new-workspace", group: "commands" as const, primary: "New cloud workspace…", secondary: `A new machine in ${cloud.orgName}: repositories, first prompt and price`, recentAt: 1, icon: Cloud, run: () => openNewCloudWorkspace() }, ["cloud workspace create vm"])]
         : []),
     ];
-    return [...shortcutEntries, ...extras];
-  }, [selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
+    // PRO-363: the open local session's project actions and preview URLs, as the header's Run menu and Open button list them.
+    const runProject = selectedSession && !store.selectedCloudWorkspace ? store.projects.find((project) => project.path === selectedSession.projectPath) : undefined;
+    const runVisible = runProject ? visibleActions(runProject.actions ?? []) : [];
+    const runEntries: CommandEntry[] = selectedSession && offersRunMenu(selectedSession, runProject)
+      ? [
+          // ⌘R runs an action only when it is the only one; with several it opens the Run menu, which shows the key.
+          ...runVisible.map((action, index) => indexPaletteItem({
+            id: `command:run-action:${action.id}`, group: "commands" as const, primary: `Run ${action.name}`, secondary: action.command,
+            recentAt: 30 - index, icon: Play, chord: runVisible.length === 1 ? keymap["session.runAction"][0] : undefined,
+            run: () => startAction(selectedSession, action),
+          }, ["run action start script"])),
+          ...(runProject.previewUrls ?? []).map((preview, index) => indexPaletteItem({
+            id: `command:open-preview:${preview.id}`, group: "commands" as const, primary: `Open ${preview.name}`, secondary: preview.url,
+            recentAt: 28 - index, icon: Globe,
+            run: () => openPreview(selectedSession, preview),
+          }, ["open preview url browser"])),
+        ]
+      : [];
+    return [...runEntries, ...shortcutEntries, ...extras];
+  }, [store.projects, selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({

@@ -156,8 +156,11 @@ describe("settings in the command palette", () => {
     expect(results).toHaveLength(pages.length + 1);
     expect(results.map((row) => row.id)).not.toContain("palette:settings-page:orchestrator");
     expect(screen.getByRole("option", { name: /^Environment/ })).toBeTruthy();
-    expect(screen.getByRole("option", { name: /^Projects/ })).toBeTruthy();
-    expect(screen.getByRole("option", { name: /^Repositories/ }).textContent).toBe("RepositoriesRepository paths, files to copy, scripts and workspace cleanup");
+    // PRO-131: the repository pages are titled Projects and the templates page Project templates; their ids are unchanged.
+    expect(screen.getByRole("option", { name: /^Project templates/ }).id).toBe("palette:settings-page:projects");
+    expect(screen.getByRole("option", { name: /^ProjectsProject paths/ }).textContent).toBe("ProjectsProject paths, preview URLs, files to copy, scripts, actions and workspace cleanup");
+    expect(screen.getByRole("option", { name: /^ProjectsProject paths/ }).id).toBe("palette:settings-page:repositories");
+    expect(screen.queryByRole("option", { name: /^Repositories/ })).toBeNull();
     // The footer says the pages are not all there is (design 07.05).
     expect(screen.getByText("Type to search every setting, not only pages")).toBeTruthy();
     expect(screen.getByText("↑↓ to move")).toBeTruthy();

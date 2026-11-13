@@ -116,6 +116,8 @@ fn validate_actions(actions: &[RepositoryActionEntry]) -> Result<()> {
     let (mut names, mut ids) = (std::collections::HashSet::new(), std::collections::HashSet::new());
     for a in actions {
         anyhow::ensure!(!a.id.trim().is_empty() && ids.insert(a.id.as_str()), "Every action needs a unique id.");
+        // Its run's tab is named by the id, and tab names have a length limit (PRO-363).
+        anyhow::ensure!(a.id.len() <= crate::action_runner::MAX_ACTION_ID, "Action \"{}\" has an id longer than {} characters.", a.name, crate::action_runner::MAX_ACTION_ID);
         anyhow::ensure!(!a.name.trim().is_empty() && a.name.len() <= 200, "Every action needs a name of at most 200 characters.");
         anyhow::ensure!(names.insert(normalized_name(&a.name)), "Action names must be unique.");
         anyhow::ensure!(!a.command.trim().is_empty(), "Action \"{}\" needs a command.", a.name);
@@ -712,6 +714,17 @@ mod tests {
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["projects"][0]["futureField"], serde_json::json!(["kept"]));
         assert_eq!(saved["projects"][0]["pinned"], true);
+    }
+
+    #[test]
+    fn an_action_id_too_long_to_name_its_tab_is_refused_with_a_reason() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        let action = |id: String| RepositoryActionEntry { id, name: "Dev".into(), command: "pnpm dev".into(), ..Default::default() };
+        let error = update(&project.path, ProjectPatch { actions: Some(vec![action("x".repeat(65))]), ..Default::default() }).unwrap_err().to_string();
+        assert_eq!(error, "Action \"Dev\" has an id longer than 64 characters.");
+        update(&project.path, ProjectPatch { actions: Some(vec![action("x".repeat(64))]), ..Default::default() }).unwrap();
     }
 
     #[test]
