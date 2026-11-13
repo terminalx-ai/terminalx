@@ -411,6 +411,10 @@ impl Terminals {
         }
         let master = AdoptedMaster { fd: master, tty, took_writer: AtomicBool::new(false) };
         let reader = master.try_clone_reader()?;
+        // As a pane opened under a supervisor writes (`supervised_writer`).
+        #[cfg(target_os = "linux")]
+        let writer: Box<dyn Write + Send> = if supervised.is_some() { Box::new(master.file()?) } else { master.take_writer()? };
+        #[cfg(not(target_os = "linux"))]
         let writer = master.take_writer()?;
         let mut parser = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
         parser.process(&screen);

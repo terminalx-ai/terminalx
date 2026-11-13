@@ -453,6 +453,20 @@ impl std::fmt::Display for SupervisedTerminals {
 #[cfg(target_os = "linux")]
 impl std::error::Error for SupervisedTerminals {}
 
+/// The input side of a supervised pane. portable-pty's writer types an end
+/// of file (`\n` and VEOF) when it is dropped, to end a shell politely; but
+/// a supervised launch is ended by its supervisor, whose Stop reaches the
+/// program a moment after the pane is let go of, and that program would
+/// read those bytes as input meanwhile (#467).
+#[cfg(target_os = "linux")]
+fn supervised_writer(master: &(dyn MasterPty + Send)) -> Result<Box<dyn Write + Send>> {
+    use std::os::fd::{AsFd, BorrowedFd};
+    let fd = master.as_raw_fd().context("a Linux terminal has no descriptor")?;
+    // SAFETY: the master stays open for this call; the duplicate is ours.
+    let own = unsafe { BorrowedFd::borrow_raw(fd) }.as_fd().try_clone_to_owned().context("pty writer")?;
+    Ok(Box::new(std::fs::File::from(own)))
+}
+
 /// What `cmd` runs, as the supervisor execs it: portable-pty's own spawn,
 /// with the arguments and environment kept as bytes.
 #[cfg(target_os = "linux")]
@@ -992,7 +1006,10 @@ impl Terminals {
         push_scrollback(&mut scrollback, &printed);
         self.start(sink, id, Parts {
             reader: pair.master.try_clone_reader().map_err(|e| anyhow!("pty reader: {e}"))?,
+            #[cfg(not(target_os = "linux"))]
             writer: pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?,
+            #[cfg(target_os = "linux")]
+            writer: supervised_writer(pair.master.as_ref())?,
             master: pair.master,
             #[cfg(not(target_os = "linux"))]
             waiter: Waiter::Spawned(child),
