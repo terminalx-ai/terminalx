@@ -178,7 +178,7 @@
               "type": "string"
             }
           ],
-          "description": "Dollars its workers on an API key may spend; then the run starts nothing new and asks you. No limit lets a run spend until its work is done; its cost is still shown."
+          "description": "Dollars spent on an API key; then the run pauses and asks you."
         },
         "budgetPoints": {
           "anyOf": [
@@ -193,10 +193,21 @@
               "type": "string"
             }
           ],
-          "description": "Points of a usage window one run may use: the change in the window while it runs, which counts everything else you run too. No limit leaves only the window level to pause it."
+          "description": "Points of a usage window one run may use."
+        },
+        "effortCeiling": {
+          "description": "Past this, the next model up is tried.",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "type": "string"
         },
         "pieceLimit": {
-          "description": "A larger plan is refused, and the lead is told the limit. From 1 to 50.",
+          "description": "A larger plan is refused, and the lead is told the limit.",
           "maximum": 50,
           "minimum": 1,
           "type": "integer"
@@ -233,6 +244,16 @@
                   }
                 ]
               },
+              "effortCeiling": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
               "pieceLimit": {
                 "maximum": 50,
                 "minimum": 1,
@@ -255,6 +276,11 @@
                 },
                 "description": "Changed rows of the orchestration routing table: which tier and effort a kind of piece starts on, per agent.",
                 "type": "object"
+              },
+              "triesPerPiece": {
+                "maximum": 6,
+                "minimum": 1,
+                "type": "integer"
               },
               "windowCeiling": {
                 "anyOf": [
@@ -287,7 +313,7 @@
           "type": "object"
         },
         "requireApproval": {
-          "description": "Show the plan and wait for Approve. Off: a lead starts its workers as soon as its plan is stored.",
+          "description": "Show the plan and wait for Approve. Off, the workers start at once.",
           "type": "boolean"
         },
         "reviewDiffLines": {
@@ -307,8 +333,14 @@
           "type": "object"
         },
         "stallMinutes": {
-          "description": "No tool call or file change, no command running, and its agent idle. A long build is not a stall.",
+          "description": "No tool call, file change or command. A long build is not a stall.",
           "maximum": 240,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "triesPerPiece": {
+          "description": "Retry, raise effort, then move up a model. From 1 to 6.",
+          "maximum": 6,
           "minimum": 1,
           "type": "integer"
         },
@@ -325,10 +357,10 @@
               "type": "string"
             }
           ],
-          "description": "Whoever used it; the run can go on after the reset. Keeps your own window from running out. Off, a run can use the whole window."
+          "description": "Whoever used it; the run goes on after the reset."
         },
         "workerMode": {
-          "description": "The permission mode a worker starts in unless its piece names another. Push, merge and deploy stay blocked by deny rules in every mode.",
+          "description": "Push, merge and deploy stay blocked by deny rules in every mode.",
           "enum": [
             "plan",
             "manual",
@@ -339,13 +371,13 @@
           "type": "string"
         },
         "workersAtOnce": {
-          "description": "Across every run. Sessions you start by hand are never counted or queued.",
+          "description": "Across every run. Sessions you start by hand are not counted.",
           "maximum": 50,
           "minimum": 1,
           "type": "integer"
         },
         "workersPerRun": {
-          "description": "The rest wait in a queue and start by themselves as workers finish. From 1 to 50.",
+          "description": "The rest wait in a queue and start as workers finish.",
           "maximum": 50,
           "minimum": 1,
           "type": "integer"

@@ -3190,8 +3190,11 @@ fn relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata() {
     assert!(index::get(SESSION).unwrap().worktree_name.is_none());
 }
 
+/// An earlier launch whose exit cannot be confirmed refuses only the start
+/// that found it (#467 review): the tab is not left stopping, and Stop still
+/// finds the launch by its pane and ends it.
 #[test]
-fn startup_retains_unconfirmed_detached_ownership_until_explicit_stop() {
+fn startup_refuses_only_itself_while_detached_ownership_is_unconfirmed() {
     let rig = Rig::with_live_pane();
     let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
     failure.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3206,15 +3209,72 @@ fn startup_retains_unconfirmed_detached_ownership_until_explicit_stop() {
     {
         let mut rt = rig.rt.lock().unwrap();
         let refused = rig.manager.require_prior_cli_exit(&mut rt, &rig.pane);
-        assert!(refused.as_ref().is_err_and(|error| error.to_string().contains("Previous PTY exit is unconfirmed")), "{refused:?}");
-        assert!(rt.stopping);
-        assert_eq!(rig.manager.stopping_ptys.lock().unwrap()[&key_of(SESSION, TAB)].len(), detached.len());
+        assert!(refused.as_ref().is_err_and(|error| error.to_string().contains("has not exited yet")), "{refused:?}");
+        assert!(!rt.stopping, "the tab is not left stopping");
     }
+    assert!(!rig.manager.terminals.detached_stops(&rig.pane).is_empty(), "the launch is still owned, for Stop to end");
+    assert!(!detached.is_empty());
     failure.store(false, std::sync::atomic::Ordering::SeqCst);
     rig.manager.stop(SESSION, TAB).unwrap();
     let mut rt = rig.rt.lock().unwrap();
     assert!(!rt.stopping);
     rig.manager.require_prior_cli_exit(&mut rt, &rig.pane).unwrap();
+}
+
+/// #467 review: the CLI exits into a #437 shell, whose respawn lets go of
+/// the old process with a terminate that waits up to two seconds for it.
+/// A prompt in that window waits for it and starts the CLI, and the tab is
+/// never left refusing later prompts. One that cannot confirm the old
+/// process's exit refuses just itself.
+#[test]
+fn a_prompt_while_the_exited_cli_is_still_going_neither_locks_the_tab_nor_targets_the_shell() {
+    for confirmable in [true, false] {
+        let mut rig = Rig::new();
+        rig.pane = SessionManager::pane_id(TAB);
+        let program = rig._dir.path().join("claude-fixture");
+        let ran = rig._dir.path().join("claude-fixture.ran");
+        std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.ran\"\nIFS= read -r line\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _program = claude::pty::claude_program_for_tests(program);
+        restartable(&rig);
+        let spec = |command| pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command, env: &[] };
+        // The CLI, as Claude Code's TUI does, ignores SIGTERM.
+        rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec(Some("sh -c 'trap \"\" TERM; echo ignoring-term; while :; do sleep 0.1; done'"))).unwrap();
+        let old = rig.manager.terminals.pid(&rig.pane).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !String::from_utf8_lossy(&rig.manager.terminals.read_output(&rig.pane).unwrap_or_default()).contains("ignoring-term") {
+            assert!(Instant::now() < deadline, "the stand-in CLI never started");
+            std::thread::sleep(MOMENT);
+        }
+        let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+        // It exits into a shell in the same terminal (#437).
+        { let mut rt = rig.rt.lock().unwrap(); rig.manager.release_cli(&mut rt); }
+        rig.manager.terminals.respawn(rig.manager.sink.clone(), &rig.pane, spec(None)).unwrap();
+        assert!(crate::harness::host::is_alive(old), "the old process is still going");
+        if !confirmable { failure.store(true, std::sync::atomic::Ordering::SeqCst); }
+        let first = rig.manager.ensure_started(SESSION, TAB);
+        assert!(!rig.rt.lock().unwrap().stopping, "the tab is not left stopping");
+        if confirmable {
+            first.unwrap();
+        } else {
+            assert!(first.is_err(), "the prompt that could not confirm the old process is refused");
+            let errors: Vec<_> = rig.events().into_iter().filter(|event| matches!(event.payload, Payload::Error { .. })).map(|event| serde_json::to_string(&event.payload).unwrap()).collect();
+            assert!(errors.iter().any(|error| error.contains("has not exited yet")), "the chat says why: {errors:?}");
+            failure.store(false, std::sync::atomic::Ordering::SeqCst);
+            rig.manager.ensure_started(SESSION, TAB).expect("a later prompt starts once the old process can be confirmed gone");
+        }
+        assert!(!crate::harness::host::is_alive(old), "the old process was ended before the CLI started");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !ran.exists() {
+            assert!(Instant::now() < deadline, "the CLI never started");
+            std::thread::sleep(MOMENT);
+        }
+        rig.manager.ensure_started(SESSION, TAB).expect("a later prompt works");
+        rig.manager.stop(SESSION, TAB).unwrap();
+    }
 }
 
 /// A settings restart admits the tab's settings from the index first.

@@ -126,6 +126,32 @@ export function workerTitle(session: SessionEntry, found: Pick<WorkerTry, "piece
   return found?.piece.title ?? (session.title?.trim() || conversationTitle(session));
 }
 
+/** A piece the sidebar lists before its worker exists: queued, and no worker started for it yet (18.03, 18.07). */
+export function awaitsWorker(piece: RunPiece): boolean {
+  return piece.state === "queued" && !piece.worker;
+}
+
+/** One row under a lead: a worker's session, or a queued piece whose worker has not started. */
+export type FamilyRow = { kind: "worker"; session: SessionEntry } | { kind: "queued"; piece: RunPiece };
+
+/**
+ * The rows under a lead, in the run's order: each piece where the plan numbers
+ * it, as its worker's row (each earlier try's too) or, before that worker
+ * starts, as the queued piece; then any other session the lead started. A piece's worker row takes the
+ * place its queued row had.
+ */
+export function familyRows(workers: readonly SessionEntry[], run: Run | null | undefined): FamilyRow[] {
+  const ordered = orderWorkers(workers, run);
+  if (!run) return ordered.map((session) => ({ kind: "worker", session }));
+  // Every try's worker sits in its piece's place, not only the current one's (PRO-364).
+  const rows: { at: number; row: FamilyRow }[] = [
+    ...ordered.map((session) => ({ at: tryOf(run, session.id)?.index ?? Infinity, row: { kind: "worker", session } as FamilyRow })),
+    ...run.pieces.flatMap((piece, index) => (awaitsWorker(piece) ? [{ at: index, row: { kind: "queued", piece } as FamilyRow }] : [])),
+  ];
+  // Stable: workers keep `orderWorkers`' order among themselves, and a piece has one row.
+  return rows.sort((a, b) => (a.at === b.at ? 0 : a.at < b.at ? -1 : 1)).map(({ row }) => row);
+}
+
 export function runProgress(run: Pick<Run, "pieces">): { done: number; total: number } {
   return { done: donePieces(run).length, total: run.pieces.length };
 }

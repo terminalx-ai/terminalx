@@ -5,16 +5,26 @@ use crate::{
 };
 
 fn fixture() -> (tempfile::TempDir, SessionEntry, RemovedWorkspace) {
+    fixture_with(None)
+}
+
+/// With `sparse`, the workspace checks out only those folders of keep/ and drop/.
+fn fixture_with(sparse: Option<&[&str]>) -> (tempfile::TempDir, SessionEntry, RemovedWorkspace) {
     let repo = tempfile::tempdir().unwrap();
     let project = std::fs::canonicalize(repo.path()).unwrap();
     for args in [vec!["init", "-q", "-b", "main"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"]] {
         git::run(&project, &args).unwrap();
     }
     std::fs::write(project.join("tracked.txt"), "committed\n").unwrap();
+    for folder in ["keep", "drop"] {
+        std::fs::create_dir(project.join(folder)).unwrap();
+        std::fs::write(project.join(folder).join("f"), folder).unwrap();
+    }
     git::run(&project, &["add", "."]).unwrap();
     git::run(&project, &["commit", "-qm", "initial"]).unwrap();
     let path = git::worktree_root(&project).join("restore-me");
-    git::run(&project, &["worktree", "add", "-b", "topic", path.to_str().unwrap()]).unwrap();
+    let folders: Option<Vec<String>> = sparse.map(|folders| folders.iter().map(|folder| folder.to_string()).collect());
+    git::worktree_add(&project, &["-b", "topic", path.to_str().unwrap()], &path, folders.as_deref(), Some("topic"), true).unwrap();
     let session: SessionEntry = serde_json::from_value(serde_json::json!({
         "id": "retained", "projectPath": project, "cwd": path, "worktreeName": "restore-me", "branch": "stale-cached-branch",
         "title": "Keep this conversation", "created": index::now(), "modified": index::now(), "archived": true,
@@ -246,4 +256,35 @@ fn index_failure_after_checkout_rolls_back_the_checkout_and_branch() {
     assert!(error.to_string().contains("index write failed"));
     assert_absent(repo.path(), &plan.path, "new-branch");
     assert_eq!(index::get("retained").unwrap(), session);
+}
+
+#[test]
+fn a_sparse_workspace_comes_back_with_its_folders_and_no_checkout_hook_runs() {
+    let _home = crate::store::temp_home();
+    let (_repo, _session, removed) = fixture_with(Some(&["keep"]));
+    assert_eq!(removed.sparse_checkout.as_deref(), Some(&["keep".to_string()][..]));
+    let project = PathBuf::from(removed.repository.clone().unwrap());
+    let hooks = project.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let marker = project.join("hook-ran");
+    std::fs::write(hooks.join("post-checkout"), format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(hooks.join("post-checkout"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let plan = preview("retained").unwrap();
+    restore_preview(&plan, None).unwrap();
+    let path = Path::new(&plan.path);
+    assert!(path.join("keep/f").exists() && path.join("tracked.txt").exists());
+    assert!(!path.join("drop").exists(), "the restored workspace checks out only the folders it had");
+    assert_eq!(git::run(path, &["status", "--porcelain"]).unwrap(), "");
+    assert!(!marker.exists(), "restoring runs no checkout hook");
+}
+
+#[test]
+fn a_full_workspace_comes_back_full() {
+    let _home = crate::store::temp_home();
+    let (_repo, _session, removed) = fixture();
+    assert_eq!(removed.sparse_checkout, None);
+    let plan = preview("retained").unwrap();
+    restore_preview(&plan, None).unwrap();
+    assert!(Path::new(&plan.path).join("drop/f").exists());
 }

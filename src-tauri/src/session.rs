@@ -2537,6 +2537,29 @@ impl SessionManager {
         crate::cloud_grants::sign_in_required_for_launch(harness, &launch)
     }
 
+    /// Whether an earlier stop of this tab is still unconfirmed: retained
+    /// launches a Stop has to finish before anything is removed (#467).
+    pub(crate) fn stop_unconfirmed(&self, session_id: &str, tab_id: &str) -> bool {
+        let key = key_of(session_id, tab_id);
+        if self.stopping_ptys.lock().unwrap().get(&key).is_some_and(|panes| panes.iter().any(pty::StoppingPane::pending)) { return true; }
+        let runtime = self.tabs.lock().unwrap().get(&key).cloned();
+        if runtime.is_some_and(|runtime| runtime.lock().unwrap().stopping) { return true; }
+        let pane = index::get(session_id).ok().and_then(|entry| entry.tab(tab_id).map(TabEntry::pane_id)).unwrap_or_else(|| Self::pane_id(tab_id));
+        !self.terminals.detached_stops(&pane).is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_status_for_test(&self, session_id: &str, tab_id: &str, status: TabStatus) {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        let mut rt = runtime.lock().unwrap();
+        self.set_status(&mut rt, status);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_for_test(&self, session_id: &str, tab_id: &str) -> TabStatus {
+        self.runtime(session_id, tab_id).unwrap().lock().unwrap().status
+    }
+
     pub fn is_running(&self, session_id: &str, tab_id: &str) -> bool {
         let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
         runtime.is_some_and(|runtime| {
@@ -4793,7 +4816,7 @@ impl SessionManager {
         let _admission = crate::issue_pipeline::admission::lock();
         self.begin_shutdown();
         let tabs: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
-        let mut pids = self.terminals.owned_groups();
+        let mut pids = self.terminals.census_groups();
         for tab in &tabs {
             let tab = tab.lock().unwrap();
             pids.extend(tab.child_pid.or(tab.stopping_pid));
@@ -4959,12 +4982,16 @@ impl SessionManager {
     /// Startup holds the runtime lock. Never wait for a previous launch here:
     /// close admission and retain its exact handles for the explicit Stop path,
     /// which releases the runtime before waiting.
-    fn require_prior_cli_exit(&self, rt: &mut TabRuntime, pane: &str) -> Result<()> {
+    fn require_prior_cli_exit(&self, _rt: &mut TabRuntime, pane: &str) -> Result<()> {
+        // An earlier launch of this pane that is still on its way out (its
+        // CLI exited into a #437 shell, which let go of it with a terminate
+        // that takes up to two seconds) is waited for, bounded, as main
+        // waits for the pane itself. One that still has not gone refuses
+        // only this start: the tab is not left stopping, the next prompt
+        // checks again, and Stop still finds it by its pane id.
         let pending = self.terminals.detached_stops(pane);
-        if !pending.is_empty() {
-            self.retain_stopping_ptys(&key_of(&rt.session_id, &rt.tab_id), &pending);
-            rt.stopping = true;
-            bail!("Previous PTY exit is unconfirmed. Retry Stop before resuming.");
+        if !pending.is_empty() && !pty::StoppingPane::wait_all(&pending, RESTART_WAIT) {
+            bail!("The agent's previous process has not exited yet. Send the prompt again in a moment, or press Stop.");
         }
         Ok(())
     }
@@ -5093,8 +5120,14 @@ impl SessionManager {
             }
         }
         // The Local VM's driver, while the reader has it on (`local_vm.rs`).
-        let computer = crate::local_vm::launch_args(&tab.harness, config.args.contains("--append-system-prompt"));
-        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}", launch.command, config.args, computer), &unset);
+        let computer = crate::local_vm::launch_args(&tab.harness);
+        // One appended prompt for everything the agent is told: the
+        // workspace's prompts, the Local VM's note, and which folders a
+        // sparse checkout has (`sparse_checkout.rs`). A second
+        // `--append-system-prompt` or `developer_instructions` would replace the first.
+        let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
+        let prompt = crate::cloud_config::prompt_args(&tab.harness, &[config.prompt.as_deref(), computer.note, sparse.as_deref()]);
+        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt), &unset);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         // Kept up with the file this tab's tail follows, wherever it moves,

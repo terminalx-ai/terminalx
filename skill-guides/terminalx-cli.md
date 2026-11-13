@@ -94,6 +94,8 @@ User-facing webview choices are under `preferences`, for example:
     "windowCeiling": 85,
     "stallMinutes": 10,
     "reviewDiffLines": 400,
+    "triesPerPiece": 3,
+    "effortCeiling": "high",
     "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12, "budgetPoints": 15 } }
   }
 }
@@ -104,10 +106,12 @@ most pieces a plan may have (1 to 50), the permission mode workers start in, ove
 changed lines a result is read by a verifier though its commands pass (`reviewDiffLines`,
 1 to 100000), how many workers run at once (per run, and across every run of the app), each
 run's budget (dollars for workers on an API key; points of a usage window, and the window
-level past which nothing new starts, for workers on a subscription), and after how many
-minutes of nothing a worker counts as stalled. A project may answer for itself under
+level past which nothing new starts, for workers on a subscription), after how many
+minutes of nothing a worker counts as stalled, how many tries a piece gets before it is
+blocked (`triesPerPiece`, 1 to 6) and the effort escalation raises it no higher than
+(`effortCeiling`: `low`, `medium`, `high`, `xhigh` or `max`). A project may answer for itself under
 `projects`, by its path, for approval, the piece limit, the worker mode, the diff threshold,
-its routing rows and the three budget values; a setting it leaves out follows the app-wide
+the tries per piece, the effort ceiling, its routing rows and the three budget values; a setting it leaves out follows the app-wide
 value. Each budget value, and the window level, may be `"none"` for No limit. These are the person's to change, in Settings → Orchestrator: do not edit
 them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
 settings page in the app; the `runs` commands work either way.
@@ -878,17 +882,22 @@ A piece whose worker reports `failed` or `partial`, or whose result fails a chec
 again without you asking, and you do not start, brief or message anything for it. Each try is a new worker session in a
 new worktree, on what the next step names, briefed with the piece again plus what the try
 before fell short on and the branch it left. It never gets the earlier worker's
-conversation. A piece gets at most three tries:
+conversation. A piece gets the run's `maxTries` tries (three unless Settings say otherwise):
 
 1. The first, on its kind's model and effort.
 2. The same model with the failure text, and the effort raised one level, never past
-   `high` (at `high` or above, or on a model with no effort levels, the same effort again).
+   `high` or the run's `effortCeiling` when Settings set another (at the ceiling or above,
+   or on a model with no effort levels, the same effort again).
 3. One model tier up, at one effort level lower.
 
-After the third try, or the second when no model tier above it is installed, the piece is
-`blocked` and its `note` says what was tried and what failed last. Three is also the most
-rounds of checking and fixing a piece gets: each try is checked once, and there is no fourth
-unless the person widens the piece (below). The run does not fail on a blocked piece: it
+Past three the last two steps alternate: the fourth try raises the effort on the model the
+third moved to, the fifth moves up a tier again, and so on. With one try per piece the piece
+is blocked after its first; with two it gets step 2 only. Once its tries are used, or at a
+move up when no model tier above it is installed, the piece is `blocked` and its `note` says
+what was tried and what failed last. The tries are also the most rounds of checking and
+fixing a piece gets: each try is checked once, and there is no further one unless the person
+widens the piece (below). A run keeps the tries and the ceiling it was created with: changing
+them in Settings affects runs created afterwards. The run does not fail on a blocked piece: it
 stays `running` and waits on the person, who sees four choices in the Run view. Each is a
 `runs` command too; `wait` tells you when nothing else is under way.
 
@@ -954,7 +963,7 @@ report `done`, and a run's worker cannot call it (`not_the_lead`).
 
 `runs show` returns the run: `state`, `goal`, `budget`, `workerMode`, `pieces`, `ready` (the
 pieces the next `runs start` would start), `waiting`, `estimate` with `unestimated` (how
-many pieces carry none), `maxTries`, `costUsd` (what its workers used so far, at API list
+many pieces carry none), `maxTries` and `effortCeiling` (the run's own ladder), `costUsd` (what its workers used so far, at API list
 prices, as `sessions usage` counts it; `null` before any was read), `limits`, `usage`,
 `pause`, `inTurn` (its workers in a turn now) and `fit`. Each piece has its plan fields and
 `state`, `tier`, `modelNote`, `modelByKind` and `effortByKind` (true when the plan left that

@@ -255,18 +255,38 @@ struct State {
     last_error: Option<String>,
 }
 
-/// What a new agent session gets: variables to set and arguments to append
-/// (already shell-quoted, each with a leading space).
+/// What a new agent session gets: variables to set, arguments to append
+/// (already shell-quoted, each with a leading space) and the workspace's
+/// prompts. The prompts are text, not an argument: an agent takes one
+/// appended prompt, so the launch joins them with its other notes through
+/// [`prompt_args`].
 #[derive(Default, PartialEq, Eq)]
 pub struct LaunchConfig {
     pub env: Vec<(String, String)>,
     pub args: String,
+    pub prompt: Option<String>,
+}
+
+/// The one argument that appends `texts` (empty ones skipped), joined by a
+/// blank line, to an agent's instructions: `--append-system-prompt` for
+/// Claude Code, which honours only one, and `-c developer_instructions=…`
+/// for Codex, where a later override of the key replaces an earlier one.
+/// Shell-quoted with a leading space; empty when nothing is to be appended
+/// or the harness takes no prompt.
+pub fn prompt_args(harness: &str, texts: &[Option<&str>]) -> String {
+    let prompt = texts.iter().flatten().map(|text| text.trim()).filter(|text| !text.is_empty()).collect::<Vec<_>>().join("\n\n");
+    if prompt.is_empty() { return String::new(); }
+    match harness {
+        "claude" => format!(" --append-system-prompt {}", quote(&prompt)),
+        "codex" => format!(" -c {}", quote(&format!("developer_instructions={}", toml::Value::String(prompt)))),
+        _ => String::new(),
+    }
 }
 
 impl std::fmt::Debug for LaunchConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<&str> = self.env.iter().map(|(name, _)| name.as_str()).collect();
-        f.debug_struct("LaunchConfig").field("env", &names).field("args", &self.args).finish()
+        f.debug_struct("LaunchConfig").field("env", &names).field("args", &self.args).field("prompt", &self.prompt).finish()
     }
 }
 
@@ -595,13 +615,10 @@ impl ConfigStore {
                 env.push((name.clone(), value.to_string()));
             }
         }
-        let prompt = config.prompts.join("\n\n");
+        let prompt = Some(config.prompts.join("\n\n")).filter(|prompt| !prompt.is_empty());
         let mut args = String::new();
         match harness {
             "claude" => {
-                if !prompt.is_empty() {
-                    args.push_str(&format!(" --append-system-prompt {}", quote(&prompt)));
-                }
                 if !config.mcp_servers.is_empty() {
                     match self.grants.private_root() {
                         Some(root) => {
@@ -629,10 +646,6 @@ impl ConfigStore {
                 }
             }
             "codex" => {
-                if !prompt.is_empty() {
-                    let value = toml::Value::String(prompt).to_string();
-                    args.push_str(&format!(" -c {}", quote(&format!("developer_instructions={value}"))));
-                }
                 args.push_str(&self.codex_mcp_args(&state, &config.mcp_servers, &mut env, now));
             }
             _ => {}
@@ -640,7 +653,9 @@ impl ConfigStore {
         // Whatever path a name took, the runtime's own never leave here.
         env.retain(|(name, _)| is_injectable_name(name) || name.starts_with("MCP_HEADER_SECRET_"));
         state.launches.insert(launch.to_string(), config.revision.clone());
-        LaunchConfig { env, args }
+        // Prompts reach only the harnesses that take one.
+        let prompt = prompt.filter(|_| matches!(harness, "claude" | "codex"));
+        LaunchConfig { env, args, prompt }
     }
 
     pub fn forget_launch(&self, launch: &str) {
@@ -861,7 +876,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = synced("ws-claude", json!({}), Some(json!({ "NPM_TOKEN": SECRET, "SEARCH_TOKEN": OTHER_SECRET })), Some(dir.path().to_path_buf()));
         let config = store.launch_config("claude", "pane-1", Instant::now());
-        assert!(config.args.contains("--append-system-prompt 'Org rules.\n\nUse pnpm.'"));
+        assert_eq!(config.prompt.as_deref(), Some("Org rules.\n\nUse pnpm."));
+        assert!(!config.args.contains("--append-system-prompt"), "the launch appends the prompt, once, with its other notes");
+        assert_eq!(prompt_args("claude", &[config.prompt.as_deref()]), " --append-system-prompt 'Org rules.\n\nUse pnpm.'");
         assert!(!config.args.contains(SECRET) && !config.args.contains(OTHER_SECRET));
         let path = store.state().files.get("pane-1").cloned().unwrap();
         assert!(config.args.contains(&format!("--mcp-config '{}'", path.display())));
@@ -924,7 +941,8 @@ mod tests {
     fn codex_names_secrets_by_variable_only() {
         let store = synced("ws-codex", json!({}), Some(json!({ "NPM_TOKEN": SECRET, "SEARCH_TOKEN": OTHER_SECRET })), None);
         let config = store.launch_config("codex", "pane", Instant::now());
-        assert!(config.args.contains("developer_instructions="));
+        assert!(config.prompt.is_some() && !config.args.contains("developer_instructions="));
+        assert!(prompt_args("codex", &[config.prompt.as_deref()]).starts_with(" -c 'developer_instructions=\""));
         assert!(config.args.contains("mcp_servers.docs="));
         assert!(config.args.contains("env_vars = [\"DOCS_KEY\"]"));
         assert!(config.args.contains("env_http_headers = { Authorization = \"MCP_HEADER_SECRET_1\" }"));

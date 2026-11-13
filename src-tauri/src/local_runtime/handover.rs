@@ -338,6 +338,11 @@ fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Send
         // Only now, with every tab held, can no waiting hook be answered; one
         // answered before is answered here.
         let hooks = runtime.bridge.take(|request_id| held.awaited.contains(request_id)).map_err(|error| Unsettled(format!("{error:#}")))?;
+        // A terminal closed since the freeze goes over as stopping (#467).
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut terminals = terminals;
+        #[cfg(target_os = "linux")]
+        runtime.terminals.refresh_frozen(&mut terminals);
         let (record, kept) = Record::of(runtime, hooks, terminals, held.tabs)?;
         // It holds the agents' hook tokens: none of it is left behind.
         if let Err(error) = write(&path, &record) {
@@ -353,9 +358,25 @@ fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Send
             let _ = std::fs::remove_file(&path);
             return Err(error);
         }
+        // One closed after that would be lost with this process: the
+        // handover is off, and the Stop goes ahead here (#467).
+        #[cfg(target_os = "linux")]
+        if runtime.terminals.stopped_since_refresh() {
+            for fd in kept.iter().map(AsRawFd::as_raw_fd).chain([runtime.owner]) { let _ = set_cloexec(fd, true); }
+            let _ = std::fs::remove_file(&path);
+            return Err(Unsettled("A terminal was closed during the handover".into()).into());
+        }
         let _ = ready.send(Ok(()));
         // The reply to the handover goes out first.
         let _ = go.recv_timeout(REPLY_WITHIN);
+        // Closed while the reply went out: called off all the same. The
+        // desktop, told it was handing over, sees the takeover not happen.
+        #[cfg(target_os = "linux")]
+        if runtime.terminals.stopped_since_refresh() {
+            for fd in kept.iter().map(AsRawFd::as_raw_fd).chain([runtime.owner]) { let _ = set_cloexec(fd, true); }
+            let _ = std::fs::remove_file(&path);
+            return Err(Unsettled("A terminal was closed during the handover".into()).into());
+        }
         log::info!("the runtime hands {} terminal(s) and {} agent tab(s) to {}", record.panes.len(), record.tabs.len(), binary.path.display());
         log::logger().flush();
         let error = exec(binary, &path);

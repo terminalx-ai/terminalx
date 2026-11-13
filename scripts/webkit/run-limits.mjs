@@ -73,7 +73,7 @@ function setup({ mode, scene }) {
   const withWaiting = (run) => ({ ...run, ready: [], waiting: run.pieces.filter((p) => p.state === "queued").map((p) => ({ piece: p.id, on: [], queuedFor: p.queuedFor })) });
   const state = {
     run: runs[scene] ?? null,
-    settings: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, projects: {} },
+    settings: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, triesPerPiece: 3, effortCeiling: "high", reviewDiffLines: 400, projects: {} },
     experimental: { nativeCodex: false, orchestratorRuns: true },
   };
   window.__RUNS__ = { state, calls: [], label };
@@ -295,7 +295,14 @@ try {
         const value = (name) => tab.getByRole("spinbutton", { name, exact: true }).inputValue();
         const checks = {
           "the rows show the stored limits": (await value("Workers at once, per run")) === "4" && (await value("Workers at once, whole app")) === "8" && (await value("Budget per run, API key")) === "15" && (await value("Budget per run, subscription")) === "25" && (await value("Pause when a window passes")) === "85" && (await value("Mark a worker stalled after")) === "10",
-          "a budget and stalls group says what each limit does": (await tab.textContent()).includes("Budget and stalls") && (await tab.textContent()).includes("Sessions you start by hand are never counted or queued."),
+          "a budget and stalls group says what each limit does": (await tab.textContent()).includes("Budget and stalls") && (await tab.textContent()).includes("Sessions you start by hand are not counted."),
+          // PRO-362: two cards side by side, each with its new row.
+          "the Runs and Budget and stalls cards sit side by side": await tab.evaluate((node) => {
+            const [runs, budget] = ["Runs", "Budget and stalls"].map((name) => node.querySelector(`[role=group][aria-label="${name}"]`)?.getBoundingClientRect());
+            return !!runs && !!budget && Math.abs(runs.top - budget.top) < 1 && runs.right <= budget.left;
+          }),
+          "tries per piece and the effort ceiling show their stored values": (await value("Tries per piece")) === "3" && (await tab.getByRole("combobox", { name: "Raise effort no higher than" }).inputValue()) === "high",
+          "nothing in the cards scrolls sideways, leaves them, overlaps or is too small": tidy(await layoutOf(tab)),
         };
         await tab.getByRole("spinbutton", { name: "Budget per run, subscription", exact: true }).fill("30");
         await tab.getByRole("spinbutton", { name: "Budget per run, subscription", exact: true }).press("Enter");

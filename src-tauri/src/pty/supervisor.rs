@@ -157,7 +157,7 @@ fn passwd() -> io::Result<(OsString, OsString)> {
 fn failure(stage: &str, errno: i32, then: &str) -> String {
     let cause = io::Error::from_raw_os_error(errno);
     let help = match stage {
-        "preflight" => ": this Linux system lacks what terminal ownership needs (pidfd_open and pidfd_send_signal, close_range, PR_SET_CHILD_SUBREAPER, an all-child waitid and a /proc of this PID namespace; Linux 5.9 or later without a seccomp filter denying them)",
+        stage if stage.starts_with(linux::PREFLIGHT) => ": this Linux system lacks what terminal ownership needs (pidfd_open and pidfd_send_signal, close_range, PR_SET_CHILD_SUBREAPER, an all-child waitid, /proc child lists and a /proc of this PID namespace; Linux 5.9 or later without a seccomp filter denying them)",
         "ancestry" => ": the supervisor was not started by this TerminalX program",
         _ => "",
     };
@@ -170,6 +170,14 @@ pub(crate) fn dispatch() -> Option<i32> {
     let launch = args.next().and_then(|arg| arg.to_str().and_then(|s| Uuid::parse_str(s).ok()));
     Some(match (launch, args.next()) { (Some(launch), None) => linux::run(launch), _ => 119 })
 }
+
+/// How long a lost launch's helper may go on without exiting before the
+/// reader can release the launch anyway (#467 review): one stopped or stuck
+/// in the kernel never settles it.
+#[cfg(not(test))]
+const LOST_GRACE: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const LOST_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase { Reserved, Bootstrapping, Running, Stopping, Unconfirmed, Proven, Lost, Extinct }
@@ -195,7 +203,24 @@ pub(crate) struct Carried {
     phase: CarriedPhase,
 }
 
+/// Reap a helper this runtime let go of (its adoption failed): it ends
+/// what it runs when its channel closes, then exits, and must not be left
+/// a zombie. A pid that is not this process's child is left alone.
+pub(crate) fn reap_abandoned(pid: u32) {
+    let _ = std::thread::Builder::new().name("pty-supervisor-reaper".into()).spawn(move || loop {
+        let mut status = 0;
+        let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
+        if reaped == pid as libc::pid_t || (reaped < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)) { return; }
+    });
+}
+
 impl Carried {
+    #[cfg(test)]
+    pub(crate) fn break_for_test(&mut self) { self.launch = "not a launch".into(); }
+
+    #[cfg(test)]
+    pub(crate) fn stopping_for_test(&self) -> bool { self.phase == CarriedPhase::Stopping && self.stop_claim > 0 }
+
     /// The launch's shell, as its pane names it.
     pub(crate) fn shell(&self) -> u32 { self.shell }
 
@@ -262,6 +287,13 @@ struct State {
     observing: bool,
     /// The helper has exited and been reaped: nothing more can be learned.
     reaped: bool,
+    /// What preflight found this system lacking, before any launch.
+    unsupported: Option<String>,
+    /// When the launch was lost.
+    lost_at: Option<Instant>,
+    /// A Stop came while the observer was held for a handover, after the
+    /// state was last taken for the record (#765 review).
+    stopped_while_parked: bool,
 }
 
 pub(super) struct Owner {
@@ -273,6 +305,22 @@ pub(super) struct Owner {
     carried: Mutex<Option<(Carried, OwnedFd)>>,
     #[cfg(test)]
     observer_reaped: AtomicBool,
+    /// A fault for this launch's helper alone, from [`with_test_fault`].
+    #[cfg(test)]
+    fault: Option<String>,
+}
+
+#[cfg(test)]
+thread_local! { static TEST_FAULT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) }; }
+
+/// Run `then` with every launch it starts given `fault` (the helper's
+/// `TX467_SUPERVISOR_FAULT`), without touching other tests' launches.
+#[cfg(test)]
+pub(crate) fn with_test_fault<R>(fault: &str, then: impl FnOnce() -> R) -> R {
+    TEST_FAULT.with(|slot| *slot.borrow_mut() = Some(fault.to_string()));
+    let result = then();
+    TEST_FAULT.with(|slot| *slot.borrow_mut() = None);
+    result
 }
 
 impl Owner {
@@ -281,9 +329,9 @@ impl Owner {
     pub(super) fn reserve() -> Arc<Self> {
         Arc::new(Self { launch: Uuid::new_v4(), state: Mutex::new(State {
             phase: Phase::Reserved, supervisor: None, shell: None,
-            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false, reaped: false,
+            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false, reaped: false, unsupported: None, lost_at: None, stopped_while_parked: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
-            #[cfg(test)] observer_reaped: AtomicBool::new(false), })
+            #[cfg(test)] observer_reaped: AtomicBool::new(false), #[cfg(test)] fault: TEST_FAULT.with(|slot| slot.borrow().clone()), })
     }
 
     /// Hold the observer still where its channel state is whole, so a
@@ -316,22 +364,46 @@ impl Owner {
     /// caller says so. True when released.
     pub(super) fn release_lost(&self) -> bool {
         let mut state = self.state.lock().unwrap();
-        if state.phase != Phase::Lost || !state.reaped { return false; }
+        if !Self::given_up(&state) { return false; }
+        // A helper that never exited (stopped, or stuck in the kernel) is
+        // killed and reaped by its observer once this is no longer pending.
         state.phase = Phase::Extinct;
         self.changed.notify_all();
         true
     }
 
-    /// Lost, with its helper gone: only the reader can release it now.
-    pub(super) fn lost_for_good(&self) -> bool {
-        let state = self.state.lock().unwrap();
-        state.phase == Phase::Lost && state.reaped
+    /// Lost, with nothing left to learn: its helper gone, or not heard from
+    /// for [`LOST_GRACE`]. Only the reader can release it now.
+    pub(super) fn lost_for_good(&self) -> bool { Self::given_up(&self.state.lock().unwrap()) }
+
+    fn given_up(state: &State) -> bool {
+        state.phase == Phase::Lost && (state.reaped || state.lost_at.is_some_and(|at| at.elapsed() >= LOST_GRACE))
     }
+
+    /// Bring a held launch's carried state up to date for the record: a Stop
+    /// that came since it was held goes over as Stopping, with its claim,
+    /// for the runtime that takes over to send. From here on any further
+    /// Stop shows in [`Self::stopped_while_parked`].
+    pub(super) fn refresh(&self, carried: &mut Carried) {
+        let mut state = self.state.lock().unwrap();
+        if state.stop_claim > carried.stop_claim {
+            carried.stop_claim = state.stop_claim;
+            carried.phase = match state.phase { Phase::Unconfirmed => CarriedPhase::Unconfirmed, _ => CarriedPhase::Stopping };
+        }
+        state.stopped_while_parked = false;
+    }
+
+    /// Whether `carried` is this launch's.
+    pub(super) fn launch_is(&self, carried: &Carried) -> bool { carried.launch == self.launch.to_string() }
+
+    /// A Stop came since the state was last taken for the record.
+    pub(super) fn stopped_while_parked(&self) -> bool { self.state.lock().unwrap().stopped_while_parked }
 
     /// Let a held observer go on: the handover was called off.
     pub(super) fn unpark(&self) {
         self.carried.lock().unwrap().take();
         let mut state = self.state.lock().unwrap();
+        state.stopped_while_parked = false;
         state.park = Park::Running;
         self.changed.notify_all();
     }
@@ -372,9 +444,9 @@ impl Owner {
         let phase = match carried.phase { CarriedPhase::Running => Phase::Running, CarriedPhase::Stopping => Phase::Stopping, CarriedPhase::Unconfirmed => Phase::Unconfirmed };
         let owner = Arc::new(Self { launch, state: Mutex::new(State {
             phase, supervisor: Some(carried.supervisor), shell: Some(carried.shell), shell_status: carried.shell_status,
-            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true, reaped: false,
+            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true, reaped: false, unsupported: None, lost_at: None, stopped_while_parked: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
-            #[cfg(test)] observer_reaped: AtomicBool::new(false), });
+            #[cfg(test)] observer_reaped: AtomicBool::new(false), #[cfg(test)] fault: TEST_FAULT.with(|slot| slot.borrow().clone()), });
         let observer = owner.clone();
         let resume = Resume { ready: true, empty_received: carried.empty_received, launch_sent: true, sent_claim: carried.sent_claim };
         std::thread::Builder::new().name("pty-supervisor".into())
@@ -396,6 +468,20 @@ impl Owner {
     pub(super) fn reserved(&self) -> bool {
         self.state.lock().unwrap().phase == Phase::Reserved && !self.cancelled.load(Ordering::SeqCst)
     }
+    /// What this system lacks, when preflight said so before any launch:
+    /// nothing was started, and the launch can be made without a supervisor.
+    /// Waits briefly for the helper that said so to be reaped: only then is
+    /// it certain that nothing was started.
+    pub(super) fn unsupported(&self) -> Option<String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut state = self.state.lock().unwrap();
+        while state.unsupported.is_some() && state.phase != Phase::Extinct {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else { break };
+            state = self.changed.wait_timeout(state, left).unwrap().0;
+        }
+        if state.phase == Phase::Extinct { state.unsupported.clone() } else { None }
+    }
+
     /// Lose the channel as a protocol fault would: ownership stays, unproven.
     #[cfg(test)]
     pub(super) fn lose_for_test(&self) { self.lost("lost for a test"); }
@@ -407,7 +493,11 @@ impl Owner {
 
     pub(super) fn pid(&self) -> Option<u32> {
         let state = self.state.lock().unwrap();
-        if state.phase == Phase::Extinct { None } else { state.shell.or(state.supervisor) }
+        // Once the supervisor has reaped the shell its pid may be anyone's:
+        // the helper, still this process's unreaped child, names the launch.
+        if state.phase == Phase::Extinct { None }
+        else if state.shell_status.is_some() { state.supervisor }
+        else { state.shell.or(state.supervisor) }
     }
 
     pub(super) fn stop(&self) {
@@ -426,6 +516,9 @@ impl Owner {
         let Some(claim) = state.stop_claim.checked_add(1) else { state.phase = Phase::Lost; return };
         state.stop_claim = claim;
         state.phase = Phase::Stopping;
+        // Held for a handover, the observer sends nothing: the record must
+        // say so, or the handover is called off (`refresh`).
+        if state.park != Park::Running { state.stopped_while_parked = true; }
         self.changed.notify_all();
     }
 
@@ -448,6 +541,7 @@ impl Owner {
     fn lost(&self, reason: &str) {
         let mut state = self.state.lock().unwrap();
         if state.phase == Phase::Extinct { return; }
+        if state.phase != Phase::Lost { state.lost_at = Some(Instant::now()); }
         state.phase = Phase::Lost;
         if state.boot.is_none() { state.boot = Some(Err(reason.into())); }
         self.changed.notify_all();
@@ -503,6 +597,8 @@ impl Owner {
                 .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             #[cfg(test)]
             command.stderr(Stdio::inherit());
+            #[cfg(test)]
+            if let Some(fault) = &self.fault { command.env("TX467_SUPERVISOR_FAULT", fault); }
             let socket_fd = pass_socket.as_raw_fd();
             let slave_fd = pass_slave.as_raw_fd();
             unsafe {
@@ -611,7 +707,13 @@ impl Owner {
                     let mut reason = "supervisor failed before launch".to_string();
                     for _ in 0..16 {
                         match protocol::receive::<Response>(socket.as_raw_fd(), self.launch) {
-                            Ok(Some(Response::Failed { stage, errno })) => { reason = failure(&stage, errno, "before launch"); break; }
+                            Ok(Some(Response::Failed { stage, errno })) => {
+                                reason = failure(&stage, errno, "before launch");
+                                if let Some(feature) = stage.strip_prefix(linux::PREFLIGHT) {
+                                    self.state.lock().unwrap().unsupported = Some(feature.to_string());
+                                }
+                                break;
+                            }
                             Ok(Some(_)) => {},
                             _ => break,
                         }
@@ -744,6 +846,8 @@ impl Owner {
                         state.phase = Phase::Unconfirmed; true
                     }
                     Response::Failed { stage, errno } if state.boot.is_none() => {
+                        // Before any launch, preflight says what the system lacks.
+                        if !launch_sent { if let Some(feature) = stage.strip_prefix(linux::PREFLIGHT) { state.unsupported = Some(feature.to_string()); } }
                         state.boot = Some(Err(failure(&stage, errno, "cleanup pending")));
                         if state.stop_claim == 0 { state.stop_claim = 1; state.phase = Phase::Stopping; }
                         true

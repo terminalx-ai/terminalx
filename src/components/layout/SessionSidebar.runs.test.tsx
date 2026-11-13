@@ -117,13 +117,67 @@ describe("a lead and its workers in the sidebar (PRO-281)", () => {
     mount();
     await waitFor(() => expect(workerRows()).toHaveLength(3));
     const workers = within(leadRow()).getByTestId("lead-workers");
-    expect(within(workers).getAllByRole("listitem").map((row) => row.dataset.worker)).toEqual(["w-map", "w-store", "w-docs"]);
+    // The queued piece whose worker has not started is listed in its place, after the workers (18.03).
+    expect(within(workers).getAllByRole("listitem").map((row) => row.dataset.worker ?? `queued:${row.dataset.queuedPiece}`)).toEqual(["w-map", "w-store", "w-docs", "queued:cli"]);
     expect(workerTitles()).toEqual(["Map every settings read Haiku", "Typed store module Opus", "Update the docs Sonnet"]);
     expect(workerRows().map((row) => row.querySelector("[data-piece-mark]")?.getAttribute("data-piece-mark"))).toEqual(["done", "running", "running"]);
     // The lead is marked as one, and its workers are no rows of their own at the project's level.
     expect(within(leadRow()).getAllByTestId("lead-glyph")).toHaveLength(1);
     const top = screen.getByRole("group", { name: "web" }).querySelectorAll(":scope ul > li:not([data-worker])");
     expect([...top].filter((row) => row.closest("[data-testid=lead-workers]") === null).length).toBe(2);
+  });
+
+  it("lists a queued piece with no worker under its lead: its queued mark, its title, what it waits on, and no session actions", async () => {
+    await boot(family(), [runOf(pieces())]);
+    mount();
+    await waitFor(() => expect(workerRows()).toHaveLength(3));
+    const queued = within(leadRow()).getByTestId("lead-workers").querySelector<HTMLElement>('[data-queued-piece="cli"]')!;
+    expect(queued.querySelector("[data-piece-mark]")?.getAttribute("data-piece-mark")).toBe("queued");
+    expect(within(queued).getByRole("img", { name: "Queued" })).toBeTruthy();
+    expect(queued.querySelector(".truncate")?.textContent).toBe("Move CLI code");
+    const after = queued.querySelector("[data-row-meta=after]")!;
+    expect([after.textContent, after.getAttribute("aria-label")]).toEqual(["after 2", "Waits for piece 2"]);
+    expect(queued.querySelector("div[title]")?.getAttribute("title")).toBe("Move CLI code · Queued · waits for Typed store module");
+    // It is no session: nothing to open, rename, archive or pick.
+    expect(within(queued).queryAllByRole("button")).toHaveLength(0);
+    expect(queued.querySelector("[data-row-sessions]")).toBeNull();
+    // A queued piece with nothing to wait on says no "after".
+    const free = pieces();
+    free[3] = { ...free[3], dependsOn: [] };
+    act(() => mocks.listeners.get("orchestration_run")!({ payload: runOf(free) }));
+    expect(document.querySelector('[data-queued-piece="cli"] [data-row-meta=after]')).toBeNull();
+  });
+
+  it("replaces the queued row with its worker's row, in the same place, when the worker starts", async () => {
+    const list = family();
+    const extra = [piece("tests", "Add the tests", { state: "queued" })];
+    await boot(list, [runOf([...pieces().slice(0, 3), piece("cli", "Move CLI code", { state: "queued", dependsOn: ["store"] }), ...extra])]);
+    mount();
+    await waitFor(() => expect(workerRows()).toHaveLength(3));
+    const order = () => within(within(leadRow()).getByTestId("lead-workers")).getAllByRole("listitem").map((row) => row.dataset.worker ?? `queued:${row.dataset.queuedPiece}`);
+    expect(order()).toEqual(["w-map", "w-store", "w-docs", "queued:cli", "queued:tests"]);
+    // The worker starts: the run names it, and its session is listed.
+    sessions = [...list, worker("w-cli", 0)];
+    const started = [...pieces().slice(0, 3), piece("cli", "Move CLI code", { state: "running", dependsOn: ["store"], worker: { sessionId: "w-cli" } }), ...extra];
+    runs = [runOf(started)];
+    await act(async () => {
+      await store.refreshEverything();
+      mocks.listeners.get("orchestration_run")!({ payload: runOf(started) });
+    });
+    await waitFor(() => expect(order()).toEqual(["w-map", "w-store", "w-docs", "w-cli", "queued:tests"]));
+    expect(document.querySelector('[data-queued-piece="cli"]')).toBeNull();
+  });
+
+  it("lists a run's queued pieces under a lead none of whose workers has started, and folds them with it", async () => {
+    await boot([session("lead", { title: "Move settings reads" }), session("other")], [runOf([piece("a", "First", { state: "queued" }), piece("b", "Second", { state: "queued", dependsOn: ["a"] })])]);
+    store.selectSession("other");
+    mount();
+    await waitFor(() => expect(document.querySelectorAll("[data-queued-piece]")).toHaveLength(2));
+    expect(workerRows()).toHaveLength(0);
+    fireEvent.click(within(leadRow()).getByRole("button", { name: "Fold the workers of Talk lead" }));
+    expect(document.querySelectorAll("[data-queued-piece]")).toHaveLength(0);
+    // Folded, the queued pieces count in the run's progress, as done out of total.
+    expect(within(leadRow()).getByTestId("lead-progress").textContent).toBe("0/2");
   });
 
   it("folds the workers into the lead's row, which then shows pieces done out of total and how many run, and updates them without a reload", async () => {

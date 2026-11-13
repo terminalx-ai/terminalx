@@ -126,6 +126,10 @@ pub struct Record {
     pub sessions_deleted: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored_at: Option<String>,
+    /// The folders it checked out when it was a sparse workspace, so an undo
+    /// brings it back with them; absent for a full checkout and older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse_checkout: Option<Vec<String>>,
 }
 
 /// A removal with whether it can still be undone.
@@ -679,6 +683,7 @@ fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, e
         sessions_kept,
         sessions_deleted,
         restored_at: None,
+        sparse_checkout: removed.sparse_checkout,
     })
 }
 
@@ -877,10 +882,11 @@ pub fn restore(host: &Host<'_>, sink: &dyn EventSink, id: &str, now: DateTime<Ut
     let root = cleanup::canonical(Path::new(&project.path));
     let target = path.to_str().ok_or_else(|| anyhow::anyhow!("its path is not a name git can be given"))?;
     let exists = git::run(&root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", record.branch)]).is_ok();
+    let sparse = record.sparse_checkout.as_deref();
     if exists {
-        git::run(&root, &["worktree", "add", "--", target, &record.branch])?;
+        git::worktree_add(&root, &["--", target, &record.branch], &path, sparse, None, true)?;
     } else {
-        git::run(&root, &["worktree", "add", "--no-track", "-b", &record.branch, "--", target, &record.commit])?;
+        git::worktree_add(&root, &["--no-track", "-b", &record.branch, "--", target, &record.commit], &path, sparse, Some(&record.branch), true)?;
     }
 
     let mut notes = Vec::new();

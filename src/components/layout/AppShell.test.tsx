@@ -96,6 +96,14 @@ vi.mock("@/lib/hotkeys", () => ({
   useShortcutKeys: () => [],
   useShortcutKeycaps: () => () => [],
 }));
+// PRO-362: whether runs are on, and the run each session leads, as the Run view shortcut reads them.
+const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
+vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns }) }));
+vi.mock("@/lib/orchestration", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/orchestration")>()),
+  showRunView: runShortcut.showRunView,
+  useRun: (sessionId: string | undefined, enabled = true) => (enabled && sessionId ? runShortcut.runs[sessionId] ?? null : undefined),
+}));
 vi.mock("@/lib/status", () => ({ bootStatus: vi.fn(), useStatus: () => ({ settings: { visible: true } }) }));
 vi.mock("@/components/layout/StatusBar", () => ({
   StatusBar: ({ onOpenAgentSettings }: { onOpenAgentSettings: () => void }) => (
@@ -365,6 +373,38 @@ describe("automation navigation", () => {
     render(<AppShell />);
 
     expect(screen.getByTestId("automations").getAttribute("data-automation-id")).toBe("automation-99");
+  });
+});
+
+describe("the Run view shortcut (PRO-362)", () => {
+  const lead = { id: "lead", projectPath: "/repo", cwd: "/repo", title: "Lead", tabs: [], activeTab: null };
+  const show = (sessionId: string, runs: boolean, run: unknown) => {
+    sessionStore.sessions = [lead as never];
+    sessionStore.selectedSessionId = sessionId as never;
+    sessionStore.view = "session" as never;
+    runShortcut.orchestratorRuns = runs;
+    runShortcut.runs = run ? { lead: run } : {};
+    runShortcut.showRunView.mockReset();
+    render(<AppShell />);
+    act(() => shortcuts.get("app.runView")!());
+  };
+  afterEach(() => {
+    sessionStore.sessions = [];
+    runShortcut.orchestratorRuns = false;
+    runShortcut.runs = {};
+  });
+
+  it("opens the open session's Run view when it leads a run", () => {
+    show("lead", true, { id: "run-1", state: "running" });
+    expect(runShortcut.showRunView).toHaveBeenCalledWith("lead", true);
+  });
+
+  it("does nothing for a session that leads no run, or while runs are off", () => {
+    show("lead", true, null);
+    expect(runShortcut.showRunView).not.toHaveBeenCalled();
+    cleanup();
+    show("lead", false, { id: "run-1", state: "running" });
+    expect(runShortcut.showRunView).not.toHaveBeenCalled();
   });
 });
 

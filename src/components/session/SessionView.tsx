@@ -1,5 +1,5 @@
 import { RunStrip } from "@/components/orchestration/RunStrip";
-import { RunPill } from "@/components/orchestration/RunPill";
+import { RunPill, RunViewHint } from "@/components/orchestration/RunPill";
 import { RunView } from "@/components/orchestration/RunView";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { showRunView, useRun, useRunViewShown } from "@/lib/orchestration";
@@ -772,6 +772,8 @@ export function SessionView({
           <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", HEADER_TIGHT_BUTTONS, !compact && "max-w-[70%]")}>
             {/* A lead's run in a word (18.01, 18.03): it needs you, or how many workers run. Opens the Run view. */}
             {runOffered && <RunPill run={run} onOpen={() => showRunView(session.id, true)} />}
+            {/* The keys that open the Run view (Go → Run View), while this session leads a run (18.01). */}
+            {runOffered && run && <RunViewHint className="@max-[560px]/session-header:hidden" />}
             {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={session.id} session={session} tabId={activeTab?.id} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}

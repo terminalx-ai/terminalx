@@ -1741,6 +1741,14 @@ pub async fn repository_files_preview(path: String, patterns: Option<Vec<String>
         .await.map_err(err)?
 }
 
+/// The repository's folders at the primary checkout's HEAD, with descriptions
+/// and, with `measure`, sizes, for choosing a sparse checkout (PRO-307).
+#[tauri::command]
+pub async fn repository_folders(path: String, measure: bool) -> CmdResult<crate::sparse_checkout::RepositoryFolders> {
+    tauri::async_runtime::spawn_blocking(move || crate::sparse_checkout::folders(Path::new(&path), measure).map_err(err))
+        .await.map_err(err)?
+}
+
 /// The project list changed: a window that did not make the change reads it again.
 pub(crate) const PROJECTS_CHANGED_EVENT: &str = "projects_changed";
 
@@ -5282,6 +5290,12 @@ pub struct OrchestratorPatch {
     /// Over how many changed lines a result is read by a verifier.
     #[serde(default, deserialize_with = "given")]
     review_diff_lines: Option<Option<u32>>,
+    /// The tries a piece gets, the first included; `null` follows the app, for a project.
+    #[serde(default, deserialize_with = "given")]
+    tries_per_piece: Option<Option<u32>>,
+    /// The effort escalation stops at; `null` follows the app, for a project.
+    #[serde(default, deserialize_with = "given")]
+    effort_ceiling: Option<Option<String>>,
     /// Cells of the routing table, by kind and then by agent. A cell given
     /// as `null` loses its override: it follows the app again (for a
     /// project) or the built-in table (for the app).
@@ -5308,6 +5322,16 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
     for workers in [patch.workers_per_run, patch.workers_at_once].into_iter().flatten() {
         if !valid_workers(workers) {
             return Err(format!("From 1 to {MAX_WORKERS} workers at once, not {workers}."));
+        }
+    }
+    if let Some(Some(tries)) = patch.tries_per_piece {
+        if !crate::store::settings::valid_tries_per_piece(tries) {
+            return Err(format!("A piece gets from 1 to {} tries, not {tries}.", crate::store::settings::MAX_TRIES_PER_PIECE));
+        }
+    }
+    if let Some(Some(effort)) = &patch.effort_ceiling {
+        if !crate::store::settings::valid_effort_ceiling(effort) {
+            return Err(format!("{effort} is not an effort level: use {}.", crate::orchestration::routing::EFFORTS.join(", ")));
         }
     }
     if let Some(minutes) = patch.stall_minutes.filter(|minutes| !valid_stall_minutes(*minutes)) {
@@ -5367,6 +5391,8 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
                 return Err("Worker limits and the stall time are set for the whole app, not for one project.".into());
             }
             if let Some(value) = patch.review_diff_lines { project.review_diff_lines = value; }
+            if let Some(value) = patch.tries_per_piece { project.tries_per_piece = value; }
+            if let Some(value) = patch.effort_ceiling { project.effort_ceiling = value; }
             // A project that follows the app in everything has no entry of its own.
             if project.is_empty() { orchestrator.projects.remove(&path); }
         }
@@ -5385,6 +5411,8 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             if let Some(value) = patch.budget_points { orchestrator.budget_points = value.ok_or("Say how many points a run may use.")?; }
             if let Some(value) = patch.window_ceiling { orchestrator.window_ceiling = value.ok_or("Say how full a window may get.")?; }
             if let Some(value) = patch.review_diff_lines { orchestrator.review_diff_lines = value.ok_or("Say over how many changed lines a result is read by a verifier.")?; }
+            if let Some(value) = patch.tries_per_piece { orchestrator.tries_per_piece = value.ok_or("Say how many tries a piece gets.")?; }
+            if let Some(value) = patch.effort_ceiling { orchestrator.effort_ceiling = value.ok_or("Say how high escalation may raise the effort.")?; }
         }
     }
     store::settings::save(&settings).map_err(err)?;
