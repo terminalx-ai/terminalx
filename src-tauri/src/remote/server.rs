@@ -272,6 +272,8 @@ struct PtyState {
     exited_at: Option<Instant>,
     /// `pty.kill` was called; the entry goes once the exit is reported.
     closed: bool,
+    /// A fallible cleanup must retain ownership metadata even after PTY exit.
+    stop_pending: bool,
     /// Last applied `pty.write` seq per ([`Peer::input_scope`], writer): a
     /// resend is dropped and a gap is refused, so input is applied once and
     /// in order.
@@ -1405,6 +1407,7 @@ impl WorkspaceRpc {
                     exit: None,
                     exited_at: None,
                     closed: false,
+                    stop_pending: false,
                     applied_seq: HashMap::new(),
                     input,
                     input_pending,
@@ -1610,6 +1613,7 @@ impl WorkspaceRpc {
                     exit: None,
                     exited_at: None,
                     closed: false,
+                    stop_pending: false,
                     applied_seq: HashMap::new(),
                     input,
                     input_pending: input_pending.clone(),
@@ -2165,13 +2169,13 @@ impl WorkspaceRpc {
                     json!({ "subscriptionId": subscription_id, "ptyId": exit.id, "code": exit.code, "offset": pty.end }),
                 );
             }
-            if pty.closed {
+            if pty.closed && !pty.stop_pending {
                 ended.extend(Self::remove_pty(&mut ptys, &exit.id));
             }
             // Exited terminals keep their output for a late reader, up to a
             // bound: the oldest are dropped first.
             let mut exited: Vec<(Instant, String)> =
-                ptys.iter().filter_map(|(id, pty)| pty.exited_at.map(|at| (at, id.clone()))).collect();
+                ptys.iter().filter(|(_, pty)| !pty.stop_pending).filter_map(|(id, pty)| pty.exited_at.map(|at| (at, id.clone()))).collect();
             let mut evicted = Vec::new();
             if exited.len() > MAX_EXITED_PTYS {
                 exited.sort();
@@ -2851,11 +2855,11 @@ impl WorkspaceRpc {
                     fetch: crate::landed::Fetch::Fresh,
                     guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
                 };
-                let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
+                let removed = crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
                 kept_branch = removed.removal.kept_branch;
                 removed.sessions
             }
-            None => vec![crate::session_ops::delete_session_blocking(&*self.sink, &session.id, &stop).map_err(RpcError::internal)?],
+            None => vec![crate::session_ops::delete_session_blocking_fallible(&*self.sink, &session.id, &stop).map_err(RpcError::internal)?],
         };
         // Said when the worktree was asked for and stayed because other
         // sessions still run in it.
@@ -2865,18 +2869,15 @@ impl WorkspaceRpc {
     }
 
     /// End what a session that is about to be deleted runs, and wait.
-    fn stop_before_removal(&self, doomed: &SessionEntry) {
-        for tab in &doomed.tabs {
-            let Some(manager) = &self.sessions else { break };
-            if manager.is_running(&doomed.id, &tab.id) {
-                if let Err(error) = manager.stop(&doomed.id, &tab.id) {
-                    log::warn!("stop {}/{} before delete: {error:#}", doomed.id, tab.id);
-                }
-            }
+    fn stop_before_removal(&self, doomed: &SessionEntry) -> Result<(), String> {
+        let mut failures = Vec::new();
+        if let Some(manager) = &self.sessions {
+            if let Err(error) = manager.stop_session_confirmed(doomed) { failures.push(format!("{error:#}")); }
         }
-        // Its shells go before the worktree does, and are waited for, so
-        // nothing holds the directory.
-        self.close_session_ptys_waiting(&HashSet::from([doomed.id.clone()]), Some(std::time::Duration::from_secs(5)));
+        if let Err(error) = self.close_session_ptys_waiting(&HashSet::from([doomed.id.clone()]), Some(std::time::Duration::from_secs(5))) {
+            failures.push(error);
+        }
+        if failures.is_empty() { Ok(()) } else { Err(failures.join("; ")) }
     }
 
     /// Drop what the runtime still holds for sessions that were deleted, and
@@ -2945,7 +2946,7 @@ impl WorkspaceRpc {
             guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
         };
         let stop = |doomed: &SessionEntry| self.stop_before_removal(doomed);
-        let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
+        let removed = crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
         let deleted = self.forget_deleted_sessions(&removed.sessions);
         Ok(json!({ "deleted": deleted, "keptBranch": removed.removal.kept_branch, "rescuedBranch": removed.removal.rescued_branch }))
     }
@@ -2979,8 +2980,8 @@ impl WorkspaceRpc {
                 };
                 let stop = |doomed: &SessionEntry| self.stop_before_removal(doomed);
                 let pull_requests = |cwd: &Path, branches: &[String]| crate::github::branch_prs(cwd, branches);
-                let run = crate::merged_cleanup::Sweep { host, sink: &*self.sink, stop: &stop, pull_requests: &pull_requests, now: chrono::Utc::now() };
-                crate::merged_cleanup::sweep(&run, &scope)
+                let run = crate::merged_cleanup::FallibleSweep { host, sink: &*self.sink, stop: &stop, pull_requests: &pull_requests, now: chrono::Utc::now() };
+                crate::merged_cleanup::sweep_fallible(&run, &scope)
             })?
             .map_err(RpcError::internal)?;
         // What the runtime still holds for sessions deleted with their
@@ -3020,12 +3021,19 @@ impl WorkspaceRpc {
 
     /// Close the terminals opened for sessions that are gone.
     fn close_session_ptys(&self, sessions: &HashSet<String>) {
-        self.close_session_ptys_waiting(sessions, None);
+        let _ = self.close_session_ptys_waiting(sessions, None);
     }
 
     /// Close the sessions' terminals; with `wait`, also wait that long for
     /// their processes to exit.
-    fn close_session_ptys_waiting(&self, sessions: &HashSet<String>, wait: Option<std::time::Duration>) {
+    fn close_session_ptys_waiting(&self, sessions: &HashSet<String>, wait: Option<std::time::Duration>) -> Result<(), String> {
+        if let Some(timeout) = wait {
+            let ids = self.ptys.lock().unwrap().iter()
+                .filter(|(_, pty)| pty.session_id.as_ref().is_some_and(|id| sessions.contains(id)))
+                .map(|(id, _)| id.clone()).collect::<Vec<_>>();
+            return self.close_selected_ptys_waiting(&ids, timeout);
+        }
+        // Nonwaiting teardown retains its existing close/forget semantics.
         let (killed, ended) = {
             let mut ptys = self.ptys.lock().unwrap();
             let doomed: Vec<(String, bool)> = ptys
@@ -3044,15 +3052,45 @@ impl WorkspaceRpc {
             }
             (doomed.into_iter().map(|(id, _)| id).collect::<Vec<_>>(), ended)
         };
-        match wait {
-            Some(timeout) => self.terminals.kill_all_and_wait(&killed, timeout),
-            None => {
-                for id in killed {
-                    self.terminals.kill(&id);
+        for id in killed { self.terminals.kill(&id); }
+        self.forget_subscriptions(ended);
+        Ok(())
+    }
+
+    /// Retain the remote entry, output and subscriptions until the captured
+    /// launches have actually stopped. A retry still knows which panes belong
+    /// to the session even though their local Pane objects were detached.
+    fn close_selected_ptys_waiting(&self, ids: &[String], timeout: std::time::Duration) -> Result<(), String> {
+        let identities: Vec<_> = {
+            let mut ptys = self.ptys.lock().unwrap();
+            ids.iter().filter_map(|id| ptys.get_mut(id).map(|pty| {
+                pty.stop_pending = true;
+                (id.clone(), pty.input_pending.clone(), pty.pid)
+            })).collect()
+        };
+        self.terminals.kill_all_and_wait_confirmed(ids, timeout).map_err(|error| format!("{error:#}"))?;
+        self.finish_selected_ptys_stop(identities)
+    }
+
+    fn finish_selected_ptys_stop(&self, identities: Vec<(String, Arc<AtomicUsize>, Option<u32>)>) -> Result<(), String> {
+        let ended = {
+            let mut ptys = self.ptys.lock().unwrap();
+            if identities.iter().any(|(id, identity, pid)| self.terminals.is_live(id) || !self.terminals.pending_stops(id).is_empty()
+                || ptys.get(id).is_some_and(|pty| !Arc::ptr_eq(&pty.input_pending, identity) || pty.pid != *pid)) {
+                return Err("A terminal changed while stopping; its session was retained. Retry the operation.".into());
+            }
+            let mut ended = Vec::new();
+            for (id, _, _) in identities {
+                if let Some(pty) = ptys.get_mut(&id) {
+                    pty.stop_pending = false;
+                    pty.closed = true;
+                    if pty.exit.is_some() { ended.extend(Self::remove_pty(&mut ptys, &id)); }
                 }
             }
-        }
+            ended
+        };
         self.forget_subscriptions(ended);
+        Ok(())
     }
 
     fn session_close(&self, params: Value) -> Result<Value, RpcError> {
@@ -3067,12 +3105,18 @@ impl WorkspaceRpc {
         // Without agents (tests) nothing is running to stop.
         if let Some(manager) = &self.sessions {
             for tab_id in &closing {
-                if manager.is_running(&session.id, tab_id) {
-                    manager.stop(&session.id, tab_id).map_err(RpcError::internal)?;
-                }
+                manager.stop(&session.id, tab_id).map_err(RpcError::internal)?;
             }
         }
         if params.get("remove").and_then(Value::as_bool) == Some(true) {
+            let pane_ids: Vec<_> = session.tabs.iter().filter(|tab| closing.contains(&tab.id)).map(crate::store::index::TabEntry::pane_id).collect();
+            self.terminals.kill_all_and_wait_confirmed(&pane_ids, std::time::Duration::from_secs(5)).map_err(RpcError::internal)?;
+            if closing.len() == session.tabs.len() {
+                self.close_session_ptys_waiting(&HashSet::from([session.id.clone()]), Some(std::time::Duration::from_secs(5))).map_err(RpcError::internal)?;
+            } else {
+                let agent_ids: Vec<_> = closing.iter().map(|id| format!("{AGENT_PTY_PREFIX}{id}")).collect();
+                self.close_selected_ptys_waiting(&agent_ids, std::time::Duration::from_secs(5)).map_err(RpcError::internal)?;
+            }
             index::update(|sessions| {
                 if let Some(entry) = sessions.iter_mut().find(|entry| entry.id == session.id) {
                     entry.tabs.retain(|tab| !closing.contains(&tab.id));

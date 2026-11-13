@@ -445,7 +445,7 @@ mod tests {
         let all: Restart = serde_json::from_value(serde_json::json!("stoppingAll")).unwrap();
         assert_eq!(all, Restart::StoppingAll);
         let gemini = crate::session::retire::Work { kind: crate::session::retire::WorkKind::Turn, session_id: Some("s1".into()), tab_id: Some("t1".into()),
-            harness: Some("gemini".into()), title: None };
+            harness: Some("gemini".into()), title: None, pane: None };
         let refused = RestartRefused { message: "kept but these".into(), unkept: vec!["Gemini in \u{201c}Web\u{201d}".into()], stop: vec![gemini] };
         assert_eq!(serde_json::to_value(&refused).unwrap(), serde_json::json!({ "message": "kept but these", "unkept": ["Gemini in \u{201c}Web\u{201d}"],
             "stop": [{ "kind": "turn", "sessionId": "s1", "tabId": "t1", "harness": "gemini" }] }), "what is sent back to stop only it");
