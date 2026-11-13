@@ -82,6 +82,7 @@
   "preferences.shortcuts.composer.sendAlternate": "Composer keyboard shortcut.",
   "preferences.shortcuts.composer.slashCommand": "Composer keyboard shortcut.",
   "preferences.shortcuts.files.closeAll": "Files keyboard shortcut.",
+  "preferences.shortcuts.files.copyContents": "Files keyboard shortcut.",
   "preferences.shortcuts.files.find": "Files keyboard shortcut.",
   "preferences.shortcuts.files.quickOpen": "Files keyboard shortcut.",
   "preferences.shortcuts.files.replace": "Files keyboard shortcut.",
