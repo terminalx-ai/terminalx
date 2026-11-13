@@ -130,7 +130,8 @@ export function Chat({
   /** Send a message queued behind the running turn now, where the backend can (local). */
   onSendQueuedNow?: (seq: number) => void;
   /** A message sent from the composer that the runtime has not recorded yet: drawn last, as sending (#727). */
-  sending?: { text: string; images: { url: string; name?: string }[]; pressedAt: number } | null;
+  /** `files`: the names of the files attached to it (PRO-290), drawn as chips that do not open yet. */
+  sending?: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[]; pressedAt: number } | null;
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
   onSendAgain?: (seq: number) => void;
   onSecondOpinion?: (turn: Turn) => void;

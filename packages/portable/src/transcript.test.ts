@@ -377,3 +377,31 @@ it("keeps the runtime checkpoint identity when a queued prompt becomes a new tur
   expect(turns[1].prompt?.seq).toBe(2);
   expect(turns[2].prompt).toBeUndefined();
 });
+
+describe("attached files (PRO-290)", () => {
+  const event = (seq: number, payload: Payload): AgentEvent => ({
+    id: `files-${seq}`, seq, sessionId: "s", tabId: "t", harness: "claude", ts: "2026-11-13T14:31:00Z", messageTs: "2026-11-13T14:31:00Z", payload,
+  });
+  const notes = { path: "/Users/me/.terminalx/attachments/s/k3f9qa/notes.md", name: "notes.md", mediaType: "text/markdown", size: 12 };
+  const shot = { path: "/Users/me/.terminalx/attachments/s/k3f9qa/shot.png", name: "shot.png", mediaType: "image/png" };
+
+  it("carries a user_message's files onto the turn's prompt and onto a queued message", () => {
+    const transcript = buildTranscript([
+      event(1, { type: "user_message", text: "Read these", files: [notes, shot], queued: false }),
+      event(2, { type: "user_message", text: "And this", files: [notes], queued: true }),
+    ], true);
+    expect(transcript.turns[0].prompt?.files).toEqual([notes, shot]);
+    const queued = transcript.turns[0].work.find((item) => item.kind === "queued");
+    expect(queued?.kind === "queued" && queued.files).toEqual([notes]);
+  });
+
+  it("keeps a message that is only files", () => {
+    const transcript = buildTranscript([event(1, { type: "user_message", text: "", files: [notes], queued: false })], true);
+    expect(transcript.turns[0].prompt?.files).toEqual([notes]);
+  });
+
+  it("leaves a message without files without a files field", () => {
+    const transcript = buildTranscript([event(1, { type: "user_message", text: "Hi", queued: false })], true);
+    expect(transcript.turns[0].prompt && "files" in transcript.turns[0].prompt).toBe(false);
+  });
+});

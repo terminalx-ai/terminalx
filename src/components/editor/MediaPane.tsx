@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { fs, type MediaFile } from "@/lib/api";
 import type { FileEditorEntry } from "@/lib/editors";
 import { changedSince, fileErrorText, useFileSource, type FileState } from "@/lib/workspaceFiles";
+import { AttachmentToolbar } from "./AttachmentToolbar";
 
 const PdfSurface = lazy(() => import("./PdfSurface"));
 
@@ -95,12 +96,14 @@ function LocalMediaPane({ entry, visible }: { entry: FileEditorEntry; visible: b
     <div ref={pane} tabIndex={-1} className="flex h-full min-h-0 flex-col outline-none" onKeyDownCapture={(e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); e.stopPropagation(); }
     }}>
-      <div className="flex min-h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs">
-        <span className="min-w-0 truncate text-muted-foreground" title={abs}>{entry.rel}</span>
-        <span className="ml-auto shrink-0 text-faint">Read-only</span>
-        <Button variant="ghost" size="icon-xs" aria-label="Reload media" onClick={reload}><RotateCcw /></Button>
-        <Button variant="ghost" size="icon-xs" aria-label="Reveal file" onClick={reveal}><FolderOpen /></Button>
-      </div>
+      {entry.attachment ? <AttachmentToolbar path={entry.attachment.path} name={entry.name} sentAt={entry.attachment.sentAt} /> : (
+        <div className="flex min-h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs">
+          <span className="min-w-0 truncate text-muted-foreground" title={abs}>{entry.rel}</span>
+          <span className="ml-auto shrink-0 text-faint">Read-only</span>
+          <Button variant="ghost" size="icon-xs" aria-label="Reload media" onClick={reload}><RotateCcw /></Button>
+          <Button variant="ghost" size="icon-xs" aria-label="Reveal file" onClick={reveal}><FolderOpen /></Button>
+        </div>
+      )}
       {changed && !error && <div className="flex items-center gap-2 bg-warning/10 px-3 py-2 text-xs">
         File changed on disk. Reload to view the latest version.
         <Button variant="outline" size="xs" onClick={reload}>Reload</Button>

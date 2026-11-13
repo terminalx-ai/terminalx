@@ -10,6 +10,7 @@ const entry = `
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { EditorToolbar } from '/src/components/editor/EditorToolbar.tsx';
+import { AttachmentToolbar } from '/src/components/editor/AttachmentToolbar.tsx';
 import { Segmented } from '/src/components/ui/controls.tsx';
 import '/src/styles/app.css';
 import { RepoPanel } from '/src/components/changes/RepoPanel.tsx';
@@ -54,6 +55,11 @@ function App() {
     markdown viewMode={mode} onViewModeChange={setMode} readOnly dirty truncated
     saveDisabled={false} saveKeys={['⌘', 'S']} onSave={() => { window.saved = true; }} {...overrides}
   /></div><button id="after">After toolbar</button>
+  <div id="attach" style={{width: 700}}><AttachmentToolbar
+    path="/Users/me/.terminalx/attachments/7c1d2e9a-session/k3f9qa/release-checklist-for-the-november-build.md" name="release-checklist-for-the-november-build.md"
+    sentAt={new Date(2026, 10, 13, 14, 31).toISOString()} markdown viewMode={mode} onViewModeChange={setMode} copyContents={() => '# Release'}
+  /></div>
+  <div id="attach-media" style={{width: 700}}><AttachmentToolbar path="/Users/me/.terminalx/attachments/7c1d2e9a-session/k3f9qa/shot.png" name="shot.png" /></div>
   <div id="shared" style={{width: 120}}>{[
     ['RepoPanel', 'Uncommitted · 123', 'History'],
     ['CloudGit', 'Changes', 'Pull request'],
@@ -91,7 +97,7 @@ try {
   page.on('pageerror', error => console.error(error));
   await page.addInitScript(await readFile(new URL('./tauri-stub.js', import.meta.url), 'utf8'));
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/toolbar-test`);
-  const toolbar = page.getByTestId('editor-toolbar');
+  const toolbar = page.locator('#pane').getByTestId('editor-toolbar');
   await toolbar.waitFor();
   for (const width of [700, 600, 520, 519, 440, 439, 360, 359, 300, 260, 259, 180, 120, 80]) {
     await page.locator('#pane').evaluate((pane, width) => { pane.style.width = `${width}px`; }, width);
@@ -162,6 +168,66 @@ try {
   assert.equal(await toolbar.getByRole('button', { name: 'Reveal in Finder' }).count(), 0);
   assert(await toolbar.getByRole('button', { name: 'Save', exact: true }).isDisabled());
   console.log('ok cloud/plain-text toolbar and save state');
+  // The attachment tab's toolbar (PRO-290, screen 03.22) from wide to narrow.
+  const attachment = page.locator('#attach [data-testid=attachment-toolbar]');
+  for (const width of [900, 700, 520, 519, 480, 479, 360, 359, 300, 240]) {
+    await page.locator('#attach, #attach-media').evaluateAll((panes, width) => { for (const pane of panes) pane.style.width = `${width}px`; }, width);
+    await page.waitForTimeout(50);
+    const result = await attachment.evaluate((toolbar) => {
+      const box = el => el.getBoundingClientRect();
+      const visible = el => !!el && box(el).width > 0 && box(el).height > 0;
+      const row = toolbar.querySelector('[data-testid=editor-toolbar] > div');
+      const path = toolbar.querySelector('[data-testid=attachment-path]');
+      const [folder, file] = path.children;
+      const sent = toolbar.querySelector('[data-testid=attachment-sent]');
+      const group = toolbar.querySelector('[role=radiogroup]');
+      const button = name => toolbar.querySelector(`[aria-label="${name}"]`);
+      const controls = [toolbar.querySelector('svg[data-icon]'), path, ...(visible(sent) ? [sent] : []), group, button('Copy'), button('Download'), button('More')].map(box);
+      return {
+        clip: visible(toolbar.querySelector('svg')),
+        title: path.title,
+        text: path.textContent,
+        fileWhole: file.scrollWidth <= file.clientWidth + 1 || box(file).width >= box(path).width - 1,
+        folderTruncates: folder.scrollWidth >= folder.clientWidth,
+        mono: getComputedStyle(path).fontFamily.toLowerCase().includes('mono'),
+        sent: visible(sent) ? sent.textContent : null,
+        separate: controls.every((b, i) => !i || b.left >= controls[i - 1].right - 0.5),
+        labels: ['Copy', 'Download'].map(name => visible(button(name).querySelector('span'))),
+        radioLabels: [...group.querySelectorAll('[role=radio]')].every(radio => visible(radio.querySelector('span'))),
+        fits: row.scrollWidth <= row.clientWidth + 1,
+        height: box(toolbar.querySelector('[data-testid=editor-toolbar]')).height,
+      };
+    });
+    assert(result.clip && result.separate && result.fits && result.mono && result.fileWhole, `attachment ${width}: ${JSON.stringify(result)}`);
+    assert.equal(result.height, 32);
+    assert.equal(result.title, '/Users/me/.terminalx/attachments/7c1d2e9a-session/k3f9qa/release-checklist-for-the-november-build.md');
+    assert.equal(result.text, '~/.terminalx/attachments/7c1d2e9a-session/k3f9qa/release-checklist-for-the-november-build.md');
+    assert.equal(result.sent, width >= 480 ? 'on your message · 14:31' : null);
+    assert.deepEqual(result.labels, width >= 360 ? [true, true] : [false, false]);
+    assert.equal(result.radioLabels, width >= 520);
+    const media = await page.locator('#attach-media [data-testid=attachment-toolbar]').evaluate((toolbar) => ({
+      group: toolbar.querySelectorAll('[role=radiogroup]').length,
+      sent: toolbar.querySelectorAll('[data-testid=attachment-sent]').length,
+      fits: toolbar.querySelector('[data-testid=editor-toolbar] > div').scrollWidth <= toolbar.querySelector('[data-testid=editor-toolbar] > div').clientWidth + 1,
+    }));
+    assert.deepEqual(media, { group: 0, sent: 0, fits: true });
+    console.log(`ok attachment toolbar at ${width}px`);
+  }
+  // Keyboard: the switch, then Copy, Download and More in order.
+  await page.locator('#attach').evaluate(pane => { pane.style.width = '700px'; });
+  await attachment.getByRole('radio', { name: 'Source', exact: true }).click();
+  await attachment.getByRole('radio', { name: 'Source', exact: true, checked: true }).waitFor({ state: 'attached', timeout: 3000 });
+  await attachment.getByRole('radiogroup', { name: 'View' }).focus();
+  const order = [];
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press('Alt+Tab');
+    order.push(await page.evaluate(() => document.activeElement.getAttribute('aria-label')));
+  }
+  assert.deepEqual(order, ['Copy', 'Download', 'More']);
+  await attachment.getByRole('button', { name: 'More' }).click();
+  await page.getByRole('menuitem', { name: 'Reveal in Finder' }).waitFor();
+  await page.keyboard.press('Escape');
+  console.log('ok attachment toolbar keyboard order and overflow menu');
   // The shared switch under flex pressure with the unequal labels from every caller.
   // These are control-level checks, not end-to-end navigation through those screens.
   for (const group of await page.locator('#shared [role=radiogroup]').all()) {

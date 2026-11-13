@@ -20,6 +20,7 @@ import { turnFileChanges } from "@/lib/turnChanges";
 import { TurnChanges } from "./TurnChanges";
 import { DisclosureScope, useDisclosure, useSearchSection } from "./disclosures";
 import { ChatMedia } from "./ChatMedia";
+import { MessageFiles } from "./MessageFiles";
 import { mediaMentions } from "@/lib/chatMedia";
 import { classifyRecovery } from "@/lib/recovery";
 import { useExposure, useInView, useRecoveryReporter } from "@/lib/recoveryReports";
@@ -313,6 +314,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
               </WithTooltip>
             )}
           </div>
+          {item.files?.length ? <div className="mt-1.5"><MessageFiles files={item.files} sessionId={linkContext?.sessionId} sentAt={item.messageTs} cwd={cwd} open={!!linkContext} /></div> : null}
           <div className="mt-1 min-w-0 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={item.text} context={linkContext} /></span><MessageTime ts={item.messageTs} /></div>
           {item.inputOccupied && <InputOccupiedNote />}
           {item.withdrawn && <WithdrawnNote unconfirmed={item.unconfirmed} seq={item.seq} onSendAgain={onSendAgain} />}
@@ -423,7 +425,7 @@ function MentionedMedia({ text, linkContext }: { text: string; linkContext: { se
  * in the chat at once, said to be sending, and is replaced by the message the
  * runtime records. Not a turn yet: nothing is measured or folded here.
  */
-export function SendingMessage({ message, cwd }: { message: { text: string; images: { url: string; name?: string }[] }; cwd?: string }) {
+export function SendingMessage({ message, cwd }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[] }; cwd?: string }) {
   const layout = usePrefs().transcriptLayout;
   return (
     <div className="transcript-turn flow-root" data-testid="sending-message" aria-busy>
@@ -474,7 +476,7 @@ function ReaderMessage({
   className,
   onSendAgain,
 }: {
-  message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[] } & Delivery;
+  message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; files?: readonly { name: string; path?: string }[] } & Delivery;
   cwd?: string;
   linkContext?: { sessionId: string; cwd: string };
   className: string;
@@ -516,6 +518,8 @@ function ReaderMessage({
             )}
           </div>
         ) : null}
+        {/* Attached files (PRO-290): a sent one opens its stored copy; a sending one is only named. */}
+        {message.files?.length ? <MessageFiles files={message.files} sessionId={linkContext?.sessionId} sentAt={message.messageTs} cwd={cwd} open={!!linkContext && message.seq != null} /> : null}
         {message.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={message.author.userId}>{message.author.displayName}</div>}
         <div {...(message.seq == null ? {} : section)} className={cn((message.replaced || message.withdrawn) && "text-muted-foreground")}>
           {/* A pasted table reads as a table; every other line stays the plain text that was typed. Web links only, no
