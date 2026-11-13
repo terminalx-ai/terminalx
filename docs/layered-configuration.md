@@ -1,4 +1,4 @@
-# Layered configuration (PRO-136)
+# Layered configuration (PRO-136, PRO-140)
 
 TerminalX resolves supported keys in this order, highest first:
 
@@ -7,6 +7,14 @@ TerminalX resolves supported keys in this order, highest first:
 3. `<primary checkout>/.terminalx/settings.json` (shared in Git)
 4. `$TERMINALX_HOME/settings.json` and existing private user environment
 5. Built-in defaults
+
+| Layer | File | Schema | A problem in it |
+| --- | --- | --- | --- |
+| Managed | macOS `/Library/Application Support/TerminalX/managed-settings.json`, Linux `/etc/terminalx/managed-settings.json` | repository schema | blocks every launch that resolves it |
+| Repository local | `<primary checkout>/.terminalx/settings.local.json` | repository schema | malformed, tracked or not ignored: blocks launches in that repository; a key it may not set is ignored |
+| Repository shared | `<primary checkout>/.terminalx/settings.json` | repository schema | malformed: the whole file is ignored; a key it may not set is ignored |
+| User | `$TERMINALX_HOME/settings.json` | user schema | each invalid entry keeps its last good value |
+| Defaults | built in | — | — |
 
 `TERMINALX_HOME` defaults to `~/.raccoon`. Each linked workspace inherits the
 **primary checkout's** files, including local overrides; checking out a branch in
@@ -26,7 +34,8 @@ makes it repository-configurable.
 | `environment` | Yes, requires trust when shared | Yes, each supplied variable is locked | A map of literal variable names to strings; never expanded by TerminalX. Existing reserved-name and size limits apply. |
 | `worktreeDir` | No | No | Existing machine-specific user setting; repository files cannot move filesystem/deletion boundaries. |
 
-Unknown or forbidden repository keys are ignored and logged without their values.
+`$schema` is editor metadata in every file and never a setting. Unknown or
+forbidden repository keys are ignored and logged without their values.
 A malformed shared document is ignored with a warning. A malformed local document
 or unreadable/invalid managed policy blocks resolution, rather than silently
 removing overrides or administrative restrictions. Files are limited to 1 MiB;
@@ -74,17 +83,61 @@ File environment is authored explicitly; the app does not copy Keychain secrets
 into repository files. A managed variable cannot be changed/deleted through that
 existing editor. The Layered configuration view shows its lock and effective source.
 
-**Dependency check:** PRO-131 (#804), PRO-140 (#812), and PRO-149 (#808) were open
-and absent from `origin/main` at implementation; they have since merged, and this
-branch now saves the user layer through PRO-140's `settings::file`. Reading their
-files-to-copy and script settings from repository files is follow-up work. This standalone increment uses
-the existing environment service and branch settings. Files-to-copy integration,
-setup/archive script fields and runners, comprehensive preference migration,
-settings-schema publication and per-row sources throughout Settings
-remain with those changes. `scripts` is deliberately unsupported and cannot run;
-this PR does not duplicate their editors or storage. Changing any bytes, including
-an unsupported script field, invalidates a trust decision for effective shared
-settings.
+**Scope:** the user layer is saved through `settings::file` (PRO-140). Reading
+files-to-copy and setup/archive script settings from repository files is
+follow-up work (PRO-131, PRO-149). `scripts` is deliberately unsupported and
+cannot run. Changing any bytes, including an unsupported script field or a
+`$schema`, invalidates a trust decision for effective shared settings.
+
+## Schemas
+
+Two JSON schemas are generated from the native validators and committed:
+
+- `schemas/settings.schema.json` describes the user file. It comes from the
+  settings template in `store/settings/file.rs` and the constraint table in
+  `store/settings/schema.rs` that the file validator itself reads, so the schema
+  and the app cannot disagree about a choice, range or type. Each key's
+  description is its Settings row's (`schemas/settings-descriptions.json`, kept
+  equal to `src/components/settings/settingsRegistry.tsx` by a test). The app
+  bundles it and keeps `$TERMINALX_HOME/schemas/settings.schema.json` current at
+  every start, writing only when the bytes differ.
+- `schemas/repository-settings.schema.json` describes repository files and the
+  managed policy: the keys of the registry in `store/configuration.rs` and the
+  limits its validator reads. It is published from the main branch.
+
+A file the app writes gets a `$schema` unless it already has one: the user file
+`"./schemas/settings.schema.json"`, the local repository file
+`"https://raw.githubusercontent.com/terminalx-ai/terminalx/main/schemas/repository-settings.schema.json"`.
+The committed shared file does not: builds before PRO-140 count `$schema` there
+as an unsupported setting and would warn every teammate on each resolve. Add
+that reference to the shared file yourself once everyone runs a build that has
+it. A `$schema` the person wrote is left alone. After changing a setting's type,
+choices, range, registry entry or row description, regenerate both with
+`TERMINALX_WRITE_SCHEMAS=1 cargo t --lib store::settings::schema` in `src-tauri`;
+the same test fails while the committed files are stale.
+
+## Problems, sources and reset
+
+Every settings file's first problem is reported structured: its dotted key (none
+when the JSON itself does not parse), its 1-based line, the parser's or
+validator's own words, and what it does (`lastGood`, `ignoredKey`, `fileIgnored`,
+`blocked`, as in the table above). Problems, statuses and events never carry a
+value. The user file's status also lists the dotted keys it sets (`setKeys`),
+names only, and its path with the home directory written as `~`.
+
+`configuration_resolve` gives each value its `layers`: every layer that supplies
+the key, highest first, the first being `source`. Environment values are
+`value: null, redacted: true` in every layer. Private Keychain variables appear
+as a user or repository-local layer by name.
+
+Settings' row menu offers **Reset to inherited value** for a key the user file
+sets: `reset_user_setting` removes that key (and any object it leaves empty) and
+nothing else, so the value falls through to the defaults. Like every save, it is
+refused while the file has an error: "Can't save: ~/.raccoon/settings.json has an
+error on line N …". **Settings files** (`settings_files_list`) lists managed,
+repository local, repository shared, user and defaults with each path, whether it
+exists, its number of top-level keys, Git state (`committed`, `ignored`,
+`untracked`) for repository files and its first problem.
 
 ## Consent and execution
 
@@ -133,7 +186,7 @@ terminalx config show --project my-repository --json
 
 The webview's `configuration_resolve` and the paired phone's
 `configuration.resolve` return the same `values`, `registry`, `warnings` and
-`trust` structure. Phone requests take an optional opaque `projectId`, never a
+`trust` structure; the webview's values also carry `layers`. Phone requests take an optional opaque `projectId`, never a
 filesystem path, and are advertised only by a runtime with
 `layeredConfiguration: 1`. Each value has `source`, `locked`, and `redacted` flags.
 Environment entries return `value: null, redacted: true` on every read surface.
