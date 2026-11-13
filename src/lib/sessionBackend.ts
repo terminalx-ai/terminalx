@@ -1,5 +1,6 @@
 import type { AgentProcessState, AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
-import { agent, type ImageInput } from "@/lib/api";
+import { agent, attachments, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
+import { showError } from "@/lib/errorToasts";
 import { loadTab, setTabStatus } from "@/lib/agentEvents";
 import { patchTab } from "@/lib/sessions";
 import {
@@ -18,7 +19,7 @@ import {
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
 import { APPROVE_BLOCKED_REASON, canApprove, mayConfigure, roleBlockReason } from "@/lib/cloudCollab";
-import { CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked, type ComposerCommands, type ComposerFiles } from "@/lib/cloudComposer";
+import { CLOUD_FILES_REFUSED, CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked, type ComposerCommands, type ComposerFiles } from "@/lib/cloudComposer";
 import { isPtyFirst } from "@/lib/tabViews";
 import type { TerminalInstance } from "@/lib/terminal";
 import type { AgentEvent } from "@/types/events";
@@ -109,7 +110,12 @@ export interface SessionBackend {
    * nothing is kept, so the caller can ask the person and send again.
    */
   /** `pressedAt`: when Send was pressed, which a local runtime notes with its own timings of the send (#727). */
-  send(tabId: string, text: string, images: ImageInput[], options?: { wake?: boolean; pressedAt?: number }): Promise<SendResult>;
+  /**
+   * `files` (local only, PRO-290): attached files other than images. They are
+   * stored in the session's attachments folder first and the message carries
+   * their references; a failed store sends nothing. A cloud session refuses them.
+   */
+  send(tabId: string, text: string, images: ImageInput[], options?: { wake?: boolean; pressedAt?: number; files?: FileInput[] }): Promise<SendResult>;
   steer(tabId: string, text: string): Promise<void>;
   /** Local only: persist and control messages held until the turn ends. */
   changeHeldQueue?(tabId: string, change: import("@/lib/heldQueue").HeldQueueChange): Promise<SendResult>;
@@ -220,7 +226,11 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     openTab: (tabId, onError) => {
       void loadTab(sessionId, tabId).catch(onError);
     },
-    send: (tabId, text, images, options) => agent.send(sessionId, tabId, text, images, false, options?.pressedAt),
+    send: async (tabId, text, images, options) => {
+      if (!options?.files?.length) return agent.send(sessionId, tabId, text, images, false, options?.pressedAt);
+      const stored = await attachments.store(sessionId, options.files);
+      return agent.send(sessionId, tabId, text, images, false, options.pressedAt, stored);
+    },
     steer: (tabId, text) => agent.send(sessionId, tabId, text, []).then(() => undefined),
     changeHeldQueue: (tabId, change) => agent.changeHeldQueue(sessionId, tabId, change),
     sendQueuedNow: (tabId, seq) => agent.sendQueuedNow(sessionId, tabId, seq),
@@ -241,6 +251,22 @@ export function localSessionBackend(sessionId: string): SessionBackend {
   if (localBackends.size > 256) localBackends.clear();
   localBackends.set(sessionId, backend);
   return backend;
+}
+
+/**
+ * The first message of a session just created from the new-session screen:
+ * it had no session to store files in until now (PRO-290), so they are stored
+ * here and go with the message by reference. Without files it is sent exactly
+ * as any first prompt was.
+ */
+export async function sendFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]): Promise<SendOutcome> {
+  if (!files?.length) return agent.send(sessionId, tabId, text, images);
+  // Nothing else on screen holds this message any more: a store that fails says so, rather than leaving the session silent.
+  const stored = await attachments.store(sessionId, files).catch((error) => {
+    showError(`Couldn't attach ${files.length === 1 ? files[0].name : `${files.length} files`} to the first message`, error);
+    throw error;
+  });
+  return agent.send(sessionId, tabId, text, images, false, undefined, stored);
 }
 
 // ---- cloud
@@ -415,6 +441,8 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     },
     send: async (tabId, text, images, options) => {
       guard();
+      // Files other than images are stored on this computer (PRO-290); a cloud agent takes images only.
+      if (options?.files?.length) throw new CloudImageError(CLOUD_FILES_REFUSED);
       // Images are uploaded straight to the runtime (PRO-22): a stopped workspace is started
       // for them, by the same single wake a message asks for, and the message stays in the composer.
       const blocked = images.length ? cloudImagesBlocked(client, cloudAsleep(ctx.state, ctx.workspaceState)) : null;

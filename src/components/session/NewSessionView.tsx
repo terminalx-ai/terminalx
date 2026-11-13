@@ -16,10 +16,11 @@ import {
 } from "@/components/ui/menu";
 import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto, useDictationShortcuts } from "@/components/chat/Dictation";
 import { insertNewLine } from "@/components/chat/Composer";
-import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
+import { AttachButton, DropHint, useAttachments } from "@/components/chat/useImageAttachments";
+import { AttachmentChips } from "@/components/chat/ComposerAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
-import { api, errorMessage, type ImageInput, type Issue, type PullRequest } from "@/lib/api";
+import { api, errorMessage, type FileInput, type ImageInput, type Issue, type PullRequest } from "@/lib/api";
 import { issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import { worktreeNameFromPrompt } from "@/lib/worktreeNames";
 import { clearNewSessionPreset, createChat, createQuickChat, linkSessionIssue, refreshHarnesses, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
@@ -76,7 +77,8 @@ export function NewSessionView({
   compact = false,
   modal = false,
 }: {
-  onCreated?: (sessionId: string, tabId: string, firstPrompt: string, images: ImageInput[]) => void;
+  /** `files`: attached files besides images (PRO-290), passed only when there are any, to be stored once the session exists. */
+  onCreated?: (sessionId: string, tabId: string, firstPrompt: string, images: ImageInput[], files?: FileInput[]) => void;
   useWorktree?: boolean;
   onUseWorktreeChange?: (value: boolean) => void;
   /** Start a quick chat: a session with no project. */
@@ -251,10 +253,11 @@ export function NewSessionView({
   useDictationShortcuts(dictation);
   const keymap = useKeymap();
   const sendKeys = keymap["composer.send"][0];
-  const attach = useImageAttachments({ textareaRef: ref, draft: text, onDraftChange: setText });
-  const hasImages = attach.attachments.length > 0;
+  const attach = useAttachments({ textareaRef: ref, draft: text, onDraftChange: setText });
+  // Refused chips are never sent, and alone make no prompt.
+  const hasImages = attach.images.length + attach.files.length > 0;
 
-  // A screenshot alone is a prompt, as it is in the session composer.
+  // A screenshot or a file alone is a prompt, as it is in the session composer.
   const canSend = useMemo(
     () =>
       cloud
@@ -355,12 +358,14 @@ export function NewSessionView({
       if (blocked) { setError(blocked); return; }
       const title = text.trim().split("\n")[0].slice(0, 60);
       const images = attach.images;
+      const files = attach.files;
       const s = await (quick ? createQuickChat : createChat)({ title, cwd: quickCwd, ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}), tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
       setText("");
       attach.clear();
       setQuickCwd(null);
       selectSession(s.id);
-      onCreated?.(s.id, s.tabs[0].id, text, images);
+      if (files.length) onCreated?.(s.id, s.tabs[0].id, text, images, files);
+      else onCreated?.(s.id, s.tabs[0].id, text, images);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -385,6 +390,7 @@ export function NewSessionView({
       // sends an empty title rather than inventing one here.
       const title = (text.trim().split("\n")[0] || issue?.title || pullRequest?.title || "").slice(0, 60);
       const images = attach.images;
+      const files = attach.files;
       // Named for the work: the issue's name when there is one, else the prompt's words; the drawn name when they say nothing.
       // An existing branch's worktree is named after the branch.
       const named = pullRequest ? `pr-${pullRequest.number}-${pullRequest.title}` : checkoutBranch ? (checkoutBranch.split("/").pop() ?? "") : !preset?.cwd && useWorktree && !issue ? worktreeNameFromPrompt(text) : "";
@@ -420,7 +426,8 @@ export function NewSessionView({
       setIssue(null);
       attach.clear();
       selectSession(s.id);
-      onCreated?.(s.id, s.tabs[0].id, prompt, images);
+      if (files.length) onCreated?.(s.id, s.tabs[0].id, prompt, images, files);
+      else onCreated?.(s.id, s.tabs[0].id, prompt, images);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -607,7 +614,7 @@ export function NewSessionView({
                   <button type="button" aria-label="Remove pull request" onClick={() => setPullRequest(null)} className="shrink-0 rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground"><X className="size-3" /></button>
                 </div>
               )}
-              <AttachmentThumbs attach={attach} />
+              <AttachmentChips attach={attach} />
               <textarea
                 ref={ref}
                 autoFocus

@@ -150,6 +150,8 @@ export const CLOUD_IMAGES_NEED_RUNNING = "Starting the workspace: images are upl
 /** Not connected for another reason (reconnecting, offline): nothing is started, and the message stays in the composer. */
 export const CLOUD_IMAGES_NEED_CONNECTION = "Not connected to the workspace: images are uploaded straight to it. Send again once it is connected.";
 /** As many as the runtime takes with one message. */
+/** A cloud agent takes images only (PRO-290): any other file stays on this computer. */
+export const CLOUD_FILES_REFUSED = "Only images can be sent to a cloud agent. Other files can be attached to a session on this computer.";
 export const CLOUD_MAX_IMAGES = 8;
 export const CLOUD_TOO_MANY_IMAGES = `A message to a cloud agent carries at most ${CLOUD_MAX_IMAGES} images.`;
 
