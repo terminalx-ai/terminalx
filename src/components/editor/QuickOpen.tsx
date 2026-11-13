@@ -155,6 +155,22 @@ export function QuickOpen({ sessionId, root, source, branch }: { sessionId: stri
   const noMatch = typed && !!current && !hits.length && !!reader.findFiles;
   const selected = files[Math.min(sel, files.length - 1)];
 
+  /**
+   * The file a key acts on. The list answers a moment after each keystroke;
+   * a key pressed before then acts on the best match for what is typed now,
+   * not on nothing.
+   */
+  const stale = typed && !current;
+  const withTarget = (act: (h: FileHit | undefined) => void) => (stale ? void latestMatch().then(act) : act(selected));
+  const latestMatch = async (): Promise<FileHit | undefined> => {
+    const find = reader.findFiles?.bind(reader);
+    if (!find) return undefined;
+    const top = await Promise.resolve()
+      .then(() => (includeIgnored ? find(q, 1, { includeIgnored }) : find(q, 1)))
+      .catch(() => []);
+    return top[0];
+  };
+
   const choose = (h: FileHit | undefined) => {
     if (!h) return;
     openFile(sessionId, root, h.path, undefined, root, cloudKey);
@@ -217,11 +233,10 @@ export function QuickOpen({ sessionId, root, source, branch }: { sessionId: stri
                 setSel((s) => Math.max(0, s - 1));
               } else if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                 e.preventDefault();
-                if (mod(e)) chooseDiff(selected);
-                else choose(selected);
+                withTarget(mod(e) ? chooseDiff : choose);
               } else if (e.code === "KeyC" && e.altKey && mod(e) && !e.shiftKey) {
                 e.preventDefault();
-                copyPath(selected);
+                withTarget(copyPath);
               }
             }}
             placeholder="Search files…"
@@ -235,6 +250,7 @@ export function QuickOpen({ sessionId, root, source, branch }: { sessionId: stri
             query={q.trim()}
             branch={branch}
             includeIgnored={includeIgnored}
+            searched={count}
             canIncludeIgnored={!!reader.findsIgnored}
             searchKeys={searchKeys}
             onSearchInside={searchInside}
@@ -342,6 +358,7 @@ function NoMatch({
   query,
   branch,
   includeIgnored,
+  searched,
   canIncludeIgnored,
   searchKeys,
   onSearchInside,
@@ -350,6 +367,8 @@ function NoMatch({
   query: string;
   branch?: string | null;
   includeIgnored: boolean;
+  /** How many files were searched; `truncated` when the walk stopped short of the whole worktree. */
+  searched: FileCount | null;
   canIncludeIgnored: boolean;
   searchKeys: string[];
   onSearchInside: () => void;
@@ -366,6 +385,7 @@ function NoMatch({
         <div className="mt-3 text-sm font-medium text-foreground">No files match “{query}”</div>
         <div className="mt-1 px-6 text-[12.5px] text-muted-foreground">
           File names and paths {where} were searched. {includeIgnored ? "Gitignored files were searched too." : "Gitignored files are skipped."}
+          {searched?.truncated && ` Only the first ${fileWord(searched.files)} were searched; the rest of this worktree was not.`}
         </div>
         <div className="mt-4 flex justify-center gap-2">
           <button type="button" className={action} onClick={onSearchInside}>

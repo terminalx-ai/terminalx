@@ -15,25 +15,31 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
 
 const MAX_FILES: usize = 60_000;
+/// The index with ignored files: every file of the plain index, then ignored
+/// ones up to this many in all. A `node_modules` alone often passes 60,000.
+const MAX_FILES_WITH_IGNORED: usize = 250_000;
 const FRESH_FOR: Duration = Duration::from_secs(20);
 
+#[derive(Clone)]
 struct Index {
     built: Instant,
     files: Vec<String>,
     truncated: bool,
 }
 
-/// One index per checkout and per mode: with `include_ignored` the walk also
-/// takes what `.gitignore` (and the folders skipped by name) would leave out.
+/// One index per checkout and per mode: with `include_ignored` it also holds
+/// what `.gitignore` (and the folders skipped by name) would leave out.
 fn cache() -> &'static Mutex<HashMap<(PathBuf, bool), Index>> {
     static C: OnceLock<Mutex<HashMap<(PathBuf, bool), Index>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// The files of a checkout, hidden ones included, as the file tree shows
-/// them. Without `include_ignored`, what Git ignores is skipped, and so are
-/// `node_modules` and `target` in a folder that has no `.gitignore` for them.
-fn walk(root: &Path, include_ignored: bool) -> (Vec<String>, bool) {
+/// them, walked in name order and cut at `cap`. Without `include_ignored`,
+/// what Git ignores is skipped, and so are `node_modules` and `target` in a
+/// folder that has no `.gitignore` for them. `keep` drops files as they are
+/// found, before they count against the cap.
+fn walk(root: &Path, include_ignored: bool, cap: usize, keep: impl Fn(&str) -> bool) -> (Vec<String>, bool) {
     let mut out = Vec::new();
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
@@ -43,6 +49,7 @@ fn walk(root: &Path, include_ignored: bool) -> (Vec<String>, bool) {
         .git_exclude(!include_ignored)
         .require_git(false)
         .follow_links(false)
+        .sort_by_file_name(|a, b| a.cmp(b))
         .filter_entry(move |e| {
             let name = e.file_name().to_string_lossy();
             if name == ".git" || name == ".raccoon" || name == ".DS_Store" {
@@ -53,28 +60,54 @@ fn walk(root: &Path, include_ignored: bool) -> (Vec<String>, bool) {
         .build();
     for entry in walker.flatten() {
         if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            if out.len() >= MAX_FILES {
+            let Ok(rel) = entry.path().strip_prefix(root) else { continue };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if !keep(&rel) {
+                continue;
+            }
+            if out.len() >= cap {
                 return (out, true);
             }
-            if let Ok(rel) = entry.path().strip_prefix(root) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
-            }
+            out.push(rel);
         }
     }
     (out, false)
 }
 
-fn index_for(root: &Path, include_ignored: bool) -> (Vec<String>, bool) {
-    let mut c = cache().lock().unwrap();
-    let key = (root.to_path_buf(), include_ignored);
-    if let Some(ix) = c.get(&key) {
-        if ix.built.elapsed() < FRESH_FOR {
-            return (ix.files.clone(), ix.truncated);
-        }
+/// Build a checkout's index. With ignored files it is the plain index whole,
+/// then the ignored files after it, so no file Git tracks is ever crowded
+/// out by a dependency folder; `truncated` says either part was cut.
+fn build(root: &Path, include_ignored: bool, caps: (usize, usize)) -> Index {
+    let (plain_cap, total_cap) = caps;
+    if !include_ignored {
+        let (files, truncated) = walk(root, false, plain_cap, |_| true);
+        return Index { built: Instant::now(), files, truncated };
     }
-    let (files, truncated) = walk(root, include_ignored);
-    c.insert(key, Index { built: Instant::now(), files: files.clone(), truncated });
-    (files, truncated)
+    let plain = cached(root, false).unwrap_or_else(|| store(root, false, build(root, false, caps)));
+    let seen: std::collections::HashSet<&str> = plain.files.iter().map(String::as_str).collect();
+    let room = total_cap.saturating_sub(plain.files.len());
+    let (ignored, cut) = walk(root, true, room, |rel| !seen.contains(rel));
+    let mut files = plain.files.clone();
+    files.extend(ignored);
+    Index { built: Instant::now(), files, truncated: plain.truncated || cut }
+}
+
+fn cached(root: &Path, include_ignored: bool) -> Option<Index> {
+    let c = cache().lock().unwrap();
+    c.get(&(root.to_path_buf(), include_ignored)).filter(|ix| ix.built.elapsed() < FRESH_FOR).cloned()
+}
+
+fn store(root: &Path, include_ignored: bool, ix: Index) -> Index {
+    cache().lock().unwrap().insert((root.to_path_buf(), include_ignored), ix.clone());
+    ix
+}
+
+/// The cached index, or a fresh walk. The cache lock is never held while
+/// walking: a slow walk of one checkout (or of ignored files) holds up no
+/// other search. Two searches that both miss may both walk; the last one wins.
+fn index_for(root: &Path, include_ignored: bool) -> (Vec<String>, bool) {
+    let ix = cached(root, include_ignored).unwrap_or_else(|| store(root, include_ignored, build(root, include_ignored, (MAX_FILES, MAX_FILES_WITH_IGNORED))));
+    (ix.files, ix.truncated)
 }
 
 pub fn invalidate(root: &Path) {
@@ -194,6 +227,49 @@ mod tests {
         std::fs::write(p.join("lib.rs"), "").unwrap();
         assert_eq!(count(p, false).files, 4);
         assert_eq!(count(p, true).files, 7);
+    }
+
+    #[test]
+    fn ignored_files_never_crowd_out_the_plain_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        // `aaa` sorts, and so walks, before `src`: a capped walk of everything would fill up on it.
+        std::fs::create_dir_all(p.join("aaa_deps/pkg")).unwrap();
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join(".gitignore"), "aaa_deps/\n").unwrap();
+        for i in 0..6 {
+            std::fs::write(p.join(format!("aaa_deps/pkg/f{i}.js")), "").unwrap();
+        }
+        std::fs::write(p.join("src/main.rs"), "").unwrap();
+        std::fs::write(p.join("src/lib.rs"), "").unwrap();
+
+        let ix = build(p, true, (100, 6));
+        assert_eq!(&ix.files[..3], [".gitignore", "src/lib.rs", "src/main.rs"]);
+        assert_eq!(ix.files[3..], ["aaa_deps/pkg/f0.js", "aaa_deps/pkg/f1.js", "aaa_deps/pkg/f2.js"]);
+        assert!(ix.truncated, "the cut is reported");
+
+        let whole = build(p, true, (100, 100));
+        assert_eq!(whole.files.len(), 9);
+        assert!(!whole.truncated);
+        assert_eq!(whole.files.iter().filter(|f| f.as_str() == "src/main.rs").count(), 1, "no file listed twice");
+    }
+
+    #[test]
+    fn mention_and_phone_searches_see_hidden_files_as_the_tree_does() {
+        // Chat @ mentions (`search_files`) and the phone's workspace search (remote/server.rs)
+        // both go through `search`: tracked dotfiles are found, ignored ones and .git are not.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join(".vscode")).unwrap();
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        std::fs::write(p.join(".gitignore"), ".env\n").unwrap();
+        std::fs::write(p.join(".vscode/settings.json"), "").unwrap();
+        std::fs::write(p.join(".env"), "").unwrap();
+        std::fs::write(p.join(".git/HEAD"), "").unwrap();
+        let all: Vec<String> = search(p, "", 50, false).unwrap().into_iter().map(|h| h.path).collect();
+        assert!(all.contains(&".vscode/settings.json".to_string()));
+        assert!(!all.iter().any(|f| f == ".env" || f.starts_with(".git/")));
+        assert_eq!(list_all(p, 50).unwrap().paths.len(), all.len(), "the same files the tree lists");
     }
 }
 

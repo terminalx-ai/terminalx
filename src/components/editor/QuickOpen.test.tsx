@@ -216,6 +216,41 @@ describe("QuickOpen", () => {
     await screen.findByRole("button", { name: "Include gitignored files" });
   });
 
+  it("acts on the best match when a key comes before the list answers", async () => {
+    render(<QuickOpen sessionId="s1" root={ROOT} />);
+    openQuickOpen();
+    const field = await input();
+    // Enter at once, inside the search's debounce: the typed name still opens.
+    fireEvent.change(field, { target: { value: "readme" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() => expect(getEditors().editors.some((e) => e.rel === "README.md" && e.kind === "text")).toBe(true));
+    expect(invoke).toHaveBeenCalledWith("search_files", { cwd: ROOT, query: "readme", limit: 1 });
+
+    // ⌘Enter and ⌥⌘C the same way.
+    openQuickOpen();
+    await screen.findByText(/files in this worktree/);
+    fireEvent.change(await input(), { target: { value: "ProjectScripts" } });
+    await waitFor(() => expect(screen.getAllByRole("option").length).toBeGreaterThan(0));
+    fireEvent.change(await input(), { target: { value: "docs/scripts" } });
+    fireEvent.keyDown(await input(), { key: "ç", code: "KeyC", ctrlKey: true, altKey: true });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("copy_text", { text: "/repo/docs/scripts.md" }));
+    fireEvent.keyDown(await input(), { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(getEditors().editors.some((e) => e.kind === "diff" && e.rel === "docs/scripts.md")).toBe(true));
+  });
+
+  it("says when the search stopped short of the whole worktree", async () => {
+    const plain = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: Record<string, unknown>) =>
+      command === "count_files" ? { files: 250_000, truncated: true } : plain(command, args),
+    );
+    render(<QuickOpen sessionId="s1" root={ROOT} />);
+    openQuickOpen();
+    fireEvent.change(await input(), { target: { value: "zqx" } });
+    await screen.findByText(/No files match/);
+    expect(await screen.findByText(/Only the first 250,000 files were searched; the rest of this worktree was not\./)).toBeTruthy();
+    expect(screen.getByText("Over 250,000 files in this worktree")).toBeTruthy();
+  });
+
   it("starts each opening without ignored files", async () => {
     render(<QuickOpen sessionId="s1" root={ROOT} />);
     openQuickOpen();
