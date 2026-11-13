@@ -1,6 +1,8 @@
 import { cloneElement, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import { SettingRow } from "@/components/ui/controls";
 import { SHORTCUT_ACTIONS } from "@/lib/shortcuts";
+import { userFileKeys } from "@/lib/settingSources";
+import { UserFileRowAccessory } from "./SettingSources";
 
 export const NATIVE_CODEX_DESCRIPTION =
   "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.";
@@ -56,12 +58,15 @@ export interface SettingRegistration extends SettingDefinition {
  * adapters supply live controls and (only when needed) a status-dependent description.
  * Content rows retain the native structure of editors, lists and organization sections. */
 function defineSetting<const T extends SettingDefinition>(definition: T): T & SettingRegistration {
+  // A row kept in the user file shows "Your value" and its row menu beside its title (PRO-140).
+  const keys = userFileKeys(definition.storage.location);
+  const accessory = keys.length ? <UserFileRowAccessory keys={keys} title={definition.title} /> : undefined;
   return { ...definition, render: ({ children, instance, ...props }) => {
     const anchor = { "data-setting-id": definition.id, "data-setting-instance": instance, tabIndex: -1 };
     if (definition.layout === "content") {
       return children ? cloneElement(children as ReactElement<Record<string, unknown>>, anchor) : null;
     }
-    return <div {...anchor} className="min-w-0 outline-none"><SettingRow label={definition.title} description={definition.hideDescription ? undefined : definition.description} control={null} {...props} /></div>;
+    return <div {...anchor} className="min-w-0 outline-none"><SettingRow label={definition.title} description={definition.hideDescription ? undefined : definition.description} control={null} titleAccessory={accessory} {...props} /></div>;
   } };
 }
 
@@ -861,6 +866,10 @@ const byId = new Map<string, SettingRegistration>(SETTINGS_ROWS.map((row) => [ro
 if (byId.size !== SETTINGS_ROWS.length) throw new Error("Duplicate settings row id");
 export function settingById(id: string): SettingRegistration | undefined { return byId.get(id); }
 export function settingsInSection(section: SettingsSection): readonly SettingRegistration[] { return SETTINGS_ROWS.filter((row) => row.section === section); }
+/** Whether a section has rows that show "Your value" (rows kept in the user file, drawn as rows). */
+export function sectionShowsUserValues(section: SettingsSection): boolean {
+  return settingsInSection(section).some((row) => row.layout !== "content" && userFileKeys(row.storage.location).length > 0);
+}
 type ContentSettingId = Extract<(typeof SETTINGS_ROWS)[number], { layout: "content" }>["id"];
 type RegisteredProps = Omit<RowProps, "children" | "control"> & (
   | { setting: ContentSettingId; children: ReactElement; control?: never }

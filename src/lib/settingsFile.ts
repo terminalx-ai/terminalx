@@ -17,15 +17,17 @@ export interface SettingsFileStatus {
   setKeys: string[];
   preferences: Record<string, unknown>;
 }
-let state: { file: SettingsFileStatus | null; error: string | null; revision: number } = { file: null, error: null, revision: 0 };
+/** A save the native layer refused (PRO-140): the toast says which file and line stopped it. */
+export interface SettingsSaveFailure { id: number; cause: string }
+let state: { file: SettingsFileStatus | null; error: string | null; revision: number; saveFailure: SettingsSaveFailure | null } = { file: null, error: null, revision: 0, saveFailure: null };
 const listeners = new Set<() => void>();
 const pending: Record<string, unknown>[] = [];
 let connected = false;
 let queue: Promise<void> = Promise.resolve();
 let boot: Promise<void> | null = null;
 
-function publish(file: SettingsFileStatus | null, error = file?.error ?? null) {
-  state = { file, error, revision: state.revision + 1 };
+function publish(file: SettingsFileStatus | null, error = file?.error ?? null, saveFailure = state.saveFailure) {
+  state = { file, error, revision: state.revision + 1, saveFailure };
   for (const listener of listeners) listener();
 }
 
@@ -36,7 +38,8 @@ function apply(file: SettingsFileStatus) {
   const values = Object.assign({}, legacy, file.preferences, ...pending);
   applyFilePreferences(values, connected);
   applyFileTheme(values, connected);
-  publish(file);
+  // A refused save is forgotten once the file is valid again, so a later problem raises no old toast.
+  publish(file, file.error, file.problem || file.error ? state.saveFailure : null);
 }
 
 function enqueue(work: () => Promise<void>) {
@@ -55,10 +58,31 @@ function save(patch: Record<string, unknown>): Promise<void> {
       apply(file);
     } catch (error) {
       pending.splice(pending.indexOf(patch), 1);
-      if (state.file) apply(state.file);
+      // Read the file again so the toast can name the line that stopped the save.
+      let latest = state.file;
+      try { latest = await invoke<SettingsFileStatus>("settings_file_status"); } catch { /* keep the last view */ }
+      if (latest) apply(latest);
+      publish(state.file, state.error, { id: state.revision + 1, cause: String(error) });
       throw error;
     }
   });
+}
+
+export function dismissSaveFailure(id: number) {
+  if (state.saveFailure?.id === id) publish(state.file, state.error, null);
+}
+
+/** Remove a key from the user file, so it inherits its default (PRO-140). Rejects when the file refuses. */
+export function resetUserSetting(key: string): Promise<void> {
+  let failure: unknown = null;
+  return enqueue(async () => {
+    try {
+      apply(await invoke<SettingsFileStatus>("reset_user_setting", { key }));
+    } catch (error) {
+      failure = error ?? "Couldn’t reset the setting";
+      throw error;
+    }
+  }).then(() => { if (failure !== null) throw failure; });
 }
 
 async function refresh() {
