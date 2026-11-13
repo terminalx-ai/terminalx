@@ -3092,3 +3092,250 @@ fn the_observer_hears_the_readers_prompts_and_answers_and_not_the_clis_own_turns
     assert!(rig.manager.respond_permission(SESSION, TAB, &request, "allow").is_err());
     assert_eq!(rig.observer.answered.lock().unwrap().len(), 1);
 }
+
+/// A real PTY exits, but a per-launch inspection failure leaves its ownership
+/// unresolved. Exercise the actual destructive caller, not a model of it.
+#[test]
+fn deleting_session_preserves_history_when_detached_ownership_is_unconfirmed() {
+    let mut rig = Rig::new();
+    rig.pane = SessionManager::pane_id(TAB);
+    if let Engine::Cli(cli) = &mut rig.rt.lock().unwrap().engine { cli.pane_id = rig.pane.clone(); }
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "stop retention", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    rig.start_turn();
+    let before = index::get(SESSION).unwrap();
+    rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
+        cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
+        command: Some("sh -c 'read line'"), env: &[],
+    }).unwrap();
+    let pid = rig.manager.terminals.pid(&rig.pane).unwrap();
+    rig.rt.lock().unwrap().child_pid = Some(pid);
+    let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+    failure.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while crate::harness::host::group_or_process_alive(pid) {
+        assert!(Instant::now() < deadline, "fixture leader did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = rig.manager.delete_session(SESSION);
+    let retained = index::get(SESSION);
+    // Clear only the test injection even on the old failing control.
+    failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(result.is_err(), "unconfirmed stop was acknowledged: {result:?}; index retained: {}", retained.is_ok());
+    assert_eq!(retained.unwrap().id, before.id);
+    assert!(rig.transcript.is_file(), "failed deletion removed provider transcript");
+    assert!(rig.rt.lock().unwrap().stopping, "failed stop must keep launch admission closed");
+    rig.manager.delete_session(SESSION).unwrap();
+    assert!(index::get(SESSION).is_err(), "confirmed retry should complete deletion");
+}
+
+#[test]
+fn stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement() {
+    let rig = Rig::with_live_pane();
+    let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+    failure.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.manager.terminals.is_running(&rig.pane) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let first = rig.manager.stop(SESSION, TAB);
+    assert!(first.as_ref().is_err_and(|error| error.to_string().contains("PTY process exit could not be confirmed")), "{first:?}");
+    assert!(!rig.manager.terminals.is_live(&rig.pane));
+    rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
+        cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
+        command: Some("sh -c 'read line'"), env: &[],
+    }).unwrap();
+    let replacement = rig.manager.terminals.pid(&rig.pane).unwrap();
+    let retry = rig.manager.stop(SESSION, TAB);
+    assert!(retry.is_err(), "retry lost the detached ownership: {retry:?}");
+    assert!(crate::harness::host::is_alive(replacement), "retry targeted the replacement pane");
+    failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.stop(SESSION, TAB).unwrap();
+    assert!(crate::harness::host::is_alive(replacement));
+    assert!(!rig.rt.lock().unwrap().stopping);
+}
+
+#[test]
+fn relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata() {
+    let rig = Rig::with_live_pane();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "worktreeName": "retained-worktree", "title": "retained", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "created": index::now() }]
+    })).unwrap();
+    index::save(std::slice::from_ref(&entry)).unwrap();
+    let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+    failure.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.manager.terminals.is_running(&rig.pane) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = crate::local_runtime::workspaces::execute(&rig.manager, rig.manager.sink.as_ref(), "relocate", json!({"sessionId":SESSION}));
+    assert!(result.is_err(), "relocation acknowledged unresolved ownership: {result:?}");
+    let retained = index::get(SESSION).unwrap();
+    assert_eq!(retained.worktree_name, entry.worktree_name);
+    assert_eq!(retained.cwd, entry.cwd);
+    assert!(rig.transcript.is_file());
+    failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::local_runtime::workspaces::execute(&rig.manager, rig.manager.sink.as_ref(), "relocate", json!({"sessionId":SESSION})).unwrap();
+    assert!(index::get(SESSION).unwrap().worktree_name.is_none());
+}
+
+#[test]
+fn startup_retains_unconfirmed_detached_ownership_until_explicit_stop() {
+    let rig = Rig::with_live_pane();
+    let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+    failure.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.manager.terminals.is_running(&rig.pane) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let detached = rig.manager.terminals.begin_stop_all(std::slice::from_ref(&rig.pane));
+    assert!(!rig.manager.terminals.is_live(&rig.pane));
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let refused = rig.manager.require_prior_cli_exit(&mut rt, &rig.pane);
+        assert!(refused.as_ref().is_err_and(|error| error.to_string().contains("Previous PTY exit is unconfirmed")), "{refused:?}");
+        assert!(rt.stopping);
+        assert_eq!(rig.manager.stopping_ptys.lock().unwrap()[&key_of(SESSION, TAB)].len(), detached.len());
+    }
+    failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.stop(SESSION, TAB).unwrap();
+    let mut rt = rig.rt.lock().unwrap();
+    assert!(!rt.stopping);
+    rig.manager.require_prior_cli_exit(&mut rt, &rig.pane).unwrap();
+}
+
+/// A settings restart admits the tab's settings from the index first.
+fn restartable(rig: &Rig) {
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "restart", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+}
+
+#[test]
+fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completion() {
+    for complete_failure in [false, true] {
+        let rig = Rig::with_live_pane();
+        restartable(&rig);
+        let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+        failure.store(true, std::sync::atomic::Ordering::SeqCst);
+        rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while rig.manager.terminals.is_running(&rig.pane) {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let work = rig.manager.begin_restart_launch(&rig.rt, &rig.tail).unwrap().unwrap();
+        assert!(!rig.manager.terminals.is_live(&rig.pane));
+        if complete_failure {
+            let result = rig.manager.claim_restart_completion(&rig.rt, &work, false);
+            assert!(result.as_ref().is_err_and(|error| error.to_string().contains("exit could not be confirmed")));
+        }
+        let stop = rig.manager.stop(SESSION, TAB);
+        assert!(stop.as_ref().is_err_and(|error| error.to_string().contains("PTY process exit could not be confirmed")), "{stop:?}");
+        assert!(rig.rt.lock().unwrap().stopping);
+        assert!(rig.manager.stopping_ptys.lock().unwrap()[&key_of(SESSION, TAB)].iter()
+            .any(|pane| pane.same_launch(work.process.as_ref().unwrap())));
+        failure.store(false, std::sync::atomic::Ordering::SeqCst);
+        rig.manager.stop(SESSION, TAB).unwrap();
+        assert!(!rig.rt.lock().unwrap().stopping);
+        assert!(!rig.manager.stopping_ptys.lock().unwrap().contains_key(&key_of(SESSION, TAB)));
+        // Explicit Stop cancelled the claim: late completion cannot reopen it.
+        assert!(rig.manager.claim_restart_completion(&rig.rt, &work, true).unwrap().is_none());
+    }
+}
+
+#[test]
+fn restart_completion_retires_only_its_exact_current_handle() {
+    for superseded in [false, true] {
+        let rig = Rig::with_live_pane();
+        restartable(&rig);
+        let work = rig.manager.begin_restart_launch(&rig.rt, &rig.tail).unwrap().unwrap();
+        assert!(work.process.as_ref().unwrap().wait(Duration::from_secs(5)));
+        rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
+            cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
+            command: Some("sh -c 'read line'"), env: &[],
+        }).unwrap();
+        let successor = rig.manager.terminals.pid(&rig.pane).unwrap();
+        let newer = rig.manager.terminals.pending_stops(&rig.pane);
+        let key = key_of(SESSION, TAB);
+        rig.manager.retain_stopping_ptys(&key, &newer);
+        let successor_claim = Arc::new(tui::Tail::unknown(crate::harness::codex::rollout::decode_line));
+        if superseded { rig.rt.lock().unwrap().restart_claim = Some(successor_claim.clone()); }
+        assert!(rig.manager.claim_restart_completion(&rig.rt, &work, true).unwrap().is_none());
+        {
+            let retained = rig.manager.stopping_ptys.lock().unwrap();
+            assert!(newer.iter().all(|new| retained[&key].iter().any(|pane| pane.same_launch(new))));
+            assert_eq!(retained[&key].iter().any(|pane| pane.same_launch(work.process.as_ref().unwrap())), superseded,
+                "only the applicable claim can retire its exact handle");
+        }
+        if superseded {
+            assert!(rig.rt.lock().unwrap().restart_claim.as_ref().is_some_and(|claim| Arc::ptr_eq(claim, &successor_claim)));
+        }
+        assert!(crate::harness::host::is_alive(successor), "completion must not stop the replacement");
+        rig.manager.stop(SESSION, TAB).unwrap();
+        assert!(!crate::harness::host::is_alive(successor));
+        assert!(!rig.manager.stopping_ptys.lock().unwrap().contains_key(&key));
+    }
+}
+
+#[test]
+fn later_pty_confirmation_resolves_only_the_captured_batch_failure() {
+    let rig = Rig::with_live_pane();
+    let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+    failure.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.manager.terminals.is_running(&rig.pane) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let captured = rig.manager.terminals.begin_stop_all(std::slice::from_ref(&rig.pane));
+    let first = pty::StoppingPane::wait_all(&captured, Duration::ZERO);
+    assert!(!first);
+    assert!(SessionManager::settle_pty_wait(&captured, first).unwrap_err().to_string().contains("PTY process exit could not be confirmed"));
+    rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
+        cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
+        command: Some("sh -c 'read line'"), env: &[],
+    }).unwrap();
+    let replacement = rig.manager.terminals.pid(&rig.pane).unwrap();
+    assert!(SessionManager::settle_pty_wait(&captured, first).is_err(), "a new pane cannot settle the old handle");
+    failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    SessionManager::settle_pty_wait(&captured, first).unwrap();
+    assert!(crate::harness::host::is_alive(replacement), "confirmation must not target the reused pane");
+}
+
+#[test]
+fn confirmed_pty_stop_preserves_unrelated_tab_failure() {
+    let rig = Rig::with_live_pane();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "retained", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    let pid = rig.manager.terminals.pid(&rig.pane).unwrap();
+    rig.rt.lock().unwrap().stop_in_flight = true;
+    let error = rig.manager.stop_all_confirmed().unwrap_err().to_string();
+    assert_eq!(error, "Stop all could not settle every tab: Stop is already in progress.");
+    assert!(!crate::harness::host::is_alive(pid), "the PTY batch itself must have completed");
+    assert!(rig.manager.terminals.owned_groups().is_empty());
+    assert!(rig.rt.lock().unwrap().stop_in_flight, "terminal completion cannot settle another stop operation");
+    assert!(rig.rt.lock().unwrap().stopping);
+    assert!(index::get(SESSION).is_ok(), "failed stop-all must retain session metadata");
+}

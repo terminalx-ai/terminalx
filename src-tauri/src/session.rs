@@ -1228,6 +1228,9 @@ pub struct SessionManager {
     watcher_lifetime: Option<std::sync::mpsc::Sender<()>>,
     stop_pids: Arc<Mutex<Vec<u32>>>,
     session_stop_pids: Arc<Mutex<HashMap<String, Vec<u32>>>>,
+    /// Exact detached launches survive a failed Stop; retry never resolves a
+    /// pane name again and accidentally targets its replacement.
+    stopping_ptys: Arc<Mutex<HashMap<String, Vec<pty::StoppingPane>>>>,
     /// Tabs following their terminal (#437); off until the desktop app asks.
     follow: Arc<follow::Following>,
     /// New tabs whose agent's first start is still told apart (PRO-291).
@@ -1666,6 +1669,7 @@ impl SessionManager {
             typing: Arc::default(),
             stop_pids: Arc::new(Mutex::new(Vec::new())),
             session_stop_pids: Arc::default(),
+            stopping_ptys: Arc::default(),
             follow: Arc::default(),
             first_starts: Arc::default(),
         };
@@ -3838,6 +3842,29 @@ impl SessionManager {
         Ok(removed.map(|q| q.message))
     }
 
+    // Called with the runtime reservation held; never acquire runtime from
+    // this map. More than one cancelled/restarting launch may remain outstanding.
+    fn retain_stopping_ptys(&self, key: &str, panes: &[pty::StoppingPane]) {
+        if panes.is_empty() { return; }
+        let mut stopping = self.stopping_ptys.lock().unwrap();
+        let retained = stopping.entry(key.to_string()).or_default();
+        for pane in panes {
+            if !retained.iter().any(|old| old.same_launch(pane)) { retained.push(pane.clone()); }
+        }
+    }
+
+    /// Retire only this operation's confirmed handles, preserving newer work.
+    /// Returns whether any other launch still needs confirmation.
+    fn retire_stopping_ptys(&self, key: &str, completed: &[pty::StoppingPane]) -> bool {
+        let mut stopping = self.stopping_ptys.lock().unwrap();
+        if let Some(retained) = stopping.get_mut(key) {
+            retained.retain(|pane| !completed.iter().any(|old| old.same_launch(pane)));
+            if !retained.is_empty() { return true; }
+            stopping.remove(key);
+        }
+        false
+    }
+
     /// Kill the agent but keep resume state, so the next prompt resumes.
     pub fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
         self.stop_with(session_id, tab_id, false)
@@ -4025,7 +4052,7 @@ impl SessionManager {
             return self.stop_by_hand(&rt_arc);
         }
         let own_pane = index::get(session_id).ok().and_then(|entry| entry.tab(tab_id).map(TabEntry::pane_id)).unwrap_or_else(|| Self::pane_id(tab_id));
-        let (pane, pid) = {
+        let (panes, pid) = {
             let mut rt = rt_arc.lock().unwrap();
             if rt.stop_in_flight { bail!("Stop is already in progress."); }
             rt.stop_in_flight = true;
@@ -4046,6 +4073,13 @@ impl SessionManager {
             self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
             // Its status is settled below.
             let pane = self.let_go_of_cli(&mut rt);
+            let had_cli = pane.is_some();
+            if let Some(pane) = pane {
+                let captured = self.terminals.begin_stop_all(&[pane]);
+                self.retain_stopping_ptys(&key, &captured);
+            }
+            let panes = self.stopping_ptys.lock().unwrap().get(&key).cloned()
+                .or_else(|| had_cli.then(Vec::new));
             crate::cloud_grants::forget_launch(&key);
             rt.child = None;
             rt.child_pid = None;
@@ -4057,14 +4091,22 @@ impl SessionManager {
             if !(keep_unread && rt.status == TabStatus::Completed) {
                 self.set_status(&mut rt, TabStatus::Idle);
             }
-            (pane, pid)
+            (panes, pid)
         };
         let signalled = Instant::now();
-        if let Some(pane) = pane {
-            self.terminals.kill_and_wait(&pane, RESTART_WAIT);
-        } else if self.host.is_live(&key) {
+        if let Some(panes) = &panes {
+            if !pty::StoppingPane::wait_all(panes, RESTART_WAIT) {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.stop_in_flight = false;
+                self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
+                bail!("Local PTY process exit could not be confirmed. Retry Stop before resuming.");
+            }
+        }
+        // A cancelled earlier CLI can leave retained handles even after the
+        // tab changes to a headless engine. Stop its current host as before.
+        if self.host.is_live(&key) {
             self.host.kill(&key);
-        } else if let Some(pid) = pid {
+        } else if let Some(pid) = pid.filter(|_| panes.is_none()) {
             crate::harness::host::terminate(pid);
         }
         let deadline = signalled + STOP_CONFIRM_WAIT;
@@ -4078,8 +4120,13 @@ impl SessionManager {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let mut rt = rt_arc.lock().unwrap();
-        rt.stopping = false;
         rt.stop_in_flight = false;
+        if self.retire_stopping_ptys(&key, panes.as_deref().unwrap_or_default()) {
+            rt.stopping = true;
+            self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
+            bail!("Another PTY launch still needs exit confirmation. Retry Stop before resuming.");
+        }
+        rt.stopping = false;
         rt.stopping_pid = None;
         self.publish(&mut rt, Payload::Status { text: recovery::SESSION_CLOSED_MESSAGE.into() }, None);
         Ok(())
@@ -4107,7 +4154,7 @@ impl SessionManager {
         self.first_starts.forget(&key_of(session_id, tab_id));
         // A followed shell is closed by the explicit tab-close action too.
         if crate::pty::is_shell_id(&pane) {
-            self.terminals.kill_and_wait(&pane, RESTART_WAIT);
+            self.terminals.kill_and_wait_confirmed(&pane, RESTART_WAIT)?;
             self.sink.emit("pty_closed", &pane);
         }
         crate::session_ops::close_tab_entry(session_id, tab_id).map_err(anyhow::Error::msg)?;
@@ -4167,8 +4214,8 @@ impl SessionManager {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        self.session_stop_pids.lock().unwrap().remove(&key);
         if !failures.is_empty() { bail!("Agents could not be stopped: {}", failures.join("; ")); }
+        self.session_stop_pids.lock().unwrap().remove(&key);
         Ok(())
     }
 
@@ -4197,14 +4244,16 @@ impl SessionManager {
         for tab in &entry.tabs {
             if let Err(error) = self.stop(&entry.id, &tab.id) { failures.push(error.to_string()); }
         }
-        self.terminals.kill_all_and_wait(&panes, RESTART_WAIT);
+        if let Err(error) = self.terminals.kill_all_and_wait_confirmed(&panes, RESTART_WAIT) {
+            failures.push(error.to_string());
+        }
         pids.retain(|pid| crate::harness::host::group_or_process_alive(*pid));
         if !pids.is_empty() {
             self.session_stop_pids.lock().unwrap().insert(entry.id.clone(), pids);
             bail!("Session processes have not all exited. Its history was kept; retry the operation after they stop.");
         }
-        self.session_stop_pids.lock().unwrap().remove(&entry.id);
         if !failures.is_empty() { bail!("The session could not be stopped: {}", failures.join("; ")); }
+        self.session_stop_pids.lock().unwrap().remove(&entry.id);
         for pane in panes.into_iter().filter(|pane| crate::pty::is_shell_id(pane)) {
             self.sink.emit("pty_closed", &pane);
         }
@@ -4759,15 +4808,28 @@ impl SessionManager {
             if let Err(error) = self.stop(&session, &id) { failures.push(error.to_string()); }
         }
         let panes: Vec<_> = self.terminals.panes().into_iter().map(|pane| pane.id).collect();
-        self.terminals.kill_all_and_wait(&panes, RESTART_WAIT);
+        let terminal_stops = self.terminals.begin_stop_all(&panes);
+        let terminals_confirmed = pty::StoppingPane::wait_all(&terminal_stops, RESTART_WAIT);
         self.terminals.stop_owned_groups(RESTART_WAIT);
+        // The existing second bounded phase can confirm a batch whose first
+        // wait expired. Recheck those exact handles, not only original PIDs.
+        if let Err(error) = Self::settle_pty_wait(&terminal_stops, terminals_confirmed) {
+            failures.push(error.to_string());
+        }
         self.host.kill_all_and_wait(RESTART_WAIT);
         pids.retain(|pid| crate::harness::host::group_or_process_alive(*pid));
         *self.stop_pids.lock().unwrap() = pids.clone();
-        if !pids.is_empty() {
+        if !pids.is_empty() || !self.terminals.owned_groups().is_empty() {
             bail!("Stop all could not confirm every process exited. Retry Stop all; the runtime remains stopping.");
         }
         if !failures.is_empty() { bail!("Stop all could not settle every tab: {}", failures.join("; ")); }
+        Ok(())
+    }
+
+    fn settle_pty_wait(panes: &[pty::StoppingPane], initially_confirmed: bool) -> Result<()> {
+        if !initially_confirmed && panes.iter().any(|pane| pane.pid().is_some()) {
+            bail!("PTY process exit could not be confirmed. Retained ownership must be stopped before retrying the operation.");
+        }
         Ok(())
     }
 
@@ -4894,6 +4956,19 @@ impl SessionManager {
         }
     }
 
+    /// Startup holds the runtime lock. Never wait for a previous launch here:
+    /// close admission and retain its exact handles for the explicit Stop path,
+    /// which releases the runtime before waiting.
+    fn require_prior_cli_exit(&self, rt: &mut TabRuntime, pane: &str) -> Result<()> {
+        let pending = self.terminals.detached_stops(pane);
+        if !pending.is_empty() {
+            self.retain_stopping_ptys(&key_of(&rt.session_id, &rt.tab_id), &pending);
+            rt.stopping = true;
+            bail!("Previous PTY exit is unconfirmed. Retry Stop before resuming.");
+        }
+        Ok(())
+    }
+
     /// Returns whether this call is what started it, so a prompt sent in the
     /// same breath knows to wait for the TUI to finish drawing. `prompting`
     /// is whether the caller is about to send one.
@@ -4924,8 +4999,12 @@ impl SessionManager {
         }
         // An orderly idle exit left history, not a process to kill. Keep
         // those bytes for the newly resumed CLI's terminal stream.
+        self.require_prior_cli_exit(rt, &pane)?;
+        // What the tab's terminal runs now (a shell its last CLI left, #437)
+        // is stopped as before; one whose exit is not confirmed stays owned,
+        // for the check above to refuse the next start.
         if self.terminals.is_live(&pane) {
-            self.terminals.kill_and_wait(&pane, RESTART_WAIT);
+            self.terminals.kill_and_wait_confirmed(&pane, RESTART_WAIT)?;
         }
         // A conversation the reader started by hand comes with no mode the
         // app knows (#437). Launched by the app it runs in the one that asks:
@@ -5365,6 +5444,7 @@ impl SessionManager {
         // replacement can reuse the pane name without becoming this work's target.
         let process = self.terminals.begin_stop(&pane);
         rt.stopping_pid = process.as_ref().and_then(pty::StoppingPane::pid);
+        self.retain_stopping_ptys(&key_of(&rt.session_id, &rt.tab_id), process.as_slice());
         rt.restart_claim = Some(tail.clone());
         Some(CliRestart { tail: tail.clone(), pane, process, _privacy: privacy })
     }
@@ -5373,7 +5453,10 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         if !rt.restart_claim.as_ref().is_some_and(|claim| Arc::ptr_eq(claim, &work.tail)) { return Ok(None); }
         rt.restart_claim = None;
-        if exited { rt.stopping_pid = None; }
+        if exited {
+            rt.stopping_pid = None;
+            self.retire_stopping_ptys(&key_of(&rt.session_id, &rt.tab_id), work.process.as_slice());
+        }
         // A followed agent or a shell may have taken the slot during the wait.
         if !matches!(rt.engine, Engine::None) || self.terminals.is_live(&work.pane) { return Ok(None); }
         if !exited {

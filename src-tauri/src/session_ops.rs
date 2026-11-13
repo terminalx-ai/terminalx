@@ -889,7 +889,7 @@ pub(crate) struct WorkspaceRemoved {
     pub strays: Vec<crate::stray_processes::Stray>,
 }
 
-/// How an error from [`remove_workspace`] starts when the workspace was left
+/// How an error from [`remove_workspace_fallible`] starts when the workspace was left
 /// alone because it needs the second confirmation. Callers that can ask for
 /// it look for this.
 pub(crate) const NEEDS_CONFIRMATION: &str = "This workspace needs a second confirmation before it is removed";
@@ -932,6 +932,7 @@ fn needs_confirmation(landed: &crate::landed::Landed, confirmation: &Confirmatio
 ///
 /// A folder that is not on disk (removed by hand, or on a volume that is not
 /// mounted) cannot be checked, so it needs the second confirmation too.
+#[cfg(test)]
 pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<'_>, stop: &dyn Fn(&SessionEntry)) -> Result<WorkspaceRemoved> {
     remove_workspace_fallible(sink, request, &|entry| { stop(entry); Ok(()) })
 }
@@ -1247,7 +1248,7 @@ pub(crate) fn rename_tab_entry(session_id: &str, tab_id: &str, title: Option<Str
 /// Delete one session: its index entry, logs, attachments and the agents'
 /// own data for it. Nothing else goes: not its workspace, and never another
 /// session, whatever they share. A workspace is removed only through
-/// [`remove_workspace`]. `stop` ends what the session's tabs are running.
+/// [`remove_workspace_fallible`]. `stop` ends what the session's tabs are running.
 pub(crate) fn delete_session_blocking(sink: &dyn EventSink, session_id: &str, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
     delete_session_blocking_fallible(sink, session_id, &|entry| { stop(entry); Ok(()) })
 }

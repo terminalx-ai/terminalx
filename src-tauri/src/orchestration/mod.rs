@@ -862,10 +862,73 @@ impl Run {
         placed
     }
 
+    /// The workers whose try is finished: accepted, failed with no further try
+    /// to come, superseded by a later try, stopped with the run, or of a skipped
+    /// piece. A try still under way is not: one with no outcome yet, or the
+    /// last try of a piece that is running, being checked, with the lead, or
+    /// blocked waiting for a person's word to its worker. Never the lead's own
+    /// session (the worker of a try it took over), and never a session that also
+    /// holds a try under way.
+    pub fn finished_workers(&self) -> Vec<&SessionRef> {
+        let mut finished: Vec<&SessionRef> = Vec::new();
+        let mut at_work: Vec<&str> = vec![self.lead.session_id.as_str()];
+        for piece in &self.pieces {
+            let last_over = matches!(piece.state, PieceState::Done | PieceState::Failed | PieceState::Skipped | PieceState::Stopped) || piece.gave_up();
+            for (index, attempt) in piece.tries.iter().enumerate() {
+                let Some(worker) = attempt.worker.as_ref() else { continue };
+                let last = index + 1 == piece.tries.len();
+                if attempt.outcome.is_some() && (!last || last_over) {
+                    finished.push(worker);
+                } else {
+                    at_work.push(&worker.session_id);
+                }
+            }
+            // A worker stored before tries were kept is finished with its piece, and under way until then.
+            // Otherwise its tries say it all: a piece the lead took over still names its last worker.
+            if let Some(worker) = piece.worker.as_ref().filter(|_| piece.tries.is_empty()) {
+                if last_over {
+                    finished.push(worker);
+                } else {
+                    at_work.push(&worker.session_id);
+                }
+            }
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        finished.retain(|worker| {
+            let keep = !at_work.contains(&worker.session_id.as_str()) && !seen.contains(&worker.session_id.as_str());
+            seen.push(&worker.session_id);
+            keep
+        });
+        finished
+    }
+
     /// The summed estimate of the pieces that carry one, and how many do not.
     pub fn estimate(&self) -> (Option<Estimate>, usize) {
         let known: Vec<Estimate> = self.pieces.iter().filter_map(|piece| piece.estimate).collect();
         let total = (!known.is_empty()).then(|| Estimate { low: known.iter().map(|e| e.low).sum(), high: known.iter().map(|e| e.high).sum() });
         (total, self.pieces.len() - known.len())
     }
+}
+
+/// When a run has ended (done, failed or stopped), stop the agents of its
+/// workers whose try is finished ([`Run::finished_workers`]), as
+/// `sessions stop --children-of` does: a finished try's idle agent no longer
+/// holds its worktree from `runs cleanup`. A worker still under way is left as
+/// it is, and so is every run that has not ended. Asked again it stops nothing
+/// more: only an agent that is running is stopped. Returns the sessions whose
+/// agent was stopped; one that would not stop is logged and does not keep the
+/// rest running.
+pub(crate) fn stop_finished(run: &Run, stop: &dyn Fn(&SessionRef) -> anyhow::Result<bool>) -> Vec<String> {
+    if !run.state.ended() {
+        return Vec::new();
+    }
+    let mut stopped = Vec::new();
+    for worker in run.finished_workers() {
+        match stop(worker) {
+            Ok(true) => stopped.push(worker.session_id.clone()),
+            Ok(false) => {}
+            Err(error) => log::warn!("stop the finished worker {} of run {}: {error:#}", worker.session_id, run.id),
+        }
+    }
+    stopped
 }
