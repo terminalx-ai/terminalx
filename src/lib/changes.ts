@@ -80,18 +80,17 @@ export function useWorkingChanges(cwd: string | undefined, active: boolean, tick
 
 /** Uncommitted changes of a local checkout or a cloud repository. */
 export function useGitWorkingChanges(source: GitSource | undefined, active: boolean, tick = 0, hideWhitespace = false) {
-  const [state, setState] = useState<{ key: string | null; head: string | null; files: ChangedFile[] }>({ key: null, head: null, files: [] });
+  const [state, setState] = useState<{ key: string | null; head: string | null; index: string | null; files: ChangedFile[]; staged: ChangedFile[]; unstaged: ChangedFile[] }>({ key: null, head: null, index: null, files: [], staged: [], unstaged: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
   useEffect(() => {
     if (!source || !active) return;
     let cancelled = false;
     setLoading(true);
-    source
-      .workingChanges(hideWhitespace)
-      .then(({ head, files }) => {
+    (source.workingChangeSets ? source.workingChangeSets(hideWhitespace).then(({ head, index, staged, unstaged }) => ({ head, index, staged, unstaged, files: [...new Map([...staged, ...unstaged].map((file) => [file.path, file])).values()] })) : source.workingChanges(hideWhitespace).then(({ head, files }) => ({ head, index: null, files, staged: [], unstaged: files })))
+      .then(({ head, index, files, staged, unstaged }) => {
         if (cancelled) return;
-        setState({ key: source.key, head, files });
+        setState({ key: source.key, head, index, files, staged, unstaged });
         setError(null);
       })
       .catch((e) => !cancelled && setError(e))
@@ -102,5 +101,5 @@ export function useGitWorkingChanges(source: GitSource | undefined, active: bool
   }, [source, active, tick, hideWhitespace]);
   // Never show one repository's changes under another.
   const current = state.key === (source?.key ?? null);
-  return { head: current ? state.head : null, files: current ? state.files : [], loading, error };
+  return { head: current ? state.head : null, index: current ? state.index : null, files: current ? state.files : [], staged: current ? state.staged : [], unstaged: current ? state.unstaged : [], loading, error };
 }

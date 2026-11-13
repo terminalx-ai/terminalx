@@ -19,14 +19,15 @@ export function diffMediaKind(path: string): "image" | "pdf" | "svg" | null {
 /** Owns the revision read so switching files/scopes never leaves stale content or copy actions. */
 type FileDiffProps = {
   source: GitSource; path: string; oldPath?: string; base: string; head: string | null; revision?: number; onDiscard?: () => void;
+  staging?: { staged: boolean; disabled?: boolean; onHunk: (index: number) => void };
   /** A centre editor also needs this snapshot for Entire file and disk-change warnings. */
   text?: { before: string; after: string };
 };
 export function FileDiff(props: FileDiffProps) {
-  return <FileDiffContent key={JSON.stringify([props.source.key, props.path, props.oldPath, props.base, props.head, props.revision])} {...props} />;
+  return <FileDiffContent key={JSON.stringify([props.source.key, props.path, props.oldPath, props.base, props.head, props.revision, props.staging?.staged])} {...props} />;
 }
 
-function FileDiffContent({ source, path, oldPath, base, head, text, onDiscard }: FileDiffProps) {
+function FileDiffContent({ source, path, oldPath, base, head, text, onDiscard, staging }: FileDiffProps) {
   const fileKey = diffFileKey(source.key, path);
   const options = useDiffOptions(fileKey);
   const kind = diffMediaKind(path);
@@ -35,6 +36,13 @@ function FileDiffContent({ source, path, oldPath, base, head, text, onDiscard }:
   const [error, setError] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const [hunks, setHunks] = useState(0);
+  useEffect(() => {
+    if (!staging || !source.hunkCount) { setHunks(0); return; }
+    let cancelled = false;
+    source.hunkCount(path, oldPath, staging.staged).then((count) => !cancelled && setHunks(count)).catch(() => !cancelled && setHunks(0));
+    return () => { cancelled = true; };
+  }, [source, path, oldPath, staging?.staged, head]);
   useEffect(() => {
     let cancelled = false;
     setPair(null);
@@ -61,6 +69,7 @@ function FileDiffContent({ source, path, oldPath, base, head, text, onDiscard }:
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-xs">
       <span className="min-w-0 flex-1 truncate" title={path}>{path}</span>
       {onDiscard && <DiscardButton path={path} onClick={onDiscard} />}
+      {staging && source.applyHunk && Array.from({ length: hunks }, (_, index) => <Button key={index} size="xs" variant="ghost" disabled={staging.disabled} onClick={() => staging.onHunk(index)}>{staging.staged ? "Unstage" : "Stage"} hunk {index + 1}</Button>)}
       {kind === "svg" && <Button size="xs" variant="secondary" onClick={() => setRaw(!raw)}>{raw ? "Rendered SVG" : "Raw SVG"}</Button>}
       {textView && <label className="flex items-center gap-1">Wrap lines
         <select aria-label="Wrap lines for this file" className="rounded bg-well p-1" value={options.override === undefined ? "default" : String(options.override)} onChange={(e) => setFileWrap(fileKey, e.target.value === "default" ? undefined : e.target.value === "true")}>

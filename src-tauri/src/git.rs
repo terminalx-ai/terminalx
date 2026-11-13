@@ -1467,6 +1467,233 @@ pub fn commit_all(cwd: &Path, message: &str, paths: Option<&[String]>) -> Result
     Ok(head_commit(cwd).unwrap_or_default())
 }
 
+/// Commit the explicit index when it has changes; otherwise preserve the
+/// repository panel's historical add-all behavior.
+pub fn commit_staged_or_all(cwd: &Path, message: &str) -> Result<String> {
+    let staged = match raw(cwd, &["diff", "--cached", "--quiet", "--exit-code", "--"]) {
+        Some((0, _)) => false,
+        Some((1, _)) => true,
+        _ => bail!("Could not inspect the Git index before committing."),
+    };
+    if staged {
+        run(cwd, &["commit", "-m", message])?;
+        return Ok(head_commit(cwd).unwrap_or_default());
+    }
+    commit_all(cwd, message, None)
+}
+
+/// Add paths to the index without changing their working-tree contents.
+pub fn stage_paths(cwd: &Path, paths: &[String]) -> Result<()> {
+    anyhow::ensure!(!paths.is_empty(), "Select at least one file to stage.");
+    anyhow::ensure!(run(cwd, &["ls-files", "-u", "--"])?.is_empty(), "Resolve merge conflicts before staging files.");
+    let mut args = vec!["--literal-pathspecs", "add", "-A", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run(cwd, &args).map(|_| ())
+}
+
+/// Remove paths from the index while preserving every working-tree edit.
+pub fn unstage_paths(cwd: &Path, paths: &[String]) -> Result<()> {
+    anyhow::ensure!(!paths.is_empty(), "Select at least one file to unstage.");
+    let mut args = vec!["--literal-pathspecs", "reset", "-q", "HEAD", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run(cwd, &args).map(|_| ())
+}
+
+pub fn unstage_all(cwd: &Path) -> Result<()> {
+    run(cwd, &["reset", "-q"]).map(|_| ())
+}
+
+/// Apply one hunk from Git's own working-tree or cached diff. The patch is
+/// generated here so callers cannot redirect it to another path. `reverse`
+/// removes a selected cached hunk; neither operation touches the worktree.
+pub fn apply_hunk(
+    cwd: &Path,
+    path: &str,
+    old_path: Option<&str>,
+    index: usize,
+    reverse: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        !path.is_empty() && !path.contains('\0'),
+        "Invalid file path."
+    );
+    if !reverse && !path_is_tracked(cwd, path) {
+        if let Some(old) = old_path {
+            let staged_old = raw(cwd, &["diff", "--cached", "--quiet", "--exit-code", "--", old]);
+            anyhow::ensure!(matches!(staged_old, Some((0, _))), "Unstage existing changes to the original file before staging rename hunks.");
+            let before = hunk_diff(cwd, path, old_path, false)?;
+            let count = before.match_indices("@@ -").count();
+            anyhow::ensure!(index < count, "That hunk is no longer available. Refresh the diff and try again.");
+            stage_paths(cwd, &[old.to_string(), path.to_string()])?;
+            let result = (|| {
+                let diff = hunk_diff(cwd, path, old_path, true)?;
+                let staged_count = diff.match_indices("@@ -").count();
+                anyhow::ensure!(index < staged_count, "That hunk is no longer available. Refresh the diff and try again.");
+                for other in (0..staged_count).rev().filter(|other| *other != index) {
+                    apply_patch(cwd, &hunk_patch(&diff, other)?, true)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                if let Err(rollback_error) = unstage_paths(cwd, &[old.to_string(), path.to_string()]) {
+                    bail!("Could not finish staging this rename hunk ({error}); the worktree is unchanged, but unstage {path} and {old} to restore the index: {rollback_error}");
+                }
+                return Err(error);
+            }
+            return Ok(());
+        }
+    }
+    let diff = hunk_diff(cwd, path, old_path, reverse)?;
+    apply_patch(cwd, &hunk_patch(&diff, index)?, reverse)
+}
+
+fn hunk_patch(diff: &str, index: usize) -> Result<String> {
+    let starts: Vec<usize> = diff.match_indices("@@ -").map(|(i, _)| i).collect();
+    let header_end = starts.first().copied().ok_or_else(|| anyhow!("This file has no text hunks to apply."))?;
+    let selected = starts.get(index).ok_or_else(|| anyhow!("That hunk is no longer available. Refresh the diff and try again."))?;
+    let end = starts.get(index + 1).copied().unwrap_or(diff.len());
+    Ok(format!("{}{}", &diff[..header_end], &diff[*selected..end]))
+}
+
+fn apply_patch(cwd: &Path, patch: &str, reverse: bool) -> Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut command = git();
+    let args: &[&str] = if reverse {
+        &["apply", "--cached", "--reverse", "--recount", "--"]
+    } else {
+        &["apply", "--cached", "--recount", "--"]
+    };
+    command
+        .current_dir(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("Git input unavailable"))?;
+    let write_result = stdin.write_all(patch.as_bytes());
+    drop(stdin);
+    let output = child.wait_with_output()?;
+    write_result?;
+    if !output.status.success() {
+        bail!(
+            "git apply: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+pub fn hunk_count(cwd: &Path, path: &str, old_path: Option<&str>, staged: bool) -> Result<usize> {
+    anyhow::ensure!(
+        !path.is_empty() && !path.contains('\0'),
+        "Invalid file path."
+    );
+    let diff = hunk_diff(cwd, path, old_path, staged)?;
+    Ok(diff.match_indices("@@ -").count())
+}
+
+fn hunk_diff(cwd: &Path, path: &str, old_path: Option<&str>, cached: bool) -> Result<String> {
+    if !cached && !path_is_tracked(cwd, path) {
+        if let Some(old) = old_path {
+            let index = run(cwd, &["write-tree"])?.trim().to_string();
+            let previous = run(cwd, &["show", &format!("{index}:{old}")])?;
+            let temp = tempfile::tempdir()?;
+            let baseline = temp.path().join("baseline");
+            std::fs::write(&baseline, previous)?;
+            let output = git()
+                .current_dir(cwd)
+                .args([
+                    "--literal-pathspecs", "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color",
+                    "--unified=3", "--", baseline.to_str().ok_or_else(|| anyhow!("Invalid temporary path"))?, path,
+                ])
+                .output()?;
+            anyhow::ensure!(matches!(output.status.code(), Some(0 | 1)), "git diff could not read the renamed file: {}", String::from_utf8_lossy(&output.stderr).trim());
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+    }
+    let mut args = vec![
+        "--literal-pathspecs",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--find-renames",
+        "--unified=3",
+    ];
+    if cached {
+        args.push("--cached");
+    }
+    args.push("--");
+    if let Some(old) = old_path {
+        args.push(old);
+    }
+    args.push(path);
+    let diff = run(cwd, &args)?;
+    if !diff.is_empty() || cached {
+        return Ok(diff);
+    }
+    // Git's ordinary diff omits untracked files. Build their patch from /dev/null;
+    // this still lets `git apply --cached` select only one hunk.
+    let tracked = path_is_tracked(cwd, path);
+    if tracked {
+        return Ok(diff);
+    }
+    use std::process::Stdio;
+    let output = git()
+        .current_dir(cwd)
+        .args([
+            "--literal-pathspecs",
+            "diff",
+            "--no-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--unified=3",
+            "--",
+            "/dev/null",
+            path,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    anyhow::ensure!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "git diff could not read the untracked file: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn path_is_tracked(cwd: &Path, path: &str) -> bool {
+    raw(cwd, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", path]).is_some_and(|(code, _)| code == 0)
+}
+
+pub fn staged_diff(cwd: &Path, limit: usize) -> Result<String> {
+    let diff = run(
+        cwd,
+        &[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--",
+            ".",
+        ],
+    )?;
+    anyhow::ensure!(
+        !diff.trim().is_empty(),
+        "Stage changes before generating a commit message."
+    );
+    anyhow::ensure!(
+        diff.len() <= limit,
+        "The staged diff is too large to send for a commit message. Stage a smaller selection."
+    );
+    Ok(diff)
+}
+
 pub fn push(cwd: &Path) -> Result<String> {
     let _request = crate::github_process::scope();
     let branch = current_branch(cwd).ok_or_else(|| anyhow!("detached HEAD"))?;
@@ -1609,6 +1836,87 @@ mod tests {
         run(p, &["commit", "-q", "-m", "init"]).unwrap();
         dir
     }
+
+    #[test]
+    fn staging_one_hunk_preserves_other_worktree_edits_and_commit_uses_only_index() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=24).map(|n| format!("line {n}\n")).collect::<String>();
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "fixture", None).unwrap();
+        let changed = original
+            .replace("line 2\n", "changed 2\n")
+            .replace("line 22\n", "changed 22\n");
+        std::fs::write(p.join("a.txt"), &changed).unwrap();
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 2);
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        assert_eq!(
+            run(p, &["diff", "--cached", "--numstat", "--", "a.txt"])
+                .unwrap()
+                .trim(),
+            "1\t1\ta.txt"
+        );
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 1);
+        commit_staged_or_all(p, "only first hunk").unwrap();
+        let committed = run(p, &["show", "HEAD:a.txt"]).unwrap();
+        assert!(committed.contains("changed 2"));
+        assert!(committed.contains("line 22"));
+        assert!(std::fs::read_to_string(p.join("a.txt"))
+            .unwrap()
+            .contains("changed 22"));
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        apply_hunk(p, "a.txt", None, 0, true).unwrap();
+        assert!(run(p, &["diff", "--cached", "--quiet", "--"]).is_ok());
+        assert!(std::fs::read_to_string(p.join("a.txt"))
+            .unwrap()
+            .contains("changed 22"));
+    }
+
+    #[test]
+    fn hunk_patches_support_untracked_and_renamed_files() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=24).map(|n| format!("line {n}\n")).collect::<String>();
+        let new_file = (1..=24).map(|n| format!("new {n}\n")).collect::<String>();
+        std::fs::write(
+            p.join("fresh.txt"),
+            new_file
+                .replace("new 2\n", "changed 2\n")
+                .replace("new 22\n", "changed 22\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            hunk_count(p, "fresh.txt", None, false).unwrap(),
+            1,
+            "an untracked file is one all-additions hunk"
+        );
+        apply_hunk(p, "fresh.txt", None, 0, false).unwrap();
+        assert!(
+            run(p, &["diff", "--cached", "--name-only", "--", "fresh.txt"])
+                .unwrap()
+                .contains("fresh.txt")
+        );
+        unstage_all(p).unwrap();
+
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "rename fixture", None).unwrap();
+        std::fs::rename(p.join("a.txt"), p.join("renamed.txt")).unwrap();
+        let changed = original
+            .replace("line 2\n", "changed 2\n")
+            .replace("line 22\n", "changed 22\n");
+        std::fs::write(p.join("renamed.txt"), changed).unwrap();
+        assert_eq!(
+            hunk_count(p, "renamed.txt", Some("a.txt"), false).unwrap(),
+            2
+        );
+        apply_hunk(p, "renamed.txt", Some("a.txt"), 0, false).unwrap();
+        assert_eq!(
+            hunk_count(p, "renamed.txt", Some("a.txt"), true).unwrap(),
+            1
+        );
+        assert!(p.join("renamed.txt").exists());
+    }
+
 
     #[test]
     fn pr_checkout_uses_the_fetched_head_and_cleans_up_a_failed_checkout() {
