@@ -15,7 +15,10 @@ pub(super) const HELPER: &str = "__terminalx-private-pty-supervisor-v1";
 #[serde(deny_unknown_fields)]
 pub(super) struct Envelope<T> { pub version: u8, pub launch: Uuid, pub body: T }
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "op", deny_unknown_fields)]
+// snake_case: a private wire format between the runtime and its own helper
+// image, never read by the web view or any other program; its field names
+// are single words, which this keeps exactly as they are on the wire.
+#[serde(tag = "op", rename_all_fields = "snake_case", deny_unknown_fields)]
 pub(super) enum Request {
     Config { offset: usize, bytes: Vec<u8> },
     Launch { length: usize },
@@ -23,7 +26,8 @@ pub(super) enum Request {
     Release { claim: u64 },
 }
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "op", deny_unknown_fields)]
+// snake_case, as `Request`: the helper's private wire format.
+#[serde(tag = "op", rename_all_fields = "snake_case", deny_unknown_fields)]
 pub(super) enum Response {
     Ready { supervisor: u32 },
     /// An observed exec transition, not completed loader work, provider
