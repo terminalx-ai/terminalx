@@ -31,6 +31,8 @@ import type {
   TabEntry,
   TabStatus,
   UnfinishedMerge,
+  ConflictChoice,
+  ConflictFile,
   WorkStatus,
   WorkspaceRemoveReport,
   Leftover,
@@ -2252,6 +2254,15 @@ export const git = {
   commitMerge: (cwd: string, head: string, mergeHead: string) => invoke<string>("commit_merge", { cwd, head, mergeHead }),
   /** `git merge --abort` of the merge that was read, and no other. */
   abortMerge: (cwd: string, head: string, mergeHead: string) => invoke<void>("abort_merge", { cwd, head, mergeHead }),
+  /** A conflicted file of the merge that was read, cut into its conflicts (PRO-293). */
+  conflictFile: (cwd: string, head: string, mergeHead: string, path: string) =>
+    invoke<ConflictFile>("merge_conflict_file", { cwd, head, mergeHead, path }),
+  /** Replace one conflict with a side, or both, and return the file as written. Refused when the file changed since `version`. */
+  resolveConflict: (cwd: string, head: string, mergeHead: string, path: string, version: string, index: number, choice: ConflictChoice) =>
+    invoke<ConflictFile>("resolve_merge_conflict", { cwd, head, mergeHead, path, version, index, choice }),
+  /** Stage a file with no conflict markers left (`git add`). Refused when it changed since `version` or still has markers. */
+  markResolved: (cwd: string, head: string, mergeHead: string, path: string, version: string) =>
+    invoke<void>("mark_conflict_resolved", { cwd, head, mergeHead, path, version }),
 };
 
 export type PrScope = { kind: "local"; cwd: string } | { kind: "cloud"; workspace: string; repo: string };
