@@ -282,6 +282,9 @@ struct State {
     shell_status: Option<i32>,
     boot: Option<Result<u32, String>>,
     stop_claim: u64,
+    /// The current claim's grace, in milliseconds: how long after its TERM
+    /// the supervisor kills what is left (`protocol::Request::Stop`).
+    stop_grace: u32,
     park: Park,
     /// The observer is in its channel loop, where it can be held still.
     observing: bool,
@@ -329,7 +332,7 @@ impl Owner {
     pub(super) fn reserve() -> Arc<Self> {
         Arc::new(Self { launch: Uuid::new_v4(), state: Mutex::new(State {
             phase: Phase::Reserved, supervisor: None, shell: None,
-            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false, reaped: false, unsupported: None, lost_at: None, stopped_while_parked: false,
+            shell_status: None, boot: None, stop_claim: 0, stop_grace: protocol::STOP_GRACE, park: Park::Running, observing: false, reaped: false, unsupported: None, lost_at: None, stopped_while_parked: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
             #[cfg(test)] observer_reaped: AtomicBool::new(false), #[cfg(test)] fault: TEST_FAULT.with(|slot| slot.borrow().clone()), })
     }
@@ -444,7 +447,7 @@ impl Owner {
         let phase = match carried.phase { CarriedPhase::Running => Phase::Running, CarriedPhase::Stopping => Phase::Stopping, CarriedPhase::Unconfirmed => Phase::Unconfirmed };
         let owner = Arc::new(Self { launch, state: Mutex::new(State {
             phase, supervisor: Some(carried.supervisor), shell: Some(carried.shell), shell_status: carried.shell_status,
-            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true, reaped: false, unsupported: None, lost_at: None, stopped_while_parked: false,
+            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, stop_grace: protocol::STOP_GRACE, park: Park::Running, observing: true, reaped: false, unsupported: None, lost_at: None, stopped_while_parked: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
             #[cfg(test)] observer_reaped: AtomicBool::new(false), #[cfg(test)] fault: TEST_FAULT.with(|slot| slot.borrow().clone()), });
         let observer = owner.clone();
@@ -500,9 +503,21 @@ impl Owner {
         else { state.shell.or(state.supervisor) }
     }
 
-    pub(super) fn stop(&self) {
+    pub(super) fn stop(&self) { self.stop_within(Duration::from_millis(protocol::STOP_GRACE.into())); }
+
+    /// Stop the launch: TERM, then KILL `grace` later. During a Stop, a
+    /// shorter grace brings its KILL forward, as a caller forcing its stop
+    /// does; a longer one changes nothing.
+    pub(super) fn stop_within(&self, grace: Duration) {
+        let grace = u32::try_from(grace.as_millis()).unwrap_or(u32::MAX);
         self.cancelled.store(true, Ordering::SeqCst);
         let mut state = self.state.lock().unwrap();
+        if state.phase == Phase::Stopping && grace < state.stop_grace {
+            state.stop_grace = grace;
+            if state.park != Park::Running { state.stopped_while_parked = true; }
+            self.changed.notify_all();
+            return;
+        }
         if state.phase == Phase::Reserved {
             // Closing this gate under the same lock used by bootstrap proves
             // no worker can ever begin this launch. No OS child exists yet.
@@ -515,6 +530,7 @@ impl Owner {
         // Exhaustion is an explicit loss, never claim reuse.
         let Some(claim) = state.stop_claim.checked_add(1) else { state.phase = Phase::Lost; return };
         state.stop_claim = claim;
+        state.stop_grace = grace;
         state.phase = Phase::Stopping;
         // Held for a handover, the observer sends nothing: the record must
         // say so, or the handover is called off (`refresh`).
@@ -689,6 +705,9 @@ impl Owner {
     fn observe_loop(self: &Arc<Self>, child: &mut Helper, socket: &OwnedFd, witness: &OwnedFd, config: &[u8], delivery: &mut LaunchDelivery, resume: Resume) {
         let pid = child.id();
         let Resume { mut ready, mut empty_received, mut launch_sent, mut sent_claim } = resume;
+        // A carried claim's grace is not in the record: assume the default,
+        // so a stop forced after the handover is still sent.
+        let mut sent_grace = protocol::STOP_GRACE;
         let mut offset = if launch_sent { config.len() } else { 0 };
         let mut release = None;
         let boot_deadline = Instant::now() + Duration::from_secs(11);
@@ -771,9 +790,9 @@ impl Owner {
                 }
                 eprintln!("H1 exact helper={pid} live-check -> terminal WNOWAIT -> response EOF; no Launch attempt");
             }
-            let (phase, claim) = { let state = self.state.lock().unwrap(); (state.phase, state.stop_claim) };
+            let (phase, claim, grace) = { let state = self.state.lock().unwrap(); (state.phase, state.stop_claim, state.stop_grace) };
             let outgoing = if let Some(claim) = release { Some(Request::Release { claim }) }
-                else if ready && claim > sent_claim { Some(Request::Stop { claim }) }
+                else if ready && (claim > sent_claim || (claim > 0 && claim == sent_claim && grace < sent_grace)) { Some(Request::Stop { claim, grace }) }
                 else if ready && claim == 0 && offset < config.len() { Some(Request::Config { offset, bytes: config[offset..(offset + protocol::CHUNK).min(config.len())].to_vec() }) }
                 else if ready && claim == 0 && !launch_sent { Some(Request::Launch { length: config.len() }) }
                 else { None };
@@ -792,7 +811,7 @@ impl Owner {
                     Ok(true) => match request {
                         Request::Config { bytes, .. } => offset += bytes.len(),
                         Request::Launch { .. } => { launch_sent = true; *delivery = LaunchDelivery::Sent; },
-                        Request::Stop { claim } => sent_claim = claim,
+                        Request::Stop { claim, grace } => { sent_claim = claim; sent_grace = grace; }
                         Request::Release { .. } => {
                             // Proof was checked while the exact witness was
                             // alive; Release merely lets that now-empty helper
