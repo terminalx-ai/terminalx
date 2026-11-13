@@ -6,12 +6,14 @@ import { QuickOpen } from "./QuickOpen";
 import { closeAllEditors, getEditors, setPaneCollapsed } from "@/lib/editors";
 
 const mocks = vi.hoisted(() => ({ hotkeys: new Map<string, () => void>(), name: "" }));
-vi.mock("@/lib/api", () => ({
-  fs: { listDir: async () => [{ path: mocks.name, name: mocks.name, isDir: false }] },
-  files: { search: async () => [{ path: mocks.name, name: mocks.name }] },
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
+  fs: { listDir: async () => [{ path: mocks.name, name: mocks.name, isDir: false }], mtime: async () => 1 },
+  files: { search: async () => [{ path: mocks.name, name: mocks.name }], count: async () => ({ files: 1, truncated: false }) },
+  api: { reviewRange: async () => { throw new Error("Not a Git repository"); } },
 }));
 vi.mock("@/lib/changes", () => ({ useWorkingChanges: () => ({ files: [], loading: false, head: null }) }));
-vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), useShortcut: (action: string, cb: () => void) => { mocks.hotkeys.set(action, cb); } }));
+vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), useShortcutKeys: () => [], useShortcut: (action: string, cb: () => void, opts?: { enabled?: boolean }) => { if (opts?.enabled !== false) mocks.hotkeys.set(action, cb); } }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 
@@ -29,8 +31,9 @@ it.each([["透明 image.png", "image"], ["sound.mp3", "audio"], ["clip.mp4", "vi
   fireEvent.click(await screen.findByRole("menuitem", { name: "Open" }));
   expect(getEditors().collapsed.opening).toBe(false);
   act(() => mocks.hotkeys.get("files.quickOpen")!());
-  await screen.findByRole("button", { name });
-  fireEvent.keyDown(screen.getByPlaceholderText("Open file by name"), { key: "Enter" });
+  // The row's name is the file's, then its folder and marks.
+  await screen.findByRole("option", { name: (accessible) => accessible.startsWith(name) });
+  fireEvent.keyDown(screen.getByPlaceholderText("Search files…"), { key: "Enter" });
   expect(getEditors().editors).toHaveLength(1);
   expect(getEditors().active.opening).toBe(entry.id);
 });

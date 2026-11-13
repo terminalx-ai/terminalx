@@ -3387,7 +3387,7 @@ impl WorkspaceRpc {
             return Err(RpcError::invalid("the query is too long"));
         }
         let limit = params.get("limit").and_then(Value::as_u64).map_or(DEFAULT_FILE_HITS, |limit| limit as usize).clamp(1, MAX_FILE_HITS);
-        let files = crate::files::search(Path::new(&session.cwd), query, limit).map_err(RpcError::internal)?;
+        let files = crate::files::search(Path::new(&session.cwd), query, limit, false).map_err(RpcError::internal)?;
         Ok(json!({ "files": files }))
     }
 

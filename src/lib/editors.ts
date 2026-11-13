@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { recordRecentFile } from "@/lib/recentFiles";
 import { ask } from "@tauri-apps/plugin-dialog";
 import mediaTypes from "./mediaTypes.json";
 import { extOf, fileName } from "@/lib/paths";
@@ -178,6 +179,7 @@ let nonce = 0;
  * reader wants a line, which only source can show, so it forces source mode.
  */
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
+  recordRecentFile(source ?? `local:${root}`, rel);
   const existing = state.editors.find((e) => !isReviewEditor(e) && e.sessionId === sessionId && e.root === root && e.rel === rel);
   const selected = getTerminalState().selected[sessionId];
   if (selected?.kind === "review") clearSelectedReview(sessionId, selected.id);

@@ -3008,10 +3008,20 @@ pub async fn list_files(cwd: String, limit: Option<usize>) -> CmdResult<crate::f
 }
 
 #[tauri::command]
-pub async fn search_files(cwd: String, query: String, limit: Option<usize>) -> CmdResult<Vec<crate::files::FileHit>> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::search(Path::new(&cwd), &query, limit.unwrap_or(40)).map_err(err))
+pub async fn search_files(cwd: String, query: String, limit: Option<usize>, include_ignored: Option<bool>) -> CmdResult<Vec<crate::files::FileHit>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::files::search(Path::new(&cwd), &query, limit.unwrap_or(40), include_ignored.unwrap_or(false)).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// How many files `search_files` looks through in this checkout.
+#[tauri::command]
+pub async fn count_files(cwd: String, include_ignored: Option<bool>) -> CmdResult<crate::files::FileCount> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::count(Path::new(&cwd), include_ignored.unwrap_or(false)))
         .await
-        .map_err(err)?
+        .map_err(err)
 }
 
 #[tauri::command]

@@ -10,7 +10,7 @@ import {
   statRemote,
   writeRemoteFile,
 } from "@terminalx/portable/workspaceFiles";
-import { files, fs, type DirEntry, type FileHit, type FileList, type ReplaceReport, type ReplaceTarget, type TextHit, type TextSearch } from "@/lib/api";
+import { files, fs, type DirEntry, type FileCount, type FileHit, type FileList, type ReplaceReport, type ReplaceTarget, type TextHit, type TextSearch } from "@/lib/api";
 import type { ChangeStatus } from "@/types/session";
 
 /**
@@ -48,8 +48,12 @@ export interface FileSource {
    * would become (a preview; nothing is written). `limit` caps the hits.
    */
   search?(query: SearchQuery, signal: AbortSignal): Promise<TextSearch>;
-  /** Fuzzy file-name search, best first (Quick Open). */
-  findFiles?(query: string, limit: number): Promise<FileHit[]>;
+  /** Fuzzy file-name search, best first (Quick Open). `includeIgnored` needs `findsIgnored`. */
+  findFiles?(query: string, limit: number, options?: { includeIgnored?: boolean }): Promise<FileHit[]>;
+  /** `findFiles` can search the files Git ignores too. */
+  readonly findsIgnored?: boolean;
+  /** How many files `findFiles` looks through. */
+  countFiles?(options?: { includeIgnored?: boolean }): Promise<FileCount>;
   /** Every file the tree can show, by the tree's own rules, for the All files filter. */
   listFiles?(limit?: number): Promise<FileList>;
   /**
@@ -131,7 +135,9 @@ export function localFileSource(root: string): FileSource {
       return mtime == null ? null : { version: String(mtime) };
     },
     search: ({ query, regex, caseSensitive, wholeWord, limit, replacement }) => fs.searchText(root, query, regex, caseSensitive, limit, replacement, !!wholeWord),
-    findFiles: (query, limit) => files.search(root, query, limit),
+    findFiles: (query, limit, options) => files.search(root, query, limit, !!options?.includeIgnored),
+    findsIgnored: true,
+    countFiles: (options) => files.count(root, !!options?.includeIgnored),
     listFiles: (limit) => files.list(root, limit),
     replaceText: ({ query, replacement, regex, caseSensitive, wholeWord, targets, skip }) => fs.replaceText(root, query, replacement, regex, caseSensitive, targets, skip, !!wholeWord),
   };

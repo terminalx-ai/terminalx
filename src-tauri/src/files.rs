@@ -20,54 +20,79 @@ const FRESH_FOR: Duration = Duration::from_secs(20);
 struct Index {
     built: Instant,
     files: Vec<String>,
+    truncated: bool,
 }
 
-fn cache() -> &'static Mutex<HashMap<PathBuf, Index>> {
-    static C: OnceLock<Mutex<HashMap<PathBuf, Index>>> = OnceLock::new();
+/// One index per checkout and per mode: with `include_ignored` the walk also
+/// takes what `.gitignore` (and the folders skipped by name) would leave out.
+fn cache() -> &'static Mutex<HashMap<(PathBuf, bool), Index>> {
+    static C: OnceLock<Mutex<HashMap<(PathBuf, bool), Index>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn walk(root: &Path) -> Vec<String> {
+/// The files of a checkout, hidden ones included, as the file tree shows
+/// them. Without `include_ignored`, what Git ignores is skipped, and so are
+/// `node_modules` and `target` in a folder that has no `.gitignore` for them.
+fn walk(root: &Path, include_ignored: bool) -> (Vec<String>, bool) {
     let mut out = Vec::new();
     let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
+        .hidden(false)
+        .ignore(!include_ignored)
+        .git_ignore(!include_ignored)
+        .git_global(!include_ignored)
+        .git_exclude(!include_ignored)
         .require_git(false)
         .follow_links(false)
-        .filter_entry(|e| {
+        .filter_entry(move |e| {
             let name = e.file_name().to_string_lossy();
-            !(name == ".git" || name == "node_modules" || name == "target" || name == ".raccoon")
+            if name == ".git" || name == ".raccoon" || name == ".DS_Store" {
+                return false;
+            }
+            include_ignored || !(name == "node_modules" || name == "target")
         })
         .build();
     for entry in walker.flatten() {
-        if out.len() >= MAX_FILES {
-            break;
-        }
         if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            if out.len() >= MAX_FILES {
+                return (out, true);
+            }
             if let Ok(rel) = entry.path().strip_prefix(root) {
-                out.push(rel.to_string_lossy().into_owned());
+                out.push(rel.to_string_lossy().replace('\\', "/"));
             }
         }
     }
-    out
+    (out, false)
 }
 
-fn files_for(root: &Path) -> Vec<String> {
+fn index_for(root: &Path, include_ignored: bool) -> (Vec<String>, bool) {
     let mut c = cache().lock().unwrap();
-    if let Some(ix) = c.get(root) {
+    let key = (root.to_path_buf(), include_ignored);
+    if let Some(ix) = c.get(&key) {
         if ix.built.elapsed() < FRESH_FOR {
-            return ix.files.clone();
+            return (ix.files.clone(), ix.truncated);
         }
     }
-    let files = walk(root);
-    c.insert(root.to_path_buf(), Index { built: Instant::now(), files: files.clone() });
-    files
+    let (files, truncated) = walk(root, include_ignored);
+    c.insert(key, Index { built: Instant::now(), files: files.clone(), truncated });
+    (files, truncated)
 }
 
 pub fn invalidate(root: &Path) {
-    cache().lock().unwrap().remove(root);
+    cache().lock().unwrap().retain(|(path, _), _| path != root);
+}
+
+/// How many files a search looks through (quick open's footer).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileCount {
+    pub files: usize,
+    /// The walk stopped at its cap: there are at least `files`.
+    pub truncated: bool,
+}
+
+pub fn count(root: &Path, include_ignored: bool) -> FileCount {
+    let (files, truncated) = index_for(root, include_ignored);
+    FileCount { files: files.len(), truncated }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,9 +104,10 @@ pub struct FileHit {
 }
 
 /// Fuzzy-search the index. An empty query lists the shallowest files first,
-/// which is what a bare `@` should open on.
-pub fn search(root: &Path, query: &str, limit: usize) -> Result<Vec<FileHit>> {
-    let files = files_for(root);
+/// which is what a bare `@` should open on. `include_ignored` searches the
+/// files Git ignores as well.
+pub fn search(root: &Path, query: &str, limit: usize, include_ignored: bool) -> Result<Vec<FileHit>> {
+    let (files, _) = index_for(root, include_ignored);
     let name_of = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
     if query.trim().is_empty() {
         let mut v: Vec<&String> = files.iter().collect();
@@ -123,14 +149,51 @@ mod tests {
         std::fs::write(p.join("src/button.css"), "").unwrap();
         std::fs::write(p.join("README.md"), "").unwrap();
         std::fs::write(p.join("node_modules/x/button.js"), "").unwrap();
-        let all = search(p, "", 10).unwrap();
+        let all = search(p, "", 10, false).unwrap();
         assert_eq!(all[0].path, "README.md");
         assert!(all.iter().all(|h| !h.path.starts_with("node_modules")));
-        let hits = search(p, "button", 10).unwrap();
+        let hits = search(p, "button", 10, false).unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().any(|h| h.path == "src/components/Button.tsx"));
-        let hits = search(p, "readme", 10).unwrap();
+        let hits = search(p, "readme", 10, false).unwrap();
         assert_eq!(hits[0].path, "README.md");
+    }
+
+    #[test]
+    fn includes_ignored_files_only_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join(".github/workflows")).unwrap();
+        std::fs::create_dir_all(p.join("node_modules/left-pad")).unwrap();
+        std::fs::create_dir_all(p.join("dist")).unwrap();
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        std::fs::write(p.join(".gitignore"), ".env.local\ndist/\n").unwrap();
+        std::fs::write(p.join(".github/workflows/ci.yml"), "").unwrap();
+        std::fs::write(p.join(".env.local"), "").unwrap();
+        std::fs::write(p.join("dist/bundle.js"), "").unwrap();
+        std::fs::write(p.join("node_modules/left-pad/index.js"), "").unwrap();
+        std::fs::write(p.join(".git/config"), "").unwrap();
+        std::fs::write(p.join("main.rs"), "").unwrap();
+
+        // Hidden files are searched, as the tree shows them; ignored ones are not.
+        assert_eq!(search(p, "ci.yml", 10, false).unwrap()[0].path, ".github/workflows/ci.yml");
+        assert!(search(p, "env.local", 10, false).unwrap().is_empty());
+        assert!(search(p, "bundle", 10, false).unwrap().is_empty());
+        assert!(search(p, "left-pad", 10, false).unwrap().is_empty());
+        assert_eq!(count(p, false).files, 3, "{:?}", search(p, "", 10, false).unwrap());
+
+        // Asked to, the same search finds them, and the two modes keep their own index.
+        assert_eq!(search(p, "env.local", 10, true).unwrap()[0].path, ".env.local");
+        assert_eq!(search(p, "bundle", 10, true).unwrap()[0].path, "dist/bundle.js");
+        assert_eq!(search(p, "left-pad", 10, true).unwrap()[0].path, "node_modules/left-pad/index.js");
+        assert!(search(p, "", 20, true).unwrap().iter().all(|h| !h.path.starts_with(".git/")));
+        assert_eq!(count(p, true), FileCount { files: 6, truncated: false });
+        assert!(search(p, "env.local", 10, false).unwrap().is_empty());
+
+        invalidate(p);
+        std::fs::write(p.join("lib.rs"), "").unwrap();
+        assert_eq!(count(p, false).files, 4);
+        assert_eq!(count(p, true).files, 7);
     }
 }
 

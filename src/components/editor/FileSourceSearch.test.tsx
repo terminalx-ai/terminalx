@@ -6,7 +6,11 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async (command: string) => 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
+vi.mock("@/components/ui/tooltip", () => ({
+  WithTooltip: ({ children }: { children: React.ReactNode }) => children,
+  Kbd: ({ children }: { children: React.ReactNode }) => <kbd>{children}</kbd>,
+  KbdGroup: ({ keys }: { keys: string[] }) => <kbd>{keys.join("")}</kbd>,
+}));
 
 const { ProjectSearch } = await import("./ProjectSearch");
 const { QuickOpen } = await import("./QuickOpen");

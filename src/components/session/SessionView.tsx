@@ -1006,7 +1006,7 @@ export function SessionView({
         )
       ) : (
         <>
-          <QuickOpen sessionId={session.id} root={session.cwd} />
+          <QuickOpen sessionId={session.id} root={session.cwd} branch={session.branch} />
           <ProjectSearch sessionId={session.id} root={session.cwd} />
         </>
       )}
