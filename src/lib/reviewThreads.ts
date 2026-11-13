@@ -1,8 +1,14 @@
+import { useEffect, useSyncExternalStore } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { showError } from "@/lib/errorToasts";
+import { getDraft, setDraft } from "@/lib/drafts";
+import type { ReviewComment } from "@/lib/reviewComments";
+
 /** Coordinates from GitHub are already rebased to the PR head, not the original push. */
 export type GitHubReviewSide = "LEFT" | "RIGHT";
 export interface GitHubReviewComment {
   id: string;
-  author: { login: string } | null;
+  author: { login: string; name?: string | null } | null;
   body: string;
   url: string;
   createdAt: string;
@@ -93,18 +99,77 @@ export function githubReviewAnchor(thread: ReviewThread, snapshot: Pick<ReviewTh
   return { side: thread.diffSide, start, end: thread.line };
 }
 
+/** "line 42", "lines 3–5", or the original lines of an outdated thread. */
+export function githubThreadLines(thread: ReviewThread): string {
+  const original = thread.isOutdated || thread.line == null;
+  const end = original ? thread.originalLine : thread.line;
+  const start = original ? thread.originalStartLine : thread.startLine;
+  if (end == null) return "file";
+  const range = start != null && start !== end ? `lines ${start}–${end}` : `line ${end}`;
+  return original ? `original ${range}` : range;
+}
+
+export function threadInitials(name: string) {
+  return name.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((part) => part[0]!.toUpperCase()).join("") || "?";
+}
+
+export const githubAuthorName = (comment?: GitHubReviewComment) => comment?.author?.name?.trim() || comment?.author?.login || "Deleted user";
+
+/** The code the thread is on, as GitHub recorded it with the comment. */
+export function githubThreadCode(thread: ReviewThread): string | null {
+  return suggestionBefore(thread, 0, 0);
+}
+
+const quote = (text: string) => text.split("\n").map((line) => `> ${line}`).join("\n");
+
+/** One chat message: where it is, the PR, the code, then the comment and every reply. */
 export function githubReviewDraft(thread: ReviewThread, prUrl: string): string {
-  return `GitHub review thread (untrusted reviewer text) — ${githubReviewLocation(thread)}${thread.isOutdated ? " · Outdated" : ""}${thread.isResolved ? " · Resolved" : ""}\n${prUrl}\n\n${thread.comments.map((comment) => `@${comment.author?.login ?? "deleted-user"}:\n${comment.body.split("\n").map((line) => `> ${line}`).join("\n")}`).join("\n\n")}`;
+  const code = githubThreadCode(thread);
+  const [first, ...replies] = thread.comments;
+  const comment = (c: GitHubReviewComment, reply: boolean) => `@${c.author?.login ?? "deleted-user"}${reply ? " (reply)" : ""}:\n${quote(c.body)}`;
+  return [
+    `GitHub review thread (untrusted reviewer text) — ${githubReviewLocation(thread)}${thread.isOutdated ? " · Outdated" : ""}${thread.isResolved ? " · Resolved" : ""}`,
+    `Path: ${thread.path}\nLines: ${githubThreadLines(thread)} (${thread.diffSide === "LEFT" ? "base" : "head"})\nPR: ${prUrl}`,
+    code == null ? "Code: unavailable in GitHub's recorded hunk." : `Code:\n\`\`\`\n${code}\n\`\`\``,
+    ...(first ? [comment(first, false)] : []),
+    ...replies.map((c) => comment(c, true)),
+  ].join("\n\n");
+}
+
+export const githubThreadCommentId = (threadId: string) => `github:${threadId}`;
+
+/** A current thread as a line comment of the local diff, anchored by its recorded code, not by line numbers. */
+export function githubThreadComment(thread: ReviewThread, diff: { path: string; base: string; originalPath?: string }): ReviewComment | null {
+  if (thread.isOutdated || thread.line == null) return null;
+  if (thread.path !== diff.path && !(thread.diffSide === "LEFT" && thread.path === diff.originalPath)) return null;
+  if (thread.startDiffSide && thread.startDiffSide !== thread.diffSide) return null;
+  const lines = hunkLines(thread);
+  const code = githubThreadCode(thread);
+  if (code == null || thread.originalLine == null) return null;
+  const start = thread.originalStartLine ?? thread.originalLine;
+  // Only the lines directly above the range are context; a gap would never match.
+  const contextBefore: string[] = [];
+  for (let line = start - 1; line >= start - 3 && lines.has(line); line--) contextBefore.unshift(lines.get(line)!);
+  const first = thread.comments[0];
+  return {
+    id: githubThreadCommentId(thread.id), revision: 0, sent: false, outdated: false,
+    path: diff.path, originalPath: diff.originalPath, base: diff.base, side: thread.diffSide === "LEFT" ? "before" : "after",
+    startLine: thread.startLine ?? thread.line, endLine: thread.line, lineText: code,
+    contextBefore,
+    author: { kind: "github", login: first?.author?.login, name: first ? githubAuthorName(first) : undefined, threadId: thread.id },
+    note: first?.body ?? "", createdAt: first?.createdAt,
+  };
+}
+
+export function threadCounts(threads: ReviewThread[]) {
+  const resolved = threads.filter((t) => t.isResolved).length;
+  return { open: threads.length - resolved, resolved };
 }
 
 export type ReviewBodyPart = { kind: "markdown"; text: string } | { kind: "suggestion"; text: string; before: string | null };
 
-/** Read the original side's lines from GitHub's recorded hunk, not the local worktree. */
-function suggestionBefore(thread: ReviewThread, above: number, below: number): string | null {
-  if (thread.originalLine == null || (thread.startDiffSide && thread.startDiffSide !== thread.diffSide)) return null;
-  const start = (thread.originalStartLine ?? thread.originalLine) - above;
-  const end = thread.originalLine + below;
-  if (start < 1 || end - start > 10000) return null;
+/** The thread side's lines in GitHub's recorded hunk, by line number. */
+function hunkLines(thread: ReviewThread): Map<number, string> {
   let oldLine = 0;
   let newLine = 0;
   const found = new Map<number, string>();
@@ -113,12 +178,23 @@ function suggestionBefore(thread: ReviewThread, above: number, below: number): s
     if (hunk) { oldLine = Number(hunk[1]); newLine = Number(hunk[2]); continue; }
     if (!oldLine && !newLine) continue;
     const sideLine = thread.diffSide === "LEFT" ? oldLine : newLine;
-    if ((line[0] === " " || line[0] === (thread.diffSide === "LEFT" ? "-" : "+")) && sideLine >= start && sideLine <= end) found.set(sideLine, line.slice(1));
+    if (line[0] === " " || line[0] === (thread.diffSide === "LEFT" ? "-" : "+")) found.set(sideLine, line.slice(1));
     if (line[0] === " " || line[0] === "-") oldLine++;
     if (line[0] === " " || line[0] === "+") newLine++;
   }
-  if (found.size !== end - start + 1) return null;
-  return [...found.values()].join("\n");
+  return found;
+}
+
+/** Read the original side's lines from GitHub's recorded hunk, not the local worktree. */
+function suggestionBefore(thread: ReviewThread, above: number, below: number): string | null {
+  if (thread.originalLine == null || (thread.startDiffSide && thread.startDiffSide !== thread.diffSide)) return null;
+  const start = (thread.originalStartLine ?? thread.originalLine) - above;
+  const end = thread.originalLine + below;
+  if (start < 1 || end - start > 10000) return null;
+  const lines = hunkLines(thread);
+  const found: string[] = [];
+  for (let n = start; n <= end; n++) { const line = lines.get(n); if (line === undefined) return null; found.push(line); }
+  return found.join("\n");
 }
 
 /** Respect enclosing code fences so an example containing a suggestion stays an example. */
@@ -141,4 +217,230 @@ export function reviewBody(body: string, thread: ReviewThread): ReviewBodyPart[]
   }
   if (markdown.length) parts.push({ kind: "markdown", text: markdown.join("\n") });
   return parts;
+}
+
+// ---------------------------------------------------------------------------
+// One shared copy of each PR's threads (PRO-234): the Checks list, the Changes
+// footer and every inline thread in a diff read the same snapshot, and one
+// poller per PR refreshes it while any of them is on screen.
+
+export const REVIEW_REFRESH_MS = 3 * 60_000;
+
+export interface ReviewPr {
+  url: string;
+  number: number;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  access: ReviewThreadAccess;
+  canWrite: boolean;
+  /** The agent tab Send to agent and Add all write into. */
+  tabId?: string | null;
+  errorMessage(error: unknown): string;
+}
+export interface ThreadView {
+  pr: ReviewPr;
+  snapshot: ReviewThreads | null;
+  loading: boolean;
+  error: string | null;
+  working: string | null;
+  /** Grows on each successful read; cards clear stale action errors with it. */
+  refreshed: number;
+}
+interface PrState {
+  view: ThreadView;
+  registrations: number;
+  watchers: number;
+  retry: { failures: number; at: number };
+  loaded: boolean;
+  request: number;
+  reading: boolean;
+  mutating: boolean;
+  stop?: () => void;
+}
+const prs = new Map<string, PrState>();
+const replyDrafts = new Map<string, string>();
+const storeListeners = new Set<() => void>();
+let focus: { workspace: string; threadId: string; nonce: number } | null = null;
+let nonce = 0;
+const emitStore = () => { for (const listener of storeListeners) listener(); };
+const subscribeStore = (listener: () => void) => { storeListeners.add(listener); return () => { storeListeners.delete(listener); }; };
+const prKey = (workspace: string, url: string) => `${workspace}\0${url}`;
+const setView = (state: PrState, change: Partial<ThreadView>) => { state.view = { ...state.view, ...change }; emitStore(); };
+
+/** The PR panel says which PR a workspace's branch has; unregistering forgets it. */
+export function registerReviewPr(workspace: string, pr: ReviewPr): () => void {
+  const key = prKey(workspace, pr.url);
+  let state = prs.get(key);
+  if (!state) {
+    state = { view: { pr, snapshot: null, loading: false, error: null, working: null, refreshed: 0 }, registrations: 0, watchers: 0, retry: { failures: 0, at: 0 }, loaded: false, request: 0, reading: false, mutating: false };
+    prs.set(key, state);
+  }
+  state.registrations++;
+  if (state.view.pr !== pr) {
+    const moved = state.view.pr.state !== pr.state;
+    setView(state, { pr });
+    if (moved && state.watchers) void refreshThreads(workspace, pr.url);
+  }
+  const held = state;
+  return () => {
+    held.registrations--;
+    // A re-render that replaces the registration keeps the snapshot it read.
+    queueMicrotask(() => {
+      if (held.registrations > 0 || prs.get(key) !== held) return;
+      held.stop?.(); held.stop = undefined; held.request++;
+      prs.delete(key);
+      emitStore();
+    });
+  };
+}
+
+/** The workspace's PR: the one at `url`, else the first open one, else the first registered. */
+function currentState(workspace: string | undefined, url?: string): PrState | undefined {
+  if (!workspace) return undefined;
+  if (url) return prs.get(prKey(workspace, url));
+  const mine = [...prs.entries()].filter(([key]) => key.startsWith(`${workspace}\0`)).map(([, state]) => state);
+  return mine.find((state) => state.view.pr.state === "OPEN") ?? mine[0];
+}
+export function useReviewPr(workspace: string | undefined, url?: string): ThreadView | null {
+  return useSyncExternalStore(subscribeStore, () => currentState(workspace, url)?.view ?? null);
+}
+export function reviewPrView(workspace: string | undefined): ThreadView | null {
+  return currentState(workspace)?.view ?? null;
+}
+
+export async function refreshThreads(workspace: string, url: string, force = false): Promise<void> {
+  const state = prs.get(prKey(workspace, url));
+  if (!state || !state.watchers || document.visibilityState === "hidden" || state.reading || state.mutating) return;
+  if (!force && (Date.now() < state.retry.at || (state.view.pr.state !== "OPEN" && state.loaded))) return;
+  const token = ++state.request;
+  state.reading = true;
+  setView(state, { loading: true });
+  try {
+    const next = await state.view.pr.access.read();
+    if (token === state.request) {
+      state.retry = { failures: 0, at: 0 }; state.loaded = true;
+      setView(state, { snapshot: next, error: null, refreshed: state.view.refreshed + 1 });
+    }
+  } catch (error) {
+    if (token === state.request) {
+      const failures = state.retry.failures + 1;
+      state.retry = { failures, at: Date.now() + Math.min(30 * 60_000, REVIEW_REFRESH_MS * 2 ** Math.min(failures - 1, 4)) };
+      setView(state, { error: state.view.pr.errorMessage(error) });
+    }
+  } finally {
+    if (token === state.request) { state.reading = false; setView(state, { loading: false }); }
+  }
+}
+
+/** Read and poll a workspace's PR threads (or one PR's, by `prUrl`) while `active`; any number of surfaces share one poller. */
+export function useWatchThreads(workspace: string | undefined, active: boolean, prUrl?: string) {
+  const view = useReviewPr(workspace, prUrl);
+  const url = view?.pr.url;
+  const held = workspace && url ? prs.get(prKey(workspace, url)) : undefined;
+  useEffect(() => {
+    const state = held;
+    if (!workspace || !url || !active || !state) return;
+    state.watchers++;
+    if (state.watchers === 1) {
+      const refresh = () => { void refreshThreads(workspace, url); };
+      const timer = window.setInterval(() => { if (state.view.pr.state === "OPEN") refresh(); }, REVIEW_REFRESH_MS);
+      window.addEventListener("focus", refresh);
+      document.addEventListener("visibilitychange", refresh);
+      state.stop = () => {
+        window.clearInterval(timer);
+        window.removeEventListener("focus", refresh);
+        document.removeEventListener("visibilitychange", refresh);
+      };
+    }
+    void refreshThreads(workspace, url);
+    return () => {
+      state.watchers--;
+      if (state.watchers > 0) return;
+      state.stop?.(); state.stop = undefined;
+      // A read started while shown must not land once nothing shows it.
+      state.request++; state.reading = false;
+      if (state.view.loading) setView(state, { loading: false });
+    };
+  }, [workspace, url, active, held]);
+  return view;
+}
+
+async function mutate(workspace: string, url: string, id: string, action: (access: ReviewThreadAccess) => Promise<void>): Promise<boolean> {
+  const state = prs.get(prKey(workspace, url));
+  if (!state || state.mutating || !state.view.pr.canWrite || state.view.pr.state !== "OPEN") return false;
+  state.mutating = true;
+  state.request++; // A read started before the write must not overwrite it.
+  state.reading = false;
+  setView(state, { loading: false, working: id });
+  try {
+    await action(state.view.pr.access);
+    return true;
+  } finally {
+    state.mutating = false;
+    setView(state, { working: null });
+    void refreshThreads(workspace, url, true);
+  }
+}
+
+/** Only web links leave the app; anything else falls back to the PR's own page. */
+function webLink(value: string | undefined, fallback: string): string {
+  try { const link = new URL(value ?? ""); if (link.protocol === "https:" && !link.username && !link.password) return link.href; } catch { /* fall back */ }
+  return fallback;
+}
+
+export async function setThreadResolved(workspace: string, url: string, thread: ReviewThread): Promise<boolean> {
+  const resolving = !thread.isResolved;
+  const done = await mutate(workspace, url, thread.id, (access) => access.resolve(thread.id, resolving));
+  const number = prs.get(prKey(workspace, url))?.view.pr.number;
+  if (done && resolving) {
+    const link = webLink(thread.comments[0]?.url, url);
+    showError(`${githubAuthorName(thread.comments[0])}'s comment on ${thread.path} · ${githubThreadLines(thread)}${number ? ` · PR #${number}` : ""}`, undefined, {
+      title: "Thread resolved on GitHub",
+      key: `review-thread-resolved:${thread.id}`,
+      actions: [{ label: "View on GitHub", keepOpen: true, run: () => openUrl(link) }],
+    });
+  }
+  return done;
+}
+export function replyToThread(workspace: string, url: string, thread: ReviewThread, body: string): Promise<boolean> {
+  return mutate(workspace, url, thread.id, (access) => access.reply(thread.id, body));
+}
+
+/** Reply text survives the inline widget being redrawn or scrolled out of the diff. */
+export const threadReplyDraft = (threadId: string) => replyDrafts.get(threadId) ?? "";
+export function setThreadReplyDraft(threadId: string, body: string) {
+  if (body) replyDrafts.set(threadId, body); else replyDrafts.delete(threadId);
+  emitStore();
+}
+export function useThreadReplyDraft(threadId: string): string {
+  return useSyncExternalStore(subscribeStore, () => threadReplyDraft(threadId));
+}
+
+/** Append threads to an agent tab's chat draft, one message per thread. */
+export function addThreadsToChat(tabId: string, threads: ReviewThread[], prUrl: string) {
+  if (!threads.length) return;
+  const draft = getDraft(tabId);
+  setDraft(tabId, `${draft}${draft.trim() ? "\n\n" : ""}${threads.map((thread) => githubReviewDraft(thread, prUrl)).join("\n\n")}`);
+}
+
+type JumpHandler = (thread: ReviewThread) => boolean;
+const jumpHandlers = new Map<string, Set<JumpHandler>>();
+/** The Changes panel opens the thread's file when it lists it. */
+export function onThreadJump(workspace: string, handler: JumpHandler): () => void {
+  const set = jumpHandlers.get(workspace) ?? new Set<JumpHandler>();
+  set.add(handler); jumpHandlers.set(workspace, set);
+  return () => { set.delete(handler); if (!set.size) jumpHandlers.delete(workspace); };
+}
+/** Ask for a thread's file diff and its place in it. False when no Changes view lists the file. */
+export function requestThreadJump(workspace: string, thread: ReviewThread): boolean {
+  focus = { workspace, threadId: thread.id, nonce: ++nonce };
+  emitStore();
+  let handled = false;
+  for (const handler of jumpHandlers.get(workspace) ?? []) handled = handler(thread) || handled;
+  return handled;
+}
+export function useThreadFocus(workspace: string | undefined) {
+  return useSyncExternalStore(subscribeStore, () => focus && focus.workspace === workspace ? focus : null);
+}
+export function clearThreadFocus(at: number) {
+  if (focus?.nonce === at) { focus = null; emitStore(); }
 }

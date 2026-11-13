@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useId, useRef, useSt
 import { Button } from "@/components/ui/button";
 import { addReviewsToChat, onReviewsChanged, orderedComments, reviewComments, reviewLocation, reviewVersion, reviewDraft, type ReviewAction, type ReviewAnchor, type ReviewComment } from "@/lib/reviewComments";
 import type { GitSource } from "@/lib/gitSource";
+import { GitHubThreadComment } from "./ReviewThreads";
 
 interface Draft { anchor: ReviewAnchor; note: string; original: ReviewComment | null; opener?: HTMLElement; owner: string }
 // Switching files, scopes or sessions never discards a note being written.
@@ -166,11 +167,13 @@ export function ReviewCommentsProvider({ source, tabId, active = true, onAdd, ch
   </Context.Provider>;
 }
 
-export function ReviewCommentCard({ comment: c }: { comment: ReviewComment }) {
+/** One line comment in a diff. A GitHub review thread (author kind "github") draws as its thread, with its actions. */
+export function ReviewCommentCard({ comment: c, workspace }: { comment: ReviewComment; workspace?: string }) {
   const review = useReviewComments();
+  if (c.author?.kind === "github") return <div className="m-1 min-w-0"><GitHubThreadComment workspace={workspace} threadId={String(c.author.threadId ?? "")} /></div>;
   if (!review) return null;
   return <article className="m-1 min-w-0 rounded-md border border-hairline bg-card p-2 text-xs font-sans whitespace-normal [overflow-wrap:anywhere]" aria-label={`Comment on ${reviewLocation(c)}`}>
-    <div className="flex flex-wrap gap-2"><span className="font-mono break-all">{reviewLocation(c)} ({reviewVersion(c)})</span>{c.author?.kind === "agent" && <span>{c.author.name ?? "Reviewer agent"}</span>}{c.author?.kind === "github" && <span>GitHub{c.author.login ? ` · ${c.author.login}` : ""}</span>}{c.sent && <span className="text-add">Sent</span>}{c.outdated && <span className="text-warning">Outdated</span>}</div>
+    <div className="flex flex-wrap gap-2"><span className="font-mono break-all">{reviewLocation(c)} ({reviewVersion(c)})</span>{c.author?.kind === "agent" && <span>{c.author.name ?? "Reviewer agent"}</span>}{c.sent && <span className="text-add">Sent</span>}{c.outdated && <span className="text-warning">Outdated</span>}</div>
     <blockquote className="my-1 max-h-32 overflow-auto whitespace-pre-wrap break-all border-l-2 border-hairline pl-2 font-mono text-faint">{c.lineText}</blockquote>
     <p className="whitespace-pre-wrap break-words">{c.note}</p>
     <div className="mt-1 flex flex-wrap gap-1">

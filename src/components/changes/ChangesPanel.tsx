@@ -18,6 +18,7 @@ import { CommitPicker } from "./CommitPicker";
 import { checkpointChoices, commitRange, readChangesChoice, saveChangesChoice, type ChangesChoice, type ChangesScope } from "@/lib/changesScope";
 import { MergeInProgress } from "./MergeInProgress";
 import { RepoPanel } from "./RepoPanel";
+import { onThreadJump, threadCounts, useWatchThreads, type ThreadView } from "@/lib/reviewThreads";
 
 /**
  * Review the accumulated workspace by default; turn snapshots are opt-in.
@@ -53,6 +54,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   workingTree?: boolean;
 }) {
   const review = useReviewComments();
+  const threads = useWatchThreads(source.key, active);
   const targetId = useId();
   const { hideWhitespace } = useDiffOptions();
   const [choice, setChoice] = useState(() => readChangesChoice(source.key));
@@ -220,8 +222,18 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
           label={label} empty={loading ? "Loading changes…" : error ? "Changes unavailable." : "No changes in this scope."}
           noRange={loading ? "Loading changes…" : choice.scope === "commit" && !choice.commit ? "Choose a commit to review its changes." : "Changes unavailable."} onChanged={() => setTick((t) => t + 1)} />}
       </div>}
+      {threads?.snapshot && <ReviewThreadsFooter view={threads} />}
     </div>
   );
+}
+
+/** The PR's GitHub review threads at a glance (PRO-234, design 05.13): "PR #14 review threads 0 open · 1 resolved". */
+function ReviewThreadsFooter({ view }: { view: ThreadView }) {
+  const counts = threadCounts(view.snapshot?.threads ?? []);
+  return <div data-testid="changes-review-threads" className="flex min-w-0 shrink-0 items-center gap-2 border-t border-hairline px-3 py-1.5 text-[11px]">
+    <span className="min-w-0 truncate text-muted-foreground">PR #{view.pr.number} review threads</span>
+    <span className="ml-auto shrink-0 tabular-nums text-faint">{counts.open} open · {counts.resolved} resolved</span>
+  </div>;
 }
 
 /**
@@ -273,6 +285,13 @@ function ChangesBody({
     if (onOpenDiff && file && range) onOpenDiff(file, range);
     else setSelected((s) => s === path ? null : path);
   };
+  // A thread's row in the Checks list opens its file here, or in its centre diff tab.
+  useEffect(() => onThreadJump(source.key, (thread) => {
+    const file = files.find((f) => f.path === thread.path) ?? files.find((f) => f.oldPath === thread.path);
+    if (!file || !range) return false;
+    if (onOpenDiff) onOpenDiff(file, range); else setSelected(file.path);
+    return true;
+  }), [source.key, files, range, onOpenDiff]);
   const totals = sumChanges(files);
   const discardAction = allowDiscard && source.discard && source.canWrite ? (file: ChangedFile) => <DiscardButton path={file.path} onClick={() => setDiscarding(file)} /> : undefined;
 

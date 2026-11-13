@@ -15,6 +15,7 @@ import { diffFileKey, useDiffOptions } from "@/lib/diffOptions";
 import { editorLinkContext, fileKind, isMarkdown, setDiffMode, updateDiffRange, type DiffEditorEntry, type DiffMode, type FileEditorEntry } from "@/lib/editors";
 import { localGitSource } from "@/lib/gitSource";
 import { changedSince, useFileSource } from "@/lib/workspaceFiles";
+import { useWatchThreads } from "@/lib/reviewThreads";
 import { EditorPane } from "./EditorPane";
 import { MediaPane } from "./MediaPane";
 
@@ -29,6 +30,8 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
   const { range, mode, scope, target, uncommitted, oldPath } = entry.diff;
   const source = useMemo(() => localGitSource(entry.root), [entry.root]);
   const files = useFileSource(undefined, entry.root);
+  // Keep the PR's review threads current while its diff is shown here (PRO-234).
+  useWatchThreads(source.key, visible);
   const kind = fileKind(entry.rel);
   const media = kind !== "text" || diffMediaKind(entry.rel) === "pdf";
   const options = useDiffOptions(diffFileKey(source.key, entry.rel));
@@ -129,7 +132,7 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
         {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Open All changes in the Changes panel to review the workspace.</p>
           : surface === "diff" && !binary && (pair || (media && diffMediaKind(entry.rel))) ? <FileDiff source={source} path={entry.rel} oldPath={oldPath ?? pair?.originalPath} base={range.base} head={range.head} text={pair ?? undefined} onDiscard={canDiscard ? () => setDiscarding(true) : undefined} />
           : media || binary ? <p className="p-4 text-sm text-muted-foreground">Binary file changed.{kind !== "text" && " Choose Preview to view the current file."}</p>
-          : pair ? <DiffPane path={entry.rel} before={pair.before} after={pair.after} base={range.base} originalPath={oldPath ?? pair.originalPath} mode="entire" wrap={options.wrap} hideWhitespace={options.hideWhitespace} />
+          : pair ? <DiffPane workspace={source.key} path={entry.rel} before={pair.before} after={pair.after} base={range.base} originalPath={oldPath ?? pair.originalPath} mode="entire" wrap={options.wrap} hideWhitespace={options.hideWhitespace} />
           : !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading file diff…</p>}
       </div>)}
       {previewed && <div className={cn("absolute inset-0", mode !== "preview" && "hidden")}>

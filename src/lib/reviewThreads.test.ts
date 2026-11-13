@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { reviewFileReader, githubReviewAnchor, reviewBody, githubReviewDraft, githubReviewLocation } from "./reviewThreads";
+import { reviewFileReader, githubReviewAnchor, reviewBody, githubReviewDraft, githubReviewLocation, githubThreadCode, githubThreadLines, threadCounts } from "./reviewThreads";
 import { reviewSnapshot as snapshot, reviewThread as thread, reviewFile } from "@/test/reviewThreads";
 
 const file = { path: thread.path, headOid: snapshot.headOid, baseOid: snapshot.baseOid, beforeLines: 100, afterLines: 100 };
@@ -43,13 +43,23 @@ describe("suggestions and chat drafts", () => {
     const body = "````markdown\n```suggestion\nexample\n```\n````\n```suggestion\nunclosed";
     expect(reviewBody(body, thread)).toEqual([{ kind: "markdown", text: body }]);
   });
-  it("includes path, side, text from every author, and stale state in a draft", () => {
+  it("includes path, lines, PR link, the code, text from every author, and stale state in a draft", () => {
     const draft = githubReviewDraft({ ...thread, isOutdated: true, comments: [...thread.comments, { ...thread.comments[0], author: null, body: "Second\nreply" }] }, snapshot.url);
     expect(draft).toContain("src/login.ts:12 (head, original) · Outdated");
-    expect(draft).toContain(snapshot.url);
+    expect(draft).toContain(`Path: src/login.ts\nLines: original line 12 (head)\nPR: ${snapshot.url}`);
+    expect(draft).toContain("Code:\n```\nconst token = legacy.token;\n```");
     expect(draft).toContain("untrusted reviewer text");
     expect(draft).toContain("@reviewer:\n> Use the session token.");
-    expect(draft).toContain("@deleted-user:\n> Second\n> reply");
+    expect(draft).toContain("@deleted-user (reply):\n> Second\n> reply");
+  });
+  it("quotes a multi-line range's code and says when GitHub's hunk lacks it", () => {
+    const range = { ...thread, startLine: 41, originalStartLine: 11 };
+    expect(githubThreadCode(range)).toBe("new\nconst token = legacy.token;");
+    expect(githubThreadLines(range)).toBe("lines 41–42");
+    expect(githubReviewDraft({ ...thread, originalLine: 300 }, snapshot.url)).toContain("Code: unavailable in GitHub's recorded hunk.");
+  });
+  it("counts open and resolved threads", () => {
+    expect(threadCounts([thread, { ...thread, id: "r", isResolved: true }, { ...thread, id: "o" }])).toEqual({ open: 2, resolved: 1 });
   });
 });
 
