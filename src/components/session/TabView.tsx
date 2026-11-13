@@ -350,11 +350,13 @@ export function TabView({
       const pressedAt = Date.now();
       let drawnAt: number | undefined;
       afterPaint(() => { drawnAt = Date.now(); });
-      // A message with files (PRO-290) goes at once: the held queue keeps text and images only.
-      const route = files?.length ? "now" : followUpRoute(followUps, alternate);
+      // A held follow-up's files (PRO-290) are stored now and held by reference, like a sent message's.
+      const route = files?.length && !backend.storeFiles ? "now" : followUpRoute(followUps, alternate);
       try {
-        const out = backend.changeHeldQueue && route !== "now"
-          ? await backend.changeHeldQueue(tab.id, { type: "enqueue", text, images, sendNow: route === "interrupt" })
+        const held = backend.changeHeldQueue && route !== "now";
+        const stored = held && files?.length && backend.storeFiles ? await backend.storeFiles(files) : undefined;
+        const out = held
+          ? await backend.changeHeldQueue!(tab.id, { type: "enqueue", text, images, ...(stored?.length ? { files: stored } : {}), sendNow: route === "interrupt" })
           : await (files?.length ? backend.send(tab.id, text, images, { pressedAt, files }) : local ? backend.send(tab.id, text, images, { pressedAt }) : backend.send(tab.id, text, images));
         const answeredAt = Date.now();
         for (const ev of out.events) applyEvent(ev);

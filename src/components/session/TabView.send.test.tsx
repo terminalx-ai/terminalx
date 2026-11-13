@@ -246,20 +246,29 @@ describe("sending files (PRO-290)", () => {
     expect(stores).toBe(2);
   });
 
-  it("sends a message with files at once, past the held queue, which carries text and images only", async () => {
+  it("stores a held follow-up's files first and holds them by reference with its text", async () => {
     const { setPrefs } = await import("@/lib/prefs");
     setPrefs({ followUps: "hold", shortcuts: {} });
     try {
       runtime(false);
       const normal = mocks.invoke.getMockImplementation()!;
-      mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) =>
-        command === "store_attachments" ? stored("f3") : normal(command, args));
+      mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+        if (command === "store_attachments") return stored("f3");
+        if (command !== "change_held_queue") return normal(command, args);
+        return { queued: true, events: [{ id: "queue", seq: 1, sessionId: session.id, tabId: session.tabs[0].id, harness: "claude", ts: "",
+          payload: { type: "held_queue", queue: { items: [{ id: "held", text: "Read these notes", images: [], files: stored("f3") }], paused: false, sending: null, next: null, error: null } } }] };
+      });
       render(<Tab />);
       drop([notes()]);
       await screen.findByTitle("notes.md");
+      fireEvent.change(field(), { target: { value: "Read these notes" } });
       fireEvent.keyDown(field(), { key: "Enter" });
-      await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({ files: stored("f3") })));
-      expect(mocks.invoke.mock.calls.some(([command]) => command === "change_held_queue")).toBe(false);
+      await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("change_held_queue", expect.objectContaining({ change: { type: "enqueue", text: "Read these notes", images: [], files: stored("f3"), sendNow: false } })));
+      const order = mocks.invoke.mock.calls.map(([command]) => command).filter((command) => command === "store_attachments" || command === "change_held_queue");
+      expect(order).toEqual(["store_attachments", "change_held_queue"]);
+      expect(mocks.invoke.mock.calls.some(([command]) => command === "send_message")).toBe(false);
+      const tray = await screen.findByRole("region", { name: "Held follow-ups" });
+      expect(tray.textContent).toContain("notes.md");
     } finally {
       setPrefs({ followUps: "now" });
     }

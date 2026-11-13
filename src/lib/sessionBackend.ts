@@ -1,5 +1,6 @@
 import type { AgentProcessState, AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { agent, attachments, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
+import type { FileRef } from "@/types/events";
 import { showError } from "@/lib/errorToasts";
 import { loadTab, setTabStatus } from "@/lib/agentEvents";
 import { patchTab } from "@/lib/sessions";
@@ -119,6 +120,8 @@ export interface SessionBackend {
   steer(tabId: string, text: string): Promise<void>;
   /** Local only: persist and control messages held until the turn ends. */
   changeHeldQueue?(tabId: string, change: import("@/lib/heldQueue").HeldQueueChange): Promise<SendResult>;
+  /** Local only (PRO-290): store files in the session's attachments folder, for a follow-up that is held rather than sent. */
+  storeFiles?(files: FileInput[]): Promise<FileRef[]>;
   /** Local only: interrupt so the CLI sends input it already holds. */
   sendQueuedNow?(tabId: string, seq: number): Promise<void>;
   /** Local only: send the last prompt the agent never received again, as it was sent (#663). */
@@ -233,6 +236,7 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     },
     steer: (tabId, text) => agent.send(sessionId, tabId, text, []).then(() => undefined),
     changeHeldQueue: (tabId, change) => agent.changeHeldQueue(sessionId, tabId, change),
+    storeFiles: (files) => attachments.store(sessionId, files),
     sendQueuedNow: (tabId, seq) => agent.sendQueuedNow(sessionId, tabId, seq),
     resendUnsent: (tabId) => agent.resendUnsent(sessionId, tabId),
     resendMessage: (tabId, seq) => agent.resendMessage(sessionId, tabId, seq),
