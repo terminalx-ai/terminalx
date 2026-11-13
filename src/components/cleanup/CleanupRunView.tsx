@@ -170,6 +170,7 @@ export function CleanupRunView({ run }: { run: CleanupRun }) {
                   )}
                 </div>
                 {outcome.reason && <div className="text-[11px] text-muted-foreground">{outcome.reason}</div>}
+                {outcome.archiveFailure?.detail && !outcome.archiveFailure.timedOut && <div className="wrap-anywhere text-[11px] text-muted-foreground">It printed “{outcome.archiveFailure.detail}”.</div>}
                 {outcome.hostId === "local" && outcome.archiveFailure && <Button variant="outline" size="xs" onClick={() => setLog(outcome.archiveFailure!)}>Open log</Button>}
                 {good && (
                   <div className="text-[11px] text-muted-foreground">

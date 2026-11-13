@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Settings files are checked against a JSON schema generated from the app's
+  own validator: the user file and local repository file name it in `$schema`
+  when the app writes them (an existing one is kept; the committed shared file
+  is left without one so older builds do not warn), and `$TERMINALX_HOME/schemas/settings.schema.json` stays current, so
+  editors complete keys and flag typos. An error in a settings file names its
+  key and line; Settings can show where each value comes from, reset a key to
+  its inherited value, and list every settings file a project reads, with its
+  Git state and first problem. (PRO-140)
+
 ## 0.2.31
 
 - Keep the session's own title in the sidebar while reviewer and helper tabs

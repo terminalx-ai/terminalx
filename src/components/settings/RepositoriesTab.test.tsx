@@ -152,10 +152,13 @@ describe("Repository settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Preview URLs" }));
     fireEvent.click(screen.getByRole("button", { name: "General" }));
     expect(onSelectRow.mock.calls).toEqual([["repositories.previewUrls"], ["repositories.rootPath"]]);
-    // Rows that live on General, such as Scripts, still open General.
+    // Scripts is its own page beside ours; rows that live on General, such as Workspace cleanup, open General.
     rerender(<RepositoriesTab projectPath="/repo" row="repositories.scripts" onSelectRow={onSelectRow} />);
-    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "Scripts" }).getAttribute("aria-current")).toBe("page");
     expect(screen.queryByText("Actions page for /repo")).toBeNull();
+    rerender(<RepositoriesTab projectPath="/repo" row="repositories.mergedCleanup" onSelectRow={onSelectRow} />);
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getAllByRole("button").map((button) => button.textContent).slice(0, 6)).toEqual(["General", "Scripts", "Files to copy", "Actions", "Preview URLs", "Environment"]);
     await act(async () => undefined);
   });
 });

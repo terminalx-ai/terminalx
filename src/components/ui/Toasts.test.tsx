@@ -200,6 +200,16 @@ it("replaces a start when its issue pipeline needs the reader", () => {
   expect(screen.queryByText("Session started")).toBeNull();
 });
 
+it("shows setting-link toasts beside the other notices", async () => {
+  const { forgetSettingToasts, showSettingEnabled } = await import("@/lib/settingsToasts");
+  render(<Toasts />);
+  act(() => { showSettingEnabled("general.sounds", "Sounds"); });
+  const toast = screen.getByRole("status", { name: "Turned on Sounds" });
+  expect(within(toast).getByRole("button", { name: "Open setting" })).toBeTruthy();
+  act(forgetSettingToasts);
+  expect(screen.queryByRole("status", { name: "Turned on Sounds" })).toBeNull();
+});
+
 it("keeps an error until it is closed, stacked under the notices, and copies its whole text", async () => {
   render(<Toasts />);
   act(() => {

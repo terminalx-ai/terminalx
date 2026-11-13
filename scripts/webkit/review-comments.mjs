@@ -3,11 +3,10 @@
 // with only the native boundary replaced by the durable fixture below.
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
-import { webkit } from 'playwright';
-import { open, openConversation, serve, tab } from './harness.mjs';
+import { launch, open, openConversation, serve, tab } from './harness.mjs';
 
 const server = await serve();
-const browser = await webkit.launch({ headless: true });
+const browser = await launch({ headless: true });
 const errors = [];
 const extra = `
 localStorage.setItem('raccoon.prefs', JSON.stringify({panelOpen:true, panelWidth:540}));

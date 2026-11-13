@@ -390,6 +390,10 @@ export interface CleanupProject {
 export interface ArchiveFailure {
   log?: string | null;
   sessionsStopped?: boolean;
+  /** The script's last line of output. Absent from older hosts and from a run that printed nothing. */
+  detail?: string | null;
+  /** The run's timeout. Absent from older hosts, whose timeout was 5 minutes. */
+  timeoutMinutes?: number | null;
   token: string;
   pane: string;
   code: number | null;

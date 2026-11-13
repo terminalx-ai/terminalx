@@ -1,7 +1,12 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useSessionStore } from "@/lib/sessions";
+import { listen } from "@tauri-apps/api/event";
 import { configuration, layerLabels, type Configuration, type ConfigurationLayer } from "@/lib/configuration";
+import { LAYER_TITLES } from "@/lib/settingSources";
+import type { SettingsFileLayer } from "@/types/settingsSources";
+import { SettingsFiles } from "./SettingsFiles";
+import { ValueSource } from "./ValueSource";
 import { RegisteredSetting } from "./settingsRegistry";
 import { repositoryInputClass, useRepositoryMutation } from "./repositoryEditor";
 
@@ -23,7 +28,10 @@ export function LayeredConfiguration() {
 }
 function ConfigurationEditor({ project }: { project: string | null }) {
   const layerId = useId();
+  const prefixId = useId();
   const [resolved, setResolved] = useState<Configuration | null>(null);
+  const [files, setFiles] = useState<SettingsFileLayer[] | null>(null);
+  const [filesError, setFilesError] = useState<string | null>(null);
   const dirty = useRef(false);
   const generation = useRef(0);
   const [prefix, setPrefix] = useState("");
@@ -45,7 +53,17 @@ function ConfigurationEditor({ project }: { project: string | null }) {
     let live = true;
     let stop: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Settings files are read beside the values; an older runtime without the list keeps its values.
+    const reloadFiles = async () => {
+      try {
+        const next = await configuration.files(project);
+        if (live) { setFiles(next); setFilesError(null); }
+      } catch (cause) {
+        if (live) setFilesError(cause instanceof Error ? cause.message : String(cause));
+      }
+    };
     const reload = async () => {
+      void reloadFiles();
       const request = ++generation.current;
       try {
         const next = await configuration.resolve(project);
@@ -58,6 +76,9 @@ function ConfigurationEditor({ project }: { project: string | null }) {
       } finally { if (live && request === generation.current) setLoading(false); }
     };
     const changed = () => { if (!live) return; clearTimeout(timer); timer = setTimeout(() => { void reload(); }, 150); };
+    // The user file's own event (an edit in an editor) refreshes values and Settings files too.
+    let stopUserFile: (() => void) | undefined;
+    void listen("settings_file_changed", changed).then((unlisten) => { if (live) stopUserFile = unlisten; else unlisten(); }).catch(() => {});
     // Subscribe before resolving so edits during the initial read are observed.
     void configuration.watch(project, changed).then((unsubscribe) => {
       if (!live) { unsubscribe(); return; }
@@ -66,10 +87,17 @@ function ConfigurationEditor({ project }: { project: string | null }) {
     }).catch(() => {
       if (live) { setNotice("Automatic refresh is unavailable. Use Refresh configuration to reload changes."); void reload(); }
     });
-    return () => { live = false; clearTimeout(timer); stop?.(); };
+    return () => { live = false; clearTimeout(timer); stop?.(); stopUserFile?.(); };
   }, [project]);
   const value = resolved?.values.branchPrefix;
   const repositoryAllowed = resolved?.registry.find((r) => r.key === "branchPrefix")?.repositoryConfigurable;
+  const resetLayer = async (from: ConfigurationLayer) => {
+    await run(async () => {
+      await configuration.write(project, from, "branchPrefix", null);
+      install(await configuration.resolve(project));
+      setNotice(`Removed the ${LAYER_TITLES[from]} value.`);
+    });
+  };
   const save = (reset: boolean) => void run(async () => {
     await configuration.write(project, layer, "branchPrefix", reset ? null : prefix);
     install(await configuration.resolve(project));
@@ -88,9 +116,13 @@ function ConfigurationEditor({ project }: { project: string | null }) {
         setNotice(trusted ? "Shared configuration trusted." : "Not trusted. Nothing was started.");
       })}>Review repository trust</Button>
     </div>}
-    <label className="flex flex-col gap-1 text-sm">Branch prefix
-      <input className={repositoryInputClass} value={prefix} disabled={busy || !value || value.locked} onChange={(e) => { dirty.current = true; setPrefix(e.target.value); }} placeholder="team/" />
-    </label>
+    <div className="flex flex-col gap-1 text-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <label htmlFor={prefixId}>Branch prefix</label>
+        {value && <ValueSource value={value} label="Branch prefix" repository={!!project} files={files ?? []} onReset={resetLayer} />}
+      </div>
+      <input id={prefixId} className={repositoryInputClass} value={prefix} disabled={busy || !value || value.locked} onChange={(e) => { dirty.current = true; setPrefix(e.target.value); }} placeholder="team/" />
+    </div>
     {value && <p className="text-xs text-muted-foreground">Source: {layerLabels[value.source]}{value.locked ? " · Locked by managed configuration" : ""}</p>}
     {project && value && (value.source === "repositoryShared" || value.source === "repositoryLocal") && <p className="text-xs text-muted-foreground">This repository overrides the user prefix. Saving to User affects repositories that inherit it.</p>}
     <div className="flex flex-col gap-1 text-sm"><label htmlFor={layerId}>Save to</label>
@@ -108,6 +140,7 @@ function ConfigurationEditor({ project }: { project: string | null }) {
       <thead><tr><th className="py-2">Variable</th><th>Source</th><th>Status</th></tr></thead>
       <tbody>{Object.entries(resolved.values).filter(([key]) => key.startsWith("environment.")).map(([key, entry]) => <tr key={key}><td className="break-all py-1 font-mono">{key.slice(12)}</td><td>{layerLabels[entry.source]}</td><td>{entry.locked ? "Locked" : "Value hidden"}</td></tr>)}</tbody>
     </table>}
-    <p className="text-xs text-muted-foreground">Repository files: .terminalx/settings.json and .terminalx/settings.local.json. Private variables stay in Settings → Environment. Setup scripts and files to copy will be available with their repository settings features.</p>
+    <SettingsFiles files={files} error={filesError} />
+    <p className="text-xs text-muted-foreground">Repository files: .terminalx/settings.json and .terminalx/settings.local.json. Private variables stay in Settings → Environment. Setup and archive scripts are edited in Settings → Repositories → Scripts.</p>
   </div>;
 }

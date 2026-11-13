@@ -17,6 +17,7 @@ import { RepositoryEnvironmentSettings } from "./RepositoryEnvironmentSettings";
 
 const REPOSITORY_PAGES: { row: SettingId; label: string }[] = [
   { row: "repositories.rootPath", label: "General" },
+  { row: "repositories.scripts", label: "Scripts" },
   { row: "repositories.filesToCopy", label: "Files to copy" },
   { row: "repositories.actions", label: "Actions" },
   { row: "repositories.previewUrls", label: "Preview URLs" },
@@ -29,7 +30,7 @@ export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath
   const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
   if (!project) return <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>;
   if (project.kind === "folder") return <MergedCleanupSettings projectPath={project.path} />;
-  // Every other repository row (paths, cleanup, scripts, orchestrator) lives on General.
+  // Every other repository row (paths, cleanup, orchestrator) lives on General.
   const page = REPOSITORY_PAGES.find((candidate) => candidate.row === row) ?? REPOSITORY_PAGES[0];
   const general = page.row === "repositories.rootPath";
   return <>
@@ -39,12 +40,12 @@ export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath
       ))}
     </nav>
     {(general || page.row === "repositories.filesToCopy") && <RepositorySettingsPage key={project.path} project={project} page={general ? "general" : "files"} />}
+    {page.row === "repositories.scripts" && <RepositoryScriptsTab projectPath={project.path} />}
     {page.row === "repositories.actions" && <RegisteredSetting setting="repositories.actions" instance={project.path}><div><RepositoryActionsPage key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
     {page.row === "repositories.previewUrls" && <RegisteredSetting setting="repositories.previewUrls" instance={project.path}><div><RepositoryPreviewUrlsPage key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
     {page.row === "repositories.environment" && <RegisteredSetting setting="repositories.environment" instance={project.path}><div><RepositoryEnvironmentSettings key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
     <div hidden={!general}>
       <div className="mt-8"><MergedCleanupSettings projectPath={project.path} /></div>
-      <div className="mt-8"><RepositoryScriptsTab projectPath={project.path} /></div>
       {orchestratorRuns && <div className="mt-8"><RepositoryOrchestratorSettings projectPath={project.path} /></div>}
     </div>
   </>;

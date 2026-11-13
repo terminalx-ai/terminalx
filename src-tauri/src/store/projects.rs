@@ -50,7 +50,7 @@ pub struct Project {
     /// branch with none goes by its own name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branch_labels: BTreeMap<String, String>,
-    /// Local scripts only; repository files require the layered-config trust flow.
+    /// This computer's scripts; repository files are resolved by `configuration::setup_script` and `configuration::archive_script`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts: Option<RepositoryScripts>,
     /// Run-menu actions saved for this project, in order.
@@ -67,13 +67,16 @@ pub struct Project {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Script fields shared by the Scripts page and workspace lifecycle hooks.
-/// Both hooks run only commands explicitly saved in this local store.
+/// The Scripts page's values saved on this computer. They are the user layer
+/// of `configuration::setup_script` and `configuration::archive_script`, which the workspace hooks read: repository
+/// files and managed policy can take precedence over them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct RepositoryScripts {
     pub setup: String,
     pub archive: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_timeout_minutes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,7 +137,7 @@ fn validate_preview_urls(urls: &[PreviewUrlEntry]) -> Result<()> {
     Ok(())
 }
 
-/// Nothing is read from the checkout itself: committed commands are not trusted yet.
+/// Only this store; the hooks use `configuration::setup_script` and `configuration::archive_script` for every layer.
 pub fn scripts(path: &Path) -> Result<RepositoryScripts> {
     let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     Ok(load()?.projects.into_iter().find(|project| canonical(Path::new(&project.path)) == canonical(path))
@@ -409,6 +412,7 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
     }
     if let Some(scripts) = patch.scripts {
         anyhow::ensure!(scripts.setup.len() <= 65_536 && scripts.archive.len() <= 65_536, "Scripts must be at most 64 KiB each.");
+        anyhow::ensure!(scripts.archive_timeout_minutes.is_none_or(|minutes| super::configuration::ARCHIVE_TIMEOUT_CHOICES.contains(&minutes)), "Choose an archive timeout Settings offers.");
         p.scripts = (scripts != RepositoryScripts::default()).then_some(scripts);
     }
     if let Some(actions) = patch.actions {
@@ -677,7 +681,7 @@ mod tests {
         assert_eq!(json["previewUrls"][1]["url"], "http://localhost:$PORT_2");
         assert!(json.get("scripts").is_none());
         // The Scripts page's patch replaces only the hooks, and other patches leave the lists alone.
-        let hooks = RepositoryScripts { setup: "echo hi".into(), archive: String::new() };
+        let hooks = RepositoryScripts { setup: "echo hi".into(), archive: String::new(), archive_timeout_minutes: None };
         update(&project.path, ProjectPatch { scripts: Some(hooks.clone()), ..Default::default() }).unwrap();
         update(&project.path, ProjectPatch { pinned: Some(true), ..Default::default() }).unwrap();
         let saved = list().unwrap().0.remove(0);
@@ -713,8 +717,23 @@ mod tests {
     #[test]
     fn projects_saved_before_actions_existed_still_read() {
         let project: Project = serde_json::from_str(r#"{"path":"/r","name":"r","scripts":{"setup":"a","archive":"b"}}"#).unwrap();
-        assert_eq!(project.scripts, Some(RepositoryScripts { setup: "a".into(), archive: "b".into() }));
+        assert_eq!(project.scripts, Some(RepositoryScripts { setup: "a".into(), archive: "b".into(), archive_timeout_minutes: None }));
         assert!(project.actions.is_empty() && project.preview_urls.is_empty());
+    }
+
+    #[test]
+    fn known_fields_never_land_in_the_kept_extras() {
+        let raw = r#"{"path":"/r","name":"r","scripts":{"setup":"a","archive":"b","archiveTimeoutMinutes":10},
+            "actions":[{"id":"1","name":"Dev","command":"pnpm dev"}],"previewUrls":[{"id":"p","name":"App","url":"http://localhost:$PORT"}],
+            "repositorySettings":{},"branchLabels":{"main":"Main"},"futureField":1}"#;
+        let project: Project = serde_json::from_str(raw).unwrap();
+        assert_eq!(project.extra.keys().collect::<Vec<_>>(), vec!["futureField"]);
+        assert_eq!(project.scripts.as_ref().and_then(|s| s.archive_timeout_minutes), Some(10));
+        assert_eq!(project.actions.len(), 1);
+        assert_eq!(project.preview_urls.len(), 1);
+        let again = serde_json::to_value(&project).unwrap();
+        assert_eq!(again["scripts"]["archiveTimeoutMinutes"], 10);
+        assert_eq!(again["futureField"], 1);
     }
 
     #[cfg(unix)]
