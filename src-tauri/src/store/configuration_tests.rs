@@ -234,3 +234,111 @@ fn user_state_cannot_supply_or_remove_system_policy() {
     std::fs::remove_file(impostor).unwrap();
     assert_eq!(f.resolve().values["branchPrefix"].value, "admin/");
 }
+
+fn lines(text: &str) -> String { text.replace('\'', "\"") }
+
+#[test]
+fn each_value_lists_every_layer_that_supplies_it_highest_first_with_environment_redacted() {
+    let f = Fixture::new();
+    f.file(Layer::User, json!({"branchPrefix": "user/"}));
+    f.file(Layer::RepositoryShared, json!({"branchPrefix": "shared/", "environment": {"API_URL": "secret-shared", "ONLY_SHARED": "secret-only"}}));
+    f.file(Layer::RepositoryLocal, json!({"branchPrefix": "local/", "environment": {"API_URL": "secret-local"}}));
+    let (resolution, layers) = f.store.resolve_layers(Some(&f.repository())).unwrap();
+    let layered = LayeredResolution::new(resolution.redacted(), layers);
+    let prefix = &layered.values["branchPrefix"];
+    assert_eq!(prefix.resolved.source, Layer::RepositoryLocal);
+    assert_eq!(prefix.layers, vec![
+        LayerValue { layer: Layer::RepositoryLocal, value: json!("local/"), redacted: false },
+        LayerValue { layer: Layer::RepositoryShared, value: json!("shared/"), redacted: false },
+        LayerValue { layer: Layer::User, value: json!("user/"), redacted: false },
+        LayerValue { layer: Layer::Defaults, value: json!("raccoon/"), redacted: false },
+    ]);
+    let api = &layered.values["environment.API_URL"];
+    assert_eq!(api.layers.iter().map(|l| l.layer).collect::<Vec<_>>(), [Layer::RepositoryLocal, Layer::RepositoryShared]);
+    assert!(api.layers.iter().all(|l| l.value.is_null() && l.redacted));
+    assert_eq!(layered.values["worktreeDir"].layers.len(), 1, "only the defaults supply it");
+    let wire = serde_json::to_string(&layered).unwrap();
+    assert!(!wire.contains("secret-"), "{wire}");
+    assert!(wire.contains("\"layers\":[{\"layer\":\"repositoryLocal\""), "{wire}");
+}
+
+#[test]
+fn settings_files_name_each_layer_its_git_state_and_its_first_problem_without_values() {
+    let f = Fixture::new();
+    std::fs::write(f.repo.path().join(".terminalx/settings.json"), lines("{\n  '$schema': 'x',\n  'branchPrefix': 'team/',\n  'linearApiKey': 'secret-marker'\n}")).unwrap();
+    std::fs::write(f.store.home.join(SHARED), lines("{\n  'linearApiKey': 'secret-marker',\n  'notifications': 'secret-marker'\n}")).unwrap();
+    let files = f.store.files(Some(&f.repository()));
+    assert_eq!(files.iter().map(|file| file.layer).collect::<Vec<_>>(), [Layer::Managed, Layer::RepositoryLocal, Layer::RepositoryShared, Layer::User, Layer::Defaults]);
+    let [managed, local, shared, user, defaults] = &files[..] else { unreachable!() };
+    assert!(!managed.exists && managed.problem.is_none());
+    assert!(!local.exists && local.git == Some(GitState::Ignored) && local.problem.is_none());
+    assert!(shared.exists && shared.keys == 2 && shared.git == Some(GitState::Untracked));
+    assert_eq!(shared.problem, Some(Problem { key: Some("linearApiKey".into()), line: Some(4), message: "isn’t a setting".into(), effect: Effect::IgnoredKey }));
+    assert!(shared.display_path.as_deref().unwrap().ends_with(".terminalx/settings.json"));
+    assert_eq!(user.problem, Some(Problem { key: Some("notifications".into()), line: Some(3), message: "expected true or false".into(), effect: Effect::LastGood }));
+    assert!(user.exists && user.keys == 2 && user.git.is_none());
+    assert!(defaults.exists && defaults.path.is_none() && defaults.keys > 10);
+    let wire = serde_json::to_string(&files).unwrap();
+    assert!(!wire.contains("secret-marker") && !wire.contains("team/"), "{wire}");
+
+    // Committed shared, malformed: none of its values apply, and the parser's line.
+    std::fs::write(f.repo.path().join(".terminalx/settings.json"), lines("{\n  'branchPrefix': 'team/',\n}")).unwrap();
+    git(f.repo.path(), &["add", ".terminalx/settings.json"]).unwrap();
+    git(f.repo.path(), &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "shared"]).unwrap();
+    let files = f.store.files(Some(&f.repository()));
+    let shared = files.iter().find(|file| file.layer == Layer::RepositoryShared).unwrap();
+    assert_eq!(shared.git, Some(GitState::Committed));
+    let problem = shared.problem.clone().unwrap();
+    assert_eq!((problem.key, problem.line, problem.effect), (None, Some(3), Effect::FileIgnored));
+
+    // Malformed local and managed files block; a key policy may not set names itself.
+    f.file(Layer::Managed, json!({"worktreeDir": "/elsewhere"}));
+    std::fs::write(f.repo.path().join(".terminalx/settings.local.json"), "{").unwrap();
+    let files = f.store.files(Some(&f.repository()));
+    assert_eq!(files[0].problem, Some(Problem { key: Some("worktreeDir".into()), line: Some(1), message: "isn’t a setting".into(), effect: Effect::Blocked }));
+    assert_eq!(files[1].problem.as_ref().map(|p| p.effect), Some(Effect::Blocked));
+    assert!(f.store.files(None).iter().all(|file| !matches!(file.layer, Layer::RepositoryLocal | Layer::RepositoryShared)));
+}
+
+#[test]
+fn writes_add_the_published_schema_reference_and_keep_one_the_person_wrote() {
+    let f = Fixture::new();
+    f.store.write(Some(&f.repository()), Layer::RepositoryLocal, "branchPrefix", Some(json!("local/"))).unwrap();
+    let local = object(&std::fs::read(f.repo.path().join(".terminalx/settings.local.json")).unwrap()).unwrap();
+    assert_eq!(local["$schema"], schema::REPOSITORY_SCHEMA_REFERENCE);
+    let resolved = f.resolve();
+    assert!(resolved.warnings.is_empty(), "$schema is not a setting: {:?}", resolved.warnings);
+    assert!(f.store.files(Some(&f.repository()))[1].problem.is_none());
+    f.file(Layer::RepositoryShared, json!({"$schema": "./mine.json"}));
+    f.store.write(Some(&f.repository()), Layer::RepositoryShared, "branchPrefix", Some(json!("team/"))).unwrap();
+    let shared = object(&std::fs::read(f.repo.path().join(".terminalx/settings.json")).unwrap()).unwrap();
+    assert_eq!((&shared["$schema"], &shared["branchPrefix"]), (&json!("./mine.json"), &json!("team/")));
+    f.store.write(None, Layer::User, "branchPrefix", Some(json!("mine/"))).unwrap();
+    assert_eq!(object(&std::fs::read(f.store.home.join(SHARED)).unwrap()).unwrap()["$schema"], schema::USER_SCHEMA_REFERENCE);
+    f.file(Layer::Managed, json!({"$schema": "x", "branchPrefix": "admin/"}));
+    assert_eq!(f.resolve().values["branchPrefix"].value, "admin/", "policy may carry $schema too");
+}
+
+#[test]
+fn the_repository_schema_says_what_the_resolver_accepts() {
+    let schema = repository_schema();
+    let prefix = &schema["properties"]["branchPrefix"];
+    let pattern = regex::Regex::new(prefix["pattern"].as_str().unwrap()).unwrap();
+    let max = prefix["maxLength"].as_u64().unwrap() as usize;
+    let long = "a".repeat(129);
+    for sample in ["", "team/", "a/b", "a/b/", "a_b-c/d9", "/a", "a//b", "-a", "a/-b", "a b", "ä/", "a/b//", long.as_str()] {
+        let by_schema = sample.chars().count() <= max && pattern.is_match(sample);
+        assert_eq!(by_schema, valid("branchPrefix", &json!(sample), Layer::RepositoryShared), "{sample:?}");
+    }
+    let names = &schema["properties"]["environment"]["propertyNames"];
+    let name_pattern = regex::Regex::new(names["pattern"].as_str().unwrap()).unwrap();
+    let reserved = names["not"]["anyOf"][0]["enum"].as_array().unwrap();
+    let prefixes = regex::Regex::new(names["not"]["anyOf"][1]["pattern"].as_str().unwrap()).unwrap();
+    for name in ["API_URL", "_X", "PATH", "TERMINALX_TOKEN", "DYLD_X", "lower", "9X"] {
+        let by_schema = name_pattern.is_match(name) && !reserved.contains(&json!(name)) && !prefixes.is_match(name);
+        assert_eq!(by_schema, valid("environment", &json!({name: "v"}), Layer::RepositoryShared), "{name}");
+    }
+    let keys: Vec<&String> = schema["properties"].as_object().unwrap().keys().filter(|key| *key != "$schema").collect();
+    assert_eq!(keys, REGISTRY.iter().filter(|key| key.repository_configurable).map(|key| key.key).collect::<Vec<_>>());
+    assert_eq!(schema["additionalProperties"], false);
+}

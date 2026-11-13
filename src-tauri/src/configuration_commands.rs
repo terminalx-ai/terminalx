@@ -4,10 +4,20 @@ use serde_json::Value;
 
 type CmdResult<T> = Result<T, String>;
 
+/// Each value carries every layer that supplies it (PRO-140); environment values are redacted in all of them.
 #[tauri::command]
-pub async fn configuration_resolve(project_path: Option<String>) -> CmdResult<Resolution> {
-    tauri::async_runtime::spawn_blocking(move || configuration::view(project_path.as_deref()))
+pub async fn configuration_resolve(project_path: Option<String>) -> CmdResult<configuration::LayeredResolution> {
+    tauri::async_runtime::spawn_blocking(move || configuration::layered_view(project_path.as_deref()))
         .await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+}
+/// Settings files: every file the project's settings resolve from, highest layer first. Paths, key counts,
+/// Git state and the first problem by key and line; never a value.
+#[tauri::command]
+pub async fn settings_files_list(project_path: Option<String>) -> CmdResult<Vec<configuration::FileLayer>> {
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<_> {
+        let repository = project_path.as_deref().map(|p| configuration::repository(std::path::Path::new(p))).transpose()?;
+        Ok(Store::current()?.files(repository.as_ref()))
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub async fn configuration_write(state: tauri::State<'_, crate::AppState>, project_path: Option<String>, layer: Layer, key: String, value: Option<Value>) -> CmdResult<()> {
