@@ -17,7 +17,7 @@ import { RepositoryScriptsTab } from "./RepositoryScriptsTab";
 type Value = { value: unknown; source: ConfigurationLayer; locked?: boolean };
 function resolved(values: Record<string, Value>, trust: Configuration["trust"] = null): Configuration {
   const all: Record<string, Value> = { setupScript: { value: "", source: "defaults" }, archiveScript: { value: "", source: "defaults" }, archiveTimeoutMinutes: { value: 5, source: "defaults" }, ...values };
-  return { values: Object.fromEntries(Object.entries(all).map(([key, v]) => [key, { locked: false, redacted: false, ...v }])), registry: [], warnings: [], trust };
+  return { values: Object.fromEntries(Object.entries(all).map(([key, v]) => [key, { locked: false, redacted: false, ...v, layers: [{ layer: v.source, value: v.value, redacted: false }] }])), registry: [], warnings: [], trust };
 }
 const textarea = (label: string) => screen.getByLabelText(label) as HTMLTextAreaElement;
 const button = (name: string) => screen.getByRole("button", { name }) as HTMLButtonElement;
