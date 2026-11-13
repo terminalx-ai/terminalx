@@ -290,7 +290,7 @@ impl OwnedGroup {
         // until the supervisor proves the launch has no process left.
         #[cfg(target_os = "linux")]
         if let Some(owner) = self.owner() { return owner.pid(); }
-        self.pid_with(session_jobs)
+        self.pid_with(settled_session_jobs)
     }
 
     fn pid_with(&self, census: impl FnOnce(u32) -> Result<Vec<(u32, u32)>>) -> Option<u32> {
@@ -310,7 +310,7 @@ impl OwnedGroup {
         let mut owned = self.0.lock().unwrap();
         if let Some(pid) = *owned {
             #[cfg(unix)]
-            match session_jobs(pid) {
+            match settled_session_jobs(pid) {
                 Ok(jobs) => {
                     if jobs.is_empty() { *owned = None; return; }
                     for (member, pgid) in jobs {
@@ -349,6 +349,26 @@ fn group_alive(pid: u32) -> bool {
     #[cfg(not(unix))]
     { crate::harness::host::is_alive(pid) }
 }
+
+/// The census, taken again while one is indeterminate. Any process on the
+/// machine that ends between being listed and being asked makes a census
+/// indeterminate (it might have forked into this session), so a busy machine
+/// rarely gives a clean one at the first try. Each try is a whole new
+/// census: an indeterminate one still never counts as empty.
+#[cfg(unix)]
+fn settled_session_jobs(session: u32) -> Result<Vec<(u32, u32)>> {
+    const TRIES: usize = 64;
+    let mut last = None;
+    for _ in 0..TRIES {
+        match session_jobs(session) {
+            Ok(jobs) => return Ok(jobs),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.expect("tried at least once").context(format!("process census stayed indeterminate after {TRIES} tries")))
+}
+#[cfg(not(unix))]
+fn settled_session_jobs(session: u32) -> Result<Vec<(u32, u32)>> { session_jobs(session) }
 
 /// Enumerate before signalling: once the shell exits its jobs may be reparented,
 /// but they retain this session. An inspection failure is not evidence of exit.
