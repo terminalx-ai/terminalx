@@ -26,6 +26,12 @@ vi.mock("@/lib/api", async (original) => {
     invoke: (command: string, args?: { patch?: object }) => {
       if (command === "sidebar_order") return Promise.resolve({ custom: false, sessions: ["second", "first"], projects: ["/repos/two", "/repos/one"], revision: 0 });
       if (command === "set_sidebar_order") return mocks.saveOrder(args?.patch ?? {});
+      if (command === "configuration_watch") return Promise.reject(new Error("no watcher in tests"));
+      if (command === "configuration_resolve") return Promise.resolve({ registry: [], warnings: [], trust: null, values: {
+        setupScript: { value: "", source: "defaults", locked: false, redacted: false },
+        archiveScript: { value: "", source: "defaults", locked: false, redacted: false },
+        archiveTimeoutMinutes: { value: 5, source: "defaults", locked: false, redacted: false },
+      } });
       return actual.invoke(command, args);
     },
     api: { ...actual.api, repositoryFilesPreview: mocks.preview },
@@ -63,17 +69,18 @@ describe("registry navigation", () => {
     expect(document.activeElement).toBe(row);
   });
 
-  it("opens and saves Scripts for the chosen repository on its one page, with its cleanup controls", async () => {
+  it("opens a repository's cleanup controls, then saves its Scripts from the Scripts page", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
     const group = within(screen.getByRole("group", { name: "Repositories" }));
-    // One row a repository opens one page: its workspace cleanup, then its scripts.
     fireEvent.click(group.getByRole("button", { name: "Two" }));
     expect(group.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("heading", { name: "Two" })).toBeTruthy();
     expect(screen.getByRole("radiogroup", { name: "Delete merged workspaces of Two" })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Archive script"), { target: { value: "docker compose down" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save scripts" }));
-    await screen.findByText("Scripts saved.");
+    expect(screen.queryByLabelText("Archive script")).toBeNull();
+    fireEvent.click(within(screen.getByRole("navigation", { name: "Repository settings" })).getByRole("button", { name: "Scripts" }));
+    fireEvent.change(await screen.findByLabelText("Archive script"), { target: { value: "docker compose down" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[1]);
+    await screen.findByText("Archive script saved.");
     expect(mocks.updateProject).toHaveBeenCalledWith("/repos/two", { scripts: { setup: "", archive: "docker compose down" } });
   });
 

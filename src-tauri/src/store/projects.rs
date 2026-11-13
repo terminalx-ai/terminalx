@@ -50,7 +50,7 @@ pub struct Project {
     /// branch with none goes by its own name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branch_labels: BTreeMap<String, String>,
-    /// Local scripts only; repository files require the layered-config trust flow.
+    /// This computer's scripts; repository files are resolved by `configuration::setup_script` and `configuration::archive_script`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts: Option<RepositoryScripts>,
     /// Local repository choices; file-based layers are resolved separately.
@@ -58,16 +58,19 @@ pub struct Project {
     pub repository_settings: RepositorySettings,
 }
 
-/// Script fields shared by the Scripts page and workspace lifecycle hooks.
-/// Both hooks run only commands explicitly saved in this local store.
+/// The Scripts page's values saved on this computer. They are the user layer
+/// of `configuration::setup_script` and `configuration::archive_script`, which the workspace hooks read: repository
+/// files and managed policy can take precedence over them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct RepositoryScripts {
     pub setup: String,
     pub archive: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_timeout_minutes: Option<u64>,
 }
 
-/// Nothing is read from the checkout itself: committed commands are not trusted yet.
+/// Only this store; the hooks use `configuration::setup_script` and `configuration::archive_script` for every layer.
 pub fn scripts(path: &Path) -> Result<RepositoryScripts> {
     let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     Ok(load()?.projects.into_iter().find(|project| canonical(Path::new(&project.path)) == canonical(path))
@@ -330,6 +333,7 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
     }
     if let Some(scripts) = patch.scripts {
         anyhow::ensure!(scripts.setup.len() <= 65_536 && scripts.archive.len() <= 65_536, "Scripts must be at most 64 KiB each.");
+        anyhow::ensure!(scripts.archive_timeout_minutes.is_none_or(|minutes| super::configuration::ARCHIVE_TIMEOUT_CHOICES.contains(&minutes)), "Choose an archive timeout Settings offers.");
         p.scripts = (scripts != RepositoryScripts::default()).then_some(scripts);
     }
     let out = p.clone();

@@ -625,9 +625,9 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "repositories.scripts", section: "repositories", title: "Scripts",
-    description: "Save setup and archive scripts for this repository on this computer.",
-    searchTerms: ["repository", "setup", "archive", "scripts", "hooks"], scope: "repository",
-    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].scripts" }, layout: "content",
+    description: "Setup and archive scripts for this repository, saved on this computer or read from its trusted .terminalx/settings.json.",
+    searchTerms: ["repository", "setup", "archive", "scripts", "hooks", "timeout", "trust", "override"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].scripts; .terminalx/settings*.json#setupScript,archiveScript,archiveTimeoutMinutes" }, layout: "content",
   }),
   defineSetting({
     id: "shortcuts.systemWide", section: "shortcuts", title: "System-wide shortcut",

