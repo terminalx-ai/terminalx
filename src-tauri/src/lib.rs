@@ -454,6 +454,7 @@ pub fn run() {
             transparency::reduce_transparency,
             configuration_commands::configuration_resolve,
             configuration_commands::settings_files_list,
+            configuration_commands::open_settings_file,
             configuration_watch::configuration_watch,
             configuration_commands::configuration_write,
             configuration_commands::configuration_review,

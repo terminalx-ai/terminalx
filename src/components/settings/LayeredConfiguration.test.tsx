@@ -5,9 +5,9 @@ import { LayeredConfiguration } from "./LayeredConfiguration";
 import type { ConfigurationLayerValue } from "@/types/configuration";
 import type { SettingsFileLayer } from "@/types/settingsSources";
 const { resolve, write, review, watch, files, openPath, listeners } = vi.hoisted(() => ({ resolve: vi.fn(), write: vi.fn(), review: vi.fn(), watch: vi.fn(), files: vi.fn(), openPath: vi.fn(), listeners: new Map<string, () => void>() }));
-vi.mock("@/lib/configuration", async (original) => ({ ...await original<typeof import("@/lib/configuration")>(), configuration: { resolve, write, review, watch, files } }));
+vi.mock("@/lib/configuration", async (original) => ({ ...await original<typeof import("@/lib/configuration")>(), configuration: { resolve, write, review, watch, files, openFile: openPath } }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name: string, listener: () => void) => { listeners.set(name, listener); return () => listeners.delete(name); }) }));
-vi.mock("@tauri-apps/plugin-opener", () => ({ openPath, revealItemInDir: vi.fn() }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ projects: [{ path: "/repo", name: "App", kind: "git" }, { path: "cloud:o:w", name: "Remote", kind: "git" }] }) }));
 const fixture = (locked = false) => ({ values: { branchPrefix: { value: "team/", source: locked ? "managed" : "repositoryShared", locked, redacted: false, layers: [{ layer: locked ? "managed" : "repositoryShared", value: "team/", redacted: false }] } }, registry: [{ key: "branchPrefix", repositoryConfigurable: true, managedLockable: true, requiresTrust: true }], warnings: [], trust: null });
 afterEach(cleanup);
@@ -190,7 +190,7 @@ it("Settings files lists each layer with its chips and an error naming file, lin
   const error = within(items[1]).getByRole("alert");
   expect(error.textContent).toBe("~/repo/.terminalx/settings.local.json line 7: scripts.teardown isn’t a setting. That key is ignored; the rest of the file applies.Open");
   fireEvent.click(within(error).getByRole("button", { name: "Open" }));
-  await waitFor(() => expect(openPath).toHaveBeenCalledWith("/repo/.terminalx/settings.local.json", undefined));
+  await waitFor(() => expect(openPath).toHaveBeenCalledWith("/repo/.terminalx/settings.local.json", null));
 });
 
 it("refreshes Settings files when the user file changes on disk", async () => {

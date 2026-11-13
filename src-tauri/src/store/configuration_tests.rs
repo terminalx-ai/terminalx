@@ -301,7 +301,7 @@ fn settings_files_name_each_layer_its_git_state_and_its_first_problem_without_va
 }
 
 #[test]
-fn writes_add_the_published_schema_reference_and_keep_one_the_person_wrote() {
+fn writes_add_the_schema_reference_except_to_the_shared_file_and_keep_one_the_person_wrote() {
     let f = Fixture::new();
     f.store.write(Some(&f.repository()), Layer::RepositoryLocal, "branchPrefix", Some(json!("local/"))).unwrap();
     let local = object(&std::fs::read(f.repo.path().join(".terminalx/settings.local.json")).unwrap()).unwrap();
@@ -309,6 +309,9 @@ fn writes_add_the_published_schema_reference_and_keep_one_the_person_wrote() {
     let resolved = f.resolve();
     assert!(resolved.warnings.is_empty(), "$schema is not a setting: {:?}", resolved.warnings);
     assert!(f.store.files(Some(&f.repository()))[1].problem.is_none());
+    f.store.write(Some(&f.repository()), Layer::RepositoryShared, "branchPrefix", Some(json!("team/"))).unwrap();
+    let shared = object(&std::fs::read(f.repo.path().join(".terminalx/settings.json")).unwrap()).unwrap();
+    assert!(!shared.contains_key("$schema"), "older builds would warn every teammate about a committed $schema");
     f.file(Layer::RepositoryShared, json!({"$schema": "./mine.json"}));
     f.store.write(Some(&f.repository()), Layer::RepositoryShared, "branchPrefix", Some(json!("team/"))).unwrap();
     let shared = object(&std::fs::read(f.repo.path().join(".terminalx/settings.json")).unwrap()).unwrap();

@@ -84,6 +84,11 @@ pub struct Status {
     preferences: BTreeMap<String, Value>,
 }
 
+impl Status {
+    /// The user file's absolute path.
+    pub(crate) fn path(&self) -> &str { &self.path }
+}
+
 /// `path` with the home directory written as "~".
 pub fn display_path(path: &Path) -> String {
     match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {

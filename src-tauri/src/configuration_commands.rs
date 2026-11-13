@@ -19,6 +19,39 @@ pub async fn settings_files_list(project_path: Option<String>) -> CmdResult<Vec<
         Ok(Store::current()?.files(repository.as_ref()))
     }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
 }
+/// The editors Settings may open a settings file in. The webview names one of these ids; it never
+/// names a program.
+const EDITORS: [(&str, &str); 3] = [("cursor", "Cursor"), ("vscode", "Visual Studio Code"), ("zed", "Zed")];
+
+/// A path Settings may open: an existing settings file of a layer the app reads (the user file, the
+/// managed policy, or a repository's `.terminalx/settings.json` / `settings.local.json`).
+fn settings_file(path: &std::path::Path, user: Option<&std::path::Path>) -> anyhow::Result<std::path::PathBuf> {
+    let path = crate::files::existing_local_path(path)?;
+    anyhow::ensure!(path.is_file(), "{} is not a settings file", path.display());
+    let canonical = |known: &std::path::Path| known.canonicalize().ok();
+    let known = user.and_then(canonical).is_some_and(|user| user == path)
+        || crate::store::managed_configuration::path().and_then(canonical).is_some_and(|managed| managed == path)
+        || (path.parent().and_then(|dir| dir.file_name()).is_some_and(|dir| dir == ".terminalx")
+            && path.file_name().is_some_and(|name| name == "settings.json" || name == "settings.local.json"));
+    anyhow::ensure!(known, "{} is not a settings file", path.display());
+    Ok(path)
+}
+
+/// Open a settings file in its default app, or in one of `EDITORS` by id.
+#[tauri::command]
+pub async fn open_settings_file(app: tauri::AppHandle, path: String, editor: Option<String>) -> CmdResult<()> {
+    let program = match editor.as_deref() {
+        None => None,
+        Some(id) => Some(EDITORS.iter().find(|(known, _)| *known == id).map(|(_, program)| *program).ok_or_else(|| format!("Unknown editor: {}", id.chars().take(40).collect::<String>()))?),
+    };
+    let path = tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<_> {
+        let user = crate::store::settings::file::status().ok().map(|status| std::path::PathBuf::from(status.path()));
+        settings_file(std::path::Path::new(&path), user.as_deref())
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_path(path.to_string_lossy(), program).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn configuration_write(state: tauri::State<'_, crate::AppState>, project_path: Option<String>, layer: Layer, key: String, value: Option<Value>) -> CmdResult<()> {
     require_runtime(&state)?;
@@ -93,5 +126,34 @@ mod tests {
         let revealed = review_message(std::path::Path::new("/repo"), &resolved, true);
         assert!(revealed.contains("--require=secret\\nTrust me"));
         assert!(!revealed.contains("secret\nTrust me"));
+    }
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::{settings_file, EDITORS};
+
+    #[test]
+    fn only_settings_files_of_known_layers_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("settings.json");
+        std::fs::write(&user, "{}").unwrap();
+        let repo = dir.path().join("repo/.terminalx");
+        std::fs::create_dir_all(&repo).unwrap();
+        for name in ["settings.json", "settings.local.json", "run.sh"] { std::fs::write(repo.join(name), "{}").unwrap(); }
+        let other = dir.path().join("other.json");
+        std::fs::write(&other, "{}").unwrap();
+        assert!(settings_file(&user, Some(&user)).is_ok());
+        assert!(settings_file(&repo.join("settings.json"), Some(&user)).is_ok());
+        assert!(settings_file(&repo.join("settings.local.json"), Some(&user)).is_ok());
+        assert!(settings_file(&repo.join("run.sh"), Some(&user)).is_err());
+        assert!(settings_file(&other, Some(&user)).is_err());
+        assert!(settings_file(&dir.path().join("repo"), Some(&user)).is_err());
+        assert!(settings_file(&dir.path().join("missing.json"), Some(&user)).is_err());
+    }
+
+    #[test]
+    fn editors_are_a_fixed_list() {
+        assert_eq!(EDITORS.map(|(id, _)| id), ["cursor", "vscode", "zed"]);
     }
 }

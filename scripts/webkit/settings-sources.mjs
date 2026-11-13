@@ -46,7 +46,7 @@ const fixture = (mode) => `localStorage.setItem("raccoon.mode", ${JSON.stringify
   };
   window.__PW_CALLS__ = [];
   A.copy_text = ({ text }) => { window.__PW_CALLS__.push(["copy_text", text]); return null; };
-  A["plugin:opener|open_path"] = (args) => { window.__PW_CALLS__.push(["open_path", args.path, args.with ?? null]); return null; };
+  A.open_settings_file = (args) => { window.__PW_CALLS__.push(["open_settings_file", args.path, args.editor ?? null]); return null; };
   A["plugin:opener|reveal_item_in_dir"] = (args) => { window.__PW_CALLS__.push(["reveal", args.paths ?? args.path]); return null; };
   const at = (layer, value) => ({ layer, value, redacted: false });
   const repository = (path) => path === "/repos/p0";
@@ -150,8 +150,8 @@ try {
     checks["Open menu"] = JSON.stringify(await openMenu.getByRole("menuitem").allTextContents()) === JSON.stringify(["Your settings~/.raccoon/settings.json", "Finder", "Cursor", "VS Code", "Zed", "Copy path"]);
     await shoot(browser, page, "11.10-settings-files", mode);
     await openMenu.getByRole("menuitem", { name: "VS Code" }).click();
-    await page.waitForFunction(() => window.__PW_CALLS__.some((call) => call[0] === "open_path"));
-    checks["Open in VS Code"] = JSON.stringify((await calls()).find((call) => call[0] === "open_path")) === JSON.stringify(["open_path", "/Users/demo/.raccoon/settings.json", "Visual Studio Code"]);
+    await page.waitForFunction(() => window.__PW_CALLS__.some((call) => call[0] === "open_settings_file"));
+    checks["Open in VS Code"] = JSON.stringify((await calls()).find((call) => call[0] === "open_settings_file")) === JSON.stringify(["open_settings_file", "/Users/demo/.raccoon/settings.json", "vscode"]);
     const generalLegend = settings.getByRole("region", { name: "Badges" });
     checks["General legend lists the four badges"] = JSON.stringify(await generalLegend.locator("li [data-source-badge]").evaluateAll((nodes) => nodes.map((node) => node.dataset.sourceBadge))) === JSON.stringify(["managed", "project", "overridesProject", "yours"]);
     checks["no horizontal overflow"] = await editor.evaluate((element) => element.scrollWidth <= element.clientWidth + 1);

@@ -15,5 +15,9 @@ export const configuration = {
   review: (projectPath: string) => invoke<boolean>("configuration_review", { projectPath }),
   /** PRO-140: every settings file the project resolves, highest first (user and defaults without a project). */
   files: (projectPath: string | null) => invoke<SettingsFileLayer[]>("settings_files_list", { projectPath }),
+  /** Open a settings file in its default app, or in one of the editors native code allows. */
+  openFile: (path: string, editor: SettingsEditor | null = null) => invoke<void>("open_settings_file", { path, editor }),
 };
+/** The editors native code may open a settings file in (open_settings_file's fixed list). */
+export type SettingsEditor = "cursor" | "vscode" | "zed";
 export const layerLabels: Record<ConfigurationLayer, string> = { defaults: "Default", user: "User", repositoryShared: "Repository shared", repositoryLocal: "Repository local", managed: "Managed" };

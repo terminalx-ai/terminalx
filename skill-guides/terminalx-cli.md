@@ -66,9 +66,10 @@ The file is checked against a JSON schema generated from the app's own validator
 `schemas/settings.schema.json` in the source, kept current at
 `$TERMINALX_HOME/schemas/settings.schema.json` by each start. Files the app writes
 get `"$schema": "./schemas/settings.schema.json"` so editors complete keys and
-flag typos and wrong values; a `$schema` already in the file is kept. Repository
-files the app writes get the published
-`https://raw.githubusercontent.com/terminalx-ai/terminalx/main/schemas/repository-settings.schema.json`.
+flag typos and wrong values; a `$schema` already in the file is kept. The local
+repository file the app writes gets the published
+`https://raw.githubusercontent.com/terminalx-ai/terminalx/main/schemas/repository-settings.schema.json`;
+the committed shared file does not, because older TerminalX builds warn about it.
 
 User-facing webview choices are under `preferences`, for example:
 

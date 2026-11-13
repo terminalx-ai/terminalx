@@ -4,7 +4,6 @@ import type { SettingsFileStatus } from "@/lib/settingsFile";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  openPath: vi.fn(),
   reveal: vi.fn(),
   listeners: new Map<string, () => void>(),
 }));
@@ -13,7 +12,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, listener: () => void) => { mocks.listeners.set(name, listener); return () => mocks.listeners.delete(name); }),
 }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setTheme: vi.fn() }) }));
-vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: mocks.openPath, revealItemInDir: mocks.reveal }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: mocks.reveal }));
 
 let file: SettingsFileStatus;
 const problem = { key: "preferences.linkActions", line: 7, message: "Unexpected “,” before “}”", effect: "lastGood" as const };
@@ -27,7 +26,6 @@ beforeEach(() => {
   localStorage.clear();
   mocks.listeners.clear();
   mocks.invoke.mockReset();
-  mocks.openPath.mockReset().mockResolvedValue(undefined);
   mocks.reveal.mockReset().mockResolvedValue(undefined);
   file = { path: "/Users/me/.raccoon/settings.json", displayPath: "~/.raccoon/settings.json", exists: true, error: null, problem: null, setKeys: [], preferences: {} };
   mocks.invoke.mockImplementation(async (command: string, args?: { key?: string }) => {
@@ -82,13 +80,13 @@ it("Open settings.json opens the user file, names its broken line, and opens it 
   render(<OpenSettingsFileButton />);
   const button = screen.getByRole("button", { name: "Open settings.json" });
   fireEvent.click(button);
-  await waitFor(() => expect(mocks.openPath).toHaveBeenCalledWith("/Users/me/.raccoon/settings.json", undefined));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/Users/me/.raccoon/settings.json", editor: null }));
 
   openMenu(screen.getByRole("button", { name: "More ways to open settings.json" }));
   const menu = await screen.findByRole("menu");
   expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Your settings~/.raccoon/settings.json", "Finder", "Cursor", "VS Code", "Zed", "Copy path"]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "VS Code" }));
-  await waitFor(() => expect(mocks.openPath).toHaveBeenCalledWith("/Users/me/.raccoon/settings.json", "Visual Studio Code"));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/Users/me/.raccoon/settings.json", editor: "vscode" }));
 
   file = { ...file, error: "preferences.linkActions, line 7: Unexpected “,” before “}”", problem };
   await act(async () => mocks.listeners.get("settings_file_changed")!());
@@ -100,7 +98,8 @@ it("a failed Open in reports the failure in an error toast", async () => {
   await boot();
   const { OpenSettingsFileButton } = await import("./SettingSources");
   const toasts = await import("@/lib/errorToasts");
-  mocks.openPath.mockRejectedValue("Zed is not installed");
+  const answer = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, args?: { key?: string }) => command === "open_settings_file" ? Promise.reject("Zed is not installed") : answer(command, args));
   render(<OpenSettingsFileButton />);
   openMenu(screen.getByRole("button", { name: "More ways to open settings.json" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Zed" }));
@@ -135,7 +134,7 @@ it("a save refused by an invalid file raises Can’t save with the line, the par
   }));
   await within(toast).findByRole("button", { name: "Copied" });
   fireEvent.click(within(toast).getByRole("button", { name: "Open file" }));
-  await waitFor(() => expect(mocks.openPath).toHaveBeenCalledWith("/Users/me/.raccoon/settings.json", undefined));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/Users/me/.raccoon/settings.json", editor: null }));
 
   // Fixed in the editor: the toast goes, and a later problem raises no old toast.
   file = { ...file, error: null, problem: null };

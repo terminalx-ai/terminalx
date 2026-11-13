@@ -106,9 +106,12 @@ Two JSON schemas are generated from the native validators and committed:
   limits its validator reads. It is published from the main branch.
 
 A file the app writes gets a `$schema` unless it already has one: the user file
-`"./schemas/settings.schema.json"`, repository files
+`"./schemas/settings.schema.json"`, the local repository file
 `"https://raw.githubusercontent.com/terminalx-ai/terminalx/main/schemas/repository-settings.schema.json"`.
-A `$schema` the person wrote is left alone. After changing a setting's type,
+The committed shared file does not: builds before PRO-140 count `$schema` there
+as an unsupported setting and would warn every teammate on each resolve. Add
+that reference to the shared file yourself once everyone runs a build that has
+it. A `$schema` the person wrote is left alone. After changing a setting's type,
 choices, range, registry entry or row description, regenerate both with
 `TERMINALX_WRITE_SCHEMAS=1 cargo t --lib store::settings::schema` in `src-tauri`;
 the same test fails while the committed files are stale.

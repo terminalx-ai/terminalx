@@ -287,8 +287,13 @@ impl Store {
             let mut document = match dir.read(file)? { Some(bytes) => object(&bytes)?, None => Map::new() };
             if let Some(value) = value { document.insert(key.into(), value); } else { document.remove(key); }
             // Editors check the file against the published schema; a `$schema` the person wrote stays.
-            let reference = if layer == Layer::User { schema::USER_SCHEMA_REFERENCE } else { schema::REPOSITORY_SCHEMA_REFERENCE };
-            schema::add_reference(&mut document, reference);
+            // Not the committed shared file: builds before PRO-140 take `$schema` there for an unsupported
+            // setting and warn every teammate on each resolve. People may add it there themselves.
+            match layer {
+                Layer::User => schema::add_reference(&mut document, schema::USER_SCHEMA_REFERENCE),
+                Layer::RepositoryLocal => schema::add_reference(&mut document, schema::REPOSITORY_SCHEMA_REFERENCE),
+                _ => {}
+            }
             dir.write(file, &serde_json::to_vec_pretty(&document)?)
         })
     }

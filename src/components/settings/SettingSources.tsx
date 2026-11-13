@@ -2,7 +2,8 @@
 // row menu of a setting kept in the user file, Open settings.json, the Can't
 // save toast and the badges legend. The words come from src/lib/settingSources.
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { configuration, type SettingsEditor } from "@/lib/configuration";
 import { AlertCircle, Check, ChevronDown, Code, Copy, Ellipsis, FileText, FolderGit2, FolderOpen, Lock, RotateCcw, UserRound, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,16 +43,16 @@ export function shortFileName(displayPath: string): string {
   return displayPath.slice(displayPath.lastIndexOf("/") + 1);
 }
 
-export const EDITORS = [
-  { label: "Cursor", app: "Cursor" },
-  { label: "VS Code", app: "Visual Studio Code" },
-  { label: "Zed", app: "Zed" },
-] as const;
+export const EDITORS: readonly { label: string; id: SettingsEditor }[] = [
+  { label: "Cursor", id: "cursor" },
+  { label: "VS Code", id: "vscode" },
+  { label: "Zed", id: "zed" },
+];
 
 /** Open a settings file in its default app or a named one; a failure becomes an error toast. */
-export async function openSettingsPath(path: string, displayPath: string, app?: { label: string; app: string }): Promise<void> {
+export async function openSettingsPath(path: string, displayPath: string, app?: { label: string; id: SettingsEditor }): Promise<void> {
   try {
-    await openPath(path, app?.app);
+    await configuration.openFile(path, app?.id ?? null);
   } catch (error) {
     showError(app ? `Couldn’t open ${displayPath} in ${app.label}` : `Couldn’t open ${displayPath}`, error);
   }
@@ -133,7 +134,7 @@ export function OpenSettingsFileButton() {
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Open in</DropdownMenuLabel>
         <DropdownMenuItem onSelect={reveal}><FolderOpen />Finder</DropdownMenuItem>
-        {EDITORS.map((editor) => <DropdownMenuItem key={editor.app} onSelect={() => open(editor)}><Code />{editor.label}</DropdownMenuItem>)}
+        {EDITORS.map((editor) => <DropdownMenuItem key={editor.id} onSelect={() => open(editor)}><Code />{editor.label}</DropdownMenuItem>)}
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void copyText(file.path).catch((error: unknown) => showError("Couldn’t copy the path", error))}><Copy />Copy path</DropdownMenuItem>
       </DropdownMenuContent>
