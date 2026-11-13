@@ -3186,3 +3186,32 @@ export function closeWorkspaceConnectionsIn(orgId: string): void {
 
 export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null }
 export interface TurnUndoResult { overlap: string[]; token: string; undone: boolean; backupRef?: string | null }
+
+/** A saved action's run in a terminal tab of a local session (PRO-363). */
+export interface ActionRun {
+  sessionId: string;
+  actionId: string;
+  name: string;
+  /** The terminal tab's pane id: focus it to show the run. */
+  paneId: string;
+  state: "running" | "exited";
+  /** The program's own exit code once it exited; null while it runs, when a signal ended it, or when its exit was not heard. */
+  exitCode: number | null;
+  started: string;
+  ended: string | null;
+}
+
+export interface ActionRunOutcome {
+  run: ActionRun;
+  /** False when a non-concurrent action was already running: `run` is that tab and nothing new started. */
+  started: boolean;
+}
+
+/** Saved project actions (PRO-363). Local sessions only. */
+export const actions = {
+  /** Start `actionId` in a new terminal tab of `sessionId`; `restart` replaces a running non-concurrent run. */
+  run: (sessionId: string, actionId: string, restart = false) =>
+    invoke<ActionRunOutcome>("action_run", { sessionId, actionId, restart }),
+  /** The session's runs, oldest first: one per action tab still open, running or exited. */
+  states: (sessionId: string) => invoke<ActionRun[]>("action_states", { sessionId }),
+};

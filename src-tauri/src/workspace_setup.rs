@@ -191,12 +191,21 @@ fn execute_admitted(job: Job) {
         };
         run.wait(job.timeout, &job.cancel).map(Some)
     })();
+    let succeeded = settle(&job, result);
+    // Outside RUN_LOCK: a run takes the admission lock, which `schedule`
+    // takes before RUN_LOCK.
+    if succeeded { crate::action_runner::after_setup(&job.manager, &job.session); }
+}
+
+/// Record the attempt's result. True only when this attempt's script exited 0.
+fn settle(job: &Job, result: Result<Option<archive_script::ScriptResult>>) -> bool {
     let _run = RUN_LOCK.lock();
     {
         let mut active = controls().lock();
         if active.get(&job.session).is_some_and(|control| control.pane == job.pane) { active.remove(&job.session); }
     }
-    if store::index::get(&job.session).is_err() { return }
+    if store::index::get(&job.session).is_err() { return false }
+    let mut succeeded = false;
     let settled = (|| -> Result<()> {
         let Some(mut setup) = read(&job.session)? else { return Ok(()) };
         if setup.pane_id != job.pane || !setup.status.active() { return Ok(()) }
@@ -212,9 +221,12 @@ fn execute_admitted(job: Job) {
             Ok(None) => { setup.status = Status::Stopped; }
             Err(error) => { setup.status = Status::Failed; setup.error = Some(format!("{error:#}")); }
         }
-        publish(&job.manager, &setup)
+        publish(&job.manager, &setup)?;
+        succeeded = setup.status == Status::Succeeded;
+        Ok(())
     })();
     if let Err(error) = settled { log::warn!("Save workspace setup result: {error:#}"); }
+    succeeded
 }
 
 pub fn stop(manager: &SessionManager, session: &str, pane: &str) -> Result<Option<Setup>> {
@@ -261,7 +273,12 @@ pub fn follow_creations(manager: &SessionManager) {
         let owner = owner.clone();
         // The event may be emitted under a caller's admission lock. This short
         // dispatch only queues work; the two workers own all script execution.
-        std::thread::spawn(crate::github_process::queued(move || start_pending(&owner, &entry.id)));
+        std::thread::spawn(crate::github_process::queued(move || {
+            start_pending(&owner, &entry.id);
+            // No setup script, so no attempt was recorded: the workspace is
+            // ready now, and its Run after setup actions start (PRO-363).
+            if matches!(read(&entry.id), Ok(None)) { crate::action_runner::after_setup(&owner, &entry.id); }
+        }));
     }));
 }
 

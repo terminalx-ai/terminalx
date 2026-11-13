@@ -206,6 +206,7 @@ fn an_untrusted_committed_setup_script_becomes_a_failed_setup_and_never_runs() {
     start_pending(&rig.manager, &entry.id);
     let setup = rig.wait(&entry.id, Status::Failed);
     assert!(setup.error.as_deref().unwrap_or_default().contains("setup script that is not trusted"), "{setup:?}");
+    assert!(setup.error.as_deref().unwrap_or_default().contains("Open Settings → Projects → Scripts"), "{setup:?}");
     assert!(!Path::new(&entry.cwd).join("untrusted").exists());
 }
 
@@ -220,4 +221,79 @@ fn an_untrusted_committed_archive_script_leaves_the_saved_setup_running() {
     start(&rig.manager, &entry.id, false).unwrap();
     rig.wait(&entry.id, Status::Succeeded);
     assert_eq!(std::fs::read_to_string(Path::new(&entry.cwd).join("marker")).unwrap(), "saved");
+}
+
+#[test]
+fn run_after_setup_actions_start_only_once_setup_succeeds() {
+    use crate::action_runner::{self, State};
+    let mut rig = Rig::new();
+    action_runner::observe(rig.manager.sink().clone());
+    let entry = rig.entry("after");
+    let cwd = Path::new(&entry.cwd).to_path_buf();
+    let runs = |rig: &Rig| action_runner::states(&rig.manager, &entry.id).unwrap();
+    // "Allow several at once", so a second start would open a second tab.
+    let action = |id: &str, command: &str, run_after_setup: bool| projects::RepositoryActionEntry {
+        id: id.into(), name: id.into(), command: command.into(), run_after_setup, concurrent: true, ..Default::default()
+    };
+    projects::update(rig.root.to_str().unwrap(), ProjectPatch { actions: Some(vec![
+        // Proves it ran after setup's own work, in the same workspace.
+        action("dev", "test -f setup-done && printf ran >> ran", true),
+        action("manual", "printf manual > manual", false),
+    ]), ..Default::default() }).unwrap();
+
+    rig.script("exit 3");
+    prepare(&entry).unwrap();
+    start(&rig.manager, &entry.id, false).unwrap();
+    assert_eq!(rig.wait(&entry.id, Status::Failed).exit_code, Some(3));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(runs(&rig).is_empty(), "a failed setup starts nothing");
+    assert!(!cwd.join("ran").exists());
+
+    rig.script("sleep 0.3; printf done > setup-done");
+    start(&rig.manager, &entry.id, true).unwrap();
+    // Nothing is started while setup is still running.
+    rig.wait(&entry.id, Status::Running);
+    assert!(runs(&rig).is_empty());
+    rig.wait(&entry.id, Status::Succeeded);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let run = loop {
+        if let Some(run) = runs(&rig).into_iter().find(|r| r.state == State::Exited && r.ended.is_some()) { break run }
+        assert!(Instant::now() < deadline, "the run-after-setup action never finished: {:?}", runs(&rig));
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!((run.action_id.as_str(), run.exit_code), ("dev", Some(0)));
+    assert_eq!(std::fs::read_to_string(cwd.join("ran")).unwrap(), "ran");
+    assert_eq!(runs(&rig).len(), 1, "only the run-after-setup action runs");
+    assert!(!cwd.join("manual").exists());
+
+    // A manual Rerun setup that succeeds again starts nothing more.
+    rig.script("printf again > setup-again");
+    start(&rig.manager, &entry.id, true).unwrap();
+    rig.wait(&entry.id, Status::Succeeded);
+    assert!(cwd.join("setup-again").exists());
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(runs(&rig).len(), 1, "a rerun does not start Run after setup actions again");
+    assert_eq!(std::fs::read_to_string(cwd.join("ran")).unwrap(), "ran");
+}
+
+#[test]
+fn run_after_setup_actions_start_when_a_new_workspace_has_no_setup_script() {
+    use crate::action_runner::State;
+    let mut rig = Rig::new();
+    crate::action_runner::observe(rig.manager.sink().clone());
+    follow_creations(&rig.manager);
+    projects::update(rig.root.to_str().unwrap(), ProjectPatch { actions: Some(vec![projects::RepositoryActionEntry {
+        id: "dev".into(), name: "dev".into(), command: "printf ready > ready; exec sleep 60".into(), run_after_setup: true, ..Default::default()
+    }]), ..Default::default() }).unwrap();
+    let entry = rig.entry("plain");
+    prepare(&entry).unwrap();
+    assert!(read(&entry.id).unwrap().is_none(), "no setup script, so no setup attempt");
+    rig.manager.sink().emit("session_created", &entry);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !Path::new(&entry.cwd).join("ready").exists() {
+        assert!(Instant::now() < deadline, "the run-after-setup action never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let runs = crate::action_runner::states(&rig.manager, &entry.id).unwrap();
+    assert_eq!(runs.iter().map(|r| (r.action_id.as_str(), r.state)).collect::<Vec<_>>(), vec![("dev", State::Running)]);
 }

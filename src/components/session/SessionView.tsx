@@ -75,6 +75,7 @@ import { copyText } from "@/lib/clipboard";
 import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
 import { BranchGitButton } from "./BranchGitButton";
 import { SessionCost } from "./SessionCost";
+import { RunMenu, RunRestartOffer, offersRunMenu } from "./RunMenu";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -774,6 +775,8 @@ export function SessionView({
             {runOffered && <RunPill run={run} onOpen={() => showRunView(session.id, true)} />}
             {/* The keys that open the Run view (Go → Run View), while this session leads a run (18.01). */}
             {runOffered && run && <RunViewHint className="@max-[560px]/session-header:hidden" />}
+            {/* The project's saved actions and preview URLs (PRO-363); a cloud session's are its runtime's, so it has none here. */}
+            {local && !cloud && !compact && offersRunMenu(session, project) && <RunMenu key={`run-menu:${session.id}`} session={session} project={project} />}
             {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={session.id} session={session} tabId={activeTab?.id} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
@@ -847,6 +850,7 @@ export function SessionView({
         )}
         {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
+        {local && !cloud && <RunRestartOffer session={session} />}
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
         {(checkFix.busy || checkFix.error || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role={checkFix.error ? "alert" : "status"}>
           <span className={cn("min-w-0 flex-1", checkFix.error ? "text-destructive" : "text-muted-foreground")}>{checkFix.busy ? "Collecting failed check logs…" : checkFix.error ?? checkFix.notice}</span>

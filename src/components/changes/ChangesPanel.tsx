@@ -20,6 +20,8 @@ import { MergeInProgress } from "./MergeInProgress";
 import { RepoPanel } from "./RepoPanel";
 import { showCompareSwitchFailed } from "@/lib/branchToasts";
 import { dismissErrorKey } from "@/lib/errorToasts";
+import { onThreadJump, onThreadJumpFallback, pendingThreadJump, setPendingThreadJump, threadCounts, threadFile, type ThreadView } from "@/lib/reviewThreads";
+import { useSessionThreads } from "./ReviewThreads";
 
 /**
  * Review the accumulated workspace by default; turn snapshots are opt-in.
@@ -55,6 +57,8 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   workingTree?: boolean;
 }) {
   const review = useReviewComments();
+  // The session's PR and its threads are read here too: the PR panel need never have been opened (PRO-234).
+  const threads = useSessionThreads(source, sessionId, active);
   const targetId = useId();
   const { hideWhitespace } = useDiffOptions();
   const [choice, setChoice] = useState(() => readChangesChoice(source.key));
@@ -200,6 +204,20 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   const onOpenDiff = editor ? (file: ChangedFile, range: ChangeRange) => openDiff(editor.sessionId, editor.root, file.path, fixed
     ? { scope: "turn", range, oldPath: file.oldPath, turnLabel: choice.scope === "commit" && choice.commit ? `Commit ${choice.commit.slice(0, 7)}` : choice.scope === "checkpoint" ? "Turn" : undefined }
     : { scope: "all", range, oldPath: file.oldPath, target: choice.target, uncommitted: choice.scope === "uncommitted" }) : undefined;
+  // A Checks row whose file this list does not have yet: read All changes, then open the file (PRO-234).
+  useEffect(() => onThreadJumpFallback(source.key, async (thread) => {
+    const all = await source.reviewRange(choice.target, false);
+    const file = threadFile(await source.changesBetween(all.base, all.head, hideWhitespace), thread);
+    if (!file) return false;
+    if (editor) {
+      openDiff(editor.sessionId, editor.root, file.path, { scope: "all", range: { base: all.base, head: all.head }, oldPath: file.oldPath, target: choice.target, uncommitted: false });
+      return true;
+    }
+    // Here the list itself shows the diff: it opens the file once All changes has loaded it.
+    setPendingThreadJump(source.key, thread);
+    if (choice.scope !== "all") choose({ ...choice, scope: "all" }); else setTick((t) => t + 1);
+    return true;
+  }), [source, choice, hideWhitespace, editor?.sessionId, editor?.root]);
   useEffect(() => { if (result) review?.refresh(); }, [result, review?.refresh]);
   const merge = result?.merge ?? null;
   // While a merge is in progress, its card is the uncommitted view: conflicts, what was changed here, what it brought in.
@@ -252,8 +270,18 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
           label={label} empty={loading ? "Loading changes…" : error ? "Changes unavailable." : "No changes in this scope."}
           noRange={loading ? "Loading changes…" : choice.scope === "commit" && !choice.commit ? "Choose a commit to review its changes." : "Changes unavailable."} onChanged={() => setTick((t) => t + 1)} />}
       </div>}
+      {threads?.snapshot && <ReviewThreadsFooter view={threads} />}
     </div>
   );
+}
+
+/** The PR's GitHub review threads at a glance (PRO-234, design 05.13): "PR #14 review threads 0 open · 1 resolved". */
+function ReviewThreadsFooter({ view }: { view: ThreadView }) {
+  const counts = threadCounts(view.snapshot?.threads ?? []);
+  return <div data-testid="changes-review-threads" className="flex min-w-0 shrink-0 items-center gap-2 border-t border-hairline px-3 py-1.5 text-[11px]">
+    <span className="min-w-0 truncate text-muted-foreground">PR #{view.pr.number} review threads</span>
+    <span className="ml-auto shrink-0 tabular-nums text-faint">{counts.open} open · {counts.resolved} resolved</span>
+  </div>;
 }
 
 /**
@@ -305,6 +333,21 @@ function ChangesBody({
     if (onOpenDiff && file && range) onOpenDiff(file, range);
     else setSelected((s) => s === path ? null : path);
   };
+  // A thread's row in the Checks list opens its file here, or in its centre diff tab.
+  useEffect(() => onThreadJump(source.key, (thread) => {
+    const file = threadFile(files, thread);
+    if (!file || !range) return false;
+    if (onOpenDiff) onOpenDiff(file, range); else setSelected(file.path);
+    return true;
+  }), [source.key, files, range, onOpenDiff]);
+  // A jump that had to load this list first.
+  useEffect(() => {
+    const thread = pendingThreadJump(source.key);
+    const file = thread && range ? threadFile(files, thread) : undefined;
+    if (!thread || !file || !range) return;
+    setPendingThreadJump(source.key, null);
+    if (onOpenDiff) onOpenDiff(file, range); else setSelected(file.path);
+  }, [source.key, files, range]);
   const totals = sumChanges(files);
   const discardAction = allowDiscard && source.discard && source.canWrite ? (file: ChangedFile) => <DiscardButton path={file.path} onClick={() => setDiscarding(file)} /> : undefined;
 

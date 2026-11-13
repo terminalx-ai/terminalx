@@ -82,23 +82,27 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
     event.stopPropagation();
     dismissError(toast.id);
   };
+  const success = toast.tone === "success";
   return (
     <div
-      role="alert"
+      role={success ? "status" : "alert"}
       aria-labelledby={`${toast.id}-title`}
       aria-describedby={`${toast.id}-body`}
       data-error-toast=""
+      data-toast-tone={toast.tone}
       onKeyDown={onKeyDown}
       data-tone={toast.tone}
       className={cn(
         "pointer-events-auto flex items-start gap-2.5 bg-popover text-sm text-card-foreground shadow-surface animate-fade-in",
         // The branch toasts (PRO-295) have an edge in their colour, as their screens draw them.
-        toast.tone ? "rounded-lg border px-3.5 py-3" : "rounded-xl p-3 hairline",
+        toast.tone === "warning" || toast.tone === "error" ? "rounded-lg border px-3.5 py-3" : "rounded-xl p-3 hairline",
         toast.tone === "warning" && "border-warning/40",
         toast.tone === "error" && "border-destructive/40",
       )}
     >
-      {toast.icon === "branch" ? (
+      {success ? (
+        <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-add" />
+      ) : toast.icon === "branch" ? (
         <GitBranch aria-hidden className={cn("mt-0.5 size-4 shrink-0", toast.tone === "warning" ? "text-warning" : "text-destructive")} />
       ) : (
         <CircleX aria-hidden className={cn("mt-0.5 size-4 shrink-0", toast.tone === "warning" ? "text-warning" : "text-destructive")} />
@@ -129,7 +133,7 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
             className={cn(
               "inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs disabled:opacity-60",
               action.primary ? "bg-foreground font-medium text-background hover:opacity-90" : "text-muted-foreground hover:bg-veil-strong hover:text-foreground",
-              !action.primary && (action.icon || toast.tone) && "hairline",
+              !action.primary && (action.icon || (toast.tone && !success)) && "hairline",
             )}
           >
             {action.icon === "retry" ? <RotateCw className={cn("size-3.5", running === action.label && "animate-spin")} /> : null}
@@ -138,7 +142,7 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
             {action.label}
           </button>
         ))}
-        {toast.copy !== false && <button
+        {!success && toast.copy !== false && <button
           type="button"
           onClick={onCopy}
           className="inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs text-muted-foreground hairline hover:bg-veil-strong hover:text-foreground"

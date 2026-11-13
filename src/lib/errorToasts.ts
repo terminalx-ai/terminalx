@@ -32,8 +32,11 @@ export interface ErrorToast {
    * Drawn with an edge in its colour, as the branch toasts are (PRO-295):
    * `warning` for an action that cannot be done yet and says what to do
    * first, `error` for one that failed. Unset, the plain error look.
+   * "success": something worked and the reader is told so on the same card
+   * (PRO-234 "Thread resolved on GitHub"): a check mark, read out politely,
+   * the plain look, and no Copy error.
    */
-  tone?: "error" | "warning";
+  tone?: "error" | "warning" | "success";
   /** Its mark in place of the failure's cross: a branch, for a branch action. */
   icon?: "branch";
   /** `cause` is one line of a tool's output (a git error): set apart, in a box of its own. */
