@@ -152,6 +152,17 @@ describe("⌘R", () => {
     const menu = await screen.findByTestId("run-menu");
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([expect.stringContaining("Dev"), expect.stringContaining("Test")]);
     expect(runCalls()).toEqual([]);
+    // ⌘R opened the menu, so the key is on the menu, not on its first action.
+    expect(within(menu).getByTestId("run-menu-picker-key").textContent).toBe("⌘R");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).not.toContainEqual(expect.stringContaining("⌘R"));
+  });
+
+  it("shows ⌘R on the action itself when it is the only one", async () => {
+    await renderMenu(project([secret, dev]));
+    openMenu(screen.getByTestId("run-menu-trigger"));
+    const menu = await screen.findByTestId("run-menu");
+    expect(within(menu).getByRole("menuitem").textContent).toContain("⌘R");
+    expect(within(menu).queryByTestId("run-menu-picker-key")).toBeNull();
   });
 
   it("does nothing, and leaves the keys alone, when every action is hidden", async () => {

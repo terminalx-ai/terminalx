@@ -215,8 +215,10 @@ export function ReviewThreadList({ workspace, view }: { workspace: string; view:
       {view.snapshot && <span data-testid="review-thread-counts" className="min-w-0 text-[11px] text-faint">{counts.open} open · {counts.resolved} resolved</span>}
       <span className="ml-auto flex shrink-0 items-center gap-1">
         {view.pr.state === "OPEN" && counts.open > 0 && <Button size="xs" variant="secondary" disabled={!tabId} title={tabId ? undefined : "Open an agent tab to add threads to its chat"} onClick={() => {
-          addThreadsToChat(tabId!, open, view.pr.url);
-          setNotice(`Added ${open.length} open ${open.length === 1 ? "thread" : "threads"} to the chat draft.`);
+          const { added, omitted } = addThreadsToChat(tabId!, open, view.pr.url);
+          setNotice(omitted
+            ? `Added the first ${added} of ${open.length} open threads to the chat draft. Add the rest once these are done.`
+            : `Added ${added} open ${added === 1 ? "thread" : "threads"} to the chat draft.`);
         }}>Add all {counts.open} to chat</Button>}
         <Button size="icon-xs" variant="ghost" aria-label="Refresh threads" title="Refresh threads" disabled={view.loading || !!view.working} onClick={() => void refreshThreads(workspace, view.pr.url, true)}>
           <RefreshCw className={cn(view.loading && "animate-spin")} />

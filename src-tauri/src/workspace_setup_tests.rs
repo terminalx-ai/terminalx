@@ -206,6 +206,7 @@ fn an_untrusted_committed_setup_script_becomes_a_failed_setup_and_never_runs() {
     start_pending(&rig.manager, &entry.id);
     let setup = rig.wait(&entry.id, Status::Failed);
     assert!(setup.error.as_deref().unwrap_or_default().contains("setup script that is not trusted"), "{setup:?}");
+    assert!(setup.error.as_deref().unwrap_or_default().contains("Open Settings → Projects → Scripts"), "{setup:?}");
     assert!(!Path::new(&entry.cwd).join("untrusted").exists());
 }
 
@@ -230,8 +231,9 @@ fn run_after_setup_actions_start_only_once_setup_succeeds() {
     let entry = rig.entry("after");
     let cwd = Path::new(&entry.cwd).to_path_buf();
     let runs = |rig: &Rig| action_runner::states(&rig.manager, &entry.id).unwrap();
+    // "Allow several at once", so a second start would open a second tab.
     let action = |id: &str, command: &str, run_after_setup: bool| projects::RepositoryActionEntry {
-        id: id.into(), name: id.into(), command: command.into(), run_after_setup, ..Default::default()
+        id: id.into(), name: id.into(), command: command.into(), run_after_setup, concurrent: true, ..Default::default()
     };
     projects::update(rig.root.to_str().unwrap(), ProjectPatch { actions: Some(vec![
         // Proves it ran after setup's own work, in the same workspace.
@@ -263,4 +265,35 @@ fn run_after_setup_actions_start_only_once_setup_succeeds() {
     assert_eq!(std::fs::read_to_string(cwd.join("ran")).unwrap(), "ran");
     assert_eq!(runs(&rig).len(), 1, "only the run-after-setup action runs");
     assert!(!cwd.join("manual").exists());
+
+    // A manual Rerun setup that succeeds again starts nothing more.
+    rig.script("printf again > setup-again");
+    start(&rig.manager, &entry.id, true).unwrap();
+    rig.wait(&entry.id, Status::Succeeded);
+    assert!(cwd.join("setup-again").exists());
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(runs(&rig).len(), 1, "a rerun does not start Run after setup actions again");
+    assert_eq!(std::fs::read_to_string(cwd.join("ran")).unwrap(), "ran");
+}
+
+#[test]
+fn run_after_setup_actions_start_when_a_new_workspace_has_no_setup_script() {
+    use crate::action_runner::State;
+    let mut rig = Rig::new();
+    crate::action_runner::observe(rig.manager.sink().clone());
+    follow_creations(&rig.manager);
+    projects::update(rig.root.to_str().unwrap(), ProjectPatch { actions: Some(vec![projects::RepositoryActionEntry {
+        id: "dev".into(), name: "dev".into(), command: "printf ready > ready; exec sleep 60".into(), run_after_setup: true, ..Default::default()
+    }]), ..Default::default() }).unwrap();
+    let entry = rig.entry("plain");
+    prepare(&entry).unwrap();
+    assert!(read(&entry.id).unwrap().is_none(), "no setup script, so no setup attempt");
+    rig.manager.sink().emit("session_created", &entry);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !Path::new(&entry.cwd).join("ready").exists() {
+        assert!(Instant::now() < deadline, "the run-after-setup action never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let runs = crate::action_runner::states(&rig.manager, &entry.id).unwrap();
+    assert_eq!(runs.iter().map(|r| (r.action_id.as_str(), r.state)).collect::<Vec<_>>(), vec![("dev", State::Running)]);
 }

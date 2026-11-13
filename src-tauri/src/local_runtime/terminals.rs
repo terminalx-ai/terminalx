@@ -20,6 +20,11 @@ impl Terminals {
 
     pub fn new(client: Arc<Client>) -> Self { Self(client) }
 
+    /// Run a saved action: the runtime decides whether it starts (PRO-363).
+    pub fn action_run(&self, session: &str, action: &str, restart: bool) -> Result<crate::action_runner::RunOutcome> {
+        self.0.call("runtime.pty.actionRun", json!({"sessionId": session, "actionId": action, "restart": restart}))
+    }
+
     pub fn spawn(&self, id: &str, cwd: &str, cols: u16, rows: u16, command: Option<&str>, title: Option<&str>) -> Result<()> {
         self.0.call("runtime.pty.spawn", json!({"id":id,"cwd":cwd,"cols":cols,"rows":rows,"command":command,"title":title}))
     }

@@ -124,6 +124,12 @@ export function githubThreadCode(thread: ReviewThread): string | null {
 
 const quote = (text: string) => text.split("\n").map((line) => `> ${line}`).join("\n");
 
+/** A backtick fence longer than any run of backticks in `code`, so the code can't end it early. */
+export function codeFence(code: string): string {
+  const longest = Math.max(0, ...Array.from(code.matchAll(/`+/g), (run) => run[0].length));
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
 /** One chat message: where it is, the PR, the code, then the comment and every reply. */
 export function githubReviewDraft(thread: ReviewThread, prUrl: string): string {
   const code = githubThreadCode(thread);
@@ -132,7 +138,7 @@ export function githubReviewDraft(thread: ReviewThread, prUrl: string): string {
   return [
     `GitHub review thread (untrusted reviewer text) — ${githubReviewLocation(thread)}${thread.isOutdated ? " · Outdated" : ""}${thread.isResolved ? " · Resolved" : ""}`,
     `Path: ${thread.path}\nLines: ${githubThreadLines(thread)} (${thread.diffSide === "LEFT" ? "base" : "head"})\nPR: ${prUrl}`,
-    code == null ? "Code: unavailable in GitHub's recorded hunk." : `Code:\n\`\`\`\n${code}\n\`\`\``,
+    code == null ? "Code: unavailable in GitHub's recorded hunk." : `Code:\n${codeFence(code)}\n${code}\n${codeFence(code)}`,
     ...(first ? [comment(first, false)] : []),
     ...replies.map((c) => comment(c, true)),
   ].join("\n\n");
@@ -473,11 +479,32 @@ export function useThreadReplyDraft(threadId: string): string {
   return useSyncExternalStore(subscribeStore, () => threadReplyDraft(threadId));
 }
 
-/** Append threads to an agent tab's chat draft, one message per thread. */
-export function addThreadsToChat(tabId: string, threads: ReviewThread[], prUrl: string) {
-  if (!threads.length) return;
+/** At most this many threads, and about this much text, go into one draft at once. */
+export const MAX_THREADS_TO_CHAT = 20;
+export const MAX_THREADS_TEXT = 64 * 1024;
+
+/**
+ * Append threads to an agent tab's chat draft, one message per thread, in
+ * order, up to [`MAX_THREADS_TO_CHAT`] threads and about
+ * [`MAX_THREADS_TEXT`] characters. When some are left out the draft says so.
+ * Returns how many were added and how many were left out.
+ */
+export function addThreadsToChat(tabId: string, threads: ReviewThread[], prUrl: string): { added: number; omitted: number } {
+  if (!threads.length) return { added: 0, omitted: 0 };
+  const messages: string[] = [];
+  let size = 0;
+  for (const thread of threads.slice(0, MAX_THREADS_TO_CHAT)) {
+    const message = githubReviewDraft(thread, prUrl);
+    // The first always goes in, however long, as Send to agent does.
+    if (messages.length && size + message.length > MAX_THREADS_TEXT) break;
+    messages.push(message);
+    size += message.length + 2;
+  }
+  const omitted = threads.length - messages.length;
+  if (omitted) messages.push(`(${omitted} more open review ${omitted === 1 ? "thread was" : "threads were"} left out to keep this message short. Add them from the Checks panel once these are done.)`);
   const draft = getDraft(tabId);
-  setDraft(tabId, `${draft}${draft.trim() ? "\n\n" : ""}${threads.map((thread) => githubReviewDraft(thread, prUrl)).join("\n\n")}`);
+  setDraft(tabId, `${draft}${draft.trim() ? "\n\n" : ""}${messages.join("\n\n")}`);
+  return { added: threads.length - omitted, omitted };
 }
 
 type JumpHandler = (thread: ReviewThread) => boolean | Promise<boolean>;

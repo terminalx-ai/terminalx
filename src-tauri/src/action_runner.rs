@@ -20,11 +20,18 @@ use crate::{pty::{PtyExit, ShellPane}, session::SessionManager, sink::{EventSink
 pub const EVENT: &str = "action_state_changed";
 /// An action's tab is `<session>:action-<run>-<action id as hex>`.
 const PANE_PREFIX: &str = "action-";
-/// Pane ids are at most 256 bytes; this keeps the hex of the id well inside.
-const MAX_ACTION_ID: usize = 96;
-/// How long a restart waits for the old run to exit before starting the new
-/// one: a server that still holds the workspace's port would fail to listen.
+/// The longest action id that can run. Its hex is in the tab's pane id, and
+/// pane ids are at most [`MAX_PANE_ID`] bytes (the runtime's own limit): a
+/// session id (36), `:action-`, a run id (32), `-` and 128 hex fit with room.
+/// Saving a longer id is refused (`store::projects`).
+pub const MAX_ACTION_ID: usize = 64;
+const MAX_PANE_ID: usize = 256;
+/// How long a restart waits for the old run to exit. A run that has not
+/// exited by then is left to finish: the new one would find its port taken.
+#[cfg(not(test))]
 const RESTART_WAIT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const RESTART_WAIT: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -72,6 +79,9 @@ pub trait Host {
     /// Every session's shell tabs, including ones whose program has exited.
     fn shells(&self) -> Result<Vec<ShellPane>>;
     fn kill(&self, pane: &str) -> Result<()>;
+    /// The process a pane runs, when this host can see it: a restart waits
+    /// for that process group to be gone, not only for the pane to be closed.
+    fn pid(&self, _pane: &str) -> Option<u32> { None }
 }
 
 impl Host for SessionManager {
@@ -87,6 +97,7 @@ impl Host for SessionManager {
         crate::local_runtime::calls::execute(self, self.sink(), "runtime.pty.kill", json!({"id": pane}))?;
         Ok(())
     }
+    fn pid(&self, pane: &str) -> Option<u32> { self.terminals().pid(pane) }
 }
 
 #[cfg(unix)]
@@ -106,9 +117,18 @@ fn exits() -> &'static parking_lot::Mutex<HashMap<String, Exit>> {
     EXITS.get_or_init(Default::default)
 }
 
-/// Serializes "is it running?" with the launch that follows, so two quick
-/// clicks on a non-concurrent action start one tab.
-static LAUNCH: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+/// One lock per non-concurrent action of a session. It serializes "is it
+/// running?" with the launch that follows, so two quick starts (two clicks,
+/// or ⌘R beside Run after setup) open one tab, and a restart waiting for its
+/// old run holds up only that action. Every run is decided in the runtime
+/// process: the desktop asks it through `runtime.pty.actionRun`.
+fn action_lock(session: &str, action: &str) -> Arc<parking_lot::Mutex<()>> {
+    static LOCKS: OnceLock<parking_lot::Mutex<HashMap<(String, String), Arc<parking_lot::Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS.get_or_init(Default::default).lock();
+    // A lock nobody holds or waits on is dropped, so the map stays small.
+    locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    locks.entry((session.to_string(), action.to_string())).or_default().clone()
+}
 
 /// Record the exit code of every action tab whose `pty_exit` reaches `sink`,
 /// and tell the windows with [`EVENT`]. The desktop hears every runtime
@@ -129,9 +149,12 @@ pub fn observe(sink: Arc<dyn EventSink>) -> ListenerId {
 }
 
 fn pane_id(session: &str, action: &str) -> Result<String> {
-    if action.is_empty() || action.len() > MAX_ACTION_ID { bail!("This action's id is too long to run it"); }
+    if action.is_empty() { bail!("This action has no id. Edit it in Settings › Projects and save it again."); }
+    if action.len() > MAX_ACTION_ID { bail!("This action's id is longer than {MAX_ACTION_ID} characters, so it can't run. Edit the action in Settings › Projects and save it again."); }
     let hex: String = action.bytes().map(|byte| format!("{byte:02x}")).collect();
-    Ok(format!("{session}:{PANE_PREFIX}{}-{hex}", uuid::Uuid::now_v7().simple()))
+    let pane = format!("{session}:{PANE_PREFIX}{}-{hex}", uuid::Uuid::now_v7().simple());
+    if pane.len() > MAX_PANE_ID { bail!("This action's id is too long for this session's tabs. Give the action a shorter id in projects.json."); }
+    Ok(pane)
 }
 
 /// The session and action id an action tab's pane id names.
@@ -200,15 +223,27 @@ pub fn run(host: &dyn Host, session: &str, action_id: &str, options: RunOptions)
     // Hidden actions are only left out of menus; the action itself still runs.
     let action = project_actions(&entry.project_path)?.into_iter().find(|a| a.id == action_id)
         .context("This project has no such saved action")?;
-    let _launch = LAUNCH.lock();
+    // Refused before anything is stopped or started.
+    pane_id(session, &action.id)?;
+    let lock = action_lock(session, &action.id);
+    let _single = (!action.concurrent).then(|| lock.lock());
     if !action.concurrent {
         let running = states(host, session)?.into_iter().find(|r| r.action_id == action.id && r.state == State::Running);
         if let Some(running) = running {
             if !options.restart { return Ok(RunOutcome { run: running, started: false }) }
+            let pid = host.pid(&running.pane_id);
             host.kill(&running.pane_id)?;
+            // Gone when its process group is: a server still letting go of
+            // the workspace's port is not stopped yet.
+            let stopped = || match pid {
+                Some(pid) => !crate::harness::host::group_or_process_alive(pid),
+                None => exits().lock().contains_key(&running.pane_id)
+                    || host.shells().is_ok_and(|shells| !shells.iter().any(|shell| shell.id == running.pane_id)),
+            };
             let deadline = Instant::now() + RESTART_WAIT;
-            while !exits().lock().contains_key(&running.pane_id) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
+            while !stopped() {
+                if Instant::now() >= deadline { bail!("{} is still stopping. Try again in a moment.", action.name); }
+                std::thread::sleep(Duration::from_millis(20));
             }
         }
     }
@@ -224,10 +259,28 @@ pub fn run(host: &dyn Host, session: &str, action_id: &str, options: RunOptions)
     Ok(RunOutcome { run, started: true })
 }
 
-/// The workspace's setup script has succeeded: start its project's
-/// "Run after setup" actions, in saved order. Failures are logged, never
-/// reported as a setup failure.
+/// Claim a workspace's one start of its "Run after setup" actions. The claim
+/// is a file created only if it does not exist yet, so a rerun of setup, a
+/// second runtime or a repeated event never starts them again.
+fn claim_after_setup(session: &str) -> Result<bool> {
+    let dir = store::session_dir(session)?;
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join("after-setup-actions")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The workspace is ready: its setup script has succeeded for the first time,
+/// or it has none. Start its project's "Run after setup" actions, in saved
+/// order, once per workspace. Failures are logged, never reported as a setup
+/// failure.
 pub fn after_setup(manager: &SessionManager, session: &str) {
+    match claim_after_setup(session) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => { log::warn!("Run after setup for {session}: {error:#}"); return }
+    }
     let actions = store::index::get(session).and_then(|entry| project_actions(&entry.project_path));
     let actions = match actions { Ok(actions) => actions, Err(error) => { log::warn!("Run after setup for {session}: {error:#}"); return } };
     for action in actions.into_iter().filter(|a| a.run_after_setup) {

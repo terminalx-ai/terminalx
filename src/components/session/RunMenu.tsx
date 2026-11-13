@@ -208,7 +208,11 @@ export function RunMenu({ session, project, className }: { session: SessionEntry
             </DropdownMenuTrigger>
           </WithTooltip>
           <DropdownMenuContent align="end" className="min-w-56 max-w-80" aria-label="Run" data-testid="run-menu">
-            <DropdownMenuLabel>Run</DropdownMenuLabel>
+            {/* ⌘R opens this menu as a picker when there are several actions, so the key is shown here, not on one of them. */}
+            <DropdownMenuLabel className={cn(actions.length > 1 && "flex items-center")}>
+              Run
+              {actions.length > 1 && <span className="ml-auto flex" data-testid="run-menu-picker-key"><MenuShortcut keys={keys} /></span>}
+            </DropdownMenuLabel>
             {actions.map((action, index) => {
               const run = runs.get(action.id);
               return (
@@ -216,7 +220,7 @@ export function RunMenu({ session, project, className }: { session: SessionEntry
                   <RepositoryIcon value={action.icon} />
                   <span className="min-w-0 truncate" title={action.command}>{action.name}</span>
                   <RunState run={run} />
-                  {index === 0 && !run && <MenuShortcut keys={keys} />}
+                  {index === 0 && actions.length === 1 && !run && <MenuShortcut keys={keys} />}
                 </DropdownMenuItem>
               );
             })}

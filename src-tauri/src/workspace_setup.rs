@@ -273,7 +273,12 @@ pub fn follow_creations(manager: &SessionManager) {
         let owner = owner.clone();
         // The event may be emitted under a caller's admission lock. This short
         // dispatch only queues work; the two workers own all script execution.
-        std::thread::spawn(crate::github_process::queued(move || start_pending(&owner, &entry.id)));
+        std::thread::spawn(crate::github_process::queued(move || {
+            start_pending(&owner, &entry.id);
+            // No setup script, so no attempt was recorded: the workspace is
+            // ready now, and its Run after setup actions start (PRO-363).
+            if matches!(read(&entry.id), Ok(None)) { crate::action_runner::after_setup(&owner, &entry.id); }
+        }));
     }));
 }
 

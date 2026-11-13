@@ -94,7 +94,12 @@ fn pane_ids_name_their_session_and_any_action_id() {
         assert_eq!(crate::pty::shell_session(&pane), Some("session-1"), "a shell tab of the session");
         assert_eq!(parse_pane(&pane), Some(("session-1", id.to_string())));
     }
-    assert!(pane_id("s", &"x".repeat(MAX_ACTION_ID + 1)).is_err());
+    let long = pane_id("s", &"x".repeat(MAX_ACTION_ID + 1)).unwrap_err().to_string();
+    assert!(long.contains("longer than 64 characters"), "{long}");
+    // The pane id stays within the runtime's 256-byte limit, or the run is refused with a reason.
+    let session = "s".repeat(120);
+    let refused = pane_id(&session, &"x".repeat(MAX_ACTION_ID)).unwrap_err().to_string();
+    assert!(refused.contains("too long for this session's tabs"), "{refused}");
     assert!(pane_id("s", "").is_err());
     // Ordinary shell tabs and setup panes are not action runs.
     for other in ["s:0190aaaa-bbbb", "s:workspace-setup-1", "tab:abc", "s:action-", "s:action-run-zz", "s:action-run-6"] {
@@ -228,4 +233,65 @@ fn the_desktop_records_an_exit_relayed_from_the_runtime() {
     assert_eq!(exits().lock()[&pane].code, Some(4));
     assert!(!exits().lock().contains_key("relayed:plain"));
     sink.unlisten(listener);
+}
+
+#[test]
+fn a_restart_whose_old_run_will_not_stop_starts_nothing_and_holds_up_no_other_action() {
+    let rig = Rig::new();
+    let entry = rig.entry("stuck");
+    let cwd = Path::new(&entry.cwd).to_path_buf();
+    rig.actions(vec![
+        // Ignores the polite signals: only the forced kill 2 s later ends it.
+        action("stuck", "trap '' TERM HUP INT; printf s >> stuck; while :; do sleep 0.05; done"),
+        action("other", "printf o >> other; exec sleep 60"),
+    ]);
+    let first = run(&rig.manager, &entry.id, "stuck", RunOptions::default()).unwrap();
+    wait_until("the stuck run to start", || cwd.join("stuck").exists());
+    let restarting = {
+        let (session, manager) = (entry.id.clone(), rig.manager.clone());
+        std::thread::spawn(move || run(&manager, &session, "stuck", RunOptions { restart: true }))
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    // Another action is not held up by the restart's wait.
+    let started = Instant::now();
+    assert!(run(&rig.manager, &entry.id, "other", RunOptions::default()).unwrap().started);
+    assert!(started.elapsed() < Duration::from_millis(800), "the other action waited {:?}", started.elapsed());
+    let error = restarting.join().unwrap().unwrap_err().to_string();
+    assert_eq!(error, "Action stuck is still stopping. Try again in a moment.");
+    assert_eq!(std::fs::read_to_string(cwd.join("stuck")).unwrap(), "s", "no second run started");
+    assert!(!rig.action_panes().iter().any(|pane| pane != &first.run.pane_id && parse_pane(pane).is_some_and(|(_, id)| id == "stuck")));
+}
+
+#[test]
+fn the_desktop_runs_through_the_runtime_so_one_place_decides_a_single_instance_action() {
+    let rig = Rig::new();
+    let entry = rig.entry("routed");
+    rig.actions(vec![RepositoryActionEntry { run_after_setup: true, ..action("dev", "exec sleep 60") }]);
+    // Run after setup, in the runtime.
+    after_setup(&rig.manager, &entry.id);
+    wait_until("the after-setup run", || rig.states(&entry.id).iter().any(|r| r.state == State::Running));
+    // ⌘R from the desktop arrives as runtime.pty.actionRun and finds it running.
+    let sink = rig.manager.sink().clone();
+    let outcome: RunOutcome = serde_json::from_value(crate::local_runtime::calls::execute(&rig.manager, &sink, "runtime.pty.actionRun",
+        json!({"sessionId": entry.id, "actionId": "dev"})).unwrap()).unwrap();
+    assert!(!outcome.started, "the runtime hands back the running tab");
+    assert_eq!(rig.states(&entry.id).len(), 1);
+    let restarted: RunOutcome = serde_json::from_value(crate::local_runtime::calls::execute(&rig.manager, &sink, "runtime.pty.actionRun",
+        json!({"sessionId": entry.id, "actionId": "dev", "restart": true})).unwrap()).unwrap();
+    assert!(restarted.started);
+    assert_ne!(restarted.run.pane_id, outcome.run.pane_id);
+}
+
+#[test]
+fn run_after_setup_starts_once_per_workspace() {
+    let rig = Rig::new();
+    let entry = rig.entry("once");
+    let cwd = Path::new(&entry.cwd).to_path_buf();
+    rig.actions(vec![RepositoryActionEntry { run_after_setup: true, concurrent: true, ..action("watch", "printf w >> runs; exec sleep 60") }]);
+    after_setup(&rig.manager, &entry.id);
+    after_setup(&rig.manager, &entry.id);
+    wait_until("the first start", || cwd.join("runs").exists());
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(std::fs::read_to_string(cwd.join("runs")).unwrap(), "w", "a second call starts nothing, even for an action that may run several at once");
+    assert_eq!(rig.states(&entry.id).len(), 1);
 }

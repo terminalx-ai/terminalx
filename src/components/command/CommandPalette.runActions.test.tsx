@@ -58,6 +58,9 @@ describe("project actions in the command palette", () => {
     await waitFor(() => expect(entry("command:run-action:dev")?.textContent).toContain("Run Dev server"));
     expect(entry("command:run-action:test")?.textContent).toContain("Run Unit tests");
     expect(entry("command:run-action:secret")).toBeNull();
+    // With two visible actions ⌘R opens the Run menu, so neither entry claims the key.
+    expect(entry("command:run-action:dev")?.textContent).not.toContain("⌘R");
+    expect(entry("command:run-action:test")?.textContent).not.toContain("⌘R");
     cleanup();
     palette("secret job");
     await waitFor(() => expect(screen.getByLabelText("Command palette search")).toBeTruthy());

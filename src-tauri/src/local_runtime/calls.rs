@@ -41,6 +41,13 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
         if method == "agentLoginTabs" {
             return Ok(serde_json::to_value(crate::agent_keys::running(string(&params, "harness")?))?);
         }
+        // A saved action's run is decided here, in the runtime, for the
+        // desktop and for Run after setup alike (PRO-363): one owner, so a
+        // non-concurrent action never gets two tabs from two processes.
+        if method == "actionRun" {
+            let options = crate::action_runner::RunOptions { restart: params["restart"].as_bool().unwrap_or(false) };
+            return Ok(serde_json::to_value(crate::action_runner::run(manager, string(&params, "sessionId")?, string(&params, "actionId")?, options)?)?);
+        }
         if method == "busyMany" {
             let ids: Vec<String> = serde_json::from_value(params["ids"].clone())?;
             if ids.len() > 4096 || ids.iter().any(|id| id.is_empty() || id.len() > 256) { bail!("invalid pane list"); }

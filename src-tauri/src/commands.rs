@@ -1998,8 +1998,9 @@ pub async fn workspace_setup(state: State<'_, AppState>, operation: String, sess
 #[tauri::command]
 pub async fn action_run(state: State<'_, AppState>, session_id: String, action_id: String, restart: Option<bool>) -> CmdResult<crate::action_runner::RunOutcome> {
     let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
-    let options = crate::action_runner::RunOptions { restart: restart.unwrap_or(false) };
-    tauri::async_runtime::spawn_blocking(move || crate::action_runner::run(&runtime.terminals()?, &session_id, &action_id, options))
+    let restart = restart.unwrap_or(false);
+    // Decided by the runtime, which also starts Run after setup actions.
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.action_run(&session_id, &action_id, restart))
         .await.map_err(err)?.map_err(err)
 }
 

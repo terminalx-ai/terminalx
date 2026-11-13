@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { discoverSessionPr, noteSessionPrs, reviewFileReader, githubReviewAnchor, reviewBody, githubReviewDraft, githubReviewLocation, githubThreadCode, githubThreadLines, threadCounts } from "./reviewThreads";
+import { addThreadsToChat, codeFence, discoverSessionPr, noteSessionPrs, reviewFileReader, githubReviewAnchor, reviewBody, githubReviewDraft, githubReviewLocation, githubThreadCode, githubThreadLines, MAX_THREADS_TO_CHAT, threadCounts } from "./reviewThreads";
+import { getDraft, setDraft } from "@/lib/drafts";
 import type { GitSource } from "./gitSource";
 import { reviewSnapshot as snapshot, reviewThread as thread, reviewFile } from "@/test/reviewThreads";
 
@@ -58,6 +59,31 @@ describe("suggestions and chat drafts", () => {
     expect(githubThreadCode(range)).toBe("new\nconst token = legacy.token;");
     expect(githubThreadLines(range)).toBe("lines 41–42");
     expect(githubReviewDraft({ ...thread, originalLine: 300 }, snapshot.url)).toContain("Code: unavailable in GitHub's recorded hunk.");
+  });
+  it("fences the code with more backticks than it contains, so the code can't close it", () => {
+    expect(codeFence("plain")).toBe("```");
+    expect(codeFence("const s = `a` + ```b```;")).toBe("````");
+    const tricky = { ...thread, comments: [{ ...thread.comments[0], diffHunk: "@@ -12 +12 @@\n-old\n+const md = \"````js\";" }] };
+    const draft = githubReviewDraft(tricky, snapshot.url);
+    expect(draft).toContain("Code:\n`````\nconst md = \"````js\";\n`````");
+  });
+  it("adds at most 20 threads at once and says in the draft how many were left out", () => {
+    const many = Array.from({ length: 25 }, (_, n) => ({ ...thread, id: `t${n}`, path: `src/file${n}.ts` }));
+    setDraft("cap", "");
+    expect(addThreadsToChat("cap", many, snapshot.url)).toEqual({ added: MAX_THREADS_TO_CHAT, omitted: 5 });
+    const draft = getDraft("cap");
+    expect(draft).toContain("src/file19.ts");
+    expect(draft).not.toContain("src/file20.ts");
+    expect(draft.endsWith("(5 more open review threads were left out to keep this message short. Add them from the Checks panel once these are done.)")).toBe(true);
+    setDraft("small", "");
+    expect(addThreadsToChat("small", many.slice(0, 2), snapshot.url)).toEqual({ added: 2, omitted: 0 });
+    expect(getDraft("small")).not.toContain("left out");
+  });
+  it("stops before the draft grows past about 64 KB, but always adds the first thread", () => {
+    const long = (id: string) => ({ ...thread, id, comments: [{ ...thread.comments[0], body: "x".repeat(40_000) }] });
+    setDraft("size", "");
+    expect(addThreadsToChat("size", [long("a"), long("b"), long("c")], snapshot.url)).toEqual({ added: 1, omitted: 2 });
+    expect(getDraft("size")).toContain("2 more open review threads were left out");
   });
   it("counts open and resolved threads", () => {
     expect(threadCounts([thread, { ...thread, id: "r", isResolved: true }, { ...thread, id: "o" }])).toEqual({ open: 2, resolved: 1 });

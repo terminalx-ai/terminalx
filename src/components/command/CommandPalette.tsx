@@ -586,11 +586,13 @@ export function CommandPalette({
     ];
     // PRO-363: the open local session's project actions and preview URLs, as the header's Run menu and Open button list them.
     const runProject = selectedSession && !store.selectedCloudWorkspace ? store.projects.find((project) => project.path === selectedSession.projectPath) : undefined;
+    const runVisible = runProject ? visibleActions(runProject.actions ?? []) : [];
     const runEntries: CommandEntry[] = selectedSession && offersRunMenu(selectedSession, runProject)
       ? [
-          ...visibleActions(runProject.actions ?? []).map((action, index) => indexPaletteItem({
+          // ⌘R runs an action only when it is the only one; with several it opens the Run menu, which shows the key.
+          ...runVisible.map((action, index) => indexPaletteItem({
             id: `command:run-action:${action.id}`, group: "commands" as const, primary: `Run ${action.name}`, secondary: action.command,
-            recentAt: 30 - index, icon: Play, chord: index === 0 ? keymap["session.runAction"][0] : undefined,
+            recentAt: 30 - index, icon: Play, chord: runVisible.length === 1 ? keymap["session.runAction"][0] : undefined,
             run: () => startAction(selectedSession, action),
           }, ["run action start script"])),
           ...(runProject.previewUrls ?? []).map((preview, index) => indexPaletteItem({
