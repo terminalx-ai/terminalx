@@ -817,6 +817,15 @@ pub struct Run {
     /// Its worker limit and budget (PRO-280).
     #[serde(default)]
     pub limits: budget::RunLimits,
+    /// The tries each piece gets, the first included, as the project had it
+    /// set when the run was created ([`ladder`]). A run stored before the
+    /// setting existed has the three it was made with.
+    #[serde(default = "default_max_tries")]
+    pub max_tries: u32,
+    /// The effort escalation stops at, kept the same way: `high` for a run
+    /// stored before the setting existed.
+    #[serde(default = "default_effort_ceiling")]
+    pub effort_ceiling: String,
     /// What it has used, as of its last refresh.
     #[serde(default)]
     pub usage: budget::RunUsage,
@@ -827,7 +836,21 @@ pub struct Run {
     pub modified: String,
 }
 
+fn default_max_tries() -> u32 {
+    ladder::DEFAULT_TRIES_PER_PIECE
+}
+
+fn default_effort_ceiling() -> String {
+    ladder::DEFAULT_EFFORT_CEILING.into()
+}
+
 impl Run {
+    /// How far its pieces climb when a try falls short: its own values, not
+    /// the ones Settings hold now.
+    pub fn ladder(&self) -> ladder::Rules {
+        ladder::Rules { tries: self.max_tries, ceiling: self.effort_ceiling.clone() }
+    }
+
     pub fn piece(&self, id: &str) -> Option<&Piece> {
         self.pieces.iter().find(|piece| piece.id == id)
     }
