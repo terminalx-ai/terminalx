@@ -3221,25 +3221,7 @@ pub async fn working_change_sets(
     hide_whitespace: Option<bool>,
 ) -> CmdResult<(String, String, Vec<git::ChangedFile>, Vec<git::ChangedFile>)> {
     tauri::async_runtime::spawn_blocking(move || {
-        let p = Path::new(&cwd);
-        let head = git::head_tree(p).map_err(err)?;
-        let index = git::run(p, &["write-tree"])
-            .map_err(err)?
-            .trim()
-            .to_string();
-        let worktree = git::snapshot_tree(p).map_err(err)?;
-        let whitespace = hide_whitespace.unwrap_or(false);
-        let staged = if head == index {
-            Vec::new()
-        } else {
-            git::changes_between_options(p, &head, Some(&index), whitespace).map_err(err)?
-        };
-        let unstaged = if index == worktree {
-            Vec::new()
-        } else {
-            git::changes_between_options(p, &index, Some(&worktree), whitespace).map_err(err)?
-        };
-        Ok((head, index, staged, unstaged))
+        git::working_change_sets(Path::new(&cwd), hide_whitespace.unwrap_or(false)).map_err(err)
     })
     .await
     .map_err(err)?

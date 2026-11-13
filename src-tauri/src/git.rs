@@ -414,6 +414,38 @@ pub fn snapshot_tree(cwd: &Path) -> Result<String> {
     snapshot_tree_including(cwd, &[])
 }
 
+/// Return staged and unstaged changes. During a conflict, keep the checkout
+/// reviewable by comparing HEAD with a temporary snapshot of the worktree;
+/// Git cannot write a tree from an index containing unmerged entries.
+pub fn working_change_sets(
+    cwd: &Path,
+    hide_whitespace: bool,
+) -> Result<(String, String, Vec<ChangedFile>, Vec<ChangedFile>)> {
+    let head = head_tree(cwd)?;
+    if !run(cwd, &["ls-files", "-u", "--"])?.is_empty() {
+        let worktree = snapshot_tree(cwd)?;
+        let changes = if head == worktree {
+            Vec::new()
+        } else {
+            changes_between_options(cwd, &head, Some(&worktree), hide_whitespace)?
+        };
+        return Ok((head.clone(), head, Vec::new(), changes));
+    }
+    let index = run(cwd, &["write-tree"])?.trim().to_string();
+    let worktree = snapshot_tree(cwd)?;
+    let staged = if head == index {
+        Vec::new()
+    } else {
+        changes_between_options(cwd, &head, Some(&index), hide_whitespace)?
+    };
+    let unstaged = if index == worktree {
+        Vec::new()
+    } else {
+        changes_between_options(cwd, &index, Some(&worktree), hide_whitespace)?
+    };
+    Ok((head, index, staged, unstaged))
+}
+
 /// Include a checkpoint's paths even if later edits added them to .gitignore.
 fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
     let index = run(cwd, &["rev-parse", "--git-path", "index"])?.trim().to_string();
@@ -1522,12 +1554,12 @@ pub fn apply_hunk(
             let staged_old = raw(cwd, &["diff", "--cached", "--quiet", "--exit-code", "--", old]);
             anyhow::ensure!(matches!(staged_old, Some((0, _))), "Unstage existing changes to the original file before staging rename hunks.");
             let before = hunk_diff(cwd, path, old_path, false)?;
-            let count = before.match_indices("@@ -").count();
+            let count = hunk_starts(&before).len();
             anyhow::ensure!(index < count, "That hunk is no longer available. Refresh the diff and try again.");
             stage_paths(cwd, &[old.to_string(), path.to_string()])?;
             let result = (|| {
                 let diff = hunk_diff(cwd, path, old_path, true)?;
-                let staged_count = diff.match_indices("@@ -").count();
+                let staged_count = hunk_starts(&diff).len();
                 anyhow::ensure!(index < staged_count, "That hunk is no longer available. Refresh the diff and try again.");
                 for other in (0..staged_count).rev().filter(|other| *other != index) {
                     apply_patch(cwd, &hunk_patch(&diff, other)?, true)?;
@@ -1547,12 +1579,51 @@ pub fn apply_hunk(
     apply_patch(cwd, &hunk_patch(&diff, index)?, reverse)
 }
 
+fn hunk_starts(diff: &str) -> Vec<usize> {
+    let mut starts: Vec<usize> = diff.match_indices("\n@@ -").map(|(i, _)| i + 1).collect();
+    if diff.starts_with("@@ -") {
+        starts.insert(0, 0);
+    }
+    starts
+}
+
 fn hunk_patch(diff: &str, index: usize) -> Result<String> {
-    let starts: Vec<usize> = diff.match_indices("@@ -").map(|(i, _)| i).collect();
+    let starts = hunk_starts(diff);
     let header_end = starts.first().copied().ok_or_else(|| anyhow!("This file has no text hunks to apply."))?;
     let selected = starts.get(index).ok_or_else(|| anyhow!("That hunk is no longer available. Refresh the diff and try again."))?;
     let end = starts.get(index + 1).copied().unwrap_or(diff.len());
-    Ok(format!("{}{}", &diff[..header_end], &diff[*selected..end]))
+    let patch = format!("{}{}", &diff[..header_end], &diff[*selected..end]);
+    Ok(keep_rename_path_for_hunk(&patch))
+}
+
+/// Apply a selected rename hunk as a content edit at the destination path.
+/// Keeping Git's rename metadata would move the whole file on reverse apply.
+fn keep_rename_path_for_hunk(patch: &str) -> String {
+    let Some(plus) = patch.lines().find(|line| {
+        line.starts_with("+++ b/") || line.starts_with("+++ \"b/")
+    }) else {
+        return patch.to_string();
+    };
+    if !patch.lines().any(|line| line.starts_with("rename from ")) {
+        return patch.to_string();
+    }
+    let new_path = &plus[4..];
+    let old_path = if let Some(stripped) = new_path.strip_prefix("\"b/") {
+        format!("\"a/{stripped}")
+    } else {
+        format!("a/{}", new_path.strip_prefix("b/").unwrap_or(new_path))
+    };
+    let mut lines = Vec::new();
+    for (i, line) in patch.lines().enumerate() {
+        match i {
+            0 => lines.push(format!("diff --git {old_path} {new_path}")),
+            _ if line.starts_with("similarity index ") || line.starts_with("rename from ") || line.starts_with("rename to ") => continue,
+            _ if line.starts_with("--- a/") || line.starts_with("--- \"a/") => lines.push(format!("--- {old_path}")),
+            _ if line.starts_with("+++ b/") || line.starts_with("+++ \"b/") => lines.push(format!("+++ {new_path}")),
+            _ => lines.push(line.to_string()),
+        }
+    }
+    lines.join("\n") + if patch.ends_with('\n') { "\n" } else { "" }
 }
 
 fn apply_patch(cwd: &Path, patch: &str, reverse: bool) -> Result<()> {
@@ -1591,7 +1662,7 @@ pub fn hunk_count(cwd: &Path, path: &str, old_path: Option<&str>, staged: bool) 
         "Invalid file path."
     );
     let diff = hunk_diff(cwd, path, old_path, staged)?;
-    Ok(diff.match_indices("@@ -").count())
+    Ok(hunk_starts(&diff).len())
 }
 
 fn hunk_diff(cwd: &Path, path: &str, old_path: Option<&str>, cached: bool) -> Result<String> {
@@ -1914,7 +1985,78 @@ mod tests {
             hunk_count(p, "renamed.txt", Some("a.txt"), true).unwrap(),
             1
         );
+        assert_rename_is_staged(p);
+
+        unstage_all(p).unwrap();
+        stage_paths(p, &["a.txt".into(), "renamed.txt".into()]).unwrap();
+        assert_eq!(hunk_count(p, "renamed.txt", Some("a.txt"), true).unwrap(), 2);
+        apply_hunk(p, "renamed.txt", Some("a.txt"), 0, true).unwrap();
+        assert_eq!(hunk_count(p, "renamed.txt", Some("a.txt"), true).unwrap(), 1);
+        assert_rename_is_staged(p);
         assert!(p.join("renamed.txt").exists());
+        assert!(!p.join("a.txt").exists());
+    }
+
+    fn assert_rename_is_staged(cwd: &Path) {
+        let status = run(cwd, &["diff", "--cached", "--name-status", "-M", "--"]).unwrap();
+        let fields: Vec<_> = status.trim().split('\t').collect();
+        assert_eq!(fields.len(), 3, "expected one staged rename, got {status:?}");
+        assert!(fields[0].starts_with('R'), "expected rename status, got {status:?}");
+        assert_eq!(&fields[1..], ["a.txt", "renamed.txt"]);
+    }
+
+    #[test]
+    fn hunk_boundaries_only_match_line_starts() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=32).map(|n| format!("line {n}\n")).collect::<String>();
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "hunk boundary fixture", None).unwrap();
+        let changed = original.replace("line 2\n", "see @@ -1,2 +1,2 @@ here\n").replace("line 30\n", "changed 30\n");
+        std::fs::write(p.join("a.txt"), changed).unwrap();
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 2);
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
+    }
+
+    #[test]
+    fn hunk_staging_handles_missing_final_newline_and_crlf() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=24).map(|n| format!("line {n}\r\n")).collect::<String>();
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "crlf fixture", None).unwrap();
+        let changed = original.replace("line 2\r\n", "changed 2\r\n").replace("line 24\r\n", "changed final");
+        std::fs::write(p.join("a.txt"), changed.as_bytes()).unwrap();
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 2);
+        apply_hunk(p, "a.txt", None, 1, false).unwrap();
+        assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
+        assert!(run(p, &["diff", "--cached", "--", "a.txt"]).unwrap().contains("\\ No newline at end of file"));
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 1);
+        unstage_all(p).unwrap();
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
+    }
+
+    #[test]
+    fn working_change_sets_keep_conflicted_worktree_reviewable() {
+        let dir = repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "base\n").unwrap();
+        commit_all(p, "conflict base", None).unwrap();
+        run(p, &["checkout", "-qb", "other"]).unwrap();
+        std::fs::write(p.join("a.txt"), "theirs\n").unwrap();
+        commit_all(p, "theirs", None).unwrap();
+        run(p, &["checkout", "main"]).unwrap();
+        std::fs::write(p.join("a.txt"), "ours\n").unwrap();
+        commit_all(p, "ours", None).unwrap();
+        assert!(run(p, &["merge", "other"]).is_err());
+
+        assert!(!run(p, &["ls-files", "-u", "--"]).unwrap().is_empty());
+        let (_, index, staged, unstaged) = working_change_sets(p, false).unwrap();
+        assert!(!index.is_empty());
+        assert!(staged.is_empty());
+        assert!(unstaged.iter().any(|file| file.path == "a.txt"));
     }
 
 
