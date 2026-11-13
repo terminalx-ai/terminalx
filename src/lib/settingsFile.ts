@@ -2,12 +2,19 @@ import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { applyFilePreferences, connectPreferenceFile, legacyUserPreferences } from "./prefs";
+import type { SettingsFileProblem } from "@/types/settingsSources";
 import { applyFileTheme, connectThemeFile, legacyThemePreferences } from "./theme";
 
 export interface SettingsFileStatus {
   path: string;
+  /** PRO-140: `path` with the home directory written as "~". */
+  displayPath: string;
   exists: boolean;
   error: string | null;
+  /** PRO-140: the same error, structured; null when the file is valid. */
+  problem: SettingsFileProblem | null;
+  /** PRO-140: dotted keys the user file sets itself ("preferences.theme", "agents.idleStopMinutes", "orchestrator.projects"); never values. */
+  setKeys: string[];
   preferences: Record<string, unknown>;
 }
 let state: { file: SettingsFileStatus | null; error: string | null; revision: number } = { file: null, error: null, revision: 0 };
