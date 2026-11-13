@@ -168,7 +168,7 @@ it("Reset to default removes a user value", async () => {
 
 it("Settings files lists each layer with its chips and an error naming file, line and key", async () => {
   files.mockResolvedValue([
-    { layer: "managed", path: "/Library/Managed Preferences/ai.terminalx.plist", displayPath: "/Library/Managed Preferences/ai.terminalx.plist", exists: false, keys: 0, git: null, problem: null },
+    { layer: "managed", path: "/Library/Application Support/TerminalX/managed-settings.json", displayPath: "/Library/Application Support/TerminalX/managed-settings.json", exists: false, keys: 0, git: null, problem: null },
     { layer: "repositoryLocal", path: "/repo/.terminalx/settings.local.json", displayPath: "~/repo/.terminalx/settings.local.json", exists: true, keys: 2, git: "ignored", problem: { key: "scripts.teardown", line: 7, message: "isn’t a setting", effect: "ignoredKey" } },
     { layer: "repositoryShared", path: "/repo/.terminalx/settings.json", displayPath: "~/repo/.terminalx/settings.json", exists: true, keys: 5, git: "committed", problem: null },
     ...userFiles,

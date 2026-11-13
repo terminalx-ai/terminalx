@@ -62,7 +62,7 @@ const fixture = (mode) => `localStorage.setItem("raccoon.mode", ${JSON.stringify
   A.configuration_write = (request) => { window.__PW_CALLS__.push(["configuration_write", request.projectPath, request.layer, request.key, request.value]); return null; };
   A.settings_files_list = ({ projectPath }) => [
     ...(repository(projectPath) ? [
-      { layer: "managed", path: "/Library/Managed Preferences/ai.terminalx.plist", displayPath: "/Library/Managed Preferences/ai.terminalx.plist", exists: false, keys: 0, git: null, problem: null },
+      { layer: "managed", path: "/Library/Application Support/TerminalX/managed-settings.json", displayPath: "/Library/Application Support/TerminalX/managed-settings.json", exists: false, keys: 0, git: null, problem: null },
       { layer: "repositoryLocal", path: "/repos/p0/.terminalx/settings.local.json", displayPath: "/repos/p0/.terminalx/settings.local.json", exists: true, keys: 1, git: "ignored",
         problem: { key: "scripts.teardown", line: 7, message: "isn’t a setting", effect: "ignoredKey" } },
       { layer: "repositoryShared", path: "/repos/p0/.terminalx/settings.json", displayPath: "/repos/p0/.terminalx/settings.json", exists: true, keys: 2, git: "committed", problem: null },
