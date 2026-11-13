@@ -1,4 +1,5 @@
 import type { RepositorySettings, WorktreeCopyReport } from "@/types/repositorySettings";
+import type { RepositoryAction, RepositoryPreviewUrl } from "@/lib/repositoryActions";
 import type { ManualStatus } from "@terminalx/portable/manualStatus";
 export type { ManualStatus } from "@terminalx/portable/manualStatus";
 import type { AutomationRef } from "@/types/automations";
@@ -27,6 +28,9 @@ export interface TabEntry {
   providerSessionId?: string | null;
   resetLogId?: string;
   resetBackupId?: string;
+  /** After a reset: the turn it went back to, and how many files "Also reset files" restored. */
+  resetTurn?: number;
+  resetFilesRestored?: number;
   /**
    * How the app reaches the agent. Absent is its CLI in the tab's terminal.
    * An experimental Codex connection has no terminal: opening the terminal
@@ -248,6 +252,10 @@ export interface Project {
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;
   scripts?: RepositoryScripts | null;
+  /** Run-menu actions, in saved order. Absent is none. Saved with the `actions` patch. */
+  actions?: RepositoryAction[];
+  /** Templates with $PORT / $PORT_n, in saved order. Absent is none. Saved with the `previewUrls` patch. */
+  previewUrls?: RepositoryPreviewUrl[];
   repositorySettings?: RepositorySettings;
 }
 
@@ -264,6 +272,10 @@ export interface ProjectPatch {
   /** Set one branch's label; null or blank clears it. */
   branchLabel?: { branch: string; label: string | null };
   repositorySettings?: RepositorySettings;
+  /** Replaces the saved actions; [] clears them. Leaves the hooks alone. */
+  actions?: RepositoryAction[];
+  /** Replaces the saved preview URLs; [] clears them. Leaves the hooks alone. */
+  previewUrls?: RepositoryPreviewUrl[];
 }
 
 /** One checkout of a project: the root or any worktree, whoever made it. */

@@ -51,6 +51,16 @@ describe("settings row search", () => {
     expect(searchSettings("zzzz-no-such-setting")).toEqual([]);
   });
 
+  it("finds the repository Actions, Preview URLs and Environment pages", () => {
+    const first = (query: string) => searchSettings(query)[0]?.id;
+    expect(first("preview urls")).toBe("repositories.previewUrls");
+    expect(first("localhost port")).toBe("repositories.previewUrls");
+    expect(first("dev server")).toBe("repositories.actions");
+    expect(searchSettings("actions").map((match) => match.id)).toContain("repositories.actions");
+    expect(first("dotenv")).toBe("repositories.environment");
+    expect(searchSettings("keychain").map((match) => match.id)).toContain("repositories.environment");
+  });
+
   it("returns the row, its page and highlight ranges for title and description", () => {
     const [sounds] = searchSettings("sounds");
     expect(sounds.id).toBe("general.sounds");

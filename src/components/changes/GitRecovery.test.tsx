@@ -267,3 +267,25 @@ describe("local Git recovery", () => {
     expect(backend.invoke.mock.calls.some(([command]) => command === "git_push")).toBe(false);
   });
 });
+
+describe("PR load failures by cause", () => {
+  afterEach(cleanup);
+  it("names access, timeout and offline, with their actions", async () => {
+    const { GitError } = await import("./GitRecovery");
+    const retry = vi.fn();
+    const connect = vi.fn();
+    const view = render(<GitError details="HTTP 403: Resource not accessible by integration" onConnect={connect} onRetry={retry} />);
+    expect(screen.getByText("GitHub access required")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    expect(connect).toHaveBeenCalled();
+    view.rerender(<GitError details="gh pr view: call did not answer" onRetry={retry} />);
+    expect(screen.getByText("Couldn't refresh PR info")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalled();
+    view.rerender(<GitError details="error connecting to api.github.com" />);
+    expect(screen.getByText("You're offline")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    view.rerender(<GitError details="HTTP 403" operation="push" />);
+    expect(screen.queryByText("GitHub access required")).toBeNull();
+  });
+});

@@ -261,3 +261,28 @@ it("closes an error by its button or by Escape, and counts a repeat instead of s
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByRole("alert")).toBeNull();
 });
+
+it("shows a failure's own heading, its body apart, and its actions beside Copy error (PRO-291)", async () => {
+  vi.useRealTimers();
+  const retry = vi.fn(async () => true);
+  const open = vi.fn(async () => undefined);
+  render(<Toasts />);
+  act(() => {
+    showError("", "~/.claude/settings.json line 14: Unexpected token }", {
+      title: "Couldn't open a new Claude Code tab: claude exited while starting",
+      actions: [{ label: "Try again", icon: "retry", run: retry }, { label: "Open settings.json", keepOpen: true, run: open }],
+    });
+  });
+  const alert = screen.getByRole("alert");
+  expect(within(alert).getByText("Couldn't open a new Claude Code tab: claude exited while starting")).toBeTruthy();
+  expect(alert.textContent).not.toContain("Something went wrong");
+  expect(within(alert).getByText("~/.claude/settings.json line 14: Unexpected token }").className).toContain("font-mono");
+  expect(within(alert).getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again", "Open settings.json", "Copy error", ""]);
+
+  await act(async () => fireEvent.click(within(alert).getByRole("button", { name: "Open settings.json" })));
+  expect(open).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("alert")).toBeTruthy();
+  await act(async () => fireEvent.click(within(alert).getByRole("button", { name: "Try again" })));
+  expect(retry).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("alert")).toBeNull();
+});

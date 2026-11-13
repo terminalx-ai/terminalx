@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight } from "@/icons";
+import { ChevronDown, ChevronRight, ListFilter, Search, X } from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useWorkingChanges } from "@/lib/changes";
 import { getDraft, setDraft } from "@/lib/drafts";
@@ -11,6 +11,10 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import type { ChangeStatus } from "@/types/session";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { copyText } from "@/lib/clipboard";
+import { openProjectSearch } from "@/lib/projectSearch";
+import { keycaps, useKeymap } from "@/lib/shortcuts";
+import { Button } from "@/components/ui/button";
+import { KbdGroup } from "@/components/ui/tooltip";
 
 interface Row {
   path: string;
@@ -19,6 +23,64 @@ interface Row {
   depth: number;
   /** A symlink out of the workspace: listed, never opened. */
   escapes?: boolean;
+  /** Filtering only: the folder shows the matches inside it. */
+  open?: boolean;
+}
+
+/**
+ * The tree a name filter leaves: every file and folder whose name holds
+ * `query`, and the folders above them, from the workspace's whole file list.
+ * Counts are entries (files and folders) that match, and all of them.
+ */
+/** The most files the filter reads; past it the count says it is incomplete. */
+export const FILTER_LIMIT = 60_000;
+
+export function filterRows(paths: string[], query: string, rootName: string): { rows: Row[]; matched: number; total: number } {
+  const q = query.toLocaleLowerCase();
+  const kids = new Map<string, Map<string, boolean>>();
+  const add = (parent: string, path: string, isDir: boolean) => {
+    let m = kids.get(parent);
+    if (!m) kids.set(parent, (m = new Map()));
+    if (isDir || !m.has(path)) m.set(path, isDir);
+  };
+  for (const path of paths) {
+    const parts = path.split("/");
+    for (let i = 0; i < parts.length; i++) add(parts.slice(0, i).join("/"), parts.slice(0, i + 1).join("/"), i < parts.length - 1);
+  }
+  const nameOf = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+  const hit = (p: string) => nameOf(p).toLocaleLowerCase().includes(q);
+  let matched = 0;
+  let total = 0;
+  const show = new Set<string>();
+  const mark = (rel: string): boolean => {
+    let any = false;
+    for (const [path, isDir] of kids.get(rel) ?? []) {
+      total++;
+      const inner = isDir ? mark(path) : false;
+      if (hit(path)) {
+        matched++;
+        any = true;
+        show.add(path);
+      } else if (inner) {
+        any = true;
+        show.add(path);
+      }
+    }
+    return any;
+  };
+  mark("");
+  const rows: Row[] = [{ path: "", name: rootName, isDir: true, depth: 0, open: true }];
+  const walk = (rel: string, depth: number) => {
+    const list = [...(kids.get(rel) ?? [])].filter(([p]) => show.has(p));
+    list.sort((a, b) => Number(b[1]) - Number(a[1]) || nameOf(a[0]).localeCompare(nameOf(b[0])));
+    for (const [path, isDir] of list) {
+      const open = isDir && [...(kids.get(path) ?? [])].some(([p]) => show.has(p));
+      rows.push({ path, name: nameOf(path), isDir, depth, open });
+      if (open) walk(path, depth + 1);
+    }
+  };
+  walk("", 1);
+  return { rows, matched, total };
 }
 
 interface FileTreeViewProps {
@@ -76,6 +138,15 @@ function RootedFileTreeView({
   const [focus, setFocus] = useState<string>("");
   const [tick, setTick] = useState(0);
   const container = useRef<HTMLDivElement>(null);
+  const filterInput = useRef<HTMLInputElement>(null);
+  const [filter, setFilter] = useState("");
+  // The whole list for the filter, by the tree's own rules; `truncated` when the cap cut it.
+  const [allFiles, setAllFiles] = useState<{ paths: string[]; truncated: boolean } | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const query = filter.trim();
+  const canFilter = !!reader.listFiles;
+  const filtering = canFilter && query !== "";
+  const searchKeys = useKeymap()["files.search"][0];
   const editors = useEditors();
   const activeRel = editors.editors.find((e) => e.id === editors.active[sessionId])?.rel;
 
@@ -104,6 +175,25 @@ function RootedFileTreeView({
     },
     [reader, source],
   );
+
+  // The whole file list, read once a filter is typed and again after a refresh.
+  const wanted = filtering && active;
+  useEffect(() => {
+    if (!wanted || !reader.listFiles) return;
+    let cancelled = false;
+    setListError(null);
+    reader
+      .listFiles(FILTER_LIMIT)
+      .then((list) => {
+        if (!cancelled) setAllFiles(list);
+      })
+      .catch((e) => {
+        if (!cancelled) setListError(source ? fileErrorText(e) : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [wanted, reader, refreshTick, source]);
 
   // First listing on show; a refresh re-lists every directory still open.
   useEffect(() => {
@@ -178,6 +268,7 @@ function RootedFileTreeView({
 
   const toggle = useCallback(
     (rel: string) => {
+      if (filtering) return;
       setExpanded((s) => {
         const n = new Set(s);
         if (n.has(rel)) n.delete(rel);
@@ -188,11 +279,12 @@ function RootedFileTreeView({
         return n;
       });
     },
-    [children, load],
+    [children, load, filtering],
   );
 
   // The visible rows, flattened, so keyboard movement is index arithmetic.
-  const rows = useMemo(() => {
+  const filtered = useMemo(() => (filtering && allFiles ? filterRows(allFiles.paths, query, rootName) : null), [filtering, allFiles, query, rootName]);
+  const plainRows = useMemo(() => {
     const out: Row[] = [{ path: "", name: rootName, isDir: true, depth: 0 }];
     const walk = (rel: string, depth: number) => {
       const list = children[rel];
@@ -205,6 +297,10 @@ function RootedFileTreeView({
     if (expanded.has("")) walk("", 1);
     return out;
   }, [children, expanded, rootName]);
+  // While the list loads, or when it could not, the plain tree's folders would not answer to the
+  // filter: show nothing in their place (the state says why).
+  const rows = filtered ? filtered.rows : filtering ? [] : plainRows;
+  const noMatch = !!filtered && filtered.matched === 0;
 
   const activate = useCallback(
     (row: Row) => {
@@ -286,17 +382,94 @@ function RootedFileTreeView({
     setDraft(mentionTabId, `${cur}${cur && !cur.endsWith(" ") ? " " : ""}@${rel} `);
   };
 
+  const clearFilter = () => {
+    setFilter("");
+    filterInput.current?.focus();
+  };
+
   return (
+    <div className="flex h-full min-h-0 flex-col">
+      {canFilter && (
+        <div className="shrink-0 border-b border-hairline px-2 py-1.5" data-testid="file-tree-filter">
+          <div className="flex h-7 min-w-0 items-center gap-1.5 rounded-md bg-well px-2 text-xs focus-within:ring-1 focus-within:ring-ring/50">
+            <ListFilter className="size-3.5 shrink-0 text-faint" />
+            <input
+              ref={filterInput}
+              type="text"
+              spellCheck={false}
+              autoComplete="off"
+              aria-label="Filter files by name"
+              placeholder="Filter files by name…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && filter) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setFilter("");
+                } else if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  container.current?.focus();
+                }
+              }}
+              className="min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-faint"
+            />
+            {filtering && filtered && (
+              <span
+                className="shrink-0 whitespace-nowrap text-[11px] tabular-nums text-faint"
+                data-testid="file-tree-filter-count"
+                title={allFiles?.truncated ? `Only the first ${FILTER_LIMIT.toLocaleString()} files are filtered` : undefined}
+              >
+                {filtered.matched} of {filtered.total}{allFiles?.truncated ? "+" : ""}
+              </span>
+            )}
+            {filter && (
+              <button type="button" aria-label="Clear filter" onClick={clearFilter} className="shrink-0 rounded text-faint hover:text-foreground">
+                <X className="size-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     <div
       ref={container}
       role="tree"
       tabIndex={0}
       onKeyDown={onKeyDown}
-      className="animate-panel-content h-full overflow-auto py-1 outline-none scrollbar-thin focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/40"
+      className="animate-panel-content min-h-0 flex-1 overflow-auto py-1 outline-none scrollbar-thin focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/40"
     >
       {error && <div className="px-3 py-2 text-xs text-destructive">{error}</div>}
-      {rows.map((row) => {
-        const open = row.isDir && expanded.has(row.path);
+      {filtering && listError && (
+        <div role="alert" className="px-3 py-2 text-xs text-destructive" data-testid="file-tree-filter-error">
+          Couldn’t list the files to filter: {listError}
+        </div>
+      )}
+      {filtering && !listError && !allFiles && <div className="px-3 py-2 text-xs text-faint">Listing files…</div>}
+      {filtering && allFiles?.truncated && !noMatch && (
+        <div className="px-3 py-1 text-[11px] text-faint" data-testid="file-tree-filter-truncated">
+          Only the first {FILTER_LIMIT.toLocaleString()} files are filtered.
+        </div>
+      )}
+      {noMatch && (
+        <div className="px-6 pt-10 text-center" data-testid="file-tree-no-match">
+          <div className="mx-auto grid size-9 place-items-center rounded-lg bg-veil-strong text-muted-foreground">
+            <Search className="size-4" />
+          </div>
+          <div className="mt-3 break-words text-sm font-medium text-foreground">No files match “{query}”</div>
+          <div className="mt-1 text-xs text-muted-foreground">The filter matches file and folder names. To look inside files, search in files.</div>
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
+            <Button size="sm" onClick={clearFilter}>
+              <X /> Clear filter
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => openProjectSearch(query)}>
+              <Search /> Search in files
+              {searchKeys && <KbdGroup keys={keycaps(searchKeys)} />}
+            </Button>
+          </div>
+        </div>
+      )}
+      {!noMatch && rows.map((row) => {
+        const open = row.isDir && (filtered ? !!row.open : expanded.has(row.path));
         const status = row.isDir ? undefined : fileStatus.get(row.path);
         const dirty = row.isDir && row.path !== "" && dirsWithChanges.has(row.path);
         const isActive = !row.isDir && activeRel === row.path;
@@ -341,7 +514,7 @@ function RootedFileTreeView({
             </ContextMenuTrigger>
             <ContextMenuContent>
               {!row.isDir && !row.escapes && <ContextMenuItem onSelect={() => activate(row)}>Open</ContextMenuItem>}
-              {row.isDir && row.path !== "" && <ContextMenuItem onSelect={() => toggle(row.path)}>{open ? "Collapse" : "Expand"}</ContextMenuItem>}
+              {row.isDir && row.path !== "" && !filtering && <ContextMenuItem onSelect={() => toggle(row.path)}>{open ? "Collapse" : "Expand"}</ContextMenuItem>}
               {!source && <ContextMenuItem onSelect={() => void revealItemInDir(abs(row.path)).catch(() => {})}>Reveal in Finder</ContextMenuItem>}
               <ContextMenuSeparator />
               {!source && <ContextMenuItem onSelect={() => copy(abs(row.path))}>Copy path</ContextMenuItem>}
@@ -355,7 +528,8 @@ function RootedFileTreeView({
           </ContextMenu>
         );
       })}
-      {children[""] !== undefined && !children[""]?.length && <div className="px-3 py-2 text-xs text-faint">Empty.</div>}
+      {!filtering && children[""] !== undefined && !children[""]?.length && <div className="px-3 py-2 text-xs text-faint">Empty.</div>}
+    </div>
     </div>
   );
 }

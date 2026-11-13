@@ -103,6 +103,16 @@ function endedAt(iso: string): string {
   return at.toLocaleString(undefined, today ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+/** What the backend saves on a tab after a chat reset (session_reset.rs). */
+type ResetTab = TabEntry & { resetTurn?: number; resetFilesRestored?: number };
+
+/** "Reset to turn 2 · 3 files restored" */
+export function resetNotice(tab: TabEntry): string {
+  const { resetTurn, resetFilesRestored } = tab as ResetTab;
+  const reset = typeof resetTurn === "number" ? `Reset to turn ${resetTurn}` : "Chat reset";
+  return typeof resetFilesRestored === "number" ? `${reset} · ${resetFilesRestored} ${resetFilesRestored === 1 ? "file" : "files"} restored` : reset;
+}
+
 export function TabView({
   session,
   tab,
@@ -931,10 +941,12 @@ export function TabView({
     </div>}
     {permissionNotice && <p role="status" className="shrink-0 border-b border-hairline px-4 py-2 text-xs text-muted-foreground">{permissionNotice}</p>}
     {terminalMode && banner("top")}
-    {canReset && tab.resetBackupId && !live && <div className="border-b border-hairline px-4 py-2 text-xs">
-      <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo last chat reset</Button>
+    {canReset && tab.resetBackupId && !live && <div role="status" className="flex items-center gap-2 border-b border-hairline px-4 py-2 text-xs text-muted-foreground">
+      <span>{resetNotice(tab)}</span>
+      <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo reset</Button>
     </div>}
-    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq} onClose={() => setResetTarget(null)} onWarning={setError} />}
+    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq}
+      filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}
       onDelivered={(to) => {
         dialogShown.end("submitted");

@@ -10,7 +10,7 @@ import {
   statRemote,
   writeRemoteFile,
 } from "@terminalx/portable/workspaceFiles";
-import { files, fs, type DirEntry, type FileHit, type ReplaceReport, type ReplaceTarget, type TextHit, type TextSearch } from "@/lib/api";
+import { files, fs, type DirEntry, type FileHit, type FileList, type ReplaceReport, type ReplaceTarget, type TextHit, type TextSearch } from "@/lib/api";
 import type { ChangeStatus } from "@/types/session";
 
 /**
@@ -50,6 +50,8 @@ export interface FileSource {
   search?(query: SearchQuery, signal: AbortSignal): Promise<TextSearch>;
   /** Fuzzy file-name search, best first (Quick Open). */
   findFiles?(query: string, limit: number): Promise<FileHit[]>;
+  /** Every file the tree can show, by the tree's own rules, for the All files filter. */
+  listFiles?(limit?: number): Promise<FileList>;
   /**
    * Rewrite matches in files. Null `targets` walks every searchable file,
    * skipping the paths in `skip`. Local only for now.
@@ -130,6 +132,7 @@ export function localFileSource(root: string): FileSource {
     },
     search: ({ query, regex, caseSensitive, wholeWord, limit, replacement }) => fs.searchText(root, query, regex, caseSensitive, limit, replacement, !!wholeWord),
     findFiles: (query, limit) => files.search(root, query, limit),
+    listFiles: (limit) => files.list(root, limit),
     replaceText: ({ query, replacement, regex, caseSensitive, wholeWord, targets, skip }) => fs.replaceText(root, query, replacement, regex, caseSensitive, targets, skip, !!wholeWord),
   };
 }

@@ -39,7 +39,7 @@ fn output_admitted(command: Command, timeout: std::time::Duration, ticket: crate
 fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     let mut command = gh()?;
     command.current_dir(cwd).args(args);
-    let out = output_within(command, GH_TIMEOUT).with_context(|| format!("gh {}", args.join(" ")))?;
+    let out = output_within(command, GH_TIMEOUT).map_err(|e| anyhow!("gh {}: {e:#}", args.join(" ")))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         bail!("{}", if err.is_empty() { format!("gh {} failed", args.join(" ")) } else { err });

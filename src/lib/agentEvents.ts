@@ -396,7 +396,7 @@ export async function reconcileAgentEvents() {
           // A live update during the read wins over its snapshot. Only status
           // is reconciled here; recovery must not close panes or change drafts.
           if (old === current && syncHistoryGeneration(session.id, tab.id, tab.resetLogId)) {
-            patchTab(session.id, tab.id, { resetLogId: tab.resetLogId, resetBackupId: tab.resetBackupId });
+            patchTab(session.id, tab.id, { resetLogId: tab.resetLogId, resetBackupId: tab.resetBackupId, resetTurn: tab.resetTurn, resetFilesRestored: tab.resetFilesRestored });
             await reloadTabHistory(session.id, tab.id, tab.resetLogId);
           }
           if (old && old === current && old.status !== tab.status) setTabStatus(session.id, tab.id, tab.status);

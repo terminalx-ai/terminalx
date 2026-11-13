@@ -1,11 +1,18 @@
 //! Reset changes the native conversation and the app log with one atomic index
 //! write. Prepared files are private, immutable generations until that commit.
 use super::*;
+use crate::checkpoints;
 use crate::harness::reset::{anchor, duplicate};
 use crate::issue_pipeline::admission::{self, Kind, Scope};
 use std::io::Read;
 
 const LIMIT: u64 = 128 * 1024 * 1024;
+/// Starts the refusal when restoring files would overwrite other changes; a
+/// JSON array of the paths follows. The dialog reads it to ask for confirmation.
+pub const OVERLAP: &str = "Other changes to these files would be overwritten: ";
+/// Ends an [`OVERLAP`] refusal: the token that confirms exactly that plan.
+pub const CONFIRM: &str = "Confirm: ";
+const FILES_FENCE: &str = "Files in this checkout are being reset to an earlier turn. Send it again once the reset finishes.";
 
 fn read(path: &Path) -> Result<String> {
     let meta = std::fs::symlink_metadata(path).context("The saved conversation is unavailable.")?;
@@ -53,11 +60,31 @@ fn destination(harness: &str, cwd: &str, id: &str) -> Result<PathBuf> {
     }
 }
 
+/// Puts back the files a reset restored when the conversation commit fails.
+struct RevertFiles<'a> {
+    session_id: &'a str,
+    tab_id: &'a str,
+    applied: Option<&'a checkpoints::ResetApplied>,
+}
+
+impl Drop for RevertFiles<'_> {
+    fn drop(&mut self) {
+        if let Some(applied) = self.applied {
+            if let Err(error) = checkpoints::revert_reset(self.session_id, self.tab_id, applied) {
+                log::error!("put files back after a failed chat reset (kept in the reset backup checkpoint): {error:#}");
+            }
+        }
+    }
+}
+
 impl SessionManager {
-    /// `end_seq=None` restores the one saved reset. Files are deliberately not
-    /// supported until PRO-258's checkpoints and overlap confirmation land.
-    pub fn reset_chat(&self, session_id: &str, tab_id: &str, end_seq: Option<u64>, reset_files: bool) -> Result<Option<String>> {
-        anyhow::ensure!(!reset_files, "Resetting files needs saved turn checkpoints and is not available yet. Nothing was reset.");
+    /// `end_seq=None` restores the one saved reset, with the files it replaced.
+    /// `reset_files` also puts the checkout back to the end of the chosen turn
+    /// (its saved checkpoint); a reset that would overwrite changes other than
+    /// this chat's later turns is refused with [`OVERLAP`], the paths and a
+    /// [`CONFIRM`] token. Only a request that passes that token as `confirm`,
+    /// with nothing changed since, goes ahead.
+    pub fn reset_chat(&self, session_id: &str, tab_id: &str, end_seq: Option<u64>, reset_files: bool, confirm: Option<&str>) -> Result<Option<String>> {
         let admitted = admission::lock_for(session_id, tab_id);
         admission::open(session_id, Some(tab_id))?;
         self.accepting_work()?;
@@ -65,6 +92,13 @@ impl SessionManager {
         drop(admitted);
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).context("Tab not found.")?.clone();
+        let undo_backup = tab.unknown.get("resetBackupId").and_then(Value::as_str).map(String::from);
+        let undo_files = end_seq.is_none() && undo_backup.as_deref().is_some_and(|backup| checkpoints::reset_has_files(session_id, tab_id, backup));
+        // Nothing starts in the checkout while its files go back.
+        let _checkout = (reset_files && end_seq.is_some() || undo_files).then(|| {
+            let root = checkpoints::workspace_root(&entry.cwd).unwrap_or_else(|_| entry.cwd.clone());
+            admission::fence(Kind::Refuse(FILES_FENCE), [Scope::checkout(root)])
+        });
         anyhow::ensure!(matches!(tab.harness.as_str(), "claude" | "codex") && tab.transport == index::AgentTransport::Pty
             && !tab.by_hand() && !tab.is_terminal() && tab.follow.history.is_empty() && tab.follow.conversation.is_none(),
             "Reset is available for managed Claude Code and Codex CLI chats with a single conversation.");
@@ -115,9 +149,30 @@ impl SessionManager {
             (native, log)
         };
         let retained = log_events(&log)?;
+        let files = match (end_seq, undo_backup.as_deref()) {
+            (Some(seq), _) if reset_files => Some(checkpoints::plan_reset(session_id, tab_id, seq)?),
+            (None, Some(backup)) => checkpoints::plan_reset_undo(session_id, tab_id, backup)?,
+            _ => None,
+        };
+        anyhow::ensure!(files.is_some() || !undo_files, "The files saved before the reset are unavailable. Nothing was undone.");
+        if let Some(plan) = &files {
+            if !checkpoints::confirm_overlap(plan, confirm) {
+                bail!("{OVERLAP}{}. {} {CONFIRM}{}", serde_json::to_string(&plan.overlap)?,
+                    if end_seq.is_some() { "Resetting files removes those changes too." } else { "Undoing the reset removes those changes too." },
+                    plan.token());
+            }
+        }
+        let turn = end_seq.map(|seq| current_events.iter().filter(|e| e.seq <= seq && matches!(e.payload, Payload::TurnCompleted { .. })).count());
         // Everything above is read-only, including strict format validation.
         // Stop behind admission, then verify no tail/hook raced the validation.
         self.stop(session_id, tab_id)?;
+        // Files go back after the agent stopped and before the conversation
+        // commit, which puts them back again if it fails.
+        let applied = match &files {
+            Some(plan) => Some(checkpoints::apply_reset(session_id, tab_id, plan, &generation)?),
+            None => None,
+        };
+        let mut revert = RevertFiles { session_id, tab_id, applied: applied.as_ref() };
         let mut rt = rt_arc.lock().unwrap();
         anyhow::ensure!(read(&source_path)? == source_text, "The native conversation changed during reset. Nothing was reset; try again.");
         let settled = log_events(&read(&current_log)?)?;
@@ -147,6 +202,12 @@ impl SessionManager {
         next.parked = false;
         next.unknown.insert("resetLogId".into(), generation.clone().into());
         next.unknown.insert("resetSeq".into(), rt.seq.into());
+        // What the transcript's notice says: "Reset to turn N · M files restored".
+        match turn { Some(turn) => { next.unknown.insert("resetTurn".into(), turn.into()); } None => { next.unknown.remove("resetTurn"); } }
+        match (&applied, end_seq) {
+            (Some(applied), Some(_)) => { next.unknown.insert("resetFilesRestored".into(), applied.paths.len().into()); }
+            _ => { next.unknown.remove("resetFilesRestored"); }
+        }
         next.modified = index::now();
         // One commit point for both histories. Failure leaves the original
         // pointers in place; any prepared files are harmless orphan backups.
@@ -166,7 +227,7 @@ impl SessionManager {
             current.status = TabStatus::Idle;
             current.parked = false;
             current.modified.clone_from(&next.modified);
-            for key in ["resetLogId", "resetBackupId", "resetSeq"] {
+            for key in ["resetLogId", "resetBackupId", "resetSeq", "resetTurn", "resetFilesRestored"] {
                 if let Some(value) = next.unknown.get(key) { current.unknown.insert(key.into(), value.clone()); }
                 else { current.unknown.remove(key); }
             }
@@ -174,6 +235,13 @@ impl SessionManager {
             next = current.clone();
             Ok(session.clone())
         })?;
+        revert.applied = None;
+        // The turns cut off (or, on Undo, brought back) are no longer this
+        // chat's own when a later reset plans its files.
+        let live: std::collections::HashSet<u64> = retained.iter().map(|event| event.seq).collect();
+        if let Err(error) = checkpoints::sync_live_turns(session_id, tab_id, &live) {
+            log::warn!("[{session_id}/{tab_id}] could not mark the turns a reset cut off: {error:#}");
+        }
         rt.log_path = next_log;
         // The new log is a copy cut at an earlier turn (or the pre-reset one
         // on undo). Its last held_queue snapshot can predate deliveries and
@@ -250,17 +318,17 @@ mod tests {
             store::append_line(&log, &json!({"id":format!("e{seq}"),"sessionId":"reset-s","tabId":"reset-t","harness":"claude","seq":seq,"ts":"2026-11-07T10:56:21.941Z","payload":payload}).to_string()).unwrap();
         }
         let m = manager();
-        // Unsupported file restore and unknown formats leave process, index
+        // File restore outside Git and unknown formats leave process, index
         // and both log files untouched, before any backup is prepared.
         let before = read(&log).unwrap();
-        assert!(m.reset_chat("reset-s", "reset-t", Some(3), true).is_err());
+        assert!(m.reset_chat("reset-s", "reset-t", Some(3), true, None).is_err());
         std::fs::write(&native, format!("{fixture}\n{{\"type\":\"future\"}}\n")).unwrap();
-        assert!(m.reset_chat("reset-s", "reset-t", Some(3), false).is_err());
+        assert!(m.reset_chat("reset-s", "reset-t", Some(3), false, None).is_err());
         assert_eq!(store::log_path("reset-s", "reset-t").unwrap(), log);
         assert_eq!(read(&log).unwrap(), before);
         assert_eq!(index::get("reset-s").unwrap().tabs[0].provider_session_id.as_deref(), Some(provider));
         std::fs::write(&native, fixture).unwrap();
-        m.reset_chat("reset-s", "reset-t", Some(3), false).unwrap();
+        m.reset_chat("reset-s", "reset-t", Some(3), false, None).unwrap();
         let new_log = store::log_path("reset-s", "reset-t").unwrap();
         assert_ne!(new_log, log);
         assert!(!read(&new_log).unwrap().contains("LATER_RESET_SECRET"));
@@ -271,11 +339,87 @@ mod tests {
         m.closing();
         m.terminals.kill_all();
         let restarted = manager();
-        restarted.reset_chat("reset-s", "reset-t", None, false).unwrap();
+        restarted.reset_chat("reset-s", "reset-t", None, false, None).unwrap();
         let restored = index::get("reset-s").unwrap();
         assert!(!restored.tabs[0].unknown.contains_key("resetBackupId"));
         assert!(read(&store::log_path("reset-s", "reset-t").unwrap()).unwrap().contains("LATER_RESET_SECRET"));
         assert!(read(&native_path(&restored, &restored.tabs[0]).unwrap()).unwrap().contains("LATER_RESET_SECRET"));
+        restarted.closing();
+        restarted.terminals.kill_all();
+    }
+
+    /// PRO-261: "Also reset files" puts the checkout back to the end of the
+    /// chosen turn's checkpoint, and Undo puts the later files back.
+    #[test]
+    fn reset_with_files_matches_the_end_checkpoint_and_undo_restores_them() {
+        let _home = store::temp_home();
+        let program = store::root().unwrap().join("claude");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _program = claude::pty::claude_program_for_tests(program);
+        let cwd = store::root().unwrap().join("checkout");
+        std::fs::create_dir(&cwd).unwrap();
+        let cwd = std::fs::canonicalize(&cwd).unwrap();
+        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "test@example.com"], &["config", "user.name", "Test"]] {
+            crate::git::run(&cwd, args).unwrap();
+        }
+        std::fs::write(cwd.join("a.txt"), "initial\n").unwrap();
+        crate::git::run(&cwd, &["add", "."]).unwrap();
+        crate::git::run(&cwd, &["commit", "-qm", "Initial"]).unwrap();
+        let provider = "32610000-0000-4000-8000-000000000001";
+        let (s, t) = ("reset-files-s", "reset-files-t");
+        let entry: index::SessionEntry = serde_json::from_value(json!({"id":s, "projectPath":cwd,"cwd":cwd,"title":"Reset", "created":"now", "modified":"now", "tabs":[{"id":t,"harness":"claude","providerSessionId":provider,"created":"now"}]})).unwrap();
+        index::save(std::slice::from_ref(&entry)).unwrap();
+        let native = native_path(&entry, &entry.tabs[0]).unwrap();
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, include_str!("harness/fixtures/claude-reset.jsonl")).unwrap();
+        let log = store::log_path(s, t).unwrap();
+        for (seq, payload, write) in [
+            (1, json!({"type":"turn_started"}), None),
+            (2, json!({"type":"assistant_text","text":"FIRST_RESET_MARKER"}), Some("first\n")),
+            (3, json!({"type":"turn_completed","status":"ok"}), None),
+            (4, json!({"type":"user_message","text":"LATER","images":[],"queued":false}), Some("later\n")),
+            (5, json!({"type":"turn_completed","status":"ok"}), None),
+        ] {
+            let mut event: Payload = serde_json::from_value(payload.clone()).unwrap();
+            crate::checkpoints::observe(s, t, seq, &mut event).unwrap();
+            if let Some(text) = write { std::fs::write(cwd.join("a.txt"), text).unwrap(); }
+            store::append_line(&log, &json!({"id":format!("e{seq}"),"sessionId":s,"tabId":t,"harness":"claude","seq":seq,"ts":"2026-11-07T10:56:21.941Z","payload":payload}).to_string()).unwrap();
+        }
+        let end = crate::checkpoints::get(s, t, 1).unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "later\n");
+        let m = manager();
+        // A file made by hand overlaps: the refusal lists it with a token, and only that token goes ahead.
+        std::fs::write(cwd.join("c.txt"), "by hand\n").unwrap();
+        let refused = m.reset_chat(s, t, Some(3), true, None).unwrap_err().to_string();
+        assert!(refused.starts_with(OVERLAP) && refused.contains(r#"["c.txt"]"#), "{refused}");
+        let token = refused.rsplit_once(CONFIRM).expect("the refusal carries its token").1.to_string();
+        let again = m.reset_chat(s, t, Some(3), true, None).unwrap_err().to_string();
+        assert!(again.starts_with(OVERLAP), "asking again without the token is refused again, as after a Cancel: {again}");
+        assert!(m.reset_chat(s, t, Some(3), true, Some("reset:stale")).is_err(), "another plan's token does not confirm");
+        assert_eq!(std::fs::read_to_string(cwd.join("c.txt")).unwrap(), "by hand\n");
+        m.reset_chat(s, t, Some(3), true, Some(&token)).unwrap();
+        assert!(!cwd.join("c.txt").exists());
+        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "first\n");
+        let first_end = crate::git::run(&cwd, &["rev-parse", &crate::git::checkpoints::reference(s, &format!("{t}-1"), "end").unwrap()]).unwrap();
+        assert_eq!(crate::git::snapshot_tree(&cwd).unwrap(), first_end.trim(), "the worktree matches turn 1's end checkpoint");
+        assert_eq!(end.files.len(), 1);
+        let reset = index::get(s).unwrap();
+        assert_eq!(reset.tabs[0].unknown.get("resetTurn"), Some(&json!(1)));
+        assert_eq!(reset.tabs[0].unknown.get("resetFilesRestored"), Some(&json!(2)), "a.txt and the confirmed c.txt");
+        m.stop(s, t).unwrap();
+        m.closing();
+        m.terminals.kill_all();
+        let restarted = manager();
+        restarted.reset_chat(s, t, None, false, None).unwrap();
+        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "later\n");
+        assert_eq!(std::fs::read_to_string(cwd.join("c.txt")).unwrap(), "by hand\n", "Undo puts the confirmed hand edit back too");
+        let undone = index::get(s).unwrap();
+        assert!(!undone.tabs[0].unknown.contains_key("resetFilesRestored"));
+        assert!(!undone.tabs[0].unknown.contains_key("resetBackupId"));
         restarted.closing();
         restarted.terminals.kill_all();
     }
@@ -320,11 +464,11 @@ mod tests {
         let rt = m.runtime("reset-held-s", "reset-held-t").unwrap();
         assert!(rt.lock().unwrap().held_queue.items.is_empty());
         rt.lock().unwrap().held_queue = held::Queue { items: vec![held::Item { id: "h2".into(), text: "CLAIMED".into(), images: Vec::new() }], sending: Some("h2".into()), ..Default::default() };
-        let error = m.reset_chat("reset-held-s", "reset-held-t", Some(4), false).unwrap_err();
+        let error = m.reset_chat("reset-held-s", "reset-held-t", Some(4), false, None).unwrap_err();
         assert!(error.to_string().contains("queued messages"), "{error:#}");
         assert_eq!(store::log_path("reset-held-s", "reset-held-t").unwrap(), log);
         rt.lock().unwrap().held_queue = held::Queue::default();
-        m.reset_chat("reset-held-s", "reset-held-t", Some(4), false).unwrap();
+        m.reset_chat("reset-held-s", "reset-held-t", Some(4), false, None).unwrap();
         let new_log = store::log_path("reset-held-s", "reset-held-t").unwrap();
         assert_ne!(new_log, log);
         assert!(held::Queue::restore(&new_log).unwrap().items.is_empty());

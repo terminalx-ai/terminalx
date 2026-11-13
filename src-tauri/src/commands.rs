@@ -2803,9 +2803,9 @@ pub async fn change_held_queue(state: State<'_, AppState>, session_id: String, t
 }
 
 #[tauri::command]
-pub async fn reset_chat(state: State<'_, AppState>, session_id: String, tab_id: String, end_seq: Option<u64>, reset_files: bool) -> CmdResult<Option<String>> {
+pub async fn reset_chat(state: State<'_, AppState>, session_id: String, tab_id: String, end_seq: Option<u64>, reset_files: bool, confirm: Option<String>) -> CmdResult<Option<String>> {
     let m = state.sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || m.reset_chat(&session_id, &tab_id, end_seq, reset_files).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || m.reset_chat(&session_id, &tab_id, end_seq, reset_files, confirm.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 /// Send a message the CLI holds behind its running turn now: interrupt, then type it.
@@ -2998,6 +2998,14 @@ pub async fn status_resource_kill(
 }
 
 // ------------------------------------------------------------------ files & commands
+
+#[tauri::command]
+pub async fn list_files(cwd: String, limit: Option<usize>) -> CmdResult<crate::files::FileList> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::list_all(Path::new(&cwd), limit.unwrap_or(60_000)))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
 
 #[tauri::command]
 pub async fn search_files(cwd: String, query: String, limit: Option<usize>) -> CmdResult<Vec<crate::files::FileHit>> {

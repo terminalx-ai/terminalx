@@ -108,9 +108,9 @@ describe("settings registry", () => {
 
 it("keeps global settings rows in the registry", () => {
   // Custom organization fields register as a section.
-  // PRO-155's controlled action editor is not mounted in Settings yet (see
-  // docs/repository-action-editors.md). Its dialog switches edit an unsaved
-  // action draft; registering them would advertise row links that cannot open.
+  // PRO-155's action editor is mounted as one registered row (repositories.actions),
+  // but its dialog switches edit an unsaved action draft; registering them would
+  // advertise row links that cannot open.
   const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx"], { query: "?raw", import: "default", eager: true });
   for (const [path, source] of Object.entries(adapters)) expect(source, path).not.toMatch(/<SettingRow\b/);
 });

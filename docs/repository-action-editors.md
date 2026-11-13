@@ -5,7 +5,7 @@ This is the independent portion of [PRO-155](https://linear.app/procyonlabs/issu
 - **PRO-131**, per-repository settings, is open as [PR #804](https://github.com/terminalx-ai/terminalx/pull/804). The settings store and Repositories navigation are not available.
 - **PRO-243**, named run actions and port blocks, is absent from `main`. There is no action runner, Run menu, Command-R binding or allocated local session port block to connect to.
 
-The components are deliberately not mounted in Settings yet: showing a working Save button without the repository store would misrepresent persistence. No alternate browser-local settings store, repository file format, runner or port allocator is introduced. Full ticket acceptance remains pending those integrations.
+Both editors are mounted under Settings → Repositories → project as the Actions and Preview URLs pages (rows `repositories.actions` and `repositories.previewUrls`), through `RepositoryActionsPage` and `RepositoryPreviewUrlsPage`. They save to the project store: `actions` and `previewUrls` on each project in `$TERMINALX_HOME/projects.json`, through `update_project`. No repository file format, runner or port allocator exists yet, so the Run menu, ⌘R, ⌘K "Open <name>" and "Reset to repository file" are still pending; the reset button is hidden until a repository-file source is passed in.
 
 ## Components and integration contract
 
@@ -18,7 +18,7 @@ The components are deliberately not mounted in Settings yet: showing a working S
 
 ## Remaining wiring
 
-The Settings page now uses PRO-123's `settingsRegistry.tsx` and `sectionRenderers.tsx`. Fields inside the action editor are saved with the action and stay out of Settings search. Once PRO-131 lands, add the Actions / Preview URLs section registrations and mount their adapters through `sectionRenderers`, under Settings → Repositories → project, connected to that native store. Do not introduce another Settings row or navigation list. Reset additionally needs the repository-file configuration layer.
+The Settings page now uses PRO-123's `settingsRegistry.tsx` and `sectionRenderers.tsx`. Fields inside the action editor are saved with the action and stay out of Settings search. The two pages are registered rows in the Repositories section and appear as pages beside General and Files to copy. Reset additionally needs the repository-file configuration layer.
 
 Once PRO-243 lands, use `visibleActions` in both the Run menu and action palette entries, preserving array order. Command-R's default is the first entry of that filtered list, or none when all are hidden. Pass the action's command, concurrent and run-after-setup choices to that ticket's runner.
 

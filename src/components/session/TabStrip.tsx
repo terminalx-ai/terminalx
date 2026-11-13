@@ -11,8 +11,10 @@ import { useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
 import { getPrefs } from "@/lib/prefs";
 import { openBrowserTab } from "@/lib/browser";
-import { closePeer, paneRow, useTabRow } from "@/lib/sessionTabs";
-import { addTab, useSessionStore } from "@/lib/sessions";
+import { paneRow, peerLabel, useTabRow } from "@/lib/sessionTabs";
+import { addTab, getSessionStore, useSessionStore } from "@/lib/sessions";
+import { closeTabTelling, openAgentTabTelling } from "@/components/session/TabMenu";
+import { dismissErrorKey, showError } from "@/lib/errorToasts";
 import type { ShortcutId } from "@/lib/shortcuts";
 import { moveTabBy, openTabAt, reopenClosedTab, stepTab } from "@/lib/tabActions";
 import { openTerminal, selectSessionTab, type SelectedSessionTab } from "@/lib/terminal";
@@ -87,7 +89,8 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
       return;
     }
     const active = shown();
-    if (active) void closePeer(row.session.id, active, row.tabs, selected);
+    const harnessName = (id: string) => getSessionStore().harnesses.find((harness) => harness.id === id)?.name;
+    if (active) void closeTabTelling(row.session.id, active, row.tabs, selected, peerLabel(active, row.layout, harnessName));
   }, []);
   const next = useCallback(() => stepTab(now.current.row, now.current.selected, 1), []);
   const previous = useCallback(() => stepTab(now.current.row, now.current.selected, -1), []);
@@ -123,10 +126,18 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
 /** What a local session's "New tab" offers: an agent tab with any installed agent, a terminal, a browser page. */
 export function LocalNewTabItems({ session }: { session: SessionEntry }) {
   const store = useSessionStore();
-  const add = async (harness: string) => {
+  const add = (harness: string) => {
     const prefs = getPrefs();
-    await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
+    return openAgentTabTelling(session, harness, () => addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode));
   };
+  // A terminal or a page that would not open says so, and can be tried again (PRO-291).
+  const openOr = (kind: string, noun: string, open: () => Promise<unknown>): Promise<boolean> => open().then(
+    () => { dismissErrorKey(`open:${session.id}:${kind}`); return true; },
+    (error: unknown) => {
+      showError(`Couldn't open a new ${noun}`, error, { key: `open:${session.id}:${kind}`, actions: [{ label: "Try again", icon: "retry", run: () => openOr(kind, noun, open) }] });
+      return false;
+    },
+  );
   return (
     <>
       <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>
@@ -135,10 +146,10 @@ export function LocalNewTabItems({ session }: { session: SessionEntry }) {
         {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
       </DropdownMenuItem>)}
       <DropdownMenuSeparator />
-      <DropdownMenuItem onSelect={() => void openTerminal(session.id, session.cwd)} aria-label="Terminal on this computer">
+      <DropdownMenuItem onSelect={() => void openOr("terminal", "terminal", () => openTerminal(session.id, session.cwd))} aria-label="Terminal on this computer">
         <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[11px] text-faint">on this computer</span>
       </DropdownMenuItem>
-      <DropdownMenuItem onSelect={() => void openBrowserTab(session.id, session.cwd).catch((error) => console.error("browser open failed", error))}>
+      <DropdownMenuItem onSelect={() => void openOr("browser", "browser tab", () => openBrowserTab(session.id, session.cwd))}>
         <Globe /><span>Browser</span>
       </DropdownMenuItem>
     </>

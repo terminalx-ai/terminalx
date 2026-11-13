@@ -12,6 +12,18 @@ import { RepositoryOrchestratorSettings } from "./OrchestratorSettings";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { RepositoryScriptsTab } from "./RepositoryScriptsTab";
 import { SparseCheckoutRow } from "./SparseCheckoutRow";
+import { RepositoryActionsPage } from "./RepositoryActionsPage";
+import { RepositoryPreviewUrlsPage } from "./RepositoryPreviewUrlsPage";
+import { RepositoryEnvironmentSettings } from "./RepositoryEnvironmentSettings";
+
+const REPOSITORY_PAGES: { row: SettingId; label: string }[] = [
+  { row: "repositories.rootPath", label: "General" },
+  { row: "repositories.scripts", label: "Scripts" },
+  { row: "repositories.filesToCopy", label: "Files to copy" },
+  { row: "repositories.actions", label: "Actions" },
+  { row: "repositories.previewUrls", label: "Preview URLs" },
+  { row: "repositories.environment", label: "Environment" },
+];
 
 export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath?: string; row?: string | null; onSelectRow?: (row: SettingId) => void }) {
   const { projects } = useSessionStore();
@@ -19,21 +31,24 @@ export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath
   const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
   if (!project) return <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>;
   if (project.kind === "folder") return <MergedCleanupSettings projectPath={project.path} />;
-  const page = row === "repositories.filesToCopy" ? "files" : row === "repositories.scripts" ? "scripts" : "general";
-  const tab = (id: typeof page, label: string, target: SettingId) => <Button size="sm" variant={page === id ? "outline" : "ghost"} aria-current={page === id ? "page" : undefined} onClick={() => onSelectRow?.(target)}>{label}</Button>;
+  // Every other repository row (paths, cleanup, orchestrator) lives on General.
+  const page = REPOSITORY_PAGES.find((candidate) => candidate.row === row) ?? REPOSITORY_PAGES[0];
+  const general = page.row === "repositories.rootPath";
   return <>
     <nav aria-label="Repository settings" className="mb-5 flex flex-wrap gap-2">
-      {tab("general", "General", "repositories.rootPath")}
-      {tab("scripts", "Scripts", "repositories.scripts")}
-      {tab("files", "Files to copy", "repositories.filesToCopy")}
+      {REPOSITORY_PAGES.map((candidate) => (
+        <Button key={candidate.row} size="sm" variant={candidate === page ? "outline" : "ghost"} aria-current={candidate === page ? "page" : undefined} onClick={() => onSelectRow?.(candidate.row)}>{candidate.label}</Button>
+      ))}
     </nav>
-    {page === "scripts" ? <RepositoryScriptsTab projectPath={project.path} /> : <>
-      <RepositorySettingsPage key={project.path} project={project} page={page} />
-      <div hidden={page === "files"}>
-        <div className="mt-8"><MergedCleanupSettings projectPath={project.path} /></div>
-        {orchestratorRuns && <div className="mt-8"><RepositoryOrchestratorSettings projectPath={project.path} /></div>}
-      </div>
-    </>}
+    {(general || page.row === "repositories.filesToCopy") && <RepositorySettingsPage key={project.path} project={project} page={general ? "general" : "files"} />}
+    {page.row === "repositories.scripts" && <RepositoryScriptsTab projectPath={project.path} />}
+    {page.row === "repositories.actions" && <RegisteredSetting setting="repositories.actions" instance={project.path}><div><RepositoryActionsPage key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
+    {page.row === "repositories.previewUrls" && <RegisteredSetting setting="repositories.previewUrls" instance={project.path}><div><RepositoryPreviewUrlsPage key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
+    {page.row === "repositories.environment" && <RegisteredSetting setting="repositories.environment" instance={project.path}><div><RepositoryEnvironmentSettings key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
+    <div hidden={!general}>
+      <div className="mt-8"><MergedCleanupSettings projectPath={project.path} /></div>
+      {orchestratorRuns && <div className="mt-8"><RepositoryOrchestratorSettings projectPath={project.path} /></div>}
+    </div>
   </>;
 }
 

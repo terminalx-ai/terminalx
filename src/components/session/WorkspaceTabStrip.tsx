@@ -12,7 +12,8 @@ import { registerHotkey } from "@/lib/hotkeys";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import { recoveryFromEvents } from "@/lib/recovery";
 import { useSessionStore } from "@/lib/sessions";
-import { closePeer, isShellPeer, openPeer, peerAgent, peerKind, peerLabel, peerShell, peerStateWords, peerStatus, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { closeTabTelling } from "@/components/session/TabMenu";
+import { isShellPeer, openPeer, peerAgent, peerKind, peerLabel, peerShell, peerStateWords, peerStatus, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { tabViewIn } from "@/lib/tabFront";
 import { landingIndex, moveTab } from "@/lib/tabActions";
 import { useTabViews } from "@/lib/tabViews";
@@ -287,7 +288,7 @@ export function WorkspaceTabStrip({
                   onAuxClick={(event) => {
                     if (event.button !== 1 || readOnlyReason) return;
                     event.preventDefault();
-                    void closePeer(session.id, tab, tabs, selected);
+                    void closeTabTelling(session.id, tab, tabs, selected, label);
                   }}
                   className={cn(
                     "group/tab relative flex h-9 select-none items-center",
@@ -342,7 +343,7 @@ export function WorkspaceTabStrip({
                       type="button"
                       data-tab-close
                       aria-label={`Close ${label}`}
-                      onClick={() => void closePeer(session.id, tab, tabs, selected)}
+                      onClick={() => void closeTabTelling(session.id, tab, tabs, selected, label)}
                       // Shown only while the tab is pointed at or has the focus. The open tab keeps its room for it,
                       // invisible, so its title does not shift as it appears; another tab takes no room until then, so a
                       // narrow tab shows its title instead.
