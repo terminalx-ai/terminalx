@@ -503,7 +503,7 @@ mod tests {
         let other = terminals.pid("resource-other:shell").unwrap();
         let failure = terminals.inspection_failure_for_test("resource-failed:shell");
         failure.store(true, std::sync::atomic::Ordering::SeqCst);
-        let result = ResourceStore::default().kill(&terminals, "resource-failed:shell", true);
+        let result = ResourceStore::default().kill(&terminals, "resource-failed:shell", true, &|_, _| anyhow::bail!("no agent in this fixture"));
         failure.store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(result.as_ref().is_err_and(|error| error.to_string().contains("PTY process exit could not be confirmed")), "{result:?}");
         assert!(crate::harness::host::is_alive(other));

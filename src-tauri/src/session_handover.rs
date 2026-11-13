@@ -355,7 +355,14 @@ impl SessionManager {
         // A tab held up elsewhere is not waited on for long: the handover
         // itself finds out whether it comes to rest.
         let deadline = Instant::now() + PLAN_WITHIN;
-        tabs.iter().filter_map(|tab| Self::unadoptable_tab(&*take(tab, deadline, "An agent tab").ok()?)).collect()
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut work: Vec<Work> = tabs.iter().filter_map(|tab| Self::unadoptable_tab(&*take(tab, deadline, "An agent tab").ok()?)).collect();
+        // Supervised Linux terminals, agents' included, by title: named for
+        // the reader but never by a session and tab, so Update now does not
+        // stop them. The handover waits until they have ended (#467).
+        #[cfg(target_os = "linux")]
+        work.extend(self.terminals.supervised_work().into_iter().map(|title| Work { kind: WorkKind::Terminal, session_id: None, tab_id: None, harness: None, title: Some(title) }));
+        work
     }
 
     fn unadoptable_tab(rt: &TabRuntime) -> Option<Work> {

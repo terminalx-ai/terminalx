@@ -1,7 +1,10 @@
 //! Fresh-executable, single-main-thread supervisor controls. This target has no
 //! libtest harness; every named case below runs explicitly and failures exit 1.
+// The runtime's own module, as it ships: this target uses the launch and
+// stop half; the handover half is the runtime's (`pty_handover.rs`).
 #[cfg(target_os = "linux")]
 #[path = "../../src/pty/supervisor.rs"]
+#[allow(dead_code)]
 mod supervisor;
 
 #[cfg(not(target_os = "linux"))]
@@ -18,9 +21,10 @@ fn main() {
         ancestry_child();
         return;
     }
-    supervisor::select_test_helper(std::env::current_exe().expect("locate this dispatcher"))
-        .expect("fix the standalone helper dispatcher before controller work");
+    // The helper is always /proc/self/exe: this dispatcher, which handles
+    // the private mode above (and from its ELF constructor before that).
     let cases: &[(&str, fn())] = &[
+        ("helper_refuses_a_parent_that_is_another_program", helper_refuses_a_parent_that_is_another_program),
         ("native_non_sigchld_all_child_selection", native_non_sigchld_all_child_selection),
         ("native_clone_parent_adoption", native_clone_parent_adoption),
         ("native_nested_subreaper_adoption", native_nested_subreaper_adoption),
@@ -411,6 +415,42 @@ fn ancestry_child() {
         }
         _ => panic!("unknown ancestry fixture"),
     }
+}
+
+/// The helper supervises only for this same program. Here its parent is a
+/// shell, which also made the channel, so every descriptor check passes and
+/// only the parent's image differs: the helper must refuse (exit 125)
+/// before preflight, and fork nothing.
+#[cfg(target_os = "linux")]
+fn helper_refuses_a_parent_that_is_another_program() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let master = master();
+    let name = unsafe { std::ffi::CStr::from_ptr(libc::ptsname(master.as_raw_fd())) }.to_owned();
+    let slave = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(slave >= 0, "open PTY slave: {}", std::io::Error::last_os_error());
+    let mut command = std::process::Command::new("/bin/sh");
+    // `; echo` keeps the shell from exec'ing the helper: the shell stays
+    // its parent, and says how it exited.
+    command.arg("-c").arg("\"$0\" __terminalx-private-pty-supervisor-v1 \"$1\" 5<&-; echo status=$?")
+        .arg(std::env::current_exe().unwrap()).arg(uuid::Uuid::new_v4().to_string())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            // Made here, in the shell's own process before it execs, so the
+            // channel's peer is the helper's parent, as the runtime's is.
+            let mut pair = [-1; 2];
+            if libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, pair.as_mut_ptr()) < 0
+                || libc::dup2(pair[1], 3) < 0 || libc::dup2(slave, 4) < 0 || libc::dup2(pair[0], 5) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    unsafe { libc::close(slave); }
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(said.trim(), "status=125", "the helper did not refuse its parent for its image: {said}");
 }
 
 #[cfg(target_os = "linux")]

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- On Linux, give every terminal and terminal agent a supervisor of its own
+  that owns all its processes, including jobs that leave the shell's session
+  or outlive the shell. Stop is confirmed only once none is left. Supervised
+  terminals go on through a runtime update; one that cannot be carried yet
+  holds the update until it can, and is named meanwhile. (#467)
+- Keep a failed or unconfirmed terminal stop owned through retries, session
+  and workspace removal, and resource kills, instead of reporting success
+  or targeting a terminal that reused its name. (#467)
+
 ## 0.2.31
 
 - Keep the session's own title in the sidebar while reviewer and helper tabs

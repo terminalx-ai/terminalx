@@ -123,6 +123,10 @@ pub(super) fn preflight() -> io::Result<()> {
     }
     #[cfg(test)]
     assert_single_thread("entry");
+    // Nothing else may wait for children here, or run while this forks.
+    if std::fs::read_dir("/proc/self/task")?.count() != 1 {
+        return Err(io::Error::other("supervisor must be single threaded"));
+    }
     let mut own_stat = Vec::new();
     File::open("/proc/self/stat")?.take(4097).read_to_end(&mut own_stat)?;
     let own_pid = own_stat.split(|byte| byte.is_ascii_whitespace()).next()
@@ -341,6 +345,29 @@ fn verify_channel(control: RawFd, slave: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+/// Supervise only for the parent that is this same program, at the same
+/// privilege. The inherited channel already names the parent (SO_PEERCRED
+/// pid and uid, checked above); this checks what that parent is. Both
+/// `/proc/<pid>/exe` links resolve to the exact image mapped, so a file
+/// replaced or removed since launch still compares as itself.
+pub(super) fn verify_ancestry() -> io::Result<()> {
+    let (uid, euid, gid, egid) = unsafe { (libc::getuid(), libc::geteuid(), libc::getgid(), libc::getegid()) };
+    if uid != euid || gid != egid {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "supervisor must not run with changed privileges"));
+    }
+    let identity = |path: &str| -> io::Result<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path)?;
+        Ok((metadata.dev(), metadata.ino()))
+    };
+    let own = identity("/proc/self/exe")?;
+    let parent = identity(&format!("/proc/{}/exe", unsafe { libc::getppid() }))?;
+    if own != parent {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "supervisor parent is not this program"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ExecObservation { Ready, Exiting, Interrupted }
 
@@ -396,6 +423,14 @@ pub(super) fn run(launch: Uuid) -> i32 {
     // dispatch owns neither the PTY master nor any application service handle.
     if unsafe { libc::syscall(libc::SYS_close_range, 5u32, u32::MAX, 0) } < 0 { return 121; }
     let control = unsafe { OwnedFd::from_raw_fd(control) };
+    // The channel is the parent's; refuse before preflight for any other
+    // parent, and say why on it. No child exists yet.
+    if let Err(error) = verify_ancestry() {
+        let _ = protocol::send(control.as_raw_fd(), launch, &Response::Failed {
+            stage: "ancestry".into(), errno: error.raw_os_error().unwrap_or(libc::EPERM),
+        });
+        return 125;
+    }
     let mut slave = Some(unsafe { OwnedFd::from_raw_fd(slave) });
     #[cfg(test)]
     if std::env::var("TX467_SUPERVISOR_FAULT").as_deref() == Ok("preflight-after-live-check") {
@@ -634,8 +669,10 @@ pub(super) fn run(launch: Uuid) -> i32 {
 
 #[cfg(test)]
 fn assert_single_thread(phase: &str) {
-    let threads = std::fs::read_dir("/proc/self/task").unwrap().collect::<io::Result<Vec<_>>>().unwrap().len();
-    assert_eq!(threads, 1, "supervisor {phase} must be single threaded");
+    let tasks = std::fs::read_dir("/proc/self/task").unwrap().collect::<io::Result<Vec<_>>>().unwrap();
+    let threads = tasks.len();
+    let names: Vec<String> = tasks.iter().map(|task| std::fs::read_to_string(task.path().join("comm")).unwrap_or_default().trim().to_string()).collect();
+    assert_eq!(threads, 1, "supervisor {phase} must be single threaded: {names:?}");
     eprintln!("supervisor thread evidence phase={phase} pid={} threads={threads}", unsafe { libc::getpid() });
 }
 

@@ -31,6 +31,9 @@ use handover::{Hold, Parts, Waiter};
 mod output;
 #[path = "pty_urls.rs"]
 mod urls;
+/// Linux PTY ownership: one private supervisor process per launch (#467).
+#[cfg(target_os = "linux")]
+pub(crate) mod supervisor;
 use output::{OutputQueue, READ_BYTES};
 const COALESCE: Duration = Duration::from_millis(8);
 pub(crate) const MAX_CHUNK: usize = 32 * 1024;
@@ -257,13 +260,36 @@ impl StoppingPane {
 /// Retain that ownership after leader exit, and retire it permanently only once
 /// the entire session is observed empty. Session IDs remain reserved while any
 /// member exists; a process from another session cannot join this one.
-struct OwnedGroup(Mutex<Option<u32>>, #[cfg(test)] Arc<AtomicBool>);
+///
+/// On Linux a pane opened here is owned by its launch's supervisor instead
+/// (`pty/supervisor.rs`): the census below is only for panes a runtime from
+/// before the supervisor handed over (#765). The supervisor alone says a
+/// launch is over, and only from an all-child wait that found none left.
+struct OwnedGroup(Mutex<Option<u32>>, #[cfg(test)] Arc<AtomicBool>, #[cfg(target_os = "linux")] Option<Arc<supervisor::Owner>>);
 impl OwnedGroup {
-    fn new(pid: Option<u32>) -> Self { Self(Mutex::new(pid), #[cfg(test)] Arc::new(AtomicBool::new(false))) }
+    fn new(pid: Option<u32>) -> Self { Self(Mutex::new(pid), #[cfg(test)] Arc::new(AtomicBool::new(false)), #[cfg(target_os = "linux")] None) }
+
+    /// The launch `owner` started, whose shell is `shell`.
+    #[cfg(target_os = "linux")]
+    fn supervised(owner: Arc<supervisor::Owner>, shell: u32) -> Self {
+        Self(Mutex::new(Some(shell)), #[cfg(test)] Arc::new(AtomicBool::new(false)), Some(owner))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn owner(&self) -> Option<&Arc<supervisor::Owner>> {
+        #[cfg(test)]
+        { self.2.as_ref() }
+        #[cfg(not(test))]
+        { self.1.as_ref() }
+    }
 
     fn pid(&self) -> Option<u32> {
         #[cfg(test)]
         if self.1.load(Ordering::SeqCst) { return *self.0.lock().unwrap(); }
+        // Its shell, or the supervisor while its shell is not known: owned
+        // until the supervisor proves the launch has no process left.
+        #[cfg(target_os = "linux")]
+        if let Some(owner) = self.owner() { return owner.pid(); }
         self.pid_with(session_jobs)
     }
 
@@ -277,6 +303,10 @@ impl OwnedGroup {
     fn signal(&self, force: bool) {
         #[cfg(test)]
         if self.1.load(Ordering::SeqCst) { return; }
+        // The supervisor sends TERM, then KILL after the same grace, to
+        // every process of the launch, and keeps going until none is left.
+        #[cfg(target_os = "linux")]
+        if let Some(owner) = self.owner() { let _ = force; owner.stop(); return; }
         let mut owned = self.0.lock().unwrap();
         if let Some(pid) = *owned {
             #[cfg(unix)]
@@ -379,6 +409,52 @@ fn process_ids() -> Result<Vec<i32>> {
 #[cfg(not(unix))]
 fn session_jobs(pid: u32) -> Result<Vec<(u32, u32)>> {
     Ok(if group_alive(pid) { vec![(pid, pid)] } else { Vec::new() })
+}
+
+/// A launch being started under a supervisor, until it is listed.
+#[cfg(target_os = "linux")]
+struct Opening<'a>(&'a std::sync::atomic::AtomicUsize);
+
+#[cfg(target_os = "linux")]
+impl<'a> Opening<'a> {
+    fn new(count: &'a std::sync::atomic::AtomicUsize) -> Self { count.fetch_add(1, Ordering::SeqCst); Self(count) }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Opening<'_> {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); }
+}
+
+/// Terminals whose supervised launches a handover record cannot carry: a
+/// supervisor's channel and its witness are this process's memory (#467).
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) struct SupervisedTerminals(pub usize);
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for SupervisedTerminals {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "{} terminal(s) cannot be carried through the update on Linux; it is handed over once they have ended.", self.0)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::error::Error for SupervisedTerminals {}
+
+/// What `cmd` runs, as the supervisor execs it: portable-pty's own spawn,
+/// with the arguments and environment kept as bytes.
+#[cfg(target_os = "linux")]
+fn supervised_launch(cmd: &CommandBuilder) -> std::io::Result<supervisor::Launch> {
+    let argv = cmd.get_argv();
+    let program = argv.first().ok_or_else(|| std::io::Error::other("no program to run"))?;
+    // Every name the program can receive: inherited, set, or a default
+    // portable-pty adds. `get_env` answers what each holds, as bytes, and
+    // nothing for one removed.
+    let mut names: std::collections::BTreeSet<std::ffi::OsString> = std::env::vars_os().map(|(name, _)| name).collect();
+    names.extend(cmd.iter_full_env_as_str().map(|(name, _)| std::ffi::OsString::from(name)));
+    names.insert("SHELL".into());
+    let env = names.into_iter().filter_map(|name| cmd.get_env(&name).map(|value| (name.clone(), value.to_os_string()))).collect();
+    supervisor::launch_parts(program, &argv[1..], env, cmd.get_cwd().map(std::path::Path::new)).map(|(launch, _)| launch)
 }
 
 /// A direct line for one pane's raw output, beside the `pty_data` event: a
@@ -540,6 +616,9 @@ pub struct Terminals {
     /// Every pane is being handed to the runtime that replaces this one
     /// (#765): none is opened meanwhile.
     frozen: Mutex<bool>,
+    /// Supervised launches being started, not yet listed (#467).
+    #[cfg(target_os = "linux")]
+    bootstrapping: std::sync::atomic::AtomicUsize,
 }
 
 /// Why a pane is not opened while the runtime is being replaced.
@@ -599,7 +678,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), docked: Mutex::default(), frozen: Mutex::new(false) }
+        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), docked: Mutex::default(), frozen: Mutex::new(false), #[cfg(target_os = "linux")] bootstrapping: Default::default() }
     }
 }
 
@@ -879,6 +958,11 @@ impl Terminals {
         }
         let created = crate::store::index::now();
         let startup = self.startup_ticket(id, &created, None);
+        #[cfg(target_os = "linux")]
+        let (waiter, pid, owned, _opening) = self.supervise(id, pair.master.as_ref(), &cmd).inspect_err(|_| {
+            if let Some(startup) = &startup { startup.exited(None); }
+        })?;
+        #[cfg(not(target_os = "linux"))]
         let child = pair.slave.spawn_command(cmd).map_err(|e| {
             if let Some(startup) = &startup { startup.exited(None); }
             anyhow!("spawn shell: {e}")
@@ -887,6 +971,7 @@ impl Terminals {
         // subsequently fails. Lifecycle callers must not repeat its effects.
         if let Some(program) = executable { (program.started)(); }
         drop(pair.slave);
+        #[cfg(not(target_os = "linux"))]
         let pid = child.process_id();
         if let Some(startup) = &startup { startup.spawned(pid); }
         let mut screen = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
@@ -897,9 +982,14 @@ impl Terminals {
             reader: pair.master.try_clone_reader().map_err(|e| anyhow!("pty reader: {e}"))?,
             writer: pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?,
             master: pair.master,
+            #[cfg(not(target_os = "linux"))]
             waiter: Waiter::Spawned(child),
+            #[cfg(target_os = "linux")]
+            waiter,
             pid,
             group: pid,
+            #[cfg(target_os = "linux")]
+            owned: Some(owned),
             explicit_command,
             environment: environment.stamp,
             cwd: cwd.to_string(),
@@ -911,10 +1001,35 @@ impl Terminals {
         })
     }
 
+    /// Start `cmd` in the terminal `master` leads, under a supervisor of its
+    /// own, and return once its exec is observed. Ownership the supervisor
+    /// could not settle on failure stays listed under `id`, for Stop to end.
+    #[cfg(target_os = "linux")]
+    fn supervise(&self, id: &str, master: &(dyn MasterPty + Send), cmd: &CommandBuilder) -> Result<(Waiter, Option<u32>, Arc<OwnedGroup>, Opening<'_>)> {
+        let fd = master.as_raw_fd().context("a Linux terminal has no descriptor")?;
+        // Counted until the caller has listed it: no handover begins
+        // meanwhile (#765). Counted first, then checked, as freeze does in
+        // the other order, so one of them always sees the other.
+        let opening = Opening::new(&self.bootstrapping);
+        if *self.frozen.lock().unwrap() { bail!("{}", HANDING_OVER); }
+        let launch = supervised_launch(cmd).context("spawn shell")?;
+        let owner = supervisor::Owner::reserve();
+        match owner.bootstrap(fd, launch) {
+            Ok(shell) => Ok((Waiter::Supervised(owner.clone()), Some(shell), Arc::new(OwnedGroup::supervised(owner, shell)), opening)),
+            Err(error) => {
+                if owner.pending() {
+                    let shell = owner.pid().unwrap_or_default();
+                    self.groups.lock().unwrap().push((id.to_string(), Arc::new(OwnedGroup::supervised(owner, shell))));
+                }
+                Err(anyhow!("spawn shell: {error}"))
+            }
+        }
+    }
+
     /// Run a pane's reader, emitter and waiter, and list it: one opened here
     /// or one handed over by the runtime this one replaced (#765).
     fn start(&self, sink: Arc<dyn EventSink>, id: &str, parts: Parts) -> Result<()> {
-        let Parts { master, reader, writer, mut waiter, pid, group, explicit_command, environment, cwd, created, scrollback, printed, screen, last_output } = parts;
+        let Parts { master, reader, writer, mut waiter, pid, group, #[cfg(target_os = "linux")] owned, explicit_command, environment, cwd, created, scrollback, printed, screen, last_output } = parts;
         let startup = self.startup_ticket(id, &created, pid);
         if last_output.is_some() { if let Some(startup) = &startup { startup.ready(); } }
         #[cfg(unix)]
@@ -928,6 +1043,9 @@ impl Terminals {
         };
         *self.sink.lock().unwrap() = Some(sink.clone());
         let alive = Arc::new(Mutex::new(true));
+        #[cfg(target_os = "linux")]
+        let group = owned.unwrap_or_else(|| Arc::new(OwnedGroup::new(group)));
+        #[cfg(not(target_os = "linux"))]
         let group = Arc::new(OwnedGroup::new(group));
         {
             let mut groups = self.groups.lock().unwrap();
@@ -1421,6 +1539,19 @@ impl Terminals {
         Ok((size.cols, size.rows))
     }
 
+    /// Each launch a supervisor owns that a handover cannot carry as it
+    /// stands (starting, mid-release or lost), by the title or name of its
+    /// terminal: what a handover waits for on Linux (#467). Ownership whose
+    /// pane was closed is listed too, until its supervisor settles it.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn supervised_work(&self) -> Vec<String> {
+        let launches: Vec<String> = self.groups.lock().unwrap().iter()
+            .filter(|(_, group)| group.owner().is_some_and(|owner| owner.pending() && !owner.carriable()))
+            .map(|(id, _)| id.clone()).collect();
+        let titles = self.titles.lock().unwrap();
+        launches.into_iter().map(|id| titles.get(&id).cloned().unwrap_or(id)).collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn inspection_failure_for_test(&self, id: &str) -> Arc<AtomicBool> {
         self.panes.lock().unwrap()[id].group.1.clone()
@@ -1470,6 +1601,13 @@ impl Terminals {
         self.groups.lock().unwrap().iter()
             .filter(|(pane, group)| pane == id && group.pid().is_some())
             .map(|(pane, group)| StoppingPane { id: pane.clone(), group: group.clone() }).collect()
+    }
+
+    /// [`Self::pending_stops`], but for launches no live pane holds: what a
+    /// stop detached and could not confirm, never the pane open under `id`.
+    pub(crate) fn detached_stops(&self, id: &str) -> Vec<StoppingPane> {
+        let live = self.panes.lock().unwrap().get(id).map(|pane| pane.group.clone());
+        self.pending_stops(id).into_iter().filter(|stop| live.as_ref().is_none_or(|live| !Arc::ptr_eq(live, &stop.group))).collect()
     }
 
     /// Capture every retained launch of these pane IDs before waiting. A new
@@ -1785,6 +1923,89 @@ impl Terminals {
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.emit(crate::status::resources::CHANGED_EVENT, &());
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod supervised_tests {
+    use super::*;
+
+    fn gone(pid: i32) -> bool { !std::path::Path::new(&format!("/proc/{pid}")).exists() }
+
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn escaped(dir: &tempfile::TempDir) -> i32 {
+        let file = dir.path().join("escaped");
+        wait_for("the escaped job's pid", || std::fs::read_to_string(&file).is_ok_and(|text| text.ends_with('\n')));
+        std::fs::read_to_string(file).unwrap().trim().parse().unwrap()
+    }
+
+    /// #467: a job that left the shell's session (`setsid`) is beyond the
+    /// session census, but not beyond its launch's supervisor, which is its
+    /// subreaper. Stop confirms only once it is gone too.
+    #[test]
+    fn stop_ends_a_job_that_left_the_shells_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let command = r#"sh -c 'setsid sh -c "echo \$\$ > escaped; exec sleep 300" & exec sleep 300'"#;
+        terminals.spawn(sink, "escape:shell", PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(command), env: &[] }).unwrap();
+        let shell = terminals.pid("escape:shell").unwrap();
+        let job = escaped(&dir);
+        assert!(!gone(job), "the job is running");
+        assert_ne!(unsafe { libc::getsid(job) }, unsafe { libc::getsid(shell as i32) }, "the job runs in a session of its own");
+        let owner = terminals.panes.lock().unwrap()["escape:shell"].group.owner().cloned().expect("a supervised launch");
+        terminals.kill_and_wait_confirmed("escape:shell", Duration::from_secs(10)).unwrap();
+        assert!(!owner.pending(), "the supervisor proved the launch empty");
+        assert!(gone(job) && gone(shell as i32), "the escaped job and the shell are gone");
+        assert!(terminals.owned_groups().is_empty());
+    }
+
+    /// #467: the shell exiting is not the launch ending. What it left
+    /// running stays owned, for Stop All to end.
+    #[test]
+    fn a_shell_that_exits_leaves_its_jobs_owned_until_they_are_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        // Off the terminal too, so the pane ends with its shell and only the
+        // launch's ownership outlives it.
+        let command = r#"sh -c 'setsid sh -c "echo \$\$ > escaped; exec sleep 300" </dev/null >/dev/null 2>&1 & sleep 1; exit 3'"#;
+        terminals.spawn(sink, "exits:shell", PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(command), env: &[] }).unwrap();
+        let job = escaped(&dir);
+        wait_for("the shell's exit", || !terminals.is_running("exits:shell"));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!gone(job), "the job runs on after its shell");
+        assert!(!terminals.owned_groups().is_empty(), "the launch is still owned");
+        terminals.stop_owned_groups(Duration::from_secs(10));
+        assert!(gone(job), "Stop All ended it");
+        assert!(terminals.owned_groups().is_empty());
+    }
+
+    /// #467/#765: a launch whose supervisor cannot be carried holds the
+    /// handover up, is named for the reader, and is never stopped by it.
+    #[test]
+    fn a_launch_that_cannot_be_carried_holds_the_handover_and_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        terminals.spawn(sink, "lost:shell", PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] }).unwrap();
+        terminals.set_title("lost:shell", "Long job");
+        assert!(terminals.supervised_work().is_empty(), "a running launch can be carried");
+        let owner = terminals.panes.lock().unwrap()["lost:shell"].group.owner().cloned().unwrap();
+        owner.lose_for_test();
+        wait_for("the observer to let go", || !owner.carriable());
+        assert_eq!(terminals.supervised_work(), ["Long job"]);
+        let error = terminals.freeze(Duration::from_secs(2)).map(|_| ()).unwrap_err();
+        assert!(error.is::<SupervisedTerminals>(), "{error:#}");
+        assert!(!*terminals.frozen.lock().unwrap(), "a refused freeze lets terminals open again");
+        assert!(owner.pending(), "nothing was stopped or forgotten");
     }
 }
 

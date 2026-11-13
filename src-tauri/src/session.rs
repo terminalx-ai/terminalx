@@ -3969,7 +3969,7 @@ impl SessionManager {
             if !pty::StoppingPane::wait_all(panes, RESTART_WAIT) {
                 let mut rt = rt_arc.lock().unwrap();
                 rt.stop_in_flight = false;
-                self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+                self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
                 bail!("Local PTY process exit could not be confirmed. Retry Stop before resuming.");
             }
         }
@@ -3994,7 +3994,7 @@ impl SessionManager {
         rt.stop_in_flight = false;
         if self.retire_stopping_ptys(&key, panes.as_deref().unwrap_or_default()) {
             rt.stopping = true;
-            self.needs_recovery(&mut rt, RecoveryKind::Disconnected);
+            self.needs_recovery(&mut rt, RecoveryKind::Disconnected, crate::recovery_log::Source::Connection);
             bail!("Another PTY launch still needs exit confirmation. Retry Stop before resuming.");
         }
         rt.stopping = false;
@@ -4820,7 +4820,7 @@ impl SessionManager {
     /// close admission and retain its exact handles for the explicit Stop path,
     /// which releases the runtime before waiting.
     fn require_prior_cli_exit(&self, rt: &mut TabRuntime, pane: &str) -> Result<()> {
-        let pending = self.terminals.pending_stops(pane);
+        let pending = self.terminals.detached_stops(pane);
         if !pending.is_empty() {
             self.retain_stopping_ptys(&key_of(&rt.session_id, &rt.tab_id), &pending);
             rt.stopping = true;
@@ -4860,10 +4860,11 @@ impl SessionManager {
         // An orderly idle exit left history, not a process to kill. Keep
         // those bytes for the newly resumed CLI's terminal stream.
         self.require_prior_cli_exit(rt, &pane)?;
+        // What the tab's terminal runs now (a shell its last CLI left, #437)
+        // is stopped as before; one whose exit is not confirmed stays owned,
+        // for the check above to refuse the next start.
         if self.terminals.is_live(&pane) {
-            // The ownership check above confirmed exit; this only detaches
-            // the old Pane. No process wait occurs under the runtime lock.
-            self.terminals.kill_and_wait_confirmed(&pane, std::time::Duration::ZERO)?;
+            self.terminals.kill_and_wait_confirmed(&pane, RESTART_WAIT)?;
         }
         // A conversation the reader started by hand comes with no mode the
         // app knows (#437). Launched by the app it runs in the one that asks:

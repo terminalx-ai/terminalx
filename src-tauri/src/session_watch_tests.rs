@@ -3217,10 +3217,21 @@ fn startup_retains_unconfirmed_detached_ownership_until_explicit_stop() {
     rig.manager.require_prior_cli_exit(&mut rt, &rig.pane).unwrap();
 }
 
+/// A settings restart admits the tab's settings from the index first.
+fn restartable(rig: &Rig) {
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "restart", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+}
+
 #[test]
 fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completion() {
     for complete_failure in [false, true] {
         let rig = Rig::with_live_pane();
+        restartable(&rig);
         let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
         failure.store(true, std::sync::atomic::Ordering::SeqCst);
         rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
@@ -3253,6 +3264,7 @@ fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completi
 fn restart_completion_retires_only_its_exact_current_handle() {
     for superseded in [false, true] {
         let rig = Rig::with_live_pane();
+        restartable(&rig);
         let work = rig.manager.begin_restart_launch(&rig.rt, &rig.tail).unwrap().unwrap();
         assert!(work.process.as_ref().unwrap().wait(Duration::from_secs(5)));
         rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {

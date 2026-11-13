@@ -18,51 +18,46 @@ pub(super) use protocol::Launch;
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use serde::{Deserialize, Serialize};
 
-// A root libtest executable has no private helper dispatch. Test controllers
-// must name the fresh dispatcher they built from this exact source snapshot.
-// Configuration is frozen on first use; parallel cases cannot switch it.
-#[cfg(test)]
-static TEST_HELPER: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
-
-#[cfg(test)]
-fn checked_test_helper(path: PathBuf) -> Result<PathBuf, String> {
-    use std::os::unix::fs::PermissionsExt;
-    if !path.is_absolute() { return Err("test PTY supervisor executable must be an explicit absolute path".into()); }
-    let path = path.canonicalize().map_err(|error| format!("test PTY supervisor executable: {error}"))?;
-    let metadata = path.metadata().map_err(|error| format!("test PTY supervisor executable: {error}"))?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-        return Err("test PTY supervisor path is not an executable file".into());
-    }
-    Ok(path)
-}
-
-#[cfg(test)]
-pub(super) fn select_test_helper(path: PathBuf) -> io::Result<()> {
-    let selected = checked_test_helper(path).map_err(io::Error::other)?;
-    match TEST_HELPER.set(Ok(selected.clone())) {
-        Ok(()) => Ok(()),
-        Err(_) if TEST_HELPER.get() == Some(&Ok(selected)) => Ok(()),
-        Err(_) => Err(io::Error::other("test PTY supervisor executable was already fixed for this process")),
-    }
-}
-
+/// The helper is always this process's own running image: `/proc/self/exe`
+/// names the exact executable mapped now, even when its path was replaced or
+/// removed by an update since launch. The helper checks the same identity
+/// from its side (`linux::verify_ancestry`), so a supervisor never runs on
+/// behalf of a parent that is not this program.
 fn helper_executable() -> io::Result<PathBuf> {
-    #[cfg(not(test))]
-    { std::env::current_exe() }
-    #[cfg(test)]
-    {
-        TEST_HELPER.get_or_init(|| {
-            let path = std::env::var_os("TERMINALX_TEST_PTY_SUPERVISOR")
-                .ok_or_else(|| "test PTY supervisor executable is required; libtest is not a helper dispatcher".to_string())?;
-            checked_test_helper(PathBuf::from(path))
-        }).clone().map_err(io::Error::other)
-    }
+    Ok(PathBuf::from("/proc/self/exe"))
 }
+
+/// The helper runs from the executable's pre-initialisation array: before
+/// any shared library's constructor, Rust's `main` or libtest, so before
+/// anything could start a thread, which `linux::preflight` requires of a
+/// supervisor. (The desktop links GTK and WebKit, whose libraries can start
+/// threads before `main`; tests have libtest's own `main`.) [`dispatch`],
+/// at the top of both mains, refers to this so the linker keeps it, and
+/// still dispatches should it not have run.
+#[used]
+#[link_section = ".preinit_array"]
+static DISPATCH: extern "C" fn() = {
+    extern "C" fn dispatch_before_main() {
+        let Ok(cmdline) = std::fs::read("/proc/self/cmdline") else { return };
+        let mut args = cmdline.split(|byte| *byte == 0).skip(1);
+        if args.next() != Some(protocol::HELPER.as_bytes()) { return; }
+        let launch = args.next().and_then(|arg| std::str::from_utf8(arg).ok()).and_then(|arg| Uuid::parse_str(arg).ok());
+        let rest = args.filter(|arg| !arg.is_empty()).count();
+        let code = match (launch, rest) { (Some(launch), 0) => linux::run(launch), _ => 119 };
+        // SAFETY: the helper owns no Rust runtime state that needs unwinding.
+        unsafe { libc::_exit(code) }
+    }
+    dispatch_before_main
+};
 
 /// portable-pty's public environment iterator converts to UTF-8 and drops raw
 /// Unix names/values. Keep a single complete OsString snapshot instead. The
 /// caller uses the same arg/env/remove/cwd operations as its portable builder.
+/// The standalone serve control target builds its launches with this; the
+/// runtime converts its portable-pty builder through [`launch_parts`].
+#[allow(dead_code)]
 pub(super) struct CommandBuilder(Command);
 impl std::ops::Deref for CommandBuilder {
     type Target = Command;
@@ -71,6 +66,7 @@ impl std::ops::Deref for CommandBuilder {
 impl std::ops::DerefMut for CommandBuilder {
     fn deref_mut(&mut self) -> &mut Command { &mut self.0 }
 }
+#[allow(dead_code)]
 impl CommandBuilder {
     pub(super) fn new(program: impl AsRef<OsStr>) -> Self {
         let mut command = Command::new(program);
@@ -87,33 +83,39 @@ impl CommandBuilder {
     pub(super) fn cwd(&mut self, cwd: impl AsRef<OsStr>) { self.0.current_dir(cwd.as_ref()); }
 
     pub(super) fn launch(&self) -> io::Result<(Launch, PathBuf)> {
-        let env: std::collections::BTreeMap<_, _> = self.0.get_envs().filter_map(|(key, value)| value.map(|value| (key, value))).collect();
-        // Match portable-pty 0.9's invalid-directory fallback. Resolve that
-        // actual directory before checkout admission, never merely the input.
-        let home = match env.get(OsStr::new("HOME")).and_then(|home| home.to_str()) {
-            Some(home) => PathBuf::from(home),
-            None => PathBuf::from(passwd()?.0),
-        };
-        let cwd = self.0.get_current_dir().filter(|cwd| cwd.is_dir()).unwrap_or(&home);
-        let cwd = if cwd.is_absolute() { cwd.to_path_buf() } else { std::env::current_dir()?.join(cwd) };
-        // Registration uses this exact identity and fails rather than treating
-        // a path it cannot resolve as an unrelated/idle checkout.
-        let identity = cwd.canonicalize()?;
-        let program = Path::new(self.0.get_program());
-        let path = if program.is_absolute() { program.to_path_buf() }
-            else if matches!(program.components().next(), Some(std::path::Component::CurDir | std::path::Component::ParentDir)) {
-                cwd.join(program)
-            } else {
-                env.get(OsStr::new("PATH")).into_iter().flat_map(std::env::split_paths)
-                    .map(|directory| cwd.join(directory).join(program)).find(|path| executable(path))
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "PTY executable not found in PATH"))?
-            };
-        if !executable(&path) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "PTY executable is not an executable file")); }
-        let argv = std::iter::once(self.0.get_program()).chain(self.0.get_args()).map(|arg| arg.as_bytes().to_vec()).collect();
-        Ok((Launch { executable: path.as_os_str().as_bytes().to_vec(), argv,
-            env: env.into_iter().map(|(key, value)| (key.as_bytes().to_vec(), value.as_bytes().to_vec())).collect(),
-            cwd: cwd.as_os_str().as_bytes().to_vec() }, identity))
+        let env = self.0.get_envs().filter_map(|(key, value)| value.map(|value| (key.to_os_string(), value.to_os_string()))).collect();
+        let args: Vec<OsString> = self.0.get_args().map(OsStr::to_os_string).collect();
+        launch_parts(self.0.get_program(), &args, env, self.0.get_current_dir())
     }
+}
+
+/// One launch, as bytes: Unix arguments and environment are not UTF-8.
+/// `env` is the complete environment the program receives.
+pub(super) fn launch_parts(program: &OsStr, args: &[OsString], env: std::collections::BTreeMap<OsString, OsString>, cwd: Option<&Path>) -> io::Result<(Launch, PathBuf)> {
+    // Match portable-pty 0.9's invalid-directory fallback, then resolve that
+    // actual directory, never merely the input.
+    let home = match env.get(OsStr::new("HOME")).and_then(|home| home.to_str()) {
+        Some(home) => PathBuf::from(home),
+        None => PathBuf::from(passwd()?.0),
+    };
+    let cwd = cwd.filter(|cwd| cwd.is_dir()).unwrap_or(&home);
+    let cwd = if cwd.is_absolute() { cwd.to_path_buf() } else { std::env::current_dir()?.join(cwd) };
+    // Fails rather than treating a path it cannot resolve as some other one.
+    let identity = cwd.canonicalize()?;
+    let program_path = Path::new(program);
+    let path = if program_path.is_absolute() { program_path.to_path_buf() }
+        else if matches!(program_path.components().next(), Some(std::path::Component::CurDir | std::path::Component::ParentDir)) {
+            cwd.join(program_path)
+        } else {
+            env.get(OsStr::new("PATH")).into_iter().flat_map(std::env::split_paths)
+                .map(|directory| cwd.join(directory).join(program_path)).find(|path| executable(path))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{} was not found in PATH", program_path.display())))?
+        };
+    if !executable(&path) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is not an executable file", path.display()))); }
+    let argv = std::iter::once(program).chain(args.iter().map(OsString::as_os_str)).map(|arg| arg.as_bytes().to_vec()).collect();
+    Ok((Launch { executable: path.as_os_str().as_bytes().to_vec(), argv,
+        env: env.into_iter().map(|(key, value)| (key.into_vec(), value.into_vec())).collect(),
+        cwd: cwd.as_os_str().as_bytes().to_vec() }, identity))
 }
 
 fn executable(path: &Path) -> bool {
@@ -136,7 +138,20 @@ fn passwd() -> io::Result<(OsString, OsString)> {
     }
 }
 
+/// A supervisor failure as a person can act on it. Preflight checks what the
+/// kernel must provide; ancestry, what may ask for supervision.
+fn failure(stage: &str, errno: i32, then: &str) -> String {
+    let cause = io::Error::from_raw_os_error(errno);
+    let help = match stage {
+        "preflight" => ": this Linux system lacks what terminal ownership needs (pidfd_open and pidfd_send_signal, close_range, PR_SET_CHILD_SUBREAPER, an all-child waitid and a /proc of this PID namespace; Linux 5.9 or later without a seccomp filter denying them)",
+        "ancestry" => ": the supervisor was not started by this TerminalX program",
+        _ => "",
+    };
+    format!("PTY supervisor {stage} failed: {cause}{help}; {then}")
+}
+
 pub(crate) fn dispatch() -> Option<i32> {
+    std::hint::black_box(&DISPATCH);
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() != Some(std::ffi::OsStr::new(protocol::HELPER)) { return None; }
     let launch = args.next().and_then(|arg| arg.to_str().and_then(|s| Uuid::parse_str(s).ok()));
@@ -145,6 +160,73 @@ pub(crate) fn dispatch() -> Option<i32> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase { Reserved, Bootstrapping, Running, Stopping, Unconfirmed, Proven, Lost, Extinct }
+
+/// Whether the observer is held still for a handover (#765).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Park { Running, Requested, Parked }
+
+/// What a held launch is, as the runtime replacing this one in the same
+/// process takes it over (#765). The helper stays this process's unreaped
+/// child across the exec, so its pid still names it; its control channel
+/// goes over as a descriptor the handover keeps open.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Carried {
+    launch: String,
+    supervisor: u32,
+    shell: u32,
+    shell_status: Option<i32>,
+    stop_claim: u64,
+    sent_claim: u64,
+    empty_received: bool,
+    phase: CarriedPhase,
+}
+
+impl Carried {
+    /// The launch's shell, as its pane names it.
+    pub(crate) fn shell(&self) -> u32 { self.shell }
+
+    /// The helper process: this runtime's child, across the handover too.
+    pub(crate) fn supervisor(&self) -> u32 { self.supervisor }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum CarriedPhase { Running, Stopping, Unconfirmed }
+
+/// The outcome of holding a launch still for a handover.
+pub(crate) enum Parked {
+    /// Nothing is left of it to carry.
+    Settled,
+    /// Held, with its channel duplicated for the next runtime.
+    Carried(Carried, OwnedFd),
+    /// Starting, mid-release or lost: not carried now. The handover waits.
+    Not,
+}
+
+/// The helper process an observer watches: one it spawned, or one the
+/// runtime it replaced spawned in this same process (#765).
+enum Helper { Spawned(Child), Adopted(u32) }
+
+impl Helper {
+    fn id(&self) -> u32 { match self { Self::Spawned(child) => child.id(), Self::Adopted(pid) => *pid } }
+
+    /// Reap the helper if it has exited.
+    fn try_wait(&mut self) -> io::Result<Option<()>> {
+        match self {
+            Self::Spawned(child) => child.try_wait().map(|status| status.map(|_| ())),
+            Self::Adopted(pid) => {
+                let mut status = 0;
+                let reaped = unsafe { libc::waitpid(*pid as libc::pid_t, &mut status, libc::WNOHANG) };
+                if reaped < 0 { Err(io::Error::last_os_error()) } else { Ok((reaped > 0).then_some(())) }
+            }
+        }
+    }
+}
+
+/// Where an observer's channel stands: a new launch's, or a carried one's.
+#[derive(Default)]
+struct Resume { ready: bool, empty_received: bool, launch_sent: bool, sent_claim: u64 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LaunchDelivery { NoLaunch, MayHaveBeenSent, Sent }
@@ -156,6 +238,9 @@ struct State {
     shell_status: Option<i32>,
     boot: Option<Result<u32, String>>,
     stop_claim: u64,
+    park: Park,
+    /// The observer is in its channel loop, where it can be held still.
+    observing: bool,
 }
 
 pub(super) struct Owner {
@@ -163,6 +248,8 @@ pub(super) struct Owner {
     state: Mutex<State>,
     changed: Condvar,
     cancelled: AtomicBool,
+    /// What the held observer left for a handover to take.
+    carried: Mutex<Option<(Carried, OwnedFd)>>,
     #[cfg(test)]
     observer_reaped: AtomicBool,
 }
@@ -173,20 +260,107 @@ impl Owner {
     pub(super) fn reserve() -> Arc<Self> {
         Arc::new(Self { launch: Uuid::new_v4(), state: Mutex::new(State {
             phase: Phase::Reserved, supervisor: None, shell: None,
-            shell_status: None, boot: None, stop_claim: 0,
-        }), changed: Condvar::new(), cancelled: AtomicBool::new(false),
+            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false,
+        }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
             #[cfg(test)] observer_reaped: AtomicBool::new(false), })
     }
 
+    /// Hold the observer still where its channel state is whole, so a
+    /// handover can carry the launch (#765). Messages the helper sends
+    /// meanwhile wait in the channel. Undo with [`Self::unpark`].
+    pub(super) fn park(&self, within: Duration) -> Parked {
+        let deadline = Instant::now() + within;
+        let mut state = self.state.lock().unwrap();
+        if !state.observing {
+            return if state.phase == Phase::Extinct { Parked::Settled } else { Parked::Not };
+        }
+        state.park = Park::Requested;
+        self.changed.notify_all();
+        while state.park == Park::Requested && state.observing {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else { break };
+            state = self.changed.wait_timeout(state, left).unwrap().0;
+        }
+        if state.park != Park::Parked { state.park = Park::Running; return Parked::Not; }
+        let taken = self.carried.lock().unwrap().take();
+        match taken {
+            Some((carried, socket)) => Parked::Carried(carried, socket),
+            // Held where it could not be carried: let it go on at once.
+            None => { state.park = Park::Running; self.changed.notify_all(); Parked::Not }
+        }
+    }
+
+    /// Let a held observer go on: the handover was called off.
+    pub(super) fn unpark(&self) {
+        self.carried.lock().unwrap().take();
+        let mut state = self.state.lock().unwrap();
+        state.park = Park::Running;
+        self.changed.notify_all();
+    }
+
+    /// Whether a handover could carry this launch as it stands: started,
+    /// with its channel up, and not lost.
+    pub(super) fn carriable(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.observing && state.shell.is_some() && state.boot.as_ref().is_some_and(Result::is_ok)
+            && matches!(state.phase, Phase::Running | Phase::Stopping | Phase::Unconfirmed | Phase::Proven)
+    }
+
+    /// Take over a launch the runtime this one replaced carried (#765). Its
+    /// helper must still be this process's child, and `socket` its channel.
+    pub(super) fn adopt(carried: Carried, socket: OwnedFd) -> io::Result<Arc<Self>> {
+        let launch = Uuid::parse_str(&carried.launch).map_err(|_| io::Error::other("carried launch has no valid identity"))?;
+        let pid = carried.supervisor as libc::pid_t;
+        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) } < 0 {
+            return Err(io::Error::other(format!("carried supervisor {pid} is not this runtime's child: {}", io::Error::last_os_error())));
+        }
+        // A socket pair's credentials are its maker's: this process, which
+        // made it before the exec and keeps its pid across it. The helper
+        // checked the same from its end when it started.
+        let mut kind: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&kind) as libc::socklen_t;
+        if unsafe { libc::getsockopt(socket.as_raw_fd(), libc::SOL_SOCKET, libc::SO_TYPE, (&mut kind as *mut libc::c_int).cast(), &mut length) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut peer = unsafe { std::mem::zeroed::<libc::ucred>() };
+        length = std::mem::size_of_val(&peer) as libc::socklen_t;
+        if unsafe { libc::getsockopt(socket.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut peer as *mut libc::ucred).cast(), &mut length) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if kind != libc::SOCK_SEQPACKET || peer.pid != unsafe { libc::getpid() } || peer.uid != unsafe { libc::getuid() } {
+            return Err(io::Error::other("carried channel is not one this runtime made"));
+        }
+        let phase = match carried.phase { CarriedPhase::Running => Phase::Running, CarriedPhase::Stopping => Phase::Stopping, CarriedPhase::Unconfirmed => Phase::Unconfirmed };
+        let owner = Arc::new(Self { launch, state: Mutex::new(State {
+            phase, supervisor: Some(carried.supervisor), shell: Some(carried.shell), shell_status: carried.shell_status,
+            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true,
+        }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
+            #[cfg(test)] observer_reaped: AtomicBool::new(false), });
+        let observer = owner.clone();
+        let resume = Resume { ready: true, empty_received: carried.empty_received, launch_sent: true, sent_claim: carried.sent_claim };
+        std::thread::Builder::new().name("pty-supervisor".into())
+            .spawn(move || observer.observe(Helper::Adopted(carried.supervisor), socket, Vec::new(), resume))?;
+        Ok(owner)
+    }
+
+    // Read by the standalone control target only.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(super) fn observer_reaped(&self) -> bool { self.observer_reaped.load(Ordering::SeqCst) }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(super) fn test_unconfirmed(&self) -> bool { self.state.lock().unwrap().phase == Phase::Unconfirmed }
 
+    /// The standalone control target checks this and [`Self::attach_allowed`].
+    #[allow(dead_code)]
     pub(super) fn reserved(&self) -> bool {
         self.state.lock().unwrap().phase == Phase::Reserved && !self.cancelled.load(Ordering::SeqCst)
     }
+    /// Lose the channel as a protocol fault would: ownership stays, unproven.
+    #[cfg(test)]
+    pub(super) fn lose_for_test(&self) { self.lost("lost for a test"); }
+
     pub(super) fn pending(&self) -> bool { self.state.lock().unwrap().phase != Phase::Extinct }
 
     pub(super) fn pid(&self) -> Option<u32> {
@@ -213,6 +387,7 @@ impl Owner {
         self.changed.notify_all();
     }
 
+    #[allow(dead_code)]
     pub(super) fn attach_allowed(&self) -> bool {
         let state = self.state.lock().unwrap();
         !self.cancelled.load(Ordering::SeqCst) && state.phase != Phase::Lost
@@ -310,8 +485,8 @@ impl Owner {
             drop(pass_socket); drop(pass_slave);
             match spawned {
                 Ok(child) => {
-                    owner.state.lock().unwrap().supervisor = Some(child.id());
-                    owner.observe(child, socket, config);
+                    { let mut state = owner.state.lock().unwrap(); state.supervisor = Some(child.id()); state.observing = true; }
+                    owner.observe(Helper::Spawned(child), socket, config, Resume::default());
                 }
                 Err(error) => owner.no_child(format!("start PTY supervisor: {error}")),
             }
@@ -331,13 +506,16 @@ impl Owner {
         }
     }
 
-    fn observe(self: Arc<Self>, mut child: Child, socket: OwnedFd, config: Vec<u8>) {
+    fn observe(self: Arc<Self>, mut child: Helper, socket: OwnedFd, config: Vec<u8>, resume: Resume) {
+        // An adopted helper is still this process's unreaped child, so its
+        // pid cannot have been reused: a new pidfd names the same process.
         let witness = linux::pidfd(child.id() as i32);
-        let mut delivery = LaunchDelivery::NoLaunch;
+        let mut delivery = if resume.launch_sent { LaunchDelivery::Sent } else { LaunchDelivery::NoLaunch };
         match &witness {
-            Ok(witness) => self.observe_loop(&mut child, &socket, witness, &config, &mut delivery),
+            Ok(witness) => self.observe_loop(&mut child, &socket, witness, &config, &mut delivery, resume),
             Err(_) => self.lost("could not retain supervisor identity"),
         }
+        { let mut state = self.state.lock().unwrap(); state.observing = false; self.changed.notify_all(); }
         // Closing the private endpoint requests helper-side cleanup on loss.
         // Keep the direct Child/pidfd until its actual exit: never abandon an
         // unreaped helper or kill a witness that may still own descendants.
@@ -364,13 +542,10 @@ impl Owner {
         }
     }
 
-    fn observe_loop(self: &Arc<Self>, child: &mut Child, socket: &OwnedFd, witness: &OwnedFd, config: &[u8], delivery: &mut LaunchDelivery) {
+    fn observe_loop(self: &Arc<Self>, child: &mut Helper, socket: &OwnedFd, witness: &OwnedFd, config: &[u8], delivery: &mut LaunchDelivery, resume: Resume) {
         let pid = child.id();
-        let mut ready = false;
-        let mut empty_received = false;
-        let mut offset = 0;
-        let mut launch_sent = false;
-        let mut sent_claim = 0;
+        let Resume { mut ready, mut empty_received, mut launch_sent, mut sent_claim } = resume;
+        let mut offset = if launch_sent { config.len() } else { 0 };
         let mut release = None;
         let boot_deadline = Instant::now() + Duration::from_secs(11);
         #[cfg(test)]
@@ -388,7 +563,7 @@ impl Owner {
                     let mut reason = "supervisor failed before launch".to_string();
                     for _ in 0..16 {
                         match protocol::receive::<Response>(socket.as_raw_fd(), self.launch) {
-                            Ok(Some(Response::Failed { stage, errno })) => { reason = format!("PTY supervisor {stage} failed ({errno}) before launch"); break; }
+                            Ok(Some(Response::Failed { stage, errno })) => { reason = failure(&stage, errno, "before launch"); break; }
                             Ok(Some(_)) => {},
                             _ => break,
                         }
@@ -400,6 +575,32 @@ impl Owner {
                     return;
                 }
                 _ => { self.lost("supervisor exited before acknowledged release"); return; }
+            }
+            // A handover holds the observer here, between whole exchanges:
+            // what was sent and received is all in these locals and the
+            // state, and anything newer waits in the channel (#765).
+            {
+                let mut state = self.state.lock().unwrap();
+                if state.park == Park::Requested {
+                    let phase = match state.phase {
+                        Phase::Running => Some(CarriedPhase::Running),
+                        Phase::Stopping => Some(CarriedPhase::Stopping),
+                        Phase::Unconfirmed => Some(CarriedPhase::Unconfirmed),
+                        _ => None,
+                    };
+                    let steady = ready && launch_sent && release.is_none() && *delivery == LaunchDelivery::Sent;
+                    let carried = phase.zip(state.shell).filter(|_| steady).and_then(|(phase, shell)| {
+                        // Close-on-exec: the handover clears that on the
+                        // descriptors its record names, and only those.
+                        let fd = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+                        (fd >= 0).then(|| (Carried { launch: self.launch.to_string(), supervisor: pid, shell, shell_status: state.shell_status,
+                            stop_claim: state.stop_claim, sent_claim, empty_received, phase }, unsafe { OwnedFd::from_raw_fd(fd) }))
+                    });
+                    *self.carried.lock().unwrap() = carried;
+                    state.park = Park::Parked;
+                    self.changed.notify_all();
+                    while state.park == Park::Parked { state = self.changed.wait(state).unwrap(); }
+                }
             }
             #[cfg(test)]
             if fault == "preflight-after-live-check" && !live_barrier_done {
@@ -492,7 +693,7 @@ impl Owner {
                         state.phase = Phase::Unconfirmed; true
                     }
                     Response::Failed { stage, errno } if state.boot.is_none() => {
-                        state.boot = Some(Err(format!("PTY supervisor {stage} failed ({errno}); cleanup pending")));
+                        state.boot = Some(Err(failure(&stage, errno, "cleanup pending")));
                         if state.stop_claim == 0 { state.stop_claim = 1; state.phase = Phase::Stopping; }
                         true
                     }

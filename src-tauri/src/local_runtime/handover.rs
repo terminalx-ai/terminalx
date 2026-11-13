@@ -84,6 +84,11 @@ pub struct Record {
     pub(crate) retained: Vec<crate::local_runtime::scrollback::History>,
     #[serde(default)]
     pub groups: Vec<u32>,
+    /// Supervised Linux launches no live pane holds: an exited shell's jobs,
+    /// or a stop still unconfirmed (#467).
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    pub(crate) supervised: Vec<SupervisedRecord>,
     #[serde(default)]
     pub(crate) tabs: Vec<TabRecord>,
     /// Each tab's last state as activity history counted it, so work under
@@ -147,6 +152,28 @@ pub struct PaneRecord {
     pub renamed: bool,
     #[serde(default)]
     pub docked: Option<bool>,
+    /// The launch's supervisor, on Linux (#467).
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) supervisor: Option<SupervisorRecord>,
+}
+
+/// A launch's supervisor: what it stood at, and its control channel.
+#[cfg(target_os = "linux")]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SupervisorRecord {
+    pub(crate) state: crate::pty::supervisor::Carried,
+    pub(crate) fd: RawFd,
+}
+
+/// A supervised launch no live pane holds, under the pane id it had.
+#[cfg(target_os = "linux")]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SupervisedRecord {
+    pub(crate) id: String,
+    pub(crate) supervisor: SupervisorRecord,
 }
 
 /// What `handover-formats` prints: which records this binary reads.
@@ -194,6 +221,11 @@ impl std::error::Error for Unkept {}
 fn failed(error: anyhow::Error) -> ControlError {
     if let Some(unkept) = error.downcast_ref::<Unkept>() {
         return refused("handover_unadoptable", unkept.to_string());
+    }
+    // Not carried, and never stopped by a handover: it waits for them (#467).
+    #[cfg(target_os = "linux")]
+    if let Some(supervised) = error.downcast_ref::<crate::pty::SupervisedTerminals>() {
+        return refused("handover_unadoptable", supervised.to_string());
     }
     if let Some(unsettled) = error.downcast_ref::<Unsettled>() {
         return ControlError::new("handover_busy", format!("{unsettled}; it is handed over once that has settled."), Some("Try again in a moment.".into()));
@@ -285,6 +317,8 @@ fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Send
         Err(error) => {
             drop((admission, steps));
             thawed();
+            #[cfg(target_os = "linux")]
+            if error.is::<crate::pty::SupervisedTerminals>() { return Err(error); }
             return Err(Unsettled(format!("{error:#}")).into());
         }
     };
@@ -357,11 +391,15 @@ impl Record {
             cwd: pane.cwd, created: pane.created, tty: pane.tty, cols: pane.cols, rows: pane.rows, scrollback: pane.scrollback,
             printed: pane.printed, screen: pane.screen, quiet_ms: pane.quiet.map(|quiet| u64::try_from(quiet.as_millis()).unwrap_or(u64::MAX)),
             title: pane.title, renamed: pane.renamed, docked: pane.docked,
+            #[cfg(target_os = "linux")]
+            supervisor: pane.supervised.map(|(state, fd)| SupervisorRecord { state, fd: keep(fd) }),
         }).collect();
+        #[cfg(target_os = "linux")]
+        let supervised = terminals.supervised.into_iter().map(|(id, state, fd)| SupervisedRecord { id, supervisor: SupervisorRecord { state, fd: keep(fd) } }).collect();
         // Read with every tab held: no transition is recorded meanwhile.
         let activity = crate::store::activity::carried();
         let record = Self { format: FORMAT, from: env!("CARGO_PKG_VERSION").into(), pid: std::process::id(), owner, control, frames, decisions,
-            panes, retained: terminals.retained, groups: terminals.groups, tabs, activity };
+            panes, retained: terminals.retained, groups: terminals.groups, #[cfg(target_os = "linux")] supervised, tabs, activity };
         Ok((record, kept))
     }
 }
@@ -662,6 +700,11 @@ pub fn read(path: &Path) -> Result<Adopted> {
     named.extend(record.frames.iter().map(|frame| frame.fd));
     named.extend(record.decisions.iter().map(|decision| decision.fd));
     named.extend(record.panes.iter().map(|pane| pane.fd));
+    #[cfg(target_os = "linux")]
+    {
+        named.extend(record.panes.iter().filter_map(|pane| pane.supervisor.as_ref()).map(|supervisor| supervisor.fd));
+        named.extend(record.supervised.iter().map(|launch| launch.supervisor.fd));
+    }
     let mut descriptors = HashMap::new();
     for fd in named.into_iter().chain([record.owner]) {
         if fd <= 2 || descriptors.contains_key(&fd) {
@@ -679,6 +722,16 @@ pub fn read(path: &Path) -> Result<Adopted> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #467: supervised terminals that cannot be carried refuse the handover
+    /// as work it cannot carry, which the desktop reads again and waits on,
+    /// never as a busy runtime whose retries run out.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uncarried_supervised_terminals_refuse_as_unadoptable() {
+        let error = failed(crate::pty::SupervisedTerminals(2).into());
+        assert_eq!(error.code, "handover_unadoptable", "{error:?}");
+    }
 
     #[test]
     fn this_build_reads_the_format_it_writes_and_says_so() {
