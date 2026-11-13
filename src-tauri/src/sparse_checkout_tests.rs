@@ -179,7 +179,7 @@ fn described_repo() -> tempfile::TempDir {
     write(p, "docs/guide/intro.md", "intro\n");
     write(p, "lib/only/one.txt", "one child folder\n");
     write(p, "plain/file.bin", &"x".repeat(5000));
-    for n in 0..205 { write(p, &format!("many/m{n:03}/f"), "m"); }
+    for n in 0..MAX_CHILDREN + 5 { write(p, &format!("many/m{n:03}/f"), "m"); }
     sh(p, &["add", "."]);
     sh(p, &["commit", "-qm", "init"]);
     // A submodule's gitlink (no .gitmodules needed for the tree) at the top and one level down.
@@ -230,9 +230,8 @@ fn folders_are_listed_from_head_with_sizes_children_and_descriptions() {
     // One subfolder is not worth listing; none either.
     assert!(find(&listing.folders, "docs").children.is_empty() && find(&listing.folders, "lib").children.is_empty());
     assert_eq!(find(&listing.folders, "lib").description, None);
-    // Past MAX_CHILDREN subfolders none are listed, so the folder is chosen whole
-    // and a partial choice cannot drop subfolders the dialog never showed.
-    assert!(205 > MAX_CHILDREN);
+    // Past MAX_CHILDREN subfolders (it has 205) none are listed, so the folder is
+    // chosen whole and a partial choice cannot drop subfolders the dialog never showed.
     assert!(find(&listing.folders, "many").children.is_empty());
     let vendor = find(&listing.folders, "vendor");
     assert_eq!((vendor.size, vendor.children.len()), (Some(0), 0));
