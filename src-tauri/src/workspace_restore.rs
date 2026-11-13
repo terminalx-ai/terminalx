@@ -17,6 +17,7 @@ pub(crate) fn removal_record(project: &Path, path: &Path) -> RemovedWorkspace {
         branch: git::current_branch(path),
         commit: git::head_commit(path),
         repository: Some(project.to_string_lossy().into_owned()),
+        sparse_checkout: crate::sparse_checkout::checked_out_folders(path),
     }
 }
 
@@ -256,8 +257,9 @@ fn restore_with(
                 git::run(project, &["update-ref", &format!("refs/heads/{branch}"), &expected.commit, ""])?;
                 checkout.created_branch = Some(branch.into());
             }
-            // Restoring files must not execute a repository's checkout hook.
-            git::run(project, &["-c", "core.hooksPath=/dev/null", "worktree", "add", "--", &expected.path, branch])?;
+            // Restoring files must not execute a repository's checkout hook. A
+            // sparse workspace comes back with the folders it had, not everything.
+            git::worktree_add(project, &["--", &expected.path, branch], &checkout.path, removed.sparse_checkout.as_deref(), None, false)?;
             if git::head_commit(&checkout.path).as_deref() != Some(&expected.commit) || git::current_branch(&checkout.path).as_deref() != Some(branch) {
                 bail!("The branch moved during restoration. Nothing was restored; review it again.");
             }

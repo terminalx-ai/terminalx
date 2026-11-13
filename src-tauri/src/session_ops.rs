@@ -887,6 +887,8 @@ pub(crate) struct WorkspaceRemoved {
     /// Processes found still working in it once its sessions were stopped:
     /// leftover builds were stopped, anything else listed (`stray_processes`).
     pub strays: Vec<crate::stray_processes::Stray>,
+    /// The folders it checked out when it was a sparse workspace.
+    pub sparse_checkout: Option<Vec<String>>,
 }
 
 /// How an error from [`remove_workspace`] starts when the workspace was left
@@ -1018,7 +1020,8 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
             moved
         }
     };
-    Ok(WorkspaceRemoved { sessions, removal, strays })
+    let sparse_checkout = removed_workspace.and_then(|removed| removed.sparse_checkout);
+    Ok(WorkspaceRemoved { sessions, removal, strays, sparse_checkout })
 }
 
 /// Record that the workspace these sessions ran in is gone: they keep their

@@ -35,8 +35,31 @@ export function describeChoice(folders: RepositoryFolder[], value: SparseCheckou
   return value === null ? `All ${total} folder${total === 1 ? "" : "s"}` : `${chosenTopCount(folders, value)} of ${total} folder${total === 1 ? "" : "s"}`;
 }
 
-/** The folders a box stands for: a folder's children when it lists them, else the folder itself. */
-const units = (folder: RepositoryFolder): RepositoryFolder[] => (folder.children.length ? folder.children : [folder]);
+/**
+ * Whether the `sparseCheckout` setting can name this folder (`valid_sparse_folder`
+ * in src-tauri/src/store/configuration.rs): git takes `[`, `]` and `!` literally
+ * in cone mode, but a `*` turns cone mode off, and `?` and backslashes are refused.
+ */
+export function sparseFolderAllowed(path: string) {
+  // eslint-disable-next-line no-control-regex
+  return path.length > 0 && !/[*?\\\u0000-\u001f\u007f]/.test(path);
+}
+
+/** Whether a folder is chosen by its subfolders: it lists them, and the setting can name each one. */
+const splits = (folder: RepositoryFolder) => folder.children.length > 0 && folder.children.every((child) => sparseFolderAllowed(child.path));
+/** The folders a box stands for: a folder's children when it is chosen by them, else the folder itself. */
+const units = (folder: RepositoryFolder): RepositoryFolder[] => (splits(folder) ? folder.children : [folder]);
+
+/** Bytes a top-level folder adds to a checkout: all of it when fully chosen; when partly chosen, the chosen
+ * subfolders and the files directly in the folder, which cone mode checks out with any of its subfolders. */
+function chosenSize(folder: RepositoryFolder, chosen: ReadonlySet<string>): number | null {
+  const picked = units(folder).filter((unit) => chosen.has(unit.path));
+  if (!picked.length) return 0;
+  if (picked.length === units(folder).length) return folder.size;
+  const listed = folder.children.reduce<number | null>((sum, child) => (sum === null || child.size === null ? null : sum + child.size), 0);
+  if (folder.size === null || listed === null || picked.some((unit) => unit.size === null)) return null;
+  return folder.size - listed + picked.reduce((sum, unit) => sum + (unit.size ?? 0), 0);
+}
 const allUnits = (folders: RepositoryFolder[]) => folders.flatMap(units);
 
 /** The boxes ticked for a saved value, and the saved paths that no listed folder stands for (kept as they are). */
@@ -148,15 +171,20 @@ export function SparseCheckoutDialog({ project, value, onClose, onSaved }: {
   };
 
   const chosenTops = folders.filter((folder) => boxState(folder, chosen) !== "empty" || extras.some((extra) => within(extra, folder.path))).length;
-  const chosenUnits = allUnits(folders).filter((unit) => chosen.has(unit.path));
-  const chosenBytes = sizes === "measured" && listing?.rootFiles.size != null && chosenUnits.every((unit) => unit.size !== null)
-    ? listing.rootFiles.size + chosenUnits.reduce((sum, unit) => sum + (unit.size ?? 0), 0)
+  const folderBytes = folders.map((folder) => chosenSize(folder, chosen));
+  const chosenBytes = sizes === "measured" && listing?.rootFiles.size != null && folderBytes.every((size) => size !== null)
+    ? listing.rootFiles.size + folderBytes.reduce<number>((sum, size) => sum + (size ?? 0), 0)
     : null;
   const totalBytes = sizes === "measured" ? listing?.totalSize ?? null : null;
 
   const save = async () => {
     if (!listing || saving) return;
     const next = sparseCheckoutValue(listing.folders, chosen, extras);
+    const unnamable = (next ?? []).filter((path) => !sparseFolderAllowed(path));
+    if (unnamable.length) {
+      setSaveError(`${unnamable.map((path) => `${path}/`).join(", ")} can’t be checked out on ${unnamable.length === 1 ? "its" : "their"} own: a name with *, ? or \\ can’t go in a sparse checkout. Untick ${unnamable.length === 1 ? "it" : "them"}, or Select all for a full checkout.`);
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     try {
@@ -213,7 +241,9 @@ export function SparseCheckoutDialog({ project, value, onClose, onSaved }: {
         <Folder aria-hidden className={cn("size-3.5 shrink-0", dim ? "text-faint" : "text-accent")} />
         <span className="flex min-w-0 flex-1 items-baseline gap-2">
           <span className={cn("min-w-0 break-all font-mono text-[12.5px]", dim && "text-faint")}>{folder.path}/</span>
-          {folder.description && <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={folder.description}>{folder.description}</span>}
+          {!sparseFolderAllowed(folder.path)
+            ? <span className="min-w-0 flex-1 text-xs text-warning">Only with all folders: its name has *, ? or {"\\"}</span>
+            : folder.description && <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={folder.description}>{folder.description}</span>}
         </span>
         {sizeCell(folder.size, dim)}
       </li>
@@ -244,7 +274,7 @@ export function SparseCheckoutDialog({ project, value, onClose, onSaved }: {
             <ul className="min-w-0">
               {!shown.length && <li className="border-b border-hairline px-3 py-2.5 text-xs text-muted-foreground">{folders.length ? "No folders match." : "This repository has no folders."}</li>}
               {shown.flatMap(({ folder, children, open }) => {
-                const hasChildren = folder.children.length > 0;
+                const hasChildren = splits(folder);
                 const row = folderRow(folder, boxState(folder, chosen), 0,
                   hasChildren ? { open, toggle: () => setExpanded((current) => { const next = new Set(current); next.has(folder.path) ? next.delete(folder.path) : next.add(folder.path); return next; }) } : null,
                   () => toggleFolder(folder));

@@ -43,11 +43,13 @@ pub const SPARSE_CHECKOUT_MAX_PATH: usize = 1024;
 
 /// A repository-relative folder as `git sparse-checkout set --cone --stdin`
 /// takes it: `/`-separated, no leading or trailing slash, no empty, `.` or
-/// `..` segment, and nothing git or a shell would read as a pattern, an
-/// escape or a line break.
+/// `..` segment, and no `*`, `?`, backslash or line break. Git escapes `[`
+/// and `]` in cone-mode folders (Next.js's `app/[locale]` checks out as
+/// itself), and a `!` is never at the start of the `/folder/` patterns it
+/// writes; a `*` collides with cone mode's own `/folder/*/` patterns and turns it off.
 pub fn valid_sparse_folder(path: &str) -> bool {
     !path.is_empty() && path.len() <= SPARSE_CHECKOUT_MAX_PATH
-        && !path.chars().any(|c| c.is_control() || matches!(c, '\\' | '*' | '?' | '[' | ']' | '!'))
+        && !path.chars().any(|c| c.is_control() || matches!(c, '\\' | '*' | '?'))
         && path.split('/').all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 

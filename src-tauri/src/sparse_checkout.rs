@@ -137,10 +137,12 @@ pub fn folders(project: &Path, measure: bool) -> Result<RepositoryFolders> {
         }
     }
     let mut listing: Vec<RepositoryFolder> = top_folders.iter().map(|entry| {
-        let children = below.remove(&entry.path).filter(|children| children.len() >= 2).unwrap_or_default();
+        // Past MAX_CHILDREN none are listed: the folder is then chosen whole, so a
+        // partial choice can never drop subfolders the dialog did not show.
+        let children = below.remove(&entry.path).filter(|children| (2..=MAX_CHILDREN).contains(&children.len())).unwrap_or_default();
         RepositoryFolder {
             path: entry.path.clone(), description: None, size: None,
-            children: children.into_iter().take(MAX_CHILDREN).map(|path| RepositoryFolder { path, description: None, size: None, children: Vec::new() }).collect(),
+            children: children.into_iter().map(|path| RepositoryFolder { path, description: None, size: None, children: Vec::new() }).collect(),
         }
     }).collect();
 
@@ -298,13 +300,31 @@ pub(crate) fn readme_description(text: &str) -> Option<String> {
 /// and the root files, then check it out. The sparse configuration is the
 /// worktree's own (`git config --worktree`): the primary checkout and the
 /// repository's other worktrees keep everything they have.
-pub(crate) fn populate(worktree: &Path, folders: &[String]) -> Result<()> {
+pub(crate) fn populate(worktree: &Path, folders: &[String], hooks: bool) -> Result<()> {
     // `--stdin` C-unquotes a line that starts with a quote; quoting every
     // folder keeps any name (no backslash or control character: `valid()`) as it is.
     let input: String = folders.iter().map(|folder| format!("\"{}\"\n", folder.replace('"', "\\\""))).collect();
     output(worktree, &["sparse-checkout", "set", "--cone", "--stdin"], Some(input.into_bytes()))?;
-    output(worktree, &["checkout", "-q"], None)?;
+    let checkout: &[&str] = if hooks { &["checkout", "-q"] } else { &["-c", "core.hooksPath=/dev/null", "checkout", "-q"] };
+    output(worktree, checkout, None)?;
     Ok(())
+}
+
+/// The folders a cone-mode sparse worktree checks out, read from the
+/// worktree itself, so removing it can record them and a restore can narrow
+/// the new checkout the same way. `None` for a full checkout, a non-cone
+/// sparse checkout (its patterns are not folders), or a list with a name the
+/// `sparseCheckout` setting would refuse.
+pub(crate) fn checked_out_folders(worktree: &Path) -> Option<Vec<String>> {
+    let read = |args: &[&str]| {
+        let mut command = git(worktree);
+        command.args(args);
+        crate::git::output_within(command, NOTE_TIMEOUT).ok()
+    };
+    if read(&["config", "--get", "--bool", "core.sparseCheckout"])?.trim() != "true" { return None; }
+    if read(&["config", "--get", "--bool", "core.sparseCheckoutCone"])?.trim() != "true" { return None; }
+    let folders: Vec<String> = read(&["sparse-checkout", "list"])?.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect();
+    folders.iter().all(|folder| crate::store::configuration::valid_sparse_folder(folder)).then_some(folders)
 }
 
 /// The note an agent launched in `cwd` is given when that checkout is sparse,

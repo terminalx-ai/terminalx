@@ -888,7 +888,7 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     let path = worktree_path(project, name);
     let sparse = crate::store::configuration::sparse_checkout(project)?;
     std::fs::create_dir_all(worktree_root(project))?;
-    worktree_add(project, &["--no-track", "-b", &branch, arg(&path)?, &base], &path, sparse.as_deref(), Some(&branch))?;
+    worktree_add(project, &["--no-track", "-b", &branch, arg(&path)?, &base], &path, sparse.as_deref(), Some(&branch), true)?;
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
     let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
@@ -926,7 +926,7 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         if branch_exists(project, &local) {
             add_checkout(project, &path, &[&local], &local, sparse)?;
         } else {
-            worktree_add(project, &["--track", "-b", &local, arg(&path)?, branch], &path, sparse, Some(&local))?;
+            worktree_add(project, &["--track", "-b", &local, arg(&path)?, branch], &path, sparse, Some(&local), true)?;
         }
         local
     };
@@ -957,7 +957,7 @@ pub(crate) fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64,
     let sparse = crate::store::configuration::sparse_checkout(project)?;
     std::fs::create_dir_all(worktree_root(project))?;
     // Narrowed before the PR's branch is checked out, which then keeps to the same folders.
-    worktree_add(project, &["--detach", arg(&path)?, "HEAD"], &path, sparse.as_deref(), None)?;
+    worktree_add(project, &["--detach", arg(&path)?, "HEAD"], &path, sparse.as_deref(), None, true)?;
     // Before the file copy below: it refuses to stage inside an unignored folder.
     ensure_worktree_dir_ignored(project);
     let result = (|| {
@@ -985,18 +985,20 @@ pub(crate) fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64,
 /// without a checkout, narrowed in its own configuration, then checked out,
 /// so the primary checkout and other worktrees are left as they are. One that
 /// cannot be narrowed is removed again, with the branch `-b` made for it (`created`).
-fn worktree_add(project: &Path, args: &[&str], path: &Path, sparse: Option<&[String]>, created: Option<&str>) -> Result<()> {
-    let mut command = vec!["worktree", "add"];
+/// Without `hooks`, the repository's checkout hooks do not run (a restore).
+pub(crate) fn worktree_add(project: &Path, args: &[&str], path: &Path, sparse: Option<&[String]>, created: Option<&str>, hooks: bool) -> Result<()> {
+    let mut command = if hooks { vec![] } else { vec!["-c", "core.hooksPath=/dev/null"] };
+    command.extend(["worktree", "add"]);
     if sparse.is_some() { command.push("--no-checkout"); }
     command.extend_from_slice(args);
     run(project, &command)?;
     let Some(folders) = sparse else { return Ok(()) };
-    if let Err(error) = crate::sparse_checkout::populate(path, folders) {
+    if let Err(error) = crate::sparse_checkout::populate(path, folders, hooks) {
         // Only the checkout made just now, which has never hosted a session.
         if run(project, &["worktree", "remove", "--force", arg(path)?]).is_ok() {
             if let Some(branch) = created { let _ = run(project, &["branch", "-D", branch]); }
         }
-        bail!("Could not check out only the folders this repository's settings choose: {error:#}");
+        bail!("Could not check out only the chosen folders: {error:#}");
     }
     Ok(())
 }
@@ -1005,7 +1007,7 @@ fn worktree_add(project: &Path, args: &[&str], path: &Path, sparse: Option<&[Str
 fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str, sparse: Option<&[String]>) -> Result<()> {
     let mut args = vec![arg(path)?];
     args.extend_from_slice(rest);
-    worktree_add(project, &args, path, sparse, None).map_err(|e| {
+    worktree_add(project, &args, path, sparse, None, true).map_err(|e| {
         let text = e.to_string();
         if text.contains("already checked out") || text.contains("already used by worktree") {
             anyhow::anyhow!("{branch} is already checked out in another folder. Open that workspace instead, or pick New branch.")

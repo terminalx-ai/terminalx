@@ -8,7 +8,8 @@ export interface RepositoryFolder {
   /** From the folder's own package.json or Cargo.toml description, or its README's first line. */
   description: string | null;
   size: number | null;
-  /** Folders one level down, listed where a top-level folder has more than one. Empty otherwise. */
+  /** Folders one level down, listed where a top-level folder has from 2 to 200 of them. Empty otherwise,
+   * so a folder with more is chosen whole and a partial choice never drops subfolders the dialog did not show. */
   children: RepositoryFolder[];
 }
 

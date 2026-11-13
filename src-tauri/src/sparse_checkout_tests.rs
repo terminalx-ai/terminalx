@@ -71,6 +71,8 @@ fn a_new_worktree_checks_out_only_the_chosen_folders_and_leaves_the_others_as_th
     // Cone mode: the root files, each chosen folder, and the files directly inside a chosen folder's parents (a/top).
     assert_eq!(files(wt), set(&["README", "a/top", "a/x/f", "b/f", "\"q d/f"]));
     assert_eq!(sh(wt, &["status", "--porcelain"]), "", "a sparse workspace starts clean");
+    // The folders it left out hide no changes, so cleanup can still check it.
+    assert_eq!(crate::landed::hidden_from_status(wt), Some(0));
     assert_eq!(sh(wt, &["config", "--worktree", "--bool", "core.sparseCheckout"]).trim(), "true");
     assert_eq!(sparse.base_tree, sh(project, &["rev-parse", "HEAD^{tree}"]).trim());
     // The sparse configuration is the new worktree's own: not the repository's shared config.
@@ -88,6 +90,21 @@ fn a_new_worktree_checks_out_only_the_chosen_folders_and_leaves_the_others_as_th
     let root_only = git::create_worktree(project, "root-only", None).unwrap();
     assert_eq!(files(Path::new(&root_only.path)), set(&["README"]));
     assert_eq!(sh(Path::new(&root_only.path), &["status", "--porcelain"]), "");
+
+    // Folder names git takes literally in cone mode, as Next.js uses them.
+    write(project, "app/[locale]/page.tsx", "p");
+    write(project, "app/[locale]x/page.tsx", "q");
+    write(project, "app/other/page.tsx", "o");
+    write(project, "!d/f", "d");
+    sh(project, &["add", "--", "app", "!d"]);
+    sh(project, &["commit", "-qm", "brackets"]);
+    choose(project, serde_json::json!(["app/[locale]", "!d"]));
+    let brackets = git::create_worktree(project, "brackets", None).unwrap();
+    assert_eq!(files(Path::new(&brackets.path)), set(&["README", "app/[locale]/page.tsx", "!d/f"]));
+    assert_eq!(sh(Path::new(&brackets.path), &["status", "--porcelain"]), "");
+    assert_eq!(crate::sparse_checkout::checked_out_folders(Path::new(&brackets.path)), Some(vec!["!d".to_string(), "app/[locale]".to_string()]));
+    assert_eq!(crate::sparse_checkout::checked_out_folders(Path::new(&full.path)), None, "a full checkout has no folder list");
+    sh(project, &["reset", "-q", "--hard", "HEAD~1"]);
 
     // Absent again: a full checkout.
     std::fs::remove_file(project.join(".terminalx/settings.json")).unwrap();
@@ -136,7 +153,7 @@ fn a_worktree_that_cannot_be_narrowed_is_removed_with_its_branch() {
     sh(project, &["config", "core.hooksPath", hooks.path().to_str().unwrap()]);
     choose(project, serde_json::json!(["b"]));
     let error = git::create_worktree(project, "broken", None).unwrap_err().to_string();
-    assert!(error.contains("Could not check out only the folders"), "{error}");
+    assert!(error.contains("Could not check out only the chosen folders"), "{error}");
     assert!(!git::worktree_path(project, "broken").exists());
     assert!(!git::branch_exists(project, &git::worktree_branch_for(project, "broken").unwrap()));
     assert_eq!(files(project), set(&EVERYTHING));
@@ -213,8 +230,10 @@ fn folders_are_listed_from_head_with_sizes_children_and_descriptions() {
     // One subfolder is not worth listing; none either.
     assert!(find(&listing.folders, "docs").children.is_empty() && find(&listing.folders, "lib").children.is_empty());
     assert_eq!(find(&listing.folders, "lib").description, None);
-    assert_eq!(find(&listing.folders, "many").children.len(), MAX_CHILDREN);
-    assert_eq!(find(&listing.folders, "many").children[0].path, "many/m000");
+    // Past MAX_CHILDREN subfolders none are listed, so the folder is chosen whole
+    // and a partial choice cannot drop subfolders the dialog never showed.
+    assert!(205 > MAX_CHILDREN);
+    assert!(find(&listing.folders, "many").children.is_empty());
     let vendor = find(&listing.folders, "vendor");
     assert_eq!((vendor.size, vendor.children.len()), (Some(0), 0));
 

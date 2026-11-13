@@ -237,7 +237,7 @@ fn user_state_cannot_supply_or_remove_system_policy() {
 
 #[test]
 fn sparse_checkout_accepts_repository_folders_and_refuses_anything_else() {
-    let accepted = [json!([]), json!(["src"]), json!(["packages/web", "docs", "a.b/c-d_e", "naïve dir/x"]),
+    let accepted = [json!([]), json!(["src"]), json!(["packages/web", "docs", "a.b/c-d_e", "naïve dir/x"]), json!(["app/[locale]", "!important", "a]b"]),
         json!(["a".repeat(SPARSE_CHECKOUT_MAX_PATH)]),
         Value::Array((0..SPARSE_CHECKOUT_MAX_FOLDERS).map(|n| json!(format!("f{n}"))).collect())];
     for value in accepted {
@@ -245,7 +245,7 @@ fn sparse_checkout_accepts_repository_folders_and_refuses_anything_else() {
     }
     let refused = [json!(null), json!("src"), json!({"src": true}), json!([1]), json!([null]), json!([""]),
         json!(["/src"]), json!(["src/"]), json!(["a//b"]), json!(["."]), json!(["./a"]), json!(["a/.."]), json!(["../a"]),
-        json!(["a\\b"]), json!(["a*"]), json!(["a?"]), json!(["[a]"]), json!(["!a"]), json!(["a\nb"]), json!(["a\tb"]), json!(["a\u{7f}"]),
+        json!(["a\\b"]), json!(["a*"]), json!(["a?"]), json!(["app/[...slug]*"]), json!(["a\nb"]), json!(["a\tb"]), json!(["a\u{7f}"]),
         json!(["src", "src"]), json!(["a".repeat(SPARSE_CHECKOUT_MAX_PATH + 1)]),
         Value::Array((0..=SPARSE_CHECKOUT_MAX_FOLDERS).map(|n| json!(format!("f{n}"))).collect())];
     for value in refused {

@@ -14,7 +14,8 @@ const listing = (measured: boolean): RepositoryFolders => {
   const size = (bytes: number) => (measured ? bytes : null);
   return {
     folders: [
-      { path: "apps", description: "Console and web", size: size(96 * MB), children: [
+      // 4 MB of its own files beside its two subfolders' 96 MB.
+      { path: "apps", description: "Console and web", size: size(100 * MB), children: [
         { path: "apps/console", description: "Web console", size: size(61 * MB), children: [] },
         { path: "apps/web", description: "Marketing site", size: size(35 * MB), children: [] },
       ] },
@@ -22,7 +23,7 @@ const listing = (measured: boolean): RepositoryFolders => {
       { path: "docs", description: null, size: size(6 * MB), children: [] },
     ],
     rootFiles: { count: 4, size: size(2 * MB) },
-    totalSize: size(122 * MB),
+    totalSize: size(126 * MB),
     sizesError: null,
   };
 };
@@ -55,10 +56,10 @@ describe("SparseCheckoutDialog", () => {
     await openDialog();
     expect(mock.folders.mock.calls).toEqual([["/repo", false], ["/repo", true]]);
     expect(screen.getByRole("dialog", { name: "Check out only some folders" })).toBeTruthy();
-    expect(screen.getByText("example · example-org/example · 122 MB when checked out in full")).toBeTruthy();
+    expect(screen.getByText("example · example-org/example · 126 MB when checked out in full")).toBeTruthy();
     expect(screen.getByText("Files at the root")).toBeTruthy();
     expect(screen.getByText("always checked out")).toBeTruthy();
-    expect(summary()).toBe("3 of 3 folders· about 122 MB of 122 MB");
+    expect(summary()).toBe("3 of 3 folders· about 126 MB of 126 MB");
     expect(screen.getByText(/Agents can’t open folders that aren’t checked out; they ask you to add one\./)).toBeTruthy();
     expect(screen.getByText("for everyone on this project", { exact: false }).textContent).toBe("Saved in .terminalx/settings.json for everyone on this project");
   });
@@ -66,13 +67,46 @@ describe("SparseCheckoutDialog", () => {
   it("updates the summary as boxes are ticked, counting a parent with any chosen child", async () => {
     await openDialog();
     fireEvent.click(screen.getByRole("button", { name: "Clear" }));
-    expect(summary()).toBe("0 of 3 folders· about 2 MB of 122 MB");
+    expect(summary()).toBe("0 of 3 folders· about 2 MB of 126 MB");
     fireEvent.click(box("src/"));
-    expect(summary()).toBe("1 of 3 folders· about 20 MB of 122 MB");
+    expect(summary()).toBe("1 of 3 folders· about 20 MB of 126 MB");
     fireEvent.click(screen.getByRole("button", { name: "Show folders in apps/" }));
     fireEvent.click(box("apps/console/"));
-    expect(summary()).toBe("2 of 3 folders· about 81 MB of 122 MB");
+    // Cone mode checks out apps/'s own 4 MB of files with any of its subfolders.
+    expect(summary()).toBe("2 of 3 folders· about 85 MB of 126 MB");
     expect(box("apps/").getAttribute("aria-checked")).toBe("mixed");
+    fireEvent.click(box("apps/web/"));
+    expect(summary()).toBe("2 of 3 folders· about 120 MB of 126 MB");
+    fireEvent.click(box("docs/"));
+    // Everything ticked adds up to the full size: the root files and every listed folder.
+    expect(summary()).toBe("3 of 3 folders· about 126 MB of 126 MB");
+  });
+
+  it("offers a folder whose name the setting cannot hold only as part of a full checkout, and says which", async () => {
+    mock.folders.mockImplementation(async (_path: string, measure: boolean) => {
+      const base = listing(measure);
+      const size = (bytes: number) => (measure ? bytes : null);
+      base.folders.push(
+        { path: "glob*", description: "Odd name", size: size(1 * MB), children: [] },
+        { path: "pages", description: null, size: size(3 * MB), children: [
+          { path: "pages/[locale]", description: null, size: size(1 * MB), children: [] },
+          { path: "pages/what?", description: null, size: size(1 * MB), children: [] },
+        ] },
+      );
+      base.totalSize = size(130 * MB);
+      return base;
+    });
+    await openDialog();
+    expect(screen.getByText(/Only with all folders: its name has \*, \? or \\/)).toBeTruthy();
+    // A subfolder the setting cannot name makes its parent a single choice.
+    expect(screen.queryByRole("button", { name: "Show folders in pages/" })).toBeNull();
+    fireEvent.click(box("docs/"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("glob*/ can’t be checked out on its own");
+    expect(mock.write).not.toHaveBeenCalled();
+    fireEvent.click(box("glob*/"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mock.write).toHaveBeenLastCalledWith("/repo", "repositoryShared", "sparseCheckout", ["apps", "src", "pages"]));
   });
 
   it("expands a parent and shows checked, partial and empty boxes", async () => {
@@ -129,7 +163,7 @@ describe("SparseCheckoutDialog", () => {
     await act(async () => measured.resolve(listing(true)));
     expect(screen.queryAllByLabelText("Measuring size")).toHaveLength(0);
     expect(within(document.querySelector('[data-folder-row="src"]') as HTMLElement).getByText("18 MB")).toBeTruthy();
-    expect(summary()).toBe("3 of 3 folders· about 122 MB of 122 MB");
+    expect(summary()).toBe("3 of 3 folders· about 126 MB of 126 MB");
   });
 
   it("keeps listing folders and says so when sizes cannot be read", async () => {
