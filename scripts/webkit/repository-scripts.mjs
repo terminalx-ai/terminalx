@@ -107,7 +107,9 @@ try {
       "override hint": text.includes("Edits go in your own settings.local.json, which git ignores.") && text.includes("Override locally"),
       "Run setup now waits for trust": await page.getByRole("button", { name: "Run setup now" }).isDisabled(),
       "archive timeout shows 2 minutes": (await page.getByLabel("Archive timeout").inputValue()) === "2",
-      "Open settings.json": (await page.getByRole("button", { name: "Open settings.json" }).count()) === 1,
+      // The repository file's own button, not the user-file one every Settings page has top right (PRO-140), nor its
+      // "More ways to open settings.json" menu: both match a loose name.
+      "Open settings.json": (await page.getByRole("button", { name: "Open settings.json", exact: true }).and(page.locator(":not([data-open-settings-file] > button)")).count()) === 1,
       "seven numbered setup lines": measured.editors[0]?.lines === 7,
       "textarea covers its lines": measured.editors.every((e) => e.covers),
       "no horizontal overflow": !measured.overflow,
