@@ -56,6 +56,7 @@ export const ArrowDown = icon("ArrowDown", GLYPHS.ArrowDown!);
 export const ArrowLeft = icon("ArrowLeft", GLYPHS.ArrowLeft!);
 export const ArrowRight = icon("ArrowRight", GLYPHS.ArrowRight!);
 export const Ellipsis = icon("Ellipsis", GLYPHS.Ellipsis!);
+export const EllipsisVertical = icon("EllipsisVertical", GLYPHS.EllipsisVertical!);
 export const PanelLeft = icon("PanelLeft", GLYPHS.PanelLeft!);
 export const PanelRight = icon("PanelRight", GLYPHS.PanelRight!);
 export const Settings = icon("Settings", GLYPHS.Settings!);

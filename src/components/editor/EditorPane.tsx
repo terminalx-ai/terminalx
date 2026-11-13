@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
 import {
   EditorView,
   GutterMarker,
@@ -8,6 +8,7 @@ import {
   gutter,
   highlightActiveLine,
   highlightActiveLineGutter,
+  highlightWhitespace,
   keymap,
   lineNumbers,
 } from "@codemirror/view";
@@ -15,10 +16,13 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { highlightSelectionMatches, openSearchPanel, searchKeymap } from "@codemirror/search";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle } from "@/icons";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
-import { api } from "@/lib/api";
+import { api, fs } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
+import { getPrefs, usePrefs } from "@/lib/prefs";
 import { registerLiveEditor } from "@/lib/editorViews";
 import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 import { diffLines } from "@/lib/diff";
@@ -97,6 +101,13 @@ function gitMarks(head: string, now: string): Map<number, Mark> {
   return out;
 }
 
+/** The source view's View options (PRO-297), swapped in place as they change. */
+const wrapExtension = (on: boolean): Extension => (on ? EditorView.lineWrapping : []);
+const whitespaceExtension = (on: boolean): Extension => (on ? highlightWhitespace() : []);
+
+/** The file name a download suggests: the file's own. */
+const downloadName = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1) || "file";
+
 /**
  * A file open for editing. ⌘S saves; the tab shows a dot while the buffer
  * differs from disk. A local file's mtime is compared with the one last read
@@ -125,6 +136,12 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
   const [find, setFind] = useState<FindPanelHandle | null>(null);
   // The buffer as text, for the markdown preview; refreshed a beat after edits.
   const [docText, setDocText] = useState("");
+  // Copy and Download say how they went, a moment, under the toolbar.
+  const [notice, setNotice] = useState<string | null>(null);
+  const wrapSlot = useRef(new Compartment()).current;
+  const whitespaceSlot = useRef(new Compartment()).current;
+  const { editorWrap, editorShowWhitespace } = usePrefs();
+  const paneRef = useRef<HTMLDivElement>(null);
   const source = useFileSource(entry.source, entry.root);
   const cloud = source?.kind === "cloud";
   const readOnly = !!source?.readOnly;
@@ -173,6 +190,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
 
   // Save and Find are the reader's shortcuts, not CodeMirror's fixed keys. They act on the editor that has the focus.
   const saveKeys = useShortcutKeys("files.save");
+  const copyKeys = useShortcutKeys("files.copyContents");
   const focused = () => {
     const view = viewRef.current;
     return view && view.dom.contains(document.activeElement) ? view : null;
@@ -184,6 +202,61 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
   }, []);
   useShortcut("files.save", saveFocused, { enabled: visible });
   useShortcut("files.find", findFocused, { enabled: visible });
+
+  const flash = useCallback((text: string) => {
+    setNotice(text);
+    window.setTimeout(() => setNotice((now) => (now === text ? null : now)), 2500);
+  }, []);
+
+  /**
+   * The whole file as the reader has it: the buffer, unsaved edits and all,
+   * unless the editor shows only the start of a large file. Then the file
+   * itself, read again in full.
+   */
+  const wholeText = useCallback(async () => {
+    const view = viewRef.current;
+    if (truncated && source?.kind === "local") return fs.readWholeText(abs);
+    return view ? view.state.doc.toString() : docText;
+  }, [truncated, source, abs, docText]);
+
+  const copyContents = useCallback(async () => {
+    try {
+      await copyText(await wholeText());
+      setError(null);
+      flash("Copied the file's contents");
+    } catch (e) {
+      setError(`Could not copy the file: ${describeError(e)}`);
+    }
+  }, [wholeText, flash, describeError]);
+
+  /**
+   * Save a copy where the reader picks. A local file with nothing unsaved
+   * is copied byte for byte (whatever its size or encoding); an unsaved
+   * buffer, or a cloud workspace's file, is written as the text it holds.
+   */
+  const download = useCallback(async () => {
+    const view = viewRef.current;
+    if (!source || !view) return;
+    const to = await saveDialog({ title: `Download ${downloadName(entry.rel)}`, defaultPath: downloadName(entry.rel) }).catch(() => null);
+    if (!to) return;
+    try {
+      const unsaved = view.state.doc.toString() !== savedDoc.current;
+      await fs.exportFile(to, source.kind === "local" && (!unsaved || truncated) ? { from: abs } : { content: view.state.doc.toString() });
+      setError(null);
+      flash(`Saved a copy to ${to}`);
+    } catch (e) {
+      setError(`Could not download the file: ${describeError(e)}`);
+    }
+  }, [source, entry.rel, abs, truncated, flash, describeError]);
+
+  // ⌥⌘C acts on the file tab that has the focus, in Preview as in Source.
+  const copyFocused = useCallback(() => (status === "ready" && paneRef.current?.contains(document.activeElement) ? (void copyContents(), true) : false), [status, copyContents]);
+  useShortcut("files.copyContents", copyFocused, { enabled: visible });
+
+  // Wrap and whitespace change the open view at once.
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: [wrapSlot.reconfigure(wrapExtension(editorWrap)), whitespaceSlot.reconfigure(whitespaceExtension(editorShowWhitespace))] });
+  }, [editorWrap, editorShowWhitespace, wrapSlot, whitespaceSlot, status]);
 
   /**
    * Resolve a conflict in favour of the buffer: overwrite what is there now,
@@ -272,6 +345,8 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
           highlightSelectionMatches(),
           findPanel(setFind),
           languageFor(entry.rel),
+          wrapSlot.of(wrapExtension(getPrefs().editorWrap)),
+          whitespaceSlot.of(whitespaceExtension(getPrefs().editorShowWhitespace)),
           EditorState.readOnly.of(source.readOnly),
           EditorView.editable.of(!source.readOnly),
           keymap.of([
@@ -335,7 +410,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
       viewRef.current = null;
       setFind(null);
     };
-  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError, embedded]);
+  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError, embedded, wrapSlot, whitespaceSlot]);
 
   // Jump to a line when asked (from search results or the tree).
   useEffect(() => {
@@ -393,7 +468,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
   }, [visible, status, source, entry.rel, checkForChange]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div ref={paneRef} className="flex h-full min-h-0 flex-col">
       <EditorToolbar
         path={abs}
         relativePath={entry.rel}
@@ -407,6 +482,10 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
         saveDisabled={!dirty || readOnly || !source}
         saveKeys={saveKeys}
         onSave={() => void save()}
+        copyKeys={copyKeys}
+        contentsDisabled={status !== "ready"}
+        onCopy={() => void copyContents()}
+        onDownload={() => void download()}
       />
       {conflict && (
         <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 bg-destructive/10 px-3 py-1.5 text-xs text-foreground" data-testid="editor-conflict">
@@ -438,6 +517,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
         </div>
       )}
       {error && <div className="shrink-0 px-3 py-1.5 text-xs text-destructive">{error}</div>}
+      {notice && !error && <div role="status" className="shrink-0 truncate px-3 py-1.5 text-xs text-muted-foreground" data-testid="editor-notice">{notice}</div>}
       {status === "binary" && (
         <div className="p-4 text-sm text-muted-foreground">
           Cannot preview {entry.name}. {cloud ? "It is binary or not UTF-8 text." : "This binary format is unsupported. Use Reveal in Finder to open it externally."}
@@ -448,7 +528,8 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
         <div className="p-4 text-sm text-muted-foreground">Open the cloud workspace to read {entry.name}. Unsaved changes are kept until then.</div>
       )}
       {preview && status === "ready" && (
-        <div className="min-h-0 flex-1 overflow-auto scrollbar-thin px-6 py-4 select-text">
+        // Focusable, so ⌥⌘C copies the file while reading its preview.
+        <div tabIndex={-1} className="min-h-0 flex-1 overflow-auto scrollbar-thin px-6 py-4 outline-none select-text">
           <Markdown
             text={docText}
             className="prose-chat"

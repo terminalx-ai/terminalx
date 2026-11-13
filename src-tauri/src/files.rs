@@ -264,6 +264,44 @@ pub fn read_text(path: &Path) -> Result<TextFile> {
     Ok(TextFile { content, mtime_ms: mtime_ms(&meta), size, binary, truncated: size > MAX_TEXT })
 }
 
+/// The most a file tab copies to the clipboard (PRO-297): far past what the
+/// editor shows (`MAX_TEXT`), short of what would stall the webview.
+const MAX_WHOLE_TEXT: u64 = 256 * 1024 * 1024;
+
+/// A file's whole text, for copying a file the editor shows truncated.
+pub fn read_whole_text(path: &Path) -> Result<String> {
+    let size = std::fs::metadata(path)?.len();
+    anyhow::ensure!(size <= MAX_WHOLE_TEXT, "This file is too large to copy ({} MB); the limit is {} MB.", size / (1024 * 1024), MAX_WHOLE_TEXT / (1024 * 1024));
+    let bytes = std::fs::read(path)?;
+    anyhow::ensure!(!bytes.iter().take(8192).any(|&b| b == 0), "This file is binary; it cannot be copied as text.");
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Save a copy of a file somewhere the person chose (the file tab's
+/// Download): the file's exact bytes from `from`, or `content` (an unsaved
+/// buffer, or a cloud workspace's file). Returns the bytes written.
+pub fn export_file(to: &Path, from: Option<&Path>, content: Option<&str>) -> Result<u64> {
+    anyhow::ensure!(to.is_absolute(), "The download location must be an absolute path");
+    anyhow::ensure!(!to.is_dir(), "{} is a folder", to.display());
+    match (from, content) {
+        (Some(from), None) => {
+            anyhow::ensure!(std::fs::metadata(from)?.is_file(), "{} is not a file", from.display());
+            if let (Ok(a), Ok(b)) = (from.canonicalize(), to.canonicalize()) {
+                // Copying a file onto itself would truncate it first.
+                if a == b {
+                    return Ok(std::fs::metadata(from)?.len());
+                }
+            }
+            Ok(std::fs::copy(from, to)?)
+        }
+        (None, Some(content)) => {
+            std::fs::write(to, content)?;
+            Ok(content.len() as u64)
+        }
+        _ => anyhow::bail!("Download needs either a file or its contents"),
+    }
+}
+
 pub fn write_text(path: &Path, content: &str) -> Result<u64> {
     anyhow::ensure!(crate::media_types::media_type(path).is_none(), "Media files are read-only in the file pane");
     if let Some(parent) = path.parent() {
@@ -904,5 +942,37 @@ mod tree_tests {
         // Paths cannot escape the root.
         let err = replace_text(p, "x", "y", false, false, false, Some(vec![ReplaceTarget { path: "../outside".into(), lines: None }]), &[]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn whole_text_reads_past_the_editor_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let text = "a".repeat(MAX_TEXT as usize + 10);
+        std::fs::write(&path, &text).unwrap();
+        assert!(read_text(&path).unwrap().truncated, "the editor shows only the start");
+        assert_eq!(read_whole_text(&path).unwrap().len(), text.len());
+        let bin = dir.path().join("bin");
+        std::fs::write(&bin, [0u8, 1, 2]).unwrap();
+        assert!(read_whole_text(&bin).is_err());
+    }
+
+    #[test]
+    fn export_copies_bytes_or_writes_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("in.bin");
+        std::fs::write(&from, [0u8, 0xff, 10, 13]).unwrap();
+        let to = dir.path().join("out.bin");
+        assert_eq!(export_file(&to, Some(&from), None).unwrap(), 4);
+        assert_eq!(std::fs::read(&to).unwrap(), vec![0u8, 0xff, 10, 13]);
+        // Onto itself: left alone, not truncated.
+        assert_eq!(export_file(&from, Some(&from), None).unwrap(), 4);
+        assert_eq!(std::fs::read(&from).unwrap().len(), 4);
+        let text = dir.path().join("note.md");
+        assert_eq!(export_file(&text, None, Some("hello")).unwrap(), 5);
+        assert_eq!(std::fs::read_to_string(&text).unwrap(), "hello");
+        assert!(export_file(Path::new("relative.txt"), None, Some("x")).is_err());
+        assert!(export_file(dir.path(), None, Some("x")).is_err());
+        assert!(export_file(&to, None, None).is_err());
     }
 }

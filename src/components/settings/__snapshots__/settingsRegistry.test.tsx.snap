@@ -208,6 +208,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "shortcuts.files.replace",
   "shortcuts.files.find",
   "shortcuts.files.save",
+  "shortcuts.files.copyContents",
   "shortcuts.files.togglePreview",
   "shortcuts.files.closeAll",
   "shortcuts.issues.status",

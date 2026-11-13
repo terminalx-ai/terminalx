@@ -20,6 +20,7 @@ export {
   ArrowLeft,
   ArrowRight,
   Ellipsis,
+  EllipsisVertical,
   PanelLeft,
   PanelRight,
   Settings,

@@ -124,6 +124,7 @@ const ACTIONS = [
   { id: "files.replace", label: "Replace in project", group: "Files", keys: ["mod+shift+h"] },
   { id: "files.find", label: "Find in the focused chat, file or terminal", group: "Files", keys: ["mod+f"] },
   { id: "files.save", label: "Save the open file", group: "Files", keys: ["mod+s"] },
+  { id: "files.copyContents", label: "Copy the open file's contents", group: "Files", keys: ["mod+alt+c"] },
   { id: "files.togglePreview", label: "Preview or source for a markdown file", group: "Files", keys: ["mod+shift+p"] },
   { id: "files.closeAll", label: "Close all open files", group: "Files", keys: ["mod+alt+w"] },
   // Handled by the Issues view, while the focus is in it and not in a text field.
