@@ -10,6 +10,8 @@ const LIMIT: u64 = 128 * 1024 * 1024;
 /// Starts the refusal when restoring files would overwrite other changes; a
 /// JSON array of the paths follows. The dialog reads it to ask for confirmation.
 pub const OVERLAP: &str = "Other changes to these files would be overwritten: ";
+/// Ends an [`OVERLAP`] refusal: the token that confirms exactly that plan.
+pub const CONFIRM: &str = "Confirm: ";
 const FILES_FENCE: &str = "Files in this checkout are being reset to an earlier turn. Send it again once the reset finishes.";
 
 fn read(path: &Path) -> Result<String> {
@@ -79,9 +81,10 @@ impl SessionManager {
     /// `end_seq=None` restores the one saved reset, with the files it replaced.
     /// `reset_files` also puts the checkout back to the end of the chosen turn
     /// (its saved checkpoint); a reset that would overwrite changes other than
-    /// this chat's later turns is refused once with [`OVERLAP`], and the same
-    /// request again, with nothing changed since, confirms it.
-    pub fn reset_chat(&self, session_id: &str, tab_id: &str, end_seq: Option<u64>, reset_files: bool) -> Result<Option<String>> {
+    /// this chat's later turns is refused with [`OVERLAP`], the paths and a
+    /// [`CONFIRM`] token. Only a request that passes that token as `confirm`,
+    /// with nothing changed since, goes ahead.
+    pub fn reset_chat(&self, session_id: &str, tab_id: &str, end_seq: Option<u64>, reset_files: bool, confirm: Option<&str>) -> Result<Option<String>> {
         let admitted = admission::lock_for(session_id, tab_id);
         admission::open(session_id, Some(tab_id))?;
         self.accepting_work()?;
@@ -153,9 +156,10 @@ impl SessionManager {
         };
         anyhow::ensure!(files.is_some() || !undo_files, "The files saved before the reset are unavailable. Nothing was undone.");
         if let Some(plan) = &files {
-            if !checkpoints::confirm_overlap(session_id, tab_id, plan) {
-                bail!("{OVERLAP}{}. {}", serde_json::to_string(&plan.overlap)?,
-                    if end_seq.is_some() { "Resetting files removes those changes too." } else { "Undoing the reset removes those changes too." });
+            if !checkpoints::confirm_overlap(plan, confirm) {
+                bail!("{OVERLAP}{}. {} {CONFIRM}{}", serde_json::to_string(&plan.overlap)?,
+                    if end_seq.is_some() { "Resetting files removes those changes too." } else { "Undoing the reset removes those changes too." },
+                    plan.token());
             }
         }
         let turn = end_seq.map(|seq| current_events.iter().filter(|e| e.seq <= seq && matches!(e.payload, Payload::TurnCompleted { .. })).count());
@@ -232,6 +236,12 @@ impl SessionManager {
             Ok(session.clone())
         })?;
         revert.applied = None;
+        // The turns cut off (or, on Undo, brought back) are no longer this
+        // chat's own when a later reset plans its files.
+        let live: std::collections::HashSet<u64> = retained.iter().map(|event| event.seq).collect();
+        if let Err(error) = checkpoints::sync_live_turns(session_id, tab_id, &live) {
+            log::warn!("[{session_id}/{tab_id}] could not mark the turns a reset cut off: {error:#}");
+        }
         rt.log_path = next_log;
         // The new log is a copy cut at an earlier turn (or the pre-reset one
         // on undo). Its last held_queue snapshot can predate deliveries and
@@ -311,14 +321,14 @@ mod tests {
         // File restore outside Git and unknown formats leave process, index
         // and both log files untouched, before any backup is prepared.
         let before = read(&log).unwrap();
-        assert!(m.reset_chat("reset-s", "reset-t", Some(3), true).is_err());
+        assert!(m.reset_chat("reset-s", "reset-t", Some(3), true, None).is_err());
         std::fs::write(&native, format!("{fixture}\n{{\"type\":\"future\"}}\n")).unwrap();
-        assert!(m.reset_chat("reset-s", "reset-t", Some(3), false).is_err());
+        assert!(m.reset_chat("reset-s", "reset-t", Some(3), false, None).is_err());
         assert_eq!(store::log_path("reset-s", "reset-t").unwrap(), log);
         assert_eq!(read(&log).unwrap(), before);
         assert_eq!(index::get("reset-s").unwrap().tabs[0].provider_session_id.as_deref(), Some(provider));
         std::fs::write(&native, fixture).unwrap();
-        m.reset_chat("reset-s", "reset-t", Some(3), false).unwrap();
+        m.reset_chat("reset-s", "reset-t", Some(3), false, None).unwrap();
         let new_log = store::log_path("reset-s", "reset-t").unwrap();
         assert_ne!(new_log, log);
         assert!(!read(&new_log).unwrap().contains("LATER_RESET_SECRET"));
@@ -329,7 +339,7 @@ mod tests {
         m.closing();
         m.terminals.kill_all();
         let restarted = manager();
-        restarted.reset_chat("reset-s", "reset-t", None, false).unwrap();
+        restarted.reset_chat("reset-s", "reset-t", None, false, None).unwrap();
         let restored = index::get("reset-s").unwrap();
         assert!(!restored.tabs[0].unknown.contains_key("resetBackupId"));
         assert!(read(&store::log_path("reset-s", "reset-t").unwrap()).unwrap().contains("LATER_RESET_SECRET"));
@@ -382,20 +392,31 @@ mod tests {
         let end = crate::checkpoints::get(s, t, 1).unwrap().unwrap();
         assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "later\n");
         let m = manager();
-        m.reset_chat(s, t, Some(3), true).unwrap();
+        // A file made by hand overlaps: the refusal lists it with a token, and only that token goes ahead.
+        std::fs::write(cwd.join("c.txt"), "by hand\n").unwrap();
+        let refused = m.reset_chat(s, t, Some(3), true, None).unwrap_err().to_string();
+        assert!(refused.starts_with(OVERLAP) && refused.contains(r#"["c.txt"]"#), "{refused}");
+        let token = refused.rsplit_once(CONFIRM).expect("the refusal carries its token").1.to_string();
+        let again = m.reset_chat(s, t, Some(3), true, None).unwrap_err().to_string();
+        assert!(again.starts_with(OVERLAP), "asking again without the token is refused again, as after a Cancel: {again}");
+        assert!(m.reset_chat(s, t, Some(3), true, Some("reset:stale")).is_err(), "another plan's token does not confirm");
+        assert_eq!(std::fs::read_to_string(cwd.join("c.txt")).unwrap(), "by hand\n");
+        m.reset_chat(s, t, Some(3), true, Some(&token)).unwrap();
+        assert!(!cwd.join("c.txt").exists());
         assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "first\n");
         let first_end = crate::git::run(&cwd, &["rev-parse", &crate::git::checkpoints::reference(s, &format!("{t}-1"), "end").unwrap()]).unwrap();
         assert_eq!(crate::git::snapshot_tree(&cwd).unwrap(), first_end.trim(), "the worktree matches turn 1's end checkpoint");
         assert_eq!(end.files.len(), 1);
         let reset = index::get(s).unwrap();
         assert_eq!(reset.tabs[0].unknown.get("resetTurn"), Some(&json!(1)));
-        assert_eq!(reset.tabs[0].unknown.get("resetFilesRestored"), Some(&json!(1)));
+        assert_eq!(reset.tabs[0].unknown.get("resetFilesRestored"), Some(&json!(2)), "a.txt and the confirmed c.txt");
         m.stop(s, t).unwrap();
         m.closing();
         m.terminals.kill_all();
         let restarted = manager();
-        restarted.reset_chat(s, t, None, false).unwrap();
+        restarted.reset_chat(s, t, None, false, None).unwrap();
         assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "later\n");
+        assert_eq!(std::fs::read_to_string(cwd.join("c.txt")).unwrap(), "by hand\n", "Undo puts the confirmed hand edit back too");
         let undone = index::get(s).unwrap();
         assert!(!undone.tabs[0].unknown.contains_key("resetFilesRestored"));
         assert!(!undone.tabs[0].unknown.contains_key("resetBackupId"));
@@ -443,11 +464,11 @@ mod tests {
         let rt = m.runtime("reset-held-s", "reset-held-t").unwrap();
         assert!(rt.lock().unwrap().held_queue.items.is_empty());
         rt.lock().unwrap().held_queue = held::Queue { items: vec![held::Item { id: "h2".into(), text: "CLAIMED".into(), images: Vec::new() }], sending: Some("h2".into()), ..Default::default() };
-        let error = m.reset_chat("reset-held-s", "reset-held-t", Some(4), false).unwrap_err();
+        let error = m.reset_chat("reset-held-s", "reset-held-t", Some(4), false, None).unwrap_err();
         assert!(error.to_string().contains("queued messages"), "{error:#}");
         assert_eq!(store::log_path("reset-held-s", "reset-held-t").unwrap(), log);
         rt.lock().unwrap().held_queue = held::Queue::default();
-        m.reset_chat("reset-held-s", "reset-held-t", Some(4), false).unwrap();
+        m.reset_chat("reset-held-s", "reset-held-t", Some(4), false, None).unwrap();
         let new_log = store::log_path("reset-held-s", "reset-held-t").unwrap();
         assert_ne!(new_log, log);
         assert!(held::Queue::restore(&new_log).unwrap().items.is_empty());

@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -81,6 +81,10 @@ pub struct Checkpoint {
     pub backup_ref: Option<String>,
     #[serde(default)]
     pub unavailable_reason: Option<String>,
+    /// Cut off by a chat reset: no longer part of the conversation, so its
+    /// files are not this chat's own when a later reset plans what to restore.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    abandoned: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -351,6 +355,7 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
                 restored: false,
                 backup_ref: None,
                 unavailable_reason: None,
+                abandoned: false,
             });
         } else if let Payload::TurnCompleted { head, .. } = payload {
             if let Some(turn) = state.turns.last_mut().filter(|t| t.end.is_none()) {
@@ -731,7 +736,7 @@ pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
         }
         let state = load(session, tab)?;
         let missing = "This turn has no saved file checkpoint. Reset the chat without files.";
-        let at = state.turns.iter().rposition(|t| t.seq <= end_seq).ok_or_else(|| anyhow::anyhow!(missing))?;
+        let at = state.turns.iter().rposition(|t| t.seq <= end_seq && !t.abandoned).ok_or_else(|| anyhow::anyhow!(missing))?;
         let turn = &state.turns[at];
         let Some(end) = turn.end.clone() else { bail!(missing) };
         if let Some(reason) = &turn.unavailable_reason {
@@ -754,15 +759,37 @@ pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
         paths.extend(trees::paths(cwd, &end_index, &now_index)?);
         let paths: Vec<String> = paths.into_iter().collect();
         let now = trees::current(cwd, &paths)?;
-        // This chat's later turns account for their own files. Everything else
-        // (other conversations in the checkout, edits by hand) needs confirmation.
+        // This chat's later turns account for their own files, as each last
+        // left them. Everything else (other conversations in the checkout,
+        // turns an earlier reset cut off, edits by hand, including edits to a
+        // file after the last turn that touched it) needs confirmation.
         let mut own = BTreeSet::new();
+        let mut last_end: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
         let mut others = BTreeSet::new();
         let mut unknown = false;
-        for later in &state.turns[at + 1..] {
-            own.extend(file_paths(later));
+        for later in state.turns[at + 1..].iter().filter(|t| !t.abandoned) {
+            for path in file_paths(later) {
+                last_end.insert(path.clone(), (later.end.clone(), later.end_index.clone()));
+                own.insert(path);
+            }
             others.extend(later.concurrent_paths.iter().cloned());
             unknown |= later.concurrent_unknown || uncertain(session, tab, later)?;
+        }
+        let mut by_end: BTreeMap<(Option<String>, Option<String>), Vec<&String>> = BTreeMap::new();
+        for path in paths.iter().filter(|p| own.contains(*p)) {
+            by_end.entry(last_end[path].clone()).or_default().push(path);
+        }
+        let mut drifted = BTreeSet::new();
+        for ((end, end_index), group) in by_end {
+            let changed = match (end, end_index) {
+                (Some(end), Some(end_index)) => trees::paths(cwd, &end, &now)
+                    .and_then(|mut changed| { changed.extend(trees::paths(cwd, &end_index, &now_index)?); Ok(changed) })
+                    .ok()
+                    .map(|changed| changed.into_iter().collect::<BTreeSet<_>>()),
+                // An unfinished or conflicted end (or an expired one): nothing to compare with.
+                _ => None,
+            };
+            drifted.extend(group.into_iter().filter(|p| changed.as_ref().is_none_or(|c| c.contains(*p))).cloned());
         }
         for (owner, peer_tab, peer_state) in workspace_states(&turn.cwd)? {
             if owner == session && peer_tab == tab {
@@ -773,7 +800,7 @@ pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
                 unknown |= uncertain(&owner, &peer_tab, peer)?;
             }
         }
-        let overlap = paths.iter().filter(|p| unknown || others.contains(*p) || !own.contains(*p)).cloned().collect();
+        let overlap = paths.iter().filter(|p| unknown || others.contains(*p) || !own.contains(*p) || drifted.contains(*p)).cloned().collect();
         Ok(ResetPlan {
             cwd: turn.cwd.clone(),
             token: format!("reset:{end}:{end_index}:{now}:{now_index}"),
@@ -824,24 +851,34 @@ pub fn plan_reset_undo(session: &str, tab: &str, generation: &str) -> Result<Opt
     })
 }
 
-type Confirmations = Mutex<std::collections::HashMap<String, String>>;
-static RESET_CONFIRMATIONS: std::sync::LazyLock<Confirmations> = std::sync::LazyLock::new(Mutex::default);
+impl ResetPlan {
+    /// Names exactly this plan, and the checkout as it was when it was made.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+}
 
-/// A reset that overlaps other changes is refused once with the list; asking
-/// again for exactly the same plan, with nothing changed since, confirms it.
-pub fn confirm_overlap(session: &str, tab: &str, plan: &ResetPlan) -> bool {
-    if plan.overlap.is_empty() {
-        return true;
-    }
-    let key = format!("{session}/{tab}");
-    let mut shown = RESET_CONFIRMATIONS.lock().unwrap_or_else(|error| error.into_inner());
-    if shown.get(&key) == Some(&plan.token) {
-        shown.remove(&key);
-        true
-    } else {
-        shown.insert(key, plan.token.clone());
-        false
-    }
+/// A reset that overlaps other changes is refused with the list and the
+/// plan's token; only a request that hands back that token, with nothing
+/// changed since, confirms it. Nothing is remembered between requests, so a
+/// cancelled dialog or another window's plain request never counts as consent.
+pub fn confirm_overlap(plan: &ResetPlan, confirmed: Option<&str>) -> bool {
+    plan.overlap.is_empty() || confirmed == Some(plan.token.as_str())
+}
+
+/// After a reset or its Undo: the turns whose prompt is not in the
+/// conversation that remains are abandoned, and the ones that are are live.
+pub fn sync_live_turns(session: &str, tab: &str, live: &std::collections::HashSet<u64>) -> Result<()> {
+    locked(session, || {
+        let mut state = load(session, tab)?;
+        let mut changed = false;
+        for turn in &mut state.turns {
+            let abandoned = !live.contains(&turn.seq);
+            changed |= turn.abandoned != abandoned;
+            turn.abandoned = abandoned;
+        }
+        if changed { save(session, tab, &state) } else { Ok(()) }
+    })
 }
 
 /// Write the planned files and staging, keeping what they replace for Undo.

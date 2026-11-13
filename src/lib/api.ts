@@ -2089,8 +2089,9 @@ export const agent = {
     invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId }),
   /** The hard stop: ends the tab's agent process, keeping what it needs to resume. */
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
-  resetChat: (sessionId: string, tabId: string, endSeq: number | null, resetFiles: boolean) =>
-    invoke<string | null>("reset_chat", { sessionId, tabId, endSeq, resetFiles }),
+  /** `confirm`: the token from an overlap refusal, to go ahead with exactly the plan that was shown. */
+  resetChat: (sessionId: string, tabId: string, endSeq: number | null, resetFiles: boolean, confirm?: string | null) =>
+    invoke<string | null>("reset_chat", { sessionId, tabId, endSeq, resetFiles, confirm: confirm ?? null }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
   /** Send a message the CLI holds behind its running turn now: the turn is interrupted and the message typed again. */

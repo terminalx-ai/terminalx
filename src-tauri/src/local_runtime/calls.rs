@@ -221,7 +221,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     let session = string(&params, "sessionId")?;
     let tab = string(&params, "tabId")?;
     let value = match method {
-        "resetChat" => serde_json::to_value(manager.reset_chat(session, tab, serde_json::from_value(params.get("endSeq").context("endSeq is required (null for Undo)")?.clone())?, params["resetFiles"].as_bool().context("resetFiles is required")?)?)?,
+        "resetChat" => serde_json::to_value(manager.reset_chat(session, tab, serde_json::from_value(params.get("endSeq").context("endSeq is required (null for Undo)")?.clone())?, params["resetFiles"].as_bool().context("resetFiles is required")?, params["confirm"].as_str())?)?,
         "saveTerminalSelection" => json!(save_terminal_selection(session, tab, string(&params, "text")?)?),
         "resumeConversation" => { manager.resume_conversation(session, tab, string(&params, "harness")?, string(&params, "providerSessionId")?)?; Value::Null }
         // `opened`: only shown, which does not start an agent nobody is about to use.

@@ -2795,9 +2795,9 @@ pub async fn change_held_queue(state: State<'_, AppState>, session_id: String, t
 }
 
 #[tauri::command]
-pub async fn reset_chat(state: State<'_, AppState>, session_id: String, tab_id: String, end_seq: Option<u64>, reset_files: bool) -> CmdResult<Option<String>> {
+pub async fn reset_chat(state: State<'_, AppState>, session_id: String, tab_id: String, end_seq: Option<u64>, reset_files: bool, confirm: Option<String>) -> CmdResult<Option<String>> {
     let m = state.sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || m.reset_chat(&session_id, &tab_id, end_seq, reset_files).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || m.reset_chat(&session_id, &tab_id, end_seq, reset_files, confirm.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 /// Send a message the CLI holds behind its running turn now: interrupt, then type it.

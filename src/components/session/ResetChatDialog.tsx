@@ -8,15 +8,19 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 
 /** Starts the backend's refusal when restoring files would overwrite other changes (session_reset.rs `OVERLAP`). */
 const OVERLAP = "Other changes to these files would be overwritten: ";
+/** Ends that refusal: the token that confirms exactly the plan it lists (session_reset.rs `CONFIRM`). */
+const CONFIRM = "Confirm: ";
 
-/** The paths in an overlap refusal, or null for any other error. */
-export function overlapPaths(message: string): string[] | null {
+/** The paths and confirmation token in an overlap refusal, or null for any other error. */
+export function overlapRefusal(message: string): { paths: string[]; token: string } | null {
   const at = message.indexOf(OVERLAP);
-  if (at < 0) return null;
-  const rest = message.slice(at + OVERLAP.length);
+  const confirm = message.lastIndexOf(CONFIRM);
+  if (at < 0 || confirm < at) return null;
+  const rest = message.slice(at + OVERLAP.length, confirm);
+  const token = message.slice(confirm + CONFIRM.length).trim();
   try {
     const paths: unknown = JSON.parse(rest.slice(0, rest.lastIndexOf("]") + 1));
-    return Array.isArray(paths) && paths.every((path) => typeof path === "string") ? paths : null;
+    return token && Array.isArray(paths) && paths.every((path) => typeof path === "string") ? { paths, token } : null;
   } catch {
     return null;
   }
@@ -33,17 +37,20 @@ export function ResetChatDialog({ sessionId, tabId, endSeq, filesRestored, onClo
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [overlap, setOverlap] = useState<string[] | null>(null);
+  // The overlap the backend listed, with the token that confirms exactly that plan. It lives
+  // only in this dialog: Cancel, a changed choice or a new refusal replace it.
+  const [refusal, setRefusal] = useState<{ paths: string[]; token: string } | null>(null);
+  const overlap = refusal?.paths ?? null;
   const [resetFiles, setResetFiles] = usePref("resetFiles");
   const undo = endSeq === null;
-  const withFiles = undo ? !!filesRestored : resetFiles;
   async function reset() {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      // Asking again after the overlap warning, with nothing changed since, confirms it.
-      const warning = await agent.resetChat(sessionId, tabId, endSeq, !undo && resetFiles);
+      // "Reset anyway" hands back the token of the list that was shown; the backend
+      // goes ahead only if nothing changed since that plan was made.
+      const warning = await agent.resetChat(sessionId, tabId, endSeq, !undo && resetFiles, refusal?.token ?? null);
       // Also refresh directly: the window may have missed the owner event.
       const refreshed = await Promise.allSettled([reloadTabHistory(sessionId, tabId), refreshSessions()]);
       if (warning) onWarning(warning);
@@ -51,9 +58,10 @@ export function ResetChatDialog({ sessionId, tabId, endSeq, filesRestored, onClo
       onClose();
     } catch (e) {
       const message = errorMessage(e);
-      const paths = withFiles ? overlapPaths(message) : null;
-      setOverlap(paths);
-      if (!paths) setError(message);
+      // Undo can restore files even when this window has no count of them.
+      const next = overlapRefusal(message);
+      setRefusal(next);
+      if (!next) setError(message);
     } finally {
       setBusy(false);
     }
@@ -71,7 +79,7 @@ export function ResetChatDialog({ sessionId, tabId, endSeq, filesRestored, onClo
         {!undo && <>
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={resetFiles} disabled={busy} aria-describedby="reset-files-hint"
-              onChange={(e) => { setResetFiles(e.target.checked); setOverlap(null); setError(null); }} />
+              onChange={(e) => { setResetFiles(e.target.checked); setRefusal(null); setError(null); }} />
             Also reset files
           </label>
           <p id="reset-files-hint" className="pl-6 text-xs text-muted-foreground">{resetFiles
