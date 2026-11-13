@@ -140,6 +140,9 @@ Usage:
   terminalx runs check-failed PIECE [--run RUN] [--output FILE|-] [--reason TEXT] [--json]
   terminalx runs merge [RUN] [--skip PIECE]... [--recheck] [--json]
   terminalx runs send-back PIECE [--run RUN] [--json]
+  terminalx runs take-over|finish|skip PIECE [--run RUN] [--json]
+  terminalx runs widen PIECE [--own PATH]... [--run RUN] [--json]
+  terminalx runs note PIECE --text TEXT|--text-file FILE|- [--run RUN] [--json]
   terminalx runs cleanup [RUN] --yes [--json]
   terminalx vm status|start|stop [--json]
   terminalx vm tools [TOOL] [--json]
@@ -1266,7 +1269,7 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
 /// Orchestration runs: a lead's plan of pieces, and the workers started for
 /// them. Approving a run is not here: a person does that in the app.
 fn parse_runs(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, ControlError>) -> Result<Action, ControlError> {
-    let command = tokens.required_front("runs command (create, start, show, list, stop, check-failed, merge, send-back or cleanup)")?;
+    let command = tokens.required_front("runs command (create, start, show, list, stop, check-failed, merge, send-back, take-over, finish, widen, note, skip or cleanup)")?;
     // Where the command runs: the lead of a new run, and the run meant when none is named.
     let caller = calling_session();
     match command.as_str() {
@@ -1335,6 +1338,48 @@ fn parse_runs(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, Con
             tokens.finish()?;
             Ok(Action::Rpc { command: "runs.sendBack".into(), params: json!({"run": run, "piece": piece, "caller": caller}), timeout: RUN_START_TIMEOUT })
         }
+        // A blocked piece (PRO-361): the lead finishes it, a fresh worker tries it with more files,
+        // its worker is sent a note, or it is left out. `finish` checks what the lead committed.
+        "take-over" | "finish" | "skip" => {
+            let piece = tokens.required_front("piece id")?;
+            let run = tokens.option("--run")?;
+            tokens.finish()?;
+            // Finishing runs the piece's commands in the lead's checkout; widening starts a worker.
+            let (name, timeout) = match command.as_str() {
+                "take-over" => ("runs.takeOver", Duration::from_secs(60)),
+                "finish" => ("runs.finish", RUN_MERGE_TIMEOUT),
+                _ => ("runs.skip", Duration::from_secs(60)),
+            };
+            Ok(Action::Rpc { command: name.into(), params: json!({"run": run, "piece": piece, "caller": caller}), timeout })
+        }
+        "widen" => {
+            let piece = tokens.required_front("piece id")?;
+            let own = tokens.options("--own")?;
+            if own.iter().any(|path| path.trim().is_empty()) {
+                return Err(invalid("--own needs a path."));
+            }
+            let run = tokens.option("--run")?;
+            tokens.finish()?;
+            Ok(Action::Rpc { command: "runs.widen".into(), params: json!({"run": run, "piece": piece, "own": own, "caller": caller}), timeout: RUN_START_TIMEOUT })
+        }
+        "note" => {
+            let piece = tokens.required_front("piece id")?;
+            let text = tokens.option("--text")?;
+            let file = tokens.option("--text-file")?;
+            let run = tokens.option("--run")?;
+            tokens.finish()?;
+            let text = match (text, file.as_deref()) {
+                (Some(text), None) => text,
+                (None, Some("-")) => stdin()?,
+                (None, Some(path)) => std::fs::read_to_string(path).map_err(|error| invalid(format!("Could not read --text-file {path}: {error}")))?,
+                (Some(_), Some(_)) => return Err(invalid("Give the note once: --text TEXT or --text-file FILE.")),
+                (None, None) => return Err(invalid("Say what the worker should know: --text TEXT, or --text-file FILE (- for standard input).")),
+            };
+            if text.trim().is_empty() {
+                return Err(invalid("The note is empty."));
+            }
+            Ok(Action::Rpc { command: "runs.note".into(), params: json!({"run": run, "piece": piece, "text": text, "caller": caller}), timeout: Duration::from_secs(60) })
+        }
         // The workers' worktrees, once their work is merged. Explicit: nothing goes without --yes.
         "cleanup" => {
             let confirmed = tokens.flag("--yes")?;
@@ -1342,7 +1387,7 @@ fn parse_runs(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, Con
             tokens.finish()?;
             Ok(Action::Rpc { command: "runs.cleanup".into(), params: json!({"run": run, "confirmed": confirmed, "caller": caller}), timeout: RUN_START_TIMEOUT })
         }
-        other => Err(invalid(format!("Unknown runs command {other}. Use create, start, show, list, stop, check-failed, merge, send-back or cleanup."))),
+        other => Err(invalid(format!("Unknown runs command {other}. Use create, start, show, list, stop, check-failed, merge, send-back, take-over, finish, widen, note, skip or cleanup."))),
     }
 }
 
@@ -1615,7 +1660,7 @@ mod tests {
             assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
         }
         // A lead does not approve its own plan: there is no such command, and the guide says so.
-        assert!(parse(&args(&["runs", "approve", "01a1"])).unwrap_err().message.contains("Use create, start, show, list, stop, check-failed, merge, send-back or cleanup"));
+        assert!(parse(&args(&["runs", "approve", "01a1"])).unwrap_err().message.contains("Use create, start, show, list, stop, check-failed, merge, send-back, take-over, finish, widen, note, skip or cleanup"));
 
         // A failed done-check names the piece and carries what the check printed.
         std::fs::write(dir.path().join("check.log"), "test control::tests::reads_default ... FAILED\n").unwrap();
@@ -1630,6 +1675,22 @@ mod tests {
         assert_eq!(rpc_of(&["runs", "merge", "--json"]), ("runs.merge".into(), json!({"run": null, "skip": [], "recheck": false, "caller": null}), Duration::from_secs(4 * 60 * 60)));
         assert_eq!(rpc_of(&["runs", "merge", "01a1", "--skip", "cli", "--skip", "docs", "--recheck"]).1, json!({"run": "01a1", "skip": ["cli", "docs"], "recheck": true, "caller": null}));
         assert_eq!(rpc_of(&["runs", "send-back", "cli", "--run", "01a1"]), ("runs.sendBack".into(), json!({"run": "01a1", "piece": "cli", "caller": null}), Duration::from_secs(300)));
+        // A blocked piece (PRO-361): each action by piece, in the lead's session or by run.
+        assert_eq!(rpc_of(&["runs", "take-over", "cli", "--run", "01a1"]), ("runs.takeOver".into(), json!({"run": "01a1", "piece": "cli", "caller": null}), Duration::from_secs(60)));
+        assert_eq!(rpc_of(&["runs", "finish", "cli"]), ("runs.finish".into(), json!({"run": null, "piece": "cli", "caller": null}), Duration::from_secs(4 * 60 * 60)));
+        assert_eq!(rpc_of(&["runs", "skip", "cli", "--json"]), ("runs.skip".into(), json!({"run": null, "piece": "cli", "caller": null}), Duration::from_secs(60)));
+        assert_eq!(rpc_of(&["runs", "widen", "cli", "--own", "src/store/projects.rs", "--own", "docs/**"]).1, json!({"run": null, "piece": "cli", "own": ["src/store/projects.rs", "docs/**"], "caller": null}));
+        assert_eq!(rpc_of(&["runs", "widen", "cli"]).1["own"], json!([]));
+        assert_eq!(rpc_of(&["runs", "note", "cli", "--text", "Use the store's reader."]), ("runs.note".into(), json!({"run": null, "piece": "cli", "text": "Use the store's reader.", "caller": null}), Duration::from_secs(60)));
+        let note = dir.path().join("note.md");
+        std::fs::write(&note, "Read store/projects.rs first.").unwrap();
+        assert_eq!(rpc_of(&["runs", "note", "cli", "--text-file", note.to_str().unwrap()]).1["text"], "Read store/projects.rs first.");
+        let mut said = || Ok("From standard input.".to_string());
+        let Action::Rpc { params, .. } = parse_with_stdin(&args(&["runs", "note", "cli", "--text-file", "-"]), &mut said).unwrap().action else { panic!("expected rpc") };
+        assert_eq!(params["text"], "From standard input.");
+        for refused in [&["runs", "note", "cli"][..], &["runs", "note", "cli", "--text", "  "], &["runs", "note", "cli", "--text", "a", "--text-file", "b"], &["runs", "widen", "cli", "--own", ""], &["runs", "skip"], &["runs", "take-over", "cli", "extra"]] {
+            assert!(parse(&args(refused)).is_err(), "{refused:?} should be refused");
+        }
         assert_eq!(rpc_of(&["runs", "cleanup", "01a1", "--yes"]).1, json!({"run": "01a1", "confirmed": true, "caller": null}));
         assert_eq!(rpc_of(&["runs", "cleanup"]), ("runs.cleanup".into(), json!({"run": null, "confirmed": false, "caller": null}), Duration::from_secs(300)));
         for refused in [&["runs", "merge", "01a1", "extra"][..], &["runs", "merge", "--skip"], &["runs", "merge", "--skip", " "], &["runs", "send-back"], &["runs", "send-back", "cli", "extra"], &["runs", "cleanup", "01a1", "extra"]] {

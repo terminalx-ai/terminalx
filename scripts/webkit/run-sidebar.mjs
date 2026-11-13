@@ -149,7 +149,8 @@ try {
       "workers are indented under their lead, a row each": workerRows.every((row) => row.left > leadLeft + 8 && row.height <= 32),
       "workers are no rows of their own at the project's level": (await list.locator(":scope li[data-worker]").count()) === (await page.locator("[data-lead] li[data-worker]").count()),
       "the open lead shows what its workers have cost": (await leadA.locator(":scope > div [data-row-meta=spend]").first().textContent()) === "$7.42",
-      "the open lead carries its run's need: the blocked piece is its worker's": (await leadA.locator(":scope > div [data-testid=lead-needs]").count()) === 0,
+      // A blocked piece is answered in the lead's Run view (PRO-361, 18.03): the open lead carries its mark.
+      "the open lead carries its run's need: the blocked piece": await (async () => { const mark = leadA.locator(":scope > div [data-testid=lead-needs]"); return (await mark.count()) === 1 && (await mark.getAttribute("data-needs")) === "attention" && (await mark.getAttribute("title")).includes("Move CLI code to the store: Check still fails after 3 tries"); })(),
       "a session no other started looks as it did with the switch off": sameRow(soloOn, soloOff),
       "the sidebar does not scroll sideways": !rail.scrolls,
     };
@@ -210,6 +211,7 @@ try {
     checks["the run view shows each worker's cost"] = JSON.stringify(await view.getByTestId("piece-cost").allTextContents()) === JSON.stringify(["$0.04", "$1.82", "$0.88", "$0.97", "$3.71", "–"]);
     checks["the run view shows spend against the budget"] = (await view.getByTestId("run-spend").textContent()) === "$7.42 of $15.00";
     checks["the run view says what needs the person, with the reason"] = (await view.getByTestId("run-needs").innerText()).includes("Move CLI code to the store: Needs permission");
+    checks["the lead's row keeps its needs-you mark while its run is open"] = (await leadA.locator(":scope > div [data-testid=lead-needs]").getAttribute("data-needs")) === "attention";
     checks["the run's line says which piece is blocked and what waits for it"] = (await view.getByText("Piece 5 is blocked. Piece 6 waits for it; nothing else is running.").count()) === 1;
     // The Run view's side panel, as on a Mac (glass on, PRO-336).
     await page.evaluate(() => document.documentElement.setAttribute("data-glass", ""));

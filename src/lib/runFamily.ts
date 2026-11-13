@@ -1,6 +1,6 @@
 import type { StatusDescription } from "@terminalx/portable/sessionStatus";
 import { modelLabel } from "@/lib/models";
-import { pieceCost } from "@/lib/orchestration";
+import { donePieces, pieceCost } from "@/lib/orchestration";
 import { conversationTitle } from "@/lib/sessions";
 import { sessionModels, totals } from "@/components/session/SessionCost";
 import type { PieceState, Run, RunPiece } from "@/types/orchestration";
@@ -48,7 +48,7 @@ export function orderWorkers(workers: readonly SessionEntry[], run: Run | null |
 }
 
 export function runProgress(run: Pick<Run, "pieces">): { done: number; total: number } {
-  return { done: run.pieces.filter((piece) => piece.state === "done").length, total: run.pieces.length };
+  return { done: donePieces(run).length, total: run.pieces.length };
 }
 
 /** What a session has cost, API-equivalent: `null` when nothing it used has a price, or it has used nothing. */
@@ -116,6 +116,8 @@ export interface Need {
   /** The session to open for it: the worker's, or the lead's for the run itself. */
   sessionId: string;
   text: string;
+  /** A blocked piece, by id: the Run view says it in its subtitle and its panel, not in a list. */
+  piece?: string;
 }
 
 const waitsOnPerson = (status: StatusDescription) => status.label === "Needs approval" || status.label === "Needs you";
@@ -151,7 +153,8 @@ export function familyNeeds({ lead, leadStatus, run, workers, statusOf, spend }:
   }
   for (const piece of run?.pieces ?? []) {
     if (piece.state !== "blocked" || (piece.worker && asked.has(piece.worker.sessionId))) continue;
-    needs.push({ kind: "attention", sessionId: piece.worker?.sessionId ?? lead.id, text: `${piece.title}: ${piece.note ?? "blocked"}` });
+    // Answered in the lead's Run view (PRO-361): take it over, widen it, send its worker a note, or skip it.
+    needs.push({ kind: "attention", sessionId: lead.id, text: `${piece.title}: ${piece.note ?? "blocked"}`, piece: piece.id });
   }
   return needs;
 }

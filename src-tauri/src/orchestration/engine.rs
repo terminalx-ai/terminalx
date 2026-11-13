@@ -35,7 +35,7 @@ use super::ladder::{self, Step, Verdict};
 use super::plan::{self, Plan, PlanError};
 use super::routing::{self, LeadModel};
 use super::verify::{self as checks, Gate, GateResult, Tally, Verification, Verifier};
-use super::{brief, guard, store, Approval, Hold, MergeState, Outcome, Piece, PieceState, Run, RunState, SessionRef, Try};
+use super::{brief, guard, plan as plans, store, Approval, Hold, MergeState, Outcome, Piece, PieceState, Run, RunState, SessionRef, Try, TryReport};
 use crate::models::Model;
 use crate::status::usage::UsageWindow;
 use crate::store::settings::OrchestratorLimits;
@@ -86,8 +86,8 @@ pub struct Activity {
 pub enum WorkerNow {
     /// In a turn, about to take its brief, or about to be reminded of its report.
     Working,
-    /// Its last turn ended with a report.
-    Reported { status: Status, result: String },
+    /// Its last turn ended with a report: its status and result line, and the rest of it.
+    Reported { status: Status, result: String, report: TryReport },
     /// Its last turn ended, it was reminded once, and there is still no
     /// report that can be read: what is wrong with the reply. Gate 1 fails.
     NoReport(String),
@@ -117,6 +117,8 @@ pub struct Cost {
     pub usd: Option<f64>,
     /// Models whose tokens the cost leaves out.
     pub unpriced_models: Vec<String>,
+    /// The output tokens its session used; `None` before any usage was read.
+    pub output_tokens: Option<u64>,
 }
 
 pub trait Host: Send + Sync {
@@ -183,6 +185,28 @@ pub trait Host: Send + Sync {
     /// or waits to resume after a reset.
     fn watch(&self);
     fn now_ms(&self) -> i64;
+    /// The commit the lead's branch is at now; `None` when its checkout cannot be read.
+    fn lead_head(&self, run: &Run) -> Option<String>;
+    /// What the lead committed in its checkout since `since`, for a piece it took over
+    /// ([`finish`]), and what it left uncommitted.
+    fn lead_work(&self, run: &Run, since: &str) -> anyhow::Result<LeadWork>;
+    /// Run a piece's command done-checks in the lead's checkout, in order, until one fails.
+    /// `by_lead`: the lead's own turn asked, so that turn is not one to wait for.
+    /// `Err` says why they could not be run (its checkout is in use).
+    fn lead_commands(&self, run: &Run, piece: &Piece, by_lead: bool) -> Result<Vec<checks::CommandRun>, String>;
+    /// The permission mode of the lead's conversation, when it can be read.
+    fn lead_mode(&self, run: &Run) -> Option<String>;
+}
+
+/// What the lead's checkout holds of a piece it took over.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeadWork {
+    /// The commit its branch is at now.
+    pub head: String,
+    /// Each file changed between the commit it took the piece over at and `head`.
+    pub changes: Vec<checks::FileChange>,
+    /// Tracked files with changes that are not committed.
+    pub uncommitted: Vec<String>,
 }
 
 /// A refusal with a code a caller can branch on.
@@ -434,6 +458,10 @@ enum Launch {
 /// budget starts none: its next tries start when it is resumed.
 pub fn start_retries(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    start_retries_locked(host, id)
+}
+
+fn start_retries_locked(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     let mut run = stored(id)?;
     if run.state == RunState::NeedsYou && run.pieces.iter().any(|piece| piece.retry_waits() && piece.queued_for.is_none()) {
         // Held for the person, as what the lead asks for is: it starts when they resume the run.
@@ -742,7 +770,8 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         .pieces
         .iter()
         // A piece whose worker was never briefed says why until it is; there is nothing to read from it.
-        .filter(|piece| piece.state != PieceState::Stopped && piece.held.is_none())
+        // One a person skipped, or the lead took over, no longer follows the worker it had.
+        .filter(|piece| !matches!(piece.state, PieceState::Stopped | PieceState::Skipped | PieceState::Lead) && piece.held.is_none())
         .filter_map(|piece| {
             let worker = piece.worker.clone()?;
             // A try that has ended has its cost: only one still open is read again.
@@ -785,7 +814,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         }
         for (piece_id, worker, now, cost) in seen {
             // A piece whose worker was replaced meanwhile is not this worker's to decide.
-            let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.worker.as_ref() == Some(&worker) && piece.state != PieceState::Stopped && piece.held.is_none()) else { continue };
+            let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.worker.as_ref() == Some(&worker) && !matches!(piece.state, PieceState::Stopped | PieceState::Skipped | PieceState::Lead) && piece.held.is_none()) else { continue };
             // What a worker reported stands when its session is deleted afterwards: the report
             // was read, and its branch is still in the repository.
             if piece.state == PieceState::Done && now == WorkerNow::Gone {
@@ -796,6 +825,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                 if let Some(cost) = cost.filter(|_| now != WorkerNow::Gone) {
                     attempt.cost_usd = cost.usd;
                     attempt.cost_unpriced_models = cost.unpriced_models;
+                    attempt.output_tokens = cost.output_tokens.or(attempt.output_tokens);
                 }
                 // A failed done-check stands over the `done` its worker reported, until that worker works again.
                 if attempt.outcome == Some(Outcome::CheckFailed) && now != WorkerNow::Working {
@@ -804,6 +834,10 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             }
             let short = fell_short(&now).then(|| failure_of(&now));
             let outcome = outcome_of(&now);
+            let report = match &now {
+                WorkerNow::Reported { report, .. } => Some(report.clone()),
+                _ => None,
+            };
             let (mut state, note) = follows(now);
             // `done` is the worker's claim: the piece is done once its result has passed the gates.
             if state == PieceState::Done {
@@ -835,7 +869,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                         if attempt.verification.is_some() {
                             back_at_work.push(worker.clone());
                         }
-                        (attempt.outcome, attempt.ended, attempt.verification) = (None, None, None);
+                        (attempt.outcome, attempt.ended, attempt.verification, attempt.report) = (None, None, None, None);
                     }
                     Some(outcome) => {
                         let at = crate::store::index::now();
@@ -844,6 +878,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                         }
                         attempt.outcome = Some(outcome);
                         attempt.detail = short.clone().or(note);
+                        attempt.report = report;
                         // Gate 1, from the report that was just read: no session, no command.
                         if attempt.verification.is_none() {
                             attempt.verification = match (&short, state) {
@@ -1119,7 +1154,7 @@ fn fell_short(now: &WorkerNow) -> bool {
 /// What the next try is told went wrong: the worker's own words.
 fn failure_of(now: &WorkerNow) -> String {
     match now {
-        WorkerNow::Reported { status: Status::Partial, result } => format!("The worker reported partial: {result}"),
+        WorkerNow::Reported { status: Status::Partial, result , .. } => format!("The worker reported partial: {result}"),
         WorkerNow::Reported { result, .. } => format!("The worker reported failed: {result}"),
         WorkerNow::NoReport(problem) => format!("The worker ended without a report that can be read, after it was asked once more for one. {problem} Whatever it did is on its branch, unchecked."),
         _ => String::new(),
@@ -1142,10 +1177,10 @@ fn outcome_of(now: &WorkerNow) -> Option<Outcome> {
 fn follows(now: WorkerNow) -> (PieceState, Option<String>) {
     match now {
         WorkerNow::Working => (PieceState::Running, None),
-        WorkerNow::Reported { status: Status::Done, result } => (PieceState::Done, Some(result)),
-        WorkerNow::Reported { status: Status::Failed, result } => (PieceState::Failed, Some(result)),
-        WorkerNow::Reported { status: Status::Partial, result } => (PieceState::Blocked, Some(format!("Reported partial: {result}"))),
-        WorkerNow::Reported { status: Status::Blocked, result } => (PieceState::Blocked, Some(format!("Reported blocked: {result}"))),
+        WorkerNow::Reported { status: Status::Done, result , .. } => (PieceState::Done, Some(result)),
+        WorkerNow::Reported { status: Status::Failed, result , .. } => (PieceState::Failed, Some(result)),
+        WorkerNow::Reported { status: Status::Partial, result , .. } => (PieceState::Blocked, Some(format!("Reported partial: {result}"))),
+        WorkerNow::Reported { status: Status::Blocked, result , .. } => (PieceState::Blocked, Some(format!("Reported blocked: {result}"))),
         WorkerNow::NoReport(problem) => (PieceState::Blocked, Some(format!("No report: {problem}"))),
         WorkerNow::Stuck(why) => (PieceState::Blocked, Some(why)),
         WorkerNow::Gone => (PieceState::Blocked, Some("Its worker session was deleted.".into())),
@@ -1185,7 +1220,12 @@ fn climb(piece: &mut Piece, failure: &str, models: &[Model]) {
     // A piece stored before tries were kept has no ladder to climb.
     let Some(last) = piece.tries.last().cloned() else { return };
     let tries = piece.tries.len();
-    match ladder::next(&piece.agent, tries, &last.model, last.effort.as_deref(), last.tier, models) {
+    // A try a person asked for past the ladder (its files widened) is the last: the person decides again.
+    let verdict = match piece.tries.iter().any(|attempt| attempt.step == Step::Widened) {
+        true => Verdict::Blocked("The try after a person widened its files fell short too.".into()),
+        false => ladder::next(&piece.agent, tries, &last.model, last.effort.as_deref(), last.tier, models),
+    };
+    match verdict {
         Verdict::Again(next) => {
             piece.note = Some(format!("Try {tries} fell short on {}. Try {} runs on {} ({}).", on(&last.model, last.effort.as_deref()), tries + 1, on(&next.model, next.effort.as_deref()), ladder::describe(next.step)));
             piece.tries.push(Try::planned(next.step, &next.model, next.effort.as_deref(), next.tier));
@@ -1422,6 +1462,459 @@ pub fn resolve_in_lead(host: &dyn Host, id: &str, piece_id: &str) -> Result<Run,
     Ok(run)
 }
 
+/// The piece `piece_id` of `run`, or the refusal that names the pieces it has.
+fn piece_of<'a>(run: &'a Run, piece_id: &str) -> Result<&'a Piece, EngineError> {
+    run.piece(piece_id).ok_or_else(|| {
+        let mut error = EngineError::new("piece_not_found", format!("Run {} has no piece {piece_id}.", run.id), Some("Use a piece id from `terminalx runs show --json`."));
+        error.details = json!({"pieces": run.pieces.iter().map(|piece| piece.id.clone()).collect::<Vec<_>>()});
+        error
+    })
+}
+
+fn piece_state_name(state: PieceState) -> String {
+    serde_json::to_value(state).ok().and_then(|state| state.as_str().map(str::to_owned)).unwrap_or_default()
+}
+
+/// A run a person acts on a blocked piece of: started, and not ended by a stop or by being done.
+fn acting_on(run: &Run, what: &str) -> Result<(), EngineError> {
+    match run.state {
+        RunState::AwaitingApproval | RunState::Planned => Err(EngineError::new("run_not_started", format!("Run {} has not started: no piece of it is blocked. To change a piece before it starts, edit the plan.", run.id), None)),
+        RunState::Stopped | RunState::Done => {
+            let mut error = EngineError::new("run_ended", format!("Run {} has ended ({}), so TerminalX does not {what}.", run.id, state_name(run.state)), Some("Create a new run for what is left."));
+            error.details = json!({"run": run.id, "state": run.state});
+            Err(error)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The piece `piece_id`, which must be blocked (or failed) for a person to `what` it.
+fn blocked<'a>(run: &'a Run, piece_id: &str, what: &str) -> Result<&'a Piece, EngineError> {
+    acting_on(run, what)?;
+    let piece = piece_of(run, piece_id)?;
+    if !matches!(piece.state, PieceState::Blocked | PieceState::Failed) {
+        let why = match piece.state {
+            PieceState::Running | PieceState::Stalled => "its worker is at work",
+            PieceState::Verifying => "its result is being checked",
+            PieceState::Queued => "it has not started",
+            PieceState::Done => "it is done",
+            PieceState::Skipped => "it was skipped",
+            PieceState::Lead => "the lead has taken it over",
+            _ => "it was stopped",
+        };
+        let mut error = EngineError::new("piece_not_blocked", format!("Piece {piece_id} is not blocked: {why}. TerminalX does not {what} unless it is."), Some("`terminalx runs show --json` says where each piece stands."));
+        error.details = json!({"piece": piece_id, "state": piece.state});
+        return Err(error);
+    }
+    Ok(piece)
+}
+
+/// A person approved this run's plan: what changes it (the files a piece owns, a piece left out, a piece
+/// lifted out of its scope into the lead) is theirs, from the Run view, not the lead's from the CLI.
+fn person_only(run: &Run, piece_id: &str, by: By, what: &str) -> Result<(), EngineError> {
+    if by == By::Cli && run.approval.is_some() {
+        let mut error = EngineError::new("person_only", format!("A person approved the plan of run {}: only they {what}, in the session's Run view.", run.id), Some("Tell the person what the piece needs and why, then end your turn. You are told here when they decide."));
+        error.details = json!({"piece": piece_id});
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// A turn of a worker that has a session: within the budget and the worker limits, as any
+/// worker's turn is (PRO-280). `what` names it in the refusal.
+fn turn_fits(host: &dyn Host, run: &Run, piece_id: &str, what: &str) -> Result<(), EngineError> {
+    if let Some(reached) = budget::reached(run, host.now_ms()) {
+        return Err(over_budget(host, &run.id, reached, what));
+    }
+    let app_limit = host.limits(&run.project_path).workers_at_once as usize;
+    let full = if run.in_turn() >= run.limits.workers as usize {
+        Some(format!("this run has {} of its {} workers in a turn", run.in_turn(), run.limits.workers))
+    } else if in_turn_everywhere()? >= app_limit {
+        Some(format!("the app has as many run workers in a turn as it allows ({app_limit})"))
+    } else {
+        None
+    };
+    match full {
+        None => Ok(()),
+        Some(full) => {
+            let mut error = EngineError::new("no_free_worker", format!("TerminalX did not {what}: {full}. Its worker would be one more."), Some("Try again when a worker's turn has ended, or raise the worker limit for this run."));
+            error.details = json!({"piece": piece_id, "inTurn": run.in_turn(), "workers": run.limits.workers});
+            Err(error)
+        }
+    }
+}
+
+/// What skipping a piece did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Skipped {
+    pub run: Run,
+    /// The piece, then the pieces that depend on it and had not started: left out with it.
+    pub skipped: Vec<String>,
+}
+
+/// A person leaves a blocked piece out of the run (18.03's Skip piece). No
+/// worker works on it again, it is not merged, and the run is done once every
+/// other piece is. A piece that depends on it and has not started is left out
+/// with it: it would be built on work that will not be there. Asks no model,
+/// so it works while the run is paused on its budget.
+pub fn skip(host: &dyn Host, id: &str, piece_id: &str, by: By) -> Result<Skipped, EngineError> {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let run = refreshed(host, id)?;
+    acting_on(&run, "skip a piece")?;
+    let piece = piece_of(&run, piece_id)?;
+    // The lead may give up on a piece it took over, too.
+    if !matches!(piece.state, PieceState::Blocked | PieceState::Failed | PieceState::Lead) {
+        blocked(&run, piece_id, "skip a piece")?;
+    }
+    person_only(&run, piece_id, by, "leave a piece out")?;
+    let mut skipped = vec![piece_id.to_string()];
+    loop {
+        let more: Vec<String> = run.pieces.iter().filter(|other| !skipped.contains(&other.id) && other.state == PieceState::Queued && other.worker.is_none() && other.depends_on.iter().any(|on| skipped.contains(on))).map(|other| other.id.clone()).collect();
+        if more.is_empty() {
+            break;
+        }
+        skipped.extend(more);
+    }
+    let at = crate::store::index::now();
+    let (after, ()) = store::update(id, |run| {
+        for piece in run.pieces.iter_mut().filter(|piece| skipped.contains(&piece.id)) {
+            piece.note = Some(match piece.id == piece_id {
+                true => "Skipped by a person: the run goes on without it, and it is not merged.".to_string(),
+                false => format!("Skipped with piece {piece_id}, which it depends on."),
+            });
+            piece.state = PieceState::Skipped;
+            piece.queued_for = None;
+            // A try under way (the lead's) or planned and never started ends here.
+            if let Some(attempt) = piece.tries.last_mut().filter(|attempt| attempt.outcome.is_none()) {
+                attempt.outcome = Some(Outcome::Stopped);
+                attempt.ended = Some(at.clone());
+            }
+        }
+        follow_resolution(run, None);
+        settle(run);
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    host.changed(&after);
+    if by == By::Person {
+        let with = if skipped.len() > 1 { format!(", and with it {}, which depend{} on it", skipped[1..].join(", "), if skipped.len() == 2 { "s" } else { "" }) } else { String::new() };
+        host.tell_lead(
+            &after,
+            &format!("The person skipped piece {piece_id} of run {id}{with}. The run goes on without {}: nothing of {} is merged, and the run is done once every other piece is merged. Do not do that work another way unless they ask.", if skipped.len() == 1 { "it" } else { "them" }, if skipped.len() == 1 { "it" } else { "them" }),
+        );
+    }
+    Ok(Skipped { run: after, skipped })
+}
+
+/// What widening a piece's files did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Widened {
+    pub run: Run,
+    pub piece: String,
+    /// The files the piece owns now that it did not before.
+    pub added: Vec<String>,
+    /// A fresh worker was started for it; it waits for a slot or the budget otherwise.
+    pub started: bool,
+    pub failed: Vec<NotStarted>,
+}
+
+/// A person widens a blocked piece's files and has it tried again (18.03's
+/// Widen scope and retry). `files` are the paths or globs it should own as
+/// well; none means the files its last report and check name outside its
+/// scope (`Piece::outside`). A file another piece still works on is refused:
+/// two workers would change it at once. The new try is a fresh worker on the
+/// last try's model and effort, briefed with what went before, and it starts
+/// as any worker does, within the budget and the worker limits.
+pub fn widen(host: &dyn Host, id: &str, piece_id: &str, files: &[String], by: By) -> Result<Widened, EngineError> {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let run = refreshed(host, id)?;
+    let piece = blocked(&run, piece_id, "widen a piece's files")?;
+    // A person approved the files each piece owns: changing them is theirs, as editing the plan is.
+    person_only(&run, piece_id, by, "widen the files a piece owns")?;
+    let named: Vec<String> = files.iter().map(|file| file.trim().trim_start_matches("./").to_string()).filter(|file| !file.is_empty()).collect();
+    let wanted: Vec<String> = if named.is_empty() { piece.outside(&run).into_iter().map(|outside| outside.path).collect() } else { named };
+    // A catch-all (`**`, `*/*`, `.`) is not a widening: it is every file.
+    let everything = |path: &str| path.chars().all(|c| matches!(c, '*' | '/' | '.'));
+    if let Some(bad) = wanted.iter().find(|path| everything(path)) {
+        let mut error = EngineError::new("invalid_path", format!("{bad} is every file of the repository, not a widening. Name the files or directories the piece needs."), None);
+        error.details = json!({"piece": piece_id, "path": bad});
+        return Err(error);
+    }
+    if let Some(bad) = wanted.iter().find(|path| path.starts_with('/') || path.contains('\\') || path.split('/').any(|part| part == "..")) {
+        let mut error = EngineError::new("invalid_path", format!("{bad} is not a path in the repository: a piece owns paths relative to the repository's root, with forward slashes and no `..`."), None);
+        error.details = json!({"piece": piece_id, "path": bad});
+        return Err(error);
+    }
+    let added: Vec<String> = wanted.iter().filter(|path| !plans::owns(&piece.owns, path)).cloned().collect();
+    if added.is_empty() {
+        let message = match wanted.is_empty() {
+            true => format!("Piece {piece_id}'s last report and check name no file outside what it owns, so there is nothing to widen it to."),
+            false => format!("Piece {piece_id} already owns {}.", wanted.join(", ")),
+        };
+        let mut error = EngineError::new("nothing_to_widen", message, Some("Name the files it needs: `terminalx runs widen <piece> --own <path>`, once a path."));
+        error.details = json!({"piece": piece_id, "owns": piece.owns});
+        return Err(error);
+    }
+    // A done piece's work is finished, and a skipped one's will not come: only one still to be done is in the way.
+    // A directory or a glob is compared as one: `src/store` meets a piece that owns `src/store/a.rs`.
+    let meets = |path: &str, other: &Piece| other.owns.iter().any(|owned| plans::overlap(path, owned));
+    if let Some((path, other)) = added.iter().find_map(|path| run.pieces.iter().find(|other| other.id != piece_id && meets(path, other) && !other.state.settled() && other.state != PieceState::Stopped).map(|other| (path, other))) {
+        let mut error = EngineError::new("owned_by_another", format!("{path} is owned by piece {}, which is {}: two workers would change it at once.", other.id, piece_state_name(other.state)), Some("Widen it once that piece is done, or skip one of them."));
+        error.details = json!({"piece": piece_id, "path": path, "owner": other.id, "state": other.state});
+        return Err(error);
+    }
+    let last = piece.tries.last().cloned();
+    let (after, ()) = store::update(id, |run| {
+        if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id) {
+            piece.owns.extend(added.iter().cloned());
+            let (model, effort, tier) = match &last {
+                Some(last) => (last.model.clone(), last.effort.clone(), last.tier),
+                None => (piece.model.clone(), piece.effort.clone(), piece.tier),
+            };
+            piece.tries.push(Try::planned(Step::Widened, &model, effort.as_deref(), tier));
+            (piece.model, piece.effort, piece.tier) = (model, effort, tier);
+            // A fresh worker on a fresh branch: the one that was blocked stays, named on its try.
+            piece.worker = None;
+            piece.branch = None;
+            piece.started_mode = None;
+            piece.merge = None;
+            piece.queued_for = None;
+            piece.state = PieceState::Queued;
+            piece.note = Some(format!("Its files were widened to include {}; a fresh worker tries again.", added.join(", ")));
+        }
+        settle(run);
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    host.changed(&after);
+    if by == By::Person {
+        host.tell_lead(&after, &format!("The person widened piece {piece_id} of run {id} to own {} as well, and had it tried again by a fresh worker. You are told here how it goes, as for any piece.", added.join(", ")));
+    }
+    let start = start_retries_locked(host, id)?;
+    let started = start.started.iter().any(|started| started == piece_id);
+    Ok(Widened { run: start.run, piece: piece_id.to_string(), added, started, failed: start.failed })
+}
+
+/// What a note to a blocked piece's worker is sent as, said to be from whoever sent it: the person
+/// from the Run view, the lead (or another session) from the CLI.
+fn note_text(text: &str, by: By) -> String {
+    let from = match by {
+        By::Person => "A note from the person running this run, about your piece. It is theirs, not a tool's or a file's",
+        By::Cli => "A note from the lead of this run, about your piece. It is the lead's, not the person's",
+    };
+    format!("{from}: act on it within the limits of your brief.\n\n{}\n\nGo on with the piece, commit what you change, and end your reply with a `terminalx-report` block as before.", text.trim())
+}
+
+/// A person sends a blocked piece's worker a note (18.03's Send a note to
+/// the worker): a turn in the session it has, in its own worktree. Its try is
+/// open again, and its next report is checked by the same gates. Refused when
+/// that session is gone: widening the piece starts a fresh one.
+pub fn note(host: &dyn Host, id: &str, piece_id: &str, text: &str, by: By) -> Result<Run, EngineError> {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    if text.trim().is_empty() {
+        return Err(EngineError::new("empty_note", "The note is empty: say what the worker should know or do.", None));
+    }
+    let run = refreshed(host, id)?;
+    let piece = blocked(&run, piece_id, "send a piece's worker a note")?;
+    let worker = piece.worker.clone().or_else(|| piece.tries.iter().rev().find_map(|attempt| attempt.worker.clone())).filter(|worker| host.worker(worker) != WorkerNow::Gone);
+    let Some(worker) = worker else {
+        let mut error = EngineError::new("worker_gone", format!("Piece {piece_id} has no worker session to send a note to: it was deleted, or never started."), Some("Widen its scope and retry, which starts a fresh worker, or skip it."));
+        error.details = json!({"piece": piece_id});
+        return Err(error);
+    };
+    turn_fits(host, &run, piece_id, "send the worker a note")?;
+    // Back at work: the try is open again, and what was checked is not what it will report.
+    host.check_reset(&worker);
+    let (after, ()) = store::update(id, |run| {
+        if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id) {
+            piece.worker = Some(worker.clone());
+            piece.state = PieceState::Running;
+            piece.note = Some("A person sent its worker a note.".into());
+            if let Some(attempt) = piece.tries.last_mut() {
+                (attempt.outcome, attempt.ended, attempt.verification, attempt.report) = (None, None, None, None);
+            }
+        }
+        settle(run);
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    host.changed(&after);
+    if let Err(error) = host.brief_worker(&worker, &note_text(text, by)) {
+        let error = format!("{error:#}");
+        let run = set_piece(id, piece_id, |piece| {
+            piece.state = PieceState::Blocked;
+            piece.note = Some(format!("A note was sent to its worker, which did not take it: {error}"));
+        })?;
+        host.changed(&run);
+        let mut refusal = EngineError::new("note_not_taken", format!("The worker of piece {piece_id} did not take the note: {error}"), None);
+        refusal.details = json!({"piece": piece_id});
+        return Err(refusal);
+    }
+    // A worker in a turn again is watched for a stall, as any is.
+    host.watch();
+    if by == By::Person {
+        host.tell_lead(&after, &format!("The person sent the worker of piece {piece_id} of run {id} a note, and it is at work again:\n\n{}\n\nYou are told here how it goes, as for any piece.", text.trim().lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n")));
+    }
+    Ok(after)
+}
+
+/// A person has the lead take a blocked piece over (18.03's Take over in
+/// lead): the lead is sent the piece's brief, what its tries came to and where
+/// their work is (`brief::take_over`), and finishes it in its own checkout,
+/// where it may change any file. `finish` then checks that and makes the
+/// piece done. Like resolving a conflict in the lead, it is a model call the
+/// run's budget counts: a run past it does not start it.
+pub fn take_over(host: &dyn Host, id: &str, piece_id: &str, by: By) -> Result<Run, EngineError> {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let run = refreshed(host, id)?;
+    let piece = blocked(&run, piece_id, "hand a piece to the lead")?;
+    // It lifts the piece out of the files a person approved for it.
+    person_only(&run, piece_id, by, "hand a piece to the lead")?;
+    if let Some(other) = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).filter(|resolving| run.piece(&resolving.piece).is_some_and(|other| other.state == PieceState::Lead || other.current_merge().is_some_and(|merge| merge.state == MergeState::Conflict))) {
+        let mut error = EngineError::new("lead_busy", format!("The lead is already working on piece {} for you: it takes one piece at a time.", other.piece), Some("Wait until that piece is settled, or skip it."));
+        error.details = json!({"piece": piece_id, "busyWith": other.piece});
+        return Err(error);
+    }
+    if let Some(reached) = budget::reached(&run, host.now_ms()) {
+        return Err(over_budget(host, id, reached, "hand the piece to the lead"));
+    }
+    let Some(head) = host.lead_head(&run) else {
+        return Err(EngineError::new("lead_not_found", "The lead's checkout cannot be read, so its work on the piece could not be told from what was there before.", None));
+    };
+    let lead = host.lead(&run.lead.session_id).ok();
+    let login = lead.as_ref().map(|lead| host.login(&lead.agent)).unwrap_or(Login::Subscription);
+    let lead_usd = host.worker_cost(&run.lead).usd.unwrap_or(0.0);
+    let prompt = brief::take_over(&run, piece, &head, by == By::Person);
+    let at = crate::store::index::now();
+    let (after, ()) = store::update(id, |run| {
+        let merge = run.merge.get_or_insert_with(Default::default);
+        merge.end_resolving();
+        merge.resolving = Some(super::Resolution { piece: piece_id.to_string(), login, lead_usd, usd: 0.0 });
+        if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id) {
+            let mut attempt = Try::planned(Step::Lead, lead.as_ref().map_or("", |lead| lead.model.as_str()), None, None);
+            attempt.worker = Some(run.lead.clone());
+            attempt.from_commit = Some(head.clone());
+            attempt.started = Some(at.clone());
+            piece.tries.push(attempt);
+            piece.state = PieceState::Lead;
+            piece.queued_for = None;
+            piece.note = Some("Taken over by the lead: it finishes the piece in its own checkout.".into());
+        }
+        settle(run);
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    host.changed(&after);
+    host.tell_lead(&after, &prompt);
+    Ok(after)
+}
+
+/// What checking the lead's work on a piece it took over came to.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Finished {
+    pub run: Run,
+    pub piece: String,
+    /// The commit of the lead's branch the piece is done at.
+    pub commit: String,
+    pub checks: Vec<checks::CommandRun>,
+}
+
+/// The lead says it finished a piece it took over: what it committed since is
+/// the piece's result, checked by the piece's command done-checks in the
+/// lead's checkout. Passing, the piece is done and in the lead's branch
+/// already, so the merge counts it as merged by hand; failing, it stays with
+/// the lead, and what the check printed is kept on its try.
+pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) -> Result<Finished, EngineError> {
+    let starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let run = refreshed(host, id)?;
+    acting_on(&run, "finish a piece")?;
+    let piece = piece_of(&run, piece_id)?;
+    let since = piece.tries.last().filter(|attempt| attempt.step == Step::Lead && piece.state == PieceState::Lead).and_then(|attempt| attempt.from_commit.clone());
+    let Some(since) = since else {
+        let mut error = EngineError::new("not_taken_over", format!("Piece {piece_id} is not with the lead: a piece is finished this way once the lead has taken it over."), Some("A blocked piece is handed to the lead from the Run view, or with `terminalx runs take-over <piece>`."));
+        error.details = json!({"piece": piece_id, "state": piece.state});
+        return Err(error);
+    };
+    let commands = piece.done_checks.iter().any(|check| matches!(check, super::Check::Command { .. }));
+    // The rule a merge keeps (`verify::may_run_commands`): a plan's commands are run unasked for a
+    // person, for an approved plan, or for a lead that runs commands unasked itself.
+    if by == By::Cli && commands && !checks::may_run_commands(run.approval.is_some(), host.lead_mode(&run).as_deref().unwrap_or_default()) {
+        return Err(EngineError::new(
+            "checks_not_approved",
+            "Finishing runs the plan's commands in the lead's checkout, and nobody approved this plan: TerminalX does not run them unasked for a lead that is itself asked before it runs a command.",
+            Some("Ask the person to press Check and finish in the session's Run view."),
+        ));
+    }
+    let work = host.lead_work(&run, &since).map_err(|error| EngineError::new("lead_not_found", format!("The lead's checkout cannot be read: {error:#}"), None))?;
+    if !work.uncommitted.is_empty() {
+        let mut error = EngineError::new("uncommitted", format!("The lead's checkout has changes that are not committed: {}. A piece is finished as a commit.", work.uncommitted.iter().take(8).cloned().collect::<Vec<_>>().join(", ")), Some("Commit them, then finish the piece again."));
+        error.details = json!({"piece": piece_id, "files": work.uncommitted});
+        return Err(error);
+    }
+    if work.changes.is_empty() {
+        let mut error = EngineError::new("nothing_committed", format!("Nothing was committed in the lead's branch since it took piece {piece_id} over at {}.", &since[..since.len().min(7)]), Some("Commit the piece's work in the lead's checkout first, or skip the piece."));
+        error.details = json!({"piece": piece_id, "since": since});
+        return Err(error);
+    }
+    let ran = host.lead_commands(&run, piece, by_lead).map_err(|why| EngineError::new("checkout_busy", format!("The lead's checkout is in use: {why} Nothing was checked."), Some("Finish the piece again once it is free.")))?;
+    let failed = ran.iter().find(|command| !command.passed).cloned();
+    let at = crate::store::index::now();
+    let files: Vec<String> = work.changes.iter().map(|change| change.path.clone()).collect();
+    let lines: u32 = work.changes.iter().map(|change| change.added.unwrap_or(0) + change.removed.unwrap_or(0)).sum();
+    let gate = match (&failed, ran.is_empty()) {
+        (Some(failed), _) => checks::GateResult { gate: Gate::Commands, passed: false, detail: Some(format!("`{}` {} in the lead's checkout.", failed.run, failed.exit_code.map_or("did not finish".to_string(), |code| format!("exited {code}")))), commands: ran.clone() },
+        (None, false) => checks::GateResult { gate: Gate::Commands, passed: true, detail: Some(format!("{} passed in the lead's checkout.", if ran.len() == 1 { "Its command".to_string() } else { format!("All {} of its commands", ran.len()) })), commands: ran.clone() },
+        (None, true) => GateResult::passed(Gate::Commands, "The piece has no command to run: the lead's commit is its result."),
+    };
+    let (after, ()) = store::update(id, |run| {
+        if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id) {
+            if let Some(attempt) = piece.tries.last_mut() {
+                attempt.verification = Some(Verification {
+                    gates: vec![GateResult::passed(Gate::Report, "The lead said it finished the piece."), gate.clone()],
+                    facts: Some(checks::Facts { files: files.clone(), changed_lines: lines, changes: work.changes.clone(), commit: Some(work.head.clone()), ..Default::default() }),
+                    outcome: Some(if failed.is_some() { checks::Outcome::Failed } else { checks::Outcome::Passed }),
+                    failure: gate.detail.clone().filter(|_| failed.is_some()),
+                    started: Some(at.clone()),
+                    ended: Some(at.clone()),
+                    ..Verification::default()
+                });
+                if failed.is_none() {
+                    attempt.outcome = Some(Outcome::Done);
+                    attempt.ended = Some(at.clone());
+                    attempt.detail = Some(format!("Finished by the lead at {}.", &work.head[..work.head.len().min(7)]));
+                }
+            }
+            match &failed {
+                None => {
+                    piece.state = PieceState::Done;
+                    piece.note = Some(format!("Finished by the lead in its own checkout, at {}; its checks passed there.", &work.head[..work.head.len().min(7)]));
+                }
+                Some(failed) => piece.note = Some(format!("The lead's work did not pass its checks: `{}` {}.", failed.run, failed.exit_code.map_or("did not finish".to_string(), |code| format!("exited {code}")))),
+            }
+        }
+        follow_resolution(run, None);
+        settle(run);
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    host.changed(&after);
+    if let Some(failed) = failed {
+        let mut error = EngineError::new("checks_failed", format!("Piece {piece_id} is not done: `{}` {} in the lead's checkout. It stays with the lead.", failed.run, failed.exit_code.map_or("did not finish".to_string(), |code| format!("exited {code}"))), Some("Fix it in the lead's checkout, commit, and finish the piece again."));
+        error.details = json!({"piece": piece_id, "check": failed});
+        return Err(error);
+    }
+    if by == By::Person {
+        host.tell_lead(&after, &format!("The person checked piece {piece_id} of run {id}: what you committed passed its checks, so it is done. Start what waited for it with `terminalx runs start {id} --json`."));
+    }
+    // What waited on it may start, and its slot is free for a queued piece: started under the same lock.
+    drop(starting);
+    host.fill_later();
+    Ok(Finished { run: after, piece: piece_id.to_string(), commit: work.head, checks: ran })
+}
+
 /// The run is past its budget, so a model call of its merge stage was not
 /// started: the run waits for the person (`needsYou`), as it does when a
 /// piece would start, and the caller is told which limit.
@@ -1440,7 +1933,8 @@ fn over_budget(host: &dyn Host, id: &str, reached: Pause, what: &str) -> EngineE
 /// `lead_usd` is what the lead's session has cost now, when it was read.
 fn follow_resolution(run: &mut Run, lead_usd: Option<f64>) {
     let Some(piece) = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).map(|resolving| resolving.piece.clone()) else { return };
-    let open = run.piece(&piece).and_then(Piece::current_merge).is_some_and(|merge| merge.state == MergeState::Conflict);
+    // A conflict the lead resolves, or a piece it took over: open until the piece is settled either way.
+    let open = run.piece(&piece).is_some_and(|piece| piece.state == PieceState::Lead || piece.current_merge().is_some_and(|merge| merge.state == MergeState::Conflict));
     let Some(merge) = run.merge.as_mut() else { return };
     if let (Some(now), Some(resolving)) = (lead_usd, merge.resolving.as_mut()) {
         resolving.usd = (now - resolving.lead_usd).max(0.0);
@@ -1460,7 +1954,7 @@ fn settle(run: &mut Run) {
         // starts no worker and asks no model, so it does not wait on the budget; a merge that
         // stopped and needs resolving does, and the run stays with the person.
         let unresolved = run.pieces.iter().any(|piece| piece.current_merge().is_some_and(|merge| matches!(merge.state, MergeState::Conflict | MergeState::IntegrationFailed | MergeState::Failed)));
-        if run.pieces.iter().all(|piece| piece.state == PieceState::Done) && !unresolved {
+        if run.pieces.iter().all(|piece| piece.state.settled()) && !unresolved {
             run.state = RunState::Merging;
             run.reason = None;
             run.pause = None;
@@ -1470,23 +1964,20 @@ fn settle(run: &mut Run) {
     if !run.state.live() {
         return;
     }
-    let failed: Vec<&Piece> = run.pieces.iter().filter(|piece| (piece.state == PieceState::Failed && piece.worker.is_some()) || piece.gave_up()).collect();
-    let (state, reason) = if run.pieces.iter().all(|piece| piece.state == PieceState::Done) {
+    // A blocked piece does not end the run: a person can take it over in the lead, widen it, send
+    // its worker a note or skip it (PRO-361). Only a piece that failed with nothing to try does.
+    let failed: Vec<&Piece> = run.pieces.iter().filter(|piece| piece.state == PieceState::Failed && piece.worker.is_some() && piece.tries.is_empty()).collect();
+    let (state, reason) = if run.pieces.iter().all(|piece| piece.state.settled()) {
         // Every result is accepted. The run is done once they are merged into the lead's branch
         // and the checks pass there (`merge::merge`), which says so itself: what keeps a merged
         // run from done is its reason until then.
         (RunState::Merging, if run.state == RunState::Merging { run.reason.clone() } else { None })
-    } else if run.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Stalled | PieceState::Verifying)) || !run.ready().is_empty() || failed.is_empty() {
+    } else if run.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Stalled | PieceState::Verifying | PieceState::Lead)) || !run.ready().is_empty() || failed.is_empty() {
         (RunState::Running, None)
     } else {
         let names: Vec<String> = failed.iter().map(|piece| piece.id.clone()).collect();
-        let said: Vec<String> = failed
-            .iter()
-            .map(|piece| match piece.gave_up() {
-                true => format!("{} is blocked after {} {}.", piece.id, piece.tries.len(), if piece.tries.len() == 1 { "try" } else { "tries" }),
-                false => format!("{} failed.", piece.id),
-            })
-            .collect();
+        // Only a piece stored before tries were kept gets here: its worker reported failed and it has no ladder.
+        let said: Vec<String> = failed.iter().map(|piece| format!("{} failed.", piece.id)).collect();
         let held: Vec<String> = waiting(run).into_iter().filter(|waiting| waiting.on.iter().any(|on| names.contains(on))).map(|waiting| waiting.piece).collect();
         let held = if held.is_empty() { String::new() } else { format!(" {} cannot start without {}.", held.join(", "), if names.len() == 1 { "it" } else { "them" }) };
         (RunState::Failed, Some(format!("{}{held}", said.join(" "))))
@@ -1817,7 +2308,7 @@ pub fn worker_turn_ended(host: &dyn Host, session_id: &str) -> Option<String> {
 /// under way any more.
 pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     let name = |state: PieceState| serde_json::to_value(state).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
-    let settled = |state: PieceState| matches!(state, PieceState::Done | PieceState::Blocked | PieceState::Failed | PieceState::Stopped);
+    let settled = |state: PieceState| matches!(state, PieceState::Done | PieceState::Blocked | PieceState::Failed | PieceState::Stopped | PieceState::Skipped);
     let changed: Vec<&Piece> = now.pieces.iter().filter(|piece| settled(piece.state) && began.piece(&piece.id).is_none_or(|before| before.state != piece.state)).collect();
     // A piece whose next try waits is started without the lead: it is not the lead's to start.
     let ready: Vec<String> = if matches!(now.state, RunState::Planned | RunState::Running) { now.ready().into_iter().filter(|piece| !piece.retry_waits()).map(|piece| piece.id.clone()).collect() } else { Vec::new() };
@@ -1851,7 +2342,15 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
         why.push(format!("The run is {}.", state_name(now.state)));
     } else if !under_way && ready.is_empty() {
         let held: Vec<String> = now.pieces.iter().filter(|piece| matches!(piece.state, PieceState::Blocked | PieceState::Failed)).map(|piece| piece.id.clone()).collect();
-        why.push(format!("Nothing is under way and nothing can start: waiting changes nothing.{}", if held.is_empty() { String::new() } else { format!(" Held up by: {}. `terminalx runs show` says why for each.", held.join(", ")) }));
+        let yours: Vec<String> = now.pieces.iter().filter(|piece| piece.state == PieceState::Lead).map(|piece| piece.id.clone()).collect();
+        let mut said = String::new();
+        if !held.is_empty() {
+            said.push_str(&format!(" Held up by: {}. `terminalx runs show` says why for each; the person decides what happens to a blocked piece.", held.join(", ")));
+        }
+        if !yours.is_empty() {
+            said.push_str(&format!(" Taken over by you: {}. Finish {} in your checkout, commit, then `terminalx runs finish <piece>`.", yours.join(", "), if yours.len() == 1 { "it" } else { "them" }));
+        }
+        why.push(format!("Nothing is under way and nothing can start: waiting changes nothing.{said}"));
     }
     Some(json!({
         "run": now.id, "state": now.state, "reason": now.reason, "why": why, "ready": ready,
@@ -1883,6 +2382,11 @@ pub fn shown(run: &Run) -> Value {
     for (index, piece) in run.pieces.iter().enumerate() {
         let (cost, missing) = piece.cost();
         value["pieces"][index]["costUsd"] = json!(cost);
+        // Files its last report or check names that it does not own: where a blocked piece's fix lies.
+        let outside = piece.outside(run);
+        if !outside.is_empty() {
+            value["pieces"][index]["outside"] = json!(outside);
+        }
         value["pieces"][index]["costUnpricedModels"] = json!(missing);
         if let Some(cost) = cost {
             total = Some(total.unwrap_or(0.0) + cost);
