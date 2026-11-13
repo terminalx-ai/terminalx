@@ -1777,7 +1777,10 @@ impl ControlService {
                     seen.push(worker.session_id.clone());
                     let (blocked, worktree) = match verdicts.get(&worker.session_id) {
                         Some((reason, worktree)) => (failed.clone().or_else(|| reason.clone()), Some(worktree.clone())),
-                        None => (Some(failed.clone().unwrap_or_else(|| "Its session is not in a worktree of its own, so the run's cleanup does not remove it.".to_string())), None),
+                        // No worktree of its own (removed already, sessions kept on purpose, or never one):
+                        // the run's cleanup has nothing to remove and does not block the delete, which
+                        // leaves the session as it is. Only a cleanup that cannot run blocks.
+                        None => (failed.clone(), None),
                     };
                     orphans.push(crate::worktree_control::Orphan {
                         run: run.id.clone(),
@@ -1852,7 +1855,7 @@ impl ControlService {
         }
         // What the cleanup could not remove after all (a worker that wrote
         // something in its last moment) still blocks the delete.
-        let left = self.worktree_delete_orphans(project, held)?;
+        let left: Vec<_> = self.worktree_delete_orphans(project, held)?.into_iter().filter(|orphan| !orphan.keeps_session()).collect();
         if !left.is_empty() {
             return Err(refuse(&left, &cleaned));
         }
@@ -2935,6 +2938,41 @@ mod tests {
         assert!(recovery.contains(&format!("terminalx runs cleanup {run}")) && recovery.contains("terminalx worktrees delete"), "{recovery}");
         assert_eq!(refused.details.unwrap()["orphans"].as_array().unwrap().len(), 1);
         untouched();
+    }
+
+    /// PRO-364 review: a worker whose worktree is already gone (removed with
+    /// its session kept) has nothing for the run's cleanup to remove. It does
+    /// not keep the lead's worktree from being deleted, and its session is
+    /// left as it is.
+    #[test]
+    fn worktree_delete_of_a_leads_worktree_is_not_blocked_by_a_worker_without_a_worktree() {
+        let _home = crate::store::temp_home();
+        let repo = git_repo();
+        let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+        let (lead, workers, _run) = lead_with_workers(&project, &[true, true]);
+        let name = lead.worktree_name.clone().unwrap();
+        let (service, _sink) = headless_service();
+        // The second worker's worktree goes, its session stays.
+        crate::git::run(repo.path(), &["worktree", "remove", "--force", &workers[1].cwd]).unwrap();
+        assert!(!Path::new(&workers[1].cwd).exists());
+
+        let preview = service.execute("worktrees.delete", json!({"project": project.path, "worktree": name, "dryRun": true}), "r1").unwrap();
+        let orphans = preview["orphans"].as_array().unwrap();
+        let of = |id: &str| orphans.iter().find(|o| o["session"]["id"] == id).unwrap().clone();
+        assert!(of(&workers[0].id).get("blocked").is_none() && of(&workers[0].id)["worktree"].is_string());
+        assert!(of(&workers[1].id).get("blocked").is_none() && of(&workers[1].id).get("worktree").is_none(), "{:?}", of(&workers[1].id));
+        let asked = service.execute("worktrees.delete", json!({"project": project.path, "worktree": name}), "r2").unwrap_err();
+        assert_eq!(asked.code, "confirmation_required", "{}", asked.message);
+        assert!(asked.message.contains("its session stays as it is") && asked.message.contains("no worktree left to remove"), "{}", asked.message);
+
+        let deleted = service.execute("worktrees.delete", json!({
+            "project": project.path, "worktree": name, "confirmed": true, "force": true, "sessions": [lead.id],
+        }), "r3").unwrap();
+        assert_eq!(ids(&deleted["removedSessions"]), std::collections::BTreeSet::from([lead.id.clone()]));
+        assert!(!Path::new(&lead.cwd).exists() && !Path::new(&workers[0].cwd).exists(), "the lead and the worker that has a worktree go");
+        let left: std::collections::BTreeSet<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
+        assert!(!left.contains(&workers[0].id) && !left.contains(&lead.id));
+        assert!(left.contains(&workers[1].id), "the session of the worker without a worktree is left as it is");
     }
 
     /// #719: a session that names its project through a symlink is one of
