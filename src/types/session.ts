@@ -1,4 +1,5 @@
 import type { RepositorySettings, WorktreeCopyReport } from "@/types/repositorySettings";
+import type { RepositoryAction, RepositoryPreviewUrl } from "@/lib/repositoryActions";
 import type { ManualStatus } from "@terminalx/portable/manualStatus";
 export type { ManualStatus } from "@terminalx/portable/manualStatus";
 import type { AutomationRef } from "@/types/automations";
@@ -245,8 +246,16 @@ export interface Project {
   agentIssueUpdates?: boolean;
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;
-  scripts?: RepositoryScripts | null;
+  scripts?: ProjectScripts | null;
   repositorySettings?: RepositorySettings;
+}
+
+/** What a project saves locally under `scripts`: its hooks, Run-menu actions and preview URLs, in saved order. */
+export interface ProjectScripts extends RepositoryScripts {
+  /** Absent is none. Saved with the `actions` patch, never with `scripts`. */
+  actions?: RepositoryAction[];
+  /** Templates with $PORT / $PORT_n. Absent is none. Saved with the `previewUrls` patch. */
+  previewUrls?: RepositoryPreviewUrl[];
 }
 
 export interface ProjectPatch {
@@ -262,6 +271,10 @@ export interface ProjectPatch {
   /** Set one branch's label; null or blank clears it. */
   branchLabel?: { branch: string; label: string | null };
   repositorySettings?: RepositorySettings;
+  /** Replaces the saved actions; [] clears them. Leaves the hooks alone. */
+  actions?: RepositoryAction[];
+  /** Replaces the saved preview URLs; [] clears them. Leaves the hooks alone. */
+  previewUrls?: RepositoryPreviewUrl[];
 }
 
 /** One checkout of a project: the root or any worktree, whoever made it. */

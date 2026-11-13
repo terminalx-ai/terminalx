@@ -19,6 +19,13 @@ function Editor({ initial = [dev, test], save = async () => {}, reset }: {
 }
 
 describe("repository action editor", () => {
+  it("notes on each row what its switches do", () => {
+    render(<Editor initial={[{ ...dev, runAfterSetup: true, concurrent: true, hidden: true }, test]} />);
+    const row = screen.getByRole("button", { name: "Edit Dev" });
+    for (const note of ["runs after setup", "several at once", "Hidden"]) expect(within(row).getByText(note)).toBeTruthy();
+    expect(within(screen.getByRole("button", { name: "Edit Test" })).queryByText("several at once")).toBeNull();
+  });
+
   it("adds a multiline command, selected icon and switches using Command+Enter", async () => {
     const save = vi.fn(async () => {});
     render(<Editor initial={[]} save={save} />);
