@@ -460,6 +460,10 @@ export interface OrchestratorSettings {
   budgetPoints: Cap;
   windowCeiling: Cap;
   stallMinutes: number;
+  /** How many times one piece is tried before the run stops on it: retried, then on more effort, then on the next model up. 1 to 6. */
+  triesPerPiece: number;
+  /** The highest effort a retry raises a piece to; past it the next model up is tried. One of the routing efforts. */
+  effortCeiling: string;
   /** Over how many changed lines a result is read by a verifier though its commands pass. */
   reviewDiffLines: number;
   /** The rows of the routing table changed for the app; absent when none is. */
@@ -478,6 +482,8 @@ export interface OrchestratorLimits {
   budgetPoints: Cap;
   windowCeiling: Cap;
   stallMinutes: number;
+  triesPerPiece: number;
+  effortCeiling: string;
   reviewDiffLines: number;
   routing: RoutingTable;
 }
@@ -489,6 +495,8 @@ export interface ProjectOrchestratorSettings {
   budgetDollars?: Cap;
   budgetPoints?: Cap;
   windowCeiling?: Cap;
+  triesPerPiece?: number;
+  effortCeiling?: string;
   reviewDiffLines?: number;
   /** The project's own rows of the routing table. */
   routing?: RoutingRows;
@@ -508,6 +516,8 @@ export interface OrchestratorPatch {
   budgetDollars?: Cap | null;
   budgetPoints?: Cap | null;
   windowCeiling?: Cap | null;
+  triesPerPiece?: number | null;
+  effortCeiling?: string | null;
   reviewDiffLines?: number | null;
   /** Cells to change. `null` takes a cell's override away: it follows the app (for a project) or the built-in table. */
   routing?: Partial<Record<PieceKind, Partial<Record<RoutedAgent, Route | null>>>>;

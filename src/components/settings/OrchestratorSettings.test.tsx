@@ -46,7 +46,7 @@ function routed(rows: RoutingRows | undefined, patch: OrchestratorPatch): Routin
 
 let stored: OrchestratorSettings;
 beforeEach(() => {
-  stored = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, reviewDiffLines: 400, projects: {} };
+  stored = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, triesPerPiece: 3, effortCeiling: "high", reviewDiffLines: 400, projects: {} };
   mocks.projects = [{ path: "/repo", name: "terminalx" }, { path: "/notes", name: "notes", kind: "folder" }];
   mocks.settings.mockReset().mockImplementation(async () => stored);
   mocks.tierModels.mockReset().mockImplementation(async () => installed());
@@ -80,7 +80,7 @@ describe("Settings → Orchestrator (PRO-274)", () => {
     expect(limit("Pieces per run, at most").value).toBe("8");
     expect((screen.getByRole("combobox", { name: "Workers run in" }) as HTMLSelectElement).value).toBe("bypassPermissions");
     const text = screen.getByTestId("orchestrator-settings").textContent ?? "";
-    for (const said of ["Show the plan and wait for Approve.", "A larger plan is refused, and the lead is told the limit. From 1 to 50.", "Push, merge and deploy stay blocked by deny rules in every mode."]) {
+    for (const said of ["Show the plan and wait for Approve.", "A larger plan is refused, and the lead is told the limit.", "Push, merge and deploy stay blocked by deny rules in every mode."]) {
       expect(text).toContain(said);
     }
   });
@@ -214,7 +214,7 @@ describe("Settings → Orchestrator, limits and budget (PRO-280)", () => {
     expect(limit("Pause when a window passes").value).toBe("85");
     expect(limit("Mark a worker stalled after").value).toBe("10");
     const text = screen.getByTestId("orchestrator-settings").textContent ?? "";
-    for (const said of ["Budget and stalls", "Sessions you start by hand are never counted or queued.", "A long build is not a stall."]) expect(text).toContain(said);
+    for (const said of ["Budget and stalls", "Sessions you start by hand are not counted.", "A long build is not a stall."]) expect(text).toContain(said);
   });
 
   it("saves a changed points budget and window level, and refuses a value out of range", async () => {
@@ -252,6 +252,88 @@ describe("Settings → Orchestrator, limits and budget (PRO-280)", () => {
     fireEvent.blur(points);
     await waitFor(() => expect(mocks.setSettings).toHaveBeenCalledWith({ project: "/repo", budgetPoints: null }));
     await waitFor(() => expect(stored.projects["/repo"]).toBeUndefined());
+  });
+});
+
+describe("Settings → Orchestrator in two cards, with tries and the effort ceiling (PRO-362)", () => {
+  const group = (name: string) => within(screen.getByRole("group", { name }));
+  const rows = (name: string) => [...screen.getByRole("group", { name }).querySelectorAll<HTMLElement>("[data-setting-id]")].map((row) => row.dataset.settingId);
+  const ceiling = () => screen.getByRole("combobox", { name: "Raise effort no higher than" }) as HTMLSelectElement;
+
+  it("puts the rows in a Runs card and a Budget and stalls card, as design 18.05 has them", async () => {
+    render(<OrchestratorTab />);
+    await waitFor(() => expect(limit("Tries per piece").disabled).toBe(false));
+    expect(rows("Runs")).toEqual(["orchestrator.requireApproval", "orchestrator.workersPerRun", "orchestrator.workersAtOnce", "orchestrator.pieceLimit", "orchestrator.workerMode", "orchestrator.triesPerPiece"]);
+    expect(rows("Budget and stalls")).toEqual(["orchestrator.budgetDollars", "orchestrator.budgetPoints", "orchestrator.windowCeiling", "orchestrator.stallMinutes", "orchestrator.effortCeiling"]);
+    expect(group("Runs").getByRole("spinbutton", { name: "Tries per piece" })).toBeTruthy();
+    expect(group("Budget and stalls").getByRole("combobox", { name: "Raise effort no higher than" })).toBeTruthy();
+    const text = screen.getByTestId("orchestrator-settings").textContent ?? "";
+    for (const said of ["Retry, raise effort, then move up a model.", "Past this, the next model up is tried."]) expect(text).toContain(said);
+  });
+
+  it("shows tries per piece as stored, saves a change, and refuses one outside 1 to 6", async () => {
+    stored = { ...stored, triesPerPiece: 4 };
+    render(<OrchestratorTab />);
+    await waitFor(() => expect(limit("Tries per piece").value).toBe("4"));
+    for (const typed of ["0", "7", "2.5", "", "many"]) {
+      fireEvent.change(limit("Tries per piece"), { target: { value: typed } });
+      fireEvent.blur(limit("Tries per piece"));
+      expect(limit("Tries per piece").value).toBe("4");
+    }
+    expect(mocks.setSettings).not.toHaveBeenCalled();
+    fireEvent.change(limit("Tries per piece"), { target: { value: "6" } });
+    fireEvent.keyDown(limit("Tries per piece"), { key: "Enter" });
+    fireEvent.blur(limit("Tries per piece"));
+    await waitFor(() => expect(stored.triesPerPiece).toBe(6));
+    expect(patches()).toEqual([{ triesPerPiece: 6 }]);
+    expect(limit("Tries per piece").value).toBe("6");
+  });
+
+  it("offers every effort level for the ceiling, labelled as elsewhere, and saves the one chosen", async () => {
+    render(<OrchestratorTab />);
+    await waitFor(() => expect(ceiling().disabled).toBe(false));
+    expect([...ceiling().options].map((option) => [option.value, option.textContent])).toEqual([["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]]);
+    expect(chosen(ceiling())).toBe("High");
+    fireEvent.change(ceiling(), { target: { value: "xhigh" } });
+    await waitFor(() => expect(chosen(ceiling())).toBe("Extra high"));
+    expect(patches()).toEqual([{ effortCeiling: "xhigh" }]);
+    expect(stored.effortCeiling).toBe("xhigh");
+  });
+
+  it("lets a repository set its own tries and ceiling, and follow the defaults again", async () => {
+    stored = { ...stored, triesPerPiece: 2, effortCeiling: "medium" };
+    render(<RepositoryOrchestratorSettings projectPath="/repo" />);
+    const own = within(await screen.findByTestId("repository-orchestrator-settings"));
+    const tries = () => own.getByRole("spinbutton", { name: "Tries per piece in terminalx" }) as HTMLInputElement;
+    const cap = () => own.getByRole("combobox", { name: "Raise effort in terminalx no higher than" }) as HTMLSelectElement;
+    await waitFor(() => expect(tries().disabled).toBe(false));
+    // What it follows is the app's value.
+    expect([tries().value, tries().placeholder]).toEqual(["", "2"]);
+    expect([cap().value, chosen(cap())]).toEqual(["", "Default (Medium)"]);
+    expect([...cap().options].map((option) => option.textContent)).toEqual(["Default (Medium)", "Low", "Medium", "High", "Extra high", "Max"]);
+
+    fireEvent.change(tries(), { target: { value: "9" } });
+    fireEvent.blur(tries());
+    expect(mocks.setSettings).not.toHaveBeenCalled();
+    fireEvent.change(tries(), { target: { value: "5" } });
+    fireEvent.blur(tries());
+    await waitFor(() => expect(tries().value).toBe("5"));
+    fireEvent.change(cap(), { target: { value: "max" } });
+    await waitFor(() => expect(stored.projects["/repo"]).toEqual({ triesPerPiece: 5, effortCeiling: "max" }));
+    expect(chosen(cap())).toBe("Max");
+    // The app's own values are untouched.
+    expect([stored.triesPerPiece, stored.effortCeiling]).toEqual([2, "medium"]);
+
+    fireEvent.change(tries(), { target: { value: "" } });
+    fireEvent.blur(tries());
+    fireEvent.change(cap(), { target: { value: "" } });
+    await waitFor(() => expect(stored.projects).toEqual({}));
+    expect(patches()).toEqual([
+      { project: "/repo", triesPerPiece: 5 },
+      { project: "/repo", effortCeiling: "max" },
+      { project: "/repo", triesPerPiece: null },
+      { project: "/repo", effortCeiling: null },
+    ]);
   });
 });
 
