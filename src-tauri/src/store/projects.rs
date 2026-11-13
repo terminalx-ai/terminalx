@@ -62,6 +62,9 @@ pub struct Project {
     /// Local repository choices; file-based layers are resolved separately.
     #[serde(default)]
     pub repository_settings: RepositorySettings,
+    /// Fields a newer build wrote, kept as they are so saving here never drops them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Script fields shared by the Scripts page and workspace lifecycle hooks.
@@ -584,7 +587,7 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
@@ -612,7 +615,7 @@ fn ensure_as(path: &str, kind: Option<ProjectKind>) -> Result<Project> {
         return Ok(existing.clone());
     }
     let kind = kind.unwrap_or(if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder });
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
     f.projects.push(p.clone());
     save(&f)?;
     Ok(p)
@@ -690,6 +693,21 @@ mod tests {
         update(&project.path, ProjectPatch { actions: Some(vec![]), preview_urls: Some(vec![]), scripts: Some(RepositoryScripts::default()), ..Default::default() }).unwrap();
         let json = serde_json::to_value(&list().unwrap().0[0]).unwrap();
         assert!(json.get("scripts").is_none() && json.get("actions").is_none() && json.get("previewUrls").is_none());
+    }
+
+    #[test]
+    fn fields_a_newer_build_wrote_survive_a_save_here() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        let path = crate::store::root().unwrap().join("projects.json");
+        let mut file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        file["projects"][0]["futureField"] = serde_json::json!(["kept"]);
+        std::fs::write(&path, file.to_string()).unwrap();
+        update(&project.path, ProjectPatch { pinned: Some(true), ..Default::default() }).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["projects"][0]["futureField"], serde_json::json!(["kept"]));
+        assert_eq!(saved["projects"][0]["pinned"], true);
     }
 
     #[test]

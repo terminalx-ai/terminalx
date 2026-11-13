@@ -162,3 +162,19 @@ fn no_secret_value_reaches_settings_files_logs_or_the_diagnostics_export() {
         assert!(!export.to_string().contains(SECRET), "the diagnostics export holds a secret value");
     }
 }
+
+#[test]
+fn fields_a_newer_build_wrote_survive_a_save_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecrets::default();
+    let store = Store { root: dir.path().into(), secrets: &secrets };
+    store.save(USER, vec![input("NODE_OPTIONS", "--inspect", false)], None).unwrap();
+    let path = dir.path().join("environment.json");
+    let mut index: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    index[USER]["futureField"] = serde_json::json!({"kept": true});
+    std::fs::write(&path, index.to_string()).unwrap();
+    store.save(USER, vec![input("EDITOR", "vim", false)], None).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved[USER]["futureField"], serde_json::json!({"kept": true}));
+    assert_eq!(saved[USER]["plain"]["EDITOR"], "vim");
+}

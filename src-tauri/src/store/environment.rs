@@ -26,6 +26,9 @@ struct Scope {
     /// Values kept outside the Keychain, by the user's choice when saving.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     plain: Values,
+    /// Fields a newer build wrote, kept as they are so saving here never drops them.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -251,6 +254,7 @@ impl Store<'_> {
                 names: values.keys().cloned().collect(),
                 revision: uuid::Uuid::new_v4().to_string(),
                 plain,
+                extra: old.as_ref().map(|scope| scope.extra.clone()).unwrap_or_default(),
             };
             if !values.is_empty() {
                 self.secrets
