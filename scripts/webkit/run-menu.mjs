@@ -100,7 +100,7 @@ const browser = await launch();
 let failed = 0;
 try {
   for (const mode of ["light", "dark"]) {
-    for (const width of [960, 1440]) {
+    for (const width of [760, 1440]) {
       const name = `${mode} ${width}px`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width, height: 820 }, { extra: `(${setup})(${JSON.stringify({ mode })})`, colorScheme: mode });
       page.setDefaultTimeout(30_000);
