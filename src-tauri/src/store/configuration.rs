@@ -101,6 +101,14 @@ pub fn repository(path: &Path) -> Result<Repository> {
     Ok(Repository { root, identity: common.to_string_lossy().into_owned(), project: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()) })
 }
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+/// What trust is bound to. A file that sets scripts gets a hash no earlier
+/// version produced: before scripts were registered, trusting a file never
+/// showed or approved them, so that approval must not let them run now.
+fn trust_hash(bytes: &[u8], document: &Map<String, Value>) -> String {
+    if document.contains_key(SETUP_SCRIPT) || document.contains_key(ARCHIVE_SCRIPT) {
+        digest(&[b"terminalx-trust-scripts-v1\0".as_slice(), bytes].concat())
+    } else { digest(bytes) }
+}
 fn object(bytes: &[u8]) -> Result<Map<String, Value>> {
     serde_json::from_slice::<Value>(bytes).ok().and_then(|v| v.as_object().cloned())
         .context("Configuration must be a JSON object.")
@@ -220,9 +228,9 @@ impl Store {
             }
             let dir = Directory::open(&repository.root.join(".terminalx"), false)?;
             if let Some(bytes) = read(dir.as_ref(), SHARED)? {
-                let hash = digest(&bytes);
                 match object(&bytes) {
                     Ok(shared) => {
+                        let hash = trust_hash(&bytes, &shared);
                         apply(&mut values, shared, Layer::RepositoryShared, &mut warnings)?;
                         trust = Some(Trust { required: !self.trusted(repository, &hash), hash, keys: Vec::new() });
                     }
@@ -253,8 +261,7 @@ impl Store {
         super::transaction::run(&self.home.join("configuration.lock"), Duration::from_secs(10), || {
             let dir = Directory::open(&repository.root.join(".terminalx"), false)?.context("Shared configuration disappeared.")?;
             let bytes = dir.read(SHARED)?.context("Shared configuration disappeared.")?;
-            object(&bytes)?;
-            ensure!(digest(&bytes) == expected_hash, "Shared configuration changed. Review it again.");
+            ensure!(trust_hash(&bytes, &object(&bytes)?) == expected_hash, "Shared configuration changed. Review it again.");
             let home = self.home()?;
             let mut trust: BTreeMap<String, String> = match home.read(TRUST)? {
                 Some(bytes) => serde_json::from_slice(&bytes).context("Cannot read repository trust decisions.")?,
