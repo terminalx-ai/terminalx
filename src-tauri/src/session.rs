@@ -4676,7 +4676,7 @@ impl SessionManager {
         let _admission = crate::issue_pipeline::admission::lock();
         self.begin_shutdown();
         let tabs: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
-        let mut pids = self.terminals.owned_groups();
+        let mut pids = self.terminals.census_groups();
         for tab in &tabs {
             let tab = tab.lock().unwrap();
             pids.extend(tab.child_pid.or(tab.stopping_pid));

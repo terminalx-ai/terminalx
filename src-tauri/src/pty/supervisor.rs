@@ -486,7 +486,11 @@ impl Owner {
 
     pub(super) fn pid(&self) -> Option<u32> {
         let state = self.state.lock().unwrap();
-        if state.phase == Phase::Extinct { None } else { state.shell.or(state.supervisor) }
+        // Once the supervisor has reaped the shell its pid may be anyone's:
+        // the helper, still this process's unreaped child, names the launch.
+        if state.phase == Phase::Extinct { None }
+        else if state.shell_status.is_some() { state.supervisor }
+        else { state.shell.or(state.supervisor) }
     }
 
     pub(super) fn stop(&self) {

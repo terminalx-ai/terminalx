@@ -1974,6 +1974,18 @@ impl Terminals {
         self.panes.lock().unwrap().get(id).map(|p| *p.alive.lock().unwrap()).unwrap_or(false)
     }
 
+    /// [`Self::owned_groups`] whose only proof is a pid: not supervised
+    /// launches, which [`Self::owned_groups`] itself rechecks by their
+    /// supervisor, and whose shell's pid may be reused once reaped (#467).
+    pub(crate) fn census_groups(&self) -> Vec<u32> {
+        let mut groups = self.groups.lock().unwrap();
+        groups.retain(|(_, group)| group.pid().is_some());
+        #[cfg(target_os = "linux")]
+        return groups.iter().filter(|(_, group)| group.owner().is_none()).filter_map(|(_, group)| group.pid()).collect();
+        #[cfg(not(target_os = "linux"))]
+        groups.iter().filter_map(|(_, group)| group.pid()).collect()
+    }
+
     pub(crate) fn owned_groups(&self) -> Vec<u32> {
         let mut groups = self.groups.lock().unwrap();
         groups.retain(|(_, group)| group.pid().is_some());
@@ -2134,6 +2146,9 @@ mod supervised_tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(!gone(job), "the job runs on after its shell");
         assert!(!terminals.owned_groups().is_empty(), "the launch is still owned");
+        let helper = terminals.groups.lock().unwrap().iter().find_map(|(id, group)| (id == "exits:shell").then(|| group.owner().unwrap().supervisor_for_test().unwrap())).unwrap();
+        assert_eq!(terminals.owned_groups(), [helper], "a reaped shell's pid is not reported: it may be reused");
+        assert!(terminals.census_groups().is_empty(), "Stop All has no pid to recheck for a supervised launch");
         terminals.stop_owned_groups(Duration::from_secs(10));
         assert!(gone(job), "Stop All ended it");
         assert!(terminals.owned_groups().is_empty());
