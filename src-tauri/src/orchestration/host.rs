@@ -525,6 +525,10 @@ impl Checkouts for ManagerHost {
         Ok(())
     }
 
+    fn stop_agents(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        Host::stop_worker(self, worker)
+    }
+
     fn changed(&self, run: &Run) {
         self.sink.emit(RUN_EVENT, &super::engine::shown(run));
     }
