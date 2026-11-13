@@ -713,6 +713,9 @@ pub struct Terminals {
     /// What this system lacks for a supervisor, once preflight has said.
     #[cfg(target_os = "linux")]
     unsupervised: Mutex<Option<String>>,
+    /// Notices given, for tests to read.
+    #[cfg(all(test, target_os = "linux"))]
+    notices: Mutex<Vec<String>>,
 }
 
 /// Why a pane is not opened while the runtime is being replaced.
@@ -772,7 +775,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), docked: Mutex::default(), frozen: Mutex::new(false), #[cfg(target_os = "linux")] bootstrapping: Default::default(), #[cfg(target_os = "linux")] unsupervised: Mutex::default() }
+        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), docked: Mutex::default(), frozen: Mutex::new(false), #[cfg(target_os = "linux")] bootstrapping: Default::default(), #[cfg(target_os = "linux")] unsupervised: Mutex::default(), #[cfg(all(test, target_os = "linux"))] notices: Mutex::default() }
     }
 }
 
@@ -1134,9 +1137,7 @@ impl Terminals {
                 let missing = owner.unsupported().unwrap_or_default();
                 log::warn!("terminals open without a supervisor on this system: {error}");
                 let first = self.unsupervised.lock().unwrap().replace(missing.clone()).is_none();
-                if first {
-                    crate::store::activity::report_error(format!("Terminals on this system stop when TerminalX quits (missing: {missing})."));
-                }
+                if first { self.notice(format!("Terminals on this system stop when TerminalX quits (missing: {missing}).")); }
                 Err(Unsupervised(missing).into())
             }
             Err(error) => {
@@ -1660,6 +1661,15 @@ impl Terminals {
         let pane = panes.get(id).ok_or_else(|| anyhow!("pane not found"))?;
         let size = pane.master.get_size().map_err(|e| anyhow!("terminal size: {e}"))?;
         Ok((size.cols, size.rows))
+    }
+
+    /// Tell the reader, in every window, as the runtime's other notices do.
+    #[cfg(target_os = "linux")]
+    fn notice(&self, message: String) {
+        log::warn!("{message}");
+        #[cfg(test)]
+        self.notices.lock().unwrap().push(message.clone());
+        crate::store::activity::report_error(message);
     }
 
     /// Each launch a supervisor owns that a handover cannot carry as it

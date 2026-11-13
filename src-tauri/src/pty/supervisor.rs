@@ -203,7 +203,21 @@ pub(crate) struct Carried {
     phase: CarriedPhase,
 }
 
+/// Reap a helper this runtime let go of (its adoption failed): it ends
+/// what it runs when its channel closes, then exits, and must not be left
+/// a zombie. A pid that is not this process's child is left alone.
+pub(crate) fn reap_abandoned(pid: u32) {
+    let _ = std::thread::Builder::new().name("pty-supervisor-reaper".into()).spawn(move || loop {
+        let mut status = 0;
+        let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
+        if reaped == pid as libc::pid_t || (reaped < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)) { return; }
+    });
+}
+
 impl Carried {
+    #[cfg(test)]
+    pub(crate) fn break_for_test(&mut self) { self.launch = "not a launch".into(); }
+
     #[cfg(test)]
     pub(crate) fn stopping_for_test(&self) -> bool { self.phase == CarriedPhase::Stopping && self.stop_claim > 0 }
 

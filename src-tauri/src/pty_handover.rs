@@ -442,9 +442,17 @@ impl Terminals {
         #[cfg(target_os = "linux")]
         let (waiter, owned) = match supervised {
             Some((state, socket)) => {
-                let shell = state.shell();
-                let owner = super::supervisor::Owner::adopt(state, socket).context("take over the terminal's supervisor")?;
-                (Waiter::Supervised(owner.clone()), Some(Arc::new(OwnedGroup::supervised(owner, shell))))
+                let (shell, helper) = (state.shell(), state.supervisor());
+                match super::supervisor::Owner::adopt(state, socket) {
+                    Ok(owner) => (Waiter::Supervised(owner.clone()), Some(Arc::new(OwnedGroup::supervised(owner, shell)))),
+                    Err(error) => {
+                        // Its channel let go, the supervisor ends what it
+                        // runs and exits: reaped here, and the reader told.
+                        super::supervisor::reap_abandoned(helper);
+                        self.notice(format!("A terminal could not be kept running through the update and was stopped: \u{201c}{}\u{201d}.", title.as_deref().unwrap_or(&id)));
+                        return Err(anyhow::Error::from(error).context("take over the terminal's supervisor"));
+                    }
+                }
             }
             None => (Waiter::Adopted, None),
         };
@@ -482,8 +490,15 @@ impl Terminals {
     /// Stop and Stop All end it as before the handover (#467).
     #[cfg(target_os = "linux")]
     pub(crate) fn adopt_supervised(&self, id: &str, state: super::supervisor::Carried, socket: OwnedFd) -> Result<()> {
-        let shell = state.shell();
-        let owner = super::supervisor::Owner::adopt(state, socket).context("take over a launch's supervisor")?;
+        let (shell, helper) = (state.shell(), state.supervisor());
+        let owner = match super::supervisor::Owner::adopt(state, socket) {
+            Ok(owner) => owner,
+            Err(error) => {
+                super::supervisor::reap_abandoned(helper);
+                self.notice(format!("Processes a closed terminal left running could not be kept through the update and were stopped ({id})."));
+                return Err(anyhow::Error::from(error).context("take over a launch's supervisor"));
+            }
+        };
         self.groups.lock().unwrap().push((id.to_string(), Arc::new(OwnedGroup::supervised(owner, shell))));
         Ok(())
     }
@@ -724,6 +739,30 @@ mod tests {
         assert!(old.stopped_since_refresh(), "the handover must be called off");
         old.thaw();
         wait_for("its Stop to go ahead once thawed", || !crate::harness::host::is_alive(pid) && old.owned_groups().is_empty());
+    }
+
+    /// #467 review: a terminal whose supervisor the runtime taking over
+    /// cannot adopt is said by name, and its helper is reaped, not left a
+    /// zombie.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_supervisor_that_cannot_be_adopted_is_said_and_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Terminals::new();
+        let shell = sleeper(&old, &dir, "unadoptable");
+        old.set_title("unadoptable", "Dev server");
+        let mut frozen = old.freeze(Duration::from_secs(5)).unwrap();
+        let mut pane = frozen.panes.remove(0);
+        let helper = pane.supervised.as_ref().unwrap().0.supervisor();
+        pane.supervised.as_mut().unwrap().0.break_for_test();
+        let new = Terminals::new();
+        assert!(new.adopt(Arc::new(crate::sink::BroadcastSink::new(64)), pane).is_err());
+        assert!(new.notices.lock().unwrap().iter().any(|notice| notice.contains("could not be kept running through the update") && notice.contains("Dev server")),
+            "{:?}", new.notices.lock().unwrap());
+        // In one process the old runtime still holds a copy of the channel,
+        // so the helper is ended here, as the exec would close the copy.
+        unsafe { libc::kill(helper as i32, libc::SIGKILL); libc::kill(shell as i32, libc::SIGKILL); }
+        wait_for("the abandoned helper to be reaped", || !std::path::Path::new(&format!("/proc/{helper}")).exists());
     }
 
     /// #765: a handover called off leaves every pane as it was.
