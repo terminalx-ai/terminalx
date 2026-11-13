@@ -910,7 +910,7 @@ fn a_failed_done_check_takes_the_same_ladder_with_the_checks_output() {
 }
 
 #[test]
-fn a_run_keeps_the_tries_and_the_effort_ceiling_it_was_made_with() {
+fn a_run_keeps_the_ladder_it_was_made_with_when_settings_change_and_a_projects_value_wins() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
     let plan = |piece: &str| -> Plan { serde_json::from_value(json!({"goal": "Move CLI reads", "pieces": [{"id": piece, "title": "Move CLI code", "kind": "scoped-code", "doneChecks": [{"type": "command", "run": "cargo t control"}], "owns": ["src/cli.rs"]}]})).unwrap() };

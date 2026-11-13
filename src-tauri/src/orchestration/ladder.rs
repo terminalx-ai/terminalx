@@ -335,4 +335,27 @@ mod tests {
         // Under low nothing is raised at all.
         assert_eq!(under(&at("low"), "claude", 1, &low), Verdict::Again(Next { step: Step::Retry, ..low.clone() }));
     }
+
+    #[test]
+    fn at_every_ceiling_the_effort_step_goes_up_one_level_and_stops_there() {
+        let models = installed();
+        for ceiling in EFFORTS {
+            let rules = Rules { ceiling: ceiling.to_string(), ..Rules::default() };
+            let top = level(ceiling).unwrap();
+            for model in models.iter().filter(|model| model.harness == "claude" || model.harness == "codex") {
+                for effort in &model.efforts {
+                    let Verdict::Again(next) = next(&model.harness, 1, &rules, &model.id, Some(effort), routing::tier_of(&model.harness, &model.id), &models) else { panic!("the second try is always made") };
+                    let (before, after) = (level(effort), next.effort.as_deref().and_then(level));
+                    match next.step {
+                        Step::Effort => assert!(after > before && after <= Some(top), "{} under {ceiling}: {effort} to {:?}", model.id, next.effort),
+                        // Not raised: the same effort again, and only because nothing the model offers lies between it and the ceiling.
+                        _ => {
+                            assert_eq!((next.step, next.effort.as_deref()), (Step::Retry, Some(effort.as_str())), "{} under {ceiling}", model.id);
+                            assert!(!model.efforts.iter().filter_map(|offered| level(offered)).any(|at| Some(at) > before && at <= top), "{} under {ceiling} could have gone up from {effort}", model.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
