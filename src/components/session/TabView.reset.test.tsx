@@ -49,7 +49,7 @@ it("shows the turn and the restored files, and Undo reset restores them too", as
   const dialog = await screen.findByRole("dialog");
   expect(dialog.textContent).toContain("The 3 files it restored go back to how they were before the reset.");
   fireEvent.click(within(dialog).getByRole("button", { name: "Undo reset" }));
-  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("reset_chat", { sessionId: session.id, tabId: session.tabs[0].id, endSeq: null, resetFiles: false }));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("reset_chat", { sessionId: session.id, tabId: session.tabs[0].id, endSeq: null, resetFiles: false, confirm: null }));
 });
 
 it("names the turn of a chat-only reset without a file count", async () => {
