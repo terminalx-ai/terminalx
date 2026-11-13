@@ -51,9 +51,14 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branch_labels: BTreeMap<String, String>,
     /// Local scripts only; repository files require the layered-config trust flow.
-    /// Also holds the Run-menu actions and preview URLs saved for this project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scripts: Option<ProjectScripts>,
+    pub scripts: Option<RepositoryScripts>,
+    /// Run-menu actions saved for this project, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<RepositoryActionEntry>,
+    /// Preview URL templates with $PORT / $PORT_n, expanded against a session's ports, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preview_urls: Vec<PreviewUrlEntry>,
     /// Local repository choices; file-based layers are resolved separately.
     #[serde(default)]
     pub repository_settings: RepositorySettings,
@@ -66,22 +71,6 @@ pub struct Project {
 pub struct RepositoryScripts {
     pub setup: String,
     pub archive: String,
-}
-
-/// Everything a project saves locally under `scripts`: the lifecycle hooks
-/// (flattened, so older stores read unchanged) plus its Run-menu actions and
-/// preview URLs, in saved order. The Scripts page's patch replaces only the
-/// hooks; `actions` and `previewUrls` patches replace only their own list.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct ProjectScripts {
-    #[serde(flatten)]
-    pub commands: RepositoryScripts,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub actions: Vec<RepositoryActionEntry>,
-    /// Templates with $PORT / $PORT_n, expanded against a session's ports.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub preview_urls: Vec<PreviewUrlEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,7 +135,7 @@ fn validate_preview_urls(urls: &[PreviewUrlEntry]) -> Result<()> {
 pub fn scripts(path: &Path) -> Result<RepositoryScripts> {
     let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     Ok(load()?.projects.into_iter().find(|project| canonical(Path::new(&project.path)) == canonical(path))
-        .and_then(|project| project.scripts).map(|scripts| scripts.commands).unwrap_or_default())
+        .and_then(|project| project.scripts).unwrap_or_default())
 }
 
 /// Repository choices stored with the project, keyed by its canonical path.
@@ -415,18 +404,16 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
             None => p.branch_labels.remove(&branch),
         };
     }
-    let mut stored = p.scripts.take().unwrap_or_default();
     if let Some(scripts) = patch.scripts {
         anyhow::ensure!(scripts.setup.len() <= 65_536 && scripts.archive.len() <= 65_536, "Scripts must be at most 64 KiB each.");
-        stored.commands = scripts;
+        p.scripts = (scripts != RepositoryScripts::default()).then_some(scripts);
     }
     if let Some(actions) = patch.actions {
-        stored.actions = actions;
+        p.actions = actions;
     }
     if let Some(urls) = patch.preview_urls {
-        stored.preview_urls = urls;
+        p.preview_urls = urls;
     }
-    p.scripts = (stored != ProjectScripts::default()).then_some(stored);
     let out = p.clone();
     save(&f)?;
     Ok(out)
@@ -597,7 +584,7 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, repository_settings: RepositorySettings::default() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default() };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
@@ -625,7 +612,7 @@ fn ensure_as(path: &str, kind: Option<ProjectKind>) -> Result<Project> {
         return Ok(existing.clone());
     }
     let kind = kind.unwrap_or(if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder });
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, repository_settings: RepositorySettings::default() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default() };
     f.projects.push(p.clone());
     save(&f)?;
     Ok(p)
@@ -680,34 +667,36 @@ mod tests {
         let actions = vec![action("b", "Tests"), RepositoryActionEntry { hidden: true, run_after_setup: true, ..action("a", "Dev") }];
         let urls = vec![PreviewUrlEntry { id: "1".into(), name: "App".into(), url: "http://localhost:$PORT".into() }, PreviewUrlEntry { id: "2".into(), name: "Docs".into(), url: "http://localhost:$PORT_2".into() }];
         update(&project.path, ProjectPatch { actions: Some(actions.clone()), preview_urls: Some(urls.clone()), ..Default::default() }).unwrap();
-        let saved = list().unwrap().0.remove(0).scripts.unwrap();
-        assert_eq!((&saved.actions, &saved.preview_urls, &saved.commands), (&actions, &urls, &RepositoryScripts::default()));
+        let saved = list().unwrap().0.remove(0);
+        assert_eq!((&saved.actions, &saved.preview_urls, &saved.scripts), (&actions, &urls, &None));
         let json = serde_json::to_value(&list().unwrap().0[0]).unwrap();
-        assert_eq!(json["scripts"]["actions"][1]["runAfterSetup"], true);
-        assert_eq!(json["scripts"]["previewUrls"][1]["url"], "http://localhost:$PORT_2");
+        assert_eq!(json["actions"][1]["runAfterSetup"], true);
+        assert_eq!(json["previewUrls"][1]["url"], "http://localhost:$PORT_2");
+        assert!(json.get("scripts").is_none());
         // The Scripts page's patch replaces only the hooks, and other patches leave the lists alone.
         let hooks = RepositoryScripts { setup: "echo hi".into(), archive: String::new() };
         update(&project.path, ProjectPatch { scripts: Some(hooks.clone()), ..Default::default() }).unwrap();
         update(&project.path, ProjectPatch { pinned: Some(true), ..Default::default() }).unwrap();
-        let saved = list().unwrap().0.remove(0).scripts.unwrap();
-        assert_eq!((&saved.actions, &saved.preview_urls, &saved.commands), (&actions, &urls, &hooks));
+        let saved = list().unwrap().0.remove(0);
+        assert_eq!((&saved.actions, &saved.preview_urls, &saved.scripts), (&actions, &urls, &Some(hooks.clone())));
         assert_eq!(scripts(dir.path()).unwrap(), hooks);
         // Invalid lists are refused and change nothing.
         for bad in [vec![action("x", " ")], vec![action("x", "Dev"), action("y", "dev ")], vec![action("x", "A"), action("x", "B")], vec![RepositoryActionEntry { id: "x".into(), name: "Dev".into(), ..Default::default() }]] {
             assert!(update(&project.path, ProjectPatch { actions: Some(bad), ..Default::default() }).is_err());
         }
         assert!(update(&project.path, ProjectPatch { preview_urls: Some(vec![PreviewUrlEntry { id: "z".into(), name: "App".into(), url: " ".into() }]), ..Default::default() }).is_err());
-        assert_eq!(list().unwrap().0[0].scripts.as_ref().unwrap().actions, actions);
-        // Emptying everything stores nothing, as before.
+        assert_eq!(list().unwrap().0[0].actions, actions);
+        // Emptying everything stores nothing.
         update(&project.path, ProjectPatch { actions: Some(vec![]), preview_urls: Some(vec![]), scripts: Some(RepositoryScripts::default()), ..Default::default() }).unwrap();
-        assert_eq!(list().unwrap().0[0].scripts, None);
+        let json = serde_json::to_value(&list().unwrap().0[0]).unwrap();
+        assert!(json.get("scripts").is_none() && json.get("actions").is_none() && json.get("previewUrls").is_none());
     }
 
     #[test]
-    fn scripts_saved_before_actions_existed_still_read() {
-        let stored: ProjectScripts = serde_json::from_str(r#"{"setup":"a","archive":"b"}"#).unwrap();
-        assert_eq!(stored, ProjectScripts { commands: RepositoryScripts { setup: "a".into(), archive: "b".into() }, ..Default::default() });
-        assert_eq!(serde_json::to_value(&stored).unwrap(), serde_json::json!({"setup": "a", "archive": "b"}));
+    fn projects_saved_before_actions_existed_still_read() {
+        let project: Project = serde_json::from_str(r#"{"path":"/r","name":"r","scripts":{"setup":"a","archive":"b"}}"#).unwrap();
+        assert_eq!(project.scripts, Some(RepositoryScripts { setup: "a".into(), archive: "b".into() }));
+        assert!(project.actions.is_empty() && project.preview_urls.is_empty());
     }
 
     #[cfg(unix)]

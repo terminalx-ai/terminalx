@@ -16,5 +16,5 @@ export function RepositoryPreviewUrlsPage({ projectPath }: { projectPath: string
       throw new Error(errorMessage(cause));
     }
   };
-  return <RepositoryPreviewUrlsSettings key={project.path} urls={project.scripts?.previewUrls ?? NO_PREVIEW_URLS} onChange={save} />;
+  return <RepositoryPreviewUrlsSettings key={project.path} urls={project.previewUrls ?? NO_PREVIEW_URLS} onChange={save} />;
 }

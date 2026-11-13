@@ -28,6 +28,9 @@ export interface TabEntry {
   providerSessionId?: string | null;
   resetLogId?: string;
   resetBackupId?: string;
+  /** After a reset: the turn it went back to, and how many files "Also reset files" restored. */
+  resetTurn?: number;
+  resetFilesRestored?: number;
   /**
    * How the app reaches the agent. Absent is its CLI in the tab's terminal.
    * An experimental Codex connection has no terminal: opening the terminal
@@ -246,16 +249,12 @@ export interface Project {
   agentIssueUpdates?: boolean;
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;
-  scripts?: ProjectScripts | null;
-  repositorySettings?: RepositorySettings;
-}
-
-/** What a project saves locally under `scripts`: its hooks, Run-menu actions and preview URLs, in saved order. */
-export interface ProjectScripts extends RepositoryScripts {
-  /** Absent is none. Saved with the `actions` patch, never with `scripts`. */
+  scripts?: RepositoryScripts | null;
+  /** Run-menu actions, in saved order. Absent is none. Saved with the `actions` patch. */
   actions?: RepositoryAction[];
-  /** Templates with $PORT / $PORT_n. Absent is none. Saved with the `previewUrls` patch. */
+  /** Templates with $PORT / $PORT_n, in saved order. Absent is none. Saved with the `previewUrls` patch. */
   previewUrls?: RepositoryPreviewUrl[];
+  repositorySettings?: RepositorySettings;
 }
 
 export interface ProjectPatch {

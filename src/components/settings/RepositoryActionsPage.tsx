@@ -52,7 +52,7 @@ export function RepositoryActionsPage({ projectPath, readRepositoryFile }: {
     <p className="break-all font-mono text-xs text-faint">{project.path}</p>
     <RepositoryActionsSettings
       key={project.path}
-      actions={project.scripts?.actions ?? NO_ACTIONS}
+      actions={project.actions ?? NO_ACTIONS}
       onChange={save}
       onReset={fileActions ? () => save(fileActions) : undefined}
     />

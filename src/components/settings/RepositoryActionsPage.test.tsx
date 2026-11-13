@@ -15,7 +15,7 @@ const dev: RepositoryAction = { id: "dev", name: "Dev", icon: "play", command: "
 const project = (extra: Partial<Project> = {}): Project => ({ path: "/repo", name: "repo", kind: "git", ...extra }) as Project;
 
 beforeEach(() => {
-  mock.projects = [project({ scripts: { setup: "", archive: "", actions: [dev], previewUrls: [{ id: "a", name: "App", url: "http://localhost:$PORT" }] } })];
+  mock.projects = [project({ actions: [dev], previewUrls: [{ id: "a", name: "App", url: "http://localhost:$PORT" }] })];
   mock.update.mockReset();
   mock.toast.mockReset();
 });
