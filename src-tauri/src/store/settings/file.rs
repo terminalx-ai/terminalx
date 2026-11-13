@@ -9,7 +9,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
 
-use super::Settings;
+use super::{schema, Settings};
 
 static FILES: LazyLock<Mutex<HashMap<PathBuf, FileState>>> = LazyLock::new(Default::default);
 
@@ -19,6 +19,54 @@ struct FileState {
     // Preserve fields this version does not understand when a control saves.
     source: Option<Value>,
     error: Option<String>,
+    problem: Option<Problem>,
+}
+
+/// What a problem in a settings file does to the values it holds
+/// (`SettingsFileEffect` in src/types/settingsSources.ts).
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Effect {
+    /// User file: the last good value of each invalid entry stays in effect.
+    LastGood,
+    /// A key this build does not know, or a repository file may not set, is ignored.
+    IgnoredKey,
+    /// A malformed shared repository file: none of its values apply.
+    FileIgnored,
+    /// A malformed local repository file or managed policy: launches that resolve it are refused.
+    Blocked,
+}
+
+/// One error in one settings file: its dotted key, 1-based line and the
+/// parser's or validator's own words. Never a value: the user file holds the
+/// Linear credential, and repository files hold environment values.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Problem {
+    pub key: Option<String>,
+    pub line: Option<usize>,
+    pub message: String,
+    pub effect: Effect,
+}
+
+/// A file error, kept structured until it is shown. Its text is the legacy
+/// "<key>, line <n>: <why>" that `Status::error` still carries.
+#[derive(Debug)]
+struct Invalid { key: Option<String>, line: Option<usize>, why: String, text: String }
+impl std::fmt::Display for Invalid {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result { formatter.write_str(&self.text) }
+}
+impl std::error::Error for Invalid {}
+
+/// serde_json's own words for a syntax error, without its "at line L column C".
+pub(crate) fn parser_words(error: &serde_json::Error) -> String {
+    let text = error.to_string();
+    let suffix = format!(" at line {} column {}", error.line(), error.column());
+    text.strip_suffix(&suffix).unwrap_or(&text).to_owned()
+}
+
+fn invalid_json(error: &serde_json::Error) -> anyhow::Error {
+    anyhow::Error::new(Invalid { key: None, line: Some(error.line()), why: parser_words(error), text: format!("settings, line {}: invalid JSON", error.line()) })
 }
 
 /// Safe to send to windows. Never serialize Settings itself into an event:
@@ -27,16 +75,36 @@ struct FileState {
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     path: String,
-    exists: bool,
+    pub(crate) display_path: String,
+    pub(crate) exists: bool,
     error: Option<String>,
+    pub(crate) problem: Option<Problem>,
+    /// Dotted keys the file sets itself, never their values.
+    pub(crate) set_keys: Vec<String>,
     preferences: BTreeMap<String, Value>,
+}
+
+impl Status {
+    /// The user file's absolute path.
+    pub(crate) fn path(&self) -> &str { &self.path }
+}
+
+/// `path` with the home directory written as "~".
+pub fn display_path(path: &Path) -> String {
+    match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.to_string_lossy()),
+        None => path.to_string_lossy().into(),
+    }
 }
 
 static PREFERENCE_DEFAULTS: LazyLock<Value> = LazyLock::new(||
     serde_json::from_str(include_str!("../../../../src/lib/userPreferenceDefaults.json")).expect("bundled preference defaults")
 );
 
-static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
+/// Every key of the user file and its JSON type, from the defaults. With
+/// `schema::CONSTRAINTS` it is all `validate` and the published schema know.
+pub(super) static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
     let mut value = serde_json::to_value(Settings::default()).expect("settings defaults");
     for key in ["linearApiKey", "linearViewer", "machineName"] {
         value[key] = Value::Null;
@@ -46,7 +114,7 @@ static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
 });
 
 // These object keys are user-defined, rather than settings field names.
-static DYNAMIC_MAPS: LazyLock<BTreeMap<&str, Value>> = LazyLock::new(|| BTreeMap::from([
+pub(super) static DYNAMIC_MAPS: LazyLock<BTreeMap<&str, Value>> = LazyLock::new(|| BTreeMap::from([
     ("mergedCleanup.projects", Value::Bool(false)),
     ("orchestrator.projects", serde_json::json!({"requireApproval": false, "pieceLimit": 0, "workerMode": "", "reviewDiffLines": 0, "budgetDollars": 0.5, "budgetPoints": 0.5, "windowCeiling": 0.5})),
     ("preferences.shortcuts", serde_json::json!([""])),
@@ -71,87 +139,51 @@ impl<'de> Deserialize<'de> for Members<'de> {
     }
 }
 
+fn line_of(source: &str, raw: &RawValue) -> usize {
+    source[..raw.get().as_ptr() as usize - source.as_ptr() as usize].bytes().filter(|byte| *byte == b'\n').count() + 1
+}
+
+/// The 1-based line of each top-level member's value, first occurrence of
+/// each name, in file order; None when the source is not a JSON object.
+pub(crate) fn member_lines(source: &str) -> Option<Vec<(String, usize)>> {
+    let Members(members) = serde_json::from_str(source).ok()?;
+    let mut lines: Vec<(String, usize)> = members.into_iter().map(|(name, raws)| (name, line_of(source, raws[0]))).collect();
+    lines.sort_by_key(|(_, line)| *line);
+    Some(lines)
+}
+
 fn invalid(source: &str, raw: &RawValue, key: &str, why: &str, file_lines: bool) -> anyhow::Error {
-    let key = if key.is_empty() { "settings" } else { key };
-    if file_lines {
-        let line = source[..raw.get().as_ptr() as usize - source.as_ptr() as usize].bytes().filter(|byte| *byte == b'\n').count() + 1;
-        anyhow::anyhow!("{key}, line {line}: {why}")
-    } else {
-        anyhow::anyhow!("Cannot save settings: {key}: {why}")
-    }
+    let name = if key.is_empty() { "settings" } else { key };
+    let line = file_lines.then(|| line_of(source, raw));
+    let text = match line {
+        Some(line) => format!("{name}, line {line}: {why}"),
+        None => format!("Cannot save settings: {name}: {why}"),
+    };
+    anyhow::Error::new(Invalid { key: (!key.is_empty()).then(|| key.to_owned()), line, why: why.to_owned(), text })
 }
 
 /// RawValue borrows the original input, so diagnostics use the actual value's
 /// line even for repeated keys in different objects or escaped JSON key names.
-fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_lines: bool) -> Result<()> {
+/// `key` is the dotted key as the file spells it; `pattern` is its schema path,
+/// with `*` for an entry of a user-defined map, as `schema::CONSTRAINTS` names it.
+fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, pattern: &str, file_lines: bool) -> Result<()> {
     let value: Value = serde_json::from_str(raw.get())?;
     let error = |why: &str| invalid(source, raw, key, why, file_lines);
-    let choices: &[&str] = match key {
-        "statusBar.percent" => &["used", "remaining"],
-        "statusBar.usageMode" => &["detailed", "compact"],
-        "preferences.linkBrowser" => &["terminalx", "system", "ask"],
-        "preferences.branchSessions" => &["tabs", "sidebar"],
-        "preferences.updateChannel" => &["stable", "beta"],
-        "preferences.fontScale" => &["sm", "md", "lg"],
-        "preferences.transcriptLayout" => &["wide", "chat"],
-        "preferences.sidebarLayout" => &["simple", "list", "status"],
-        "preferences.organizationDisplay" => &["all", "one"],
-        "preferences.theme" => &["den", "slate", "moss", "ember"],
-        "preferences.mode" => &["system", "light", "dark"],
-        "orchestrator.workerMode" => &super::WORKER_MODES,
-        _ => &[],
-    };
-    if !choices.is_empty() && !value.as_str().is_some_and(|text| choices.contains(&text)) {
-        return Err(error("unknown option"));
-    }
-    let numbers: &[u32] = match key {
-        "agents.idleStopMinutes" => &super::IDLE_STOP_MINUTES,
-        "conversations.archiveIdleDays" => &super::ARCHIVE_IDLE_DAYS,
-        "mergedCleanup.graceMinutes" => &super::GRACE_MINUTES,
-        "statusBar.usageRefreshMinutes" => &super::USAGE_REFRESH_MINUTES,
-        _ => &[],
-    };
-    if !numbers.is_empty() && !value.as_u64().is_some_and(|n| numbers.iter().any(|v| u64::from(*v) == n)) {
-        return Err(error("choose one of the supported intervals"));
-    }
-    if key == "orchestrator.pieceLimit" && !value.as_u64().is_some_and(|n| (1..=u64::from(super::MAX_PIECE_LIMIT)).contains(&n)) {
-        return Err(error("expected a number of pieces from 1 to 50"));
-    }
-    if key == "orchestrator.reviewDiffLines" && !value.as_u64().is_some_and(|n| (1..=u64::from(super::MAX_REVIEW_DIFF_LINES)).contains(&n)) {
-        return Err(error("expected a number of changed lines from 1 to 100000"));
-    }
-    // PRO-280: a run's limits. The budget and the window level take fractions; the counts do not.
-    if key.starts_with("orchestrator.") && !value.is_object() {
-        let field = key.rsplit('.').next().unwrap_or_default();
-        let whole = |valid: fn(u32) -> bool| value.as_u64().and_then(|n| u32::try_from(n).ok()).is_some_and(valid);
-        // PRO-335: a budget or the window level may also be "none", No limit.
-        let cap = |valid: fn(f64) -> bool| super::read_cap(&value, valid).is_some();
-        let checked = match field {
-            "workersPerRun" | "workersAtOnce" => Some((whole(super::valid_workers), "expected a number of workers from 1 to 50")),
-            "stallMinutes" => Some((whole(super::valid_stall_minutes), "expected minutes from 1 to 240")),
-            "budgetDollars" => Some((cap(super::valid_dollars), "expected dollars above 0, at most 10000, or \"none\" for no limit")),
-            "budgetPoints" | "windowCeiling" => Some((cap(super::valid_percent), "expected a percentage above 0, at most 100, or \"none\" for no limit")),
-            _ => None,
-        };
-        if let Some((ok, why)) = checked {
-            return if ok { Ok(()) } else { Err(error(why)) };
-        }
-    }
-    if key == "floating.retentionDays" && !value.as_u64().is_some_and(|n| n <= u64::from(super::MAX_RETENTION_DAYS)) {
-        return Err(error("expected days from 0 to 3650"));
+    if let Some(constraint) = schema::constraint(pattern) {
+        return if constraint.rule.accepts(&value) { Ok(()) } else { Err(error(constraint.why)) };
     }
     match expected {
         Value::Object(properties) => {
             let Members(members): Members = serde_json::from_str(raw.get()).map_err(|_| error("expected an object"))?;
             for (name, members) in members {
                 let path = if key.is_empty() { name.clone() } else { format!("{key}.{name}") };
-                let Some(kind) = DYNAMIC_MAPS.get(key).or_else(|| properties.get(&name)) else {
+                let Some(kind) = DYNAMIC_MAPS.get(pattern).or_else(|| properties.get(&name)) else {
                     // Future fields and editor metadata (including $schema)
                     // are inert to this build, and survive subsequent writes.
                     continue;
                 };
                 if members.len() > 1 { return Err(invalid(source, members[1], &path, "duplicate setting", file_lines)); }
-                validate(source, members[0], kind, &path, file_lines)?;
+                validate(source, members[0], kind, &path, &schema::child(pattern, &name), file_lines)?;
             }
         }
         Value::Array(_) => {
@@ -160,7 +192,7 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_line
             }
         }
         Value::Bool(_) if !value.is_boolean() => return Err(error("expected true or false")),
-        Value::String(_) if !value.is_string() && !(key == "floating.shortcut" && value.is_null()) => return Err(error("expected a string")),
+        Value::String(_) if !value.is_string() => return Err(error("expected a string")),
         Value::Number(_) if !value.as_u64().is_some_and(|n| n <= u64::from(u32::MAX)) => return Err(error("expected a non-negative integer")),
         Value::Null if !value.is_null() && !value.is_string() => return Err(error("expected a string or null")),
         _ => {}
@@ -170,14 +202,21 @@ fn validate(source: &str, raw: &RawValue, expected: &Value, key: &str, file_line
 
 fn parse(source: &str) -> Result<Settings> { parse_input(source, true) }
 
+/// Whether a whole settings document is valid, with the error a file would show.
+#[cfg(test)]
+pub(super) fn check(document: &Value) -> Result<()> { parse(&serde_json::to_string(document)?).map(drop) }
+
 fn parse_input(source: &str, file_lines: bool) -> Result<Settings> {
-    let raw: &RawValue = serde_json::from_str(source).map_err(|error| anyhow::anyhow!("settings, line {}: invalid JSON", error.line()))?;
-    validate(source, raw, &TEMPLATE, "", file_lines)?;
+    let raw: &RawValue = serde_json::from_str(source).map_err(|error| invalid_json(&error))?;
+    validate(source, raw, &TEMPLATE, "", "", file_lines)?;
     let mut settings: Settings = serde_json::from_str(source).map_err(|error| {
         let message = error.to_string();
-        let key = message.strip_prefix("duplicate field `").and_then(|tail| tail.split_once('`')).map(|(key, _)| key).unwrap_or("settings");
-        if file_lines { anyhow::anyhow!("{key}, line {}: invalid or duplicate setting", error.line()) }
-        else { anyhow::anyhow!("Cannot save settings: {key}: invalid or duplicate setting") }
+        let key = message.strip_prefix("duplicate field `").and_then(|tail| tail.split_once('`')).map(|(key, _)| key);
+        let name = key.unwrap_or("settings");
+        let why = "invalid or duplicate setting";
+        let (line, text) = if file_lines { (Some(error.line()), format!("{name}, line {}: {why}", error.line())) }
+            else { (None, format!("Cannot save settings: {name}: {why}")) };
+        anyhow::Error::new(Invalid { key: key.map(str::to_owned), line, why: why.into(), text })
     })?;
     // Unknown preferences are preserved in the source, not sent to webviews.
     settings.preferences.retain(|key, _| PREFERENCE_DEFAULTS.get(key).is_some());
@@ -187,24 +226,25 @@ fn parse_input(source: &str, file_lines: bool) -> Result<Settings> {
 /// Recover each known field independently. One invalid leaf must not discard
 /// credentials, permission choices, or valid siblings on a cold start. Missing
 /// keys still inherit defaults; only an invalid field uses its previous value.
-fn recover(source: &str, raw: &RawValue, expected: &Value, previous: Option<&Value>, key: &str) -> Value {
+fn recover(source: &str, raw: &RawValue, expected: &Value, previous: Option<&Value>, key: &str, pattern: &str) -> Value {
     if let (Value::Object(properties), Ok(Members(members))) = (expected, serde_json::from_str::<Members>(raw.get())) {
         let mut values = serde_json::Map::new();
         for (name, members) in members {
             let path = if key.is_empty() { name.clone() } else { format!("{key}.{name}") };
-            let map_value = DYNAMIC_MAPS.get(key);
+            let child = schema::child(pattern, &name);
+            let map_value = DYNAMIC_MAPS.get(pattern);
             if let Some(kind) = map_value.or_else(|| properties.get(&name)) {
                 let previous = previous.and_then(|value| value.get(&name));
                 if map_value.is_some() && previous.is_none()
-                    && (members.len() > 1 || validate(source, members[0], kind, &path, true).is_err()) { continue; }
+                    && (members.len() > 1 || validate(source, members[0], kind, &path, &child, true).is_err()) { continue; }
                 let value = if members.len() > 1 { previous.unwrap_or(kind).clone() }
-                    else { recover(source, members[0], kind, previous, &path) };
+                    else { recover(source, members[0], kind, previous, &path, &child) };
                 values.insert(name, value);
             }
         }
         return Value::Object(values);
     }
-    if validate(source, raw, expected, key, true).is_ok() {
+    if validate(source, raw, expected, key, pattern, true).is_ok() {
         serde_json::from_str(raw.get()).expect("validated JSON value")
     } else {
         previous.unwrap_or(expected).clone()
@@ -216,23 +256,54 @@ fn refresh(path: &Path, state: &mut FileState) {
         Ok(source) => {
             state.source = serde_json::from_str::<Value>(&source).ok().filter(Value::is_object);
             match parse(&source) {
-                Ok(good) => { state.good = good; state.error = None; }
+                Ok(good) => { state.good = good; state.error = None; state.problem = None; }
                 Err(error) => {
                     if state.source.is_some() {
                         let previous = serde_json::to_value(&state.good).expect("settings values");
                         let raw = serde_json::from_str::<&RawValue>(&source).expect("parsed source");
-                        let recovered = recover(&source, raw, &TEMPLATE, Some(&previous), "");
+                        let recovered = recover(&source, raw, &TEMPLATE, Some(&previous), "", "");
                         let good = serde_json::from_value(recovered);
                         debug_assert!(good.is_ok(), "validated recovery must match the Settings type");
                         if let Ok(good) = good { state.good = good; }
                     }
+                    state.problem = Some(match error.downcast_ref::<Invalid>() {
+                        Some(invalid) => Problem { key: invalid.key.clone(), line: invalid.line, message: invalid.why.clone(), effect: Effect::LastGood },
+                        None => Problem { key: None, line: None, message: "could not read the settings".into(), effect: Effect::LastGood },
+                    });
                     state.error = Some(error.to_string());
                 }
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => *state = FileState::default(),
-        Err(_) => { state.source = None; state.error = Some("settings, line 1: could not read the file".into()); }
+        Err(_) => {
+            state.source = None;
+            state.error = Some("settings, line 1: could not read the file".into());
+            state.problem = Some(Problem { key: None, line: None, message: "could not read the file".into(), effect: Effect::LastGood });
+        }
     }
+}
+
+/// The dotted keys a settings document sets: each leaf, list or user-defined
+/// map of the template that it names. Unknown keys and `$schema` are not settings.
+fn set_keys(source: &Value, expected: &Value, key: &str, pattern: &str, keys: &mut Vec<String>) {
+    let (Some(source), Some(properties)) = (source.as_object(), expected.as_object()) else { return };
+    for (name, value) in source {
+        let Some(kind) = properties.get(name) else { continue };
+        let path = if key.is_empty() { name.clone() } else { format!("{key}.{name}") };
+        let child = schema::child(pattern, name);
+        if kind.is_object() && value.is_object() && !DYNAMIC_MAPS.contains_key(child.as_str()) {
+            set_keys(value, kind, &path, &child, keys);
+        } else {
+            keys.push(path);
+        }
+    }
+}
+
+/// Saves refuse a file with an error rather than overwrite the person's edit.
+fn refuse_while_invalid(path: &Path, state: &FileState) -> Result<()> {
+    let Some(error) = &state.error else { return Ok(()) };
+    let line = state.problem.as_ref().and_then(|problem| problem.line).map(|line| format!(" on line {line}")).unwrap_or_default();
+    bail!("Can't save: {} has an error{line}. Fix it in the file first ({error}).", display_path(path))
 }
 
 /// Settings serializes only fields understood by this build. Carry the others
@@ -254,7 +325,13 @@ fn preserve_unknown(next: &mut Value, source: &Value, expected: &Value, key: &st
 }
 
 fn status_at(path: &Path, state: &FileState) -> Status {
-    Status { path: path.to_string_lossy().into(), exists: path.exists(), error: state.error.clone(), preferences: state.good.preferences.clone() }
+    let mut keys = Vec::new();
+    if let Some(source) = &state.source { set_keys(source, &TEMPLATE, "", "", &mut keys); }
+    Status {
+        path: path.to_string_lossy().into(), display_path: display_path(path), exists: path.exists(),
+        error: state.error.clone(), problem: state.problem.clone(), set_keys: keys,
+        preferences: state.good.preferences.clone(),
+    }
 }
 
 pub(super) fn load() -> Settings {
@@ -272,12 +349,21 @@ fn write(path: &Path, state: &mut FileState, settings: &Settings) -> Result<()> 
 /// `absent` top-level keys are left out of the file so they inherit from the
 /// layers below the user layer (defaults) rather than pinning today's value.
 fn write_without(path: &Path, state: &mut FileState, settings: &Settings, absent: &[&str]) -> Result<()> {
-    if let Some(error) = &state.error { bail!("Fix settings.json before saving: {error}"); }
+    refuse_while_invalid(path, state)?;
     let mut next = serde_json::to_value(settings)?;
     if let Some(object) = next.as_object_mut() { for key in absent { object.remove(*key); } }
     let good = parse_input(&serde_json::to_string(&next)?, false)?;
     if let Some(source) = &state.source { preserve_unknown(&mut next, source, &TEMPLATE, ""); }
-    let bytes = serde_json::to_vec_pretty(&next)?;
+    if let Some(object) = next.as_object_mut() { schema::add_reference(object, schema::USER_SCHEMA_REFERENCE); }
+    write_document(path, &next)?;
+    state.good = good;
+    state.source = Some(next);
+    Ok(())
+}
+
+/// The user file is private: it can hold the Linear credential.
+fn write_document(path: &Path, document: &Value) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(document)?;
     // Tighten before making the temporary copy too, not after exposing a
     // credential in a file whose old permissions may have been too broad.
     #[cfg(unix)]
@@ -285,10 +371,7 @@ fn write_without(path: &Path, state: &mut FileState, settings: &Settings, absent
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
-    crate::store::write_atomic(path, &bytes)?;
-    state.good = good;
-    state.source = Some(next);
-    Ok(())
+    crate::store::write_atomic(path, &bytes)
 }
 
 pub(super) fn save(settings: &Settings) -> Result<()> {
@@ -320,11 +403,20 @@ pub(super) fn save(settings: &Settings) -> Result<()> {
 }
 
 pub fn status() -> Result<Status> {
-    let path = super::file_path()?;
+    Ok(status_of(&super::file_path()?))
+}
+
+/// The status of the user file at `path`, read now.
+pub(crate) fn status_of(path: &Path) -> Status {
     let mut files = FILES.lock().unwrap_or_else(|e| e.into_inner());
-    let state = files.entry(path.clone()).or_default();
-    refresh(&path, state);
-    Ok(status_at(&path, state))
+    let state = files.entry(path.to_owned()).or_default();
+    refresh(path, state);
+    status_at(path, state)
+}
+
+/// How many top-level keys the defaults have, for the Settings files view.
+pub(crate) fn default_keys() -> usize {
+    TEMPLATE.as_object().map_or(0, serde_json::Map::len)
 }
 
 #[cfg(any(feature = "desktop", test))]
@@ -339,7 +431,7 @@ fn change_preferences_locked(path: &Path, patch: BTreeMap<String, Value>, migrat
     let mut files = FILES.lock().unwrap_or_else(|e| e.into_inner());
     let state = files.entry(path.to_owned()).or_default();
     refresh(path, state);
-    if let Some(error) = &state.error { bail!("Fix settings.json before saving: {error}"); }
+    refuse_while_invalid(path, state)?;
     let mut next = state.good.clone();
     if migrate && next.preferences_migrated { return Ok(status_at(path, state)); }
     // Nothing to migrate on a fresh installation: let General offer Create.
@@ -355,6 +447,58 @@ fn change_preferences_locked(path: &Path, patch: BTreeMap<String, Value>, migrat
     if create && path.exists() { return Ok(status_at(path, state)); }
     write(path, state, &next)?;
     Ok(status_at(path, state))
+}
+
+/// The path a dotted key names in the template: a key of it, a user-defined
+/// map, or one entry of a map (whose own name may contain dots, as shortcut
+/// actions such as "session.stop" do).
+fn key_path(key: &str) -> Option<Vec<String>> {
+    let mut path = Vec::new();
+    let (mut expected, mut pattern, mut rest) = (&*TEMPLATE, String::new(), key);
+    loop {
+        if DYNAMIC_MAPS.contains_key(pattern.as_str()) {
+            if !rest.is_empty() { path.push(rest.to_owned()); }
+            return Some(path);
+        }
+        let (name, tail) = rest.split_once('.').unwrap_or((rest, ""));
+        expected = expected.as_object()?.get(name)?;
+        pattern = schema::child(&pattern, name);
+        path.push(name.to_owned());
+        if tail.is_empty() { return Some(path); }
+        rest = tail;
+    }
+}
+
+/// Remove `path` from `document`, and each object it leaves empty.
+fn remove(document: &mut Value, path: &[String]) -> bool {
+    let Some((name, rest)) = path.split_first() else { return false };
+    let Some(object) = document.as_object_mut() else { return false };
+    if rest.is_empty() { return object.remove(name).is_some(); }
+    let Some(child) = object.get_mut(name) else { return false };
+    let removed = remove(child, rest);
+    if removed && child.as_object().is_some_and(serde_json::Map::is_empty) { object.remove(name); }
+    removed
+}
+
+/// Take one dotted key out of the user file, so it inherits the layers below
+/// it (the defaults). Every other byte of meaning, unknown keys included, stays.
+fn reset(path: &Path, key: &str) -> Result<Status> {
+    let segments = key_path(key).filter(|segments| !segments.is_empty()).ok_or_else(|| anyhow::anyhow!("Unknown setting: {}", key.chars().filter(|c| !c.is_control()).take(200).collect::<String>()))?;
+    crate::store::transaction::run(&path.with_extension("lock"), Duration::from_secs(5), || {
+        let mut files = FILES.lock().unwrap_or_else(|e| e.into_inner());
+        let state = files.entry(path.to_owned()).or_default();
+        refresh(path, state);
+        refuse_while_invalid(path, state)?;
+        let Some(mut document) = state.source.clone() else { return Ok(status_at(path, state)) };
+        if remove(&mut document, &segments) {
+            if let Some(object) = document.as_object_mut() { schema::add_reference(object, schema::USER_SCHEMA_REFERENCE); }
+            let good = parse(&serde_json::to_string(&document)?)?;
+            write_document(path, &document)?;
+            state.good = good;
+            state.source = Some(document);
+        }
+        Ok(status_at(path, state))
+    })
 }
 
 /// How long a changed settings file must hold still before the change is reported.
@@ -410,6 +554,11 @@ impl Watcher {
     }
 
     pub fn start(sink: Arc<dyn crate::sink::EventSink>) -> Result<Self> {
+        // The user file's `$schema` names this copy; keep it this build's.
+        match crate::store::root() {
+            Ok(home) => if let Err(error) = schema::install_user_schema(&home) { log::warn!("Could not update the settings schema: {error}"); },
+            Err(error) => log::warn!("Could not update the settings schema: {error}"),
+        }
         Self::at(super::file_path()?, move || sink.emit("settings_file_changed", &()))
     }
 }
@@ -468,6 +617,12 @@ pub fn update_user_preferences(patch: BTreeMap<String, Value>, migrate: bool) ->
 #[tauri::command]
 pub fn create_settings_file() -> Result<Status, String> {
     (|| change_preferences(&super::file_path()?, BTreeMap::new(), false, true))().map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub fn reset_user_setting(key: String) -> Result<Status, String> {
+    (|| reset(&super::file_path()?, &key))().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -798,5 +953,111 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         wait();
         assert!(FILES.lock().unwrap()[&path].good.notifications);
+    }
+
+    #[test]
+    fn a_problem_names_the_key_and_line_and_no_status_carries_a_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{\n  \"linearApiKey\": \"private-key\",\n  \"preferences\": {\n    \"sounds\": \"secret-value\"\n  }\n}").unwrap();
+        let status = status_of(&path);
+        assert_eq!(status.problem, Some(Problem { key: Some("preferences.sounds".into()), line: Some(4), message: "expected true or false".into(), effect: Effect::LastGood }));
+        assert_eq!(status.error.as_deref(), Some("preferences.sounds, line 4: expected true or false"), "the legacy text stays");
+        let wire = serde_json::to_string(&status).unwrap();
+        assert!(!wire.contains("private-key") && !wire.contains("secret-value"), "{wire}");
+        assert!(wire.contains("\"setKeys\":[\"linearApiKey\",\"preferences.sounds\"]"), "{wire}");
+
+        // Malformed JSON: no key, the parser's line and its own words.
+        std::fs::write(&path, "{\n  \"notifications\": true,\n}").unwrap();
+        let status = status_of(&path);
+        let problem = status.problem.clone().unwrap();
+        assert_eq!((problem.key, problem.line, problem.effect), (None, Some(3), Effect::LastGood));
+        assert!(!problem.message.is_empty() && !problem.message.contains("line"), "{}", problem.message);
+        assert_eq!(status.error.as_deref(), Some("settings, line 3: invalid JSON"));
+        assert!(status.set_keys.is_empty());
+
+        // A duplicate key points at its second occurrence.
+        std::fs::write(&path, "{\"notifications\":true,\n\"notifications\":false}").unwrap();
+        assert_eq!(status_of(&path).problem.unwrap().key.as_deref(), Some("notifications"));
+
+        // Fixed: no problem, and the keys the file sets.
+        std::fs::write(&path, json!({
+            "$schema": "./schemas/settings.schema.json", "future": {"x": 1}, "linearApiKey": "private-key",
+            "agents": {"idleStopMinutes": 30}, "orchestrator": {"projects": {"/repo": {"pieceLimit": 3}}},
+            "preferences": {"theme": "moss", "shortcuts": {"session.stop": ["mod+."]}},
+        }).to_string()).unwrap();
+        let status = status_of(&path);
+        assert!(status.problem.is_none() && status.error.is_none());
+        assert_eq!(status.set_keys, ["agents.idleStopMinutes", "linearApiKey", "orchestrator.projects", "preferences.shortcuts", "preferences.theme"]);
+        assert!(!serde_json::to_string(&status).unwrap().contains("private-key"));
+    }
+
+    #[test]
+    fn display_paths_write_the_home_directory_as_a_tilde() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(display_path(&home.join(".raccoon/settings.json")), "~/.raccoon/settings.json");
+        assert_eq!(display_path(&home), "~");
+        assert_eq!(display_path(Path::new("/etc/terminalx/managed-settings.json")), "/etc/terminalx/managed-settings.json");
+    }
+
+    #[test]
+    fn reset_removes_one_key_so_it_inherits_its_default_and_keeps_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert!(!reset(&path, "agents.idleStopMinutes").unwrap().exists, "nothing to reset is no file");
+        std::fs::write(&path, json!({
+            "$schema": "https://example.test/mine.json", "future": 1, "linearApiKey": "private-key",
+            "agents": {"idleStopMinutes": 30, "readOnlyCommands": false},
+            "preferences": {"theme": "moss", "shortcuts": {"session.stop": ["mod+."]}},
+        }).to_string()).unwrap();
+        let status = reset(&path, "agents.idleStopMinutes").unwrap();
+        assert!(!status.set_keys.contains(&"agents.idleStopMinutes".to_string()));
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["agents"], json!({"readOnlyCommands": false}));
+        assert_eq!((&saved["$schema"], &saved["future"], &saved["linearApiKey"]), (&json!("https://example.test/mine.json"), &json!(1), &json!("private-key")));
+        assert_eq!(FILES.lock().unwrap()[&path].good.agents.idle_stop_minutes, Settings::default().agents.idle_stop_minutes);
+        assert!(!serde_json::to_string(&status).unwrap().contains("private-key"));
+
+        // A map entry whose own name has dots, then the objects it leaves empty.
+        reset(&path, "preferences.shortcuts.session.stop").unwrap();
+        let status = reset(&path, "preferences.theme").unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.get("preferences").is_none(), "{saved}");
+        assert!(!status.preferences.contains_key("theme"), "the window shows the default");
+        assert!(reset(&path, "agents.nothingLikeThis").is_err());
+        assert!(reset(&path, "").is_err());
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn reset_and_every_save_refuse_while_the_file_has_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let invalid = "{\n  \"agents\": {\n    \"idleStopMinutes\": 1\n  }\n}";
+        std::fs::write(&path, invalid).unwrap();
+        let expected = format!("Can't save: {} has an error on line 3", display_path(&path));
+        let error = reset(&path, "agents.idleStopMinutes").err().unwrap().to_string();
+        assert!(error.starts_with(&expected), "{error}");
+        let error = change_preferences(&path, patch(json!({"sounds": true})), false, false).err().unwrap().to_string();
+        assert!(error.starts_with(&expected), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn saves_add_the_bundled_schema_reference_unless_the_person_wrote_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        change_preferences(&path, BTreeMap::new(), false, true).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["$schema"], schema::USER_SCHEMA_REFERENCE);
+        assert!(status_of(&path).problem.is_none(), "$schema is not an error");
+        std::fs::write(&path, r#"{"$schema":"https://example.test/mine.json","notifications":false}"#).unwrap();
+        change_preferences(&path, patch(json!({"sounds": false})), false, false).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["$schema"], "https://example.test/mine.json");
+        assert_eq!(saved["notifications"], false);
     }
 }

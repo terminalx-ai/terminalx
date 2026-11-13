@@ -27,7 +27,7 @@ beforeEach(() => {
   mocks.listeners.clear();
   mocks.invoke.mockReset();
   migrated = false;
-  file = { path: "/fixture/settings.json", exists: false, error: null, preferences: {} };
+  file = { path: "/fixture/settings.json", displayPath: "/fixture/settings.json", exists: false, error: null, problem: null, setKeys: [], preferences: {} };
   mocks.invoke.mockImplementation(async (command: string, args?: { patch: Record<string, unknown>; migrate: boolean }) => {
     if (command === "settings_file_status") return structuredClone(file);
     if (command === "create_settings_file") file.exists = true;

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "<primary checkout>/.terminalx/settings.json (shared in Git) and .terminalx/settings.local.json (ignored). Precedence, highest first: managed policy, repository local, repository shared, user, defaults. Unknown keys are ignored.",
+  "properties": {
+    "$schema": {
+      "description": "The JSON schema editors check this file against.",
+      "type": "string"
+    },
+    "branchPrefix": {
+      "description": "Prefix for new workspace branches and for which branches workspace cleanup recognizes, such as \"team/\". Slash-separated parts of ASCII letters, digits, hyphens and underscores. Empty disables prefix-based cleanup. A shared value needs the person's trust.",
+      "maxLength": 128,
+      "pattern": "^(?:[A-Za-z0-9_][A-Za-z0-9_-]*(?:/[A-Za-z0-9_][A-Za-z0-9_-]*)*/?)?$",
+      "type": "string"
+    },
+    "environment": {
+      "additionalProperties": {
+        "maxLength": 65536,
+        "pattern": "^[^\\u0000]*$",
+        "type": "string"
+      },
+      "description": "Literal environment variables for sessions started in this repository; never expanded. Values are at most 64 KiB. Shared values need the person's trust.",
+      "maxProperties": 256,
+      "propertyNames": {
+        "maxLength": 128,
+        "not": {
+          "anyOf": [
+            {
+              "enum": [
+                "TERMINALX",
+                "RACCOON",
+                "TERM",
+                "COLORTERM",
+                "TERM_PROGRAM",
+                "PATH",
+                "HOME",
+                "LD_PRELOAD",
+                "CODEX_HOME",
+                "CLAUDECODE",
+                "CLAUDE_CODE_SESSION_ID",
+                "CLAUDE_CODE_CHILD_SESSION",
+                "CLAUDE_CODE_BRIDGE_SESSION_ID"
+              ]
+            },
+            {
+              "pattern": "^(?:TERMINALX_|RACCOON_|DYLD_)"
+            }
+          ]
+        },
+        "pattern": "^[A-Z_][A-Z0-9_]*$"
+      },
+      "type": "object"
+    },
+    "sparseCheckout": {
+      "description": "Folders new workspaces of this repository check out, relative to its root, such as \"packages/web\"; root files are always checked out. An empty list checks out root files only; absent checks out everything. Each folder is at most 1024 bytes.",
+      "items": {
+        "maxLength": 1024,
+        "pattern": "^(?:[^./\\\\*?\\x00-\\x1f\\x7f-\\x9f][^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]*|\\.[^./\\\\*?\\x00-\\x1f\\x7f-\\x9f][^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]*|\\.\\.[^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]+)(?:/(?:[^./\\\\*?\\x00-\\x1f\\x7f-\\x9f][^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]*|\\.[^./\\\\*?\\x00-\\x1f\\x7f-\\x9f][^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]*|\\.\\.[^/\\\\*?\\x00-\\x1f\\x7f-\\x9f]+))*$",
+        "type": "string"
+      },
+      "maxItems": 1000,
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "title": "TerminalX repository settings",
+  "type": "object"
+}

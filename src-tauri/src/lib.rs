@@ -455,6 +455,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             transparency::reduce_transparency,
             configuration_commands::configuration_resolve,
+            configuration_commands::settings_files_list,
+            configuration_commands::open_settings_file,
             configuration_watch::configuration_watch,
             configuration_commands::configuration_write,
             configuration_commands::configuration_review,
@@ -920,6 +922,7 @@ pub fn run() {
             store::settings::file::settings_file_status,
             store::settings::file::update_user_preferences,
             store::settings::file::create_settings_file,
+            store::settings::file::reset_user_setting,
             commands::set_experimental_settings,
             commands::orchestrator_settings,
             commands::set_orchestrator_settings,
