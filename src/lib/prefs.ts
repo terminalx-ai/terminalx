@@ -51,6 +51,8 @@ export interface Prefs {
   foldToolCalls: boolean;
   /** Under each finished turn, a chip per file it changed with the lines added and removed. */
   turnChanges: boolean;
+  /** Explicit consent to send staged diffs to the selected agent for a commit subject. */
+  writeCommitMessagesWithAgent: boolean;
   /** A mark per prompt down the transcript's right edge: hover to read one, click to go to it. */
   promptMap: boolean;
   /** "Also reset files" in the Reset chat dialog: the reader's last choice. */
@@ -175,6 +177,7 @@ const DEFAULTS: Prefs = {
   // Off: every step of a turn stays in view between its paragraphs, so a turn reads as what the agent did, in order.
   foldToolCalls: false,
   turnChanges: true,
+  writeCommitMessagesWithAgent: false,
   promptMap: true,
   resetFiles: false,
   fixErrorsInstructions: "",
