@@ -33,7 +33,7 @@ try {
       const repositories = page.getByRole("group", { name: "Repositories", exact: true });
       await repositories.waitFor();
       await page.getByRole("combobox", { name: "Search settings" }).fill("worktreeinclude");
-      await page.getByRole("option", { name: /Repositories/ }).click();
+      await page.getByRole("option", { name: /^Files to copy/ }).click();
       await repositories.getByRole("button", { name: "local-0", exact: true }).click();
       await page.getByRole("navigation", { name: "Repository settings", exact: true }).getByRole("button", { name: "General", exact: true }).click();
       await page.getByText("/repos/p0/.raccoon/worktrees", { exact: true }).waitFor();
