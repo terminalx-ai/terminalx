@@ -329,7 +329,7 @@ describe("Create a project (Quick start)", () => {
 
     expect(screen.getByRole("note").textContent).toBe("Creates a git repository on main with a first commit. No GitHub remote yet: TerminalX offers to create a private one the first time you push.");
     expect(sessionBox().checked).toBe(true);
-    expect(screen.getByRole("button", { name: "Add your own templates in Settings › Projects" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add your own templates in Settings › Project templates" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /^Cancel/ }).textContent).toContain("esc");
   });
 
@@ -388,13 +388,13 @@ describe("Create a project (Quick start)", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("project_create", { parent: "/home/me/Projects", name: "my-project", template: "user:1" }));
   });
 
-  it("opens Settings › Projects from the link and closes the dialog", async () => {
+  it("opens Settings › Project templates from the link and closes the dialog", async () => {
     const { onTemplateSettingsRequest } = await import("@/lib/projectStart");
     const opened = vi.fn();
     const stop = onTemplateSettingsRequest(opened);
     open("quick");
     await ready();
-    fireEvent.click(screen.getByRole("button", { name: "Add your own templates in Settings › Projects" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add your own templates in Settings › Project templates" }));
     expect(opened).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("start-quick-dialog")).toBeNull();
     stop();

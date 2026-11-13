@@ -82,16 +82,18 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
     event.stopPropagation();
     dismissError(toast.id);
   };
+  const success = toast.tone === "success";
   return (
     <div
-      role="alert"
+      role={success ? "status" : "alert"}
       aria-labelledby={`${toast.id}-title`}
       aria-describedby={`${toast.id}-body`}
       data-error-toast=""
+      data-toast-tone={toast.tone}
       onKeyDown={onKeyDown}
       className="pointer-events-auto flex items-start gap-2.5 rounded-xl bg-popover p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in"
     >
-      <CircleX className="mt-0.5 size-4 shrink-0 text-destructive" />
+      {success ? <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-add" /> : <CircleX className="mt-0.5 size-4 shrink-0 text-destructive" />}
       <div className="min-w-0 flex-1">
         <div id={`${toast.id}-title`} className="flex items-center gap-1.5 font-medium">
           <span className={toast.title ? "min-w-0 break-words" : "truncate"}>{toast.title ?? "Something went wrong"}</span>
@@ -122,14 +124,14 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
             {action.label}
           </button>
         ))}
-        <button
+        {!success && <button
           type="button"
           onClick={onCopy}
           className="inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs text-muted-foreground hairline hover:bg-veil-strong hover:text-foreground"
         >
           {copy === "copied" ? <Check className="size-3.5 text-add" /> : <Copy className="size-3.5" />}
           {copy === "copied" ? "Copied" : copy === "failed" ? "Couldn't copy" : "Copy error"}
-        </button>
+        </button>}
         </div>
         <span className="sr-only" aria-live="polite">{copy === "copied" ? "Error copied to the clipboard" : ""}</span>
       </div>

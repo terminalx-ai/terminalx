@@ -28,6 +28,12 @@ export interface ErrorToast {
   actions?: ErrorToastAction[];
   /** Raised again under the same key, the toast is updated in place and not stacked. */
   key?: string;
+  /**
+   * "success": something worked and the reader is told so on the same card
+   * (PRO-234 "Thread resolved on GitHub"): a check mark, read out politely,
+   * and no Copy error.
+   */
+  tone?: "success";
 }
 
 /**
@@ -47,6 +53,7 @@ export interface ErrorToastOptions {
   title?: string;
   actions?: ErrorToastAction[];
   key?: string;
+  tone?: "success";
 }
 
 let toasts: ErrorToast[] = [];
@@ -68,18 +75,18 @@ export function errorToastText(toast: Pick<ErrorToast, "action" | "cause" | "tit
 export function showError(action: string, cause?: unknown, options: ErrorToastOptions = {}): string {
   const what = action.trim().replace(/[.:]+$/, "");
   const why = cause === undefined || cause === null ? "" : errorMessage(cause).trim();
-  const { title, actions, key } = options;
+  const { title, actions, key, tone } = options;
   const same = key
     ? toasts.find((toast) => toast.key === key)
     : toasts.find((toast) => !toast.key && toast.action === what && toast.cause === why && toast.title === title);
   if (same) {
-    const bumped = { ...same, action: what, cause: why, title, actions, count: same.count + 1, at: Date.now() };
+    const bumped = { ...same, action: what, cause: why, title, actions, tone, count: same.count + 1, at: Date.now() };
     toasts = [...toasts.filter((toast) => toast.id !== same.id), bumped];
     emit();
     return same.id;
   }
   const id = `error:${++next}`;
-  toasts = [...toasts, { id, action: what, cause: why, count: 1, at: Date.now(), ...(title ? { title } : {}), ...(actions?.length ? { actions } : {}), ...(key ? { key } : {}) }];
+  toasts = [...toasts, { id, action: what, cause: why, count: 1, at: Date.now(), ...(title ? { title } : {}), ...(actions?.length ? { actions } : {}), ...(key ? { key } : {}), ...(tone ? { tone } : {}) }];
   emit();
   return id;
 }
@@ -102,7 +109,7 @@ export async function runErrorAction(id: string, action: ErrorToastAction): Prom
     if (action.keepOpen) showError(`Couldn't ${action.label.charAt(0).toLowerCase()}${action.label.slice(1)}`, cause);
     else {
       const toast = toasts.find((candidate) => candidate.id === id);
-      if (toast) showError(toast.action, cause, { title: toast.title, actions: toast.actions, key: toast.key });
+      if (toast) showError(toast.action, cause, { title: toast.title, actions: toast.actions, key: toast.key, tone: toast.tone });
     }
   }
 }

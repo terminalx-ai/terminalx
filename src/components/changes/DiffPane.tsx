@@ -1,6 +1,8 @@
 import { createPortal } from "react-dom";
 import { diffComments } from "./diffComments";
 import { ReviewCommentCard, useReviewComments } from "./ReviewComments";
+import { GitHubThreadComment } from "./ReviewThreads";
+import { clearThreadFocus, githubThreadComment, githubThreadCommentId, useReviewPr, useThreadFocus } from "@/lib/reviewThreads";
 import { locateReview, reviewInDiff } from "@/lib/reviewAnchors";
 import type { ReviewAnchor } from "@/lib/reviewComments";
 import { Button } from "@/components/ui/button";
@@ -17,17 +19,37 @@ import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
  * they highlight, collapse unchanged regions and never freeze the page on a
  * large file.
  */
-export function DiffPane({ path, before, after, mode, base, originalPath, wrap = true, hideWhitespace = false }: { base?: string; originalPath?: string; wrap?: boolean; hideWhitespace?: boolean; path: string; before: string; after: string; mode: "unified" | "split" | "entire" }) {
+export function DiffPane({ path, before, after, mode, base, originalPath, workspace, wrap = true, hideWhitespace = false }: { base?: string; originalPath?: string; workspace?: string; wrap?: boolean; hideWhitespace?: boolean; path: string; before: string; after: string; mode: "unified" | "split" | "entire" }) {
   const review = useReviewComments();
   const latest = useRef(review); latest.current = review;
   const controller = useRef<ReturnType<typeof diffComments> | null>(null);
   const [mounts, setMounts] = useState(new Map<string, HTMLElement>());
   const [selection, setSelection] = useState<ReviewAnchor | null>(null);
-  const enabled = !!review && !!base;
-  const attached = useMemo(() => (review?.comments ?? []).filter((c) => reviewInDiff(c, path, base, originalPath)).flatMap((c) => {
+  // GitHub review threads (PRO-234) are line comments of this diff too, anchored by the code they were left on.
+  const threads = useReviewPr(workspace)?.snapshot?.threads;
+  const fileThreads = useMemo(() => (threads ?? []).filter((t) => t.path === path || (!!originalPath && t.path === originalPath)), [threads, path, originalPath]);
+  const github = useMemo(() => base ? fileThreads.flatMap((t) => githubThreadComment(t, { path, base, originalPath }) ?? []) : [], [fileThreads, path, base, originalPath]);
+  const all = useMemo(() => [...(review?.comments ?? []), ...github], [review?.comments, github]);
+  const allComments = useRef(all); allComments.current = all;
+  const enabled = !!base && (!!review || github.length > 0);
+  const attached = useMemo(() => all.filter((c) => reviewInDiff(c, path, base, originalPath)).flatMap((c) => {
     const position = locateReview(c, c.side === "before" ? before : after);
     return position.endLine === undefined ? [] : [{ ...c, ...position, startLine: position.startLine!, endLine: position.endLine }];
-  }), [review?.comments, path, base, originalPath, before, after]);
+  }), [all, path, base, originalPath, before, after]);
+  // As before (main): outdated threads, and those whose code is gone or ambiguous, are listed under the diff.
+  const unplaced = useMemo(() => fileThreads.filter((t) => !attached.some((c) => c.id === githubThreadCommentId(t.id))), [fileThreads, attached]);
+  const unplacedList = useRef<HTMLElement>(null);
+  const focus = useThreadFocus(workspace);
+  useEffect(() => {
+    if (!focus) return;
+    const inline = mounts.get(githubThreadCommentId(focus.threadId))?.querySelector<HTMLElement>("[data-review-thread]");
+    const listed = [...(unplacedList.current?.querySelectorAll<HTMLElement>("[data-review-thread]") ?? [])].find((el) => el.dataset.reviewThread === focus.threadId);
+    const target = inline ?? listed;
+    if (!target) return;
+    target.scrollIntoView?.({ block: "center" });
+    target.focus({ preventScroll: true });
+    clearThreadFocus(focus.nonce);
+  }, [focus, mounts, unplaced]);
   const commentsKey = JSON.stringify(attached);
   const host = useRef<HTMLDivElement>(null);
   const scroll = useRef({ top: 0, left: 0, outerTop: 0, outerLeft: 0 });
@@ -36,7 +58,7 @@ export function DiffPane({ path, before, after, mode, base, originalPath, wrap =
     if (!el) return;
     let alive = true;
     const comments = enabled ? diffComments({ path, base: base!, originalPath, before, after,
-      comments: () => latest.current?.comments ?? [],
+      comments: () => allComments.current,
       start: (anchor) => { if (!latest.current?.busy) latest.current?.start(anchor); },
       selection: setSelection,
       mount: (id, element, old) => queueMicrotask(() => {
@@ -98,6 +120,10 @@ export function DiffPane({ path, before, after, mode, base, originalPath, wrap =
       {selection && <Button size="xs" variant="secondary" disabled={review?.busy} onClick={() => review?.start(selection)}>Comment on selection</Button>}
     </div>}
     <div ref={host} className="diff-pane min-h-0 flex-1 overflow-auto scrollbar-thin select-text" />
-    {attached.map((comment) => { const target = mounts.get(comment.id); return target ? createPortal(<ReviewCommentCard comment={comment} />, target, comment.id) : null; })}
+    {unplaced.length > 0 && <section ref={unplacedList} aria-label="Threads without a current diff line" className="max-h-[40%] shrink-0 space-y-2 overflow-auto border-t border-hairline p-2 scrollbar-thin">
+      <p className="text-xs text-muted-foreground">Outdated threads and threads without a current diff line</p>
+      {unplaced.map((thread) => <GitHubThreadComment key={thread.id} workspace={workspace} threadId={thread.id} />)}
+    </section>}
+    {attached.map((comment) => { const target = mounts.get(comment.id); return target ? createPortal(<ReviewCommentCard comment={comment} workspace={workspace} />, target, comment.id) : null; })}
   </div>;
 }

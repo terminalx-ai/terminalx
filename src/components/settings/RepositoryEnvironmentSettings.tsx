@@ -4,7 +4,7 @@ import { useSessionStore } from "@/lib/sessions";
 import { documentedVariables, type EnvironmentRow } from "@/lib/localEnvironment";
 
 /**
- * Settings › Repositories › <project> › Environment (PRO-144): the variables
+ * Settings › Projects › <project> › Environment (PRO-144): the variables
  * of one local repository, over the Personal ones it inherits, and the
  * variables the agents and the repository's files document.
  */

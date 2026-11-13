@@ -41,6 +41,8 @@ pub struct PatternPreview {
     pub matches: Vec<String>,
     pub omitted: usize,
     pub error: Option<String>,
+    /// Why a valid pattern matched nothing; null when it matched or is invalid.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -48,6 +50,8 @@ pub struct PatternPreview {
 pub struct CopyReport {
     pub copied_count: usize,
     pub copied_bytes: u64,
+    /// First copied path, for the 'Copied <first> and N other files' step.
+    pub first_copied: Option<String>,
     pub skipped_count: usize,
     pub warnings: Vec<SkippedFile>,
     pub skipped: Vec<SkippedFile>,
@@ -177,20 +181,47 @@ pub fn preview(project: &Path, draft: Option<&[String]>, snapshot: Option<&str>)
         // An empty pattern list needs only the paths, with no filesystem scan.
         let ignored = if patterns.is_empty() { Arc::new(IgnoredFiles::default()) } else { ignored_snapshot(&project, &root, snapshot)? };
         if ignored.limited { preview.warning = Some(SCAN_WARNING.into()); }
+        let mut other: Option<(Vec<String>, Vec<String>)> = None;
         preview.patterns = patterns.into_iter().map(|pattern| {
             match matcher(&pattern) {
                 Ok(glob) => {
                     let matches: Vec<_> = ignored.files.iter().filter(|file| glob.is_match(file)).collect();
+                    let reason = matches.is_empty().then(|| {
+                        let (tracked, unignored) = other.get_or_insert_with(|| (
+                            git_file_list(&root, &["ls-files", "-z", "--", "."]),
+                            git_file_list(&root, &["ls-files", "--others", "--exclude-standard", "-z", "--", "."]),
+                        ));
+                        no_match_reason(&glob, tracked, unignored, ignored.limited)
+                    });
                     PatternPreview { omitted: matches.len().saturating_sub(MAX_PREVIEW_MATCHES),
-                        matches: matches.into_iter().take(MAX_PREVIEW_MATCHES).cloned().collect(), pattern, error: None }
+                        matches: matches.into_iter().take(MAX_PREVIEW_MATCHES).cloned().collect(), pattern, error: None, reason }
                 },
-                Err(error) => PatternPreview { pattern, matches: Vec::new(), omitted: 0, error: Some(error.to_string()) },
+                Err(error) => PatternPreview { pattern, matches: Vec::new(), omitted: 0, error: Some(error.to_string()),
+                    reason: Some("The pattern is invalid".into()) },
             }
         }).collect();
         Ok(())
     })();
     if let Err(error) = result { preview.error = Some(format!("{error:#}")); }
     Ok(preview)
+}
+
+fn git_file_list(root: &safe_open::Directory, args: &[&str]) -> Vec<String> {
+    root.command().ok()
+        .and_then(|command| git::file_names_bounded(command, args, MAX_SCAN_FILES, MAX_SCAN_BYTES).ok())
+        .map(|(files, _)| files).unwrap_or_default()
+}
+
+fn no_match_reason(glob: &GlobMatcher, tracked: &[String], unignored: &[String], scan_limited: bool) -> String {
+    if tracked.iter().any(|file| glob.is_match(file)) {
+        "Matches only tracked files, which are never copied".into()
+    } else if unignored.iter().any(|file| glob.is_match(file)) {
+        "Matches files that .gitignore does not ignore (for example, excluded by a negation), so they are never copied".into()
+    } else if scan_limited {
+        "No match found before the ignored-file scan limit".into()
+    } else {
+        "No file matches this pattern".into()
+    }
 }
 
 /// A failed copy must not hide a successfully created worktree. Report the
@@ -264,6 +295,7 @@ impl CopyPlan {
             }
             match copy_one(&project, &destination, Path::new(&path), max_bytes - report.copied_bytes) {
                 Ok((bytes, warning)) => {
+                    if report.first_copied.is_none() { report.first_copied = Some(path.clone()); }
                     report.copied_count += 1;
                     report.copied_bytes += bytes;
                     if let Some(reason) = warning {
