@@ -4819,12 +4819,16 @@ impl SessionManager {
     /// Startup holds the runtime lock. Never wait for a previous launch here:
     /// close admission and retain its exact handles for the explicit Stop path,
     /// which releases the runtime before waiting.
-    fn require_prior_cli_exit(&self, rt: &mut TabRuntime, pane: &str) -> Result<()> {
+    fn require_prior_cli_exit(&self, _rt: &mut TabRuntime, pane: &str) -> Result<()> {
+        // An earlier launch of this pane that is still on its way out (its
+        // CLI exited into a #437 shell, which let go of it with a terminate
+        // that takes up to two seconds) is waited for, bounded, as main
+        // waits for the pane itself. One that still has not gone refuses
+        // only this start: the tab is not left stopping, the next prompt
+        // checks again, and Stop still finds it by its pane id.
         let pending = self.terminals.detached_stops(pane);
-        if !pending.is_empty() {
-            self.retain_stopping_ptys(&key_of(&rt.session_id, &rt.tab_id), &pending);
-            rt.stopping = true;
-            bail!("Previous PTY exit is unconfirmed. Retry Stop before resuming.");
+        if !pending.is_empty() && !pty::StoppingPane::wait_all(&pending, RESTART_WAIT) {
+            bail!("The agent's previous process has not exited yet. Send the prompt again in a moment, or press Stop.");
         }
         Ok(())
     }
