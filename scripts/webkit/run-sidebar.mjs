@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // PRO-281: a lead's workers in the sidebar, in WebKit, light and dark, at the
 // window's wide and narrow sizes. Two leads with runs (one open, one folded),
-// each worker in its own worktree, and a session no other started. The runs,
+// each worker in its own worktree, a queued piece with no worker under each,
+// and a session no other started. The runs,
 // the sessions' costs and their row states are answered by the Tauri stub as
 // the runtime answers them; nothing is started.
 // pnpm build && node scripts/webkit/run-sidebar.mjs
@@ -137,6 +138,16 @@ try {
       left: row.querySelector("button").getBoundingClientRect().left,
       height: Math.round(row.firstElementChild.getBoundingClientRect().height),
     })));
+    // Piece 6 is queued behind piece 5 and has no worker yet: it is listed in its place, after the workers (18.03, 18.07).
+    const queuedRow = await leadA.locator('[data-testid="lead-workers"] > li').evaluateAll((rows) => rows.map((row) => ({
+      id: row.dataset.worker ?? `queued:${row.dataset.queuedPiece}`,
+      mark: row.querySelector("[data-piece-mark]")?.dataset.pieceMark,
+      title: row.querySelector(".truncate")?.textContent,
+      after: row.querySelector("[data-row-meta=after]")?.textContent,
+      buttons: row.querySelectorAll("button").length,
+      left: row.querySelector("[data-piece-mark]")?.getBoundingClientRect().left,
+      height: Math.round(row.firstElementChild.getBoundingClientRect().height),
+    })));
     const leadLeft = await leadA.locator("button[aria-describedby]").first().evaluate((node) => node.getBoundingClientRect().left);
     // Rows reach past the list's gutter by design and are clipped there; the list itself must not scroll sideways.
     const rail = await page.getByTestId("conversation-list").evaluate((node) => ({ scrolls: node.scrollWidth > node.clientWidth + 1 }));
@@ -147,6 +158,9 @@ try {
       "each worker row leads with its piece's mark, and a worker that asks shows the one Needs approval mark": workerRows.map((row) => row.mark).join() === "done,done,done,done,Needs approval",
       "no worker row carries a status label as text": workerRows.every((row) => !LABELS.some((label) => row.text.split("\n").includes(label))),
       "workers are indented under their lead, a row each": workerRows.every((row) => row.left > leadLeft + 8 && row.height <= 32),
+      "a queued piece with no worker is listed under its lead, in its place after the workers": queuedRow.map((row) => row.id).join() === "lead-a-map,lead-a-store,lead-a-session,lead-a-pipeline,lead-a-cli,queued:docs",
+      "the queued row is its queued mark, its title and what it waits on, with no session actions": (({ mark, title, after, buttons }) => mark === "queued" && title === "Update the docs and the CLI guide" && after === "after 5" && buttons === 0)(queuedRow[queuedRow.length - 1]),
+      "the queued row is as tall and as indented as a worker row": (({ left, height }) => height <= 32 && height === workerRows[0].height && Math.abs(left - queuedRow[0].left) < 0.5)(queuedRow[queuedRow.length - 1]),
       "workers are no rows of their own at the project's level": (await list.locator(":scope li[data-worker]").count()) === (await page.locator("[data-lead] li[data-worker]").count()),
       "the open lead shows what its workers have cost": (await leadA.locator(":scope > div [data-row-meta=spend]").first().textContent()) === "$7.42",
       // A blocked piece is answered in the lead's Run view (PRO-361, 18.03): the open lead carries its mark.
@@ -156,6 +170,7 @@ try {
     };
     // The folded lead: done of total, how many run, unread from a worker.
     checks["the folded lead hides its workers"] = (await leadB.locator("[data-worker]").count()) === 0;
+    checks["the folded lead hides its queued pieces too"] = (await leadB.locator("[data-queued-piece]").count()) === 0;
     checks["the folded lead shows pieces done of total"] = (await leadB.getByTestId("lead-progress").textContent()) === "2/5";
     checks["the folded lead shows how many workers run"] = (await leadB.getByTestId("lead-running").getAttribute("aria-label")) === "2 running";
     checks["the folded lead keeps a worker's unread mark"] = (await leadB.getByRole("img", { name: "Unread" }).count()) === 1;
@@ -220,7 +235,7 @@ try {
     await page.mouse.move(size.width - 4, size.height - 4);
     await shot(page, "run-view-panel");
     checks["no browser errors"] = errors.length === 0;
-    failed += report(`lead and workers, ${at}`, checks, { workerRows, hover, errors });
+    failed += report(`lead and workers, ${at}`, checks, { workerRows, queuedRow, hover, errors });
     await page.close();
   }
 } finally {

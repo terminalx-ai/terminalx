@@ -6,11 +6,11 @@ import { StatusMarkIcon } from "@/components/ui/SessionStatus";
 import { formatCost } from "@/components/session/SessionCost";
 import { cn } from "@/lib/cn";
 import { isUnread } from "@/lib/dashboard";
-import { PIECE_STATE_LABEL } from "@/lib/orchestration";
+import { PIECE_STATE_LABEL, numberList, pieceNumbers } from "@/lib/orchestration";
 import { usePrefs } from "@/lib/prefs";
 import { useSessionRowStatuses } from "@/lib/sessionRowStatus";
 import { conversationTitle, useSessionStore } from "@/lib/sessions";
-import { familyNeeds, modelTier, needsMark, orderWorkers, pieceOf, runningWorkers, runProgress, runSpend, workerModel, type Need } from "@/lib/runFamily";
+import { familyNeeds, familyRows, modelTier, needsMark, orderWorkers, pieceOf, runningWorkers, runProgress, runSpend, workerModel, type FamilyRow, type Need } from "@/lib/runFamily";
 import { SESSION_STATUSES, type StatusDescription } from "@terminalx/portable/sessionStatus";
 import type { Run, RunPiece } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
@@ -31,6 +31,8 @@ export interface LeadFamily {
   lead: SessionEntry;
   workers: SessionEntry[];
   run: Run | null;
+  /** What nests under the lead, in the run's order: its workers' rows and its queued pieces that have no worker yet. */
+  rows: FamilyRow[];
 }
 
 /**
@@ -43,7 +45,7 @@ export function useLeadFamily(lead: SessionEntry, peers: readonly SessionEntry[]
   return useMemo(() => {
     const run = peers.map((peer) => runs[peer.id]).find(Boolean) ?? null;
     const workers = orderWorkers(peers.flatMap((peer) => workersOf[peer.id] ?? []), run);
-    return workers.length || run ? { lead, workers, run } : null;
+    return workers.length || run ? { lead, workers, run, rows: familyRows(workers, run) } : null;
   }, [lead, peers, workersOf, runs]);
 }
 
@@ -235,4 +237,30 @@ export function WorkerTier({ piece, session }: { piece: RunPiece | null; session
   const { agent, model } = workerModel(piece, session);
   const tier = modelTier(agent, model);
   return <span data-row-meta="model" className={cn("shrink-0 font-mono text-[10.5px]", tier.className)}>{tier.text}</span>;
+}
+
+/**
+ * A piece whose worker has not started, under its lead (18.03, 18.07): its
+ * queued mark, its title, and the pieces it waits for by their plan numbers.
+ * It is no session, so it has no actions and opens nothing; its worker's row
+ * takes its place when that worker starts.
+ */
+export function QueuedPieceRow({ piece, run }: { piece: RunPiece; run: Run }) {
+  const numbers = pieceNumbers(run);
+  const after = piece.dependsOn.map((id) => numbers[id]).filter(Boolean);
+  const waitsFor = piece.dependsOn.map((id) => run.pieces.find((entry) => entry.id === id)?.title).filter(Boolean);
+  const title = [piece.title, PIECE_STATE_LABEL.queued, waitsFor.length ? `waits for ${waitsFor.join(", ")}` : null].filter(Boolean).join(" · ");
+  return (
+    <li data-queued-piece={piece.id}>
+      <div title={title} className="relative -mx-2 flex min-h-7 items-center gap-2 py-1 pl-[calc(1rem+var(--indent,0px))] pr-3">
+        {/* It hangs from its lead's glyph by the same line as the workers. */}
+        <span aria-hidden className="pointer-events-none absolute inset-y-0 left-[calc(var(--lead-indent,0px)+1rem+7px)] border-l border-hairline" />
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <PieceStateIcon state="queued" />
+          <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted-foreground">{piece.title}</span>
+          {after.length > 0 && <span data-row-meta="after" aria-label={`Waits for piece ${numberList(after)}`} className="shrink-0 whitespace-nowrap font-mono text-[10.5px] text-faint">after {numberList(after)}</span>}
+        </span>
+      </div>
+    </li>
+  );
 }
