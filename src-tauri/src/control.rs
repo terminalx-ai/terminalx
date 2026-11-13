@@ -1688,17 +1688,17 @@ impl ControlService {
         // A lead's worktree: its run is cleaned up first, while the lead's
         // session and checkout are still there to measure the workers
         // against, so none is left a top-level row without a lead.
-        self.worktree_delete_clean_up_runs(&project, &worktree, &held_now()?)?;
-        let stop = |session: &crate::store::index::SessionEntry| {
-            self.manager.stop_session_confirmed(session).map_err(|error| format!("{error:#}"))
-        };
-        #[cfg(feature = "desktop")]
-        let browser_key = crate::browser::control::canonical(&worktree.path);
         // The same check as every other way of removing a workspace. One
         // that is not clean and merged is removed only with `--force`, which
         // is the CLI's second confirmation. A directory git cannot remove is
         // reported, never deleted directly: the CLI showed nothing of it.
         let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
+        self.worktree_delete_clean_up_runs(&project, &worktree, &held_now()?, force)?;
+        let stop = |session: &crate::store::index::SessionEntry| {
+            self.manager.stop_session_confirmed(session).map_err(|error| format!("{error:#}"))
+        };
+        #[cfg(feature = "desktop")]
+        let browser_key = crate::browser::control::canonical(&worktree.path);
         let request = crate::session_ops::WorkspaceRemoval {
             project_path: &project.path,
             path: &worktree.path,
@@ -1796,8 +1796,11 @@ impl ControlService {
     /// Before a lead's worktree goes, its runs' workers go: each run is
     /// cleaned up when every worker it would leave can be removed. Otherwise,
     /// or when the cleanup leaves one, nothing more is removed and the
-    /// workers that block the delete are named.
-    fn worktree_delete_clean_up_runs(&self, project: &Project, worktree: &crate::workspaces::Workspace, held: &[SessionEntry]) -> Result<(), ControlError> {
+    /// workers that block the delete are named. Without `force`, a lead's
+    /// worktree that is not clean and merged is refused here, before any
+    /// worker goes: the delete would stop there, and nothing may be removed
+    /// by a delete that stops.
+    fn worktree_delete_clean_up_runs(&self, project: &Project, worktree: &crate::workspaces::Workspace, held: &[SessionEntry], force: bool) -> Result<(), ControlError> {
         use crate::worktree_control::{orphan_listing, orphan_runs, orphans_recovery};
         let orphans = self.worktree_delete_orphans(project, held)?;
         if orphans.is_empty() {
@@ -1823,6 +1826,23 @@ impl ControlService {
         };
         if orphans.iter().any(|orphan| orphan.blocked.is_some()) {
             return Err(refuse(&orphans, &[]));
+        }
+        if !force {
+            let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+            let landed = crate::landed::check(&canonical(&project.path), &canonical(&worktree.path), crate::landed::Fetch::Fresh);
+            if !landed.safe {
+                let losses = if landed.losses.is_empty() { "It is not known to be clean and merged.".to_string() } else { landed.losses.join("\n") };
+                return Err(ControlError::new(
+                    "needs_force",
+                    format!(
+                        "{}. Worktree {} holds the lead of run {}, and is not clean and merged, so nothing was removed, its workers included.\n{losses}",
+                        crate::session_ops::NEEDS_CONFIRMATION,
+                        worktree.name,
+                        orphan_runs(&orphans).join(", "),
+                    ),
+                    Some("Nothing was removed. Repeat with --force only if losing this work is intended; the run's cleanup then removes its workers first.".into()),
+                ));
+            }
         }
         let host = crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone());
         let mut cleaned = Vec::new();
@@ -2851,6 +2871,17 @@ mod tests {
             assert!(asked.message.contains(expected), "{expected}: {}", asked.message);
         }
         assert!(workers.iter().all(|w| Path::new(&w.cwd).is_dir()), "a preview removes nothing");
+
+        // Confirmed without --force: the lead's worktree cannot be verified as merged (no remote),
+        // so the delete stops, and stops before any worker goes.
+        let unforced = service.execute("worktrees.delete", json!({
+            "project": project.path, "worktree": name, "confirmed": true, "sessions": [lead.id],
+        }), "r2b").unwrap_err();
+        assert_eq!(unforced.code, "needs_force", "{}", unforced.message);
+        assert!(unforced.message.contains("its workers included"), "{}", unforced.message);
+        assert!(Path::new(&lead.cwd).is_dir() && workers.iter().all(|w| Path::new(&w.cwd).is_dir()), "a delete that stops removes no worker");
+        let still: std::collections::BTreeSet<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
+        assert!(worker_ids.is_subset(&still) && still.contains(&lead.id), "{still:?}");
 
         let branches: Vec<String> = workers.iter().map(|w| crate::git::run(Path::new(&w.cwd), &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap().trim().to_string()).collect();
         // Confirmed: the workers go first, worktree and session, then the lead's worktree.
