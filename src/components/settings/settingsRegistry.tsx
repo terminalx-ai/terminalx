@@ -1,6 +1,11 @@
 import { cloneElement, type ComponentProps, type ReactElement, type ReactNode } from "react";
-import { SettingRow } from "@/components/ui/controls";
+import type { SettingRow } from "@/components/ui/controls";
+import { cn } from "@/lib/cn";
 import { SHORTCUT_ACTIONS } from "@/lib/shortcuts";
+import { setPrefs } from "@/lib/prefs";
+import { SettingRowActions } from "./SettingRowActions";
+import { userFileKeys } from "@/lib/settingSources";
+import { UserFileRowAccessory } from "./SettingSources";
 
 export const NATIVE_CODEX_DESCRIPTION =
   "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.";
@@ -47,6 +52,21 @@ interface SettingDefinition {
   layout?: "row" | "content";
   /** Some existing rows have no visible help text; metadata remains searchable. */
   hideDescription?: boolean;
+  /**
+   * A setting link with `?enable=1` may turn this row on from outside the app
+   * (PRO-127). `enable` calls the row's existing setter. Only reversible,
+   * local, non-secret on/off switches belong here: never one that widens
+   * permissions or approvals, a bypass or auto mode, computer use, cloud or
+   * network sharing, the account, or an Experimental switch.
+   */
+  linkable?: { enable: () => Promise<void> };
+  /**
+   * The Experimental switch this row is behind. While it is off the row is
+   * not shown on its page, so Settings search and ⌘K must not offer it either
+   * (lib/settingsSections.ts `settingOffered`). A whole section behind a
+   * switch is `settingsSectionOffered`'s.
+   */
+  requires?: "orchestratorRuns";
 }
 export interface SettingRegistration extends SettingDefinition {
   render: (props: RowProps) => ReactNode;
@@ -56,12 +76,31 @@ export interface SettingRegistration extends SettingDefinition {
  * adapters supply live controls and (only when needed) a status-dependent description.
  * Content rows retain the native structure of editors, lists and organization sections. */
 function defineSetting<const T extends SettingDefinition>(definition: T): T & SettingRegistration {
+  // A row kept in the user file shows "Your value" and its row menu beside its title (PRO-140).
+  const keys = userFileKeys(definition.storage.location);
+  const accessory = keys.length ? <UserFileRowAccessory keys={keys} title={definition.title} /> : undefined;
   return { ...definition, render: ({ children, instance, ...props }) => {
     const anchor = { "data-setting-id": definition.id, "data-setting-instance": instance, tabIndex: -1 };
     if (definition.layout === "content") {
       return children ? cloneElement(children as ReactElement<Record<string, unknown>>, anchor) : null;
     }
-    return <div {...anchor} className="min-w-0 outline-none"><SettingRow label={definition.title} description={definition.hideDescription ? undefined : definition.description} control={null} {...props} /></div>;
+    // SettingRow's own structure and classes (controls.tsx), with the row's “…” actions beside the title (design 09.04, 09.23).
+    const { label = definition.title, description = definition.hideDescription ? undefined : definition.description, control = null, stacked, disabled, id } = props;
+    return <div {...anchor} className="group/setting min-w-0 outline-none">
+      <div className={cn("flex flex-col gap-1.5 py-2", disabled && "opacity-60")}>
+        <div className={cn("flex gap-4", stacked ? "flex-col" : "items-center justify-between")}>
+          <div className="min-w-0">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] font-medium">
+              <span id={id} className="min-w-0">{label}</span>
+              {accessory}
+              <SettingRowActions id={definition.id as SettingId} title={definition.title} label={label} />
+            </div>
+            {description && <div className="text-xs leading-relaxed text-muted-foreground">{description}</div>}
+          </div>
+          <div className={cn(stacked ? "" : "shrink-0")}>{control}</div>
+        </div>
+      </div>
+    </div>;
   } };
 }
 
@@ -183,13 +222,13 @@ export const SETTINGS_ROWS = [
   defineSetting({
     id: "appearance.mode", section: "appearance", title: "Mode",
     description: "System follows macOS and switches with it.",
-    searchTerms: ["appearance", "mode"], scope: "user",
+    searchTerms: ["appearance", "mode", "dark", "light", "dark mode", "light mode", "system"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.mode" },
   }),
   defineSetting({
     id: "appearance.textSize", section: "appearance", title: "Text size",
     description: "Scales the transcript and composer. Chrome stays the same size.",
-    searchTerms: ["appearance", "text", "size"], scope: "user",
+    searchTerms: ["appearance", "text", "size", "font", "font size", "zoom", "bigger", "smaller"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.fontScale" },
   }),
   defineSetting({
@@ -395,6 +434,8 @@ export const SETTINGS_ROWS = [
     description: "A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there.",
     searchTerms: ["general", "sounds"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.sounds" },
+    // Linkable: an in-app tone on this Mac; off again with the same switch.
+    linkable: { enable: async () => setPrefs({ sounds: true }) },
   }),
   defineSetting({
     id: "general.animations", section: "general", title: "Pixel raccoon",
@@ -413,6 +454,8 @@ export const SETTINGS_ROWS = [
     description: "Under each finished turn, the files the agent changed with the lines it added and removed. Click a file to open it.",
     searchTerms: ["general", "show", "files", "changed"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.turnChanges" },
+    // Linkable: shows local diff stats under a turn; display only, off again with the same switch.
+    linkable: { enable: async () => setPrefs({ turnChanges: true }) },
   }),
   defineSetting({
     id: "general.fixErrorsInstructions", section: "general", title: "Fix errors instructions",
@@ -425,6 +468,8 @@ export const SETTINGS_ROWS = [
     description: "A mark for each of your prompts down the right edge of a conversation. Hover one to read it, click to go back to it.",
     searchTerms: ["general", "prompt", "map"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.promptMap" },
+    // Linkable: marks for your own prompts in the conversation; display only, off again with the same switch.
+    linkable: { enable: async () => setPrefs({ promptMap: true }) },
   }),
   defineSetting({
     id: "general.autocorrect", section: "general", title: "Autocorrect",
@@ -617,12 +662,13 @@ export const SETTINGS_ROWS = [
     description: "Override for this repository whether a run asks first, how many pieces it may have, the mode its workers run in, the model each kind of piece starts on, and its budget.",
     searchTerms: ["repositories", "orchestrator", "runs", "approval", "pieces", "workers", "permissions", "routing", "model", "effort", "tier", "budget", "points", "dollars", "window"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.projects" }, layout: "content",
+    requires: "orchestratorRuns",
   }),
   defineSetting({
     id: "repositories.scripts", section: "repositories", title: "Scripts",
-    description: "Save setup and archive scripts for this repository on this computer.",
-    searchTerms: ["repository", "setup", "archive", "scripts", "hooks"], scope: "repository",
-    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].scripts" }, layout: "content",
+    description: "Setup and archive scripts for this repository, saved on this computer or read from its trusted .terminalx/settings.json.",
+    searchTerms: ["repository", "setup", "archive", "scripts", "hooks", "timeout", "trust", "override"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].scripts; .terminalx/settings*.json#setupScript,archiveScript,archiveTimeoutMinutes" }, layout: "content",
   }),
   defineSetting({
     id: "shortcuts.systemWide", section: "shortcuts", title: "System-wide shortcut",
@@ -852,7 +898,7 @@ export const SETTINGS_ROWS = [
   }),
   ...SHORTCUT_ACTIONS.map((action) => defineSetting({
     id: `shortcuts.${action.id}`, section: "shortcuts", title: action.label,
-    description: `${action.group} keyboard shortcut.`, searchTerms: [action.group, action.label, "keyboard", "keys"],
+    description: `${action.group} keyboard shortcut.`, searchTerms: [action.group, action.label, "keyboard", "keys", "hotkeys", "key bindings", "shortcut"],
     scope: "user", storage: { kind: "file", location: `$TERMINALX_HOME/settings.json#preferences.shortcuts.${action.id}` }, layout: "content",
   } as const)),
 ] as const;
@@ -861,6 +907,10 @@ const byId = new Map<string, SettingRegistration>(SETTINGS_ROWS.map((row) => [ro
 if (byId.size !== SETTINGS_ROWS.length) throw new Error("Duplicate settings row id");
 export function settingById(id: string): SettingRegistration | undefined { return byId.get(id); }
 export function settingsInSection(section: SettingsSection): readonly SettingRegistration[] { return SETTINGS_ROWS.filter((row) => row.section === section); }
+/** Whether a section has rows that show "Your value" (rows kept in the user file, drawn as rows). */
+export function sectionShowsUserValues(section: SettingsSection): boolean {
+  return settingsInSection(section).some((row) => row.layout !== "content" && userFileKeys(row.storage.location).length > 0);
+}
 type ContentSettingId = Extract<(typeof SETTINGS_ROWS)[number], { layout: "content" }>["id"];
 type RegisteredProps = Omit<RowProps, "children" | "control"> & (
   | { setting: ContentSettingId; children: ReactElement; control?: never }

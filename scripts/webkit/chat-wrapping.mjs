@@ -3,8 +3,7 @@
 // pnpm build && pnpm exec playwright install webkit && node scripts/webkit/chat-wrapping.mjs
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { webkit } from "playwright";
-import { open, openConversation, serve, tab } from "./harness.mjs";
+import { launch, open, openConversation, serve, tab } from "./harness.mjs";
 
 const text = "Normal paragraph with spaces.\n\n" + "─".repeat(200) + "\n" + "_".repeat(200) + "\n" + "unbrokenIdentifier".repeat(30) + "\n  Explicit indentation\nhttps://example.test/docs";
 const code = "identifier".repeat(100);
@@ -14,7 +13,7 @@ if (clipboard) assert.equal(process.platform, "darwin");
 const server = await serve();
 let browser;
 try {
-  browser = await webkit.launch({ headless: !clipboard });
+  browser = await launch({ headless: !clipboard });
   for (const floating of [false, true]) {
     for (const transcriptLayout of ["chat", "wide"]) {
       const extra = `(() => {

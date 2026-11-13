@@ -26,6 +26,12 @@ vi.mock("@/lib/api", async (original) => {
     invoke: (command: string, args?: { patch?: object }) => {
       if (command === "sidebar_order") return Promise.resolve({ custom: false, sessions: ["second", "first"], projects: ["/repos/two", "/repos/one"], revision: 0 });
       if (command === "set_sidebar_order") return mocks.saveOrder(args?.patch ?? {});
+      if (command === "configuration_watch") return Promise.reject(new Error("no watcher in tests"));
+      if (command === "configuration_resolve") return Promise.resolve({ registry: [], warnings: [], trust: null, values: {
+        setupScript: { value: "", source: "defaults", locked: false, redacted: false },
+        archiveScript: { value: "", source: "defaults", locked: false, redacted: false },
+        archiveTimeoutMinutes: { value: 5, source: "defaults", locked: false, redacted: false },
+      } });
       return actual.invoke(command, args);
     },
     api: { ...actual.api, repositoryFilesPreview: mocks.preview },
@@ -63,17 +69,18 @@ describe("registry navigation", () => {
     expect(document.activeElement).toBe(row);
   });
 
-  it("opens and saves Scripts for the chosen repository on its one page, with its cleanup controls", async () => {
+  it("opens a repository's cleanup controls, then saves its Scripts from the Scripts page", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
     const group = within(screen.getByRole("group", { name: "Repositories" }));
-    // One row a repository opens one page: its workspace cleanup, then its scripts.
     fireEvent.click(group.getByRole("button", { name: "Two" }));
     expect(group.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("heading", { name: "Two" })).toBeTruthy();
     expect(screen.getByRole("radiogroup", { name: "Delete merged workspaces of Two" })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Archive script"), { target: { value: "docker compose down" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save scripts" }));
-    await screen.findByText("Scripts saved.");
+    expect(screen.queryByLabelText("Archive script")).toBeNull();
+    fireEvent.click(within(screen.getByRole("navigation", { name: "Repository settings" })).getByRole("button", { name: "Scripts" }));
+    fireEvent.change(await screen.findByLabelText("Archive script"), { target: { value: "docker compose down" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[1]);
+    await screen.findByText("Archive script saved.");
     expect(mocks.updateProject).toHaveBeenCalledWith("/repos/two", { scripts: { setup: "", archive: "docker compose down" } });
   });
 
@@ -132,6 +139,27 @@ it("opens a repository row link on the named project and marks its row", () => {
   expect(screen.getByRole("heading", { name: "Two" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
   expect(view.container.querySelector('[data-setting-id="repositories.mergedCleanup"]')?.getAttribute("data-setting-instance")).toBe("/repos/two");
+});
+
+// ⌘K, a toast's Open setting and a terminalx://settings/<row-id> link name a row, not a repository (PRO-127).
+it("opens a repository row that names no repository on the first listed one, and marks the row", () => {
+  const view = render(<SettingsPage initialTab="repositories.mergedCleanup" onBack={vi.fn()} />);
+  expect(screen.getByRole("heading", { name: "One" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "One" }).getAttribute("aria-current")).toBe("page");
+  expect(screen.queryByText("Choose a repository to view its settings.")).toBeNull();
+  expect(view.container.querySelector('[data-setting-id="repositories.mergedCleanup"]')?.getAttribute("data-setting-instance")).toBe("/repos/one");
+});
+
+it("opens a repository row that names no repository on the one already open", () => {
+  const view = render(<SettingsPage initialTab="repositories.mergedCleanup" initialProjectPath="/repos/two" onBack={vi.fn()} />);
+  view.rerender(<SettingsPage initialTab="repositories.scripts" openRequest={1} onBack={vi.fn()} />);
+  expect(screen.getByRole("heading", { name: "Two" })).toBeTruthy();
+  expect(view.container.querySelector('[data-setting-id="repositories.scripts"]')?.getAttribute("data-setting-instance")).toBe("/repos/two");
+});
+
+it("does not choose a repository for the person when no row was asked for", () => {
+  render(<SettingsPage initialTab="repositories" onBack={vi.fn()} />);
+  expect(screen.getByText("Choose a repository to view its settings.")).toBeTruthy();
 });
 
 it("lists folder projects and explains why Git cleanup does not apply to them", () => {
@@ -196,4 +224,28 @@ it("opens registered repository paths and files, retains drafts within a reposit
   expect(document.activeElement).toBe(row);
   expect((screen.getByRole("textbox", { name: "Glob patterns (one per line)" }) as HTMLTextAreaElement).value).toBe("");
   expect(group.getAllByRole("button", { name: "Files to copy" }).map((button) => button.getAttribute("aria-current"))).toEqual(["page"]);
+});
+
+describe("row search over repository rows (PRO-127)", () => {
+  it("opens a repository row on the repository already open, else the first listed, and highlights it", () => {
+    const view = render(<SettingsPage onBack={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "Search settings" });
+    fireEvent.change(input, { target: { value: "worktreeinclude" } });
+    const result = screen.getByRole("option", { name: /Files to copy/ });
+    expect(result.closest('[role="group"]')?.textContent).toContain("Repositories");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("button", { name: "One" }).getAttribute("aria-current")).toBe("page");
+    let row = view.container.querySelector<HTMLElement>('[data-setting-id="repositories.filesToCopy"]');
+    expect(row?.getAttribute("data-setting-instance")).toBe("/repos/one");
+    expect(document.activeElement).toBe(row);
+    expect(row?.dataset.settingHighlight).toBe("on");
+
+    fireEvent.click(within(screen.getByRole("group", { name: "Repositories" })).getByRole("button", { name: "Two" }));
+    fireEvent.change(input, { target: { value: "worktreeinclude" } });
+    fireEvent.click(screen.getByRole("option", { name: /Files to copy/ }));
+    expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
+    row = view.container.querySelector<HTMLElement>('[data-setting-id="repositories.filesToCopy"]');
+    expect(row?.getAttribute("data-setting-instance")).toBe("/repos/two");
+    expect(document.activeElement).toBe(row);
+  });
 });

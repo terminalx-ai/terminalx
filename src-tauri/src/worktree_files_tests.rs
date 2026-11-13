@@ -97,7 +97,7 @@ fn repository_copy_settings_and_scripts_survive_independent_updates() {
     let _home = crate::store::temp_home();
     let repo = repo();
     let project = projects::add(repo.path().to_str().unwrap()).unwrap();
-    let scripts = projects::RepositoryScripts { setup: "echo setup".into(), archive: "echo archive".into() };
+    let scripts = projects::RepositoryScripts { setup: "echo setup".into(), archive: "echo archive".into(), archive_timeout_minutes: None };
     projects::update(&project.path, projects::ProjectPatch { scripts: Some(scripts.clone()), ..Default::default() }).unwrap();
     projects::update(&project.path, projects::ProjectPatch {
         repository_settings: Some(projects::RepositorySettings { files_to_copy: patterns(&[".env*"]) }),
