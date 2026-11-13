@@ -156,7 +156,8 @@ try {
       "a row opens the thread inline, focused, between its lines": placement.inEditor && placement.betweenLines && placement.focused,
       "inline thread has no overlap": clean(cardLayout) && clean(resolvedCardLayout),
       "resolving writes to GitHub once": resolved.length === 1 && resolved[0] === "t-open",
-      "toast says it and offers View on GitHub": toastText.includes("Thread resolved on GitHub") && toastText.includes("Aisha Khan's comment on src/slug.js · lines 2–4 · PR #14") && (await toast.getByRole("button", { name: "View on GitHub" }).count()) === 1,
+      "toast says it and offers View on GitHub": toastText.includes("Thread resolved on GitHub") && toastText.includes("Aisha's comment on src/slug.js · lines 2–4 · PR #14") && (await toast.getByRole("button", { name: "View on GitHub" }).count()) === 1,
+      "toast is a success, not an error": (await toast.getAttribute("data-toast-tone")) === "success" && (await toast.getAttribute("role")) === "status" && (await toast.getByRole("button", { name: "Copy error" }).count()) === 0,
       "toast has no overlap and is in view": clean(toastLayout) && toastInView,
       "no browser errors": errors.length === 0,
     }, { listLayout, footerText, footerLayout, footerClear, placement, cardLayout, resolvedCardLayout, toastText, toastLayout, toastInView, resolved, errors, rows });

@@ -121,12 +121,12 @@ try {
   assert.equal(await page.locator("textarea[data-new-session-prompt]").count(), 0, "with the checkbox off no new-session view opens");
   console.log("ok create a project: fields, templates, Esc, Cmd+Enter, failure, checkbox off");
 
-  // The link opens Settings › Projects, where a folder is added as a template.
+  // The link opens Settings › Project templates, where a folder is added as a template.
   await page.evaluate(() => { window.__CREATE__ = null; window.__PW_STUB__.answers["plugin:dialog|open"] = "/Users/demo/templates/house-style"; });
   dialog = await openDialog();
-  await dialog.getByRole("button", { name: "Add your own templates in Settings › Projects" }).click();
+  await dialog.getByRole("button", { name: "Add your own templates in Settings › Project templates" }).click();
   await dialog.waitFor({ state: "detached" });
-  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "Project templates", exact: true, level: 2 }).waitFor();
   const settings = page.locator('[data-setting-id="projects.templates"]');
   await settings.getByRole("list", { name: "Built-in templates" }).waitFor();
   await capture("06-settings-empty", page.locator("main"));
