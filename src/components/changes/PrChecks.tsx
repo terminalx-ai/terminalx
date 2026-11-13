@@ -230,7 +230,7 @@ export function ReviewThreadList({ workspace, view }: { workspace: string; view:
     {threads.length > 0 && <ul className="flex min-w-0 flex-col" aria-label="Threads">
       {threads.map((thread) => <li key={thread.id} className="min-w-0">
         <button type="button" aria-label={`Go to review thread ${githubReviewLocation(thread)}`} title={thread.path}
-          onClick={() => setNotice(requestThreadJump(workspace, thread) ? null : `${thread.path} is not in the Changes list. Choose All changes there to see this thread.`)}
+          onClick={() => { setNotice(null); void requestThreadJump(workspace, thread).then((shown) => { if (!shown) setNotice(`${thread.path} is not in the Changes diff.`); }); }}
           className="flex w-full min-w-0 items-start gap-2 rounded-md px-1 py-1 text-left hover:bg-veil">
           <span aria-hidden className="mt-px flex size-4 shrink-0 items-center justify-center rounded-full bg-veil-strong text-[8px] font-semibold text-muted-foreground">{threadInitials(githubAuthorName(thread.comments[0]))}</span>
           <span className="flex min-w-0 flex-1 flex-col">

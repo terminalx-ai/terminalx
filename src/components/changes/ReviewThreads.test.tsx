@@ -68,7 +68,7 @@ it("jumps from a row to its thread through the Changes view that lists the file"
   expect(handler).toHaveBeenLastCalledWith(expect.objectContaining({ id: thread.id }));
   expect(screen.queryByText(/is not in the Changes list/)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Go to review thread src/api/routes.ts:29-31 (head)" }));
-  expect(screen.getByText("src/api/routes.ts is not in the Changes list. Choose All changes there to see this thread.")).toBeTruthy();
+  expect(await screen.findByText("src/api/routes.ts is not in the Changes diff.")).toBeTruthy();
   off();
 });
 

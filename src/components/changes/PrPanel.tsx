@@ -26,6 +26,7 @@ import { actionsRuns, checkCounts, checkSummary, isFailingCheck, runSignature, w
 import { NextLine } from "./NextStep";
 import { PrConversation, useDocumentVisible } from "./PrConversation";
 import { ReviewThreads } from "./ReviewThreads";
+import { noteSessionPrs } from "@/lib/reviewThreads";
 
 type WorkspaceCleanup = {
   projectPath: string;
@@ -198,6 +199,8 @@ export function PrPanel({
       .then(([{ pullRequests, workStatus, landedWork }, workspaceCheck]) => {
         if (cancelled) return;
         setRows(pullRequests.rows);
+        // The Changes view finds the same PR for its review threads without asking GitHub again (PRO-234).
+        if (!selectedPr) noteSessionPrs(source, sessionId, pullRequests.rows.flatMap((row) => row.pr ? [row.pr] : []));
         setLoadedSelection(selection);
         setStatus(workStatus);
         setLanded(landedWork);

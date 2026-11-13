@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { reviewFileReader, githubReviewAnchor, reviewBody, githubReviewDraft, githubReviewLocation, githubThreadCode, githubThreadLines, threadCounts } from "./reviewThreads";
+import { discoverSessionPr, noteSessionPrs, reviewFileReader, githubReviewAnchor, reviewBody, githubReviewDraft, githubReviewLocation, githubThreadCode, githubThreadLines, threadCounts } from "./reviewThreads";
+import type { GitSource } from "./gitSource";
 import { reviewSnapshot as snapshot, reviewThread as thread, reviewFile } from "@/test/reviewThreads";
 
 const file = { path: thread.path, headOid: snapshot.headOid, baseOid: snapshot.baseOid, beforeLines: 100, afterLines: 100 };
@@ -120,4 +121,33 @@ it("does not let an old snapshot's failed request discard a newer file cache", a
   await oldError;
   expect(await read(reviewFile.path, snapshot)).toEqual(reviewFile);
   expect(load).toHaveBeenCalledTimes(2);
+});
+
+describe("the session's PR for the Changes view", () => {
+  const source = (key: string, prs: { url: string; number: number; state: "OPEN" | "CLOSED" | "MERGED" }[]) => ({
+    key, reviewThreads: vi.fn(),
+    workStatus: vi.fn(async () => ({ branch: "feature", defaultBranch: "main" })),
+    prs: vi.fn(async () => prs),
+    prAssociations: vi.fn(async () => ({ associations: [], discoveryOnly: true })),
+    errorMessage: String,
+  }) as unknown as GitSource;
+
+  it("finds the branch's open PR once for every surface that asks at the same time", async () => {
+    const git = source("local:/discover", [{ url: "https://github.com/o/r/pull/3", number: 3, state: "CLOSED" }, { url: "https://github.com/o/r/pull/14", number: 14, state: "OPEN" }]);
+    const [a, b] = await Promise.all([discoverSessionPr(git, "s"), discoverSessionPr(git, "s")]);
+    expect(a).toEqual({ url: "https://github.com/o/r/pull/14", number: 14, state: "OPEN" });
+    expect(b).toBe(a);
+    expect(await discoverSessionPr(git, "s")).toBe(a);
+    expect(git.prs).toHaveBeenCalledTimes(1);
+    expect(git.prs).toHaveBeenCalledWith("feature");
+    await discoverSessionPr(git, "s", true);
+    expect(git.prs).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses what the PR panel already read instead of asking GitHub again", async () => {
+    const git = source("local:/noted", []);
+    noteSessionPrs(git, "s", [{ url: "https://github.com/o/r/pull/9", number: 9, state: "OPEN" }]);
+    expect(await discoverSessionPr(git, "s")).toEqual({ url: "https://github.com/o/r/pull/9", number: 9, state: "OPEN" });
+    expect(git.prs).not.toHaveBeenCalled();
+  });
 });

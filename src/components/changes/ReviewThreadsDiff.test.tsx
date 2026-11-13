@@ -72,7 +72,7 @@ it("draws threads without a review-comment provider, and focuses the one a Check
   });
   const scroll = vi.fn();
   card.scrollIntoView = scroll;
-  act(() => { requestThreadJump(workspace, thread); });
+  await act(async () => { await requestThreadJump(workspace, thread); });
   await waitFor(() => expect(document.activeElement).toBe(card));
   expect(scroll).toHaveBeenCalledWith({ block: "center" });
   expect(screen.getByTestId("focus").textContent).toBe("");

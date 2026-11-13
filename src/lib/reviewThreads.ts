@@ -3,6 +3,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { showError } from "@/lib/errorToasts";
 import { getDraft, setDraft } from "@/lib/drafts";
 import type { ReviewComment } from "@/lib/reviewComments";
+import type { GitSource } from "@/lib/gitSource";
+import { sessionPrs } from "@/lib/sessionPrs";
 
 /** Coordinates from GitHub are already rebased to the PR head, not the original push. */
 export type GitHubReviewSide = "LEFT" | "RIGHT";
@@ -275,7 +277,8 @@ export function registerReviewPr(workspace: string, pr: ReviewPr): () => void {
     prs.set(key, state);
   }
   state.registrations++;
-  if (state.view.pr !== pr) {
+  // The PR panel and the Changes view register the same PR; an equal one changes nothing.
+  if (state.view.pr !== pr && !samePr(state.view.pr, pr)) {
     const moved = state.view.pr.state !== pr.state;
     setView(state, { pr });
     if (moved && state.watchers) void refreshThreads(workspace, pr.url);
@@ -291,6 +294,58 @@ export function registerReviewPr(workspace: string, pr: ReviewPr): () => void {
       emitStore();
     });
   };
+}
+
+const samePr = (a: ReviewPr, b: ReviewPr) => a.url === b.url && a.number === b.number && a.state === b.state && a.access === b.access
+  && a.canWrite === b.canWrite && (a.tabId ?? null) === (b.tabId ?? null) && a.errorMessage === b.errorMessage;
+
+/** One thread access object per source and PR, so every surface shares its file cache. */
+const accesses = new WeakMap<GitSource, Map<string, ReviewThreadAccess>>();
+export function reviewAccessFor(source: GitSource, url: string): ReviewThreadAccess | undefined {
+  if (!source.reviewThreads) return undefined;
+  const mine = accesses.get(source) ?? new Map<string, ReviewThreadAccess>();
+  accesses.set(source, mine);
+  let access = mine.get(url);
+  if (!access) { access = source.reviewThreads(url); mine.set(url, access); }
+  return access;
+}
+
+/** Which PR a session's branch has, as the Changes view needs it without the PR panel. */
+export interface SessionReviewPr { url: string; number: number; state: ReviewPr["state"] }
+/** A fresh answer, from either surface, is reused rather than asked again. */
+export const SESSION_PR_FRESH_MS = 30_000;
+const sessionPrCache = new Map<string, { at: number; pr: Promise<SessionReviewPr | null> }>();
+const sessionPrKey = (source: GitSource, sessionId: string | undefined) => `${source.key}\0${sessionId ?? ""}`;
+const pickPr = (prs: SessionReviewPr[]) => prs.find((pr) => pr.state === "OPEN") ?? prs[0] ?? null;
+
+/** The PR panel says what it read, so the Changes view does not read it again. */
+export function noteSessionPrs(source: GitSource, sessionId: string | undefined, prs: SessionReviewPr[]) {
+  const pr = pickPr(prs.map(({ url, number, state }) => ({ url, number, state })));
+  sessionPrCache.set(sessionPrKey(source, sessionId), { at: Date.now(), pr: Promise.resolve(pr) });
+}
+export function sessionReviewPrCached(source: GitSource, sessionId: string | undefined): boolean {
+  const cached = sessionPrCache.get(sessionPrKey(source, sessionId));
+  return !!cached && Date.now() - cached.at < SESSION_PR_FRESH_MS;
+}
+
+/** The session's PR the way the PR panel finds it: its branch's PR and the ones it opened or linked, an open one first. */
+export function discoverSessionPr(source: GitSource, sessionId: string | undefined, force = false): Promise<SessionReviewPr | null> {
+  const key = sessionPrKey(source, sessionId);
+  const cached = sessionPrCache.get(key);
+  if (cached && (cached.at === 0 || (!force && Date.now() - cached.at < SESSION_PR_FRESH_MS))) return cached.pr;
+  const pr = (async () => {
+    if (!source.reviewThreads) return null;
+    const status = await source.workStatus();
+    const branch = status.branch && status.branch !== status.defaultBranch ? status.branch : null;
+    const { rows } = await sessionPrs(source, sessionId, branch);
+    return pickPr(rows.flatMap((row) => row.pr ? [{ url: row.pr.url, number: row.pr.number, state: row.pr.state }] : []));
+  })();
+  // In flight (at 0) is shared; once settled it is fresh for a while. A failure is asked again next time.
+  const entry = { at: 0, pr };
+  sessionPrCache.set(key, entry);
+  pr.then(() => { if (sessionPrCache.get(key) === entry) entry.at = Date.now(); },
+    () => { if (sessionPrCache.get(key) === entry) sessionPrCache.delete(key); });
+  return pr;
 }
 
 /** The workspace's PR: the one at `url`, else the first open one, else the first registered. */
@@ -422,21 +477,42 @@ export function addThreadsToChat(tabId: string, threads: ReviewThread[], prUrl: 
   setDraft(tabId, `${draft}${draft.trim() ? "\n\n" : ""}${threads.map((thread) => githubReviewDraft(thread, prUrl)).join("\n\n")}`);
 }
 
-type JumpHandler = (thread: ReviewThread) => boolean;
+type JumpHandler = (thread: ReviewThread) => boolean | Promise<boolean>;
 const jumpHandlers = new Map<string, Set<JumpHandler>>();
+const jumpFallbacks = new Map<string, Set<JumpHandler>>();
+const pendingJumps = new Map<string, ReviewThread>();
+const subscribe = (handlers: Map<string, Set<JumpHandler>>, workspace: string, handler: JumpHandler) => {
+  const set = handlers.get(workspace) ?? new Set<JumpHandler>();
+  set.add(handler); handlers.set(workspace, set);
+  return () => { set.delete(handler); if (!set.size) handlers.delete(workspace); };
+};
 /** The Changes panel opens the thread's file when it lists it. */
-export function onThreadJump(workspace: string, handler: JumpHandler): () => void {
-  const set = jumpHandlers.get(workspace) ?? new Set<JumpHandler>();
-  set.add(handler); jumpHandlers.set(workspace, set);
-  return () => { set.delete(handler); if (!set.size) jumpHandlers.delete(workspace); };
+export function onThreadJump(workspace: string, handler: (thread: ReviewThread) => boolean): () => void {
+  return subscribe(jumpHandlers, workspace, handler);
 }
-/** Ask for a thread's file diff and its place in it. False when no Changes view lists the file. */
-export function requestThreadJump(workspace: string, thread: ReviewThread): boolean {
+/** Asked when no Changes list has the file yet: it reads the changes itself, then opens the file or leaves the jump pending. */
+export function onThreadJumpFallback(workspace: string, handler: (thread: ReviewThread) => Promise<boolean>): () => void {
+  return subscribe(jumpFallbacks, workspace, handler);
+}
+/** Ask for a thread's file diff and its place in it. False when no Changes view has the file, even after reading its changes. */
+export async function requestThreadJump(workspace: string, thread: ReviewThread): Promise<boolean> {
   focus = { workspace, threadId: thread.id, nonce: ++nonce };
+  pendingJumps.delete(workspace);
   emitStore();
   let handled = false;
-  for (const handler of jumpHandlers.get(workspace) ?? []) handled = handler(thread) || handled;
-  return handled;
+  for (const handler of jumpHandlers.get(workspace) ?? []) handled = (handler(thread) as boolean) || handled;
+  if (handled) return true;
+  const results = await Promise.all([...jumpFallbacks.get(workspace) ?? []].map((handler) => Promise.resolve().then(() => handler(thread)).catch(() => false)));
+  return results.some(Boolean);
+}
+/** A jump waiting for a Changes list to load its file. */
+export const pendingThreadJump = (workspace: string) => pendingJumps.get(workspace) ?? null;
+export function setPendingThreadJump(workspace: string, thread: ReviewThread | null) {
+  if (thread) pendingJumps.set(workspace, thread); else pendingJumps.delete(workspace);
+}
+/** The file a thread is on in a list of changed files, by its path or, on the base side, its old path. */
+export function threadFile<T extends { path: string; oldPath?: string | null }>(files: T[], thread: ReviewThread): T | undefined {
+  return files.find((f) => f.path === thread.path) ?? files.find((f) => f.oldPath === thread.path);
 }
 export function useThreadFocus(workspace: string | undefined) {
   return useSyncExternalStore(subscribeStore, () => focus && focus.workspace === workspace ? focus : null);

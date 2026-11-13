@@ -3,13 +3,14 @@ import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/chat/Markdown";
 import { useSessionStore } from "@/lib/sessions";
 import {
-  addThreadsToChat, githubAuthorName, githubReviewLocation, githubThreadLines, registerReviewPr, replyToThread, reviewBody,
-  setThreadReplyDraft, setThreadResolved, threadInitials, useReviewPr, useThreadReplyDraft, useWatchThreads, type ReviewPr, type ReviewThread,
+  addThreadsToChat, discoverSessionPr, githubAuthorName, githubReviewLocation, githubThreadLines, registerReviewPr, replyToThread, reviewAccessFor, reviewBody,
+  REVIEW_REFRESH_MS, setThreadReplyDraft, setThreadResolved, threadInitials, useReviewPr, useThreadReplyDraft, useWatchThreads,
+  type ReviewPr, type ReviewThread, type SessionReviewPr, type ThreadView,
 } from "@/lib/reviewThreads";
 import type { GitSource } from "@/lib/gitSource";
 import { ReviewThreadList } from "./PrChecks";
 
-export { REVIEW_REFRESH_MS } from "@/lib/reviewThreads";
+export { REVIEW_REFRESH_MS };
 
 type Props = { source: GitSource; url: string; number?: number; sessionId?: string; active: boolean; prState?: "OPEN" | "CLOSED" | "MERGED" };
 
@@ -19,14 +20,53 @@ type Props = { source: GitSource; url: string; number?: number; sessionId?: stri
  * the Checks section, with their counts.
  */
 export function ReviewThreads({ source, url, number = 0, sessionId, active, prState = "OPEN" }: Props) {
-  const tabId = useSessionStore().sessions.find((session) => session.id === sessionId)?.activeTab ?? null;
-  const access = useMemo(() => source.reviewThreads?.(url), [source, url]);
-  const pr = useMemo<ReviewPr | null>(() => access ? { url, number, state: prState, access, canWrite: source.canWrite, tabId, errorMessage: source.errorMessage } : null,
-    [url, number, prState, access, source, tabId]);
-  useEffect(() => pr ? registerReviewPr(source.key, pr) : undefined, [source.key, pr]);
-  const view = useWatchThreads(source.key, active && !!pr, url);
-  if (!pr || !view) return null;
+  const view = useRegisteredThreads(source, sessionId, active, { url, number, state: prState });
+  if (!view) return null;
   return <ReviewThreadList workspace={source.key} view={view} />;
+}
+
+function useRegisteredThreads(source: GitSource | undefined, sessionId: string | undefined, active: boolean, found: SessionReviewPr | null): ThreadView | null {
+  const tabId = useSessionStore().sessions.find((session) => session.id === sessionId)?.activeTab ?? null;
+  const url = found?.url;
+  const access = useMemo(() => source && url ? reviewAccessFor(source, url) : undefined, [source, url]);
+  const pr = useMemo<ReviewPr | null>(() => source && found && access ? { url: found.url, number: found.number, state: found.state, access, canWrite: source.canWrite, tabId, errorMessage: source.errorMessage } : null,
+    [found?.url, found?.number, found?.state, access, source, tabId]);
+  useEffect(() => source && pr ? registerReviewPr(source.key, pr) : undefined, [source?.key, pr]);
+  return useWatchThreads(source?.key, active && !!pr, url);
+}
+
+/**
+ * The session's PR and its review threads for the Changes view and its diff
+ * tabs (PRO-234), found the way the PR panel finds them, so they show without
+ * that panel ever being opened. Both share one snapshot and one poller; the
+ * PR is looked for again on focus and every few minutes while shown.
+ */
+export function useSessionThreads(source: GitSource | undefined, sessionId: string | undefined, active: boolean): ThreadView | null {
+  const [found, setFound] = useState<{ key: string; pr: SessionReviewPr } | null>(null);
+  const key = source ? `${source.key}\0${sessionId ?? ""}` : "";
+  useEffect(() => {
+    if (!source?.reviewThreads || !active) return;
+    let alive = true;
+    const look = (force: boolean) => {
+      if (document.visibilityState === "hidden") return;
+      void discoverSessionPr(source, sessionId, force).then((pr) => {
+        if (!alive) return;
+        setFound((old) => !pr ? null : old?.key === key && old.pr.url === pr.url && old.pr.number === pr.number && old.pr.state === pr.state ? old : { key, pr });
+      }, () => { /* No PR is said by the PR panel; here nothing shows. */ });
+    };
+    look(false);
+    const timer = window.setInterval(() => look(true), REVIEW_REFRESH_MS);
+    const onFocus = () => look(false);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [source, sessionId, active, key]);
+  return useRegisteredThreads(source, sessionId, active, found?.key === key ? found.pr : null);
 }
 
 /** A thread drawn in a diff: the shared line-comment widget's GitHub kind reads it from the PR's snapshot. */

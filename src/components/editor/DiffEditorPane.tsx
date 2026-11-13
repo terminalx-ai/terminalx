@@ -15,7 +15,7 @@ import { diffFileKey, useDiffOptions } from "@/lib/diffOptions";
 import { editorLinkContext, fileKind, isMarkdown, setDiffMode, updateDiffRange, type DiffEditorEntry, type DiffMode, type FileEditorEntry } from "@/lib/editors";
 import { localGitSource } from "@/lib/gitSource";
 import { changedSince, useFileSource } from "@/lib/workspaceFiles";
-import { useWatchThreads } from "@/lib/reviewThreads";
+import { useSessionThreads } from "@/components/changes/ReviewThreads";
 import { EditorPane } from "./EditorPane";
 import { MediaPane } from "./MediaPane";
 
@@ -30,8 +30,8 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
   const { range, mode, scope, target, uncommitted, oldPath } = entry.diff;
   const source = useMemo(() => localGitSource(entry.root), [entry.root]);
   const files = useFileSource(undefined, entry.root);
-  // Keep the PR's review threads current while its diff is shown here (PRO-234).
-  useWatchThreads(source.key, visible);
+  // The PR's review threads, found and kept current while its diff is shown here (PRO-234).
+  useSessionThreads(source, entry.sessionId.startsWith("checkout:") ? undefined : entry.sessionId, visible);
   const kind = fileKind(entry.rel);
   const media = kind !== "text" || diffMediaKind(entry.rel) === "pdf";
   const options = useDiffOptions(diffFileKey(source.key, entry.rel));
