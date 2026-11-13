@@ -601,6 +601,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "action", location: "Repository worktree directory" }, layout: "content",
   }),
   defineSetting({
+    id: "repositories.sparseCheckout", section: "repositories", title: "Check out only some folders",
+    description: "New workspaces check out only the folders you pick. Useful in a large repository. Existing workspaces are unaffected.",
+    searchTerms: ["repositories", "general", "sparse", "checkout", "folders", "cone", "large", "monorepo", "partial"], scope: "repository",
+    storage: { kind: "file", location: ".terminalx/settings.json#sparseCheckout" }, layout: "content",
+  }),
+  defineSetting({
     id: "repositories.filesToCopy", section: "repositories", title: "Files to copy",
     description: "Copy matching ignored, untracked files into new workspaces.",
     searchTerms: ["repositories", "files", "copy", "ignored", "globs", "worktreeinclude", "env"], scope: "repository",
