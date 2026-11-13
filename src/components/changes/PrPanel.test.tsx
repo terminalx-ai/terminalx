@@ -727,7 +727,7 @@ describe("PrPanel load failure states", () => {
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "gh_connection_status") return { state: "connected", details: null };
       if (command === "git_has_remote") return true;
-      if (command === "work_status") throw "[pr-error:offline] error connecting to api.github.com";
+      if (command === "work_status") throw "error connecting to api.github.com";
       return null;
     });
     render(<PrPanel cwd={cwd} branch="feature" busy={false} active />);

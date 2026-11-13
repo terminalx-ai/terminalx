@@ -1,4 +1,4 @@
-import { prErrorDetails, prErrorKind, type PrErrorKind } from "@/lib/prErrors";
+import { prErrorKind, type PrErrorKind } from "@/lib/prErrors";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -159,7 +159,7 @@ export function PrLoadError({ kind, details, onRetry, onConnect }: { kind: PrErr
     <p className="font-medium">{copy.title}</p>
     <p className="mt-1 text-muted-foreground">{copy.text}</p>
     {copy.action && copy.run && <Button size="xs" variant="outline" className="mt-2" onClick={copy.run}>{copy.action}</Button>}
-    <CommandDetails key={details} details={prErrorDetails(details)} />
+    <CommandDetails key={details} details={details} />
   </div>;
 }
 

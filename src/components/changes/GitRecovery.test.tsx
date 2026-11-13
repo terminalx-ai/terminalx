@@ -272,7 +272,7 @@ describe("PR load failures by cause", () => {
     const { GitError } = await import("./GitRecovery");
     const retry = vi.fn();
     const connect = vi.fn();
-    const view = render(<GitError details="[pr-error:access] HTTP 403" onConnect={connect} onRetry={retry} />);
+    const view = render(<GitError details="HTTP 403: Resource not accessible by integration" onConnect={connect} onRetry={retry} />);
     expect(screen.getByText("GitHub access required")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
     expect(connect).toHaveBeenCalled();
@@ -280,7 +280,7 @@ describe("PR load failures by cause", () => {
     expect(screen.getByText("Couldn't refresh PR info")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalled();
-    view.rerender(<GitError details="[pr-error:offline] error connecting to api.github.com" />);
+    view.rerender(<GitError details="error connecting to api.github.com" />);
     expect(screen.getByText("You're offline")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     view.rerender(<GitError details="HTTP 403" operation="push" />);

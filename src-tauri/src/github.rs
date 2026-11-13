@@ -36,40 +36,13 @@ fn output_admitted(command: Command, timeout: std::time::Duration, ticket: crate
     crate::github_process::output_admitted(command, timeout, None, ticket)
 }
 
-/// Why PR info could not load, as a stable kind the panel matches: `access`
-/// (no access or denied), `offline` (no network) or `timeout`. Judged from the
-/// text `gh` or the process runner gave; the kind never carries that text.
-pub(crate) fn failure_kind(text: &str) -> Option<&'static str> {
-    let t = text.to_lowercase();
-    if t.contains("did not answer") || t.contains("timed out") || t.contains("timeout") || t.contains("deadline exceeded") {
-        Some("timeout")
-    } else if t.contains("error connecting to") || t.contains("could not resolve host") || t.contains("no such host")
-        || t.contains("network is unreachable") || t.contains("dial tcp") || t.contains("connection refused") || t.contains("offline") {
-        Some("offline")
-    } else if t.contains("http 401") || t.contains("http 403") || t.contains("http 404") || t.contains("bad credentials")
-        || t.contains("not logged in") || t.contains("gh auth login") || t.contains("resource not accessible")
-        || t.contains("could not resolve to a repository") || t.contains("authentication") || t.contains("saml") {
-        Some("access")
-    } else {
-        None
-    }
-}
-
-/// `text` led by its kind (`[pr-error:offline] `) when it has one.
-pub(crate) fn tag_failure(text: String) -> String {
-    match failure_kind(&text) {
-        Some(kind) if !text.starts_with("[pr-error:") => format!("[pr-error:{kind}] {text}"),
-        _ => text,
-    }
-}
-
 fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     let mut command = gh()?;
     command.current_dir(cwd).args(args);
-    let out = output_within(command, GH_TIMEOUT).map_err(|e| anyhow!(tag_failure(format!("gh {}: {e:#}", args.join(" ")))))?;
+    let out = output_within(command, GH_TIMEOUT).map_err(|e| anyhow!("gh {}: {e:#}", args.join(" ")))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        bail!("{}", tag_failure(if err.is_empty() { format!("gh {} failed", args.join(" ")) } else { err }));
+        bail!("{}", if err.is_empty() { format!("gh {} failed", args.join(" ")) } else { err });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -1941,18 +1914,6 @@ pub fn enable_head_branch_deletion(cwd: &Path) -> Result<HeadBranchSetting> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn pr_failures_get_a_stable_kind_without_the_credential() {
-        use super::{failure_kind, tag_failure};
-        assert_eq!(failure_kind("error connecting to api.github.com"), Some("offline"));
-        assert_eq!(failure_kind("gh pr view: the call did not answer within 120s"), Some("timeout"));
-        assert_eq!(failure_kind("HTTP 403: Resource not accessible"), Some("access"));
-        assert_eq!(failure_kind("HTTP 502: Bad Gateway"), None);
-        assert_eq!(tag_failure("error connecting to x".into()), "[pr-error:offline] error connecting to x");
-        assert_eq!(tag_failure("[pr-error:offline] a".into()), "[pr-error:offline] a");
-        assert_eq!(tag_failure("boom".into()), "boom");
-    }
-
     use super::*;
 
     #[cfg(feature = "desktop")]
