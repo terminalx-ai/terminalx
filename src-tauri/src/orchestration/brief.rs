@@ -212,6 +212,8 @@ mod tests {
             budget: Budget::default(),
             pieces,
             worker_mode: "bypassPermissions".into(),
+            max_tries: 3,
+            effort_ceiling: "high".into(),
             plan_edited: false,
             approval: None,
             reason: None,

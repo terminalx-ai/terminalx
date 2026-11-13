@@ -910,6 +910,62 @@ fn a_failed_done_check_takes_the_same_ladder_with_the_checks_output() {
 }
 
 #[test]
+fn a_run_keeps_the_ladder_it_was_made_with_when_settings_change_and_a_projects_value_wins() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    let plan = |piece: &str| -> Plan { serde_json::from_value(json!({"goal": "Move CLI reads", "pieces": [{"id": piece, "title": "Move CLI code", "kind": "scoped-code", "doneChecks": [{"type": "command", "run": "cargo t control"}], "owns": ["src/cli.rs"]}]})).unwrap() };
+    {
+        let mut settings = host.settings.lock().unwrap();
+        settings.require_approval = false;
+        // The project answers for the tries; the ceiling is the app's.
+        settings.effort_ceiling = "max".into();
+        settings.projects.entry("/repo".into()).or_default().tries_per_piece = Some(1);
+    }
+    let first = engine::create(&host, &plan("one"), "lead", None).unwrap();
+    assert_eq!((first.max_tries, first.effort_ceiling.as_str()), (1, "max"));
+    let shown = engine::shown(&first);
+    assert_eq!((&shown["maxTries"], &shown["effortCeiling"]), (&json!(1), &json!("max")));
+
+    // Settings change after the run was made: its ladder does not.
+    {
+        let mut settings = host.settings.lock().unwrap();
+        settings.effort_ceiling = "medium".into();
+        settings.projects.get_mut("/repo").unwrap().tries_per_piece = Some(2);
+    }
+    engine::start(&host, &first.id).unwrap();
+    host.reports("one", Status::Failed, "It does not build.");
+    assert_eq!(engine::worker_turn_ended(&host, "w1-one"), None, "one try, and no other");
+    let blocked = store::get(&first.id).unwrap();
+    assert_eq!(blocked.piece("one").unwrap().state, PieceState::Blocked);
+    assert_eq!(blocked.piece("one").unwrap().note.as_deref(), Some("Blocked after 1 try: sonnet at medium. It had its one try: the run gives a piece no more. Last failure: The worker reported failed: It does not build."));
+    assert_eq!((blocked.max_tries, blocked.effort_ceiling.as_str()), (1, "max"));
+
+    // A run made now takes the new values: two tries, and medium is as high as the effort goes.
+    let second = engine::create(&host, &plan("two"), "another-lead", None).unwrap();
+    assert_eq!((second.max_tries, second.effort_ceiling.as_str()), (2, "medium"));
+    engine::start(&host, &second.id).unwrap();
+    host.reports("two", Status::Failed, "It does not build.");
+    engine::worker_turn_ended(&host, "w2-two");
+    assert_eq!(tried(&store::get(&second.id).unwrap(), "two"), vec![
+        (Step::First, "sonnet".to_string(), Some("medium".to_string()), Some(Outcome::Failed)),
+        (Step::Retry, "sonnet".into(), Some("medium".into()), None),
+    ]);
+    engine::start_retries(&host, &second.id).unwrap();
+    host.reports("two", Status::Failed, "It still does not build.");
+    assert_eq!(engine::worker_turn_ended(&host, "w3-two"), None);
+    assert!(store::get(&second.id).unwrap().piece("two").unwrap().note.as_deref().unwrap().contains("It used all 2 tries."));
+
+    // A run stored before the settings existed climbs as every run did: three tries, never past high.
+    let mut old = serde_json::to_value(&blocked).unwrap();
+    let fields = old.as_object_mut().unwrap();
+    fields.remove("maxTries");
+    fields.remove("effortCeiling");
+    let old: Run = serde_json::from_value(old).unwrap();
+    assert_eq!((old.max_tries, old.effort_ceiling.as_str()), (3, "high"));
+    assert_eq!(old.ladder(), super::ladder::Rules::default());
+}
+
+#[test]
 fn a_piece_with_no_tier_above_it_is_blocked_after_two_tries() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
