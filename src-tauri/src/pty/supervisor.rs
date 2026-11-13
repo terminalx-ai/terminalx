@@ -839,6 +839,8 @@ impl Owner {
                         state.phase = Phase::Unconfirmed; true
                     }
                     Response::Failed { stage, errno } if state.boot.is_none() => {
+                        // Before any launch, preflight says what the system lacks.
+                        if !launch_sent { if let Some(feature) = stage.strip_prefix(linux::PREFLIGHT) { state.unsupported = Some(feature.to_string()); } }
                         state.boot = Some(Err(failure(&stage, errno, "cleanup pending")));
                         if state.stop_claim == 0 { state.stop_claim = 1; state.phase = Phase::Stopping; }
                         true
