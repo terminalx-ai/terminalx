@@ -92,6 +92,16 @@ it("sends one message with the comment, its code lines, every reply, the path, t
   expect(within(card).getByRole("status").textContent).toBe("Added to chat draft");
 });
 
+it("names the commenter by first name in the resolved toast, as 05.13 does", async () => {
+  read.mockResolvedValue({ ...snapshot, threads: [second] });
+  render(<><ReviewThreads {...props} />{inline(second.id)}</>);
+  read.mockResolvedValue({ ...snapshot, threads: [{ ...second, isResolved: true }] });
+  fireEvent.click(await screen.findByRole("button", { name: "Resolve" }));
+  await screen.findByRole("button", { name: "Unresolve" });
+  const [body] = vi.mocked(showError).mock.calls[0];
+  expect(body.startsWith("Aisha's comment on src/api/routes.ts")).toBe(true);
+});
+
 it("says 'Thread resolved on GitHub' with View on GitHub after resolving, and not after unresolving", async () => {
   render(<><ReviewThreads {...props} />{inline()}</>);
   read.mockResolvedValue({ ...snapshot, threads: [{ ...thread, isResolved: true }] });
@@ -103,6 +113,8 @@ it("says 'Thread resolved on GitHub' with View on GitHub after resolving, and no
   expect(body).toBe("reviewer's comment on src/login.ts · line 42 · PR #14");
   expect(cause).toBeUndefined();
   expect(options?.title).toBe("Thread resolved on GitHub");
+  // A success, said on the neutral card: no error look, no Copy error.
+  expect(options?.tone).toBe("success");
   expect(options?.actions?.map((a) => a.label)).toEqual(["View on GitHub"]);
   await options!.actions![0].run();
   expect(openUrl).toHaveBeenCalledWith(thread.comments[0].url);

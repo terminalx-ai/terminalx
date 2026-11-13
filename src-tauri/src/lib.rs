@@ -710,6 +710,7 @@ pub fn run() {
             commands::workspace_setup,
             commands::action_run,
             commands::action_states,
+            commands::workspace_ports,
             commands::create_quick_chat,
             commands::set_quick_chat_cwd,
             commands::move_quick_chat_to_project,

@@ -2011,6 +2011,16 @@ pub async fn action_states(state: State<'_, AppState>, session_id: String) -> Cm
         .await.map_err(err)?.map_err(err)
 }
 
+/// A local session's workspace port block, first port first: what $PORT and
+/// $PORT_1..$PORT_9 in a preview URL expand to (PRO-363).
+#[tauri::command]
+pub async fn workspace_ports(session_id: String) -> CmdResult<Vec<u16>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let entry = index::get(&session_id)?;
+        index::workspace_ports::ports(&entry.cwd)
+    }).await.map_err(err)?.map_err(err)
+}
+
 /// Tell every window what a session is now. The window that made a change
 /// updates its own copy from the reply; another window showing the same
 /// session (the floating one beside the main one) only learns of it here.

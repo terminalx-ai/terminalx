@@ -50,7 +50,7 @@ export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath
   </>;
 }
 
-type PreviewPattern = RepositoryFilesPreview["patterns"][number] & { reason?: string | null };
+type PreviewPattern = RepositoryFilesPreview["patterns"][number];
 
 /** Why a valid pattern matched nothing, as the preview says (PRO-131); a plain line when it gives no reason. */
 function patternReason(item: PreviewPattern): string {

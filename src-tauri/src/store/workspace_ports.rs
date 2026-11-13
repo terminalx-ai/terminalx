@@ -74,6 +74,14 @@ pub fn environment(cwd: &str) -> Result<Vec<(String, String)>> {
     })
 }
 
+/// The workspace's port block as numbers, first port first: the same block
+/// `environment` gives its terminals as TERMINALX_PORTS (PRO-363 preview URLs).
+pub fn ports(cwd: &str) -> Result<Vec<u16>> {
+    let env = environment(cwd)?;
+    let Some((_, list)) = env.iter().find(|(name, _)| name == "TERMINALX_PORTS") else { return Ok(Vec::new()) };
+    Ok(list.split(',').filter_map(|port| port.parse().ok()).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +90,18 @@ mod tests {
     fn session(id: &str, cwd: &str) -> SessionEntry {
         serde_json::from_value(json!({ "id": id, "projectPath": "/repo", "cwd": cwd,
             "title": id, "created": "now", "modified": "now" })).unwrap()
+    }
+
+    #[test]
+    fn ports_are_the_block_the_terminals_get_first_port_first() {
+        let _home = crate::store::temp_home();
+        super::super::save(&[session("a", "/repo/a")]).unwrap();
+        let env = environment("/repo/a").unwrap();
+        let ports = ports("/repo/a").unwrap();
+        assert_eq!(ports.len(), COUNT as usize);
+        assert_eq!(ports[0].to_string(), env[0].1);
+        assert_eq!(ports.iter().map(u16::to_string).collect::<Vec<_>>().join(","), env[1].1);
+        assert!(super::ports("/elsewhere").unwrap().is_empty(), "a folder outside every session has no block");
     }
 
     #[test]

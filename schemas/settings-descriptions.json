@@ -115,6 +115,7 @@
   "preferences.shortcuts.session.nextTab": "Session keyboard shortcut.",
   "preferences.shortcuts.session.previousTab": "Session keyboard shortcut.",
   "preferences.shortcuts.session.reopenTab": "Session keyboard shortcut.",
+  "preferences.shortcuts.session.runAction": "Session keyboard shortcut.",
   "preferences.shortcuts.session.stop": "Session keyboard shortcut.",
   "preferences.shortcuts.session.tab1": "Session keyboard shortcut.",
   "preferences.shortcuts.session.tab2": "Session keyboard shortcut.",

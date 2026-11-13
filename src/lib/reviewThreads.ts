@@ -448,9 +448,12 @@ export async function setThreadResolved(workspace: string, url: string, thread: 
   const number = prs.get(prKey(workspace, url))?.view.pr.number;
   if (done && resolving) {
     const link = webLink(thread.comments[0]?.url, url);
-    showError(`${githubAuthorName(thread.comments[0])}'s comment on ${thread.path} · ${githubThreadLines(thread)}${number ? ` · PR #${number}` : ""}`, undefined, {
+    // 05.13 names the commenter by first name: "Aisha's comment on …".
+    const author = githubAuthorName(thread.comments[0]).split(/\s+/)[0];
+    showError(`${author}'s comment on ${thread.path} · ${githubThreadLines(thread)}${number ? ` · PR #${number}` : ""}`, undefined, {
       title: "Thread resolved on GitHub",
       key: `review-thread-resolved:${thread.id}`,
+      tone: "success",
       actions: [{ label: "View on GitHub", keepOpen: true, run: () => openUrl(link) }],
     });
   }
