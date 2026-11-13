@@ -552,6 +552,7 @@ function transcriptNotice(stage: ConnectionStage, attempt: number, everConnected
   if (!available) return null;
   // Reconnecting would only ask for the same read again.
   if (loadError?.cause instanceof TranscriptHaltedError) return { title: "Could not load transcript", detail: loadError.cause.message, retry: true };
+  if (stage === "disconnected-on-mac") return { title: "Disconnected on your Mac", detail: `This phone stays paired; it reconnects only when you ask. ${saved ? "Showing the transcript saved on this phone." : "The transcript loads once the phone is connected."}`, retry: true };
   if (stage !== "connected") {
     const shown = saved ? "Showing the transcript saved on this phone." : "The transcript loads once the phone is connected.";
     if (attempt >= UNREACHABLE_AFTER_ATTEMPTS) return { title: "Your Mac isn't reachable", detail: `Check that your Mac is awake and TerminalX is open; the phone keeps trying. ${shown}`, retry: true };

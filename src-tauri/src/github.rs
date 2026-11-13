@@ -2901,6 +2901,57 @@ fn search_prs_with(cwd: &Path, query: &str, mut run: impl FnMut(&Path, &[&str]) 
     Ok(records.iter().map(parse_pr).filter(|pr| pr.number > 0 && seen.insert(pr.number)).take(60).collect())
 }
 
+/// The repository's open pull requests, for "Link pull request…" (PRO-294).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPrs {
+    /// `owner/name`, as the dialog names it.
+    pub repository: String,
+    /// Every open pull request, including those past `prs`.
+    pub total: u64,
+    pub prs: Vec<OpenPr>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPr {
+    #[serde(flatten)]
+    pub pr: PullRequest,
+    /// The head as GitHub writes it: `owner:branch` from a fork, else the branch.
+    pub head_label: String,
+}
+
+/// The most rows the dialog lists; its search filters these as the reader types.
+const OPEN_PR_LIMIT: usize = 100;
+
+pub fn open_prs(cwd: &Path) -> Result<OpenPrs> {
+    let _request = crate::github_process::scope();
+    open_prs_with(cwd, run)
+}
+
+fn open_prs_with(cwd: &Path, mut run: impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<OpenPrs> {
+    let repo: Value = serde_json::from_str(&run(cwd, &["repo", "view", "--json", "nameWithOwner,url"])?)?;
+    let repository = repo["nameWithOwner"].as_str().filter(|name| name.contains('/')).context("GitHub did not name this repository")?.to_string();
+    let limit = OPEN_PR_LIMIT.to_string();
+    let fields = format!("{FIELDS},isCrossRepository,headRepositoryOwner");
+    let records: Vec<Value> = serde_json::from_str(&run(cwd, &["pr", "list", "--state", "open", "--limit", &limit, "--json", &fields])?)?;
+    let prs: Vec<OpenPr> = records.iter().map(|record| {
+        let pr = parse_pr(record);
+        let owner = record["headRepositoryOwner"]["login"].as_str().filter(|_| record["isCrossRepository"].as_bool() == Some(true));
+        OpenPr { head_label: owner.map_or_else(|| pr.head.clone(), |owner| format!("{owner}:{}", pr.head)), pr }
+    }).filter(|row| row.pr.number > 0).collect();
+    // Only a full page can be short of the real count.
+    let total = if records.len() < OPEN_PR_LIMIT { prs.len() as u64 } else {
+        let host = repo["url"].as_str().and_then(|url| url::Url::parse(url).ok()).and_then(|url| url.host_str().map(String::from)).unwrap_or_else(|| "github.com".into());
+        let (owner, name) = repository.split_once('/').unwrap();
+        let (owner, name) = (format!("owner={owner}"), format!("name={name}"));
+        let out: Value = serde_json::from_str(&run(cwd, &["api", "graphql", "--hostname", &host, "-F", &owner, "-F", &name, "-f",
+            "query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN){totalCount}}}"])?)?;
+        out["data"]["repository"]["pullRequests"]["totalCount"].as_u64().unwrap_or(prs.len() as u64).max(prs.len() as u64)
+    };
+    Ok(OpenPrs { repository, total, prs })
+}
+
 /// gh resolves both same-repository and fork heads. No force, and no main checkout is touched.
 pub fn checkout_pr(cwd: &Path, number: u64, branch: &str) -> Result<()> {
     let _request = crate::github_process::scope();
@@ -2958,6 +3009,73 @@ fn attach_pr_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> R
 #[cfg(test)]
 mod start_from_tests {
     use super::*;
+
+    fn open_record(number: u64, head: &str, fork: Option<&str>, draft: bool, checks: Value) -> Value {
+        serde_json::json!({
+            "number": number, "title": format!("PR {number}"), "url": format!("https://github.com/terminalx-ai/terminalx/pull/{number}"),
+            "state": "OPEN", "isDraft": draft, "baseRefName": "main", "headRefName": head, "author": { "login": "aisha-k" },
+            "statusCheckRollup": checks, "isCrossRepository": fork.is_some(),
+            "headRepositoryOwner": { "login": fork.unwrap_or("terminalx-ai") },
+        })
+    }
+
+    #[test]
+    fn open_prs_lists_the_repository_with_fork_heads_and_check_states() {
+        let mut calls = vec![];
+        let listed = open_prs_with(Path::new("/repo"), |cwd, args| {
+            assert_eq!(cwd, Path::new("/repo"));
+            calls.push(args.join(" "));
+            Ok(match args[0] {
+                "repo" => r#"{"nameWithOwner":"terminalx-ai/terminalx","url":"https://github.com/terminalx-ai/terminalx"}"#.into(),
+                "pr" => serde_json::to_string(&vec![
+                    open_record(788, "raccoon/approval-cards-diff", None, false, serde_json::json!([{ "__typename": "CheckRun", "name": "check", "status": "COMPLETED", "conclusion": "SUCCESS" }])),
+                    open_record(786, "teams-invite", Some("aisha-k"), false, serde_json::json!([{ "__typename": "CheckRun", "name": "check", "status": "IN_PROGRESS" }])),
+                    open_record(783, "raccoon/session-overview", None, true, serde_json::json!([])),
+                ]).unwrap(),
+                other => panic!("unexpected gh {other}"),
+            })
+        }).unwrap();
+        assert_eq!(calls, [
+            "repo view --json nameWithOwner,url".to_string(),
+            format!("pr list --state open --limit 100 --json {FIELDS},isCrossRepository,headRepositoryOwner"),
+        ], "a short page needs no count query");
+        assert_eq!(listed.repository, "terminalx-ai/terminalx");
+        assert_eq!(listed.total, 3);
+        assert_eq!(listed.prs.iter().map(|row| row.head_label.as_str()).collect::<Vec<_>>(), ["raccoon/approval-cards-diff", "aisha-k:teams-invite", "raccoon/session-overview"]);
+        assert_eq!(listed.prs[0].pr.checks[0].state, "success");
+        assert_eq!(listed.prs[1].pr.checks[0].state, "in_progress");
+        assert!(listed.prs[2].pr.is_draft);
+        assert_eq!(listed.prs[0].pr.author, "aisha-k");
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["prs"][1]["headLabel"], "aisha-k:teams-invite");
+        assert_eq!(json["prs"][1]["head"], "teams-invite", "the PR's own fields sit beside the label");
+    }
+
+    #[test]
+    fn open_prs_counts_past_a_full_page_on_the_repository_host() {
+        let page: Vec<Value> = (1..=OPEN_PR_LIMIT as u64).map(|n| open_record(n, "b", None, false, serde_json::json!([]))).collect();
+        let listed = open_prs_with(Path::new("/repo"), |_, args| Ok(match args[0] {
+            "repo" => r#"{"nameWithOwner":"acme/big","url":"https://ghe.acme.dev/acme/big"}"#.into(),
+            "pr" => serde_json::to_string(&page).unwrap(),
+            "api" => {
+                assert_eq!(&args[..7], ["api", "graphql", "--hostname", "ghe.acme.dev", "-F", "owner=acme", "-F"]);
+                assert_eq!(args[7], "name=big");
+                assert!(args[9].contains("pullRequests(states:OPEN){totalCount}"), "{}", args[9]);
+                r#"{"data":{"repository":{"pullRequests":{"totalCount":412}}}}"#.into()
+            }
+            other => panic!("unexpected gh {other}"),
+        })).unwrap();
+        assert_eq!(listed.total, 412);
+        assert_eq!(listed.prs.len(), OPEN_PR_LIMIT);
+    }
+
+    #[test]
+    fn open_prs_passes_on_a_failure_to_reach_github() {
+        let error = open_prs_with(Path::new("/repo"), |_, _| bail!("error connecting to api.github.com")).unwrap_err();
+        assert!(error.to_string().contains("error connecting to api.github.com"));
+        let empty = open_prs_with(Path::new("/repo"), |_, args| Ok(if args[0] == "repo" { r#"{"nameWithOwner":"acme/quiet","url":"https://github.com/acme/quiet"}"#.into() } else { "[]".into() })).unwrap();
+        assert_eq!((empty.total, empty.prs.len()), (0, 0));
+    }
     // Recorded with gh pr view 12 --json <FIELDS>,files,changedFiles in terminalx-ai/terminalx.
     const PR: &str = include_str!("fixtures/github_pr_12.json");
 

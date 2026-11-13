@@ -1,4 +1,4 @@
-import { CircleAlert, CircleCheck, CircleDashed, CircleX, Hourglass, LoaderCircle, ScanSearch, Square } from "@/icons";
+import { CircleAlert, CircleCheck, CircleDashed, CircleX, Hourglass, LoaderCircle, ScanSearch, SkipForward, Sparkles, Square } from "@/icons";
 import { cn } from "@/lib/cn";
 import { PIECE_STATE_LABEL } from "@/lib/orchestration";
 import { usePrefs } from "@/lib/prefs";
@@ -11,9 +11,12 @@ export const PIECE_STATE_STYLE: Record<PieceState, { icon: typeof CircleCheck; c
   stalled: { icon: Hourglass, className: "text-warning" },
   verifying: { icon: ScanSearch, className: "text-info" },
   done: { icon: CircleCheck, className: "text-add" },
-  blocked: { icon: CircleAlert, className: "text-warning" },
+  // Red, as 18.03 draws it: a blocked piece is what holds the run up.
+  blocked: { icon: CircleAlert, className: "text-destructive" },
   failed: { icon: CircleX, className: "text-destructive" },
   stopped: { icon: Square, className: "text-faint" },
+  skipped: { icon: SkipForward, className: "text-faint" },
+  lead: { icon: Sparkles, className: "text-accent" },
 };
 
 /** A piece's state as the Run view labels it: its mark and its name. */

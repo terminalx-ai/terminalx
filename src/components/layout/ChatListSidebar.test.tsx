@@ -214,7 +214,7 @@ describe("renaming a chat in the list", () => {
 
     fireEvent.contextMenu(row);
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Link pull request…", "Delete…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Rename/ }));
     expect(opened).toBe("a");
   });

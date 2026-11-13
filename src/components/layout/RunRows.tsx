@@ -68,10 +68,14 @@ export function useLeadSummary(family: LeadFamily | null) {
     const byId = new Map(sessions.map((session) => [session.id, session]));
     const spend = family.run ? runSpend(family.run, byId) : null;
     const needs = familyNeeds({ lead: family.lead, leadStatus: statusOf(family.lead.id), run: family.run, workers: family.workers, statusOf, spend });
+    // A blocked piece is answered in the lead's Run view (PRO-361): the open lead carries it, though the
+    // family's list names it once as its worker's question when that worker also asks.
+    const own = needs.filter((need) => need.sessionId === family.lead.id);
+    const blocked = (family.run?.pieces ?? []).filter((piece) => piece.state === "blocked" && !own.some((need) => need.piece === piece.id));
     return {
       needs,
-      /** The lead's own: itself, and the run as a whole. */
-      ownNeeds: needs.filter((need) => need.sessionId === family.lead.id),
+      /** The lead's own: itself, the run as a whole, and the pieces blocked in it. */
+      ownNeeds: [...own, ...blocked.map((piece): Need => ({ kind: "attention", sessionId: family.lead.id, text: `${piece.title}: ${piece.note ?? "blocked"}`, piece: piece.id }))],
       running: runningWorkers(family.workers, family.run, statusOf),
       /** A worker has output not read yet: the folded lead carries the unread mark. */
       unread: family.workers.some(isUnread),

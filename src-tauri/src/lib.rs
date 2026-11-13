@@ -148,6 +148,7 @@ mod models;
 mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
+pub mod power;
 mod project_start;
 mod project_templates;
 mod pty;
@@ -654,6 +655,10 @@ pub fn run() {
             commands::session_guest_leave,
             commands::pairing_generate,
             commands::pairing_revoke,
+            commands::pairing_approve,
+            commands::pairing_decline,
+            commands::pairing_disconnect,
+            commands::pairing_set_keep_awake,
             commands::machine_name,
             commands::set_machine_name,
             commands::add_project,
@@ -776,6 +781,12 @@ pub fn run() {
             drag_text::dropped_text,
             commands::invalidate_file_index,
             commands::git_commit,
+            commands::git_stage_paths,
+            commands::git_unstage_paths,
+            commands::git_unstage_all,
+            commands::git_apply_hunk,
+            commands::git_hunk_count,
+            commands::generate_commit_message,
             commands::git_identity,
             commands::cloud_mirror_status,
             commands::cloud_mirror_enable,
@@ -809,11 +820,15 @@ pub fn run() {
             commands::abort_merge,
             commands::git_checkout,
             commands::working_changes,
+            commands::working_change_sets,
             commands::pr_list,
             commands::pr_search,
             commands::pr_attach,
             commands::pr_associations,
             commands::pr_associations_batch,
+            commands::pr_link_candidates,
+            commands::pr_link,
+            commands::pr_unlink,
             commands::pr_details,
             commands::pr_conversation,
             commands::pr_conversation_action,
@@ -943,6 +958,11 @@ pub fn run() {
             commands::orchestration_merge,
             commands::orchestration_send_back,
             commands::orchestration_resolve_in_lead,
+            commands::orchestration_take_over,
+            commands::orchestration_finish,
+            commands::orchestration_widen,
+            commands::orchestration_note,
+            commands::orchestration_skip,
             commands::orchestration_set_limits,
             commands::orchestration_resume,
             commands::session_usage,

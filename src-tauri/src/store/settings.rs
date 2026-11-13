@@ -73,6 +73,23 @@ pub struct Settings {
     /// The limits of an orchestration run (`orchestration`): the runtime that
     /// starts the workers reads them when a plan is stored and started.
     pub orchestrator: OrchestratorSettings,
+    /// Paired phones (PRO-314). The Rust side holds the power assertion, so
+    /// it reads these for itself.
+    pub pairing: PairingSettings,
+}
+
+/// Paired phones and this Mac (docs/PAIRING-APPROVAL.md).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PairingSettings {
+    /// Keep this Mac from idle sleep while a phone is connected.
+    pub keep_awake: bool,
+}
+
+impl Default for PairingSettings {
+    fn default() -> Self {
+        Self { keep_awake: true }
+    }
 }
 
 /// What a lead's run of workers may do without asking (PRO-274), and how much
@@ -663,6 +680,7 @@ impl Default for Settings {
             experimental: ExperimentalSettings::default(),
             diagnostics: DiagnosticsSettings::default(),
             orchestrator: OrchestratorSettings::default(),
+            pairing: PairingSettings::default(),
         }
     }
 }

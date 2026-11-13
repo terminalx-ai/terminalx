@@ -27,6 +27,8 @@ const hostSchema = z.object({
   endpoint: z.string().min(1),
   relay: relaySchema.optional(),
   lastConnectedAt: z.number().int().nonnegative(),
+  // PRO-314: when the Mac disconnected this phone (`pairing.disconnected`). Set, the app does not connect to it by itself; cleared once the person reconnects.
+  disconnectedOnMacAt: z.number().int().nonnegative().optional(),
   provenance: z.discriminatedUnion("kind", [z.object({ kind: z.literal("explicit") }), z.object({ kind: z.literal("automatic"), userId: z.string().min(1) })]),
 });
 

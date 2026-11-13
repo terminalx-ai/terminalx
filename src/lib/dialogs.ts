@@ -35,6 +35,8 @@ interface State {
   moveToProject: string | null;
   /** The session being linked to an issue by hand (#441). */
   linkIssue: string | null;
+  /** The session choosing an open pull request to show (PRO-294). */
+  linkPr: string | null;
   /** The bulk worktree clean-up is open. */
   worktreeCleanup: boolean;
   /** The tab being renamed. */
@@ -50,7 +52,7 @@ export interface TabRequest {
   tab: string | null;
 }
 
-let state: State = { agentHandoff: null, workspaceRestore: null, workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, linkIssue: null, worktreeCleanup: false, renameTab: null, closeTabs: null };
+let state: State = { agentHandoff: null, workspaceRestore: null, workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, linkIssue: null, linkPr: null, worktreeCleanup: false, renameTab: null, closeTabs: null };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -151,6 +153,15 @@ export function openLinkIssue(sessionId: string) {
 
 export function closeLinkIssue() {
   set({ linkIssue: null });
+}
+
+/** "Link pull request…" from a session's menu (PRO-294). */
+export function openLinkPr(sessionId: string) {
+  set({ linkPr: sessionId });
+}
+
+export function closeLinkPr() {
+  set({ linkPr: null });
 }
 
 /** Move a quick chat into a project. */

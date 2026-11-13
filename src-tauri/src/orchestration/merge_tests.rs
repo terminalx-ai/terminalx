@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use super::engine::By;
 use super::merge::{self, Checkouts, Options, Worktree};
-use super::{store, MergeState, PendingMerge, Run, RunMerge, RunState, SessionRef};
+use super::{store, MergeState, PendingMerge, PieceState, Run, RunMerge, RunState, SessionRef};
 
 fn git(cwd: &Path, args: &[&str]) -> String {
     let out = Command::new("git").current_dir(cwd).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null").output().unwrap();
@@ -715,4 +715,24 @@ fn a_piece_being_sent_back_and_a_pass_hold_the_same_lock() {
         assert!(pass.join().unwrap().unwrap().done);
     });
     assert!(merge::hold_for_send_back(&id).is_ok(), "the pass let go when it ended");
+}
+
+
+#[test]
+fn nothing_is_merged_while_a_piece_is_with_the_lead_so_its_work_is_its_own() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let a = repo.work("a", &[("a.txt", "a\n")]);
+    let b = repo.work("b", &[("b.txt", "b\n")]);
+    let id = repo.run(&[("a", &[], &a, &["a.txt"], "true"), ("b", &[], &b, &["b.txt"], "true")], Some("true"));
+    let start = repo.head();
+    // The lead took piece b over (`engine::take_over`): what it commits from here is b's result.
+    store::update(&id, |run| {
+        run.pieces.iter_mut().find(|piece| piece.id == "b").unwrap().state = PieceState::Lead;
+        Ok(())
+    })
+    .unwrap();
+    let refused = merge::merge(&repo, &id, &repo.options(By::Person, &[], false)).unwrap_err();
+    assert_eq!((refused.code, refused.details["piece"].as_str()), ("piece_with_lead", Some("b")));
+    assert_eq!(repo.head(), start, "a was not merged into the lead's branch");
 }

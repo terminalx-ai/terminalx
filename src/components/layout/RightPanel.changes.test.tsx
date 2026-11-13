@@ -31,6 +31,7 @@ beforeEach(() => {
     if (command === "review_range") return { target: "main", base: "base", head: "live-snapshot" };
     if (command === "changes_between") return files;
     if (command === "working_changes") return ["head", files];
+    if (command === "working_change_sets") return ["head", "index", [], files];
     if (command === "work_status") return { isRepo: true, dirty: true, branch: "fix/test", ahead: 0, behind: 0 };
     if (command === "log_commits") return [];
     // No merge in progress (#736).
@@ -66,7 +67,7 @@ it("shows workspace work after a status-only turn, and commits from its Uncommit
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
 
   await waitFor(() => expect(screen.getAllByTitle("Modified · src/modified.ts")).toHaveLength(1));
-  expect(invoke).toHaveBeenCalledWith("working_changes", { cwd, hideWhitespace: false });
+  expect(invoke).toHaveBeenCalledWith("working_change_sets", { cwd, hideWhitespace: false });
 
   // History and back keep a commit draft.
   fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: "Keep my draft" } });

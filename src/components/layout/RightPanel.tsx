@@ -19,6 +19,7 @@ import type { FileSource } from "@/lib/workspaceFiles";
 import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
 import { onPanelTab, rememberPanelTab, rememberedPanelTab, takePanelTab, type PanelTab } from "@/lib/panelTab";
+import { onPrLinksChanged } from "@/lib/prLinks";
 
 export type { PanelTab };
 const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
@@ -128,6 +129,8 @@ export function RightPanel({
     [],
   );
   const [focusPr, setFocusPr] = useState(0);
+  // A pull request just linked to this session (PRO-294): scroll to it in the Branch tab.
+  useEffect(() => sessionId ? onPrLinksChanged((changed) => { if (changed === sessionId) setFocusPr((n) => n + 1); }) : undefined, [sessionId]);
   const [refreshTick, setRefreshTick] = useState(0);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const fallback: PanelTab = isGit ? "changes" : "files";

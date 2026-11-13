@@ -74,6 +74,8 @@ import { bootCloudMirrors } from "@/lib/cloudMirror";
 import { bootCloudSessions } from "@/lib/cloudSessions";
 import { bootCloudPipelines } from "@/lib/cloudPipelines";
 import { bootPairing } from "@/lib/pairing";
+import { PairPhoneDialogHost } from "@/components/pairing/PairPhoneDialog";
+import { ConnectedBar } from "@/components/pairing/ConnectedBar";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
 import { useEditors } from "@/lib/editors";
@@ -308,6 +310,8 @@ export function AppShell() {
       <WorkspaceRestoreDialog />
       <WorktreeCleanupDialog />
       <ProjectStartDialogHost />
+      <PairPhoneDialogHost />
+      <ConnectedBar />
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (
           <Suspense fallback={viewFallback}>

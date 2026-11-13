@@ -6,12 +6,18 @@ import { updateStoredHost, writeHostCredential, type HostCredential, type Stored
 import { hostDisplayName } from "../store/host-name";
 import { RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
 import { closeDetail } from "./connection-errors";
+import { describeDevice, type DeviceDescription } from "./device-describe";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
 import { applyResumeConfirmation } from "./credential-confirmation";
 import { rotateCredentialIfNeeded } from "./credential-rotation";
 import type { PhoneNetwork } from "./network";
 
-export type ConnectionStage = "idle" | "connecting" | "connected" | "reconnecting" | "cant-connect" | "unreachable";
+/**
+ * `disconnected-on-mac`: the person chose Disconnect for this phone on the Mac
+ * (`pairing.disconnected`). The pairing stays, and nothing reconnects until
+ * the person reconnects from the phone.
+ */
+export type ConnectionStage = "idle" | "connecting" | "connected" | "reconnecting" | "cant-connect" | "unreachable" | "disconnected-on-mac";
 export interface ConnectionLogEntry { id: string; at: number; level: "info" | "success" | "warning" | "error"; message: string; detail?: string }
 
 const resolvedSchema = z.object({ v: z.literal(1), cellUrl: z.string().url(), assignmentEpoch: z.number().int().nonnegative(), leaseExpiresAt: z.number().int().nonnegative() }).strict();
@@ -84,16 +90,24 @@ export class HostConnection {
   private refusedMethods = new Set<string>();
   private streamCounter = 0;
   private streams = new Map<number, { method: string; params: unknown; deliver: (result: unknown) => void; detach?: () => void }>();
+  /** The Mac disconnected this phone (`pairing.disconnected`): no reconnect of any kind until the person asks for one. */
+  private heldByMac = false;
 
+  /** `device`: this phone, told to the Mac on every connection (`device.describe`). */
+  constructor(private readonly device: DeviceDescription | null = null) {}
+
+  /** Connect to a computer the person chose. It clears a disconnect made on the Mac. */
   start(host: StoredHost, credential: HostCredential): void {
     this.stop("another connection started");
     this.flaps = 0;
     this.active = { host, credential };
+    this.releaseHold();
     const generation = this.generation;
     void this.connectLoop(generation);
   }
 
   stop(reason = "disconnected"): void {
+    this.heldByMac = false;
     this.backgrounded = false;
     this.lostWhileAway = false;
     this.resumeDeadline = 0;
@@ -110,9 +124,17 @@ export class HostConnection {
     this.emitStage("idle", 0);
   }
 
-  restart(reason = "restarted"): void {
+  /**
+   * Drop the connection and make it again. After a disconnect on the Mac only
+   * the person can do that: `byPerson` is true for a tap (Reconnect, Retry,
+   * choosing the computer again), false for what the app does by itself.
+   */
+  restart(reason = "restarted", byPerson = false): void {
     const active = this.active;
     if (!active) return;
+    if (this.heldByMac && !byPerson) return;
+    this.heldByMac = false;
+    if (byPerson) this.releaseHold();
     this.cancel(reason);
     this.skipDelay?.();
     clearInterval(this.refreshTimer);
@@ -189,6 +211,11 @@ export class HostConnection {
     this.reconnectNow("the network changed");
   }
 
+  /** Whether the Mac disconnected this phone and it waits for the person to reconnect. */
+  disconnectedOnMac(): boolean {
+    return this.heldByMac;
+  }
+
   /** Each time a connection is up and usable (the first, a reconnect, a return from the background): time to read what was missed. */
   onConnected(listener: () => void): () => void {
     this.connectedListeners.add(listener);
@@ -213,6 +240,7 @@ export class HostConnection {
    */
   retryNow(): void {
     if (!this.active || this.client || this.backgrounded) return;
+    if (this.heldByMac) return this.restart("reconnect was chosen after a disconnect on the Mac", true);
     if (this.skipDelay) this.skipDelay();
     else if (this.attempting !== this.generation) this.restart();
   }
@@ -422,7 +450,10 @@ export class HostConnection {
     }
     const { client, host } = winner;
     this.client = client;
-    client.subscribe((event) => { for (const listener of this.eventListeners) listener(event); });
+    client.subscribe((event) => {
+      if (event.method === "pairing.disconnected" && generation === this.generation && this.client === client) this.holdForMac(event.params);
+      for (const listener of this.eventListeners) listener(event);
+    });
     let wasConnected = false;
     let connectedAt = 0;
     client.subscribeState((state, cause) => {
@@ -435,6 +466,11 @@ export class HostConnection {
       } else if (state === "disconnected" && wasConnected) {
         clearInterval(this.refreshTimer);
         this.client = null;
+        if (this.heldByMac) {
+          this.log("info", "Disconnected on the Mac", `${hostDisplayName(host)} · reconnect from this phone to connect again`);
+          this.emitStage("disconnected-on-mac", 0);
+          return;
+        }
         // A Mac that accepts and then drops every connection would otherwise be
         // retried at once, in a loop that fills the log (#666).
         this.flaps = Date.now() - connectedAt < FLAP_WINDOW_MS ? this.flaps + 1 : 0;
@@ -455,7 +491,8 @@ export class HostConnection {
       ? applyResumeConfirmation({ ...this.active.credential, current: this.active.credential.current }, winner.resumeVersion, confirmation)
       : this.active.credential;
     if (confirmedCredential !== this.active.credential) await writeHostCredential(host.id, confirmedCredential).catch(() => undefined);
-    const connectedHost = { ...host, lastConnectedAt: Date.now() };
+    const { disconnectedOnMacAt: _held, ...reachedHost } = host;
+    const connectedHost = { ...reachedHost, lastConnectedAt: Date.now() };
     await updateStoredHost(connectedHost).catch(() => undefined);
     if (generation !== this.generation || !this.active || this.client !== client) return;
     this.active.host = connectedHost;
@@ -464,6 +501,8 @@ export class HostConnection {
       stream.detach?.();
       stream.detach = client.subscribeStream(stream.method, stream.params, stream.deliver);
     }
+    // The Mac shows this phone by name (docs/PAIRING-APPROVAL.md); an older Mac refuses, and nothing changes.
+    void describeDevice(client, this.device);
     const refresh = () => this.refreshEndpoints(client, generation);
     void refresh();
     clearInterval(this.refreshTimer);
@@ -474,6 +513,29 @@ export class HostConnection {
         if (generation === this.generation && this.active && this.client === client) this.active.credential = rotated.credential;
       }).catch((error: unknown) => this.log("warning", "Credential rotation deferred", safeError(error)));
     }
+  }
+
+  /**
+   * The Mac says it is closing this phone's connections and keeping the
+   * pairing. Held in memory for this run, and on the stored host for the next
+   * launch, so neither reconnects by itself.
+   */
+  private holdForMac(params: unknown): void {
+    this.heldByMac = true;
+    const reason = params && typeof params === "object" && typeof (params as { reason?: unknown }).reason === "string" ? (params as { reason: string }).reason : "";
+    this.log("info", "The Mac disconnected this phone", reason ? safeError(reason) : undefined);
+    if (!this.active) return;
+    const held = { ...this.active.host, disconnectedOnMacAt: Date.now() };
+    this.active.host = held;
+    void updateStoredHost(held).catch(() => undefined);
+  }
+
+  /** The person reconnects: the stored hold goes, so the next launch connects by itself again. */
+  private releaseHold(): void {
+    if (!this.active?.host.disconnectedOnMacAt) return;
+    const { disconnectedOnMacAt: _held, ...released } = this.active.host;
+    this.active.host = released;
+    void updateStoredHost(released).catch(() => undefined);
   }
 
   private async refreshEndpoints(client: RelayClient, generation: number): Promise<void> {

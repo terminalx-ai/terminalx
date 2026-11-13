@@ -4,7 +4,7 @@ import { RelayOuterError } from "./relay-client";
 
 // `reachable` connect at once, `refused` are turned away with a relay close
 // code, `opening` open their socket and then wait in the handshake.
-const mocks = vi.hoisted(() => ({ clients: [] as any[], reachable: new Set<string>(), refused: new Map<string, number>(), opening: new Set<string>(), endpoints: [] as string[], writes: vi.fn(), hang: false }));
+const mocks = vi.hoisted(() => ({ clients: [] as any[], reachable: new Set<string>(), refused: new Map<string, number>(), opening: new Set<string>(), endpoints: [] as string[], writes: vi.fn(), hang: false, requests: [] as { method: string; params?: unknown }[], describe: "refuse" as "refuse" | "fail" }));
 vi.mock("../store/hosts", () => ({ updateStoredHost: mocks.writes, writeHostCredential: vi.fn() }));
 vi.mock("./e2ee-keypair", () => ({ loadOrCreateE2EESecretKey: async () => new Uint8Array(32) }));
 vi.mock("./credential-rotation", () => ({ rotateCredentialIfNeeded: async (args: unknown) => args }));
@@ -29,10 +29,17 @@ vi.mock("./relay-client", async (importOriginal) => {
     drop(cause: Error) { this.setState("disconnected", cause); }
     setState(state: string, cause?: Error) { this.state = state; for (const listener of this.listeners) listener(state, cause); }
     getTransport() { return this.options.transport === "direct" ? "direct" : "relay"; }
-    subscribe() {}
+    events: ((event: { method: string; params?: unknown }) => void)[] = [];
+    subscribe(listener: (event: { method: string; params?: unknown }) => void) { this.events.push(listener); return () => undefined; }
+    /** The Mac sent a notification on this connection. */
+    notify(event: { method: string; params?: unknown }) { for (const listener of this.events) listener(event); }
     subscribeState(listener: (state: string, cause?: Error) => void) { this.listeners.push(listener); listener(this.state); return () => { this.listeners = this.listeners.filter((other) => other !== listener); }; }
     getResumeConfirmation() { return null; }
-    request() { return mocks.hang ? Promise.reject(new Error("Request timed out")) : Promise.resolve({ ok: true, value: { v: 1, relay: null, directEndpoints: mocks.endpoints } }); }
+    request(method: string, params?: unknown) {
+      mocks.requests.push({ method, params });
+      // An older Mac refuses device.describe; a slow one may not answer at all.
+      if (method === "device.describe") return mocks.describe === "fail" ? Promise.reject(new Error("RPC timed out: device.describe")) : Promise.resolve({ ok: false, refusal: { code: "forbidden", message: "not available" } });
+      return mocks.hang ? Promise.reject(new Error("Request timed out")) : Promise.resolve({ ok: true, value: { v: 1, relay: null, directEndpoints: mocks.endpoints } }); }
   } };
 });
 import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS } from "./connection";
@@ -46,7 +53,7 @@ let connection: HostConnection;
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 
 beforeEach(() => {
-  vi.useFakeTimers(); mocks.clients = []; mocks.reachable.clear(); mocks.refused.clear(); mocks.opening.clear(); mocks.endpoints = [vpn, lan, bonjour]; mocks.hang = false; mocks.writes.mockReset().mockResolvedValue(undefined); connection = new HostConnection();
+  vi.useFakeTimers(); mocks.clients = []; mocks.reachable.clear(); mocks.refused.clear(); mocks.opening.clear(); mocks.endpoints = [vpn, lan, bonjour]; mocks.hang = false; mocks.requests = []; mocks.describe = "refuse"; mocks.writes.mockReset().mockResolvedValue(undefined); connection = new HostConnection();
 });
 afterEach(() => { connection.stop(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -459,5 +466,69 @@ describe("a lost connection", () => {
     const sockets = mocks.clients.length;
     connection.retryNow(); await flush();
     expect(mocks.clients).toHaveLength(sockets);
+  });
+});
+
+// PRO-314 (docs/PAIRING-APPROVAL.md): the phone's name, and Disconnect on the Mac.
+describe("the Mac's paired-device controls", () => {
+  const device = { label: "Google Pixel 8", platform: "android" as const };
+  const live = () => mocks.clients.filter((client) => client.state === "connected");
+  const sockets = () => mocks.clients.length;
+
+  it.each(["refuse", "fail"] as const)("tells the Mac the phone's name on every connection, and stays connected when it can't take it (%s)", async (answer) => {
+    mocks.describe = answer;
+    connection = new HostConnection(device);
+    const stages: string[] = []; connection.onStage((stage) => stages.push(stage));
+    mocks.reachable.add(lan); connection.start(host, credential); await flush();
+    live()[0].drop(new RelayOuterError(1001)); await vi.advanceTimersByTimeAsync(FLAP_DELAYS_MS[0]); await flush();
+    expect(mocks.requests.filter((request) => request.method === "device.describe").map((request) => request.params)).toEqual([device, device]);
+    expect(stages.at(-1)).toBe("connected");
+    expect(live()).toHaveLength(1);
+  });
+
+  it("stops reconnecting after pairing.disconnected until the person reconnects", async () => {
+    const stages: string[] = []; connection.onStage((stage) => stages.push(stage));
+    mocks.reachable.add(lan); connection.start(host, credential); await flush();
+    const client = live()[0];
+    client.notify({ method: "pairing.disconnected", params: { reason: "disconnected-on-mac" } });
+    client.drop(new RelayOuterError(1000)); await flush();
+    expect(stages.at(-1)).toBe("disconnected-on-mac");
+    expect(connection.disconnectedOnMac()).toBe(true);
+    expect(mocks.writes).toHaveBeenLastCalledWith(expect.objectContaining({ id: host.id, disconnectedOnMacAt: expect.any(Number) }));
+
+    // Nothing the app does by itself reconnects: delays, becoming active, the network, the home screen.
+    const before = sockets();
+    await vi.advanceTimersByTimeAsync(120_000); await flush();
+    connection.restart("the app became active"); await flush();
+    connection.networkChanged({ key: "wifi:a", label: "Wi-Fi", online: true });
+    connection.networkChanged({ key: "cell", label: "Cellular", online: true }); await flush();
+    connection.background(); connection.foreground(); await flush();
+    expect(sockets()).toBe(before);
+    expect(stages.at(-1)).toBe("disconnected-on-mac");
+
+    // The person taps Reconnect.
+    connection.restart("reconnect was chosen", true); await flush();
+    expect(live()).toHaveLength(1);
+    expect(stages.at(-1)).toBe("connected");
+    expect(connection.disconnectedOnMac()).toBe(false);
+    expect(mocks.writes.mock.calls.at(-1)![0]).not.toHaveProperty("disconnectedOnMacAt");
+  });
+
+  it("lets Retry resume after a disconnect on the Mac", async () => {
+    mocks.reachable.add(lan); connection.start(host, credential); await flush();
+    live()[0].notify({ method: "pairing.disconnected", params: { reason: "disconnected-on-mac" } });
+    live()[0].drop(new RelayOuterError(1000)); await flush();
+    connection.retryNow(); await flush();
+    expect(live()).toHaveLength(1);
+  });
+
+  it("ignores pairing.disconnected from a connection it already replaced", async () => {
+    const stages: string[] = []; connection.onStage((stage) => stages.push(stage));
+    mocks.reachable.add(lan); connection.start(host, credential); await flush();
+    const old = live()[0];
+    connection.restart("reconnect was chosen", true); await flush();
+    old.notify({ method: "pairing.disconnected" }); await flush();
+    expect(connection.disconnectedOnMac()).toBe(false);
+    expect(stages.at(-1)).toBe("connected");
   });
 });

@@ -559,6 +559,14 @@ export const api = {
   pairingRetryRelay: () => invoke<PairingStatus>("pairing_retry_relay"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
+  /** Let the phone waiting on this Mac finish pairing (docs/PAIRING-APPROVAL.md). */
+  pairingApprove: (requestId: string) => invoke<PairingStatus>("pairing_approve", { requestId }),
+  /** Refuse it: the unclaimed device, its token and the active code are discarded. */
+  pairingDecline: (requestId: string) => invoke<PairingStatus>("pairing_decline", { requestId }),
+  /** End a device's live connections and keep its pairing; the phone stops reconnecting. */
+  pairingDisconnect: (deviceId: string) => invoke<PairingStatus>("pairing_disconnect", { deviceId }),
+  /** Keep this Mac awake while a phone is connected. */
+  pairingSetKeepAwake: (enabled: boolean) => invoke<PairingStatus>("pairing_set_keep_awake", { enabled }),
   /** This Mac's name as the user's other devices show it (#686). */
   machineName: () => invoke<MachineName>("machine_name"),
   /** Name this Mac; null lets it follow the computer's own name again. */
@@ -2228,6 +2236,13 @@ export const git = {
   discard: (cwd: string, path: string, base: string | null = null, oldPath: string | null = null) => invoke<void>("git_discard", { cwd, path, base, oldPath }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
   workingChanges: (cwd: string, hideWhitespace = false) => invoke<[string, ChangedFile[]]>("working_changes", { cwd, hideWhitespace }),
+  workingChangeSets: (cwd: string, hideWhitespace = false) => invoke<[string, string, ChangedFile[], ChangedFile[]]>("working_change_sets", { cwd, hideWhitespace }),
+  stagePaths: (cwd: string, paths: string[]) => invoke<void>("git_stage_paths", { cwd, paths }),
+  unstagePaths: (cwd: string, paths: string[]) => invoke<void>("git_unstage_paths", { cwd, paths }),
+  unstageAll: (cwd: string) => invoke<void>("git_unstage_all", { cwd }),
+  applyHunk: (cwd: string, path: string, oldPath: string | undefined, index: number, reverse: boolean) => invoke<void>("git_apply_hunk", { cwd, path, oldPath: oldPath ?? null, index, reverse }),
+  hunkCount: (cwd: string, path: string, oldPath: string | undefined, staged: boolean) => invoke<number>("git_hunk_count", { cwd, path, oldPath: oldPath ?? null, staged }),
+  generateCommitMessage: (cwd: string, agent: "claude" | "codex") => invoke<string>("generate_commit_message", { cwd, agent }),
   /** The merge left in progress in the checkout, with what each uncommitted file is; null when none is. */
   unfinishedMerge: (cwd: string) => invoke<UnfinishedMerge | null>("unfinished_merge", { cwd }),
   /** Commit the merge that was read; refused if the checkout moved on or a file is still conflicted. */
@@ -2242,6 +2257,27 @@ export interface PrAssociation {
   number: number;
   head: string;
   scope: PrScope;
+  /** Chosen with "Link pull request…" (PRO-294), not opened from this session; only a link can be unlinked. */
+  linked?: boolean;
+}
+
+/** An open pull request as "Link pull request…" lists it. */
+export interface OpenPr extends PullRequest {
+  /** `owner:branch` for a head on a fork, else the branch. */
+  headLabel: string;
+}
+
+/** The repository's open pull requests, and which ones a session already shows. */
+export interface PrLinkCandidates {
+  /** `owner/name`. */
+  repository: string;
+  /** Every open pull request; `prs` holds at most the first 100. */
+  total: number;
+  prs: OpenPr[];
+  /** Canonical URLs this session shows already. */
+  here: string[];
+  /** Canonical URLs another session shows. */
+  elsewhere: string[];
 }
 
 /** Owner-issued privacy provenance for one Actions click, reused unchanged
@@ -2277,6 +2313,9 @@ export const gh = {
   available: () => invoke<boolean>("gh_available"),
   associationsBatch: (sessionIds: string[]) => invoke<Record<string, PrAssociation[]>>("pr_associations_batch", { sessionKeys: sessionIds }),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
+  linkCandidates: (cwd: string, sessionId: string) => invoke<PrLinkCandidates>("pr_link_candidates", { cwd, sessionKey: sessionId }),
+  link: (sessionId: string, association: PrAssociation) => invoke<PrAssociation[]>("pr_link", { sessionKey: sessionId, association }),
+  unlink: (sessionId: string, url: string) => invoke<PrAssociation[]>("pr_unlink", { sessionKey: sessionId, url }),
   list: (cwd: string, branch: string, authority?: CheckAuthority) => invoke<PullRequest[]>("pr_list", { cwd, branch, ...(authority ? { authority } : {}) }),
   details: (cwd: string, number: number, url?: string, authority?: CheckAuthority) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}), ...(authority ? { authority } : {}) }),
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
@@ -2729,6 +2768,16 @@ export const orchestration = {
   sendBack: (id: string, piece: string) => invoke<Run>("orchestration_send_back", { id, piece }),
   /** Have the lead resolve a piece's conflict: it is sent both sides and the pieces' goals. */
   resolveInLead: (id: string, piece: string) => invoke<Run>("orchestration_resolve_in_lead", { id, piece }),
+  /** A blocked piece (PRO-361, 18.03): the lead takes it over and finishes it in its own checkout. */
+  takeOver: (id: string, piece: string) => invoke<Run>("orchestration_take_over", { id, piece }),
+  /** Check what the lead committed for a piece it took over; done once its checks pass there. */
+  finish: (id: string, piece: string) => invoke<Run>("orchestration_finish", { id, piece }),
+  /** Give a blocked piece more files (its report's outside files when `own` is empty) and a fresh worker. */
+  widen: (id: string, piece: string, own: string[] = []) => invoke<Run>("orchestration_widen", { id, piece, own }),
+  /** Send a blocked piece's worker a note: its try opens again. */
+  note: (id: string, piece: string, text: string) => invoke<Run>("orchestration_note", { id, piece, text }),
+  /** Leave a blocked piece out, with the pieces that depend on it and have not started. */
+  skip: (id: string, piece: string) => invoke<Run>("orchestration_skip", { id, piece }),
   /** One run's worker limit and budget, set by the person (PRO-280). */
   setLimits: (id: string, limits: RunLimits) => invoke<Run>("orchestration_set_limits", { id, limits }),
   /** Let a run that reached its budget go on: now, or once the window that stopped it resets. */

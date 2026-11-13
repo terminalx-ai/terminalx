@@ -1660,6 +1660,46 @@ pub async fn pairing_revoke(
     state.pairing.revoke_device(&device_id).await.map_err(err)
 }
 
+/// The person approved the phone waiting with `request_id` (PRO-314).
+#[tauri::command]
+pub async fn pairing_approve(
+    request_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.approve_pairing(&request_id)).await.map_err(err)?.map_err(err)
+}
+
+/// Off the main thread: declining removes the device token from the Keychain.
+#[tauri::command]
+pub async fn pairing_decline(
+    request_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.decline_pairing(&request_id)).await.map_err(err)?.map_err(err)
+}
+
+/// End a phone's connections and keep its pairing.
+#[tauri::command]
+pub async fn pairing_disconnect(
+    device_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.disconnect_device(&device_id)).await.map_err(err)?.map_err(err)
+}
+
+/// Keep this Mac awake while a phone is connected.
+#[tauri::command]
+pub async fn pairing_set_keep_awake(
+    enabled: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::pairing::PairingStatus> {
+    let pairing = state.pairing.clone();
+    tauri::async_runtime::spawn_blocking(move || pairing.set_keep_awake(enabled)).await.map_err(err)?.map_err(err)
+}
+
 /// This Mac's name as the user's other devices show it (#686).
 #[tauri::command]
 pub async fn machine_name(state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::pairing::MachineName> {
@@ -3080,7 +3120,14 @@ pub async fn branch_step_action(state: State<'_, AppState>, session_id: String, 
 
 #[tauri::command]
 pub async fn git_commit(cwd: String, message: String, paths: Option<Vec<String>>) -> CmdResult<String> {
-    tauri::async_runtime::spawn_blocking(move || git::commit_all(Path::new(&cwd), &message, paths.as_deref()).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || {
+        if paths.as_deref().is_some_and(|paths| !paths.is_empty()) {
+            git::commit_all(Path::new(&cwd), &message, paths.as_deref())
+        } else {
+            git::commit_staged_or_all(Path::new(&cwd), &message)
+        }
+        .map_err(err)
+    }).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -3169,6 +3216,116 @@ pub async fn working_changes(cwd: String, hide_whitespace: Option<bool>) -> CmdR
 }
 
 #[tauri::command]
+pub async fn working_change_sets(
+    cwd: String,
+    hide_whitespace: Option<bool>,
+) -> CmdResult<(String, String, Vec<git::ChangedFile>, Vec<git::ChangedFile>)> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::working_change_sets(Path::new(&cwd), hide_whitespace.unwrap_or(false)).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_stage_paths(cwd: String, paths: Vec<String>) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::stage_paths(Path::new(&cwd), &paths).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_unstage_paths(cwd: String, paths: Vec<String>) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::unstage_paths(Path::new(&cwd), &paths).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_unstage_all(cwd: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || git::unstage_all(Path::new(&cwd)).map_err(err))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_apply_hunk(
+    cwd: String,
+    path: String,
+    old_path: Option<String>,
+    index: usize,
+    reverse: bool,
+) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::apply_hunk(Path::new(&cwd), &path, old_path.as_deref(), index, reverse).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn git_hunk_count(
+    cwd: String,
+    path: String,
+    old_path: Option<String>,
+    staged: bool,
+) -> CmdResult<usize> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::hunk_count(Path::new(&cwd), &path, old_path.as_deref(), staged).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn generate_commit_message(cwd: String, agent: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<String> {
+        if !matches!(agent.as_str(), "claude" | "codex") {
+            return Err("Choose Claude Code or Codex.".to_string());
+        }
+        let p = Path::new(&cwd);
+        let diff = git::staged_diff(p, 48 * 1024).map_err(err)?;
+        let prompt = format!("Write one concise conventional commit subject for these staged changes. Return only the subject, with no quotes or markdown.\n\n{diff}");
+        let mut command = std::process::Command::new(crate::binpath::resolve(&agent).unwrap_or_else(|| std::path::PathBuf::from(&agent)));
+        // Keep repository instructions and hooks out of this one-shot request;
+        // the only repository content provided to the model is the staged diff.
+        command.env("PATH", crate::binpath::login_path()).current_dir(std::env::temp_dir());
+        if agent == "claude" {
+            command.args(["-p", "--model", "haiku", "--output-format", "text", "--safe-mode", "--tools", ""]).arg(prompt);
+        } else {
+            command.args(["exec", "--model", "gpt-5-mini", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config"]).arg(prompt);
+        }
+        let output = crate::git::output_within(command, std::time::Duration::from_secs(90))
+            .map_err(|error| match error {
+                crate::git::RunError::TimedOut => format!("{label} took too long. Try again.", label = if agent == "claude" { "Claude Code" } else { "Codex" }),
+                crate::git::RunError::Failed(message) if is_agent_sign_in_error(&message) => format!("{} is signed out. Sign in to the agent, then try again.", if agent == "claude" { "Claude Code" } else { "Codex" }),
+                crate::git::RunError::Failed(message) => format!("{} could not generate a commit message: {message}", if agent == "claude" { "Claude Code" } else { "Codex" }),
+                _ => format!("{} could not start. Check that its CLI is installed.", if agent == "claude" { "Claude Code" } else { "Codex" }),
+            })?;
+        let subject = output.lines().map(str::trim).find(|line| !line.is_empty()).ok_or_else(|| "The agent returned an empty commit message.".to_string())?;
+        Ok(subject.trim_matches(['`', '"', '\'']).to_string())
+    }).await.map_err(err)?
+}
+
+fn is_agent_sign_in_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "not logged in",
+        "sign in",
+        "log in",
+        "unauthorized",
+        "authentication required",
+        "api key",
+    ]
+    .iter()
+    .any(|part| message.contains(part))
+}
+
+#[tauri::command]
 pub async fn pr_associations(session_key: String, additions: Vec<crate::pr_associations::Association>) -> CmdResult<Vec<crate::pr_associations::Association>> {
     tauri::async_runtime::spawn_blocking(move || crate::pr_associations::for_session(&session_key, additions).map_err(err)).await.map_err(err)?
 }
@@ -3181,6 +3338,40 @@ pub async fn pr_search(cwd: String, query: String) -> CmdResult<Vec<crate::githu
 #[tauri::command]
 pub async fn pr_attach(cwd: String, number: u64) -> CmdResult<String> {
     github_work(move || crate::github::attach_pr(Path::new(&cwd), number).map_err(err)).await.map_err(err)?
+}
+
+/// "Link pull request…" (PRO-294): the repository's open pull requests, and
+/// which of them this session or another one already shows.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrLinkCandidates {
+    #[serde(flatten)]
+    open: crate::github::OpenPrs,
+    /// Canonical URLs this session already shows (opened here or linked).
+    here: Vec<String>,
+    /// Canonical URLs another existing session shows.
+    elsewhere: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn pr_link_candidates(cwd: String, session_key: String) -> CmdResult<PrLinkCandidates> {
+    let open = github_work(move || crate::github::open_prs(Path::new(&cwd)).map_err(err)).await.map_err(err)??;
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<PrLinkCandidates> {
+        let urls: Vec<String> = open.prs.iter().map(|row| row.pr.url.clone()).collect();
+        let here = crate::pr_associations::for_session(&session_key, vec![])?.into_iter().map(|row| row.url).collect();
+        let elsewhere = crate::pr_associations::linked_elsewhere(&session_key, &urls)?.into_keys().collect();
+        Ok(PrLinkCandidates { open, here, elsewhere })
+    }).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn pr_link(session_key: String, association: crate::pr_associations::Association) -> CmdResult<Vec<crate::pr_associations::Association>> {
+    tauri::async_runtime::spawn_blocking(move || crate::pr_associations::link(&session_key, association).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_unlink(session_key: String, url: String) -> CmdResult<Vec<crate::pr_associations::Association>> {
+    tauri::async_runtime::spawn_blocking(move || crate::pr_associations::unlink(&session_key, &url).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -4037,6 +4228,13 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    #[test]
+    fn commit_message_generation_recognizes_signed_out_agents() {
+        assert!(super::is_agent_sign_in_error("Not logged in. Please run /login."));
+        assert!(super::is_agent_sign_in_error("Authentication required: invalid API key"));
+        assert!(!super::is_agent_sign_in_error("The model is temporarily unavailable."));
+    }
+
     #[test]
     fn revealing_configuration_never_grants_consent() {
         use tauri_plugin_dialog::MessageDialogResult;
@@ -5226,6 +5424,41 @@ pub async fn orchestration_send_back(app: AppHandle, id: String, piece: String) 
 pub async fn orchestration_resolve_in_lead(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.orchestration("resolveInLead", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
+/// Have the lead take over a blocked piece and finish it in its own checkout (PRO-361).
+#[tauri::command]
+pub async fn orchestration_take_over(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("takeOver", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
+/// Check what the lead committed for a piece it took over, and make it done when its checks pass.
+#[tauri::command]
+pub async fn orchestration_finish(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finish", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+}
+
+/// Widen a blocked piece's files (the ones its last report names outside them, when `own` is empty) and try it again.
+#[tauri::command]
+pub async fn orchestration_widen(app: AppHandle, id: String, piece: String, own: Option<Vec<String>>) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("widen", serde_json::json!({"id": id, "piece": piece, "own": own.unwrap_or_default()})).map_err(err)).await.map_err(err)?
+}
+
+/// Send a blocked piece's worker a note: its try opens again.
+#[tauri::command]
+pub async fn orchestration_note(app: AppHandle, id: String, piece: String, text: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("note", serde_json::json!({"id": id, "piece": piece, "text": text})).map_err(err)).await.map_err(err)?
+}
+
+/// Leave a blocked piece out of its run, with the pieces that depend on it and have not started.
+#[tauri::command]
+pub async fn orchestration_skip(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("skip", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
 }
 
 /// Replace the plan of a run that has not started: what Edit saves.

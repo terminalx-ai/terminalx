@@ -300,6 +300,19 @@ pub enum PieceState {
     Failed,
     /// The run was stopped while it was not done.
     Stopped,
+    /// A person left it out (`engine::skip`): no worker works on it again, it is
+    /// not merged, and the run is done without it.
+    Skipped,
+    /// The lead took it over (`engine::take_over`): it finishes the piece in its
+    /// own checkout, and `engine::finish` checks that and makes it done.
+    Lead,
+}
+
+impl PieceState {
+    /// Nothing more comes of it in this run: done, or left out on purpose.
+    pub fn settled(self) -> bool {
+        matches!(self, Self::Done | Self::Skipped)
+    }
 }
 
 /// One conversation: a session and the tab in it that does the work.
@@ -423,6 +436,79 @@ impl Outcome {
     }
 }
 
+/// What a worker's report said beyond its status and result line
+/// (`worker_report::Report`): kept with its try, so the Run view and
+/// `runs show` read it without the transcript.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TryReport {
+    pub result: String,
+    /// Commands run with their exit codes, or `file:line` for a claim.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    /// What it says it changed. Absent from a report that changed nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed: Option<ReportedChange>,
+    /// What was skipped, and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_done: Vec<String>,
+    /// Sources that could not be read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub could_not_read: Vec<String>,
+    /// Claims made without direct evidence.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub uncertain: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ReportedChange {
+    pub files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+impl TryReport {
+    /// The report as `worker_report::of_tab` returns it.
+    pub fn of_row(row: &serde_json::Value) -> Self {
+        serde_json::from_value(row.clone()).unwrap_or_default()
+    }
+
+    /// The paths it names: what it changed, and the `file:line` and quoted
+    /// paths in its words. What tells a blocked piece's fix is outside its files.
+    pub fn paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.changed.iter().flat_map(|changed| changed.files.iter().cloned()).collect();
+        let texts = std::iter::once(&self.result).chain(&self.evidence).chain(&self.not_done).chain(&self.uncertain);
+        for text in texts {
+            for path in named_paths(text) {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        paths
+    }
+}
+
+/// The repository paths a line of a report names: a word with a `/` and a
+/// file name with an extension, as `src/a.rs`, `src/a.rs:42` or `` `src/a.rs` ``.
+/// A URL, an absolute path and anything with `..` in it are not.
+pub fn named_paths(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for word in text.split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';')) {
+        let word = word.split(':').next().unwrap_or_default().trim_end_matches(['.', ',']);
+        let name = word.rsplit('/').next().unwrap_or_default();
+        let readable = word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'));
+        let has_extension = name.rsplit_once('.').is_some_and(|(stem, extension)| !stem.is_empty() && !extension.is_empty() && extension.chars().all(|c| c.is_ascii_alphanumeric()));
+        if readable && word.contains('/') && has_extension && !word.starts_with('/') && !word.contains("..") && !word.contains("//") && !found.iter().any(|seen| seen == word) {
+            found.push(word.to_string());
+        }
+    }
+    found
+}
+
 /// One try at a piece: the worker it ran in, on what, at what cost, to what end.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -459,6 +545,17 @@ pub struct Try {
     /// tokens when a model read it. Absent before its worker reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<verify::Verification>,
+    /// What its worker reported, in full. Absent before it reported, and for
+    /// a try that ended without a report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<TryReport>,
+    /// The output tokens its worker's session used, as of the last read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// A try the lead took over: the commit its branch was at then, which its
+    /// work is counted from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -468,7 +565,7 @@ pub struct Try {
 impl Try {
     /// A try that has no worker yet.
     pub fn planned(step: ladder::Step, model: &str, effort: Option<&str>, tier: Option<routing::Tier>) -> Self {
-        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, outcome: None, detail: None, cost_usd: None, cost_unpriced_models: Vec::new(), verification: None, started: None, ended: None }
+        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, outcome: None, detail: None, cost_usd: None, cost_unpriced_models: Vec::new(), verification: None, report: None, output_tokens: None, from_commit: None, started: None, ended: None }
     }
 }
 
@@ -603,6 +700,36 @@ impl Piece {
         self.current_merge().is_some_and(PieceMerge::is_in)
     }
 
+    /// Nothing of it is left to merge: merged, or skipped by a person.
+    pub fn merge_settled(&self) -> bool {
+        self.state == PieceState::Skipped || self.merged()
+    }
+
+    /// The files its last report or its last check names that it does not
+    /// own, each with the piece that owns it when one does: where a blocked
+    /// piece's fix lies outside its scope, and what widening it would add.
+    pub fn outside(&self, run: &Run) -> Vec<Outside> {
+        let mut paths: Vec<String> = Vec::new();
+        for attempt in self.tries.iter().rev().take(1) {
+            let scope = attempt.verification.iter().flat_map(|check| &check.gates).filter(|gate| gate.gate == verify::Gate::Scope && !gate.passed);
+            for line in scope.flat_map(|gate| gate.detail.as_deref().unwrap_or_default().lines()) {
+                if let Some(path) = line.strip_prefix("- ") {
+                    paths.push(path.trim().to_string());
+                }
+            }
+            paths.extend(attempt.report.iter().flat_map(TryReport::paths));
+        }
+        let mut outside: Vec<Outside> = Vec::new();
+        for path in paths {
+            if plan::owns(&self.owns, &path) || outside.iter().any(|seen| seen.path == path) {
+                continue;
+            }
+            let owner = run.pieces.iter().find(|other| other.id != self.id && plan::owns(&other.owns, &path)).map(|other| other.id.clone());
+            outside.push(Outside { path, owner });
+        }
+        outside
+    }
+
     /// What came of merging the result it is accepted with now. `None` for a
     /// piece that is not done, and for a record about another commit: a
     /// piece accepted again since is not what was merged, or what conflicted.
@@ -622,6 +749,16 @@ impl Piece {
         }
         ((!known.is_empty()).then(|| known.iter().sum()), unpriced)
     }
+}
+
+/// A file a piece's last report or check names that the piece does not own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Outside {
+    pub path: String,
+    /// The piece that owns it, when one does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// What keeps a piece the lead asked for from starting.
