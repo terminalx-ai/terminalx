@@ -37,7 +37,8 @@ import { UpdateNotice } from "./UpdateNotice";
 import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
 import { archiveSession, getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
-import { agent, type ImageInput } from "@/lib/api";
+import type { FileInput, ImageInput } from "@/lib/api";
+import { sendFirstMessage } from "@/lib/sessionBackend";
 import { loadModels, onAgentSettingsRequest } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
@@ -163,9 +164,9 @@ export function AppShell() {
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
-  const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[]) => {
-    void agent
-      .send(sessionId, tabId, text, images)
+  const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]) => {
+    // Files attached on the new-session screen are stored now that the session exists (PRO-290).
+    void sendFirstMessage(sessionId, tabId, text, images, files)
       .then((out) => out.events.forEach(applyEvent))
       .catch((e) => console.error("first send failed", e));
   }, []);

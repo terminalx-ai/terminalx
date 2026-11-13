@@ -32,10 +32,10 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 async function source() {
-  const { useImageAttachments } = await import("@/components/chat/useImageAttachments");
+  const { useAttachments } = await import("@/components/chat/useImageAttachments");
   const { openChatWindowInMain } = await import("./chatWindowHandoff");
   const { setDraft } = await import("./drafts");
-  const hook = renderHook(() => useImageAttachments({ textareaRef: useRef(null), draft: "", onDraftChange: vi.fn() }));
+  const hook = renderHook(() => useAttachments({ textareaRef: useRef(null), draft: "", onDraftChange: vi.fn() }));
   const file = new File(["an image"], "shot.png", { type: "image/png" });
   return { hook, file, openChatWindowInMain, setDraft };
 }
@@ -59,8 +59,11 @@ it.each([false, true])("keeps unsent images in their source window (with text: %
 it("keeps the source while a native image read is pending", async () => {
   const { hook, openChatWindowInMain } = await source();
   let finish!: (image: { name: string; mediaType: string; data: string }) => void;
-  mocks.invoke.mockImplementation((command) => command === "read_image_file"
-    ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve());
+  mocks.invoke.mockImplementation((command, args) => command === "read_image_file"
+    ? new Promise((resolve) => { finish = resolve; })
+    : command === "inspect_attachments"
+      ? Promise.resolve(args.paths.map((path: string) => ({ path, name: "shot.png", size: 3, mediaType: "image/png" })))
+      : Promise.resolve());
   let picking!: Promise<void>;
   await act(async () => { picking = hook.result.current.chooseFiles(); });
   await openChatWindowInMain("session", "tab");

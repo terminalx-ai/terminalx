@@ -78,10 +78,11 @@ beforeEach(() => {
   dragDropListener.mockReset();
   dragDropListener.mockResolvedValue(vi.fn());
   invoke.mockReset();
-  invoke.mockImplementation(async (cmd: string) => {
+  invoke.mockImplementation(async (cmd: string, args: { paths: string[] }) => {
     if (cmd === "check_agent_readiness") return { state: "ready", checkedAt: null, version: null };
     if (cmd === "work_status") return { branch: "main", defaultBranch: "main" };
     if (cmd === "create_session") return created;
+    if (cmd === "inspect_attachments") return inspected(args.paths);
     if (cmd === "read_image_file") return { name: "shot.png", mediaType: "image/png", data: "AQID" };
     throw new Error(`unexpected command ${cmd}`);
   });
@@ -108,6 +109,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** What the runtime finds at picked or dropped paths: a small PNG, unless the name says otherwise. */
+function inspected(paths: string[]) {
+  return paths.map((path) => {
+    const name = path.split("/").pop()!;
+    return { path, name, size: 3, mediaType: name.endsWith(".png") ? "image/png" : "text/plain" };
+  });
+}
+
 function renderView(onCreated = vi.fn()) {
   const utils = render(<NewSessionView onCreated={onCreated} useWorktree={false} onUseWorktreeChange={vi.fn()} />);
   return { ...utils, onCreated };
@@ -116,25 +125,26 @@ function renderView(onCreated = vi.fn()) {
 describe("new session attachments", () => {
   it("retains the draft and attachment when fresh login preflight refuses creation, then sends once after login", async () => {
     let signedIn = true;
-    invoke.mockImplementation(async (cmd: string) => {
+    invoke.mockImplementation(async (cmd: string, args: { paths: string[] }) => {
       if (cmd === "check_agent_readiness") return { state: signedIn ? "ready" : "signed_out", checkedAt: "2026-10-26T14:00:00Z", version: "1.0.0" };
       if (cmd === "work_status") return { branch: "main", defaultBranch: "main" };
       if (cmd === "create_session") return created;
-      if (cmd === "read_image_file") return { name: "shot.png", mediaType: "image/png", data: "AQID" };
+      if (cmd === "inspect_attachments") return inspected(args.paths);
+    if (cmd === "read_image_file") return { name: "shot.png", mediaType: "image/png", data: "AQID" };
       throw new Error(`unexpected command ${cmd}`);
     });
     openDialog.mockResolvedValue(["/tmp/shot.png"]);
     const { onCreated } = renderView();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this task" } });
     fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
-    await screen.findByAltText("shot.png");
+    await screen.findByTitle("shot.png");
     const start = screen.getByRole("button", { name: "Create" });
     await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
     signedIn = false;
     fireEvent.click(start);
     await screen.findByText(/Your draft is kept and no session has been created/);
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this task");
-    expect(screen.getByAltText("shot.png")).toBeTruthy();
+    expect(screen.getByTitle("shot.png")).toBeTruthy();
     expect(invoke.mock.calls.filter(([cmd]) => cmd === "create_session")).toHaveLength(0);
     expect(onCreated).not.toHaveBeenCalled();
     signedIn = true;
@@ -167,7 +177,7 @@ describe("new session attachments", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
 
-    expect(await screen.findByAltText("shot.png")).toBeTruthy();
+    expect(await screen.findByTitle("shot.png")).toBeTruthy();
     expect(invoke).toHaveBeenCalledWith("read_image_file", { path: "/tmp/shot.png" });
     await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
 
@@ -175,7 +185,27 @@ describe("new session attachments", () => {
 
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", "", [{ mediaType: "image/png", data: "AQID", name: "shot.png" }]));
     expect(invoke).toHaveBeenCalledWith("create_session", expect.objectContaining({ req: expect.objectContaining({ projectPath: project.path, title: "" }) }));
-    expect(screen.queryByAltText("shot.png")).toBeNull();
+    expect(screen.queryByTitle("shot.png")).toBeNull();
+  });
+
+  it("hands a picked file that is not an image to onCreated, to be stored once the session exists (PRO-290)", async () => {
+    openDialog.mockResolvedValue(["/tmp/notes.md", "/tmp/shot.png"]);
+    const { onCreated } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    expect(await screen.findByTitle("notes.md")).toBeTruthy();
+    expect(await screen.findByTitle("shot.png")).toBeTruthy();
+    expect(screen.getByTestId("attachment-summary").textContent).toBe("2 attached");
+    const start = screen.getByRole("button", { name: "Create" });
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(start);
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      "session-1", "tab-1", "",
+      [{ mediaType: "image/png", data: "AQID", name: "shot.png" }],
+      [{ name: "notes.md", path: "/tmp/notes.md" }],
+    ));
+    // Nothing is stored before the session exists: the shell stores them on its first send.
+    expect(invoke.mock.calls.some(([cmd]) => cmd === "store_attachments")).toBe(false);
+    expect(screen.queryByTitle("notes.md")).toBeNull();
   });
 
   it("attaches a pasted image", async () => {
@@ -185,7 +215,7 @@ describe("new session attachments", () => {
 
     fireEvent.paste(frame, { clipboardData: { files: [image] } });
 
-    expect(await screen.findByAltText("paste.png")).toBeTruthy();
+    expect(await screen.findByTitle("paste.png")).toBeTruthy();
   });
 
   it("shows the drop target and attaches a file dropped on the window", async () => {
@@ -194,11 +224,11 @@ describe("new session attachments", () => {
     const onDrag = dragDropListener.mock.calls[0][0] as (e: { payload: { type: string; paths?: string[] } }) => Promise<void>;
 
     await onDrag({ payload: { type: "enter" } });
-    expect(await screen.findByText("Drop images to attach, other files to mention")).toBeTruthy();
+    expect(await screen.findByText("Drop files to attach")).toBeTruthy();
 
     await onDrag({ payload: { type: "drop", paths: ["/tmp/shot.png"] } });
-    expect(await screen.findByAltText("shot.png")).toBeTruthy();
-    await waitFor(() => expect(screen.queryByText("Drop images to attach, other files to mention")).toBeNull());
+    expect(await screen.findByTitle("shot.png")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("Drop files to attach")).toBeNull());
   });
 });
 

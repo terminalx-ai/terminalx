@@ -30,12 +30,13 @@ import { usePickerModels } from "@/lib/cloudModels";
 import { ModelPickerEmpty } from "@/components/chat/ModelPickerEmpty";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { chooseMode } from "@/lib/dialogs";
-import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
+import { files as filesApi, type FileHit, type FileInput, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { DictationStatus, MicButton, useDictationInto, useDictationShortcuts } from "./Dictation";
 import { TranscriptionInputSubmenu } from "./TranscriptionInputPicker";
 import { PickerMenu, type PickerItem } from "./PickerMenu";
-import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
+import { AttachButton, DropHint, useAttachments } from "./useImageAttachments";
+import { AttachmentChips } from "./ComposerAttachments";
 import { beginComposerSend, finishComposerSend, returnToDraft, useComposerSend, withReturned } from "@/lib/composerSends";
 import { useComposerHistory } from "./useComposerHistory";
 import { usePrMention } from "./usePrMention";
@@ -105,7 +106,8 @@ const SIGN_INS: Record<string, string> = { codex: "ChatGPT" };
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
  * While a turn runs the send button becomes Stop and a new prompt queues.
  * `/` at the start opens the command list; `@` anywhere opens the file list.
- * Images attach as blocks; any other dropped file becomes an `@path` mention.
+ * Any file attaches as a chip, up to 10 a message (PRO-290): images go as
+ * image blocks, other files are stored with the session and sent by reference.
  * Up and Down recall the tab's earlier and later messages, as a shell does.
  */
 
@@ -163,7 +165,8 @@ export function Composer({
   setupRunning?: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
-  onSend: (text: string, images: ImageInput[], alternate?: boolean) => Promise<void> | void;
+  /** `files`: what is attached besides images (PRO-290), passed only when there are any; the caller stores them with the session. */
+  onSend: (text: string, images: ImageInput[], alternate?: boolean, files?: FileInput[]) => Promise<void> | void;
   followUps?: "now" | "hold";
   /** The tab's newest event, read as Send is pressed: the sent message's own event comes after it (#727). */
   sentAfter?: () => number;
@@ -251,8 +254,9 @@ export function Composer({
   const textProps = usePromptTextProps();
   // A file dropped from this computer can be mentioned only to an agent that runs here.
   const mentionDropped = !remote;
-  const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped });
-  const { attachments } = attach;
+  const attach = useAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped });
+  // Refused chips stay above the draft but are never sent, and alone do not make a message.
+  const sendable = useMemo(() => attach.attachments.filter((a) => !a.refused), [attach.attachments]);
 
   // Grow with content, up to ~10 lines. Tabs that are not selected stay
   // mounted under display: none, where scrollHeight reads 0; a measurement
@@ -438,9 +442,10 @@ export function Composer({
   const [reviewReceiptError, setReviewReceiptError] = useState<{ message: string; retry: () => Promise<void> } | null>(null);
   const send = useCallback(async (alternate = false) => {
     const text = draft.trim();
-    if ((!text && !attachments.length) || disabled || prMention.attaching) return;
-    const previews = attachments.map((a) => ({ url: a.previewUrl, name: a.name }));
-    const operation = beginComposerSend(sendScope, { text, images: previews, pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
+    if ((!text && !sendable.length) || disabled || prMention.attaching) return;
+    const previews = sendable.flatMap((a) => (a.image && a.previewUrl ? [{ url: a.previewUrl, name: a.name }] : []));
+    const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name }] : []));
+    const operation = beginComposerSend(sendScope, { text, images: previews, ...(fileNames.length ? { files: fileNames } : {}), pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
     if (!operation) return;
     // The message goes to the chat at once, drawn as sending, and the composer
     // is free for the next one (#727): what was set aside to send a recalled
@@ -453,7 +458,9 @@ export function Composer({
     const images = attach.setAside();
     ref.current?.focus({ preventScroll: true });
     try {
-      if (alternate) await onSend(text, images.images, true);
+      // Files go with their own argument; a message without any is sent exactly as before.
+      if (images.files.length) await onSend(text, images.images, alternate, images.files);
+      else if (alternate) await onSend(text, images.images, true);
       else await onSend(text, images.images);
     } catch (error) {
       // Back in the composer; into the tab's saved draft once this one has gone.
@@ -474,7 +481,7 @@ export function Composer({
     // Learning belongs to this accepted send even if a newer draft is visible.
     learnOnSuccess();
     finishComposerSend(sendScope, operation);
-  }, [draft, attachments, attach, disabled, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
+  }, [draft, sendable, attach, disabled, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
@@ -589,7 +596,7 @@ export function Composer({
             ))}
           </div>
         )}
-        <AttachmentThumbs attach={attach} />
+        <AttachmentChips attach={attach} />
         {attach.notice && (
           <div className="mb-1 px-1.5 text-xs text-warning" role="status" data-testid="attach-notice">
             {attach.notice}
@@ -721,7 +728,7 @@ export function Composer({
               onCompact={() => onSend("/compact", [])} />
             {/* One button: Stop while the agent works and nothing is typed, Send (a queued message while it works) once something is. Stop's shortcut works either way. */}
             {/* What is on its way is drawn in the chat, as sending (#727); the button waits for it. */}
-            {!sending && busy && canStop && !draft.trim() && !attachments.length ? (
+            {!sending && busy && canStop && !draft.trim() && !sendable.length ? (
               <WithTooltip label={stopMode === "force" ? "Stop session" : "Stop"} keys={keysOf(stopMode === "interrupt" ? "session.interrupt" : "session.stop")}>
                 <Button
                   size="icon-sm"
@@ -738,10 +745,10 @@ export function Composer({
                 <Button
                   size="icon-sm"
                   className={CORNER}
-                  variant={draft.trim() || attachments.length ? "accent" : "secondary"}
+                  variant={draft.trim() || sendable.length ? "accent" : "secondary"}
                   aria-label={sending ? "Sending" : "Send"}
                   aria-busy={sending}
-                  disabled={disabled || sending || prMention.attaching || (!draft.trim() && !attachments.length)}
+                  disabled={disabled || sending || prMention.attaching || (!draft.trim() && !sendable.length)}
                   onClick={() => void send()}
                 >
                   <ArrowUp />

@@ -3,7 +3,7 @@ import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQueue";
 import { usePrefs } from "@/lib/prefs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { agent as agentApi, errorMessage, pty, type ImageInput } from "@/lib/api";
+import { agent as agentApi, errorMessage, pty, type FileInput, type ImageInput } from "@/lib/api";
 import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from "@/lib/agentEvents";
 import type { Transcript } from "@/lib/transcript";
 import { useConversationView } from "@/lib/conversationView";
@@ -337,7 +337,7 @@ export function TabView({
     if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
   }, [backend, tab.id]);
   const send = useCallback(
-    async (text: string, images: ImageInput[], alternate = false) => {
+    async (text: string, images: ImageInput[], alternate = false, files?: FileInput[]) => {
       // A viewer, or someone else holds this tab's lease (PRO-30): nothing is queued.
       if (blockedRef.current) throw new Error(blockedRef.current);
       setError(null);
@@ -350,11 +350,12 @@ export function TabView({
       const pressedAt = Date.now();
       let drawnAt: number | undefined;
       afterPaint(() => { drawnAt = Date.now(); });
-      const route = followUpRoute(followUps, alternate);
+      // A message with files (PRO-290) goes at once: the held queue keeps text and images only.
+      const route = files?.length ? "now" : followUpRoute(followUps, alternate);
       try {
         const out = backend.changeHeldQueue && route !== "now"
           ? await backend.changeHeldQueue(tab.id, { type: "enqueue", text, images, sendNow: route === "interrupt" })
-          : await (local ? backend.send(tab.id, text, images, { pressedAt }) : backend.send(tab.id, text, images));
+          : await (files?.length ? backend.send(tab.id, text, images, { pressedAt, files }) : local ? backend.send(tab.id, text, images, { pressedAt }) : backend.send(tab.id, text, images));
         const answeredAt = Date.now();
         for (const ev of out.events) applyEvent(ev);
         if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
