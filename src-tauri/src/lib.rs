@@ -159,7 +159,9 @@ pub fn run_pty_supervisor() -> Option<i32> { pty::supervisor::dispatch() }
 /// The same, from an executable's `.preinit_array`, before any thread can
 /// exist. Every Linux executable that opens terminals lists it there.
 #[cfg(target_os = "linux")]
-pub extern "C" fn pty_supervisor_preinit() { pty::supervisor::dispatch_before_main() }
+pub extern "C" fn pty_supervisor_preinit(argc: libc::c_int, argv: *const *const libc::c_char, envp: *const *const libc::c_char) {
+    pty::supervisor::dispatch_before_main(argc, argv, envp)
+}
 #[cfg(feature = "desktop")]
 mod quit;
 #[cfg(feature = "desktop")]

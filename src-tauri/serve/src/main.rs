@@ -5,7 +5,12 @@
 #[cfg(target_os = "linux")]
 #[used]
 #[link_section = ".preinit_array"]
-static PTY_SUPERVISOR: extern "C" fn() = raccoon_lib::pty_supervisor_preinit;
+static PTY_SUPERVISOR: extern "C" fn(i32, *const *const u8, *const *const u8) = {
+    extern "C" fn preinit(argc: i32, argv: *const *const u8, envp: *const *const u8) {
+        raccoon_lib::pty_supervisor_preinit(argc, argv.cast(), envp.cast())
+    }
+    preinit
+};
 
 fn main() {
     if let Some(code) = raccoon_lib::run_git_transport_cli() { std::process::exit(code); }

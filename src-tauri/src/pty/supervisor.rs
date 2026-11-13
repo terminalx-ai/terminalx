@@ -38,10 +38,16 @@ fn helper_executable() -> io::Result<PathBuf> {
 /// itself: a shared object cannot have that array, and this crate is also
 /// built as one. [`dispatch`], at the top of both mains, still dispatches
 /// should it not have run.
-pub(crate) extern "C" fn dispatch_before_main() {
+pub(crate) extern "C" fn dispatch_before_main(_argc: libc::c_int, _argv: *const *const libc::c_char, envp: *const *const libc::c_char) {
     let Ok(cmdline) = std::fs::read("/proc/self/cmdline") else { return };
     let mut args = cmdline.split(|byte| *byte == 0).skip(1);
     if args.next() != Some(protocol::HELPER.as_bytes()) { return; }
+    // The loader passes the environment to this array's functions; libc
+    // has not published it yet, and `getenv` reads only what it publishes.
+    extern "C" { static mut environ: *const *const libc::c_char; }
+    // SAFETY: single threaded, before libc's own initialisation, which sets
+    // the same pointer the loader handed here.
+    unsafe { if environ.is_null() { environ = envp; } }
     let launch = args.next().and_then(|arg| std::str::from_utf8(arg).ok()).and_then(|arg| Uuid::parse_str(arg).ok());
     let rest = args.filter(|arg| !arg.is_empty()).count();
     let code = match (launch, rest) { (Some(launch), 0) => linux::run(launch), _ => 119 };
@@ -54,7 +60,11 @@ pub(crate) extern "C" fn dispatch_before_main() {
 #[cfg(test)]
 #[used]
 #[link_section = ".preinit_array"]
-static TEST_DISPATCH: extern "C" fn() = dispatch_before_main;
+static TEST_DISPATCH: PreInit = dispatch_before_main;
+
+/// What the loader calls an executable's pre-initialisation functions with.
+#[cfg(test)]
+type PreInit = extern "C" fn(libc::c_int, *const *const libc::c_char, *const *const libc::c_char);
 
 /// portable-pty's public environment iterator converts to UTF-8 and drops raw
 /// Unix names/values. Keep a single complete OsString snapshot instead. The
