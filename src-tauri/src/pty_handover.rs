@@ -100,8 +100,7 @@ impl Hold {
 
 /// How a pane's program is waited for.
 pub(super) enum Waiter {
-    /// Opened by this runtime.
-    #[cfg(not(target_os = "linux"))]
+    /// Opened by this runtime (on Linux, only without a supervisor).
     Spawned(Box<dyn portable_pty::Child + Send + Sync>),
     /// Opened by the runtime this one replaced in the same process, whose
     /// child it still is (#765).
@@ -126,7 +125,6 @@ impl Waiter {
         #[cfg(not(unix))]
         let _ = (pid, hold);
         match self {
-            #[cfg(not(target_os = "linux"))]
             Self::Spawned(child) => child.wait().ok().map(|status| status.exit_code() as i32),
             #[cfg(unix)]
             Self::Adopted => pid.and_then(reap),

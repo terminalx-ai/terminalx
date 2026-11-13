@@ -16,6 +16,8 @@ const WALL: i32 = 0x4000_0000;
 /// wait then found nothing left: it never exits so otherwise. Reaped from
 /// the exact helper, it settles the launch the runtime had lost (#467).
 pub(super) const EMPTY_AFTER_LOSS: i32 = 124;
+/// How a preflight failure's stage begins; the missing facility follows.
+pub(super) const PREFLIGHT: &str = "preflight: ";
 const MAX_CHILDREN: usize = 4096;
 const MAX_CHILD_BYTES: u64 = 64 * 1024;
 
@@ -121,46 +123,60 @@ pub(super) fn signal_children(signal: i32) -> io::Result<()> {
 
 /// Call in the freshly exec'd, dedicated, single-thread helper before any
 /// owned fork. Unsupported kernel/seccomp/proc configurations fail pre-launch.
-pub(super) fn preflight() -> io::Result<()> {
+/// What preflight found missing: the facility, and how it failed.
+pub(super) struct Missing { pub feature: &'static str, pub error: io::Error }
+
+fn needs<T>(feature: &'static str, result: io::Result<T>) -> Result<T, Missing> {
+    result.map_err(|error| Missing { feature, error })
+}
+
+fn lacking(feature: &'static str, why: &str) -> Missing {
+    Missing { feature, error: io::Error::other(why.to_string()) }
+}
+
+pub(super) fn preflight() -> Result<(), Missing> {
+    #[cfg(test)]
+    if std::env::var("TX467_SUPERVISOR_FAULT").as_deref() == Ok("preflight-unsupported") {
+        return Err(Missing { feature: "pidfd_open", error: io::Error::from_raw_os_error(libc::ENOSYS) });
+    }
     if unsafe { libc::syscall(libc::SYS_gettid) } != unsafe { libc::getpid() } as libc::c_long {
-        return Err(io::Error::other("supervisor must run on its fresh main thread"));
+        return Err(lacking("a fresh main thread", "supervisor must run on its fresh main thread"));
     }
     #[cfg(test)]
     assert_single_thread("entry");
     // Nothing else may wait for children here, or run while this forks.
-    if std::fs::read_dir("/proc/self/task")?.count() != 1 {
-        return Err(io::Error::other("supervisor must be single threaded"));
+    if needs("/proc/self/task", std::fs::read_dir("/proc/self/task"))?.count() != 1 {
+        return Err(lacking("a single-threaded start", "supervisor must be single threaded"));
     }
     let mut own_stat = Vec::new();
-    File::open("/proc/self/stat")?.take(4097).read_to_end(&mut own_stat)?;
+    needs("/proc/self/stat", File::open("/proc/self/stat").and_then(|file| file.take(4097).read_to_end(&mut own_stat)))?;
     let own_pid = own_stat.split(|byte| byte.is_ascii_whitespace()).next()
         .and_then(|pid| std::str::from_utf8(pid).ok()).and_then(|pid| pid.parse::<libc::pid_t>().ok());
     if own_stat.len() > 4096 || own_pid != Some(unsafe { libc::getpid() }) {
-        return Err(io::Error::other("proc PID view does not match supervisor PID namespace"));
+        return Err(lacking("a /proc of this PID namespace", "proc PID view does not match supervisor PID namespace"));
     }
     // This range cannot contain an open descriptor. Check the actual close_range
     // operation used by the child, without touching a real descriptor.
-    syscall_result(unsafe { libc::syscall(libc::SYS_close_range, u32::MAX, u32::MAX, 0) })?;
-    let own = pidfd(unsafe { libc::getpid() })?;
-    signal_fd(own.as_raw_fd(), 0)?;
-    candidates()?;
+    needs("close_range", syscall_result(unsafe { libc::syscall(libc::SYS_close_range, u32::MAX, u32::MAX, 0) }))?;
+    let own = needs("pidfd_open", pidfd(unsafe { libc::getpid() }))?;
+    needs("pidfd_send_signal", signal_fd(own.as_raw_fd(), 0))?;
+    needs("/proc/<pid>/task/<tid>/children (CONFIG_PROC_CHILDREN)", candidates())?;
     let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
     let result = unsafe { libc::waitid(libc::P_ALL, 0, &mut info,
         libc::WEXITED | libc::WNOHANG | libc::WNOWAIT | WALL) };
     if result != -1 || io::Error::last_os_error().raw_os_error() != Some(libc::ECHILD) {
-        return Err(io::Error::other("helper must begin without children and support all-child waitid"));
+        return Err(lacking("an all-child waitid", "helper must begin without children and support all-child waitid"));
     }
-    if drain(|_, _| {})? != Children::Empty {
-        return Err(io::Error::other("helper already owns children"));
+    if needs("waitpid(__WALL)", drain(|_, _| {}))? != Children::Empty {
+        return Err(lacking("a childless start", "helper already owns children"));
     }
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } < 0 {
-        return Err(io::Error::last_os_error());
+        return Err(Missing { feature: "PR_SET_CHILD_SUBREAPER", error: io::Error::last_os_error() });
     }
     let mut enabled: libc::c_int = 0;
-    if unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut enabled, 0, 0, 0) } < 0 {
-        return Err(io::Error::last_os_error());
+    if unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut enabled, 0, 0, 0) } < 0 || enabled != 1 {
+        return Err(lacking("PR_SET_CHILD_SUBREAPER", "subreaper setup not retained"));
     }
-    if enabled != 1 { return Err(io::Error::other("subreaper setup not retained")); }
     Ok(())
 }
 
@@ -450,12 +466,14 @@ pub(super) fn run(launch: Uuid) -> i32 {
         }).unwrap());
         return 122; // Real helper exit, before Ready/config/Launch/child creation.
     }
-    let setup = wake_descriptor().and_then(|wake| { preflight()?; Ok(wake) });
+    let setup = needs("signalfd", wake_descriptor()).and_then(|wake| { preflight()?; Ok(wake) });
     let wake = match setup {
         Ok(wake) => wake,
-        Err(error) => {
+        Err(Missing { feature, error }) => {
+            // The stage names what is missing, for the runtime to say and
+            // to open this system's terminals as before the supervisor.
             let _ = protocol::send(control.as_raw_fd(), launch, &Response::Failed {
-                stage: "preflight".into(), errno: error.raw_os_error().unwrap_or(libc::EIO),
+                stage: format!("{PREFLIGHT}{feature}"), errno: error.raw_os_error().unwrap_or(libc::EIO),
             });
             return 122; // No child has been launched.
         }

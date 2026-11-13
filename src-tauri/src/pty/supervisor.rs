@@ -157,7 +157,7 @@ fn passwd() -> io::Result<(OsString, OsString)> {
 fn failure(stage: &str, errno: i32, then: &str) -> String {
     let cause = io::Error::from_raw_os_error(errno);
     let help = match stage {
-        "preflight" => ": this Linux system lacks what terminal ownership needs (pidfd_open and pidfd_send_signal, close_range, PR_SET_CHILD_SUBREAPER, an all-child waitid and a /proc of this PID namespace; Linux 5.9 or later without a seccomp filter denying them)",
+        stage if stage.starts_with(linux::PREFLIGHT) => ": this Linux system lacks what terminal ownership needs (pidfd_open and pidfd_send_signal, close_range, PR_SET_CHILD_SUBREAPER, an all-child waitid, /proc child lists and a /proc of this PID namespace; Linux 5.9 or later without a seccomp filter denying them)",
         "ancestry" => ": the supervisor was not started by this TerminalX program",
         _ => "",
     };
@@ -265,6 +265,8 @@ struct State {
     observing: bool,
     /// The helper has exited and been reaped: nothing more can be learned.
     reaped: bool,
+    /// What preflight found this system lacking, before any launch.
+    unsupported: Option<String>,
     /// A Stop came while the observer was held for a handover, after the
     /// state was last taken for the record (#765 review).
     stopped_while_parked: bool,
@@ -279,6 +281,22 @@ pub(super) struct Owner {
     carried: Mutex<Option<(Carried, OwnedFd)>>,
     #[cfg(test)]
     observer_reaped: AtomicBool,
+    /// A fault for this launch's helper alone, from [`with_test_fault`].
+    #[cfg(test)]
+    fault: Option<String>,
+}
+
+#[cfg(test)]
+thread_local! { static TEST_FAULT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) }; }
+
+/// Run `then` with every launch it starts given `fault` (the helper's
+/// `TX467_SUPERVISOR_FAULT`), without touching other tests' launches.
+#[cfg(test)]
+pub(crate) fn with_test_fault<R>(fault: &str, then: impl FnOnce() -> R) -> R {
+    TEST_FAULT.with(|slot| *slot.borrow_mut() = Some(fault.to_string()));
+    let result = then();
+    TEST_FAULT.with(|slot| *slot.borrow_mut() = None);
+    result
 }
 
 impl Owner {
@@ -287,9 +305,9 @@ impl Owner {
     pub(super) fn reserve() -> Arc<Self> {
         Arc::new(Self { launch: Uuid::new_v4(), state: Mutex::new(State {
             phase: Phase::Reserved, supervisor: None, shell: None,
-            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false, reaped: false, stopped_while_parked: false,
+            shell_status: None, boot: None, stop_claim: 0, park: Park::Running, observing: false, reaped: false, unsupported: None, stopped_while_parked: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
-            #[cfg(test)] observer_reaped: AtomicBool::new(false), })
+            #[cfg(test)] observer_reaped: AtomicBool::new(false), #[cfg(test)] fault: TEST_FAULT.with(|slot| slot.borrow().clone()), })
     }
 
     /// Hold the observer still where its channel state is whole, so a
@@ -398,9 +416,9 @@ impl Owner {
         let phase = match carried.phase { CarriedPhase::Running => Phase::Running, CarriedPhase::Stopping => Phase::Stopping, CarriedPhase::Unconfirmed => Phase::Unconfirmed };
         let owner = Arc::new(Self { launch, state: Mutex::new(State {
             phase, supervisor: Some(carried.supervisor), shell: Some(carried.shell), shell_status: carried.shell_status,
-            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true, reaped: false, stopped_while_parked: false,
+            boot: Some(Ok(carried.shell)), stop_claim: carried.stop_claim, park: Park::Running, observing: true, reaped: false, unsupported: None, stopped_while_parked: false,
         }), changed: Condvar::new(), cancelled: AtomicBool::new(false), carried: Mutex::new(None),
-            #[cfg(test)] observer_reaped: AtomicBool::new(false), });
+            #[cfg(test)] observer_reaped: AtomicBool::new(false), #[cfg(test)] fault: TEST_FAULT.with(|slot| slot.borrow().clone()), });
         let observer = owner.clone();
         let resume = Resume { ready: true, empty_received: carried.empty_received, launch_sent: true, sent_claim: carried.sent_claim };
         std::thread::Builder::new().name("pty-supervisor".into())
@@ -422,6 +440,13 @@ impl Owner {
     pub(super) fn reserved(&self) -> bool {
         self.state.lock().unwrap().phase == Phase::Reserved && !self.cancelled.load(Ordering::SeqCst)
     }
+    /// What this system lacks, when preflight said so before any launch:
+    /// nothing was started, and the launch can be made without a supervisor.
+    pub(super) fn unsupported(&self) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        if state.phase == Phase::Extinct { state.unsupported.clone() } else { None }
+    }
+
     /// Lose the channel as a protocol fault would: ownership stays, unproven.
     #[cfg(test)]
     pub(super) fn lose_for_test(&self) { self.lost("lost for a test"); }
@@ -532,6 +557,8 @@ impl Owner {
                 .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             #[cfg(test)]
             command.stderr(Stdio::inherit());
+            #[cfg(test)]
+            if let Some(fault) = &self.fault { command.env("TX467_SUPERVISOR_FAULT", fault); }
             let socket_fd = pass_socket.as_raw_fd();
             let slave_fd = pass_slave.as_raw_fd();
             unsafe {
@@ -640,7 +667,13 @@ impl Owner {
                     let mut reason = "supervisor failed before launch".to_string();
                     for _ in 0..16 {
                         match protocol::receive::<Response>(socket.as_raw_fd(), self.launch) {
-                            Ok(Some(Response::Failed { stage, errno })) => { reason = failure(&stage, errno, "before launch"); break; }
+                            Ok(Some(Response::Failed { stage, errno })) => {
+                                reason = failure(&stage, errno, "before launch");
+                                if let Some(feature) = stage.strip_prefix(linux::PREFLIGHT) {
+                                    self.state.lock().unwrap().unsupported = Some(feature.to_string());
+                                }
+                                break;
+                            }
                             Ok(Some(_)) => {},
                             _ => break,
                         }

@@ -462,6 +462,20 @@ fn session_jobs(pid: u32) -> Result<Vec<(u32, u32)>> {
     Ok(if group_alive(pid) { vec![(pid, pid)] } else { Vec::new() })
 }
 
+/// This system lacks what a supervisor needs (the named facility): a
+/// launch is made as before the supervisor (#467 review).
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct Unsupervised(String);
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for Unsupervised {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(out, "terminal supervision is unavailable (missing: {})", self.0) }
+}
+
+#[cfg(target_os = "linux")]
+impl std::error::Error for Unsupervised {}
+
 /// A launch being started under a supervisor, until it is listed.
 #[cfg(target_os = "linux")]
 struct Opening<'a>(&'a std::sync::atomic::AtomicUsize);
@@ -696,6 +710,9 @@ pub struct Terminals {
     /// Supervised launches being started, not yet listed (#467).
     #[cfg(target_os = "linux")]
     bootstrapping: std::sync::atomic::AtomicUsize,
+    /// What this system lacks for a supervisor, once preflight has said.
+    #[cfg(target_os = "linux")]
+    unsupervised: Mutex<Option<String>>,
 }
 
 /// Why a pane is not opened while the runtime is being replaced.
@@ -755,7 +772,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), docked: Mutex::default(), frozen: Mutex::new(false), #[cfg(target_os = "linux")] bootstrapping: Default::default() }
+        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), docked: Mutex::default(), frozen: Mutex::new(false), #[cfg(target_os = "linux")] bootstrapping: Default::default(), #[cfg(target_os = "linux")] unsupervised: Mutex::default() }
     }
 }
 
@@ -1035,10 +1052,24 @@ impl Terminals {
         }
         let created = crate::store::index::now();
         let startup = self.startup_ticket(id, &created, None);
+        // On a system that lacks what a supervisor needs, a launch is made
+        // as before the supervisor, and the reader is told once (#467).
         #[cfg(target_os = "linux")]
-        let (waiter, pid, owned, _opening) = self.supervise(id, pair.master.as_ref(), &cmd).inspect_err(|_| {
-            if let Some(startup) = &startup { startup.exited(None); }
-        })?;
+        let (waiter, pid, owned, _opening) = match self.supervise(id, pair.master.as_ref(), &cmd) {
+            Ok((waiter, pid, owned, opening)) => (waiter, pid, Some(owned), Some(opening)),
+            Err(error) if error.is::<Unsupervised>() => {
+                let child = pair.slave.spawn_command(cmd).map_err(|e| {
+                    if let Some(startup) = &startup { startup.exited(None); }
+                    anyhow!("spawn shell: {e}")
+                })?;
+                let pid = child.process_id();
+                (Waiter::Spawned(child), pid, None, None)
+            }
+            Err(error) => {
+                if let Some(startup) = &startup { startup.exited(None); }
+                return Err(error);
+            }
+        };
         #[cfg(not(target_os = "linux"))]
         let child = pair.slave.spawn_command(cmd).map_err(|e| {
             if let Some(startup) = &startup { startup.exited(None); }
@@ -1060,7 +1091,7 @@ impl Terminals {
             #[cfg(not(target_os = "linux"))]
             writer: pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?,
             #[cfg(target_os = "linux")]
-            writer: supervised_writer(pair.master.as_ref())?,
+            writer: if owned.is_some() { supervised_writer(pair.master.as_ref())? } else { pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))? },
             master: pair.master,
             #[cfg(not(target_os = "linux"))]
             waiter: Waiter::Spawned(child),
@@ -1069,7 +1100,7 @@ impl Terminals {
             pid,
             group: pid,
             #[cfg(target_os = "linux")]
-            owned: Some(owned),
+            owned,
             explicit_command,
             environment: environment.stamp,
             cwd: cwd.to_string(),
@@ -1092,10 +1123,22 @@ impl Terminals {
         // the other order, so one of them always sees the other.
         let opening = Opening::new(&self.bootstrapping);
         if *self.frozen.lock().unwrap() { bail!("{}", HANDING_OVER); }
+        if let Some(missing) = self.unsupervised.lock().unwrap().clone() { return Err(Unsupervised(missing).into()); }
         let launch = supervised_launch(cmd).context("spawn shell")?;
         let owner = supervisor::Owner::reserve();
         match owner.bootstrap(fd, launch) {
             Ok(shell) => Ok((Waiter::Supervised(owner.clone()), Some(shell), Arc::new(OwnedGroup::supervised(owner, shell)), opening)),
+            // Preflight said what this system lacks, before any launch:
+            // nothing was started, and none of its launches will be.
+            Err(error) if owner.unsupported().is_some() => {
+                let missing = owner.unsupported().unwrap_or_default();
+                log::warn!("terminals open without a supervisor on this system: {error}");
+                let first = self.unsupervised.lock().unwrap().replace(missing.clone()).is_none();
+                if first {
+                    crate::store::activity::report_error(format!("Terminals on this system stop when TerminalX quits (missing: {missing})."));
+                }
+                Err(Unsupervised(missing).into())
+            }
             Err(error) => {
                 if owner.pending() {
                     let shell = owner.pid().unwrap_or_default();
@@ -2110,6 +2153,24 @@ mod supervised_tests {
         assert!(terminals.supervised_work().is_empty());
         terminals.freeze(Duration::from_secs(2)).map(|_| ()).expect("nothing holds the handover");
         terminals.thaw();
+    }
+
+    /// #467 review: on a system without what a supervisor needs (here a
+    /// preflight that reports pidfd_open missing), a terminal still opens,
+    /// as before the supervisor, and later ones do not try again.
+    #[test]
+    fn a_terminal_opens_without_a_supervisor_where_the_system_lacks_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let spec = || PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
+        supervisor::with_test_fault("preflight-unsupported", || terminals.spawn(sink.clone(), "plain:shell", spec())).unwrap();
+        assert!(terminals.is_running("plain:shell"), "the terminal opened");
+        assert!(terminals.panes.lock().unwrap()["plain:shell"].group.owner().is_none(), "without a supervisor");
+        assert_eq!(terminals.unsupervised.lock().unwrap().as_deref(), Some("pidfd_open"), "the reason is kept for the notice");
+        terminals.spawn(sink, "next:shell", spec()).unwrap();
+        assert!(terminals.panes.lock().unwrap()["next:shell"].group.owner().is_none(), "later terminals do not try again");
+        terminals.kill_all_and_wait_confirmed(&["plain:shell".into(), "next:shell".into()], Duration::from_secs(10)).unwrap();
     }
 
     /// #467/#765: a launch whose supervisor died cannot be settled by anything
