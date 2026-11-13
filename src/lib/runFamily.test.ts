@@ -65,16 +65,17 @@ describe("leads a coordinator started (PRO-364)", () => {
 describe("every try of a piece (PRO-364)", () => {
   const tries = [
     { step: "first", model: "haiku", worker: { sessionId: "t1" }, outcome: "failed" },
-    { step: "model", model: "sonnet", worker: { sessionId: "t2" }, outcome: "failed" },
+    { step: "tier", model: "sonnet", worker: { sessionId: "t2" }, outcome: "failed" },
     { step: "effort", model: "opus", worker: { sessionId: "t3" } },
   ] as RunPiece["tries"];
   const retried = () => run([piece("1", "done", "w1"), piece("2", "running", "t3", { tries }), piece("3", "queued")]);
 
   it("finds each try's piece and number, and only the last is current", () => {
     const r = retried();
-    expect(["t1", "t2", "t3"].map((id) => { const found = tryOf(r, id)!; return [found.piece.id, found.number, found.current]; }))
-      .toEqual([["2", 1, false], ["2", 2, false], ["2", 3, true]]);
-    expect(tryOf(r, "w1")).toMatchObject({ number: 1, current: true });
+    expect(["t1", "t2", "t3"].map((id) => { const found = tryOf(r, id)!; return [found.piece.id, found.number, found.of, found.current]; }))
+      .toEqual([["2", 1, 3, false], ["2", 2, 3, false], ["2", 3, 3, true]]);
+    // A piece tried once is one try of one: its row has no "try N" mark.
+    expect(tryOf(r, "w1")).toMatchObject({ number: 1, of: 1, current: true });
     expect(tryOf(r, "x")).toBeNull();
   });
 

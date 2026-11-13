@@ -58,9 +58,9 @@ export function useWorkerPiece(worker: SessionEntry): { piece: RunPiece | null; 
   return { piece: found?.piece ?? null, run, found };
 }
 
-/** A try past a piece's first, after its title: a quiet "try N" (PRO-364). */
+/** Which try a worker ran at a piece tried more than once, after its title: a quiet "try N" on every try, the first too (PRO-364). */
 export function TryMark({ found }: { found: WorkerTry | null }) {
-  if (!found || found.number < 2) return null;
+  if (!found || found.of < 2) return null;
   return (
     <span data-testid="try-mark" data-try={found.number} title={found.current ? `Try ${found.number}, the piece's current one` : `Try ${found.number}, an earlier one`}
       className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
