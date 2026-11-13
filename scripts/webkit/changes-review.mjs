@@ -56,8 +56,8 @@ try {
     console.log(url);
     await new Promise((resolve) => { process.once("SIGTERM", resolve); process.once("SIGINT", resolve); });
   } else {
-    const { webkit } = await import("playwright");
-    browser = await webkit.launch();
+    const { launch } = await import("./harness.mjs");
+    browser = await launch();
     const page = await browser.newPage({ viewport: { width: 360, height: 800 } });
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
