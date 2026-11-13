@@ -3301,8 +3301,10 @@ pub async fn git_hunk_count(
 
 #[tauri::command]
 pub async fn generate_commit_message(cwd: String, agent: String) -> CmdResult<String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        anyhow::ensure!(matches!(agent.as_str(), "claude" | "codex"), "Choose Claude Code or Codex.");
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<String> {
+        if !matches!(agent.as_str(), "claude" | "codex") {
+            return Err("Choose Claude Code or Codex.".to_string());
+        }
         let p = Path::new(&cwd);
         let diff = git::staged_diff(p, 48 * 1024).map_err(err)?;
         let prompt = format!("Write one concise conventional commit subject for these staged changes. Return only the subject, with no quotes or markdown.\n\n{diff}");
