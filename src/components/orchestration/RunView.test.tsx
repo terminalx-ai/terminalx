@@ -84,6 +84,21 @@ const open = async (run: Run | null) => {
 };
 const row = (id: string) => document.querySelector<HTMLElement>(`[data-piece="${id}"]`)!;
 const detail = () => screen.getByTestId("piece-detail");
+/** A piece's model and effort pill (18.02), in its row. */
+const pill = (id: string, title: string) => within(row(id)).getByRole("button", { name: `Model and effort of ${title}` });
+/** Opens a piece's pill: its menu's two choices, the model's and the effort's. */
+const openPill = (id: string, title: string) => {
+  fireEvent.click(pill(id, title));
+  return { model: screen.getByRole("group", { name: `Model of ${title}` }), effort: screen.getByRole("group", { name: `Effort of ${title}` }) };
+};
+/** What a group of the open pill has ticked, and every choice it offers. */
+const ticked = (group: HTMLElement) => within(group).getAllByRole("menuitemradio").filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent);
+const choices = (group: HTMLElement) => within(group).getAllByRole("menuitemradio").map((item) => item.textContent);
+/** Opens a piece's pill and picks a choice in it. */
+const choose = (id: string, title: string, which: "model" | "effort", name: string) => {
+  const groups = openPill(id, title);
+  fireEvent.click(within(groups[which]).getByRole("menuitemradio", { name }));
+};
 
 describe("a plan waiting for approval (PRO-274)", () => {
   it("shows the plan a person approves: each piece with its model, effort, done-check, what it waits on and its estimate", async () => {
@@ -98,9 +113,16 @@ describe("a plan waiting for approval (PRO-274)", () => {
     const summary = screen.getByRole("region", { name: "Plan summary" }).textContent;
     for (const said of ["Budget25 points", "Workers run inBypass", "No shared files"]) expect(summary).toContain(said);
 
-    const store = within(row("store"));
-    await waitFor(() => expect((store.getByRole("combobox", { name: "Model of Typed store module" }) as HTMLSelectElement).value).toBe("sonnet"));
-    expect((store.getByRole("combobox", { name: "Effort of Typed store module" }) as HTMLSelectElement).value).toBe("medium");
+    // Model and effort are one pill (18.02): the model and the effort, and a menu with both choices.
+    await waitFor(() => expect(pill("store", "Typed store module").textContent).toBe("Sonnet 5.5 Medium"));
+    // With no tier from the engine, the dot is the tier the model's name places it in: Sonnet is mid.
+    expect(pill("store", "Typed store module").querySelector(".rounded-full")?.classList.contains("text-add")).toBe(true);
+    const groups = openPill("store", "Typed store module");
+    await waitFor(() => expect(ticked(groups.model)).toEqual(["Sonnet 5.5"]));
+    expect(ticked(groups.effort)).toEqual(["Medium"]);
+    expect(choices(groups.model)).toEqual(["By kind", "Haiku 5.5", "Sonnet 5.5", "Opus 5.5"]);
+    expect(choices(groups.effort)).toEqual(["Default", "Low", "Medium", "High"]);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     expect(row("store").textContent).toContain("cargo t");
     expect(row("store").textContent).toContain("$1.60–2.40");
     // "After" names pieces by their number in the plan.
@@ -159,8 +181,8 @@ describe("a plan waiting for approval (PRO-274)", () => {
     };
     await open(run);
     // A model changed in the row: an effort the new model does not have goes back to its default.
-    await waitFor(() => expect(within(row("store")).getByRole("option", { name: "Haiku 5.5" })).toBeTruthy());
-    fireEvent.change(within(row("store")).getByRole("combobox", { name: "Model of Typed store module" }), { target: { value: "haiku" } });
+    await waitFor(() => expect(pill("store", "Typed store module").textContent).toContain("Sonnet 5.5"));
+    choose("store", "Typed store module", "model", "Haiku 5.5");
     await waitFor(() => expect(saved).toHaveLength(1));
     expect(saved[0].pieces.map((p) => p.id)).toEqual(["map", "store", "docs"]);
     expect([saved[0].pieces[1].model, saved[0].pieces[1].effort]).toEqual(["haiku", undefined]);
@@ -356,10 +378,38 @@ describe("a run's cost and what it waits on (PRO-281)", () => {
     expect(within(row("docs")).queryByRole("button", { name: /Open the worker/ })).toBeNull();
   });
 
+  it("changes a piece's effort from its pill, by the keyboard too, and saves the plan with it (18.02)", async () => {
+    const saved: RunPlan[] = [];
+    answers.orchestration_update_plan = ({ plan }: { plan: RunPlan }) => {
+      saved.push(plan);
+      return { ...waiting(), planEdited: true, pieces: waiting().pieces.map((p) => ({ ...p, ...plan.pieces.find((q) => q.id === p.id)!, effort: plan.pieces.find((q) => q.id === p.id)!.effort })) };
+    };
+    await open(waiting());
+    await waitFor(() => expect(pill("store", "Typed store module").textContent).toBe("Sonnet 5.5 Medium"));
+    // The pill is a button: Enter opens its menu, and the menu's items are reached and chosen from the keyboard.
+    pill("store", "Typed store module").focus();
+    fireEvent.keyDown(pill("store", "Typed store module"), { key: "Enter" });
+    const effort = screen.getByRole("group", { name: "Effort of Typed store module" });
+    const high = within(effort).getByRole("menuitemradio", { name: "High" });
+    fireEvent.keyDown(high, { key: "Enter" });
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect([saved[0].pieces[1].model, saved[0].pieces[1].effort]).toEqual(["sonnet", "high"]);
+    await waitFor(() => expect(pill("store", "Typed store module").textContent).toBe("Sonnet 5.5 High"));
+    // Choosing what is already chosen saves nothing.
+    choose("store", "Typed store module", "effort", "High");
+    expect(saved).toHaveLength(1);
+    // An effort the new model has is kept with it.
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    choose("store", "Typed store module", "model", "Opus 5.5");
+    await waitFor(() => expect(saved).toHaveLength(2));
+    expect([saved[1].pieces[1].model, saved[1].pieces[1].effort]).toEqual(["opus", "high"]);
+  });
+
   it("while the plan waits, Approve is the only way to start it: changing a piece's model saves the plan and starts nothing", async () => {
     answers.orchestration_update_plan = ({ plan }: { plan: RunPlan }) => ({ ...waiting(), planEdited: true, pieces: waiting().pieces.map((p) => ({ ...p, model: plan.pieces.find((q) => q.id === p.id)!.model })) });
     await open(waiting());
-    fireEvent.change(screen.getByRole("combobox", { name: "Model of Typed store module" }), { target: { value: "opus" } });
+    await waitFor(() => expect(pill("store", "Typed store module").textContent).toContain("Sonnet 5.5"));
+    choose("store", "Typed store module", "model", "Opus 5.5");
     await waitFor(() => expect(calls("orchestration_update_plan")).toHaveLength(1));
     expect(screen.getByTestId("run-view").getAttribute("data-run-state")).toBe("awaitingApproval");
     expect(calls("orchestration_approve")).toHaveLength(0);
@@ -465,16 +515,19 @@ describe("a piece's tries and what they cost (PRO-275)", () => {
     answers.orchestration_update_plan = ({ plan }: { plan: RunPlan }) => ({ ...run, planEdited: true, pieces: [study, { ...run.pieces[1], model: plan.pieces[1].model }, run.pieces[2]] });
     await open({ ...run, pieces: [study, ...run.pieces.slice(1)] });
     expect(within(detail()).getByRole("note").textContent).toBe(note);
-    // Its model and effort are its kind's: the selects say so, and name what the kind came to.
-    const model = within(row("map")).getByRole("combobox", { name: "Model of Map every settings read" }) as HTMLSelectElement;
-    const effort = within(row("map")).getByRole("combobox", { name: "Effort of Map every settings read" }) as HTMLSelectElement;
-    expect([model.value, model.selectedOptions[0].textContent, effort.value, effort.selectedOptions[0].textContent]).toEqual(["", "GPT-5.6 Sol (by kind: research)", "", "Medium"]);
+    // Its model and effort are its kind's: the pill shows its tier's dot, and its menu ticks what the kind came to.
+    expect(pill("map", "Map every settings read").querySelector(".text-accent.rounded-full")).toBeTruthy();
+    expect(pill("map", "Map every settings read").title).toBe("The model and effort come from the routing table, by kind: research");
+    const map = openPill("map", "Map every settings read");
+    expect([ticked(map.model), ticked(map.effort)]).toEqual([["GPT-5.6 Sol (by kind: research)"], ["Medium (by kind: research)"]]);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     // A piece whose plan named its model offers the kind's choice as a choice.
-    const store = within(row("store")).getByRole("combobox", { name: "Model of Typed store module" }) as HTMLSelectElement;
-    await waitFor(() => expect(store.value).toBe("sonnet"));
-    expect(store.options[0].textContent).toBe("By kind");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    const store = openPill("store", "Typed store module");
+    await waitFor(() => expect(ticked(store.model)).toEqual(["Sonnet 5.5"]));
+    expect(choices(store.model)[0]).toBe("By kind");
     // Another piece is edited: the plan saved leaves this one's model and effort to its kind, so it keeps its note.
-    fireEvent.change(store, { target: { value: "opus" } });
+    fireEvent.click(within(store.model).getByRole("menuitemradio", { name: "Opus 5.5" }));
     await waitFor(() => expect(calls("orchestration_update_plan")).toHaveLength(1));
     const saved = (calls("orchestration_update_plan")[0] as { plan: RunPlan }).plan.pieces;
     expect([saved[0].model, saved[0].effort, saved[1].model, saved[1].effort]).toEqual(["", undefined, "opus", "medium"]);

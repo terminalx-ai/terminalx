@@ -6,7 +6,8 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
 import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
 import { onProjectSettingsRequest } from "@/lib/projectAdded";
-import { onOrchestratorSettingsRequest } from "@/lib/orchestration";
+import { onOrchestratorSettingsRequest, showRunView, useRun } from "@/lib/orchestration";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { ProjectAddedNotice } from "@/components/ui/ProjectAddedNotice";
 import { PanelLeft, PanelRight } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -269,6 +270,15 @@ export function AppShell() {
   // "New session" from a session: a dialog over it, which goes back to it when closed.
   const opening = store.view === "new" && !store.selectedSessionId ? store.newSessionReturn : null;
   const behind = opening?.sessionId ? (store.sessions.find((s) => s.id === opening.sessionId && !s.archived) ?? null) : null;
+  // Go → Run View (18.01): the open session's run, while it leads one and runs are on (Settings → Experimental).
+  // A session that leads no run, or a cloud one, has none to open: the keys do nothing there.
+  const orchestrating = useExperimentalSettings()?.orchestratorRuns === true;
+  const selectedRun = useRun(selected && !cloudKey ? selected.id : undefined, orchestrating);
+  useShortcut("app.runView", () => {
+    if (!selected || !selectedRun) return;
+    setSettingsOpen(false);
+    showRunView(selected.id, true);
+  });
 
   return (
     <div data-app-shell className="flex h-full w-full flex-col">

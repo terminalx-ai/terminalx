@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { runPillOf } from "./RunPill";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import { setPrefs } from "@/lib/prefs";
+import { RunViewHint, runPillOf } from "./RunPill";
 import type { Run, RunPiece } from "@/types/orchestration";
 
 const piece = (id: string, state: RunPiece["state"]): RunPiece => ({
@@ -24,5 +26,25 @@ describe("the title bar's run pill (18.01, 18.03)", () => {
     expect(runPillOf(run("running", [piece("a", "done"), piece("b", "queued")], { inTurn: 0 }))).toBeNull();
     expect(runPillOf(run("stopped", [piece("a", "blocked")]))).toBeNull();
     expect(runPillOf(run("done", [piece("a", "done")]))).toBeNull();
+  });
+});
+
+describe("the Run view's keys in the title bar (18.01, PRO-362)", () => {
+  afterEach(() => {
+    cleanup();
+    setPrefs({ shortcuts: {} });
+  });
+
+  it("names the keys that open the Run view, the reader's own when they changed them, and nothing with none", () => {
+    // jsdom is not a Mac: the main modifier is Ctrl.
+    setPrefs({ shortcuts: {} });
+    const { rerender } = render(<RunViewHint />);
+    expect(screen.getByTestId("run-view-hint").textContent).toBe("Ctrl+Shift+Orun view");
+    setPrefs({ shortcuts: { "app.runView": ["mod+alt+o"] } });
+    rerender(<RunViewHint />);
+    expect(screen.getByTestId("run-view-hint").textContent).toBe("Ctrl+Alt+Orun view");
+    setPrefs({ shortcuts: { "app.runView": [] } });
+    rerender(<RunViewHint />);
+    expect(screen.queryByTestId("run-view-hint")).toBeNull();
   });
 });

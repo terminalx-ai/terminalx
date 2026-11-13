@@ -71,6 +71,9 @@ const ACTIONS = [
   { id: "app.agentDashboard", label: "Agent dashboard", group: "App", keys: ["mod+shift+a"], menu: { section: "go", order: 0, label: "Dashboard" } },
   { id: "app.stats", label: "Stats & Usage", group: "App", keys: ["mod+shift+u"] },
   { id: "app.automations", label: "Automations", group: "App", keys: ["mod+shift+r"], menu: { section: "go", order: 2, label: "Automations" } },
+  // The open session's Run view, while it leads a run (Settings → Experimental → Orchestration runs). The drafts
+  // (18.01) drew ⌘⇧R, but that is Automations; ⌘⇧O (Ctrl+Shift+O), O for orchestrator, is bound to nothing else.
+  { id: "app.runView", label: "Run view", group: "App", keys: ["mod+shift+o"], menu: { section: "go", order: 2.5, label: "Run View" } },
   { id: "app.skills", label: "Skills", group: "App", keys: ["mod+shift+k"] },
   { id: "app.settings", label: "Settings", group: "App", keys: ["mod+,"], menu: { section: "app", order: 1, label: "Settings…" } },
   { id: "app.toggleSidebar", label: "Toggle sidebar", group: "App", keys: ["mod+b"], menu: { section: "view", order: 0, label: "Toggle Sidebar" } },

@@ -25,7 +25,7 @@ describe("native menus and the action registry", () => {
       ["app", ["app.about", "app.settings", "app.checkUpdates"]],
       ["file", ["app.newSession", "app.newWindow", "app.startFrom", "app.addProject", "app.openRecent", "session.closeTab", "app.closeWindow"]],
       ["view", ["app.toggleSidebar", "app.togglePanel", "session.latestShell", "session.toggleTerminalView", "app.zoomIn", "app.zoomOut", "app.zoomReset", "app.fullscreen"]],
-      ["go", ["app.agentDashboard", "app.issues", "app.automations", "app.nextSession", "app.previousSession", "app.nextAttention"]],
+      ["go", ["app.agentDashboard", "app.issues", "app.automations", "app.runView", "app.nextSession", "app.previousSession", "app.nextAttention"]],
       ["help", ["app.docs", "app.shortcuts", "app.reportIssue"]],
     ]);
     const ids = leaves(groups.flatMap((group) => group.items)).map((item) => item.id.split(":").at(-1));
@@ -41,6 +41,18 @@ describe("native menus and the action registry", () => {
       const bindings = keymap[action.id];
       expect(item.accelerator).toBe(bindings[0] ? nativeAccelerator(bindings[0]) : null);
       for (const alternative of bindings.slice(1)) expect(item.text).toContain(bindingText(alternative, mac));
+    }
+  });
+
+  it("puts Run View in the Go menu on keys no other menu item has", () => {
+    for (const mac of [true, false]) {
+      const items = leaves(buildNativeMenu(resolveKeymap({}, mac), [], false, mac).flatMap((group) => group.items));
+      expect(items.find((item) => item.id.endsWith(":app.runView"))).toMatchObject({ id: "command:main:app.runView", text: "Run View", accelerator: "CmdOrCtrl+Shift+O" });
+      expect(items.find((item) => item.id.endsWith(":app.automations"))?.accelerator).toBe("CmdOrCtrl+Shift+R");
+      const accelerators = items.map((item) => item.accelerator).filter(Boolean);
+      expect(new Set(accelerators).size).toBe(accelerators.length);
+      // The system's own menu keys (Quit, Hide, Minimize, the Edit menu) are not it either.
+      expect(["CmdOrCtrl+Q", "CmdOrCtrl+H", "CmdOrCtrl+Alt+H", "CmdOrCtrl+M", "CmdOrCtrl+Z", "CmdOrCtrl+Shift+Z", "CmdOrCtrl+X", "CmdOrCtrl+C", "CmdOrCtrl+V", "CmdOrCtrl+A"]).not.toContain("CmdOrCtrl+Shift+O");
     }
   });
 
