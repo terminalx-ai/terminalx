@@ -299,7 +299,9 @@ fn marker_sizes(cwd: &Path, paths: &[String]) -> HashMap<String, usize> {
     // `<path>\0conflict-marker-size\0<value>\0`, once per path.
     let fields: Vec<&str> = out.split('\0').collect();
     fields
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .filter_map(|record| record[2].trim().parse::<usize>().ok().filter(|size| *size > 0).map(|size| (record[0].to_string(), size)))
         .collect()
 }
