@@ -288,6 +288,8 @@ fn sparse_checkout_is_a_repository_setting_a_user_file_cannot_give_every_reposit
     let locked = f.resolve();
     assert_eq!(locked.values["sparseCheckout"].value, json!(["managed"]));
     assert!(locked.values["sparseCheckout"].locked);
+}
+
 fn saved(setup: &str, archive: &str, minutes: Option<u64>) -> super::super::projects::RepositoryScripts {
     super::super::projects::RepositoryScripts { setup: setup.into(), archive: archive.into(), archive_timeout_minutes: minutes }
 }

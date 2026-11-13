@@ -587,6 +587,7 @@ pub fn repository_schema() -> Value {
                 "type": "array", "maxItems": SPARSE_CHECKOUT_MAX_FOLDERS, "uniqueItems": true,
                 "items": {"type": "string", "maxLength": SPARSE_CHECKOUT_MAX_PATH, "pattern": SPARSE_FOLDER_PATTERN},
                 "description": "Folders new workspaces of this repository check out, relative to its root, such as \"packages/web\"; root files are always checked out. An empty list checks out root files only; absent checks out everything. Each folder is at most 1024 bytes.",
+            }),
             SETUP_SCRIPT | ARCHIVE_SCRIPT => json!({
                 "type": "string", "maxLength": SCRIPT_LIMIT, "pattern": "^[^\\u0000]*$",
                 "description": if key.key == SETUP_SCRIPT {
