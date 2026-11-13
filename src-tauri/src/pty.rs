@@ -222,6 +222,9 @@ impl StoppingPane {
 
     pub(crate) fn pid(&self) -> Option<u32> { self.group.pid() }
 
+    /// Its processes are not known to be gone.
+    pub(crate) fn pending(&self) -> bool { self.group.pid().is_some() }
+
     pub(crate) fn wait_all(panes: &[Self], timeout: Duration) -> bool {
         for pane in panes { pane.group.signal(false); }
         let start = Instant::now();
@@ -290,9 +293,20 @@ impl OwnedGroup {
         // until the supervisor proves the launch has no process left.
         #[cfg(target_os = "linux")]
         if let Some(owner) = self.owner() { return owner.pid(); }
+        // macOS keeps main's answer, the leader's process group: the session
+        // census below is strict, and on a busy Mac it could leave a stop
+        // unconfirmed (Darwin census work is on its own hold, #467).
+        #[cfg(target_os = "macos")]
+        {
+            let mut owned = self.0.lock().unwrap();
+            if owned.is_some_and(|pid| !group_alive(pid)) { *owned = None; }
+            *owned
+        }
+        #[cfg(not(target_os = "macos"))]
         self.pid_with(settled_session_jobs)
     }
 
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn pid_with(&self, census: impl FnOnce(u32) -> Result<Vec<(u32, u32)>>) -> Option<u32> {
         let mut owned = self.0.lock().unwrap();
         if let Some(pid) = *owned {
@@ -308,6 +322,15 @@ impl OwnedGroup {
         #[cfg(target_os = "linux")]
         if let Some(owner) = self.owner() { let _ = force; owner.stop(); return; }
         let mut owned = self.0.lock().unwrap();
+        // macOS: main's signal, to the leader's process group only.
+        #[cfg(target_os = "macos")]
+        if let Some(pid) = *owned {
+            if !group_alive(pid) { *owned = None; return; }
+            // A reaped leader's PID is not authority to signal an unrelated
+            // process. Only the PTY's original process group is owned here.
+            unsafe { libc::kill(-(pid as i32), if force { libc::SIGKILL } else { libc::SIGTERM }); }
+        }
+        #[cfg(not(target_os = "macos"))]
         if let Some(pid) = *owned {
             #[cfg(unix)]
             match settled_session_jobs(pid) {
@@ -356,6 +379,8 @@ fn group_alive(pid: u32) -> bool {
 /// rarely gives a clean one at the first try. Each try is a whole new
 /// census: an indeterminate one still never counts as empty.
 #[cfg(unix)]
+// Unused on macOS, which keeps main's leader-group stop (#467 follow-up).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn settled_session_jobs(session: u32) -> Result<Vec<(u32, u32)>> {
     const TRIES: usize = 64;
     let mut last = None;
@@ -373,11 +398,15 @@ fn settled_session_jobs(session: u32) -> Result<Vec<(u32, u32)>> { session_jobs(
 /// Enumerate before signalling: once the shell exits its jobs may be reparented,
 /// but they retain this session. An inspection failure is not evidence of exit.
 #[cfg(unix)]
+// Unused on macOS, which keeps main's leader-group stop (#467 follow-up).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn session_jobs(session: u32) -> Result<Vec<(u32, u32)>> {
     session_jobs_from_pids(session, process_ids()?)
 }
 
 #[cfg(unix)]
+// Unused on macOS, which keeps main's leader-group stop (#467 follow-up).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn session_jobs_from_pids(session: u32, pids: Vec<i32>) -> Result<Vec<(u32, u32)>> {
     let mut jobs = Vec::new();
     let started = Instant::now();
@@ -399,6 +428,8 @@ fn session_jobs_from_pids(session: u32, pids: Vec<i32>) -> Result<Vec<(u32, u32)
 // Do not use ps here: it can silently omit a sampled PID that vanishes while
 // formatting the table, hiding precisely the churn that must refuse retirement.
 #[cfg(target_os = "macos")]
+// Unused on macOS, which keeps main's leader-group stop (#467 follow-up).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn process_ids() -> Result<Vec<i32>> {
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     anyhow::ensure!(count > 0, "cannot size process census");
@@ -430,6 +461,20 @@ fn process_ids() -> Result<Vec<i32>> {
 fn session_jobs(pid: u32) -> Result<Vec<(u32, u32)>> {
     Ok(if group_alive(pid) { vec![(pid, pid)] } else { Vec::new() })
 }
+
+/// This system lacks what a supervisor needs (the named facility): a
+/// launch is made as before the supervisor (#467 review).
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct Unsupervised(String);
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for Unsupervised {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(out, "terminal supervision is unavailable (missing: {})", self.0) }
+}
+
+#[cfg(target_os = "linux")]
+impl std::error::Error for Unsupervised {}
 
 /// A launch being started under a supervisor, until it is listed.
 #[cfg(target_os = "linux")]
@@ -665,6 +710,12 @@ pub struct Terminals {
     /// Supervised launches being started, not yet listed (#467).
     #[cfg(target_os = "linux")]
     bootstrapping: std::sync::atomic::AtomicUsize,
+    /// What this system lacks for a supervisor, once preflight has said.
+    #[cfg(target_os = "linux")]
+    unsupervised: Mutex<Option<String>>,
+    /// Notices given, for tests to read.
+    #[cfg(all(test, target_os = "linux"))]
+    notices: Mutex<Vec<String>>,
 }
 
 /// Why a pane is not opened while the runtime is being replaced.
@@ -724,7 +775,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), docked: Mutex::default(), frozen: Mutex::new(false), #[cfg(target_os = "linux")] bootstrapping: Default::default() }
+        Self { startup: Mutex::default(), panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default(), docked: Mutex::default(), frozen: Mutex::new(false), #[cfg(target_os = "linux")] bootstrapping: Default::default(), #[cfg(target_os = "linux")] unsupervised: Mutex::default(), #[cfg(all(test, target_os = "linux"))] notices: Mutex::default() }
     }
 }
 
@@ -1004,10 +1055,24 @@ impl Terminals {
         }
         let created = crate::store::index::now();
         let startup = self.startup_ticket(id, &created, None);
+        // On a system that lacks what a supervisor needs, a launch is made
+        // as before the supervisor, and the reader is told once (#467).
         #[cfg(target_os = "linux")]
-        let (waiter, pid, owned, _opening) = self.supervise(id, pair.master.as_ref(), &cmd).inspect_err(|_| {
-            if let Some(startup) = &startup { startup.exited(None); }
-        })?;
+        let (waiter, pid, owned, _opening) = match self.supervise(id, pair.master.as_ref(), &cmd) {
+            Ok((waiter, pid, owned, opening)) => (waiter, pid, Some(owned), Some(opening)),
+            Err(error) if error.is::<Unsupervised>() => {
+                let child = pair.slave.spawn_command(cmd).map_err(|e| {
+                    if let Some(startup) = &startup { startup.exited(None); }
+                    anyhow!("spawn shell: {e}")
+                })?;
+                let pid = child.process_id();
+                (Waiter::Spawned(child), pid, None, None)
+            }
+            Err(error) => {
+                if let Some(startup) = &startup { startup.exited(None); }
+                return Err(error);
+            }
+        };
         #[cfg(not(target_os = "linux"))]
         let child = pair.slave.spawn_command(cmd).map_err(|e| {
             if let Some(startup) = &startup { startup.exited(None); }
@@ -1029,7 +1094,7 @@ impl Terminals {
             #[cfg(not(target_os = "linux"))]
             writer: pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?,
             #[cfg(target_os = "linux")]
-            writer: supervised_writer(pair.master.as_ref())?,
+            writer: if owned.is_some() { supervised_writer(pair.master.as_ref())? } else { pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))? },
             master: pair.master,
             #[cfg(not(target_os = "linux"))]
             waiter: Waiter::Spawned(child),
@@ -1038,7 +1103,7 @@ impl Terminals {
             pid,
             group: pid,
             #[cfg(target_os = "linux")]
-            owned: Some(owned),
+            owned,
             explicit_command,
             environment: environment.stamp,
             cwd: cwd.to_string(),
@@ -1061,11 +1126,20 @@ impl Terminals {
         // the other order, so one of them always sees the other.
         let opening = Opening::new(&self.bootstrapping);
         if *self.frozen.lock().unwrap() { bail!("{}", HANDING_OVER); }
+        if let Some(missing) = self.unsupervised.lock().unwrap().clone() { return Err(Unsupervised(missing).into()); }
         let launch = supervised_launch(cmd).context("spawn shell")?;
         let owner = supervisor::Owner::reserve();
         match owner.bootstrap(fd, launch) {
             Ok(shell) => Ok((Waiter::Supervised(owner.clone()), Some(shell), Arc::new(OwnedGroup::supervised(owner, shell)), opening)),
+            // Preflight said what this system lacks, before any launch:
+            // nothing was started, and none of its launches will be.
             Err(error) => {
+                if let Some(missing) = owner.unsupported() {
+                    log::warn!("terminals open without a supervisor on this system: {error}");
+                    let first = self.unsupervised.lock().unwrap().replace(missing.clone()).is_none();
+                    if first { self.notice(format!("Terminals on this system stop when TerminalX quits (missing: {missing}).")); }
+                    return Err(Unsupervised(missing).into());
+                }
                 if owner.pending() {
                     let shell = owner.pid().unwrap_or_default();
                     self.groups.lock().unwrap().push((id.to_string(), Arc::new(OwnedGroup::supervised(owner, shell))));
@@ -1588,6 +1662,15 @@ impl Terminals {
         Ok((size.cols, size.rows))
     }
 
+    /// Tell the reader, in every window, as the runtime's other notices do.
+    #[cfg(target_os = "linux")]
+    fn notice(&self, message: String) {
+        log::warn!("{message}");
+        #[cfg(test)]
+        self.notices.lock().unwrap().push(message.clone());
+        crate::store::activity::report_error(message);
+    }
+
     /// Each launch a supervisor owns that a handover cannot carry as it
     /// stands (starting, mid-release or lost), by the title or name of its
     /// terminal: what a handover waits for on Linux (#467). Ownership whose
@@ -1890,6 +1973,18 @@ impl Terminals {
         self.panes.lock().unwrap().get(id).map(|p| *p.alive.lock().unwrap()).unwrap_or(false)
     }
 
+    /// [`Self::owned_groups`] whose only proof is a pid: not supervised
+    /// launches, which [`Self::owned_groups`] itself rechecks by their
+    /// supervisor, and whose shell's pid may be reused once reaped (#467).
+    pub(crate) fn census_groups(&self) -> Vec<u32> {
+        let mut groups = self.groups.lock().unwrap();
+        groups.retain(|(_, group)| group.pid().is_some());
+        #[cfg(target_os = "linux")]
+        return groups.iter().filter(|(_, group)| group.owner().is_none()).filter_map(|(_, group)| group.pid()).collect();
+        #[cfg(not(target_os = "linux"))]
+        groups.iter().filter_map(|(_, group)| group.pid()).collect()
+    }
+
     pub(crate) fn owned_groups(&self) -> Vec<u32> {
         let mut groups = self.groups.lock().unwrap();
         groups.retain(|(_, group)| group.pid().is_some());
@@ -2050,6 +2145,9 @@ mod supervised_tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(!gone(job), "the job runs on after its shell");
         assert!(!terminals.owned_groups().is_empty(), "the launch is still owned");
+        let helper = terminals.groups.lock().unwrap().iter().find_map(|(id, group)| (id == "exits:shell").then(|| group.owner().unwrap().supervisor_for_test().unwrap())).unwrap();
+        assert_eq!(terminals.owned_groups(), [helper], "a reaped shell's pid is not reported: it may be reused");
+        assert!(terminals.census_groups().is_empty(), "Stop All has no pid to recheck for a supervised launch");
         terminals.stop_owned_groups(Duration::from_secs(10));
         assert!(gone(job), "Stop All ended it");
         assert!(terminals.owned_groups().is_empty());
@@ -2079,6 +2177,47 @@ mod supervised_tests {
         assert!(terminals.supervised_work().is_empty());
         terminals.freeze(Duration::from_secs(2)).map(|_| ()).expect("nothing holds the handover");
         terminals.thaw();
+    }
+
+    /// #467 review: on a system without what a supervisor needs (here a
+    /// preflight that reports pidfd_open missing), a terminal still opens,
+    /// as before the supervisor, and later ones do not try again.
+    #[test]
+    fn a_terminal_opens_without_a_supervisor_where_the_system_lacks_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let spec = || PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
+        supervisor::with_test_fault("preflight-unsupported", || terminals.spawn(sink.clone(), "plain:shell", spec())).unwrap();
+        assert!(terminals.is_running("plain:shell"), "the terminal opened");
+        assert!(terminals.panes.lock().unwrap()["plain:shell"].group.owner().is_none(), "without a supervisor");
+        assert_eq!(terminals.unsupervised.lock().unwrap().as_deref(), Some("pidfd_open"), "the reason is kept for the notice");
+        terminals.spawn(sink, "next:shell", spec()).unwrap();
+        assert!(terminals.panes.lock().unwrap()["next:shell"].group.owner().is_none(), "later terminals do not try again");
+        terminals.kill_all_and_wait_confirmed(&["plain:shell".into(), "next:shell".into()], Duration::from_secs(10)).unwrap();
+    }
+
+    /// #467 review: a lost launch whose helper never exits (here stopped)
+    /// becomes the reader's to release after the grace, and releasing it
+    /// leaves no helper behind.
+    #[test]
+    fn a_lost_launch_whose_supervisor_never_exits_can_be_released_after_a_while() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let owner = sleeping(&terminals, &dir, "stuck:shell");
+        let shell = owner.pid().unwrap() as i32;
+        struct Kill(i32);
+        impl Drop for Kill { fn drop(&mut self) { unsafe { libc::kill(self.0, libc::SIGKILL); } } }
+        let _orphan = Kill(shell);
+        let helper = owner.supervisor_for_test().unwrap() as i32;
+        unsafe { libc::kill(helper, libc::SIGSTOP); }
+        owner.lose_for_test();
+        assert_eq!(terminals.release_lost("stuck:shell"), 0, "not at once: it might still settle");
+        wait_for("the grace", || owner.lost_for_good());
+        assert!(terminals.supervised_work().iter().any(|work| work.id == "stuck:shell" && work.lost));
+        assert_eq!(terminals.release_lost("stuck:shell"), 1);
+        wait_for("the stopped helper to be killed and reaped", || gone(helper));
+        assert!(terminals.supervised_work().is_empty());
     }
 
     /// #467/#765: a launch whose supervisor died cannot be settled by anything
@@ -2136,7 +2275,8 @@ mod tests {
         terminals.kill_all_and_wait_confirmed(&terminals.session_pane_ids("failed", &[]), Duration::from_secs(5)).unwrap();
     }
 
-    #[cfg(unix)]
+    // The strict census is not applied on macOS, which keeps main's leader-group stop.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn disappearing_census_member_cannot_retire_a_session_with_a_forked_successor() {
         let dir = tempfile::tempdir().unwrap();

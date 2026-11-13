@@ -2152,6 +2152,29 @@ async fn a_terminal_names_its_session_only_to_pty_2_peers_that_may_see_it() {
     assert_eq!(attached["sessionId"], session.id.as_str());
 }
 
+/// #467 review: closing a session leaves an idle tab as it is, as main did:
+/// no "Session closed" in its log, an unread reply still unread, and no
+/// refusal from a stop it never needed.
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_session_leaves_its_idle_tabs_alone() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let manager = SessionManager::new(
+        f.sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager.clone())).unwrap();
+    let session = seed_session(&f.root, "Read later", None);
+    let tab_id = session.tabs[0].id.clone();
+    manager.set_status_for_test(&session.id, &tab_id, crate::store::index::TabStatus::Completed);
+    let (peer, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    call(&f.rpc, &peer, "session.close", json!({ "sessionId": session.id, "tabId": tab_id, "clientRequestId": "close-idle" })).await.unwrap();
+    assert_eq!(manager.status_for_test(&session.id, &tab_id), crate::store::index::TabStatus::Completed, "an unread reply stays unread");
+    let closed = manager.load_events(&session.id, &tab_id).unwrap().into_iter()
+        .any(|event| matches!(&event.payload, crate::events::Payload::Status { text } if text == crate::recovery::SESSION_CLOSED_MESSAGE));
+    assert!(!closed, "nothing was stopped, so nothing says the session closed");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_a_sessions_last_tab_with_remove_closes_its_terminals() {
     let _home = crate::store::temp_home();
