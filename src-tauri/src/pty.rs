@@ -306,7 +306,7 @@ impl OwnedGroup {
         self.pid_with(settled_session_jobs)
     }
 
-    #[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn pid_with(&self, census: impl FnOnce(u32) -> Result<Vec<(u32, u32)>>) -> Option<u32> {
         let mut owned = self.0.lock().unwrap();
         if let Some(pid) = *owned {
@@ -2275,7 +2275,8 @@ mod tests {
         terminals.kill_all_and_wait_confirmed(&terminals.session_pane_ids("failed", &[]), Duration::from_secs(5)).unwrap();
     }
 
-    #[cfg(unix)]
+    // The strict census is not applied on macOS, which keeps main's leader-group stop.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn disappearing_census_member_cannot_retire_a_session_with_a_forked_successor() {
         let dir = tempfile::tempdir().unwrap();

@@ -3190,8 +3190,11 @@ fn relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata() {
     assert!(index::get(SESSION).unwrap().worktree_name.is_none());
 }
 
+/// An earlier launch whose exit cannot be confirmed refuses only the start
+/// that found it (#467 review): the tab is not left stopping, and Stop still
+/// finds the launch by its pane and ends it.
 #[test]
-fn startup_retains_unconfirmed_detached_ownership_until_explicit_stop() {
+fn startup_refuses_only_itself_while_detached_ownership_is_unconfirmed() {
     let rig = Rig::with_live_pane();
     let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
     failure.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3206,10 +3209,11 @@ fn startup_retains_unconfirmed_detached_ownership_until_explicit_stop() {
     {
         let mut rt = rig.rt.lock().unwrap();
         let refused = rig.manager.require_prior_cli_exit(&mut rt, &rig.pane);
-        assert!(refused.as_ref().is_err_and(|error| error.to_string().contains("Previous PTY exit is unconfirmed")), "{refused:?}");
-        assert!(rt.stopping);
-        assert_eq!(rig.manager.stopping_ptys.lock().unwrap()[&key_of(SESSION, TAB)].len(), detached.len());
+        assert!(refused.as_ref().is_err_and(|error| error.to_string().contains("has not exited yet")), "{refused:?}");
+        assert!(!rt.stopping, "the tab is not left stopping");
     }
+    assert!(!rig.manager.terminals.detached_stops(&rig.pane).is_empty(), "the launch is still owned, for Stop to end");
+    assert!(!detached.is_empty());
     failure.store(false, std::sync::atomic::Ordering::SeqCst);
     rig.manager.stop(SESSION, TAB).unwrap();
     let mut rt = rig.rt.lock().unwrap();
