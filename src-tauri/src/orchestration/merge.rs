@@ -37,6 +37,7 @@
 //! the merge stage, the lead resolving a conflict, is what the budget holds
 //! back (`engine::resolve_in_lead`).
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -46,6 +47,7 @@ use serde_json::json;
 
 use super::engine::{By, EngineError};
 use super::verify::{self, CommandRun};
+use crate::landed::Fetch;
 use super::{plan, store, Check, ConflictFile, FinalCheck, MergeState, PendingMerge, Piece, PieceMerge, PieceState, Run, RunMerge, RunState, SessionRef};
 
 /// The most of one conflicting place that is kept, in lines and in characters.
@@ -90,6 +92,9 @@ pub trait Checkouts: Send + Sync {
     /// Remove a worker's worktree and the session in it. Its branch stays.
     /// `still_safe` is asked again once the session is stopped, immediately before the folder goes.
     fn remove(&self, run: &Run, worker: &SessionRef, worktree: &Worktree, still_safe: &dyn Fn() -> Result<(), String>) -> anyhow::Result<()>;
+    /// Stop every agent of a worker's session that is running, as `sessions stop --children-of`
+    /// does; `Ok(false)` when none was, or the session is gone.
+    fn stop_agents(&self, worker: &SessionRef) -> anyhow::Result<bool>;
     /// The stored run changed.
     fn changed(&self, run: &Run);
 }
@@ -833,6 +838,8 @@ fn finish(host: &dyn Checkouts, id: &str, cwd: &Path, check: Option<&(String, bo
     })
     .map_err(EngineError::internal)?;
     host.changed(&after);
+    // Done: the agents of its finished workers are stopped, so none holds its worktree from `cleanup`.
+    super::stop_finished(&after, &|worker| host.stop_agents(worker));
     Ok(after)
 }
 
@@ -1017,9 +1024,33 @@ pub struct Cleanup {
     pub refused: Vec<Fate>,
 }
 
+/// What a worker's worktree is measured against to say its work is merged.
+enum Measure {
+    /// The lead's branch, where the run's pieces are merged: at `head`, named `into`.
+    Lead { head: String, into: String },
+    /// The lead's session or checkout is gone: the project's base branch, as
+    /// `worktrees delete` measures a worktree ([`crate::landed::check`]).
+    Base { project: PathBuf },
+}
+
 /// Why a worker's worktree is not removed, or `None` when it may go: nothing
-/// in it is uncommitted, and every commit of it is in the lead's branch.
-fn keeps(worktree: &Worktree, lead_head: &str, into: &str) -> Option<String> {
+/// in it is uncommitted, and every commit of it is in the lead's branch or,
+/// with the lead gone, in the project's base branch. `fetched` says the base
+/// branch was fetched for an earlier worktree of this pass, so it is not
+/// fetched again; the lead's branch is local and never fetched.
+fn keeps(worktree: &Worktree, measure: &Measure, fetched: &Cell<bool>) -> Option<String> {
+    if let Some(reason) = unsettled(worktree) {
+        return Some(reason);
+    }
+    match measure {
+        Measure::Lead { head, into } => not_in_lead(worktree, head, into),
+        Measure::Base { project } => not_on_base(worktree, project, fetched),
+    }
+}
+
+/// Why a worktree is not finished with, whatever it is measured against: an agent in it, git
+/// work left part way, or changes nobody committed.
+fn unsettled(worktree: &Worktree) -> Option<String> {
     if worktree.busy {
         return Some("An agent is running in it.".into());
     }
@@ -1037,6 +1068,11 @@ fn keeps(worktree: &Worktree, lead_head: &str, into: &str) -> Option<String> {
         let named: Vec<&str> = dirty.iter().take(5).map(|line| line.get(3..).unwrap_or(line)).collect();
         return Some(format!("It has uncommitted work in {}: {}{}.", count(dirty.len(), "file", "files"), named.join(", "), if dirty.len() > named.len() { ", …" } else { "" }));
     }
+    None
+}
+
+/// Why a settled worktree's commits are not all in the lead's branch at `lead_head`.
+fn not_in_lead(worktree: &Worktree, lead_head: &str, into: &str) -> Option<String> {
     let at = match head(&worktree.path) {
         Ok(at) => at,
         Err(error) => return Some(format!("Its commit could not be read: {error:#}")),
@@ -1048,19 +1084,65 @@ fn keeps(worktree: &Worktree, lead_head: &str, into: &str) -> Option<String> {
     None
 }
 
+/// Why a settled worktree may not go when the lead is gone: what `worktrees delete` checks
+/// ([`crate::landed::check`] is `safe`: clean, nothing stashed, merged, verified against a fresh
+/// base branch), and its HEAD an ancestor of that base branch. A branch whose work reached the
+/// base branch only as a squash or a rebase stays: what of it is there is not certain enough to
+/// remove it unasked.
+fn not_on_base(worktree: &Worktree, project: &Path, fetched: &Cell<bool>) -> Option<String> {
+    let landed = crate::landed::check(project, &worktree.path, if fetched.get() { Fetch::JustFetched } else { Fetch::Fresh });
+    fetched.set(fetched.get() || landed.fresh);
+    if !landed.checked {
+        return Some(format!("It is not a worktree of the project at {}, so nothing says what of it is merged.", project.display()));
+    }
+    let Some(base) = landed.base.clone() else {
+        return Some(format!("The lead's checkout is gone and the project's base branch is unknown, so nothing says what of it is merged: {}", landed.not_verified.as_deref().unwrap_or("no base branch was found.")));
+    };
+    if landed.uncommitted > 0 {
+        return Some(format!("It has uncommitted work in {}.", count(landed.uncommitted as usize, "file", "files")));
+    }
+    if landed.stashes > 0 {
+        return Some(format!("Its branch has {} that deleting it would orphan.", count(landed.stashes as usize, "stash entry", "stash entries")));
+    }
+    let Some(at) = landed.head.as_deref() else { return Some("Its commit could not be read.".into()) };
+    if !is_ancestor(&worktree.path, at, &base) {
+        let ahead = git(&worktree.path, &["rev-list", "--count", &format!("{base}..{at}")]).ok().and_then(|ahead| ahead.parse::<usize>().ok()).unwrap_or(0);
+        return Some(format!("It has {} that {} not in `{base}`.", count(ahead.max(1), "commit", "commits"), if ahead > 1 { "are" } else { "is" }));
+    }
+    if let Some(why) = landed.not_verified.as_deref() {
+        return Some(format!("Whether its work is in `{base}` could not be verified: {why}"));
+    }
+    if !landed.safe {
+        return Some(if landed.losses.is_empty() { format!("It is not known to be clean and merged into `{base}`.") } else { landed.losses.join(" ") });
+    }
+    None
+}
+
 /// Remove the worktrees of a run's workers, each with its session. One with
 /// uncommitted work, or with commits that are not in the lead's branch, is
 /// refused and named with the reason; so is one whose piece is still being
-/// worked on. Branches are kept. Without `yes` nothing is removed: the
-/// refusal lists what would go and what would stay.
+/// worked on. When the lead's session or checkout is gone, what is merged is
+/// read from the project's base branch instead: a worktree goes only when its
+/// HEAD is in that branch and it is clean, as `worktrees delete` checks.
+/// Branches are kept. Without `yes` nothing is removed: the refusal lists what
+/// would go and what would stay.
 pub fn cleanup(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, EngineError> {
     // Held to the end: no pass may begin, make a merge this counts as in the lead's branch, and
     // then undo it once the worktree is gone.
     let _no_merge = Hold::take(id, Holder::Cleanup).map_err(|error| EngineError::new("merge_in_progress", format!("{} Worktrees are cleaned up once that has ended.", error.message), None))?;
     let run = stored(id)?;
-    let cwd = host.lead_checkout(&run).map_err(|error| EngineError::new("lead_not_found", format!("The lead's checkout cannot be found, so nothing says what is merged: {error:#}"), None))?;
-    let lead_head = head(&cwd).map_err(EngineError::internal)?;
-    let into = crate::git::current_branch(&cwd).unwrap_or_else(|| short(&lead_head).to_string());
+    // The lead's session, or the folder it was in, is gone (its worktree removed once its pull
+    // request merged): the project's base branch says what is merged.
+    let measure = match host.lead_checkout(&run).ok().filter(|cwd| cwd.is_dir()) {
+        Some(cwd) => {
+            let lead_head = head(&cwd).map_err(EngineError::internal)?;
+            let into = crate::git::current_branch(&cwd).unwrap_or_else(|| short(&lead_head).to_string());
+            Measure::Lead { head: lead_head, into }
+        }
+        None => Measure::Base { project: PathBuf::from(&run.project_path) },
+    };
+    // The base branch is fetched for the first worktree measured against it, and again only while no fetch has worked.
+    let fetched = Cell::new(false);
     let (mut going, mut refused): (Vec<(Fate, SessionRef, Worktree)>, Vec<Fate>) = (Vec::new(), Vec::new());
     let mut seen: Vec<&str> = Vec::new();
     for piece in &run.pieces {
@@ -1071,7 +1153,7 @@ pub fn cleanup(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, Eng
             let Some(worktree) = host.worktree(worker) else { continue };
             let current = index + 1 == piece.tries.len();
             let at_work = attempt.outcome.is_none() || (current && matches!(piece.state, PieceState::Running | PieceState::Verifying));
-            let reason = if at_work { Some("Its piece is still being worked on or checked.".to_string()) } else { keeps(&worktree, &lead_head, &into) };
+            let reason = if at_work { Some("Its piece is still being worked on or checked.".to_string()) } else { keeps(&worktree, &measure, &fetched) };
             let fate = Fate { piece: piece.id.clone(), attempt: index + 1, session: worker.session_id.clone(), worktree: worktree.path.to_string_lossy().into_owned(), branch: attempt.branch.clone(), reason };
             match fate.reason {
                 Some(_) => refused.push(fate),
@@ -1094,7 +1176,7 @@ pub fn cleanup(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, Eng
     let mut removed = Vec::new();
     for (mut fate, worker, worktree) in going {
         // Looked at again behind the stop: what an agent wrote in its last moment is not removed unseen.
-        let still_safe = || match keeps(&Worktree { busy: false, ..worktree.clone() }, &lead_head, &into) {
+        let still_safe = || match keeps(&Worktree { busy: false, ..worktree.clone() }, &measure, &fetched) {
             Some(reason) => Err(reason),
             None => Ok(()),
         };
