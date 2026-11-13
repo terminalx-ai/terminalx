@@ -509,7 +509,8 @@ impl Checkouts for ManagerHost {
             sessions: crate::session_ops::SessionsFate::Delete,
             // Never the branch: what was merged is named by it, and what was not is kept by it.
             delete_branch: false,
-            // `cleanup` has looked already, and looks again through `guard`: clean, and every commit in the lead's branch.
+            // `cleanup` has looked already, and looks again through `guard`: clean, and every commit in the
+            // lead's branch (or, with the lead gone, in the project's base branch).
             confirmation: crate::session_ops::Confirmation::Forced,
             // Only the worker's own session goes: one somebody else opened there keeps the worktree.
             expected_sessions: Some(&expected),
@@ -523,6 +524,10 @@ impl Checkouts for ManagerHost {
         };
         crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &|entry| self.manager.stop_session_confirmed(entry).map_err(|error| format!("{error:#}"))).map_err(|error| anyhow!("{error}"))?;
         Ok(())
+    }
+
+    fn stop_agents(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        Host::stop_worker(self, worker)
     }
 
     fn changed(&self, run: &Run) {
