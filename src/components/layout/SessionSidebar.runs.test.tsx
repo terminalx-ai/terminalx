@@ -252,10 +252,10 @@ describe("tidy worker rows (PRO-364)", () => {
     return entry;
   };
 
-  it("names every try of a piece by the piece, marks tries past the first, and quiets the earlier ones", async () => {
+  it("names every try of a piece by the piece, marks each try of it with its number, and quiets the earlier ones", async () => {
     const tries = [
       { step: "first", model: "haiku", worker: { sessionId: "w-try1" }, outcome: "failed" },
-      { step: "model", model: "sonnet", worker: { sessionId: "w-try2" }, outcome: "failed" },
+      { step: "tier", model: "sonnet", worker: { sessionId: "w-try2" }, outcome: "failed" },
       { step: "effort", model: "opus", worker: { sessionId: "w-try3" } },
     ] as RunPiece["tries"];
     await boot([
@@ -273,10 +273,33 @@ describe("tidy worker rows (PRO-364)", () => {
     const rows = within(within(leadRow()).getByTestId("lead-workers")).getAllByRole("listitem");
     expect(rows.map((row) => row.dataset.worker)).toEqual(["w-map", "w-try1", "w-try2", "w-try3"]);
     expect(workerTitles()).toEqual(["Map every settings read Haiku", "Typed store module Haiku", "Typed store module Sonnet", "Typed store module Opus"]);
-    expect(rows.map((row) => row.querySelector("[data-testid=try-mark]")?.textContent ?? null)).toEqual([null, null, "try 2", "try 3"]);
+    expect(rows.map((row) => row.querySelector("[data-testid=try-mark]")?.textContent ?? null)).toEqual([null, "try 1", "try 2", "try 3"]);
     // The current try carries the piece's state; the earlier ones are drawn quieter.
     expect(rows.map((row) => row.dataset.earlierTry !== undefined)).toEqual([false, true, true, false]);
     expect(rows[3].querySelector("[data-piece-mark]")?.getAttribute("data-piece-mark")).toBe("running");
+    expect(leadRow().textContent).not.toMatch(/You are a worker/);
+  });
+
+  it("marks both tries of a piece tried twice, try 1 too, and leaves a piece tried once unmarked", async () => {
+    const tries = [
+      { step: "first", model: "sonnet", worker: { sessionId: "w-first" }, outcome: "checkFailed" },
+      { step: "retry", model: "sonnet", worker: { sessionId: "w-again" } },
+    ] as RunPiece["tries"];
+    await boot([
+      session("lead", { title: "Move settings reads" }),
+      briefed("w-again", "lead", "Typed store module"),
+      briefed("w-once", "lead", "Map every settings read"),
+      briefed("w-first", "lead", "Typed store module"),
+    ], [runOf([
+      piece("map", "Map every settings read", { state: "running", worker: { sessionId: "w-once" }, tries: [{ step: "first", model: "sonnet", worker: { sessionId: "w-once" } }] }),
+      piece("store", "Typed store module", { state: "verifying", worker: { sessionId: "w-again" }, tries }),
+    ])]);
+    mount();
+    await waitFor(() => expect(workerRows()).toHaveLength(3));
+    const rows = within(within(leadRow()).getByTestId("lead-workers")).getAllByRole("listitem");
+    expect(rows.map((row) => row.dataset.worker)).toEqual(["w-once", "w-first", "w-again"]);
+    expect(rows.map((row) => row.querySelector("[data-testid=try-mark]")?.textContent ?? null)).toEqual([null, "try 1", "try 2"]);
+    expect(rows.map((row) => row.dataset.earlierTry !== undefined)).toEqual([false, true, false]);
     expect(leadRow().textContent).not.toMatch(/You are a worker/);
   });
 

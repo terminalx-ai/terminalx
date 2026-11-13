@@ -76,6 +76,8 @@ export interface WorkerTry {
   /** Where the piece is in the plan. */
   index: number;
   number: number;
+  /** How many tries the piece has had, this one included: past one, every try's row says which it is. */
+  of: number;
   current: boolean;
   /** The try's own record, absent for a piece that keeps none. */
   attempt?: PieceTry;
@@ -91,8 +93,9 @@ export function tryOf(run: Run | null | undefined, sessionId: string): WorkerTry
     const tries = piece.tries ?? [];
     const at = tries.findIndex((attempt) => attempt.worker?.sessionId === sessionId);
     const current = piece.worker?.sessionId === sessionId;
-    if (at >= 0) return { piece, index, number: at + 1, current, attempt: tries[at] };
-    if (current) return { piece, index, number: Math.max(1, tries.length), current };
+    const of = Math.max(1, tries.length);
+    if (at >= 0) return { piece, index, number: at + 1, of, current, attempt: tries[at] };
+    if (current) return { piece, index, number: of, of, current };
   }
   return null;
 }
