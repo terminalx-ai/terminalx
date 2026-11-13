@@ -69,7 +69,9 @@ function ScriptsPage({ project }: { project: Project }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const trust = resolved?.trust;
-  const scriptsNeedTrust = !!trust?.required && trust.keys.some((key) => key === KEYS.setup || key === KEYS.archive);
+  // Only a script whose effective value is the committed one waits for trust; a local override or policy replaces it.
+  const untrusted = (kind: Kind) => !!trust?.required && trust.keys.includes(KEYS[kind]) && resolved?.values[KEYS[kind]]?.source === "repositoryShared";
+  const scriptsNeedTrust = untrusted("setup") || untrusted("archive");
   const sharedFile = `${project.path}/.terminalx/${SHARED_FILE}`;
   const review = async () => {
     setTrusting(true); setActionError(null); setNotice(null);
@@ -94,14 +96,14 @@ function ScriptsPage({ project }: { project: Project }) {
       <ShieldAlert className="size-4 shrink-0 self-start text-warning" aria-hidden />
       <p className="min-w-0 flex-1 text-[13px] leading-5"><span className="font-mono font-medium">.terminalx/{SHARED_FILE}</span> in this repository wants to run commands when a workspace is created or removed. Nothing runs until you trust it.</p>
       <Button variant="outline" size="sm" className="shrink-0 whitespace-nowrap" disabled={trusting} onClick={() => setNotNow(true)}>Not now</Button>
-      <Button variant="secondary" size="sm" className="shrink-0 whitespace-nowrap" disabled={trusting} onClick={() => void review()}>{trusting ? "Reviewing…" : "Review and trust"}</Button>
+      <Button size="sm" className="shrink-0 whitespace-nowrap" disabled={trusting} onClick={() => void review()}>{trusting ? "Reviewing…" : "Review and trust"}</Button>
     </div>}
     {(error || actionError) && <p role="alert" className="text-xs text-destructive">{error || actionError}</p>}
     {notice && <p role="status" className="text-xs text-muted-foreground">{notice}</p>}
     {resolved?.warnings.filter((warning) => /setupScript|archiveScript|archiveTimeoutMinutes/.test(warning)).map((warning) => <p key={warning} role="status" className="text-xs text-warning">{warning}</p>)}
     {resolved ? <>
-      <ScriptCard kind="setup" project={project} resolved={resolved} reload={reload} untrusted={scriptsNeedTrust && trust!.keys.includes(KEYS.setup)} />
-      <ScriptCard kind="archive" project={project} resolved={resolved} reload={reload} untrusted={scriptsNeedTrust && trust!.keys.includes(KEYS.archive)} />
+      <ScriptCard kind="setup" project={project} resolved={resolved} reload={reload} untrusted={untrusted("setup")} />
+      <ScriptCard kind="archive" project={project} resolved={resolved} reload={reload} untrusted={untrusted("archive")} />
     </> : !error && <p role="status" className="text-xs text-muted-foreground">Loading scripts…</p>}
   </section>;
 }

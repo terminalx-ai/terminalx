@@ -156,12 +156,12 @@ export function WorkspaceRemoveDialog() {
             <DialogTitle className="pr-6">{archiveFailureTitle(failure)}</DialogTitle>
             <DialogDescription className="wrap-anywhere">{archiveFailureDetail(failure)}</DialogDescription>
           </DialogHeader>
+          <Button variant="link" size="xs" className="-ml-2 mt-1 self-start text-muted-foreground" disabled={!removable} onClick={() => void remove(undefined, failure.token)}>
+            <RotateCcw /> Run archive script again
+          </Button>
           {error && <div role="alert" className="mt-3 whitespace-pre-line text-xs text-destructive">{error}</div>}
           {showLog && failure.pane && <div className="mt-3"><ArchiveTerminal pane={failure.pane} output={failure.log} /></div>}
-          <DialogFooter className="mt-4 flex-wrap">
-            <Button variant="ghost" size="sm" className="mr-auto" disabled={!removable} onClick={() => void remove(undefined, failure.token)}>
-              <RotateCcw /> Run archive script again
-            </Button>
+          <DialogFooter className="mt-4">
             <Button variant="ghost" size="sm" onClick={() => setShowLog(!showLog)}>
               <FileText /> {showLog ? "Hide log" : "Open log"}
             </Button>

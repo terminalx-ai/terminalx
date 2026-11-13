@@ -169,3 +169,13 @@ it("does not offer scripts for folders or unavailable projects", () => {
   view.rerender(<RepositoryScriptsTab projectPath="/missing" />);
   expect(screen.queryByLabelText("Archive script")).toBeNull();
 });
+
+it("does not ask to trust a committed script that a local override replaces", async () => {
+  state.resolve.mockResolvedValue(resolved({ setupScript: { value: "make setup", source: "repositoryLocal" } }, { hash: "h", required: true, keys: ["setupScript"] }));
+  state.sessions = [{ id: "s1", projectPath: "/a", cwd: "/a/w", worktreeName: "feature", tabs: [] }] as unknown as SessionEntry[];
+  render(<RepositoryScriptsTab projectPath="/a" />);
+  await screen.findByText("From settings.local.json · local override");
+  expect(screen.queryByRole("region", { name: "Repository trust" })).toBeNull();
+  expect(screen.queryByText(/not trusted yet/)).toBeNull();
+  expect(button("Run setup now").disabled).toBe(false);
+});

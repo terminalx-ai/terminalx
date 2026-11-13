@@ -296,8 +296,14 @@ pub(crate) fn last_line(log: &str) -> Option<String> {
     while let Some(c) = chars.next() {
         if c == '\u{1b}' {
             match chars.next() {
-                Some('[') => { while let Some(c) = chars.next() { if ('@'..='~').contains(&c) { break } } }
-                Some(']') => { while let Some(c) = chars.next() { if c == '\u{7}' { break } if c == '\u{1b}' { chars.next(); break } } }
+                // CSI ends at its final byte; OSC at BEL or ESC \.
+                Some('[') => { for c in chars.by_ref() { if ('@'..='~').contains(&c) { break } } }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' { break }
+                        if c == '\u{1b}' { chars.next(); break }
+                    }
+                }
                 _ => {}
             }
         } else if c == '\n' || c == '\r' { plain.push('\n'); }
