@@ -100,7 +100,7 @@ impl Fixture {
     fn archive_script(&mut self, archive: &str) {
         let project = crate::store::projects::add(self.alpha().to_str().unwrap()).unwrap();
         crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
         }).unwrap();
         if self.archive.is_none() { self.archive = Some((Arc::new(crate::pty::Terminals::new()), Arc::new(crate::sink::BroadcastSink::new(64)))); }
     }

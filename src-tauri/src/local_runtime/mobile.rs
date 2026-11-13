@@ -621,8 +621,10 @@ pub fn actor(params: &Value) -> Result<Actor> {
 /// - `sessionCreate`: `create`. `macSettings`: `settings` and `setSettings`.
 /// - `terminal`: `openTerminal`, and observations whose output says the pane's size.
 /// - `closeTab`: `closeTab`, closing a tab as the desktop's tab strip does.
+/// - `layeredConfiguration`: 1 resolves repository and managed settings; 2 also
+///   resolves setup and archive scripts and the archive timeout from them.
 pub fn features() -> Value {
-    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 1 })
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2 })
 }
 
 /// What a runtime too old to name its features serves, by its version

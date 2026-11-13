@@ -2,8 +2,7 @@
 // pnpm build && node scripts/webkit/permission-details.mjs
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
-import { webkit } from "playwright";
-import { open, openConversation, serve, tab } from "./harness.mjs";
+import { launch, open, openConversation, serve, tab } from "./harness.mjs";
 
 const command = `printf 'keep  two spaces\\n'\n# ${"long-command-argument".repeat(35)}\npnpm vitest run src/components/session/RecoveryBanner.test.tsx`;
 // #775: why the card is up (the app's words) and what the agent says of the command, apart and both in view.
@@ -14,7 +13,7 @@ const screenshots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, { recursive: true });
 let browser;
 try {
-  browser = await webkit.launch();
+  browser = await launch();
   for (const floating of [false, true]) {
     const extra = `(() => {
       const load = window.__PW_STUB__.answers.load_tab_events;

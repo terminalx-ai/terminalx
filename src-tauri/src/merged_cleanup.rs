@@ -6,7 +6,7 @@
 //! VM. Whoever drives it says only which projects it is on for and how long
 //! the grace period is; everything a removal rests on is read here.
 //!
-//! [`sweep`] is one pass. It looks at the worktrees TerminalX made in those
+//! [`sweep_fallible`] is one pass. It looks at the worktrees TerminalX made in those
 //! projects (never the repository's main directory, a worktree made by hand,
 //! a detached HEAD or the default branch) and asks GitHub for the pull
 //! request of each one's branch, in one request per project. Only a pull
@@ -212,6 +212,7 @@ pub struct Scope {
 pub type PullRequests<'a> = &'a dyn Fn(&Path, &[String]) -> anyhow::Result<HashMap<String, BranchPr>>;
 
 /// Everything one pass reads about its host.
+#[cfg(test)]
 pub struct Sweep<'a> {
     pub host: &'a Host<'a>,
     pub sink: &'a dyn EventSink,
@@ -464,8 +465,8 @@ impl Pass<'_> {
             (status.reason, status.detail, status.fresh, status.sessions) = (Some(reason), detail, fresh, sessions);
         };
 
-        let script = match crate::store::projects::scripts(&repository.root) {
-            Ok(scripts) => scripts.archive,
+        let script = match crate::store::configuration::archive_script(&repository.root) {
+            Ok(archive) => archive.script,
             Err(error) => return keep(self, Vec::new(), "its scripts could not be read".into(), Some(error.to_string())),
         };
         let fingerprint = if script.trim().is_empty() { None } else {
@@ -722,6 +723,7 @@ fn delete_remote_branch(project: &Path, branch: &str, merged: &str) -> BranchFat
 /// One pass over the projects in `scope`: see what merged, keep what is not
 /// safe and say why, and remove what is safe and due. With no project in
 /// scope it removes nothing and forgets what it had seen.
+#[cfg(test)]
 pub fn sweep(run: &Sweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
     sweep_fallible(&FallibleSweep { host: run.host, sink: run.sink,
         stop: &|entry| { (run.stop)(entry); Ok(()) }, pull_requests: run.pull_requests, now: run.now }, scope)

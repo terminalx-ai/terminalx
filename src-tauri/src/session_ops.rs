@@ -891,7 +891,7 @@ pub(crate) struct WorkspaceRemoved {
     pub sparse_checkout: Option<Vec<String>>,
 }
 
-/// How an error from [`remove_workspace`] starts when the workspace was left
+/// How an error from [`remove_workspace_fallible`] starts when the workspace was left
 /// alone because it needs the second confirmation. Callers that can ask for
 /// it look for this.
 pub(crate) const NEEDS_CONFIRMATION: &str = "This workspace needs a second confirmation before it is removed";
@@ -934,6 +934,7 @@ fn needs_confirmation(landed: &crate::landed::Landed, confirmation: &Confirmatio
 ///
 /// A folder that is not on disk (removed by hand, or on a volume that is not
 /// mounted) cannot be checked, so it needs the second confirmation too.
+#[cfg(test)]
 pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<'_>, stop: &dyn Fn(&SessionEntry)) -> Result<WorkspaceRemoved> {
     remove_workspace_fallible(sink, request, &|entry| { stop(entry); Ok(()) })
 }
@@ -1250,7 +1251,7 @@ pub(crate) fn rename_tab_entry(session_id: &str, tab_id: &str, title: Option<Str
 /// Delete one session: its index entry, logs, attachments and the agents'
 /// own data for it. Nothing else goes: not its workspace, and never another
 /// session, whatever they share. A workspace is removed only through
-/// [`remove_workspace`]. `stop` ends what the session's tabs are running.
+/// [`remove_workspace_fallible`]. `stop` ends what the session's tabs are running.
 pub(crate) fn delete_session_blocking(sink: &dyn EventSink, session_id: &str, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
     delete_session_blocking_fallible(sink, session_id, &|entry| { stop(entry); Ok(()) })
 }
@@ -1569,7 +1570,7 @@ mod tests {
         let dir = repo();
         let project = projects::add(dir.path().to_str().unwrap()).unwrap();
         projects::update(&project.path, projects::ProjectPatch {
-            scripts: Some(projects::RepositoryScripts { setup: "exit 0".into(), archive: String::new() }), ..Default::default()
+            scripts: Some(projects::RepositoryScripts { setup: "exit 0".into(), archive: String::new(), archive_timeout_minutes: None }), ..Default::default()
         }).unwrap();
         // Setup cannot write its status after the index has landed. (Making the
         // sessions folder a file would also stop the index, which lives in it.)
@@ -1810,7 +1811,7 @@ mod tests {
         let _home = crate::store::temp_home();
         let dir = repo();
         let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
-        let script = crate::store::projects::RepositoryScripts { setup: "future setup".into(), archive: "printf 'session:%s\\n' \"$TERMINALX_SESSION_ID\"; printf 'attribution:%s\\n' \"${RACCOON_SESSION_ID:-none}\"; exit 19".into() };
+        let script = crate::store::projects::RepositoryScripts { setup: "future setup".into(), archive: "printf 'session:%s\\n' \"$TERMINALX_SESSION_ID\"; printf 'attribution:%s\\n' \"${RACCOON_SESSION_ID:-none}\"; exit 19".into(), archive_timeout_minutes: None };
         crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch { scripts: Some(script.clone()), ..Default::default() }).unwrap();
         assert_eq!(crate::store::projects::scripts(dir.path()).unwrap(), script);
         let session = worktree_session(dir.path());
@@ -1837,12 +1838,35 @@ mod tests {
     }
 
     #[test]
+    fn an_untrusted_committed_setup_script_does_not_hold_up_the_saved_archive_script() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
+        crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "exit 3".into(), archive_timeout_minutes: None }), ..Default::default()
+        }).unwrap();
+        let session = worktree_session(dir.path());
+        // Committed after the worktree exists, as a pull would bring it.
+        std::fs::create_dir_all(dir.path().join(".terminalx")).unwrap();
+        std::fs::write(dir.path().join(".terminalx/settings.json"), r#"{"setupScript":"touch untrusted"}"#).unwrap();
+        let terminals = Arc::new(crate::pty::Terminals::new());
+        let sink: Arc<dyn EventSink> = Arc::new(sink());
+        let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
+        removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false });
+        // The saved archive script ran and failed: the person gets the Remove anyway question, not a trust error.
+        let failure = crate::archive_script::Failure::from_error(&remove_workspace(&*sink, &removal, &|_| {}).unwrap_err()).unwrap();
+        assert_eq!(failure.code, Some(3));
+        assert!(Path::new(&session.cwd).exists());
+        terminals.kill_all();
+    }
+
+    #[test]
     fn successful_archive_finishes_before_removal_and_script_changes_invalidate_consent() {
         let _home = crate::store::temp_home();
         let dir = repo();
         let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
         let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
         }).unwrap();
         save("exit 8");
         let session = worktree_session(dir.path());
@@ -1869,7 +1893,7 @@ mod tests {
             let dir = repo();
             let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
             let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-                scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+                scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
             }).unwrap();
             save("exit 8");
             let session = worktree_session(dir.path());

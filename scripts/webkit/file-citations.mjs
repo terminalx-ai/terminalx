@@ -6,8 +6,7 @@
 // menu offers the file's actions.
 // pnpm build && pnpm exec playwright install webkit && node scripts/webkit/file-citations.mjs
 import assert from "node:assert/strict";
-import { webkit } from "playwright";
-import { open, openConversation, serve, tab } from "./harness.mjs";
+import { launch, open, openConversation, serve, tab } from "./harness.mjs";
 
 const longName = `Quarterly revenue model with every regional breakdown and the full ${"assumptions ".repeat(4)}appendix.xlsx`;
 const reply = [
@@ -21,7 +20,7 @@ const reply = [
 const server = await serve();
 let browser;
 try {
-  browser = await webkit.launch();
+  browser = await launch();
   for (const floating of [false, true]) {
     const extra = `(() => {
       window.__PW_FILE_ACTIONS__ = [];
