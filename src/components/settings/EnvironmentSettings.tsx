@@ -53,7 +53,8 @@ export function TerminalXVariables() {
   </details>;
 }
 
-type Sheet = { previous: string | null; name: string; value: string };
+/** `stored`: where an edited variable lives now (true: the Keychain); null when adding. */
+type Sheet = { previous: string | null; name: string; value: string; stored: boolean | null };
 
 /**
  * The variables of one scope (Personal when `project` is null), with what
@@ -69,6 +70,10 @@ export function EnvironmentTable({ project, projects = [], emptyText = "No varia
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [paste, setPaste] = useState<string | null>(null);
   const [keepSecrets, setKeepSecrets] = useState(true);
+  // Whether the Keychain switch was used on the open sheet: until then an edit keeps the variable where it is.
+  const [switched, setSwitched] = useState(false);
+  const chooseKeepSecrets = (on: boolean) => { setKeepSecrets(on); setSwitched(true); };
+  const secretFor = (s: Sheet) => (s.stored !== null && !switched ? s.stored : keepSecrets && looksSecret(s.name, s.value));
   const ownScope = project ? "repository" : "user";
   const page = project ? "repository" : "personal";
   const names = rows?.filter((r) => r.scope === ownScope).map((r) => r.name) ?? [];
@@ -85,19 +90,21 @@ export function EnvironmentTable({ project, projects = [], emptyText = "No varia
     window.dispatchEvent(new Event("local-environment-changed"));
     await refresh();
   };
-  const openSheet = (next: Sheet) => { setKeepSecrets(true); setError(null); setSheet(next); };
-  const openPaste = (text: string) => { setKeepSecrets(true); setError(null); setPaste(text); };
+  const openSheet = (next: Sheet) => { setKeepSecrets(next.stored ?? true); setSwitched(false); setError(null); setSheet(next); };
+  const openPaste = (text: string) => { setKeepSecrets(true); setSwitched(false); setError(null); setPaste(text); };
   const nameError = sheet ? environmentNameError(sheet.name) ?? (names.includes(sheet.name) && sheet.name !== sheet.previous ? "A variable with this name already exists in this scope." : null) : null;
   const parsed = paste === null ? null : parseLocalEnv(paste, names);
   const where = project ? "This project" : "All projects";
-  const save = (inputs: EnvironmentInput[], previous: string | null, close: () => void) => void action(async () => {
-    const ready = await environment.save(project, withStorage(inputs, keepSecrets), previous);
+  // Inputs whose storage is already decided (the sheet), or decided by the switch (the paste list).
+  const saveInputs = (inputs: EnvironmentInput[], previous: string | null, close: () => void) => void action(async () => {
+    const ready = await environment.save(project, inputs, previous);
     close();
     await changed(ready);
   });
+  const save = (inputs: EnvironmentInput[], previous: string | null, close: () => void) => saveInputs(withStorage(inputs, keepSecrets), previous, close);
   return <div className="flex flex-col gap-3">
     <div className="flex flex-wrap gap-2">
-      <Button size="sm" disabled={busy || !rows} onClick={() => openSheet({ previous: null, name: "", value: "" })}>Add variable</Button>
+      <Button size="sm" disabled={busy || !rows} onClick={() => openSheet({ previous: null, name: "", value: "", stored: null })}>Add variable</Button>
       <Button size="sm" variant="outline" disabled={busy || !rows} onClick={() => openPaste("")}>Paste variables</Button>
       {project && <Button size="sm" variant="outline" disabled={busy || !rows} onClick={() => void action(async () => {
         const path = await open({ title: "Load from .env file", defaultPath: project, multiple: false, directory: false });
@@ -112,18 +119,18 @@ export function EnvironmentTable({ project, projects = [], emptyText = "No varia
         <colgroup><col className="w-[42%] @xl:w-[30%]" /><col /><col className="hidden w-[24%] @xl:table-column" /><col className="w-[5.5rem] @xl:w-[7.5rem]" /></colgroup>
         <thead className="border-b border-hairline text-muted-foreground"><tr><th className="p-3 font-normal">Name</th><th className="p-3 font-normal">Value</th><th className="hidden p-3 font-normal @xl:table-cell">Applies to</th><th className="p-3"><span className="sr-only">Actions</span></th></tr></thead>
         <tbody>{rows.map((row) => <VariableRow key={`${row.scope}:${row.name}`} row={row} label={appliesTo(row, rows, page, projects)} reset={rows} project={project} disabled={busy} editable={row.scope === ownScope} run={action}
-          edit={(value) => openSheet({ previous: row.name, name: row.name, value })}
+          edit={(value) => openSheet({ previous: row.name, name: row.name, value, stored: isSecretRow(row) })}
           remove={async () => { const ready = await environment.delete(project, row.name); await changed(ready); }} />)}</tbody>
       </table>
       {!rows.length && <p className="p-4 text-sm text-muted-foreground">{emptyText}</p>}
     </div>}
     {sheet && <Dialog open onOpenChange={(open) => { if (!open && !busy) setSheet(null); }}><DialogContent>
-      <DialogHeader><DialogTitle>{sheet.previous ? "Edit variable" : "Add variable"}</DialogTitle><DialogDescription>Applies to {where.toLowerCase()} · {keepSecrets && looksSecret(sheet.name, sheet.value) ? "kept in the Keychain" : "stored in TerminalX's settings"}</DialogDescription></DialogHeader>
-      <form onSubmit={(e) => { e.preventDefault(); if (!busy && !nameError) save([{ name: sheet.name, value: sheet.value }], sheet.previous, () => setSheet(null)); }}>
+      <DialogHeader><DialogTitle>{sheet.previous ? "Edit variable" : "Add variable"}</DialogTitle><DialogDescription>Applies to {where.toLowerCase()} · {secretFor(sheet) ? "kept in the Keychain" : "stored in TerminalX's settings"}</DialogDescription></DialogHeader>
+      <form onSubmit={(e) => { e.preventDefault(); if (!busy && !nameError) saveInputs([{ name: sheet.name, value: sheet.value, secret: secretFor(sheet) }], sheet.previous, () => setSheet(null)); }}>
         <label className="mb-3 flex flex-col gap-2 text-sm">Name<input autoFocus autoComplete="off" spellCheck={false} className={inputClass} value={sheet.name} onChange={(e) => setSheet({ ...sheet, name: e.target.value })} /></label>
         <label className="flex flex-col gap-2 text-sm">Value<input type="password" autoComplete="new-password" spellCheck={false} className={inputClass} value={sheet.value} onChange={(e) => setSheet({ ...sheet, value: e.target.value })} /></label>
         <p className="mt-2 text-xs text-muted-foreground">An empty value sets the variable to an empty string.</p>
-        <KeychainSwitch checked={keepSecrets} disabled={busy} onChange={setKeepSecrets} />
+        <KeychainSwitch checked={keepSecrets} disabled={busy} onChange={chooseKeepSecrets} />
         {sheet.name && nameError && <p role="alert" className="mt-2 text-sm text-destructive">{nameError}</p>}
         {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
         <DialogFooter><Button type="button" variant="outline" disabled={busy} onClick={() => setSheet(null)}>Cancel</Button><Button type="submit" disabled={busy || !!nameError}>Save variable</Button></DialogFooter>
@@ -141,7 +148,7 @@ export function EnvironmentTable({ project, projects = [], emptyText = "No varia
       </ul>}
       {parsed.errors.length > 0 && <ul role="alert" className="mt-2 max-h-32 overflow-y-auto text-sm text-destructive">{parsed.errors.map((e) => <li key={e}>{e}</li>)}</ul>}
       <p className="text-xs text-muted-foreground">Applies to {where.toLowerCase()}. An empty value sets the variable to an empty string.</p>
-      <KeychainSwitch checked={keepSecrets} disabled={busy} onChange={setKeepSecrets} />
+      <KeychainSwitch checked={keepSecrets} disabled={busy} onChange={chooseKeepSecrets} />
       {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
       <DialogFooter><Button variant="outline" disabled={busy} onClick={() => setPaste(null)}>Cancel</Button><Button disabled={busy || !parsed.inputs.length} onClick={() => save(parsed.inputs, null, () => setPaste(null))}>Import {parsed.inputs.length} valid variables</Button></DialogFooter>
     </DialogContent></Dialog>}

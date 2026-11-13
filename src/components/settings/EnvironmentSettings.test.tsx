@@ -77,6 +77,26 @@ describe("environment settings", () => {
     expect(values.user.NEW_KEY).toBeUndefined();
     expect(values.user.RENAMED_KEY).toBe("new-secret");
   });
+  it("an edit keeps a variable where it is stored unless the Keychain switch is changed", async () => {
+    // EDITOR does not look like a secret, but it was saved in the Keychain.
+    values.user.EDITOR = "vim";
+    await ready();
+    const lastSave = () => invoke.mock.calls.filter(([command]) => command === "environment_save").at(-1)![1].inputs;
+    fireEvent.click(screen.getByRole("button", { name: "Edit EDITOR" }));
+    let edit = within(await screen.findByRole("dialog"));
+    expect(edit.getByText(/kept in the Keychain/)).toBeTruthy();
+    fireEvent.change(edit.getByLabelText("Value"), { target: { value: "nano" } });
+    fireEvent.click(edit.getByRole("button", { name: "Save variable" }));
+    await waitFor(() => expect(lastSave()).toEqual([{ name: "EDITOR", value: "nano", secret: true }]));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // Turning the switch off on the sheet does move it out of the Keychain.
+    fireEvent.click(screen.getByRole("button", { name: "Edit EDITOR" }));
+    edit = within(await screen.findByRole("dialog"));
+    fireEvent.click(edit.getByLabelText("Keep values that look like secrets in the Keychain"));
+    expect(edit.getByText(/stored in TerminalX's settings/)).toBeTruthy();
+    fireEvent.click(edit.getByRole("button", { name: "Save variable" }));
+    await waitFor(() => expect(lastSave()).toEqual([{ name: "EDITOR", value: "nano", secret: false }]));
+  });
   it("imports ten valid rows and reports bad line numbers", async () => {
     await ready();
     fireEvent.click(screen.getByRole("button", { name: "Paste variables" }));
