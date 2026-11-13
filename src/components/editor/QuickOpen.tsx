@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Eye, EyeOff, FileX2, Search, TextSearch } from "@/icons";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { Kbd, KbdGroup } from "@/components/ui/tooltip";
+import { Kbd } from "@/components/ui/tooltip";
 import { FileTypeIcon } from "@/components/files/FileTypeIcon";
 import type { FileCount, FileHit } from "@/lib/api";
 import type { ChangeRange } from "@/lib/changes";
@@ -37,6 +37,9 @@ const MARK: Record<ChangedFile["status"], { letter: string; tone: string; word: 
 };
 
 type Row = { kind: "heading"; label: string } | { kind: "file"; hit: FileHit; index: number };
+
+/** A shortcut as one keycap, as the design shows it: ⌘⏎, ⌥⌘C; Ctrl+Enter off the Mac. */
+const cap = (keys: string[]) => keys.join(isMac ? "" : "+");
 
 const fileWord = (n: number) => `${n.toLocaleString()} ${n === 1 ? "file" : "files"}`;
 
@@ -196,7 +199,7 @@ export function QuickOpen({ sessionId, root, source, branch }: { sessionId: stri
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent showClose={false} width="max-w-[38.5rem]" className="gap-0 overflow-hidden p-0" onOpenAutoFocus={(e) => e.preventDefault()}>
+      <DialogContent showClose={false} width="max-w-[38.5rem]" className="bottom-auto top-[12%] gap-0 overflow-hidden p-0" onOpenAutoFocus={(e) => e.preventDefault()}>
         <DialogTitle className="sr-only">Open file</DialogTitle>
         <div className="flex h-12 items-center gap-2.5 border-b border-hairline px-4">
           <Search className="size-4 shrink-0 text-muted-foreground" />
@@ -271,11 +274,11 @@ export function QuickOpen({ sessionId, root, source, branch }: { sessionId: stri
                 <Kbd>{keycaps("enter")[0]}</Kbd>open
               </span>
               <span className="flex items-center gap-1.5">
-                <KbdGroup keys={keycaps("mod+enter")} />
+                <Kbd>{cap(keycaps("mod+enter"))}</Kbd>
                 open diff
               </span>
               <span className="flex items-center gap-1.5" aria-live="polite">
-                <KbdGroup keys={keycaps("mod+alt+c")} />
+                <Kbd>{cap(keycaps("mod+alt+c"))}</Kbd>
                 {copied ? "copied" : "copy path"}
               </span>
             </>
@@ -323,9 +326,7 @@ function FileRow({ hit, change, selected, onHover, onOpen }: { hit: FileHit; cha
               <span>open</span>
               {change && (
                 <>
-                  <span className="ml-1">
-                    <KbdGroup keys={keycaps("mod+enter")} />
-                  </span>
+                  <Kbd className="ml-1">{cap(keycaps("mod+enter"))}</Kbd>
                   <span>diff</span>
                 </>
               )}
@@ -370,7 +371,7 @@ function NoMatch({
           <button type="button" className={action} onClick={onSearchInside}>
             <TextSearch className="size-[13px]" />
             Search inside files
-            {searchKeys.length > 0 && <KbdGroup keys={searchKeys} />}
+            {searchKeys.length > 0 && <Kbd className="ml-1">{cap(searchKeys)}</Kbd>}
           </button>
           {canIncludeIgnored && (
             <button type="button" className={action} aria-pressed={includeIgnored} onClick={onToggleIgnored}>
