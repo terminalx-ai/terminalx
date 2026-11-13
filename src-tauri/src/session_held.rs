@@ -21,12 +21,15 @@ pub struct Item {
     pub id: String,
     pub text: String,
     pub images: Vec<ImageRef>,
+    /// Stored attachments the follow-up carries (PRO-290).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Change {
-    Enqueue { text: String, #[serde(default)] images: Vec<ImageInput>, #[serde(default)] send_now: bool },
+    Enqueue { text: String, #[serde(default)] images: Vec<ImageInput>, #[serde(default)] files: Vec<FileRef>, #[serde(default)] send_now: bool },
     Edit { id: String, text: String },
     Delete { id: String },
     Move { id: String, before_id: Option<String> },
@@ -194,15 +197,16 @@ impl SessionManager {
         let rt_arc = self.runtime(session, tab)?;
         let mut rt = rt_arc.lock().unwrap();
         if rt.stopping || rt.stop_in_flight { bail!("Wait for Stop to finish before changing the queue."); }
-        if let Change::Enqueue { text, images, send_now } = change {
-            if text.trim().is_empty() && images.is_empty() { bail!("Write a message or attach an image first."); }
+        if let Change::Enqueue { text, images, files, send_now } = change {
+            if text.trim().is_empty() && images.is_empty() && files.is_empty() { bail!("Write a message or attach a file first."); }
+            let files = crate::attachments::admit_refs(session, &files, images.len())?;
             if !rt.turn_open_for_prompts() {
                 // A fresh idle prompt is a normal send, even when an older
                 // queue is paused or the previous turn needs recovery.
                 drop(rt);
-                return self.send_held_admitted(&admission, session, tab, text, images, Some(send_now));
+                return self.send_held_admitted(&admission, session, tab, text, images, files, Some(send_now));
             }
-            return self.enqueue_held(session, tab, &rt_arc, rt, text, images, send_now);
+            return self.enqueue_held(session, tab, &rt_arc, rt, text, images, files, send_now);
         }
         let mut queue = rt.held_queue.clone();
         let mut interrupt = false;
@@ -211,7 +215,7 @@ impl SessionManager {
             Change::Enqueue { .. } => unreachable!("new follow-ups are routed above"),
             Change::Edit { id, text } => {
                 let pos = queue.position(&id)?;
-                if text.trim().is_empty() && queue.items[pos].images.is_empty() { bail!("A follow-up needs text or an image."); }
+                if text.trim().is_empty() && queue.items[pos].images.is_empty() && queue.items[pos].files.is_empty() { bail!("A follow-up needs text or an attachment."); }
                 queue.items[pos].text = text;
             }
             Change::Delete { id } => {
@@ -262,11 +266,11 @@ impl SessionManager {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn enqueue_held(&self, session: &str, tab: &str, rt_arc: &Arc<Mutex<TabRuntime>>,
-        mut rt: MutexGuard<'_, TabRuntime>, text: String, images: Vec<ImageInput>, send_now: bool) -> Result<SendOutcome> {
+        mut rt: MutexGuard<'_, TabRuntime>, text: String, images: Vec<ImageInput>, files: Vec<FileRef>, send_now: bool) -> Result<SendOutcome> {
         let (images, _) = Self::archive_images(session, &images)?;
         let mut queue = rt.held_queue.clone();
         let id = uuid::Uuid::now_v7().to_string();
-        queue.items.push(Item { id: id.clone(), text, images });
+        queue.items.push(Item { id: id.clone(), text, images, files });
         if send_now { queue.next = Some(id); }
         let event = self.save_held(&mut rt, queue)?;
         drop(rt);
@@ -289,14 +293,14 @@ impl SessionManager {
     /// The host's normal send semantics, including takeover of a shared tab.
     #[allow(clippy::too_many_arguments)]
     fn send_held_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session: &str, tab: &str, text: String, images: Vec<ImageInput>, hold_if_busy: Option<bool>) -> Result<SendOutcome> {
+        session: &str, tab: &str, text: String, images: Vec<ImageInput>, files: Vec<FileRef>, hold_if_busy: Option<bool>) -> Result<SendOutcome> {
         let mut sharing = self.sharing.lock().unwrap();
         let author = sharing.sessions.get_mut(session).map(|share| {
             share.host_takeover(tab, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({"sessionId": session, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true)}));
             share.host.clone()
         });
-        let prompt = PromptText { hold_if_busy, mobile: None, agent: text.clone(), display: text, author, shared_connection: None };
+        let prompt = PromptText { files, hold_if_busy, mobile: None, agent: text.clone(), display: text, author, shared_connection: None };
         // As send_pressed does, hold sharing through admission for a shared tab.
         if prompt.author.is_none() { drop(sharing); }
         self.send_admitted(admission, session, tab, prompt, images, None, crate::recovery_log::Origin::Composer)
@@ -358,8 +362,10 @@ impl SessionManager {
             return Err(error);
         }
         drop(rt);
+        // A file deleted while the follow-up was held refuses it, as any send.
         let outcome = item.images.iter().map(unsent::image_input).collect::<Result<Vec<_>>>()
-            .and_then(|images| self.send_held_admitted(&admission, session, tab, item.text, images, None));
+            .and_then(|images| crate::attachments::admit_refs(session, &item.files, images.len()).map(|files| (images, files)))
+            .and_then(|(images, files)| self.send_held_admitted(&admission, session, tab, item.text, images, files, None));
         let mut rt = rt_arc.lock().unwrap();
         let mut queue = rt.held_queue.clone();
         queue.sending = None;

@@ -22,7 +22,7 @@ fn event(payload: Payload) -> AgentEvent {
     AgentEvent { id: "event".into(), session_id: "s".into(), tab_id: "t".into(), harness: "codex".into(), seq: 1, ts: String::new(), message_ts: None, subagent: None, payload }
 }
 fn prompt(text: &str, queued: bool) -> AgentEvent {
-    event(Payload::UserMessage { author: None, text: text.into(), images: vec![], baseline: None, queued, cwd: None })
+    event(Payload::UserMessage { author: None, text: text.into(), images: vec![], files: Vec::new(), baseline: None, queued, cwd: None })
 }
 fn done(status: TurnStatus) -> AgentEvent {
     event(Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None })

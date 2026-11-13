@@ -95,6 +95,20 @@ pub struct ImageRef {
     pub name: Option<String>,
 }
 
+/// A file attached to a message besides its images (PRO-290), stored in the
+/// session's attachments folder. `path` is absolute; the agent is handed it in
+/// the prompt it receives.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRef {
+    pub path: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolType {
@@ -358,6 +372,9 @@ pub enum Payload {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageRef>,
+        /// Files attached to the message besides its images (PRO-290).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<FileRef>,
         /// Tree id of the checkout when the prompt was sent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         baseline: Option<String>,

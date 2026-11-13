@@ -463,7 +463,7 @@ mod tests {
         let m = manager();
         let rt = m.runtime("reset-held-s", "reset-held-t").unwrap();
         assert!(rt.lock().unwrap().held_queue.items.is_empty());
-        rt.lock().unwrap().held_queue = held::Queue { items: vec![held::Item { id: "h2".into(), text: "CLAIMED".into(), images: Vec::new() }], sending: Some("h2".into()), ..Default::default() };
+        rt.lock().unwrap().held_queue = held::Queue { items: vec![held::Item { id: "h2".into(), text: "CLAIMED".into(), images: Vec::new(), files: Vec::new() }], sending: Some("h2".into()), ..Default::default() };
         let error = m.reset_chat("reset-held-s", "reset-held-t", Some(4), false, None).unwrap_err();
         assert!(error.to_string().contains("queued messages"), "{error:#}");
         assert_eq!(store::log_path("reset-held-s", "reset-held-t").unwrap(), log);

@@ -532,8 +532,10 @@ fn strip_image_labels(mut text: &str) -> (usize, &str) {
 /// steer into the rollout as it takes it and Claude Code records it as a
 /// queued command, and either would otherwise be the same message twice.
 fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Option<String>, queued: bool, cwd: &str) -> (Payload, ComposerEcho) {
-    let echo = ComposerEcho { queued, ..ComposerEcho::new(prompt.agent.clone(), images.len()) };
-    let payload = Payload::UserMessage { author: prompt.author.clone(), text: prompt.display.clone(), images, baseline, queued, cwd: Some(cwd.to_string()) };
+    // The CLI's record holds the paths of the attached files, which its
+    // decoder takes off again (`attachments::split_block`), as here.
+    let echo = ComposerEcho { queued, ..ComposerEcho::new(crate::attachments::split_block(&prompt.agent).0, images.len()) };
+    let payload = Payload::UserMessage { author: prompt.author.clone(), text: prompt.display.clone(), images, files: prompt.files.clone(), baseline, queued, cwd: Some(cwd.to_string()) };
     (payload, echo)
 }
 
@@ -1308,6 +1310,9 @@ struct PromptText {
     author: Option<crate::local_sharing::Person>,
     agent: String,
     display: String,
+    /// Stored attachments (PRO-290), already checked to be the session's.
+    /// `agent` gains their paths in `send_admitted`; `display` never does.
+    files: Vec<FileRef>,
 }
 
 impl PromptText {
@@ -2831,7 +2836,7 @@ impl SessionManager {
         text: String,
         images: Vec<ImageInput>,
     ) -> Result<SendOutcome> {
-        self.send_pressed(session_id, tab_id, text, images, None)
+        self.send_pressed(session_id, tab_id, text, images, None, Vec::new())
     }
 
     /// [`Self::send`] from a window's composer, which says when Send was
@@ -2839,6 +2844,10 @@ impl SessionManager {
     /// tab's diagnostics note when this runtime received it, how long it
     /// waited to be admitted and when it answered (#727), so a slow send can
     /// be traced to the step that took the time.
+    ///
+    /// `files` are attachments already stored for this session
+    /// (`attachments::store`, PRO-290). One that is not, or is gone, refuses
+    /// the send before anything is published.
     pub fn send_pressed(
         &self,
         session_id: &str,
@@ -2846,7 +2855,12 @@ impl SessionManager {
         text: String,
         images: Vec<ImageInput>,
         pressed_at: Option<i64>,
+        files: Vec<FileRef>,
     ) -> Result<SendOutcome> {
+        let files = crate::attachments::admit_refs(session_id, &files, images.len())?;
+        if !files.is_empty() && tui::is_slash_command(&text) {
+            bail!("A command cannot carry attached files.");
+        }
         let received = Received::now(pressed_at);
         self.prepare_baseline(session_id, tab_id);
         let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
@@ -2856,13 +2870,13 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
             drop(sharing);
             let origin = if pressed_at.is_some() { crate::recovery_log::Origin::Composer } else { crate::recovery_log::Origin::Programmatic };
-            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, origin)
+            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin)
         };
         drop(admission);
         self.forget_baseline(session_id, tab_id);
@@ -2939,7 +2953,7 @@ impl SessionManager {
     /// handoff that is neither confirmed nor visibly in the input is an error.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = self.send_impl(session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        let outcome = self.send_impl(session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
         self.confirm_continuation(session_id, tab_id, outcome, &rx)
     }
 
@@ -2959,7 +2973,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
+            self.send_admitted(&admission, session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -3091,9 +3105,9 @@ impl SessionManager {
     /// representation to the transcript.
     #[allow(clippy::too_many_arguments)]
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, origin: crate::recovery_log::Origin,
+        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
@@ -3133,7 +3147,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile:Some(permit.clone()),
+            self.send_admitted(&admission, session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
@@ -3143,7 +3157,7 @@ impl SessionManager {
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
         let _privacy = connection.privacy.scope()?;
-        self.send_admitted(admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+        self.send_admitted(admission, session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
     #[cfg(test)]
@@ -3177,6 +3191,9 @@ impl SessionManager {
         let revert_send = crate::checkpoints::send_lock(session_id, tab_id);
         let _revert_send = revert_send.lock().unwrap();
         let notes = if tui::is_slash_command(&prompt.agent) { Vec::new() } else { crate::checkpoints::pending(session_id, tab_id)? };
+        // The agent is handed the attached files' paths after what was typed,
+        // and before any context the app adds (PRO-290).
+        prompt.agent = crate::attachments::with_block(&prompt.agent, &prompt.files);
         prompt.append_agent_context(&crate::checkpoints::context(&notes));
         // What the send found, before it changed anything.
         let found = self.runtime(session_id, tab_id).ok().map(|rt| { let rt = rt.lock().unwrap(); (rt.turn_open, rt.pending.len()) });
@@ -3234,7 +3251,7 @@ impl SessionManager {
         // Admission orders app sends; the terminal can still start a turn
         // between change_held's idle check and this lock. Hold it here too.
         if let Some(send_now) = prompt.hold_if_busy.filter(|_| rt.turn_open_for_prompts()) {
-            return self.enqueue_held(session_id, tab_id, &rt_arc, rt, prompt.display, images, send_now);
+            return self.enqueue_held(session_id, tab_id, &rt_arc, rt, prompt.display, images, prompt.files, send_now);
         }
         // A turn may have begun in the terminal after the queue claimed an
         // idle boundary. Held input must still never be typed mid-turn.
@@ -3306,6 +3323,7 @@ impl SessionManager {
                 Payload::UserMessage { author: prompt.author.clone(),
                     text: prompt.display,
                     images: refs,
+                    files: prompt.files.clone(),
                     baseline: None,
                     queued: true,
                     cwd: Some(entry.cwd.clone()),
@@ -3331,6 +3349,7 @@ impl SessionManager {
             Payload::UserMessage { author: prompt.author.clone(),
                 text: prompt.display,
                 images: refs,
+                files: prompt.files.clone(),
                 baseline,
                 queued: false,
                 cwd: Some(entry.cwd.clone()),
@@ -7807,7 +7826,7 @@ mod tests {
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
-        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
+        let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
         let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
         let mut pending = std::collections::VecDeque::new();
         let mut projected = Vec::new();
@@ -7817,7 +7836,7 @@ mod tests {
             pending.push_back(echo);
             projected.push(composer);
 
-            let rollout = Payload::UserMessage { author: None, text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+            let rollout = Payload::UserMessage { author: None, text: "[Image #1] describe this".into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
             assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0, overtaken: false, continuation: false, changed: false, into: None }));
         }
 
@@ -7827,7 +7846,7 @@ mod tests {
 
     #[test]
     fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
-        let mut prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        let mut prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
         prompt.append_agent_context("The user reverted a.txt from turn 1.");
         let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
         assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));
@@ -7873,7 +7892,7 @@ mod tests {
         let mut echo = ComposerEcho::new("continuation prompt".into(), 0);
         echo.receipt = Some(tx);
         let mut pending = std::collections::VecDeque::from([echo]);
-        let message = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+        let message = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
         assert!(consume_composer_echo(&mut pending, &message("continuation prompt")).is_none());
         assert!(rx.try_recv().is_err(), "a prompt still waiting for readiness is not delivered");
         pending[0].submitted = true;
@@ -7909,7 +7928,7 @@ mod tests {
         let mut pending = std::collections::VecDeque::new();
         pending.push_back(ComposerEcho::new("first".into(), 0));
         pending.push_back(ComposerEcho::new("second".into(), 0));
-        let user = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+        let user = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
 
         assert!(consume_composer_echo(&mut pending, &user("typed in the pane")).is_none());
         assert_eq!(pending.len(), 2);
