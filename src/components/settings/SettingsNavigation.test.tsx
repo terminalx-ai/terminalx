@@ -141,6 +141,27 @@ it("opens a repository row link on the named project and marks its row", () => {
   expect(view.container.querySelector('[data-setting-id="repositories.mergedCleanup"]')?.getAttribute("data-setting-instance")).toBe("/repos/two");
 });
 
+// ⌘K, a toast's Open setting and a terminalx://settings/<row-id> link name a row, not a repository (PRO-127).
+it("opens a repository row that names no repository on the first listed one, and marks the row", () => {
+  const view = render(<SettingsPage initialTab="repositories.mergedCleanup" onBack={vi.fn()} />);
+  expect(screen.getByRole("heading", { name: "One" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "One" }).getAttribute("aria-current")).toBe("page");
+  expect(screen.queryByText("Choose a repository to view its settings.")).toBeNull();
+  expect(view.container.querySelector('[data-setting-id="repositories.mergedCleanup"]')?.getAttribute("data-setting-instance")).toBe("/repos/one");
+});
+
+it("opens a repository row that names no repository on the one already open", () => {
+  const view = render(<SettingsPage initialTab="repositories.mergedCleanup" initialProjectPath="/repos/two" onBack={vi.fn()} />);
+  view.rerender(<SettingsPage initialTab="repositories.scripts" openRequest={1} onBack={vi.fn()} />);
+  expect(screen.getByRole("heading", { name: "Two" })).toBeTruthy();
+  expect(view.container.querySelector('[data-setting-id="repositories.scripts"]')?.getAttribute("data-setting-instance")).toBe("/repos/two");
+});
+
+it("does not choose a repository for the person when no row was asked for", () => {
+  render(<SettingsPage initialTab="repositories" onBack={vi.fn()} />);
+  expect(screen.getByText("Choose a repository to view its settings.")).toBeTruthy();
+});
+
 it("lists folder projects and explains why Git cleanup does not apply to them", () => {
   render(<SettingsPage initialTab="repositories.mergedCleanup" initialProjectPath="/notes" onBack={vi.fn()} />);
   expect(screen.getByRole("heading", { name: "Notes" })).toBeTruthy();
@@ -203,4 +224,28 @@ it("opens registered repository paths and files, retains drafts within a reposit
   expect(document.activeElement).toBe(row);
   expect((screen.getByRole("textbox", { name: "Glob patterns (one per line)" }) as HTMLTextAreaElement).value).toBe("");
   expect(group.getAllByRole("button", { name: "Files to copy" }).map((button) => button.getAttribute("aria-current"))).toEqual(["page"]);
+});
+
+describe("row search over repository rows (PRO-127)", () => {
+  it("opens a repository row on the repository already open, else the first listed, and highlights it", () => {
+    const view = render(<SettingsPage onBack={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "Search settings" });
+    fireEvent.change(input, { target: { value: "worktreeinclude" } });
+    const result = screen.getByRole("option", { name: /Files to copy/ });
+    expect(result.closest('[role="group"]')?.textContent).toContain("Repositories");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("button", { name: "One" }).getAttribute("aria-current")).toBe("page");
+    let row = view.container.querySelector<HTMLElement>('[data-setting-id="repositories.filesToCopy"]');
+    expect(row?.getAttribute("data-setting-instance")).toBe("/repos/one");
+    expect(document.activeElement).toBe(row);
+    expect(row?.dataset.settingHighlight).toBe("on");
+
+    fireEvent.click(within(screen.getByRole("group", { name: "Repositories" })).getByRole("button", { name: "Two" }));
+    fireEvent.change(input, { target: { value: "worktreeinclude" } });
+    fireEvent.click(screen.getByRole("option", { name: /Files to copy/ }));
+    expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
+    row = view.container.querySelector<HTMLElement>('[data-setting-id="repositories.filesToCopy"]');
+    expect(row?.getAttribute("data-setting-instance")).toBe("/repos/two");
+    expect(document.activeElement).toBe(row);
+  });
 });

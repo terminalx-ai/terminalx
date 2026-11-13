@@ -6,6 +6,7 @@ import { dismissNotice, openNotice, useNotices } from "@/lib/notify";
 import { useSessionStore } from "@/lib/sessions";
 import { WorkspaceSetupToasts } from "@/components/terminal/WorkspaceSetupNotice";
 import { AgentLoginToasts } from "@/components/settings/AgentLoginToasts";
+import { SettingsLinkToasts } from "@/components/settings/SettingsLinkToasts";
 import { copyText } from "@/lib/clipboard";
 import { dismissError, errorToastText, useErrorToasts, type ErrorToast } from "@/lib/errorToasts";
 
@@ -18,6 +19,7 @@ export function Toasts() {
     <div className="pointer-events-none flex max-h-[50dvh] shrink-0 flex-col gap-2 overflow-y-auto">
       <WorkspaceSetupToasts />
       <AgentLoginToasts />
+      <SettingsLinkToasts />
       {notices.map((n) => {
         const tab = store.sessions.find((s) => s.id === n.sessionId)?.tabs.find((t) => t.id === n.tabId);
         const Icon = n.kind === "started" ? Play : n.kind === "waiting" ? MessageCircleQuestion : n.kind === "failed" ? AlertCircle : CheckCircle2;
