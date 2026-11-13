@@ -2236,6 +2236,13 @@ export const git = {
   discard: (cwd: string, path: string, base: string | null = null, oldPath: string | null = null) => invoke<void>("git_discard", { cwd, path, base, oldPath }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
   workingChanges: (cwd: string, hideWhitespace = false) => invoke<[string, ChangedFile[]]>("working_changes", { cwd, hideWhitespace }),
+  workingChangeSets: (cwd: string, hideWhitespace = false) => invoke<[string, string, ChangedFile[], ChangedFile[]]>("working_change_sets", { cwd, hideWhitespace }),
+  stagePaths: (cwd: string, paths: string[]) => invoke<void>("git_stage_paths", { cwd, paths }),
+  unstagePaths: (cwd: string, paths: string[]) => invoke<void>("git_unstage_paths", { cwd, paths }),
+  unstageAll: (cwd: string) => invoke<void>("git_unstage_all", { cwd }),
+  applyHunk: (cwd: string, path: string, oldPath: string | undefined, index: number, reverse: boolean) => invoke<void>("git_apply_hunk", { cwd, path, oldPath: oldPath ?? null, index, reverse }),
+  hunkCount: (cwd: string, path: string, oldPath: string | undefined, staged: boolean) => invoke<number>("git_hunk_count", { cwd, path, oldPath: oldPath ?? null, staged }),
+  generateCommitMessage: (cwd: string, agent: "claude" | "codex") => invoke<string>("generate_commit_message", { cwd, agent }),
   /** The merge left in progress in the checkout, with what each uncommitted file is; null when none is. */
   unfinishedMerge: (cwd: string) => invoke<UnfinishedMerge | null>("unfinished_merge", { cwd }),
   /** Commit the merge that was read; refused if the checkout moved on or a file is still conflicted. */
