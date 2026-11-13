@@ -243,3 +243,89 @@ describe("a session that only started others (PRO-337)", () => {
     expect(store.getSessionStore().selectedSessionId).toBe("starter");
   });
 });
+
+describe("tidy worker rows (PRO-364)", () => {
+  /** A worker as a run starts one: its session titled by its piece, its one tab by the brief's first line. */
+  const briefed = (id: string, parent: string, title: string) => {
+    const entry = session(id, { parent: { sessionId: parent }, title });
+    entry.tabs[0] = { ...entry.tabs[0], title: "You are a worker in a run led by another session. Do this one piece and report" } as SessionEntry["tabs"][number];
+    return entry;
+  };
+
+  it("names every try of a piece by the piece, marks tries past the first, and quiets the earlier ones", async () => {
+    const tries = [
+      { step: "first", model: "haiku", worker: { sessionId: "w-try1" }, outcome: "failed" },
+      { step: "model", model: "sonnet", worker: { sessionId: "w-try2" }, outcome: "failed" },
+      { step: "effort", model: "opus", worker: { sessionId: "w-try3" } },
+    ] as RunPiece["tries"];
+    await boot([
+      session("lead", { title: "Move settings reads" }),
+      briefed("w-try3", "lead", "Typed store module"),
+      briefed("w-map", "lead", "Map every settings read"),
+      briefed("w-try1", "lead", "Typed store module"),
+      briefed("w-try2", "lead", "Typed store module"),
+    ], [runOf([
+      piece("map", "Map every settings read", { state: "done", model: "haiku", worker: { sessionId: "w-map" } }),
+      piece("store", "Typed store module", { state: "running", model: "opus", worker: { sessionId: "w-try3" }, tries }),
+    ])]);
+    mount();
+    await waitFor(() => expect(workerRows()).toHaveLength(4));
+    const rows = within(within(leadRow()).getByTestId("lead-workers")).getAllByRole("listitem");
+    expect(rows.map((row) => row.dataset.worker)).toEqual(["w-map", "w-try1", "w-try2", "w-try3"]);
+    expect(workerTitles()).toEqual(["Map every settings read Haiku", "Typed store module Haiku", "Typed store module Sonnet", "Typed store module Opus"]);
+    expect(rows.map((row) => row.querySelector("[data-testid=try-mark]")?.textContent ?? null)).toEqual([null, null, "try 2", "try 3"]);
+    // The current try carries the piece's state; the earlier ones are drawn quieter.
+    expect(rows.map((row) => row.dataset.earlierTry !== undefined)).toEqual([false, true, true, false]);
+    expect(rows[3].querySelector("[data-piece-mark]")?.getAttribute("data-piece-mark")).toBe("running");
+    expect(leadRow().textContent).not.toMatch(/You are a worker/);
+  });
+
+  it("draws each lead a coordinator started as a lead, folded with its glyph and progress, with its own workers under it", async () => {
+    const leads = [
+      { id: "lead-a", title: "Sidebar rows", workers: ["a1", "a2"] },
+      { id: "lead-b", title: "Stop finished workers", workers: ["b1", "b2", "b3"] },
+      { id: "lead-c", title: "Cleanup without a lead", workers: ["c1", "c2"] },
+    ];
+    await boot([
+      session("coord", { title: "PRO-364 coordinator" }),
+      ...leads.flatMap((lead) => [briefed(lead.id, "coord", lead.title), ...lead.workers.map((id) => briefed(id, lead.id, `Piece ${id}`))]),
+      session("other", { title: "Fix the permission cards" }),
+    ], leads.map((lead) => runOf(
+      lead.workers.map((id, index) => piece(id, `Piece ${id}`, { state: index === 0 ? "done" : "running", worker: { sessionId: id } })),
+      { id: `run-${lead.id}`, lead: { sessionId: lead.id } },
+    )));
+    store.selectSession("other");
+    mount();
+    const coord = () => document.querySelector<HTMLElement>('[data-lead="coord"]')!;
+    await waitFor(() => expect(within(coord()).getAllByTestId("lead-glyph")).toHaveLength(3));
+    // The coordinator leads no run: its leads are its rows.
+    expect(within(coord()).getAllByTestId("lead-workers")[0].querySelectorAll(":scope > li").length).toBe(3);
+    for (const lead of leads) {
+      const row = () => document.querySelector<HTMLElement>(`[data-lead="${lead.id}"]`)!;
+      expect(row().closest('[data-lead="coord"]')).toBe(coord());
+      expect(within(row()).getAllByTestId("lead-glyph")).toHaveLength(1);
+      // Its workers are under it, not under the coordinator, each named by its piece.
+      const under = within(row()).getByTestId("lead-workers");
+      expect([...under.querySelectorAll(":scope > li")].map((entry) => (entry as HTMLElement).dataset.worker)).toEqual(lead.workers);
+      // Folded, it shows its run's progress.
+      fireEvent.click(within(row()).getByRole("button", { name: `Fold the workers of ${lead.title}` }));
+      expect(within(row()).queryByTestId("lead-workers")).toBeNull();
+      expect(within(row()).getByTestId("lead-progress").textContent).toBe(`1/${lead.workers.length}`);
+    }
+    expect(coord().textContent).not.toMatch(/You are a worker/);
+    // The coordinator's own row is no run's lead: it keeps the quieter starter mark.
+    expect(coord().querySelector(":scope > div [data-testid=lead-glyph]")).toBeNull();
+  });
+
+  it("keeps every lead above an open worker unfolded", async () => {
+    await boot([
+      session("coord", { title: "Coordinator" }),
+      briefed("lead-a", "coord", "Sidebar rows"),
+      briefed("a1", "lead-a", "Piece a1"),
+    ], [runOf([piece("a1", "Piece a1", { state: "running", worker: { sessionId: "a1" } })], { lead: { sessionId: "lead-a" } })]);
+    prefs.setPrefs({ sidebarSections: { "lead:coord": "collapsed", "lead:lead-a": "collapsed" } });
+    store.selectSession("a1");
+    mount();
+    await waitFor(() => expect(document.querySelector('[data-worker="a1"]')).toBeTruthy());
+  });
+});
