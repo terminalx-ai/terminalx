@@ -41,7 +41,7 @@ import { CloudOrganizations } from "./CloudOrganizations";
 import { conversationTime } from "@/lib/messageActivity";
 
 import { useSidebarOrder } from "@/lib/sidebarOrder";
-import { SortableStatusGroups, SidebarSortList, SidebarOrderError, useSidebarSortable } from "./SidebarSort";
+import { SortableStatusGroups, SidebarDragScope, SidebarSortList, SidebarOrderError, useSidebarSortable } from "./SidebarSort";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
@@ -138,6 +138,8 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
 
       <SidebarOrderError />
       <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-1" aria-label="Conversations" data-testid="conversation-list">
+        {/* One drag scope: sessions move between the sections and the main list (PRO-174). */}
+        <SidebarDragScope>
         <LocalSidebarSections groups={sectioned.sections} filtered={filter.active} groupByStatus={sidebarLayout === "status"} renderSession={(session) => chatRow(session)} />
         {conversations.length === 0 && archived.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
@@ -170,6 +172,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
             )}
           </ul>
         )}
+        </SidebarDragScope>
         <CloudOrganizations onOpenOrganizations={() => onOpenSettings("organizations")} />
         <DevelopmentSection />
       </nav>
