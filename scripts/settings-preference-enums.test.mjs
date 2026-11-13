@@ -26,7 +26,7 @@ it("keeps every migrated preference enum in sync with its TypeScript type", () =
     expected[key] = strings(alias.type);
     expect(expected[key]).not.toBeNull();
   }
-  const actual = Object.fromEntries([...read("src-tauri/src/store/settings/file.rs").matchAll(/"preferences\.([^"]+)" => &\[([^\]]+)\]/g)]
+  const actual = Object.fromEntries([...read("src-tauri/src/store/settings/schema.rs").matchAll(/one_of\("preferences\.([^"]+)", &\[([^\]]+)\]\)/g)]
     .map(([, key, values]) => [key, JSON.parse(`[${values}]`).sort()]));
   expect(actual).toEqual(expected);
 });
