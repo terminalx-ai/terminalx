@@ -496,6 +496,22 @@ fn reset(path: &Path, key: &str) -> Result<Status> {
     })
 }
 
+/// How long a changed settings file must hold still before the change is reported.
+const SETTLE: Duration = Duration::from_millis(50);
+
+/// What a changed file settles to: `first` read again after each `wait` until two reads
+/// agree, at most ten times. `None` when `wait` says to stop.
+fn settled<T: PartialEq>(first: T, mut read: impl FnMut() -> T, mut wait: impl FnMut() -> bool) -> Option<T> {
+    let mut current = first;
+    for _ in 0..10 {
+        if !wait() { return None; }
+        let again = read();
+        if again == current { break; }
+        current = again;
+    }
+    Some(current)
+}
+
 /// One small file polled every 200ms, including when absent. This also sees
 /// editor rename-over saves, deletion, and symlink-target edits on every OS.
 /// No event payload contains values; consumers ask for their own safe view.
@@ -515,6 +531,11 @@ impl Watcher {
         let thread = std::thread::Builder::new().name("settings-file".into()).spawn(move || {
             while done.recv_timeout(Duration::from_millis(200)) == Err(mpsc::RecvTimeoutError::Timeout) {
                 let current = std::fs::read(&path).map_err(|error| error.kind());
+                if current == previous { continue; }
+                // A save in place truncates before it writes: a read between the two sees an
+                // empty or partial file. Report the change once the file holds still.
+                let read = || std::fs::read(&path).map_err(|error| error.kind());
+                let Some(current) = settled(current, read, || done.recv_timeout(SETTLE) == Err(mpsc::RecvTimeoutError::Timeout)) else { return };
                 if current == previous { continue; }
                 previous = current;
                 {
@@ -879,6 +900,26 @@ mod tests {
         let saved = parse(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(saved.preferences["sounds"], false);
         assert_eq!(saved.preferences["fontScale"], "lg");
+    }
+
+    /// A read between a save's truncation and its write sees an empty file: the change is
+    /// what the file holds once two reads agree, not that (CI, ubuntu: two events for one edit).
+    #[test]
+    fn a_change_is_what_the_file_settles_to() {
+        let mut reads = vec![b"{\"a\"".to_vec(), b"{}".to_vec()].into_iter();
+        let mut waits = 0;
+        // Empty, then partial, then whole, then whole again: it settles on the whole file.
+        let whole = settled(Vec::new(), || reads.next().unwrap_or_else(|| b"{}".to_vec()), || { waits += 1; true });
+        assert_eq!((whole.as_deref(), waits), (Some(&b"{}"[..]), 3));
+        // Already still: one more read confirms it.
+        let mut waits = 0;
+        assert_eq!(settled(5, || 5, || { waits += 1; true }), Some(5));
+        assert_eq!(waits, 1);
+        // Never still: it gives up after ten reads with the last.
+        let mut n = 0;
+        assert_eq!(settled(0, || { n += 1; n }, || true), Some(10));
+        // Stopped while waiting: nothing is reported.
+        assert_eq!(settled(1, || 1, || false), None);
     }
 
     #[test]
