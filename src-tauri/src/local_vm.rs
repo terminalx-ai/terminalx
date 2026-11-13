@@ -377,31 +377,40 @@ fn shell_quote(s: &str) -> String {
 
 const AGENT_NOTE: &str = "A Linux desktop (the TerminalX Local VM) is available through the `computer` MCP tools: screenshots, clicks, typing, launching apps such as Firefox. Use it whenever a task needs a VM, a desktop or a browser to check UI visually; never install or start another VM, desktop image, X server or VNC. Servers running on this machine are reached inside it at http://host.docker.internal:<port>, not localhost. The user may be watching it, or holding control of it. `terminalx skills get local-vm` has the details.";
 
-/// What a new agent session's command line gains while the VM is on: the VM's
-/// driver as an MCP server named `computer`, and a note saying how to reach
-/// this machine's dev servers from it. Empty while it is off.
-pub fn launch_args(harness: &str, appends_prompt: bool) -> String {
-    if !load().enabled {
-        return String::new();
-    }
-    let Some(path) = runtime() else { return String::new() };
-    // Asked on every agent launch: a runtime that hangs costs it seconds, not the usual wait.
-    if container_running_within(&path, Duration::from_secs(3)) != Some(true) {
-        return String::new();
-    }
-    agent_args(harness, &path.to_string_lossy(), appends_prompt)
+/// What a new agent session gains while the VM is on: on its command line,
+/// the VM's driver as an MCP server named `computer` (`args`), and for Claude
+/// Code a note saying how to reach this machine's dev servers from it
+/// (`note`), which the launch joins with its other appended prompts, since
+/// Claude Code honours one `--append-system-prompt`. Empty while it is off.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct VmLaunch {
+    pub args: String,
+    pub note: Option<&'static str>,
 }
 
-pub fn agent_args(harness: &str, runtime: &str, appends_prompt: bool) -> String {
+pub fn launch_args(harness: &str) -> VmLaunch {
+    if !load().enabled {
+        return VmLaunch::default();
+    }
+    let Some(path) = runtime() else { return VmLaunch::default() };
+    // Asked on every agent launch: a runtime that hangs costs it seconds, not the usual wait.
+    if container_running_within(&path, Duration::from_secs(3)) != Some(true) {
+        return VmLaunch::default();
+    }
+    VmLaunch { args: agent_args(harness, &path.to_string_lossy()), note: agent_note(harness) }
+}
+
+/// The note an agent of `harness` is given while the VM is on.
+pub fn agent_note(harness: &str) -> Option<&'static str> {
+    (harness == "claude").then_some(AGENT_NOTE)
+}
+
+pub fn agent_args(harness: &str, runtime: &str) -> String {
     let args = ["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", CONTAINER, "cua-driver", "mcp"];
     match harness {
         "claude" => {
             let config = serde_json::json!({ "mcpServers": { "computer": { "command": runtime, "args": args } } });
-            let mut out = format!(" --mcp-config {}", shell_quote(&config.to_string()));
-            if !appends_prompt {
-                out.push_str(&format!(" --append-system-prompt {}", shell_quote(AGENT_NOTE)));
-            }
-            out
+            format!(" --mcp-config {}", shell_quote(&config.to_string()))
         }
         "codex" => {
             let mut table = toml::map::Map::new();
@@ -442,16 +451,17 @@ mod tests {
 
     #[test]
     fn agents_get_the_driver_as_an_mcp_server_named_computer() {
-        let claude = agent_args("claude", "/opt/homebrew/bin/docker", false);
+        let claude = agent_args("claude", "/opt/homebrew/bin/docker");
         assert!(claude.starts_with(" --mcp-config '{\"mcpServers\":{\"computer\":{\"args\":[\"exec\",\"-i\""), "{claude}");
         assert!(claude.contains("\"command\":\"/opt/homebrew/bin/docker\""));
-        assert!(claude.contains("--append-system-prompt") && claude.contains("host.docker.internal"));
-        // A prompt the workspace already appends is not doubled.
-        assert!(!agent_args("claude", "docker", true).contains("--append-system-prompt"));
-        let codex = agent_args("codex", "/usr/local/bin/docker", false);
+        // The note is joined with the launch's other prompts, never a flag of its own.
+        assert!(!claude.contains("--append-system-prompt"));
+        assert!(agent_note("claude").is_some_and(|note| note.contains("host.docker.internal")));
+        assert_eq!(agent_note("codex"), None);
+        let codex = agent_args("codex", "/usr/local/bin/docker");
         assert!(codex.starts_with(" -c 'mcp_servers.computer={"), "{codex}");
         assert!(codex.contains("\"terminalx-computer\"") && codex.contains("\"cua-driver\""));
-        assert_eq!(agent_args("opencode", "docker", false), "");
+        assert_eq!(agent_args("opencode", "docker"), "");
     }
 
     /// Against the machine's real Docker or Podman: `cargo test --lib local_vm -- --ignored`.
@@ -465,7 +475,7 @@ mod tests {
         let viewer = up.viewer.expect("viewer");
         assert_eq!(viewer.password.len(), 8);
         assert!(std::net::TcpStream::connect(("127.0.0.1", viewer.port)).is_ok());
-        assert!(launch_args("claude", false).contains("cua-driver"));
+        assert!(launch_args("claude").args.contains("cua-driver"));
         // What an agent's CLI runs, spoken to as MCP.
         let docker = runtime().unwrap();
         let mut child = Command::new(&docker)
@@ -503,7 +513,7 @@ mod tests {
         assert!(std::fs::read(&shot).unwrap().starts_with(b"\x89PNG"));
         let down = stop().expect("stop");
         assert_eq!(down.state, VmState::Stopped);
-        assert_eq!(launch_args("claude", false), "");
+        assert_eq!(launch_args("claude"), VmLaunch::default());
         reset().expect("reset");
     }
 }

@@ -100,6 +100,7 @@ mod git;
 mod repo_mirror;
 mod checkpoints;
 mod worktree_files;
+mod sparse_checkout;
 mod git_media;
 mod github;
 mod github_process;
@@ -488,6 +489,7 @@ pub fn run() {
             updater::app_update_check,
             updater::app_update_install,
             commands::repository_files_preview,
+            commands::repository_folders,
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,

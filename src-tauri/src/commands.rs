@@ -1741,6 +1741,14 @@ pub async fn repository_files_preview(path: String, patterns: Option<Vec<String>
         .await.map_err(err)?
 }
 
+/// The repository's folders at the primary checkout's HEAD, with descriptions
+/// and, with `measure`, sizes, for choosing a sparse checkout (PRO-307).
+#[tauri::command]
+pub async fn repository_folders(path: String, measure: bool) -> CmdResult<crate::sparse_checkout::RepositoryFolders> {
+    tauri::async_runtime::spawn_blocking(move || crate::sparse_checkout::folders(Path::new(&path), measure).map_err(err))
+        .await.map_err(err)?
+}
+
 /// The project list changed: a window that did not make the change reads it again.
 pub(crate) const PROJECTS_CHANGED_EVENT: &str = "projects_changed";
 

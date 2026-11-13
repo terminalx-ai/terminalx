@@ -27,12 +27,36 @@ pub struct Key {
     pub requires_trust: bool,
 }
 // Filesystem locations stay machine-specific until the settings-file migration.
-// branchPrefix also controls cleanup candidates, hence trust.
+// branchPrefix also controls cleanup candidates, hence trust. sparseCheckout
+// only narrows what a new workspace checks out and executes nothing.
 pub const REGISTRY: &[Key] = &[
     Key { key: "worktreeDir", repository_configurable: false, managed_lockable: false, requires_trust: false },
     Key { key: "branchPrefix", repository_configurable: true, managed_lockable: true, requires_trust: true },
     Key { key: "environment", repository_configurable: true, managed_lockable: true, requires_trust: true },
+    Key { key: "sparseCheckout", repository_configurable: true, managed_lockable: true, requires_trust: false },
 ];
+
+/// Most folders one `sparseCheckout` list may name.
+pub const SPARSE_CHECKOUT_MAX_FOLDERS: usize = 1000;
+/// Longest folder path, in bytes, a `sparseCheckout` list may name.
+pub const SPARSE_CHECKOUT_MAX_PATH: usize = 1024;
+
+/// A repository-relative folder as `git sparse-checkout set --cone --stdin`
+/// takes it: `/`-separated, no leading or trailing slash, no empty, `.` or
+/// `..` segment, and nothing git or a shell would read as a pattern, an
+/// escape or a line break.
+pub fn valid_sparse_folder(path: &str) -> bool {
+    !path.is_empty() && path.len() <= SPARSE_CHECKOUT_MAX_PATH
+        && !path.chars().any(|c| c.is_control() || matches!(c, '\\' | '*' | '?' | '[' | ']' | '!'))
+        && path.split('/').all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn valid_sparse_checkout(value: &Value) -> bool {
+    let Some(folders) = value.as_array() else { return false };
+    let mut seen = std::collections::BTreeSet::new();
+    folders.len() <= SPARSE_CHECKOUT_MAX_FOLDERS
+        && folders.iter().all(|folder| folder.as_str().is_some_and(|folder| valid_sparse_folder(folder) && seen.insert(folder)))
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,6 +126,7 @@ fn valid(key: &str, value: &Value, layer: Layer) -> bool {
             && s.split('/').filter(|p| !p.is_empty()).all(|p| !p.starts_with('-') && p.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
             && !s.starts_with('/') && !s.contains("//")),
         "worktreeDir" => value.is_string(),
+        "sparseCheckout" => valid_sparse_checkout(value),
         "environment" => value.as_object().is_some_and(|env| env.len() <= 256 && env.iter().all(|(name, value)| {
             super::environment::validate_name(name).is_ok() && value.as_str().is_some_and(|s| s.len() <= 64 * 1024 && !s.contains('\0'))
         })),
@@ -114,7 +139,9 @@ fn apply(values: &mut BTreeMap<String, ResolvedValue>, document: Map<String, Val
         let allowed = registration.is_some_and(|r| match layer {
             Layer::RepositoryLocal | Layer::RepositoryShared => r.repository_configurable,
             Layer::Managed => r.managed_lockable,
-            Layer::User => r.key != "environment",
+            // A folder list names one repository's folders; a user-wide one would
+            // narrow every repository's workspaces to folders it may not have.
+            Layer::User => r.key != "environment" && r.key != "sparseCheckout",
             _ => true,
         });
         if !allowed || !valid(&key, &value, layer) {
@@ -295,6 +322,15 @@ pub(crate) fn with_private_sources(project: Option<&str>, mut resolved: Resoluti
     }
     resolved.refresh_trust();
     resolved
+}
+
+/// The folders a new workspace of `project` checks out, or `None` for a full
+/// checkout. Read like `branch_prefix`, from the primary checkout's layers.
+pub fn sparse_checkout(project: &Path) -> Result<Option<Vec<String>>> {
+    let resolved = view(Some(project.to_str().context("Repository path must be UTF-8.")?))?;
+    let Some(value) = resolved.values.get("sparseCheckout") else { return Ok(None) };
+    let folders = value.value.as_array().context("Invalid sparse checkout folders.")?;
+    folders.iter().map(|folder| folder.as_str().map(str::to_owned).context("Invalid sparse checkout folder.")).collect::<Result<Vec<_>>>().map(Some)
 }
 
 /// Policy/read failures are errors, never an empty prefix that could classify

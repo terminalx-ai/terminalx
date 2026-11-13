@@ -852,7 +852,7 @@ pub(super) fn cloud_stand_in() -> Option<(crate::cloud_grants::LaunchGrant, crat
     grant.env = vec![("CODEX_API_KEY".into(), Some("grant-secret".into())), ("OPENAI_API_KEY".into(), None)];
     grant.route = Some(crate::cloud_grants::RouteLaunch { model: Some("routed-model".into()), codex_args: " -c 'model_provider=\"route\"'".into(), ..Default::default() });
     grant.codex_auth = Some(Some(store::root().unwrap().join("grant-auth.json")));
-    let config = crate::cloud_config::LaunchConfig { env: vec![("NODE_ENV".into(), "test".into())], args: " -c 'developer_instructions=\"brief\"'".into() };
+    let config = crate::cloud_config::LaunchConfig { env: vec![("NODE_ENV".into(), "test".into())], args: String::new(), prompt: Some("brief".into()) };
     Some((grant, config))
 }
 
@@ -873,18 +873,37 @@ fn a_cloud_launch_takes_the_route_configuration_and_credential_like_a_terminal_o
     let mut grant = crate::cloud_grants::LaunchGrant::default();
     grant.env = vec![("CODEX_API_KEY".into(), Some("grant-secret".into())), ("OPENAI_API_KEY".into(), None)];
     grant.route = Some(crate::cloud_grants::RouteLaunch { model: Some("routed-model".into()), codex_args: " -c 'model_provider=\"route\"'".into(), notice: Some("The route is not answering".into()), ..Default::default() });
-    let config = crate::cloud_config::LaunchConfig { env: vec![("NODE_ENV".into(), "test".into())], args: " -c 'developer_instructions=\"brief\"'".into() };
-    let native = native_launch(&grant, &config, " -c 'mcp_servers.computer={}'");
-    assert_eq!(native.args, ["-c", "model_provider=\"route\"", "-c", "developer_instructions=\"brief\"", "-c", "mcp_servers.computer={}", "app-server", "--listen", "stdio://"]);
+    let config = crate::cloud_config::LaunchConfig { env: vec![("NODE_ENV".into(), "test".into())], args: String::new(), prompt: Some("brief".into()) };
+    let computer = crate::local_vm::VmLaunch { args: " -c 'mcp_servers.computer={}'".into(), note: None };
+    let native = native_launch(&grant, &config, &computer, None);
+    assert_eq!(native.args, ["-c", "model_provider=\"route\"", "-c", "mcp_servers.computer={}", "-c", "developer_instructions=\"brief\"", "app-server", "--listen", "stdio://"]);
     // The grant's variables come last, so a credential always wins.
     assert_eq!(native.env, [("NODE_ENV".to_string(), "test".to_string()), ("CODEX_API_KEY".to_string(), "grant-secret".to_string())]);
     assert_eq!(native.unset, ["OPENAI_API_KEY"]);
     assert_eq!((native.model.as_deref(), native.notice.as_deref()), (Some("routed-model"), Some("The route is not answering")));
 
     // Outside a workspace: the app server and nothing else.
-    let local = native_launch(&Default::default(), &Default::default(), "");
+    let local = native_launch(&Default::default(), &Default::default(), &Default::default(), None);
     assert_eq!(local.args, ["app-server", "--listen", "stdio://"]);
     assert!(local.env.is_empty() && local.unset.is_empty() && local.model.is_none());
+}
+
+#[test]
+fn a_sparse_workspace_note_joins_the_workspace_prompts_in_one_developer_instructions() {
+    let config = crate::cloud_config::LaunchConfig { env: Vec::new(), args: String::new(), prompt: Some("Org rules.".into()) };
+    let note = crate::sparse_checkout::note_text(true, &["apps/web".into()]);
+    let native = native_launch(&Default::default(), &config, &Default::default(), Some(&note));
+    let instructions: Vec<&String> = native.args.iter().filter(|arg| arg.starts_with("developer_instructions=")).collect();
+    assert_eq!(instructions.len(), 1, "a later developer_instructions would replace the first: {:?}", native.args);
+    let value: toml::Table = toml::from_str(instructions[0]).unwrap();
+    let text = value["developer_instructions"].as_str().unwrap();
+    assert!(text.starts_with("Org rules.\n\nThis workspace is a sparse checkout"), "{text}");
+    assert!(text.contains("`apps/web`") && text.contains("git sparse-checkout add <folder>"));
+    // Without a workspace prompt, the note alone.
+    let alone = native_launch(&Default::default(), &Default::default(), &Default::default(), Some(&note));
+    assert_eq!(alone.args.iter().filter(|arg| arg.starts_with("developer_instructions=")).count(), 1);
+    // A full checkout adds nothing.
+    assert_eq!(native_launch(&Default::default(), &Default::default(), &Default::default(), None).args, ["app-server", "--listen", "stdio://"]);
 }
 
 /// Stands in for Codex in a cloud workspace: records the arguments and the
